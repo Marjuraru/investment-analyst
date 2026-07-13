@@ -1,0 +1,1 @@
+"""Bundled DuckDB schema resources."""
