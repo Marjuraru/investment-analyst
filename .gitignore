@@ -1,5 +1,55 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Variables de entorno y secretos
 .env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+
+# Cachés
+.cache/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Cobertura
+.coverage
+.coverage.*
+htmlcov/
+
+# VS Code
 .vscode/
+
+# Bases de datos locales
+*.sqlite
+*.sqlite3
+*.db
+*.duckdb
+
+# Archivos Parquet locales
+*.parquet
+
+# Datos descargados
+data/raw/*
+data/normalized/*
+data/processed/*
+!data/**/.gitkeep
+
+# Logs
+logs/*
+!logs/.gitkeep
+*.log
