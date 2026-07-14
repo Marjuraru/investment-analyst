@@ -1,0 +1,69 @@
+{
+  "assets": [
+    {
+      "aliases": [
+        "BTC",
+        "BTC-USD",
+        "Bitcoin"
+      ],
+      "asset_class": "crypto",
+      "asset_id": "crypto:btc-usd",
+      "exchange": "COINBASE",
+      "is_active": true,
+      "name": "Bitcoin",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "BTC-USD",
+          "namespace": "product_id",
+          "provider": "coinbase"
+        }
+      ],
+      "provider_symbols": {
+        "coinbase_exchange": "BTC-USD"
+      },
+      "quote_currency": "USD",
+      "symbol": "BTC"
+    },
+    {
+      "aliases": [
+        "AAPL",
+        "Apple",
+        "Apple Inc."
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:aapl",
+      "exchange": "NASDAQ",
+      "is_active": true,
+      "name": "Apple Inc.",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "AAPL",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0000320193",
+          "namespace": "cik",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "AAPL",
+        "sec_cik": "0000320193"
+      },
+      "quote_currency": "USD",
+      "symbol": "AAPL"
+    }
+  ],
+  "catalog_version": 1
+}
