@@ -228,9 +228,20 @@ def _validate_diagnostic_common(
 
     metric_ids = _referenced_metric_ids(diagnostic)
     if not metric_ids:
-        raise MalformedStoredDiagnosticError(
-            "current-version diagnostic must reference persisted metric results"
-        )
+        if diagnostic.verdict is not DiagnosticVerdict.INSUFFICIENT_DATA:
+            raise MalformedStoredDiagnosticError(
+                "current-version diagnostic must reference persisted metric results"
+            )
+        if diagnostic.components or diagnostic.evidence:
+            raise MalformedStoredDiagnosticError(
+                "insufficient diagnostic must not contain components or evidence"
+            )
+        if diagnostic.final_score != 0 or diagnostic.confidence != 0:
+            raise MalformedStoredDiagnosticError(
+                "insufficient diagnostic score and confidence must be zero"
+            )
+        return _Candidate(diagnostic, metric_ids, None)
+
     metrics: list[MetricResult] = []
     for identifier in metric_ids:
         try:
