@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from investment_analyst.storage import LocalStorage, StoragePaths
+
 
 def _run(root: Path, *extra: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -26,6 +28,8 @@ def _run(root: Path, *extra: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_script_returns_valid_unavailable_json_without_writes(tmp_path) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)):
+        pass
     result = _run(tmp_path)
     assert result.returncode == 0
     payload = json.loads(result.stdout)

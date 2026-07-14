@@ -5,11 +5,16 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 
+from investment_analyst.application.cli import (
+    add_storage_location_arguments,
+    storage_location_from_namespace,
+)
+from investment_analyst.application.runtime import (
+    ApplicationRuntime,
+    ApplicationRuntimeError,
+)
 from investment_analyst.catalog.provider_configuration import resolve_sec_configuration
-from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
-from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.providers.fundamentals.sec_edgar import (
     SecEdgarClient,
     SecEdgarIdentity,
@@ -18,12 +23,14 @@ from investment_analyst.providers.fundamentals.sec_pipeline import (
     SecAaplFundamentalsPipeline,
 )
 from investment_analyst.providers.http import UrlLibHttpTransport
-from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.storage import StorageError
+from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.service import WorkspaceError
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", required=True, type=Path)
+    add_storage_location_arguments(parser)
     return parser
 
 
@@ -36,9 +43,8 @@ def main() -> int:
         return 2
 
     try:
-        catalog = AssetCatalogService.load_default()
-        resolver = ProviderAssetContextResolver(catalog)
-        configuration = resolve_sec_configuration(resolver)
+        runtime = ApplicationRuntime.create_default()
+        configuration = resolve_sec_configuration(runtime.provider_resolver)
         identity = SecEdgarIdentity(user_agent=user_agent)
         client = SecEdgarClient(
             UrlLibHttpTransport(),
@@ -46,7 +52,10 @@ def main() -> int:
             cik=configuration.cik,
             ticker=configuration.ticker,
         )
-        with LocalStorage(StoragePaths.from_root(arguments.root)) as storage:
+        with runtime.open_storage(
+            storage_location_from_namespace(arguments),
+            access_mode=WorkspaceAccessMode.READ_WRITE,
+        ) as storage:
             summary = SecAaplFundamentalsPipeline(
                 storage,
                 client,
@@ -62,6 +71,9 @@ def main() -> int:
         }
         print(json.dumps(output, indent=2, sort_keys=True))
         return 0
+    except (ApplicationRuntimeError, WorkspaceError, StorageError) as error:
+        print(f"SEC Apple fundamentals import failed: {error}", file=sys.stderr)
+        return 1
     except Exception as error:  # noqa: BLE001
         print(f"SEC Apple fundamentals import failed: {error}", file=sys.stderr)
         return 1

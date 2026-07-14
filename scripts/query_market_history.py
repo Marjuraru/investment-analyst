@@ -5,15 +5,24 @@ import argparse
 import json
 import sys
 from datetime import UTC, datetime
-from pathlib import Path
 
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
+from investment_analyst.analytics.market.bar_schemas import get_market_bar_schema
 from investment_analyst.analytics.market.history_service import (
     HistoricalMarketDataService,
     MarketHistoryError,
 )
-from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.application.cli import (
+    add_storage_location_arguments,
+    storage_location_from_namespace,
+)
+from investment_analyst.application.runtime import (
+    ApplicationRuntime,
+    ApplicationRuntimeError,
+)
 from investment_analyst.storage.errors import StorageError
+from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.service import WorkspaceError
 
 _NOTICE = (
     "Analytical query of locally stored data only; no orders are executed and this is not "
@@ -51,7 +60,7 @@ def _positive_int(value: str) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Query auditable stored daily market bars.")
-    parser.add_argument("--root", required=True, type=Path)
+    add_storage_location_arguments(parser)
     parser.add_argument("--asset-id", required=True)
     parser.add_argument("--source-id", required=True)
     parser.add_argument("--start", required=True, type=_date_utc)
@@ -72,7 +81,12 @@ def main() -> int:
             end=args.end,
             known_at=args.known_at,
         )
-        with LocalStorage(StoragePaths.from_root(args.root)) as storage:
+        get_market_bar_schema(query.source_id)
+        runtime = ApplicationRuntime.create_default()
+        with runtime.open_storage(
+            storage_location_from_namespace(args),
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
             series = HistoricalMarketDataService(storage).query(query)
         displayed = series.bars[: args.limit]
         payload = {
@@ -85,7 +99,13 @@ def main() -> int:
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
-    except (MarketHistoryError, StorageError, ValueError) as error:
+    except (
+        ApplicationRuntimeError,
+        MarketHistoryError,
+        StorageError,
+        ValueError,
+        WorkspaceError,
+    ) as error:
         print(f"market history query failed: {error}", file=sys.stderr)
         return 2
 

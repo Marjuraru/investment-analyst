@@ -3,8 +3,15 @@
 
 import argparse
 import json
-from pathlib import Path
 
+from investment_analyst.application.cli import (
+    add_storage_location_arguments,
+    storage_location_from_namespace,
+)
+from investment_analyst.application.runtime import (
+    ApplicationRuntime,
+    ApplicationRuntimeError,
+)
 from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
     SecCompanyFactsNormalizer,
 )
@@ -12,7 +19,9 @@ from investment_analyst.providers.fundamentals.sec_observation_pipeline import (
     SecAaplObservationPipeline,
     SecObservationPipelineError,
 )
-from investment_analyst.storage import LocalStorage, StorageError, StoragePaths
+from investment_analyst.storage import StorageError
+from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.service import WorkspaceError
 
 _NOTICE = (
     "Normalizes five explicit Apple facts from local SEC snapshots using filing acceptance time "
@@ -25,7 +34,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Normalize selected Apple fundamentals from local SEC raw snapshots."
     )
-    parser.add_argument("--root", required=True, type=Path)
+    add_storage_location_arguments(parser)
     return parser
 
 
@@ -33,12 +42,22 @@ def main() -> int:
     """Run the offline observation pipeline and print a compact JSON summary."""
     args = _parser().parse_args()
     try:
-        with LocalStorage(StoragePaths.from_root(args.root)) as storage:
+        runtime = ApplicationRuntime.create_default()
+        with runtime.open_storage(
+            storage_location_from_namespace(args),
+            access_mode=WorkspaceAccessMode.READ_WRITE,
+        ) as storage:
             summary = SecAaplObservationPipeline(
                 storage,
                 SecCompanyFactsNormalizer(),
             ).run()
-    except (SecObservationPipelineError, StorageError, ValueError) as error:
+    except (
+        ApplicationRuntimeError,
+        SecObservationPipelineError,
+        StorageError,
+        ValueError,
+        WorkspaceError,
+    ) as error:
         print(json.dumps({"error": str(error)}, indent=2, sort_keys=True))
         return 1
 

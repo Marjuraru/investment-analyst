@@ -5,8 +5,15 @@ import argparse
 import json
 import sys
 from datetime import UTC, date, datetime
-from pathlib import Path
 
+from investment_analyst.application.cli import (
+    add_storage_location_arguments,
+    storage_location_from_namespace,
+)
+from investment_analyst.application.runtime import (
+    ApplicationRuntime,
+    ApplicationRuntimeError,
+)
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.providers.fundamentals.sec_diagnostic_engine import (
     SecFundamentalDiagnosticEngine,
@@ -23,7 +30,9 @@ from investment_analyst.providers.fundamentals.sec_diagnostic_selection import (
     SecFundamentalDiagnosticSelectionError,
     SecFundamentalDiagnosticSelector,
 )
-from investment_analyst.storage import LocalStorage, StorageError, StoragePaths
+from investment_analyst.storage import StorageError
+from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.service import WorkspaceError
 
 _NOTICE = (
     "Descriptive Apple fundamental diagnostic based only on local point-in-time metrics and "
@@ -65,7 +74,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Compute an auditable Apple fundamental diagnostic from local metrics."
     )
-    parser.add_argument("--root", required=True, type=Path)
+    add_storage_location_arguments(parser)
     parser.add_argument("--known-at", required=True, type=_aware_datetime)
     parser.add_argument("--frequency", required=True, type=_frequency)
     parser.add_argument("--as-of", type=_date_value)
@@ -99,7 +108,11 @@ def main() -> int:
             frequency=args.frequency,
             as_of_period_end=args.as_of,
         )
-        with LocalStorage(StoragePaths.from_root(args.root)) as storage:
+        runtime = ApplicationRuntime.create_default()
+        with runtime.open_storage(
+            storage_location_from_namespace(args),
+            access_mode=WorkspaceAccessMode.READ_WRITE,
+        ) as storage:
             selector = SecFundamentalDiagnosticSelector(storage)
             pipeline = SecAaplFundamentalDiagnosticPipeline(
                 storage,
@@ -121,11 +134,13 @@ def main() -> int:
         )
         return 0
     except (
+        ApplicationRuntimeError,
         SecFundamentalDiagnosticEngineError,
         SecFundamentalDiagnosticPipelineError,
         SecFundamentalDiagnosticSelectionError,
         StorageError,
         ValueError,
+        WorkspaceError,
     ) as error:
         print(f"SEC fundamental diagnostic failed: {error}", file=sys.stderr)
         return 2

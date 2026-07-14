@@ -5,15 +5,24 @@ import argparse
 import json
 import sys
 from datetime import UTC, date, datetime
-from pathlib import Path
 
+from investment_analyst.application.cli import (
+    add_storage_location_arguments,
+    storage_location_from_namespace,
+)
+from investment_analyst.application.runtime import (
+    ApplicationRuntime,
+    ApplicationRuntimeError,
+)
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.providers.fundamentals.sec_point_in_time_service import (
     SecAaplFundamentalPointInTimeService,
     SecFundamentalQueryError,
 )
 from investment_analyst.providers.fundamentals.sec_query_models import SecFundamentalQuery
-from investment_analyst.storage import LocalStorage, StorageError, StoragePaths
+from investment_analyst.storage import StorageError
+from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.service import WorkspaceError
 
 _NOTICE = (
     "Local point-in-time query of five Apple SEC fundamental fields. The current revision is "
@@ -65,7 +74,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Query point-in-time Apple SEC facts from local normalized observations."
     )
-    parser.add_argument("--root", required=True, type=Path)
+    add_storage_location_arguments(parser)
     parser.add_argument("--known-at", required=True, type=_aware_datetime)
     parser.add_argument("--frequency", required=True, type=_frequency)
     parser.add_argument("--start", type=_date_value)
@@ -85,7 +94,11 @@ def main() -> int:
             end_period_end=args.end,
             limit=args.limit,
         )
-        with LocalStorage(StoragePaths.from_root(args.root)) as storage:
+        runtime = ApplicationRuntime.create_default()
+        with runtime.open_storage(
+            storage_location_from_namespace(args),
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
             result = SecAaplFundamentalPointInTimeService(storage).query(request)
         print(
             json.dumps(
@@ -95,7 +108,13 @@ def main() -> int:
             )
         )
         return 0
-    except (SecFundamentalQueryError, StorageError, ValueError) as error:
+    except (
+        ApplicationRuntimeError,
+        SecFundamentalQueryError,
+        StorageError,
+        ValueError,
+        WorkspaceError,
+    ) as error:
         print(f"SEC fundamental query failed: {error}", file=sys.stderr)
         return 2
 

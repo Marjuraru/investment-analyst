@@ -5,7 +5,6 @@ import argparse
 import json
 import sys
 from datetime import UTC, datetime
-from pathlib import Path
 
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
 from investment_analyst.analytics.market.diagnostic_models import MarketDiagnosticRequest
@@ -22,8 +21,17 @@ from investment_analyst.analytics.market.diagnostic_selection import (
     MarketDiagnosticMetricSelector,
     MarketDiagnosticSelectionError,
 )
-from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.application.cli import (
+    add_storage_location_arguments,
+    storage_location_from_namespace,
+)
+from investment_analyst.application.runtime import (
+    ApplicationRuntime,
+    ApplicationRuntimeError,
+)
 from investment_analyst.storage.errors import StorageError
+from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.service import WorkspaceError
 
 _NOTICE = (
     "Descriptive market diagnostic from persisted metrics only. Context confidence is not a "
@@ -70,7 +78,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Compute an auditable market diagnostic from persisted statistics."
     )
-    parser.add_argument("--root", required=True, type=Path)
+    add_storage_location_arguments(parser)
     parser.add_argument("--asset-id", required=True)
     parser.add_argument("--source-id", required=True)
     parser.add_argument("--start", required=True, type=_date_utc)
@@ -100,7 +108,11 @@ def main() -> int:
             volatility_window=args.volatility_window,
             relative_volume_window=args.relative_volume_window,
         )
-        with LocalStorage(StoragePaths.from_root(args.root)) as storage:
+        runtime = ApplicationRuntime.create_default()
+        with runtime.open_storage(
+            storage_location_from_namespace(args),
+            access_mode=WorkspaceAccessMode.READ_WRITE,
+        ) as storage:
             selector = MarketDiagnosticMetricSelector(storage)
             pipeline = MarketDiagnosticPipeline(storage, selector, MarketDiagnosticEngine())
             summary = pipeline.run(request)
@@ -122,11 +134,13 @@ def main() -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     except (
+        ApplicationRuntimeError,
         MarketDiagnosticSelectionError,
         MarketDiagnosticRuleError,
         MarketDiagnosticPipelineError,
         StorageError,
         ValueError,
+        WorkspaceError,
     ) as error:
         print(f"market diagnostic failed: {error}", file=sys.stderr)
         return 2

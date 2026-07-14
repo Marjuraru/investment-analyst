@@ -6,7 +6,6 @@ import json
 import os
 import sys
 from datetime import UTC, date, datetime
-from pathlib import Path
 
 from investment_analyst.analytics.aapl_snapshot_models import AaplCompleteSnapshotRequest
 from investment_analyst.analytics.aapl_snapshot_pipeline import (
@@ -25,16 +24,24 @@ from investment_analyst.analytics.market.diagnostic_selection import (
 from investment_analyst.analytics.market.history_service import HistoricalMarketDataService
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
 from investment_analyst.analytics.market.statistics_pipeline import MarketStatisticsPipeline
+from investment_analyst.application.cli import (
+    add_storage_location_arguments,
+    storage_location_from_namespace,
+)
+from investment_analyst.application.runtime import (
+    ApplicationRuntime,
+    ApplicationRuntimeError,
+)
 from investment_analyst.catalog.provider_configuration import (
     resolve_alpaca_configuration,
 )
-from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
-from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.providers.http import UrlLibHttpTransport
 from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistoricalPipeline
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials, AlpacaStockClient
-from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.storage import LocalStorage, StorageError
+from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.service import WorkspaceError
 
 _NOTICE = (
     "Local auditable Apple run using Alpaca Market Data IEX. IEX is a single-exchange "
@@ -75,7 +82,7 @@ def _frequency(value: str) -> DataFrequency:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", required=True, type=Path)
+    add_storage_location_arguments(parser)
     parser.add_argument("--known-at", required=True, type=_aware_datetime)
     parser.add_argument("--market-start", required=True, type=_date_value)
     parser.add_argument("--market-end", required=True, type=_date_value)
@@ -110,10 +117,12 @@ def _payload(summary) -> dict[str, object]:
     }
 
 
-def _build_pipeline(storage: LocalStorage, credentials: AlpacaCredentials):
-    catalog = AssetCatalogService.load_default()
-    resolver = ProviderAssetContextResolver(catalog)
-    configuration = resolve_alpaca_configuration(resolver)
+def _build_pipeline(
+    storage: LocalStorage,
+    credentials: AlpacaCredentials,
+    runtime: ApplicationRuntime,
+):
+    configuration = resolve_alpaca_configuration(runtime.provider_resolver)
     transport = UrlLibHttpTransport()
     client = AlpacaStockClient(transport, credentials)
     market_pipeline = AlpacaHistoricalPipeline(
@@ -166,8 +175,12 @@ def main() -> int:
             require_complete=arguments.require_complete,
         )
         credentials = AlpacaCredentials(api_key=api_key, secret_key=secret_key)
-        with LocalStorage(StoragePaths.from_root(arguments.root)) as storage:
-            summary = _build_pipeline(storage, credentials).run(request)
+        runtime = ApplicationRuntime.create_default()
+        with runtime.open_storage(
+            storage_location_from_namespace(arguments),
+            access_mode=WorkspaceAccessMode.READ_WRITE,
+        ) as storage:
+            summary = _build_pipeline(storage, credentials, runtime).run(request)
         print(json.dumps(_payload(summary), indent=2, sort_keys=True))
         return 0
     except AaplSnapshotIncompleteError as error:
@@ -176,6 +189,9 @@ def main() -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
         print(f"Apple snapshot incomplete: {error}", file=sys.stderr)
         return 3
+    except (ApplicationRuntimeError, WorkspaceError, StorageError) as error:
+        print(f"Apple snapshot failed: {error}", file=sys.stderr)
+        return 2
     except (AaplCompleteSnapshotPipelineError, ValueError) as error:
         print(f"Apple snapshot failed: {error}", file=sys.stderr)
         return 2

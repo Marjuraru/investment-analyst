@@ -5,17 +5,24 @@ import argparse
 import json
 import sys
 from datetime import UTC, date, datetime, time
-from pathlib import Path
 
+from investment_analyst.application.cli import (
+    add_storage_location_arguments,
+    storage_location_from_namespace,
+)
+from investment_analyst.application.runtime import (
+    ApplicationRuntime,
+    ApplicationRuntimeError,
+)
 from investment_analyst.catalog.provider_configuration import (
     resolve_coinbase_configuration,
 )
-from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
-from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.providers.crypto.coinbase_exchange import CoinbaseExchangeClient
 from investment_analyst.providers.crypto.coinbase_pipeline import CoinbaseHistoricalPipeline
 from investment_analyst.providers.http import UrlLibHttpTransport
-from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.storage import StorageError
+from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.service import WorkspaceError
 
 
 def _parse_date(value: str) -> date:
@@ -29,7 +36,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Import configured Coinbase Exchange daily market data."
     )
-    parser.add_argument("--root", required=True, type=Path)
+    add_storage_location_arguments(parser)
     parser.add_argument("--start", required=True, type=_parse_date)
     parser.add_argument("--end", required=True, type=_parse_date)
     return parser
@@ -48,12 +55,13 @@ def main() -> int:
         return 2
 
     try:
-        paths = StoragePaths.from_root(arguments.root)
-        catalog = AssetCatalogService.load_default()
-        resolver = ProviderAssetContextResolver(catalog)
-        configuration = resolve_coinbase_configuration(resolver)
+        runtime = ApplicationRuntime.create_default()
+        configuration = resolve_coinbase_configuration(runtime.provider_resolver)
         client = CoinbaseExchangeClient(UrlLibHttpTransport())
-        with LocalStorage(paths) as storage:
+        with runtime.open_storage(
+            storage_location_from_namespace(arguments),
+            access_mode=WorkspaceAccessMode.READ_WRITE,
+        ) as storage:
             summary = CoinbaseHistoricalPipeline(
                 storage,
                 client,
@@ -67,6 +75,9 @@ def main() -> int:
             "summary": summary.to_json_dict(),
         }
         print(json.dumps(output, indent=2, sort_keys=True))
+    except (ApplicationRuntimeError, WorkspaceError, StorageError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
     except Exception as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

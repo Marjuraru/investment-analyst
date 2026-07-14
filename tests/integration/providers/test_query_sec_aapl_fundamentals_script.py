@@ -105,6 +105,8 @@ def test_script_prints_json_and_does_not_modify_storage(tmp_path) -> None:
 
 
 def test_script_empty_database_and_invalid_arguments_are_clear(tmp_path) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)):
+        pass
     empty = subprocess.run(
         [
             sys.executable,

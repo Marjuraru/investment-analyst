@@ -5,7 +5,6 @@ import argparse
 import json
 import sys
 from datetime import UTC, date, datetime
-from pathlib import Path
 
 from investment_analyst.analytics.consolidated_diagnostic_models import (
     ConsolidatedDiagnosticRequest,
@@ -14,8 +13,18 @@ from investment_analyst.analytics.consolidated_diagnostic_service import (
     AaplConsolidatedDiagnosticService,
     ConsolidatedDiagnosticQueryError,
 )
+from investment_analyst.application.cli import (
+    add_storage_location_arguments,
+    storage_location_from_namespace,
+)
+from investment_analyst.application.runtime import (
+    ApplicationRuntime,
+    ApplicationRuntimeError,
+)
 from investment_analyst.core.models import DataFrequency
-from investment_analyst.storage import LocalStorage, StorageError, StoragePaths
+from investment_analyst.storage import StorageError
+from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.service import WorkspaceError
 
 _NOTICE = (
     "Read-only consolidated view: market and fundamental diagnostics remain separate; "
@@ -60,7 +69,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Query separate persisted Apple market and fundamental diagnostics."
     )
-    parser.add_argument("--root", required=True, type=Path)
+    add_storage_location_arguments(parser)
     parser.add_argument("--known-at", required=True, type=_aware_datetime)
     parser.add_argument(
         "--fundamental-frequency",
@@ -82,7 +91,11 @@ def main() -> int:
             market_as_of=args.market_as_of,
             fundamental_as_of=args.fundamental_as_of,
         )
-        with LocalStorage(StoragePaths.from_root(args.root)) as storage:
+        runtime = ApplicationRuntime.create_default()
+        with runtime.open_storage(
+            storage_location_from_namespace(args),
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
             view = AaplConsolidatedDiagnosticService(storage).query(request)
         result = view.to_json_dict()
         payload = {
@@ -101,7 +114,13 @@ def main() -> int:
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
-    except (ConsolidatedDiagnosticQueryError, StorageError, ValueError) as error:
+    except (
+        ApplicationRuntimeError,
+        ConsolidatedDiagnosticQueryError,
+        StorageError,
+        ValueError,
+        WorkspaceError,
+    ) as error:
         print(f"consolidated diagnostic query failed: {error}", file=sys.stderr)
         return 2
 

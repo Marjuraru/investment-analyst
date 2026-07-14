@@ -6,20 +6,27 @@ import json
 import os
 import sys
 from datetime import UTC, date, datetime
-from pathlib import Path
 
+from investment_analyst.application.cli import (
+    add_storage_location_arguments,
+    storage_location_from_namespace,
+)
+from investment_analyst.application.runtime import (
+    ApplicationRuntime,
+    ApplicationRuntimeError,
+)
 from investment_analyst.catalog.provider_configuration import (
     resolve_alpaca_configuration,
 )
-from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
-from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.providers.http import UrlLibHttpTransport
 from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistoricalPipeline
 from investment_analyst.providers.market.alpaca_stock import (
     AlpacaCredentials,
     AlpacaStockClient,
 )
-from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.storage import StorageError
+from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.service import WorkspaceError
 
 
 def _parse_date(value: str) -> datetime:
@@ -32,7 +39,7 @@ def _parse_date(value: str) -> datetime:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", required=True, type=Path)
+    add_storage_location_arguments(parser)
     parser.add_argument("--start", required=True, type=_parse_date)
     parser.add_argument("--end", required=True, type=_parse_date)
     return parser
@@ -57,12 +64,14 @@ def main() -> int:
         return 2
 
     try:
-        catalog = AssetCatalogService.load_default()
-        resolver = ProviderAssetContextResolver(catalog)
-        configuration = resolve_alpaca_configuration(resolver)
+        runtime = ApplicationRuntime.create_default()
+        configuration = resolve_alpaca_configuration(runtime.provider_resolver)
         credentials = AlpacaCredentials(api_key=api_key, secret_key=secret_key)
         client = AlpacaStockClient(UrlLibHttpTransport(), credentials)
-        with LocalStorage(StoragePaths.from_root(arguments.root)) as storage:
+        with runtime.open_storage(
+            storage_location_from_namespace(arguments),
+            access_mode=WorkspaceAccessMode.READ_WRITE,
+        ) as storage:
             summary = AlpacaHistoricalPipeline(
                 storage,
                 client,
@@ -80,6 +89,9 @@ def main() -> int:
         }
         print(json.dumps(output, indent=2, sort_keys=True))
         return 0
+    except (ApplicationRuntimeError, WorkspaceError, StorageError) as error:
+        print(f"Alpaca history import failed: {error}", file=sys.stderr)
+        return 1
     except Exception as error:  # noqa: BLE001
         print(f"Alpaca history import failed: {error}", file=sys.stderr)
         return 1
