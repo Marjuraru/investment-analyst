@@ -41,11 +41,20 @@ def _ensure_within(base: Path, candidate: Path) -> Path:
 class JsonRawRecordRepository:
     """Store canonical RawRecord documents as immutable JSON files."""
 
-    def __init__(self, paths: StoragePaths, connection: DuckDBPyConnection) -> None:
+    def __init__(
+        self,
+        paths: StoragePaths,
+        connection: DuckDBPyConnection,
+        *,
+        read_only: bool = False,
+    ) -> None:
         self._paths = paths
         self._connection = connection
+        self._read_only = read_only
 
     def save(self, record: RawRecord) -> RawRecord:
+        if self._read_only:
+            raise StorageError("raw records cannot be saved through read-only storage")
         document_bytes = canonical_json_bytes(record)
         document_text = document_bytes.decode("utf-8")
         checksum = sha256_hex(document_bytes)

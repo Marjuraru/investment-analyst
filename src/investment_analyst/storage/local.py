@@ -20,9 +20,10 @@ from investment_analyst.storage.repositories import (
 class LocalStorage:
     """Context-managed facade for local raw files, DuckDB, and Parquet exports."""
 
-    def __init__(self, paths: StoragePaths) -> None:
+    def __init__(self, paths: StoragePaths, *, read_only: bool = False) -> None:
         self.paths = paths
-        self.store = DuckDBStore(paths)
+        self.read_only = read_only
+        self.store = DuckDBStore(paths, read_only=read_only)
         self.assets: DuckDBAssetRepository
         self.sources: DuckDBSourceDefinitionRepository
         self.raw_records: JsonRawRecordRepository
@@ -46,12 +47,20 @@ class LocalStorage:
         connection = self.store.connection
         self.assets = DuckDBAssetRepository(connection)
         self.sources = DuckDBSourceDefinitionRepository(connection)
-        self.raw_records = JsonRawRecordRepository(self.paths, connection)
+        self.raw_records = JsonRawRecordRepository(
+            self.paths,
+            connection,
+            read_only=self.read_only,
+        )
         self.observations = DuckDBObservationRepository(connection)
         self.metric_definitions = DuckDBMetricDefinitionRepository(connection)
         self.metric_results = DuckDBMetricResultRepository(connection)
         self.diagnostics = DuckDBDiagnosticResultRepository(connection)
-        self.parquet = ParquetExporter(self.paths, connection)
+        self.parquet = ParquetExporter(
+            self.paths,
+            connection,
+            read_only=self.read_only,
+        )
         self._is_open = True
         return self
 

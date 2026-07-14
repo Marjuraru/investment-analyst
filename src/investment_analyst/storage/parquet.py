@@ -22,9 +22,16 @@ _ALLOWED_EXPORTS = {
 class ParquetExporter:
     """Export a closed set of storage tables to Parquet."""
 
-    def __init__(self, paths: StoragePaths, connection: DuckDBPyConnection) -> None:
+    def __init__(
+        self,
+        paths: StoragePaths,
+        connection: DuckDBPyConnection,
+        *,
+        read_only: bool = False,
+    ) -> None:
         self._paths = paths
         self._connection = connection
+        self._read_only = read_only
 
     def export_table(
         self,
@@ -34,6 +41,8 @@ class ParquetExporter:
         overwrite: bool = False,
     ) -> Path:
         """Export one allowed table without silently replacing an existing file."""
+        if self._read_only:
+            raise StorageError("Parquet cannot be exported through read-only storage")
         order_column = _ALLOWED_EXPORTS.get(table_name)
         if order_column is None:
             raise StorageError(f"table {table_name!r} is not allowed for Parquet export")

@@ -15,8 +15,9 @@ SCHEMA_VERSION = 1
 class DuckDBStore:
     """Own one explicit persistent DuckDB connection."""
 
-    def __init__(self, paths: StoragePaths) -> None:
+    def __init__(self, paths: StoragePaths, *, read_only: bool = False) -> None:
         self.paths = paths
+        self.read_only = read_only
         self._connection: DuckDBPyConnection | None = None
 
     @property
@@ -32,14 +33,24 @@ class DuckDBStore:
         return self._connection
 
     def open(self) -> "DuckDBStore":
-        """Open the database and initialize schema version 1."""
+        """Open the database in read-write or genuine DuckDB read-only mode."""
         if self._connection is not None:
             return self
-        self.paths.create_directories()
-        self._connection = duckdb.connect(str(self.paths.database_path))
+        if self.read_only:
+            if not self.paths.database_path.is_file():
+                raise StorageError("read-only DuckDB database does not exist")
+        else:
+            self.paths.create_directories()
+        self._connection = duckdb.connect(
+            str(self.paths.database_path),
+            read_only=self.read_only,
+        )
         try:
-            self._initialize_schema()
-        except Exception:
+            if self.read_only:
+                self._validate_schema()
+            else:
+                self._initialize_schema()
+        except (duckdb.Error, OSError, StorageError):
             self.close()
             raise
         return self
@@ -60,6 +71,21 @@ class DuckDBStore:
         traceback: TracebackType | None,
     ) -> None:
         self.close()
+
+    def _validate_schema(self) -> None:
+        try:
+            row = self.connection.execute(
+                "SELECT metadata_value FROM storage_metadata WHERE metadata_key = ?",
+                ["schema_version"],
+            ).fetchone()
+        except duckdb.Error as error:
+            raise StorageSchemaError("storage schema metadata is missing") from error
+        if row is None:
+            raise StorageSchemaError("storage schema version is missing")
+        if row[0] != str(SCHEMA_VERSION):
+            raise StorageSchemaError(
+                f"unsupported storage schema version {row[0]!r}; expected {SCHEMA_VERSION}"
+            )
 
     def _initialize_schema(self) -> None:
         connection = self.connection
