@@ -7,6 +7,9 @@ import os
 import sys
 from pathlib import Path
 
+from investment_analyst.catalog.provider_configuration import resolve_sec_configuration
+from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
+from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.providers.fundamentals.sec_edgar import (
     SecEdgarClient,
     SecEdgarIdentity,
@@ -33,10 +36,22 @@ def main() -> int:
         return 2
 
     try:
+        catalog = AssetCatalogService.load_default()
+        resolver = ProviderAssetContextResolver(catalog)
+        configuration = resolve_sec_configuration(resolver)
         identity = SecEdgarIdentity(user_agent=user_agent)
-        client = SecEdgarClient(UrlLibHttpTransport(), identity)
+        client = SecEdgarClient(
+            UrlLibHttpTransport(),
+            identity,
+            cik=configuration.cik,
+            ticker=configuration.ticker,
+        )
         with LocalStorage(StoragePaths.from_root(arguments.root)) as storage:
-            summary = SecAaplFundamentalsPipeline(storage, client).run()
+            summary = SecAaplFundamentalsPipeline(
+                storage,
+                client,
+                configuration=configuration,
+            ).run()
         output = {
             "notice": (
                 "Official SEC EDGAR source. This command only stores raw issuer documents; it "
@@ -48,7 +63,7 @@ def main() -> int:
         print(json.dumps(output, indent=2, sort_keys=True))
         return 0
     except Exception as error:  # noqa: BLE001
-        print(f"SEC AAPL fundamentals import failed: {error}", file=sys.stderr)
+        print(f"SEC Apple fundamentals import failed: {error}", file=sys.stderr)
         return 1
 
 

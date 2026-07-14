@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from investment_analyst.core.models import DataQuality, NormalizedObservation, RawRecord
+from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
 from investment_analyst.providers.market.alpaca_normalizer import (
     ASSET_ID,
     SOURCE_ID,
@@ -15,7 +16,11 @@ from investment_analyst.providers.market.alpaca_normalizer import (
     create_alpaca_asset,
     create_alpaca_source,
 )
-from investment_analyst.providers.market.alpaca_stock import AlpacaStockClient
+from investment_analyst.providers.market.alpaca_stock import (
+    ADJUSTMENT,
+    FEED,
+    AlpacaStockClient,
+)
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import RecordNotFoundError, StorageError
 
@@ -71,10 +76,26 @@ class AlpacaHistoricalPipeline:
         storage: LocalStorage,
         client: AlpacaStockClient,
         *,
+        configuration: AlpacaAssetConfiguration | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._storage = storage
         self._client = client
+        self._configuration = configuration or AlpacaAssetConfiguration(
+            asset_id=ASSET_ID,
+            symbol=SYMBOL,
+            feed=FEED,
+            adjustment=ADJUSTMENT,
+            source_id=SOURCE_ID,
+        )
+        if self._configuration != AlpacaAssetConfiguration(
+            asset_id=ASSET_ID,
+            symbol=SYMBOL,
+            feed=FEED,
+            adjustment=ADJUSTMENT,
+            source_id=SOURCE_ID,
+        ):
+            raise StorageError("Alpaca configuration does not match the current persisted identity")
         self._clock = clock
 
     def run(self, start: datetime, end: datetime) -> AlpacaImportSummary:
@@ -84,7 +105,13 @@ class AlpacaHistoricalPipeline:
         diagnostic_ids_before = {
             result.diagnostic_id for result in self._storage.diagnostics.list()
         }
-        fetch = self._client.fetch_daily_bars(SYMBOL, start, end)
+        fetch = self._client.fetch_daily_bars(self._configuration.symbol, start, end)
+        if (
+            fetch.symbol != self._configuration.symbol
+            or fetch.feed != self._configuration.feed
+            or fetch.adjustment != self._configuration.adjustment
+        ):
+            raise StorageError("Alpaca fetch result does not match the resolved configuration")
         self._storage.assets.upsert(create_alpaca_asset())
         self._storage.sources.upsert(create_alpaca_source())
 
@@ -138,8 +165,8 @@ class AlpacaHistoricalPipeline:
 
         bar_times = tuple(bar.timestamp for bar in fetch.bars)
         return AlpacaImportSummary(
-            asset_id=ASSET_ID,
-            source_id=SOURCE_ID,
+            asset_id=self._configuration.asset_id,
+            source_id=self._configuration.source_id,
             requested_start=fetch.requested_start,
             requested_end=fetch.requested_end,
             retrieved_at=fetch.retrieved_at,
@@ -173,9 +200,15 @@ class AlpacaHistoricalPipeline:
         for record in records:
             if self._storage.raw_records.get(record.record_id) != record:
                 raise StorageError("Alpaca raw record round-trip verification failed")
-            if record.asset_id != ASSET_ID or record.source.source_id != SOURCE_ID:
+            if (
+                record.asset_id != self._configuration.asset_id
+                or record.source.source_id != self._configuration.source_id
+            ):
                 raise StorageError("Alpaca raw record asset or source is inconsistent")
-            if not isinstance(record.payload, dict) or record.payload.get("symbol") != SYMBOL:
+            if (
+                not isinstance(record.payload, dict)
+                or record.payload.get("symbol") != self._configuration.symbol
+            ):
                 raise StorageError("Alpaca raw record payload does not represent AAPL")
             if counts[record.record_id] != 7:
                 raise StorageError("each raw Alpaca bar must have seven observations")
@@ -190,7 +223,10 @@ class AlpacaHistoricalPipeline:
                 raise StorageError("Alpaca observation references a missing raw record")
             if self._storage.observations.get(observation.observation_id) != observation:
                 raise StorageError("Alpaca observation round-trip verification failed")
-            if observation.asset_id != ASSET_ID or record.asset_id != observation.asset_id:
+            if (
+                observation.asset_id != self._configuration.asset_id
+                or record.asset_id != observation.asset_id
+            ):
                 raise StorageError("Alpaca observation asset does not match its raw record")
             if observation.source != record.source:
                 raise StorageError("Alpaca observation source does not match its raw record")

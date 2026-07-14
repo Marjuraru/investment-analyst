@@ -5,9 +5,11 @@ from datetime import datetime
 from uuid import UUID
 
 from investment_analyst.core.models import Asset, RawRecord
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_edgar import (
     APPLE_CIK,
     APPLE_ENTITY_NAME,
+    APPLE_TICKER,
     SecAaplFetchResult,
     SecDocumentType,
     SecEdgarClient,
@@ -68,9 +70,31 @@ class SecAaplImportSummary:
 class SecAaplFundamentalsPipeline:
     """Fetch and persist only raw Apple SEC documents without analytics."""
 
-    def __init__(self, storage: LocalStorage, client: SecEdgarClient) -> None:
+    def __init__(
+        self,
+        storage: LocalStorage,
+        client: SecEdgarClient,
+        *,
+        configuration: SecAssetConfiguration | None = None,
+    ) -> None:
         self._storage = storage
         self._client = client
+        self._configuration = configuration or SecAssetConfiguration(
+            asset_id=ASSET_ID,
+            cik=APPLE_CIK,
+            ticker=APPLE_TICKER,
+            submissions_source_id=SUBMISSIONS_SOURCE_ID,
+            companyfacts_source_id=COMPANY_FACTS_SOURCE_ID,
+        )
+        expected = SecAssetConfiguration(
+            asset_id=ASSET_ID,
+            cik=APPLE_CIK,
+            ticker=APPLE_TICKER,
+            submissions_source_id=SUBMISSIONS_SOURCE_ID,
+            companyfacts_source_id=COMPANY_FACTS_SOURCE_ID,
+        )
+        if self._configuration != expected:
+            raise StorageError("SEC configuration does not match the current persisted identity")
 
     def run(self) -> SecAaplImportSummary:
         """Import both Apple SEC snapshots idempotently and verify storage integrity."""
@@ -147,7 +171,11 @@ class SecAaplFundamentalsPipeline:
         self,
         fetch: SecAaplFetchResult,
     ) -> dict[SecDocumentType, RawRecord]:
-        if fetch.cik != APPLE_CIK or fetch.entity_name.casefold() != APPLE_ENTITY_NAME.casefold():
+        if (
+            fetch.cik != self._configuration.cik
+            or fetch.ticker != self._configuration.ticker
+            or fetch.entity_name.casefold() != APPLE_ENTITY_NAME.casefold()
+        ):
             raise StorageError("SEC fetch result does not identify Apple")
         candidates: dict[SecDocumentType, RawRecord] = {}
         for document in fetch.documents:

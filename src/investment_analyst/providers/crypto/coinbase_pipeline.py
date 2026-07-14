@@ -7,7 +7,9 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlsplit
 
 from investment_analyst.core.models import NormalizedObservation, RawRecord
+from investment_analyst.providers.asset_config import CoinbaseAssetConfiguration
 from investment_analyst.providers.crypto.coinbase_exchange import (
+    DAILY_GRANULARITY_SECONDS,
     CoinbaseCandle,
     CoinbaseExchangeClient,
 )
@@ -77,16 +79,34 @@ class CoinbaseHistoricalPipeline:
         storage: LocalStorage,
         client: CoinbaseExchangeClient,
         *,
+        configuration: CoinbaseAssetConfiguration | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._storage = storage
         self._client = client
+        self._configuration = configuration or CoinbaseAssetConfiguration(
+            asset_id=ASSET_ID,
+            product_id=PRODUCT_ID,
+            source_id=SOURCE_ID,
+            granularity_seconds=DAILY_GRANULARITY_SECONDS,
+        )
+        if self._configuration != CoinbaseAssetConfiguration(
+            asset_id=ASSET_ID,
+            product_id=PRODUCT_ID,
+            source_id=SOURCE_ID,
+            granularity_seconds=DAILY_GRANULARITY_SECONDS,
+        ):
+            raise StorageError(
+                "Coinbase configuration does not match the current persisted identity"
+            )
         self._clock = clock
 
     def run(self, start: datetime, end: datetime) -> CoinbaseImportSummary:
         """Fetch BTC-USD, persist raw and normalized data, and verify traceability."""
         self._storage.require_open()
-        fetch = self._client.fetch_daily_candles(PRODUCT_ID, start, end)
+        fetch = self._client.fetch_daily_candles(self._configuration.product_id, start, end)
+        if fetch.product_id != self._configuration.product_id:
+            raise StorageError("Coinbase fetch result does not match the resolved configuration")
         self._storage.assets.upsert(create_coinbase_asset())
         self._storage.sources.upsert(create_coinbase_source())
 
@@ -137,8 +157,8 @@ class CoinbaseHistoricalPipeline:
         )
         candle_times = tuple(candle.start for candle in fetch.candles)
         return CoinbaseImportSummary(
-            asset_id=ASSET_ID,
-            source_id=SOURCE_ID,
+            asset_id=self._configuration.asset_id,
+            source_id=self._configuration.source_id,
             requested_start=fetch.requested_start,
             requested_end=fetch.requested_end,
             retrieved_at=fetch.retrieved_at,
@@ -171,11 +191,14 @@ class CoinbaseHistoricalPipeline:
         for record in records:
             if self._storage.raw_records.get(record.record_id) != record:
                 raise StorageError("raw record round-trip verification failed")
-            if record.asset_id != ASSET_ID or record.source.source_id != SOURCE_ID:
+            if (
+                record.asset_id != self._configuration.asset_id
+                or record.source.source_id != self._configuration.source_id
+            ):
                 raise StorageError("raw record asset or source does not match BTC-USD")
             if not isinstance(record.payload, dict):
                 raise StorageError("raw record payload is not an object")
-            if record.payload.get("product_id") != PRODUCT_ID:
+            if record.payload.get("product_id") != self._configuration.product_id:
                 raise StorageError("raw record payload does not represent BTC-USD")
             if counts[record.record_id] != 5:
                 raise StorageError("each raw Coinbase candle must have five observations")
@@ -190,7 +213,10 @@ class CoinbaseHistoricalPipeline:
                 raise StorageError("observation references a missing raw record")
             if self._storage.observations.get(observation.observation_id) != observation:
                 raise StorageError("observation round-trip verification failed")
-            if observation.asset_id != ASSET_ID or record.asset_id != observation.asset_id:
+            if (
+                observation.asset_id != self._configuration.asset_id
+                or record.asset_id != observation.asset_id
+            ):
                 raise StorageError("observation asset does not match its raw record")
             if observation.source != record.source:
                 raise StorageError("observation source does not match its raw record")

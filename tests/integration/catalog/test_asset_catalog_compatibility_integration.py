@@ -31,6 +31,14 @@ def test_default_catalog_matches_existing_provider_constants() -> None:
         ).identifier
         == APPLE_CIK
     )
+    assert (
+        service.get_binding(
+            APPLE_ASSET_ID,
+            provider="sec",
+            namespace="ticker",
+        ).identifier
+        == APPLE_TICKER
+    )
 
     coinbase = service.get(COINBASE_ASSET_ID)
     assert (

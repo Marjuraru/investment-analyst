@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch AAPL IEX daily bars into an explicit local storage root."""
+"""Fetch Apple IEX daily bars into an explicit local storage root."""
 
 import argparse
 import json
@@ -8,6 +8,11 @@ import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from investment_analyst.catalog.provider_configuration import (
+    resolve_alpaca_configuration,
+)
+from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
+from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.providers.http import UrlLibHttpTransport
 from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistoricalPipeline
 from investment_analyst.providers.market.alpaca_stock import (
@@ -52,10 +57,17 @@ def main() -> int:
         return 2
 
     try:
+        catalog = AssetCatalogService.load_default()
+        resolver = ProviderAssetContextResolver(catalog)
+        configuration = resolve_alpaca_configuration(resolver)
         credentials = AlpacaCredentials(api_key=api_key, secret_key=secret_key)
         client = AlpacaStockClient(UrlLibHttpTransport(), credentials)
         with LocalStorage(StoragePaths.from_root(arguments.root)) as storage:
-            summary = AlpacaHistoricalPipeline(storage, client).run(
+            summary = AlpacaHistoricalPipeline(
+                storage,
+                client,
+                configuration=configuration,
+            ).run(
                 arguments.start,
                 arguments.end,
             )

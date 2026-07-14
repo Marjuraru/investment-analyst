@@ -146,6 +146,8 @@ class SecEdgarClient:
         transport: HttpTransport,
         identity: SecEdgarIdentity,
         *,
+        cik: str = APPLE_CIK,
+        ticker: str = APPLE_TICKER,
         base_url: str = OFFICIAL_BASE_URL,
         timeout_seconds: float = 30.0,
         sleep: Callable[[float], None] = default_sleep,
@@ -161,6 +163,12 @@ class SecEdgarClient:
             raise SecEdgarError("SEC base_url must not contain a path, query, or fragment")
         if timeout_seconds <= 0:
             raise SecEdgarError("timeout_seconds must be greater than zero")
+        normalized_cik = normalize_cik(cik)
+        normalized_ticker = ticker.strip()
+        if normalized_cik != APPLE_CIK or normalized_ticker != APPLE_TICKER:
+            raise SecEdgarError("SEC issuer identifiers do not identify Apple AAPL")
+        self._cik = normalized_cik
+        self._ticker = normalized_ticker
         self._transport = transport
         self._identity = identity
         self._base_url = normalized_base
@@ -170,8 +178,10 @@ class SecEdgarClient:
 
     def fetch_aapl_issuer_documents(self) -> SecAaplFetchResult:
         """Fetch, parse, validate, and checksum the two fixed Apple documents."""
-        submissions_url = f"{self._base_url}{SUBMISSIONS_PATH}"
-        company_facts_url = f"{self._base_url}{COMPANY_FACTS_PATH}"
+        submissions_path = f"/submissions/CIK{self._cik}.json"
+        company_facts_path = f"/api/xbrl/companyfacts/CIK{self._cik}.json"
+        submissions_url = f"{self._base_url}{submissions_path}"
+        company_facts_url = f"{self._base_url}{company_facts_path}"
         submissions_response = self._transport.get(
             submissions_url,
             headers=self._headers(),
@@ -201,8 +211,8 @@ class SecEdgarClient:
             retrieved_at,
         )
         return SecAaplFetchResult(
-            cik=APPLE_CIK,
-            ticker=APPLE_TICKER,
+            cik=self._cik,
+            ticker=self._ticker,
             entity_name=APPLE_ENTITY_NAME,
             retrieved_at=retrieved_at,
             documents=(submissions, company_facts),

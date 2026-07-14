@@ -55,6 +55,15 @@
           "identifier": "0000320193",
           "namespace": "cik",
           "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "AAPL",
+          "namespace": "ticker",
+          "provider": "sec"
         }
       ],
       "provider_symbols": {

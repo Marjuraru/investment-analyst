@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Import public Coinbase BTC-USD daily candles into local storage."""
+"""Import configured Coinbase daily candles into local storage."""
 
 import argparse
 import json
@@ -7,6 +7,11 @@ import sys
 from datetime import UTC, date, datetime, time
 from pathlib import Path
 
+from investment_analyst.catalog.provider_configuration import (
+    resolve_coinbase_configuration,
+)
+from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
+from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.providers.crypto.coinbase_exchange import CoinbaseExchangeClient
 from investment_analyst.providers.crypto.coinbase_pipeline import CoinbaseHistoricalPipeline
 from investment_analyst.providers.http import UrlLibHttpTransport
@@ -22,7 +27,7 @@ def _parse_date(value: str) -> date:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Import public Coinbase Exchange BTC-USD daily market data."
+        description="Import configured Coinbase Exchange daily market data."
     )
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--start", required=True, type=_parse_date)
@@ -44,9 +49,16 @@ def main() -> int:
 
     try:
         paths = StoragePaths.from_root(arguments.root)
+        catalog = AssetCatalogService.load_default()
+        resolver = ProviderAssetContextResolver(catalog)
+        configuration = resolve_coinbase_configuration(resolver)
         client = CoinbaseExchangeClient(UrlLibHttpTransport())
         with LocalStorage(paths) as storage:
-            summary = CoinbaseHistoricalPipeline(storage, client).run(start, end)
+            summary = CoinbaseHistoricalPipeline(
+                storage,
+                client,
+                configuration=configuration,
+            ).run(start, end)
         output = {
             "notice": (
                 "Market-data analysis only. This command does not execute trades and does not "

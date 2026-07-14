@@ -25,6 +25,11 @@ from investment_analyst.analytics.market.diagnostic_selection import (
 from investment_analyst.analytics.market.history_service import HistoricalMarketDataService
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
 from investment_analyst.analytics.market.statistics_pipeline import MarketStatisticsPipeline
+from investment_analyst.catalog.provider_configuration import (
+    resolve_alpaca_configuration,
+)
+from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
+from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.providers.http import UrlLibHttpTransport
 from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistoricalPipeline
@@ -106,9 +111,16 @@ def _payload(summary) -> dict[str, object]:
 
 
 def _build_pipeline(storage: LocalStorage, credentials: AlpacaCredentials):
+    catalog = AssetCatalogService.load_default()
+    resolver = ProviderAssetContextResolver(catalog)
+    configuration = resolve_alpaca_configuration(resolver)
     transport = UrlLibHttpTransport()
     client = AlpacaStockClient(transport, credentials)
-    market_pipeline = AlpacaHistoricalPipeline(storage, client)
+    market_pipeline = AlpacaHistoricalPipeline(
+        storage,
+        client,
+        configuration=configuration,
+    )
     history = HistoricalMarketDataService(storage)
     statistics_pipeline = MarketStatisticsPipeline(
         storage,
