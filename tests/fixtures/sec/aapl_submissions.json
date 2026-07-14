@@ -1,0 +1,19 @@
+{
+  "cik": 320193,
+  "name": "Apple Inc.",
+  "tickers": ["AAPL"],
+  "exchanges": ["Nasdaq"],
+  "description": "Synthetic SEC submissions fixture for offline tests; not a real filing history.",
+  "filings": {
+    "recent": {
+      "accessionNumber": [
+        "0000320193-26-000001",
+        "0000320193-26-000002"
+      ],
+      "filingDate": ["2026-01-30", "2026-04-30"],
+      "reportDate": ["2025-12-31", "2026-03-31"],
+      "form": ["10-K", "10-Q"]
+    },
+    "files": []
+  }
+}
