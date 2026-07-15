@@ -4,7 +4,7 @@
 import argparse
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
 from investment_analyst.analytics.market.diagnostic_models import MarketDiagnosticRequest
@@ -30,6 +30,7 @@ from investment_analyst.application.runtime import (
     ApplicationRuntimeError,
 )
 from investment_analyst.storage.errors import StorageError
+from investment_analyst.time_intervals import inclusive_utc_date_bounds
 from investment_analyst.workspace.models import WorkspaceAccessMode
 from investment_analyst.workspace.service import WorkspaceError
 
@@ -39,9 +40,9 @@ _NOTICE = (
 )
 
 
-def _date_utc(value: str) -> datetime:
+def _parse_date(value: str) -> date:
     try:
-        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
+        return date.fromisoformat(value)
     except ValueError as error:
         raise argparse.ArgumentTypeError("expected date in YYYY-MM-DD format") from error
 
@@ -81,8 +82,8 @@ def _parser() -> argparse.ArgumentParser:
     add_storage_location_arguments(parser)
     parser.add_argument("--asset-id", required=True)
     parser.add_argument("--source-id", required=True)
-    parser.add_argument("--start", required=True, type=_date_utc)
-    parser.add_argument("--end", required=True, type=_date_utc)
+    parser.add_argument("--start", required=True, type=_parse_date)
+    parser.add_argument("--end", required=True, type=_parse_date)
     parser.add_argument("--known-at", required=True, type=_aware_datetime)
     parser.add_argument("--short-sma-window", type=_positive_int, default=5)
     parser.add_argument("--long-sma-window", type=_positive_int, default=20)
@@ -95,12 +96,13 @@ def main() -> int:
     """Run the local diagnostic pipeline and print one JSON document."""
     args = _parser().parse_args()
     try:
+        start, end = inclusive_utc_date_bounds(args.start, args.end)
         request = MarketDiagnosticRequest(
             query=HistoricalBarQuery(
                 asset_id=args.asset_id,
                 source_id=args.source_id,
-                start=args.start,
-                end=args.end,
+                start=start,
+                end=end,
                 known_at=args.known_at,
             ),
             short_sma_window=args.short_sma_window,

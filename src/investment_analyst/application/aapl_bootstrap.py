@@ -1,7 +1,7 @@
 """Resumable Apple workspace bootstrap built only from existing domain pipelines."""
 
 from collections.abc import Callable
-from datetime import UTC, date, datetime, time
+from datetime import UTC, datetime
 from uuid import UUID
 
 from investment_analyst.analytics.consolidated_diagnostic_models import (
@@ -62,6 +62,7 @@ from investment_analyst.providers.market.alpaca_normalizer import SOURCE_ID
 from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistoricalPipeline
 from investment_analyst.providers.market.alpaca_stock import FEED
 from investment_analyst.storage import LocalStorage
+from investment_analyst.time_intervals import inclusive_utc_date_bounds
 
 
 class AaplWorkspaceBootstrapError(RuntimeError):
@@ -122,10 +123,6 @@ def _utc(value: datetime, name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise BootstrapConfigurationError(f"{name} must include timezone information")
     return value.astimezone(UTC)
-
-
-def _midnight(value: date) -> datetime:
-    return datetime.combine(value, time.min, tzinfo=UTC)
 
 
 def _stage_status(generated: int, created: int, reused: int) -> AaplBootstrapStageStatus:
@@ -197,8 +194,10 @@ class AaplWorkspaceBootstrapPipeline:
     ) -> AaplWorkspaceBootstrapSummary:
         """Execute the fixed stage order without rollback or duplicate stage calls."""
         self._storage.require_open()
-        start = _midnight(request.market_start)
-        end = _midnight(request.market_end)
+        start, end = inclusive_utc_date_bounds(
+            request.market_start,
+            request.market_end,
+        )
         stages: list[AaplBootstrapStageSummary] = []
 
         sec_fetch = self._run_sec_fetch()

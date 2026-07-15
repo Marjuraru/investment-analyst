@@ -32,6 +32,7 @@ from investment_analyst.application.aapl_bootstrap import (
     BootstrapKnownAtTooEarlyError,
 )
 from investment_analyst.application.aapl_bootstrap_models import (
+    AaplBootstrapStage,
     AaplWorkspaceBootstrapRequest,
 )
 from investment_analyst.application.runtime import (
@@ -75,6 +76,7 @@ from investment_analyst.providers.fundamentals.sec_point_in_time_service import 
     SecAaplFundamentalPointInTimeService,
 )
 from investment_analyst.providers.http import HttpResponse
+from investment_analyst.providers.market.alpaca_normalizer import ASSET_ID, SOURCE_ID
 from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistoricalPipeline
 from investment_analyst.providers.market.alpaca_stock import (
     AlpacaCredentials,
@@ -180,10 +182,18 @@ def _sec_documents() -> tuple[bytes, bytes]:
 
 
 def _bars() -> bytes:
+    timestamps = [
+        datetime(2026, 1, 1, 5, tzinfo=UTC) + timedelta(days=offset) for offset in range(26)
+    ]
+    timestamps.extend(
+        (
+            datetime(2026, 1, 27, tzinfo=UTC),
+            datetime(2026, 1, 27, 5, tzinfo=UTC),
+        )
+    )
     bars = []
-    for offset in range(25):
-        timestamp = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(days=offset)
-        value = 100 + offset
+    for timestamp in timestamps:
+        value = 100
         bars.append(
             {
                 "t": timestamp.isoformat().replace("+00:00", "Z"),
@@ -191,8 +201,8 @@ def _bars() -> bytes:
                 "h": value + 3,
                 "l": value - 1,
                 "c": value + 2,
-                "v": 1_000_000 + offset * 10_000,
-                "n": 10_000 + offset,
+                "v": 1_000_000,
+                "n": 10_000,
                 "vw": value + 1,
             }
         )
@@ -317,6 +327,11 @@ def test_bootstrap_is_complete_idempotent_and_visible_to_workspace_inspection(
             tuple(item.result_id for item in storage.metric_results.list()),
             tuple(item.diagnostic_id for item in storage.diagnostics.list()),
         )
+        market_timestamps = {
+            item.observed_at
+            for item in storage.observations.list(asset_id=ASSET_ID)
+            if item.source.source_id == SOURCE_ID and item.observed_at is not None
+        }
         second = pipeline.run(_request())
         counts_after_second = _counts(storage)
         identifiers_after_second = (
@@ -330,6 +345,7 @@ def test_bootstrap_is_complete_idempotent_and_visible_to_workspace_inspection(
     assert first.effective_known_at == EFFECTIVE
     assert first.overall_status is ConsolidatedDiagnosticStatus.COMPLETE
     assert first.consolidated.market.diagnostic is not None
+    assert first.consolidated.market.diagnostic.as_of == datetime(2026, 1, 26, 5, tzinfo=UTC)
     assert first.consolidated.fundamental.diagnostic is not None
     assert first.consolidated.market.diagnostic.verdict is not DiagnosticVerdict.INSUFFICIENT_DATA
     assert second.overall_status is ConsolidatedDiagnosticStatus.COMPLETE
@@ -339,6 +355,13 @@ def test_bootstrap_is_complete_idempotent_and_visible_to_workspace_inspection(
     assert second.observations_created == 0
     assert second.metric_results_created == 0
     assert second.diagnostics_created == 0
+    assert max(market_timestamps) == datetime(2026, 1, 26, 5, tzinfo=UTC)
+    assert datetime(2026, 1, 27, tzinfo=UTC) not in market_timestamps
+    assert datetime(2026, 1, 27, 5, tzinfo=UTC) not in market_timestamps
+    market_stage = next(
+        item for item in first.stages if item.stage is AaplBootstrapStage.MARKET_FETCH
+    )
+    assert market_stage.stage is AaplBootstrapStage.MARKET_FETCH
     assert len(transport.calls) == 6
 
     inspection = workspace_service.inspect(workspace_root)

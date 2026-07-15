@@ -1,6 +1,6 @@
 """Resumable orchestration of Apple IEX market analytics and consolidated diagnostics."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from decimal import Context, localcontext
 
 from investment_analyst.analytics.aapl_snapshot_models import (
@@ -36,6 +36,7 @@ from investment_analyst.providers.market.alpaca_normalizer import SOURCE_ID
 from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistoricalPipeline
 from investment_analyst.providers.market.alpaca_stock import FEED
 from investment_analyst.storage import LocalStorage
+from investment_analyst.time_intervals import inclusive_utc_date_bounds
 
 
 class AaplCompleteSnapshotPipelineError(RuntimeError):
@@ -77,10 +78,6 @@ def _utc_clock(clock) -> datetime:
     return value.astimezone(UTC)
 
 
-def _midnight(value: date) -> datetime:
-    return datetime(value.year, value.month, value.day, tzinfo=UTC)
-
-
 def _stage_status(generated: int, created: int, reused: int) -> AaplSnapshotStageStatus:
     if generated > 0 and created == 0 and reused == generated:
         return AaplSnapshotStageStatus.REUSED
@@ -114,8 +111,10 @@ class AaplCompleteSnapshotPipeline:
         if request.asset_id != ASSET_ID:
             raise AaplSnapshotConfigurationError("only Apple is supported")
         started_at = _utc_clock(self._clock)
-        start = _midnight(request.market_start)
-        end = _midnight(request.market_end)
+        start, end = inclusive_utc_date_bounds(
+            request.market_start,
+            request.market_end,
+        )
         query = HistoricalBarQuery(
             asset_id=ASSET_ID,
             source_id=SOURCE_ID,

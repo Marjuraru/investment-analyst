@@ -39,6 +39,7 @@ from investment_analyst.providers.market.alpaca_pipeline import AlpacaImportSumm
 KNOWN_AT = datetime(2026, 7, 14, tzinfo=UTC)
 START = datetime(2026, 6, 1, tzinfo=UTC)
 END = datetime(2026, 7, 1, tzinfo=UTC)
+END_EXCLUSIVE = datetime(2026, 7, 2, tzinfo=UTC)
 
 
 class FakeStorage:
@@ -190,7 +191,7 @@ def _market_summary() -> AlpacaImportSummary:
         asset_id=ASSET_ID,
         source_id=SOURCE_ID,
         requested_start=START,
-        requested_end=END,
+        requested_end=END_EXCLUSIVE,
         retrieved_at=datetime(2026, 7, 2, tzinfo=UTC),
         feed="iex",
         adjustment="all",
@@ -211,7 +212,7 @@ def _statistics_summary() -> MarketStatisticsRunSummary:
         asset_id=ASSET_ID,
         source_id=SOURCE_ID,
         requested_start=START,
-        requested_end=END,
+        requested_end=END_EXCLUSIVE,
         known_at=KNOWN_AT,
         computed_at=datetime(2026, 7, 3, tzinfo=UTC),
         bar_count=25,
@@ -233,7 +234,7 @@ def _diagnostic_summary() -> MarketDiagnosticRunSummary:
         asset_id=ASSET_ID,
         source_id=SOURCE_ID,
         requested_start=START,
-        requested_end=END,
+        requested_end=END_EXCLUSIVE,
         known_at=KNOWN_AT,
         as_of=datetime(2026, 6, 25, tzinfo=UTC),
         computed_at=datetime(2026, 7, 3, tzinfo=UTC),
@@ -282,13 +283,15 @@ def test_pipeline_calls_each_existing_layer_once_in_order() -> None:
     ]
     assert len(market.arguments) == len(statistics.arguments) == len(diagnostic.arguments) == 1
     assert len(consolidated.requests) == 1
-    assert market.arguments[0] == (START, END)
+    assert market.arguments[0] == (START, END_EXCLUSIVE)
     statistics_request = statistics.arguments[0][0]
     assert statistics_request.query.known_at == KNOWN_AT
+    assert statistics_request.query.end == END_EXCLUSIVE
     assert diagnostic.arguments[0][0].query == statistics_request.query
     assert consolidated.requests[0].fundamental_frequency is DataFrequency.QUARTERLY
     assert summary.overall_status is ConsolidatedDiagnosticStatus.COMPLETE
     assert summary.fundamental_refresh.status.value == "skipped"
+    assert summary.request.model_dump(mode="json")["market_end"] == "2026-07-01"
     assert "combined_score" not in summary.to_json_dict()
 
 

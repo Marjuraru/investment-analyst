@@ -20,40 +20,55 @@ _SCRIPT = _ROOT / "scripts" / "query_market_history.py"
 _SOURCE_ID = "coinbase-exchange:btc-usd:daily-candles"
 
 
-def _prepare_storage(root: Path) -> None:
-    retrieved = datetime(2026, 7, 5, tzinfo=UTC)
+def _store_candles(
+    root: Path,
+    timestamps: tuple[datetime, ...],
+    *,
+    retrieved_at: datetime,
+) -> None:
     with LocalStorage(StoragePaths.from_root(root)) as storage:
-        for day in (2, 3):
-            timestamp = datetime(2026, 7, day, tzinfo=UTC)
+        for index, timestamp in enumerate(timestamps):
+            close = Decimal("108000") + Decimal(index)
             candle = CoinbaseCandle(
                 product_id="BTC-USD",
                 start=timestamp,
-                low=Decimal("100000"),
-                high=Decimal("110000"),
-                open=Decimal("102000"),
-                close=Decimal("108000"),
-                volume=Decimal("12000"),
+                low=close - Decimal("8000"),
+                high=close + Decimal("2000"),
+                open=close - Decimal("6000"),
+                close=close,
+                volume=Decimal("12000") + Decimal(index),
                 raw_values=(
                     str(int(timestamp.timestamp())),
-                    "100000",
-                    "110000",
-                    "102000",
-                    "108000",
-                    "12000",
+                    str(close - Decimal("8000")),
+                    str(close + Decimal("2000")),
+                    str(close - Decimal("6000")),
+                    str(close),
+                    str(Decimal("12000") + Decimal(index)),
                 ),
             )
             raw = candle_to_raw_record(
                 candle,
-                retrieved_at=retrieved,
+                retrieved_at=retrieved_at,
                 request_url="https://api.exchange.coinbase.com/test",
             )
             storage.raw_records.save(raw)
             for observation in candle_to_observations(
                 candle,
                 raw,
-                normalized_at=retrieved + timedelta(minutes=1),
+                normalized_at=retrieved_at + timedelta(minutes=1),
             ):
                 storage.observations.save(observation)
+
+
+def _prepare_storage(root: Path) -> None:
+    _store_candles(
+        root,
+        (
+            datetime(2026, 7, 2, tzinfo=UTC),
+            datetime(2026, 7, 3, tzinfo=UTC),
+        ),
+        retrieved_at=datetime(2026, 7, 5, tzinfo=UTC),
+    )
 
 
 def _environment() -> dict[str, str]:
@@ -100,6 +115,57 @@ def test_script_prints_valid_bounded_json_without_keys_or_network(tmp_path) -> N
     assert payload["truncated"] is True
     assert payload["traceability_verified"] is True
     assert "raw_candle" not in result.stdout
+
+
+def test_script_includes_entire_final_date_and_excludes_next_day(tmp_path) -> None:
+    expected = (
+        datetime(2026, 7, 10, 4, tzinfo=UTC),
+        datetime(2026, 7, 13, 4, tzinfo=UTC),
+    )
+    _store_candles(
+        tmp_path,
+        expected
+        + (
+            datetime(2026, 7, 14, tzinfo=UTC),
+            datetime(2026, 7, 14, 4, tzinfo=UTC),
+        ),
+        retrieved_at=datetime(2026, 7, 14, 12, tzinfo=UTC),
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--root",
+            str(tmp_path),
+            "--asset-id",
+            "crypto:btc-usd",
+            "--source-id",
+            _SOURCE_ID,
+            "--start",
+            "2026-07-10",
+            "--end",
+            "2026-07-13",
+            "--known-at",
+            "2026-07-15T00:00:00Z",
+        ],
+        cwd=_ROOT,
+        env=_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    timestamps = tuple(
+        datetime.fromisoformat(item["timestamp"].replace("Z", "+00:00")) for item in payload["bars"]
+    )
+    assert timestamps == expected
+    assert payload["coverage"]["bar_count"] == 2
+    assert payload["query"]["end"] in {
+        "2026-07-14T00:00:00Z",
+        "2026-07-14T00:00:00+00:00",
+    }
 
 
 def test_script_reports_unknown_source_without_traceback(tmp_path) -> None:
