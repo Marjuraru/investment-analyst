@@ -6,8 +6,16 @@ import json
 import sys
 from datetime import UTC, date, datetime
 
+from investment_analyst.analytics.aapl_daily_report_formatter import (
+    format_aapl_daily_report,
+)
+from investment_analyst.analytics.aapl_daily_report_service import (
+    AaplDailyReportError,
+    AaplDailyReportService,
+)
 from investment_analyst.analytics.consolidated_diagnostic_models import (
     ConsolidatedDiagnosticRequest,
+    ConsolidatedDiagnosticView,
 )
 from investment_analyst.analytics.consolidated_diagnostic_service import (
     AaplConsolidatedDiagnosticService,
@@ -78,11 +86,40 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--market-as-of", type=_date_value)
     parser.add_argument("--fundamental-as-of", type=_date_value)
+    parser.add_argument(
+        "--format",
+        dest="output_format",
+        choices=("json", "daily-json", "text"),
+        default="json",
+        help=(
+            "output contract: legacy compact JSON (default), versioned enriched JSON, "
+            "or human-readable text"
+        ),
+    )
     return parser
 
 
+def _legacy_payload(view: ConsolidatedDiagnosticView) -> dict[str, object]:
+    """Preserve the original compact JSON output contract byte-for-byte."""
+    result = view.to_json_dict()
+    return {
+        "notice": _NOTICE,
+        "query": result["request"],
+        "status": result["status"],
+        "market": result["market"],
+        "fundamental": result["fundamental"],
+        "temporal_context": result["temporal_context"],
+        "traceability": {
+            "diagnostics_examined": result["diagnostics_examined"],
+            "metric_results_examined": result["metric_results_examined"],
+            "ignored_algorithm_versions": result["ignored_algorithm_versions"],
+            "verified": result["traceability_verified"],
+        },
+    }
+
+
 def main() -> int:
-    """Execute one read-only consolidated query and print compact JSON."""
+    """Execute one read-only query and print the selected output contract."""
     args = _parser().parse_args()
     try:
         request = ConsolidatedDiagnosticRequest(
@@ -96,25 +133,19 @@ def main() -> int:
             storage_location_from_namespace(args),
             access_mode=WorkspaceAccessMode.READ_ONLY,
         ) as storage:
-            view = AaplConsolidatedDiagnosticService(storage).query(request)
-        result = view.to_json_dict()
-        payload = {
-            "notice": _NOTICE,
-            "query": result["request"],
-            "status": result["status"],
-            "market": result["market"],
-            "fundamental": result["fundamental"],
-            "temporal_context": result["temporal_context"],
-            "traceability": {
-                "diagnostics_examined": result["diagnostics_examined"],
-                "metric_results_examined": result["metric_results_examined"],
-                "ignored_algorithm_versions": result["ignored_algorithm_versions"],
-                "verified": result["traceability_verified"],
-            },
-        }
-        print(json.dumps(payload, indent=2, sort_keys=True))
+            if args.output_format == "json":
+                view = AaplConsolidatedDiagnosticService(storage).query(request)
+                output = json.dumps(_legacy_payload(view), indent=2, sort_keys=True)
+            else:
+                report = AaplDailyReportService(storage).query(request)
+                if args.output_format == "daily-json":
+                    output = json.dumps(report.to_json_dict(), indent=2, sort_keys=True)
+                else:
+                    output = format_aapl_daily_report(report)
+        print(output)
         return 0
     except (
+        AaplDailyReportError,
         ApplicationRuntimeError,
         ConsolidatedDiagnosticQueryError,
         StorageError,
