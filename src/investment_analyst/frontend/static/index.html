@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#101827">
+    <title>Apple (AAPL) · Investment Analyst</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#contenido">Saltar al contenido principal</a>
+
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Navegación principal">
+        <a class="brand" href="#resumen" aria-label="Investment Analyst, inicio">
+          <span class="brand-mark" aria-hidden="true">IA</span>
+          <span>
+            <strong>Investment</strong>
+            <small>Analyst</small>
+          </span>
+        </a>
+
+        <nav class="primary-nav" aria-label="Secciones">
+          <a class="nav-link active" href="#resumen" aria-current="page">
+            <span class="nav-index" aria-hidden="true">01</span>
+            Resumen
+          </a>
+          <a class="nav-link" href="#analisis">
+            <span class="nav-index" aria-hidden="true">02</span>
+            Análisis
+          </a>
+          <a class="nav-link" href="#operacion">
+            <span class="nav-index" aria-hidden="true">03</span>
+            Operación
+          </a>
+        </nav>
+
+        <div class="sidebar-sources">
+          <p>Fuentes verificables</p>
+          <span>SEC EDGAR</span>
+          <span>Alpaca Market Data · IEX</span>
+        </div>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <div class="asset-context">
+            <p class="breadcrumb">Análisis de acciones <span aria-hidden="true">/</span> Estados Unidos</p>
+            <div class="asset-heading">
+              <span class="asset-symbol" aria-hidden="true">AAPL</span>
+              <div>
+                <h1>Apple Inc.</h1>
+                <p>NASDAQ · USD · Datos diarios</p>
+              </div>
+            </div>
+          </div>
+          <div class="topbar-actions">
+            <span id="health-badge" class="badge neutral">Consultando estado</span>
+            <button id="refresh-overview" class="button secondary compact" type="button">
+              Actualizar estado
+            </button>
+          </div>
+        </header>
+
+        <main id="contenido" tabindex="-1">
+          <section id="resumen" aria-labelledby="resumen-titulo">
+            <div class="section-intro">
+              <div>
+                <p class="eyebrow">VISTA GENERAL</p>
+                <h2 id="resumen-titulo">Estado del análisis</h2>
+              </div>
+              <p class="section-description">
+                Evidencia local con corte histórico, cálculos deterministas y trazabilidad completa.
+              </p>
+            </div>
+
+            <div class="scope-notice" role="note" aria-label="Alcance de la herramienta">
+              <span class="scope-icon" aria-hidden="true">i</span>
+              <p>
+                <strong>Análisis descriptivo.</strong> Mercado y fundamentales se evalúan por separado.
+                No se genera una recomendación, una puntuación combinada ni se ejecutan órdenes.
+              </p>
+            </div>
+
+            <div class="overview-grid" aria-label="Estado operativo">
+              <article class="status-card">
+                <div class="status-label">
+                  <span class="status-dot" aria-hidden="true"></span>
+                  Espacio de datos
+                </div>
+                <strong id="workspace-status">—</strong>
+                <small id="workspace-counts">—</small>
+              </article>
+              <article class="status-card">
+                <div class="status-label">
+                  <span class="status-dot" aria-hidden="true"></span>
+                  Última actualización
+                </div>
+                <strong id="run-status">—</strong>
+                <small id="run-time">—</small>
+              </article>
+              <article class="status-card">
+                <div class="status-label">
+                  <span class="status-dot" aria-hidden="true"></span>
+                  Próxima ejecución
+                </div>
+                <strong id="schedule-status">—</strong>
+                <small id="schedule-next">—</small>
+              </article>
+              <article class="status-card">
+                <div class="status-label">
+                  <span class="status-dot" aria-hidden="true"></span>
+                  Trazabilidad
+                </div>
+                <strong id="traceability-status">—</strong>
+                <small id="known-at-status">—</small>
+              </article>
+            </div>
+          </section>
+
+          <div id="global-message" class="message hidden" role="status" aria-live="polite"></div>
+
+          <section id="analisis" class="analysis-section" aria-labelledby="analisis-titulo">
+            <div class="section-intro analysis-intro">
+              <div>
+                <p class="eyebrow">ANÁLISIS</p>
+                <h2 id="analisis-titulo">Diagnóstico de Apple</h2>
+              </div>
+              <span class="context-tag">Mercado y fundamentales independientes</span>
+            </div>
+
+            <form id="report-form" class="query-panel">
+              <div class="query-main">
+                <label class="field field-wide">
+                  <span>Datos conocidos hasta</span>
+                  <input
+                    id="report-known-at"
+                    name="known_at"
+                    type="text"
+                    inputmode="text"
+                    aria-describedby="known-at-help"
+                    required
+                  >
+                  <small id="known-at-help">Fecha y hora ISO 8601 con zona; define el corte histórico.</small>
+                </label>
+                <label class="field">
+                  <span>Frecuencia fundamental</span>
+                  <select id="report-frequency" name="fundamental_frequency">
+                    <option value="quarterly">Trimestral</option>
+                    <option value="annual">Anual</option>
+                  </select>
+                </label>
+                <button id="report-button" class="button primary query-button" type="submit">
+                  Consultar análisis
+                </button>
+              </div>
+
+              <details class="advanced-filters">
+                <summary>Fechas de referencia opcionales</summary>
+                <div class="advanced-grid">
+                  <label class="field">
+                    <span>Mercado al cierre de</span>
+                    <input id="market-as-of" name="market_as_of" type="date">
+                  </label>
+                  <label class="field">
+                    <span>Fundamentales del período</span>
+                    <input id="fundamental-as-of" name="fundamental_as_of" type="date">
+                  </label>
+                </div>
+              </details>
+            </form>
+
+            <section id="report-area" class="report-area hidden" aria-live="polite" aria-busy="false">
+              <div class="report-toolbar">
+                <div>
+                  <p class="eyebrow">RESULTADO VERSIONADO</p>
+                  <h3>Lectura independiente por dimensión</h3>
+                </div>
+                <span id="report-status" class="badge neutral">—</span>
+              </div>
+
+              <div class="diagnostic-grid">
+                <article id="market-report" class="diagnostic-card" aria-label="Diagnóstico de mercado"></article>
+                <article id="fundamental-report" class="diagnostic-card" aria-label="Diagnóstico fundamental"></article>
+              </div>
+
+              <article class="trace-card">
+                <div class="trace-heading">
+                  <div>
+                    <p class="eyebrow">AUDITORÍA</p>
+                    <h3>Trazabilidad y alcance</h3>
+                  </div>
+                  <span class="trace-seal">Evidencia verificable</span>
+                </div>
+                <p id="report-traceability" class="trace-summary"></p>
+                <ul id="report-limitations" class="limitations-list"></ul>
+                <details class="json-disclosure">
+                  <summary>Ver contrato técnico JSON sin redondear</summary>
+                  <p>
+                    Esta vista conserva los valores <code>Decimal</code> exactos, identidades,
+                    fórmulas, parámetros y marcas temporales.
+                  </p>
+                  <pre id="report-json" tabindex="0"></pre>
+                </details>
+              </article>
+            </section>
+          </section>
+
+          <section id="operacion" class="operations-section" aria-labelledby="operacion-titulo">
+            <div class="section-intro">
+              <div>
+                <p class="eyebrow">OPERACIÓN</p>
+                <h2 id="operacion-titulo">Actualizar fuentes y cálculos</h2>
+              </div>
+              <p class="section-description">
+                Ejecuta el flujo completo solo cuando necesites incorporar evidencia nueva.
+              </p>
+            </div>
+
+            <details class="operation-panel">
+              <summary>
+                <span>
+                  <strong>Configuración de la actualización</strong>
+                  <small>SEC EDGAR + Alpaca Market Data IEX</small>
+                </span>
+                <span class="summary-action">Abrir</span>
+              </summary>
+              <form id="run-form" class="run-form">
+                <div class="form-grid">
+                  <label class="field">
+                    <span>Inicio del histórico de mercado</span>
+                    <input id="market-start" name="market_start" type="date" value="2025-01-01" required>
+                  </label>
+                  <label class="field">
+                    <span>Fin del histórico de mercado</span>
+                    <input id="market-end" name="market_end" type="date" required>
+                  </label>
+                  <label class="field">
+                    <span>Frecuencia fundamental</span>
+                    <select id="run-frequency" name="fundamental_frequency">
+                      <option value="quarterly">Trimestral</option>
+                      <option value="annual">Anual</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Modo de actualización</span>
+                    <select id="refresh-mode" name="refresh_mode">
+                      <option value="auto">Incremental automática</option>
+                      <option value="full">Rango completo</option>
+                    </select>
+                  </label>
+                </div>
+                <label class="field">
+                  <span>Corte conocido opcional</span>
+                  <input
+                    id="run-known-at"
+                    name="known_at"
+                    type="text"
+                    placeholder="2026-07-16T15:46:09Z"
+                    aria-describedby="run-known-at-help"
+                  >
+                  <small id="run-known-at-help">Déjalo vacío para que el flujo determine el corte UTC.</small>
+                </label>
+                <label class="check-row">
+                  <input id="require-complete" name="require_complete" type="checkbox" checked>
+                  <span>
+                    <strong>Exigir un resultado completo</strong>
+                    <small>La ejecución falla si no produce ambos diagnósticos independientes.</small>
+                  </span>
+                </label>
+                <div class="run-actions">
+                  <p>SEC se consulta en cada ejecución, aunque el mercado ya esté actualizado.</p>
+                  <button id="run-button" class="button primary" type="submit">Ejecutar actualización</button>
+                </div>
+              </form>
+            </details>
+          </section>
+        </main>
+
+        <footer>
+          <p>
+            Mercado: Alpaca Market Data IEX, ajuste total. IEX cubre un solo mercado y no equivale
+            a SIP consolidado. Fundamentales: SEC EDGAR oficial.
+          </p>
+          <p>Uso local · Sin ejecución de órdenes · No constituye asesoramiento financiero</p>
+        </footer>
+      </div>
+    </div>
+  </body>
+</html>

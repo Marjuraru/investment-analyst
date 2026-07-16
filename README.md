@@ -41,12 +41,16 @@ local:
   compacto, JSON versionado o texto legible;
 - fachada de aplicación tipada para que CLI, automatización e interfaz reutilicen las mismas
   operaciones sin duplicar composición;
+- ejecución operativa única con lock por workspace, estado atómico versionado, errores acotados y
+  health check de solo lectura, preparada para un programador externo;
+- interfaz web local para ejecutar el flujo, consultar el reporte y revisar la evidencia, junto con
+  scheduler diario persistente y unidad de usuario `systemd` generada de forma segura;
 - entorno reproducible mediante un lock versionado, pruebas unitarias e integraciones locales,
   cobertura de líneas y ramas, auditoría de dependencias y validación continua con GitHub Actions.
 
-El MVP actual no incluye interfaz gráfica, alertas, programación diaria automática, ejecución de
-órdenes ni recomendaciones de inversión. Nuevos activos, indicadores o fuentes requieren fases de
-diseño y validación independientes.
+El MVP actual no incluye alertas, autenticación o exposición remota, inicio automático desde
+Windows Task Scheduler, ejecución de órdenes ni recomendaciones de inversión. Nuevos activos,
+indicadores o fuentes requieren fases de diseño y validación independientes.
 
 ## Flujos principales
 
@@ -56,6 +60,10 @@ diseño y validación independientes.
   diario point-in-time.
 - [Fachada de aplicación](docs/application_facade.md): invocar bootstrap y consulta mediante una
   API programática estable.
+- [Runner operativo de Apple](docs/operational_runner.md): ejecutar un refresh bloqueado, consultar
+  su estado y preparar la programación local.
+- [Interfaz y operación continua](docs/local_interface.md): usar la herramienta en el navegador y
+  mantener el servicio local mediante `systemd --user`.
 - [Integración continua](docs/continuous_integration.md): validar automáticamente cada pull request.
 - [Gestión de dependencias](docs/dependency_management.md): reproducir y actualizar el entorno
   validado.

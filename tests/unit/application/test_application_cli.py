@@ -86,3 +86,27 @@ def test_scripts_and_facade_keep_explicit_storage_access_modes() -> None:
     )
     assert facade.count("access_mode=WorkspaceAccessMode.READ_ONLY") == 1
     assert facade.count("access_mode=WorkspaceAccessMode.READ_WRITE") == 1
+
+
+def test_operational_cli_delegates_without_direct_storage_or_dotenv() -> None:
+    text = (_PROJECT_ROOT / "scripts" / "run_aapl_daily.py").read_text(encoding="utf-8")
+
+    assert "AaplDailyRunner.create_default()" in text
+    assert "LocalStorage" not in text
+    assert "StoragePaths" not in text
+    assert "dotenv" not in text
+
+
+def test_local_interface_reuses_application_boundaries_and_installer_does_not_start_service() -> (
+    None
+):
+    server = (_PROJECT_ROOT / "scripts" / "serve_investment_analyst.py").read_text(encoding="utf-8")
+    installer = (_PROJECT_ROOT / "scripts" / "install_local_service.py").read_text(encoding="utf-8")
+
+    assert "AaplLocalController(" in server
+    assert "AaplDailyRunner(" in server
+    assert "InvestmentAnalystApplication(" in server
+    assert "LocalStorage" not in server
+    assert "dotenv" not in server
+    assert "subprocess" not in installer
+    assert "systemctl --user enable --now" in installer
