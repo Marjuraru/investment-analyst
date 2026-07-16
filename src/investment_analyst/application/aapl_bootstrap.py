@@ -31,9 +31,11 @@ from investment_analyst.application.aapl_bootstrap_models import (
     AaplBootstrapStageDetails,
     AaplBootstrapStageStatus,
     AaplBootstrapStageSummary,
+    AaplMarketRefreshPlan,
     AaplWorkspaceBootstrapRequest,
     AaplWorkspaceBootstrapSummary,
 )
+from investment_analyst.application.aapl_refresh_planner import AaplMarketRefreshPlanner
 from investment_analyst.core.models import DataFrequency, NormalizedObservation
 from investment_analyst.providers.fundamentals.sec_diagnostic_models import (
     SecFundamentalDiagnosticRequest,
@@ -59,7 +61,10 @@ from investment_analyst.providers.fundamentals.sec_pipeline import (
     SecAaplFundamentalsPipeline,
 )
 from investment_analyst.providers.market.alpaca_normalizer import SOURCE_ID
-from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistoricalPipeline
+from investment_analyst.providers.market.alpaca_pipeline import (
+    AlpacaHistoricalPipeline,
+    AlpacaImportSummary,
+)
 from investment_analyst.providers.market.alpaca_stock import FEED
 from investment_analyst.storage import LocalStorage
 from investment_analyst.time_intervals import inclusive_utc_date_bounds
@@ -173,6 +178,7 @@ class AaplWorkspaceBootstrapPipeline:
         market_statistics_pipeline: MarketStatisticsPipeline,
         market_diagnostic_pipeline: MarketDiagnosticPipeline,
         consolidated_service: AaplConsolidatedDiagnosticService,
+        market_refresh_planner: AaplMarketRefreshPlanner | None = None,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         storage.require_open()
@@ -186,6 +192,7 @@ class AaplWorkspaceBootstrapPipeline:
         self._market_statistics_pipeline = market_statistics_pipeline
         self._market_diagnostic_pipeline = market_diagnostic_pipeline
         self._consolidated_service = consolidated_service
+        self._market_refresh_planner = market_refresh_planner or AaplMarketRefreshPlanner(storage)
         self._clock = clock
 
     def run(
@@ -204,7 +211,15 @@ class AaplWorkspaceBootstrapPipeline:
         stages.append(sec_fetch[0])
         sec_normalization = self._run_sec_normalization()
         stages.append(sec_normalization[0])
-        market_fetch = self._run_market_fetch(start, end)
+        refresh_plan, planning_stage = self._run_market_refresh_planning(
+            request,
+            timestamp=sec_normalization[1].normalized_at,
+        )
+        stages.append(planning_stage)
+        market_fetch = self._run_market_fetch(
+            refresh_plan,
+            fallback_timestamp=planning_stage.completed_at,
+        )
         stages.append(market_fetch[0])
 
         effective_known_at, known_at_stage = self._resolve_known_at(
@@ -247,22 +262,33 @@ class AaplWorkspaceBootstrapPipeline:
             source="SEC EDGAR and Alpaca Market Data",
             feed=FEED,
             request=request,
+            refresh_plan=refresh_plan,
             requested_known_at=request.requested_known_at,
             effective_known_at=effective_known_at,
             stages=tuple(stages),
             consolidated=consolidated,
             overall_status=consolidated.status,
             raw_records_created=(
-                sec_fetch[1].raw_records_created + market_fetch[1].raw_records_created
+                sec_fetch[1].raw_records_created
+                + sum(
+                    item.raw_records_created + item.coverage_receipts_created
+                    for item in market_fetch[1]
+                )
             ),
             raw_records_reused=(
-                sec_fetch[1].raw_records_reused + market_fetch[1].raw_records_reused
+                sec_fetch[1].raw_records_reused
+                + sum(
+                    item.raw_records_reused + item.coverage_receipts_reused
+                    for item in market_fetch[1]
+                )
             ),
             observations_created=(
-                sec_normalization[1].observations_created + market_fetch[1].observations_created
+                sec_normalization[1].observations_created
+                + sum(item.observations_created for item in market_fetch[1])
             ),
             observations_reused=(
-                sec_normalization[1].observations_reused + market_fetch[1].observations_reused
+                sec_normalization[1].observations_reused
+                + sum(item.observations_reused for item in market_fetch[1])
             ),
             metric_results_created=(
                 fundamental_metrics[1].metrics_created + market_statistics[1].results_created
@@ -334,41 +360,124 @@ class AaplWorkspaceBootstrapPipeline:
             result,
         )
 
-    def _run_market_fetch(self, start: datetime, end: datetime):
-        stage = AaplBootstrapStage.MARKET_FETCH
+    def _run_market_refresh_planning(
+        self,
+        request: AaplWorkspaceBootstrapRequest,
+        *,
+        timestamp: datetime,
+    ) -> tuple[AaplMarketRefreshPlan, AaplBootstrapStageSummary]:
+        stage = AaplBootstrapStage.MARKET_REFRESH_PLANNING
         try:
-            result = self._market_pipeline.run(start, end)
+            plan = self._market_refresh_planner.plan(
+                requested_start=request.market_start,
+                requested_end=request.market_end,
+                refresh_mode=request.refresh_mode,
+            )
         except (RuntimeError, ValueError) as error:
             raise BootstrapStageError(stage, error) from error
-        if (
-            result.asset_id != ASSET_ID
-            or result.source_id != SOURCE_ID
-            or result.feed != FEED
-            or not result.traceability_verified
-        ):
-            raise BootstrapTraceabilityError("market fetch returned an invalid Apple IEX context")
-        generated = (
-            result.raw_records_created
-            + result.raw_records_reused
-            + result.observations_created
-            + result.observations_reused
+        if not plan.traceability_verified:
+            raise BootstrapTraceabilityError("market refresh plan is not traceable")
+        return plan, _stage_summary(
+            stage=stage,
+            generated=0,
+            created=0,
+            reused=0,
+            timestamp=timestamp,
+            details=AaplBootstrapStageDetails(
+                source_id=SOURCE_ID,
+                feed=FEED,
+                message=plan.reason,
+            ),
         )
-        created = result.raw_records_created + result.observations_created
-        reused = result.raw_records_reused + result.observations_reused
+
+    def _run_market_fetch(
+        self,
+        plan: AaplMarketRefreshPlan,
+        *,
+        fallback_timestamp: datetime,
+    ) -> tuple[AaplBootstrapStageSummary, tuple[AlpacaImportSummary, ...]]:
+        stage = AaplBootstrapStage.MARKET_FETCH
+        if not plan.market_fetch_required:
+            return (
+                _stage_summary(
+                    stage=stage,
+                    status=AaplBootstrapStageStatus.SKIPPED,
+                    generated=0,
+                    created=0,
+                    reused=0,
+                    timestamp=fallback_timestamp,
+                    details=AaplBootstrapStageDetails(
+                        source_id=SOURCE_ID,
+                        feed=FEED,
+                        intervals_executed=0,
+                        bars_processed=0,
+                        coverage_receipts_created=0,
+                        coverage_receipts_reused=0,
+                        empty_intervals_completed=0,
+                        message="Requested Apple IEX range is already covered; fetch skipped.",
+                    ),
+                ),
+                (),
+            )
+
+        results: list[AlpacaImportSummary] = []
+        for interval in plan.fetch_intervals:
+            start, end = inclusive_utc_date_bounds(interval.start, interval.end)
+            try:
+                result = self._market_pipeline.run(start, end)
+            except (RuntimeError, ValueError) as error:
+                raise BootstrapStageError(stage, error) from error
+            if (
+                result.asset_id != ASSET_ID
+                or result.source_id != SOURCE_ID
+                or result.feed != FEED
+                or not result.traceability_verified
+            ):
+                raise BootstrapTraceabilityError(
+                    "market fetch returned an invalid Apple IEX context"
+                )
+            results.append(result)
+
+        generated = sum(
+            item.raw_records_created
+            + item.raw_records_reused
+            + item.coverage_receipts_created
+            + item.coverage_receipts_reused
+            + item.observations_created
+            + item.observations_reused
+            for item in results
+        )
+        created = sum(
+            item.raw_records_created + item.coverage_receipts_created + item.observations_created
+            for item in results
+        )
+        reused = sum(
+            item.raw_records_reused + item.coverage_receipts_reused + item.observations_reused
+            for item in results
+        )
+        empty_intervals = sum(item.empty_intervals_completed for item in results)
         return (
             _stage_summary(
                 stage=stage,
                 generated=generated,
                 created=created,
                 reused=reused,
-                timestamp=result.retrieved_at,
+                timestamp=max(item.retrieved_at for item in results),
+                status=(AaplBootstrapStageStatus.COMPLETED if empty_intervals else None),
                 details=AaplBootstrapStageDetails(
-                    source_id=result.source_id,
-                    feed=result.feed,
-                    message="Alpaca IEX daily bars persisted or reused.",
+                    source_id=SOURCE_ID,
+                    feed=FEED,
+                    intervals_executed=len(results),
+                    bars_processed=sum(item.bars_received for item in results),
+                    coverage_receipts_created=sum(
+                        item.coverage_receipts_created for item in results
+                    ),
+                    coverage_receipts_reused=sum(item.coverage_receipts_reused for item in results),
+                    empty_intervals_completed=empty_intervals,
+                    message=(f"{len(results)} planned Alpaca IEX interval(s) persisted or reused."),
                 ),
             ),
-            result,
+            tuple(results),
         )
 
     def _resolve_known_at(

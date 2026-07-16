@@ -5,7 +5,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from hashlib import sha256
 from uuid import UUID
+
+from pydantic import JsonValue
 
 from investment_analyst.analytics.consolidated_diagnostic_models import (
     ConsolidatedDiagnosticRequest,
@@ -30,12 +33,16 @@ from investment_analyst.core.models import (
     DiagnosticResult,
     DiagnosticVerdict,
     MetricResult,
+    NormalizedObservation,
+    RawRecord,
+    SourceReference,
 )
 from investment_analyst.core.models.diagnostic import DECIMAL_TOLERANCE
 from investment_analyst.providers.fundamentals.sec_metric_models import (
     SEC_FUNDAMENTAL_METRIC_DEFINITIONS,
 )
 from investment_analyst.storage import LocalStorage
+from investment_analyst.storage.errors import RecordNotFoundError
 
 FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION = "sec-aapl-fundamental-diagnostic-v1.1-decimal34"
 
@@ -45,6 +52,7 @@ _FUNDAMENTAL_DEFINITION_BY_KEY = {
 }
 _FUNDAMENTAL_METRIC_KEYS = frozenset(_FUNDAMENTAL_DEFINITION_BY_KEY)
 _ALLOWED_FUNDAMENTAL_FREQUENCIES = frozenset({DataFrequency.ANNUAL, DataFrequency.QUARTERLY})
+_POINT_IN_TIME_CUTOFF_PARAMETER = "known_at"
 
 
 class ConsolidatedDiagnosticQueryError(RuntimeError):
@@ -167,16 +175,288 @@ def _validate_fundamental_metric(result: MetricResult) -> DataFrequency:
     return _metric_frequency(result)
 
 
-def _semantic_identity(candidate: _Candidate) -> str:
-    payload = candidate.diagnostic.model_dump(
-        mode="json",
-        exclude={"diagnostic_id", "computed_at"},
+def _canonical_json(value: JsonValue) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+        ensure_ascii=False,
     )
-    payload["metric_result_ids"] = [str(item) for item in candidate.metric_ids]
-    payload["fundamental_frequency"] = (
-        candidate.fundamental_frequency.value if candidate.fundamental_frequency else None
-    )
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _semantic_digest(value: JsonValue) -> str:
+    return sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _source_identity(source: SourceReference) -> dict[str, JsonValue]:
+    return {
+        "source_id": source.source_id,
+        "record_key": source.record_key,
+        "raw_uri": source.raw_uri,
+        "checksum_sha256": source.checksum_sha256,
+    }
+
+
+def _canonical_parameter_value(
+    value: JsonValue,
+    observation_identities: dict[UUID, str],
+) -> JsonValue:
+    if isinstance(value, str):
+        try:
+            identifier = UUID(value)
+        except ValueError:
+            return value
+        identity = observation_identities.get(identifier)
+        if identity is None:
+            return value
+        return {"semantic_observation": identity}
+    if isinstance(value, list):
+        canonical = [_canonical_parameter_value(item, observation_identities) for item in value]
+        if canonical and all(
+            isinstance(item, dict) and isinstance(item.get("role"), str) for item in canonical
+        ):
+            return sorted(canonical, key=_canonical_json)
+        return canonical
+    if isinstance(value, dict):
+        return {
+            key: _canonical_parameter_value(item, observation_identities)
+            for key, item in sorted(value.items())
+        }
+    return value
+
+
+def _parse_utc_parameter(value: JsonValue) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if _is_utc(parsed) else None
+
+
+class _SemanticTraceabilityResolver:
+    """Resolve compact semantic identities lazily for tied diagnostic revisions."""
+
+    def __init__(
+        self,
+        storage: LocalStorage,
+        metric_index: dict[UUID, MetricResult],
+        *,
+        asset_id: str,
+    ) -> None:
+        self._storage = storage
+        self._metric_index = metric_index
+        self._asset_id = asset_id
+        self._metric_identities: dict[UUID, str] = {}
+        self._observations: dict[UUID, NormalizedObservation] = {}
+        self._observation_identities: dict[UUID, str] = {}
+        self._raw_records: dict[UUID, RawRecord] = {}
+        self._raw_identities: dict[UUID, str] = {}
+
+    def metric_identity(self, identifier: UUID) -> str:
+        cached = self._metric_identities.get(identifier)
+        if cached is not None:
+            return cached
+        try:
+            result = self._metric_index[identifier]
+        except KeyError as error:
+            raise MissingReferencedMetricResultError(
+                f"diagnostic references missing metric result {identifier}"
+            ) from error
+        _validate_metric_common(result, self._asset_id)
+
+        observations = {
+            observation_id: self._observation(observation_id)
+            for observation_id in result.input_observation_ids
+        }
+        observation_identities = {
+            observation_id: self._observation_identity(observation_id)
+            for observation_id in result.input_observation_ids
+        }
+        parameters: dict[str, JsonValue] = {}
+        for key, value in sorted(result.parameters.items()):
+            if key == _POINT_IN_TIME_CUTOFF_PARAMETER:
+                cutoff = _parse_utc_parameter(value)
+                if cutoff is not None:
+                    if any(item.available_at > cutoff for item in observations.values()):
+                        raise ConsolidatedDiagnosticTraceabilityError(
+                            f"metric result {result.result_id} uses an input after known_at"
+                        )
+                    parameters[key] = {"effective_inputs": sorted(observation_identities.values())}
+                    continue
+            parameters[key] = _canonical_parameter_value(value, observation_identities)
+        document: dict[str, JsonValue] = {
+            "asset_id": result.asset_id,
+            "metric_key": result.metric_key,
+            "value": str(result.value),
+            "unit": result.unit,
+            "as_of": result.as_of.isoformat(),
+            "available_at": result.available_at.isoformat(),
+            "parameters": parameters,
+            "input_observations": sorted(
+                observation_identities[observation_id]
+                for observation_id in result.input_observation_ids
+            ),
+            "algorithm_version": result.algorithm_version,
+            "quality": result.quality.value,
+        }
+        identity = _semantic_digest(document)
+        self._metric_identities[identifier] = identity
+        return identity
+
+    def _observation_identity(self, identifier: UUID) -> str:
+        cached = self._observation_identities.get(identifier)
+        if cached is not None:
+            return cached
+        observation = self._observation(identifier)
+        raw_record = self._raw_record(observation.raw_record_id)
+        if raw_record.source.source_id != observation.source.source_id:
+            raise ConsolidatedDiagnosticTraceabilityError(
+                f"observation {identifier} source does not match its raw record"
+            )
+        document: dict[str, JsonValue] = {
+            "raw_record": self._raw_identity(raw_record.record_id),
+            "asset_id": observation.asset_id,
+            "field_name": observation.field_name,
+            "value": str(observation.value),
+            "unit": observation.unit,
+            "frequency": observation.frequency.value,
+            "observed_at": (
+                observation.observed_at.isoformat() if observation.observed_at else None
+            ),
+            "period_start": (
+                observation.period_start.isoformat() if observation.period_start else None
+            ),
+            "period_end": observation.period_end.isoformat() if observation.period_end else None,
+            "available_at": observation.available_at.isoformat(),
+            "source": _source_identity(observation.source),
+            "quality": observation.quality.value,
+            "transformation_version": observation.transformation_version,
+        }
+        identity = _semantic_digest(document)
+        self._observation_identities[identifier] = identity
+        return identity
+
+    def _observation(self, identifier: UUID) -> NormalizedObservation:
+        cached = self._observations.get(identifier)
+        if cached is not None:
+            return cached
+        try:
+            observation = self._storage.observations.get(identifier)
+        except RecordNotFoundError as error:
+            raise ConsolidatedDiagnosticTraceabilityError(
+                f"metric references missing observation {identifier}"
+            ) from error
+        self._validate_observation(observation)
+        self._observations[identifier] = observation
+        return observation
+
+    def _raw_identity(self, identifier: UUID) -> str:
+        cached = self._raw_identities.get(identifier)
+        if cached is not None:
+            return cached
+        record = self._raw_record(identifier)
+        document: dict[str, JsonValue] = {
+            "asset_id": record.asset_id,
+            "source": _source_identity(record.source),
+            "event_time": record.event_time.isoformat() if record.event_time else None,
+            "available_at": record.available_at.isoformat(),
+            "payload": record.payload,
+            "schema_version": record.schema_version,
+        }
+        identity = _semantic_digest(document)
+        self._raw_identities[identifier] = identity
+        return identity
+
+    def _raw_record(self, identifier: UUID) -> RawRecord:
+        cached = self._raw_records.get(identifier)
+        if cached is not None:
+            return cached
+        try:
+            record = self._storage.raw_records.get(identifier)
+        except RecordNotFoundError as error:
+            raise ConsolidatedDiagnosticTraceabilityError(
+                f"observation references missing raw record {identifier}"
+            ) from error
+        self._validate_raw_record(record)
+        self._raw_records[identifier] = record
+        return record
+
+    def _validate_observation(self, observation: NormalizedObservation) -> None:
+        if observation.asset_id != self._asset_id:
+            raise ConsolidatedDiagnosticTraceabilityError(
+                f"observation {observation.observation_id} belongs to another asset"
+            )
+        for name, value in (
+            ("observation observed_at", observation.observed_at),
+            ("observation period_start", observation.period_start),
+            ("observation period_end", observation.period_end),
+        ):
+            if value is not None:
+                _require_utc(value, name)
+        _require_utc(observation.available_at, "observation available_at")
+        _require_utc(observation.normalized_at, "observation normalized_at")
+        _require_utc(observation.source.retrieved_at, "observation source retrieved_at")
+
+    def _validate_raw_record(self, record: RawRecord) -> None:
+        if record.asset_id is not None and record.asset_id != self._asset_id:
+            raise ConsolidatedDiagnosticTraceabilityError(
+                f"raw record {record.record_id} belongs to another asset"
+            )
+        if record.event_time is not None:
+            _require_utc(record.event_time, "raw record event_time")
+        _require_utc(record.available_at, "raw record available_at")
+        _require_utc(record.received_at, "raw record received_at")
+        _require_utc(record.source.retrieved_at, "raw record source retrieved_at")
+
+
+def _semantic_identity(
+    candidate: _Candidate,
+    resolver: _SemanticTraceabilityResolver,
+) -> str:
+    diagnostic = candidate.diagnostic
+    components: list[JsonValue] = []
+    for component in diagnostic.components:
+        document: dict[str, JsonValue] = {
+            "component_key": component.component_key,
+            "score": str(component.score),
+            "weight": str(component.weight),
+            "weighted_contribution": str(component.weighted_contribution),
+            "metric_results": sorted(
+                resolver.metric_identity(identifier) for identifier in component.metric_result_ids
+            ),
+            "explanation": component.explanation,
+        }
+        components.append(document)
+    evidence: list[JsonValue] = []
+    for item in diagnostic.evidence:
+        document = {
+            "metric_result": resolver.metric_identity(item.metric_result_id),
+            "direction": item.direction.value,
+            "contribution": str(item.contribution),
+            "reason": item.reason,
+        }
+        evidence.append(document)
+    payload: dict[str, JsonValue] = {
+        "asset_id": diagnostic.asset_id,
+        "mode": diagnostic.mode.value,
+        "verdict": diagnostic.verdict.value,
+        "final_score": str(diagnostic.final_score),
+        "confidence": str(diagnostic.confidence),
+        "as_of": diagnostic.as_of.isoformat(),
+        "available_at": diagnostic.available_at.isoformat(),
+        "components": sorted(components, key=_canonical_json),
+        "evidence": sorted(evidence, key=_canonical_json),
+        "algorithm_version": diagnostic.algorithm_version,
+        "summary": diagnostic.summary,
+        "quality": diagnostic.quality.value,
+        "fundamental_frequency": (
+            candidate.fundamental_frequency.value if candidate.fundamental_frequency else None
+        ),
+    }
+    return _semantic_digest(payload)
 
 
 def _validate_diagnostic_math(diagnostic: DiagnosticResult) -> None:
@@ -212,6 +492,7 @@ def _validate_diagnostic_common(
     *,
     request: ConsolidatedDiagnosticRequest,
     metric_index: dict[UUID, MetricResult],
+    storage: LocalStorage,
 ) -> _Candidate:
     if diagnostic.asset_id != request.asset_id:
         raise MalformedStoredDiagnosticError("diagnostic asset does not match request")
@@ -246,10 +527,14 @@ def _validate_diagnostic_common(
     for identifier in metric_ids:
         try:
             metric = metric_index[identifier]
-        except KeyError as error:
-            raise MissingReferencedMetricResultError(
-                f"diagnostic references missing metric result {identifier}"
-            ) from error
+        except KeyError:
+            try:
+                metric = storage.metric_results.get(identifier)
+            except RecordNotFoundError as not_found:
+                raise MissingReferencedMetricResultError(
+                    f"diagnostic references missing metric result {identifier}"
+                ) from not_found
+            metric_index[identifier] = metric
         _validate_metric_common(metric, request.asset_id)
         metrics.append(metric)
 
@@ -281,6 +566,7 @@ def _select_revision(
     candidates: list[_Candidate],
     *,
     mode: DiagnosticMode,
+    resolver: _SemanticTraceabilityResolver,
 ) -> tuple[list[_Candidate], int]:
     grouped: dict[tuple[DiagnosticMode, str, DataFrequency | None, datetime], list[_Candidate]]
     grouped = defaultdict(list)
@@ -299,12 +585,21 @@ def _select_revision(
         revisions = grouped[key]
         latest_available = max(item.diagnostic.available_at for item in revisions)
         latest = [item for item in revisions if item.diagnostic.available_at == latest_available]
-        identities = {_semantic_identity(item) for item in latest}
-        if len(identities) != 1:
-            raise AmbiguousStoredDiagnosticRevisionError(
-                f"ambiguous {mode.value} diagnostic revisions at {key[3].isoformat()}"
+        if len(latest) > 1:
+            identities = {_semantic_identity(item, resolver) for item in latest}
+            if len(identities) != 1:
+                raise AmbiguousStoredDiagnosticRevisionError(
+                    f"ambiguous {mode.value} diagnostic revisions at {key[3].isoformat()}"
+                )
+        selected.append(
+            min(
+                latest,
+                key=lambda item: (
+                    item.diagnostic.computed_at,
+                    str(item.diagnostic.diagnostic_id),
+                ),
             )
-        selected.append(latest[0])
+        )
         superseded += len(revisions) - 1
     return selected, superseded
 
@@ -383,6 +678,11 @@ class AaplConsolidatedDiagnosticService:
             raise ConsolidatedDiagnosticTraceabilityError(
                 "metric result identifiers are not unique"
             )
+        semantic_resolver = _SemanticTraceabilityResolver(
+            self._storage,
+            metric_index,
+            asset_id=request.asset_id,
+        )
 
         ignored_versions = 0
         sections: dict[DiagnosticMode, ConsolidatedDiagnosticSection] = {}
@@ -405,6 +705,7 @@ class AaplConsolidatedDiagnosticService:
                     diagnostic,
                     request=request,
                     metric_index=metric_index,
+                    storage=self._storage,
                 )
                 if (
                     mode is DiagnosticMode.FUNDAMENTAL
@@ -424,7 +725,11 @@ class AaplConsolidatedDiagnosticService:
                     eligible=0,
                 )
                 continue
-            selected_revisions, superseded = _select_revision(current, mode=mode)
+            selected_revisions, superseded = _select_revision(
+                current,
+                mode=mode,
+                resolver=semantic_resolver,
+            )
             sections[mode] = _choose_period(
                 selected_revisions,
                 exact_date=exact_date,

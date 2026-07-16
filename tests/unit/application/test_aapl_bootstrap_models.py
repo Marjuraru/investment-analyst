@@ -2,6 +2,7 @@
 
 import json
 from datetime import UTC, date, datetime
+from typing import Any, get_args, get_type_hints
 from uuid import uuid4
 
 import pytest
@@ -20,6 +21,10 @@ from investment_analyst.application.aapl_bootstrap_models import (
     AaplBootstrapStageDetails,
     AaplBootstrapStageStatus,
     AaplBootstrapStageSummary,
+    AaplMarketDateInterval,
+    AaplMarketRefreshMode,
+    AaplMarketRefreshPlan,
+    AaplRefreshMode,
     AaplWorkspaceBootstrapRequest,
     AaplWorkspaceBootstrapSummary,
 )
@@ -33,11 +38,26 @@ def _request(**updates: object) -> AaplWorkspaceBootstrapRequest:
         "market_start": date(2026, 1, 1),
         "market_end": date(2026, 1, 26),
         "fundamental_frequency": DataFrequency.QUARTERLY,
+        "refresh_mode": AaplRefreshMode.AUTO,
         "requested_known_at": KNOWN_AT,
         "require_complete": False,
     }
     values.update(updates)
     return AaplWorkspaceBootstrapRequest(**values)
+
+
+def _plan() -> AaplMarketRefreshPlan:
+    return AaplMarketRefreshPlan(
+        requested_start=date(2026, 1, 1),
+        requested_end=date(2026, 1, 26),
+        persisted_earliest=None,
+        persisted_latest=None,
+        fetch_intervals=(AaplMarketDateInterval(start=date(2026, 1, 1), end=date(2026, 1, 26)),),
+        mode=AaplMarketRefreshMode.INITIAL,
+        market_fetch_required=True,
+        reason="No persisted Apple IEX daily bars were found.",
+        traceability_verified=True,
+    )
 
 
 def _view(request: AaplWorkspaceBootstrapRequest) -> ConsolidatedDiagnosticView:
@@ -113,6 +133,7 @@ def test_stage_and_summary_are_strict_compact_and_non_combined() -> None:
         source="SEC EDGAR and Alpaca Market Data",
         feed="iex",
         request=request,
+        refresh_plan=_plan(),
         requested_known_at=KNOWN_AT,
         effective_known_at=KNOWN_AT,
         stages=_stages(),
@@ -132,6 +153,8 @@ def test_stage_and_summary_are_strict_compact_and_non_combined() -> None:
     encoded = json.dumps(payload, sort_keys=True)
     assert payload["feed"] == "iex"
     assert payload["effective_known_at"] == KNOWN_AT.isoformat()
+    assert payload["request"]["refresh_mode"] == "auto"
+    assert payload["refresh_plan"]["mode"] == "initial"
     assert encoded.count('"consolidated"') == 1
     assert "combined_score" not in encoded
     assert "combined_verdict" not in encoded
@@ -148,3 +171,27 @@ def test_stage_and_summary_are_strict_compact_and_non_combined() -> None:
             details=AaplBootstrapStageDetails(),
             traceability_verified=True,
         )
+
+
+def _contains_any(annotation: object) -> bool:
+    return annotation is Any or any(_contains_any(item) for item in get_args(annotation))
+
+
+def test_refresh_models_are_immutable_strict_and_do_not_use_any() -> None:
+    plan = _plan()
+    with pytest.raises(ValidationError):
+        AaplMarketDateInterval(
+            start=datetime(2026, 1, 1, tzinfo=UTC),
+            end=date(2026, 1, 2),
+        )
+    with pytest.raises(ValidationError):
+        _request(refresh_mode="full")
+    with pytest.raises(ValidationError):
+        AaplMarketRefreshPlan(**{**plan.model_dump(), "market_fetch_required": False})
+    with pytest.raises(ValidationError):
+        AaplMarketRefreshPlan(**{**plan.model_dump(), "unexpected": True})
+    with pytest.raises(ValidationError):
+        plan.mode = AaplMarketRefreshMode.FULL
+
+    for model in (AaplMarketDateInterval, AaplMarketRefreshPlan, AaplWorkspaceBootstrapRequest):
+        assert not any(_contains_any(item) for item in get_type_hints(model).values())

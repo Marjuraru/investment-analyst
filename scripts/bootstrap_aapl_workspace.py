@@ -31,6 +31,7 @@ from investment_analyst.application.aapl_bootstrap import (
     BootstrapIncompleteError,
 )
 from investment_analyst.application.aapl_bootstrap_models import (
+    AaplRefreshMode,
     AaplWorkspaceBootstrapRequest,
 )
 from investment_analyst.application.runtime import (
@@ -123,6 +124,17 @@ def _frequency(value: str) -> DataFrequency:
         ) from error
 
 
+def _refresh_mode(value: str) -> AaplRefreshMode:
+    mapping = {
+        "auto": AaplRefreshMode.AUTO,
+        "full": AaplRefreshMode.FULL,
+    }
+    try:
+        return mapping[value.casefold()]
+    except KeyError as error:
+        raise argparse.ArgumentTypeError("refresh-mode must be auto or full") from error
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path)
@@ -134,6 +146,7 @@ def _parser() -> argparse.ArgumentParser:
         type=_frequency,
     )
     parser.add_argument("--known-at", type=_aware_datetime)
+    parser.add_argument("--refresh-mode", type=_refresh_mode, default=AaplRefreshMode.AUTO)
     parser.add_argument("--require-complete", action="store_true")
     return parser
 
@@ -209,6 +222,7 @@ def _payload(summary, workspace_root: Path) -> dict[str, object]:
             "root": str(workspace_root),
         },
         "request": serialized["request"],
+        "refresh_plan": serialized["refresh_plan"],
         "effective_known_at": serialized["effective_known_at"],
         "source": {
             "fundamentals": "SEC EDGAR",
@@ -244,6 +258,7 @@ def main() -> int:
             market_start=arguments.market_start,
             market_end=arguments.market_end,
             fundamental_frequency=arguments.fundamental_frequency,
+            refresh_mode=arguments.refresh_mode,
             requested_known_at=arguments.known_at,
             require_complete=arguments.require_complete,
         )

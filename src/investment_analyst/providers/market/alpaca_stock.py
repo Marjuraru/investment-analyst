@@ -278,12 +278,22 @@ def _parse_page(symbol: str, body: bytes) -> tuple[tuple[AlpacaStockBar, ...], s
         raise AlpacaStockError("Alpaca returned invalid JSON") from error
     if not isinstance(decoded, dict):
         raise AlpacaStockError("Alpaca bar response must be an object")
+    if any(key in decoded for key in ("error", "errors")):
+        raise AlpacaStockError("Alpaca response contains a provider error")
+    if "bars" not in decoded:
+        raise AlpacaStockError("Alpaca response bars are missing")
+    bars_value = decoded["bars"]
+    if bars_value is None:
+        bars: list[object] = []
+    elif isinstance(bars_value, list):
+        bars = bars_value
+    else:
+        raise AlpacaStockError("Alpaca response bars must be a list or null")
     response_symbol = decoded.get("symbol")
-    if response_symbol != symbol:
+    if response_symbol is not None and response_symbol != symbol:
         raise AlpacaStockError("Alpaca response symbol does not match AAPL")
-    bars = decoded.get("bars")
-    if not isinstance(bars, list):
-        raise AlpacaStockError("Alpaca response bars must be a list")
+    if bars and response_symbol != symbol:
+        raise AlpacaStockError("non-empty Alpaca responses must identify the AAPL symbol")
     if len(bars) > _MAX_BARS_PER_RESPONSE:
         raise AlpacaStockError("Alpaca returned an unjustified number of bars")
     next_page_token = decoded.get("next_page_token")

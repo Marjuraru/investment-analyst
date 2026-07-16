@@ -70,8 +70,8 @@ def _sec_documents() -> tuple[bytes, bytes]:
 
 def _bars() -> bytes:
     bars = []
-    for offset in range(25):
-        timestamp = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(days=offset)
+    for offset in range(26):
+        timestamp = datetime(2026, 1, 1, 5, tzinfo=UTC) + timedelta(days=offset)
         value = 100 + offset
         bars.append(
             {
@@ -100,21 +100,38 @@ def _run(
     *extra: str,
     credentials: bool = True,
 ) -> subprocess.CompletedProcess[str]:
+    call_log = bars.with_suffix(".calls")
     launcher = "\n".join(
         (
-            "import runpy, sys",
+            "import json, runpy, sys",
+            "from datetime import datetime",
             "from pathlib import Path",
+            "from urllib.parse import parse_qs, urlsplit",
             "from investment_analyst.providers.http import HttpResponse",
             "import investment_analyst.providers.http as http_module",
             "class FakeTransport:",
             "    def __init__(self, *args, **kwargs): pass",
             "    def get(self, url, *, headers, timeout_seconds):",
+            f"        with Path({str(call_log)!r}).open('a', encoding='utf-8') as stream:",
+            "            stream.write(url + '\\n')",
             "        if '/submissions/' in url:",
             f"            body = Path({str(submissions)!r}).read_bytes()",
             "        elif '/companyfacts/' in url:",
             f"            body = Path({str(companyfacts)!r}).read_bytes()",
             "        else:",
-            f"            body = Path({str(bars)!r}).read_bytes()",
+            f"            document = json.loads(Path({str(bars)!r}).read_text())",
+            "            query = parse_qs(urlsplit(url).query)",
+            "            start = datetime.fromisoformat(query['start'][0])",
+            "            end = datetime.fromisoformat(query['end'][0])",
+            "            selected = [",
+            "                bar for bar in document['bars']",
+            "                if start <= datetime.fromisoformat(",
+            "                    bar['t'].replace('Z', '+00:00')",
+            "                ) < end",
+            "            ]",
+            "            body = json.dumps({'bars': selected, 'symbol': document['symbol'], ",
+            "                'next_page_token': None}, separators=(',', ':'), ",
+            "                sort_keys=True).encode()",
             "        return HttpResponse(status_code=200, body=body, headers={}, url=url)",
             "http_module.UrlLibHttpTransport = FakeTransport",
             "sys.argv = ['bootstrap_aapl_workspace.py', *sys.argv[1:]]",
@@ -180,10 +197,13 @@ def test_cli_bootstraps_default_workspace_and_reuses_compact_output(tmp_path) ->
     assert payload["workspace"]["root"] == str(workspace)
     assert payload["source"]["feed"] == "iex"
     assert payload["consolidated"]["status"] == "complete"
+    assert payload["request"]["refresh_mode"] == "auto"
+    assert payload["refresh_plan"]["mode"] == "initial"
     assert set(payload) == {
         "notice",
         "workspace",
         "request",
+        "refresh_plan",
         "effective_known_at",
         "source",
         "stages",
@@ -203,6 +223,23 @@ def test_cli_bootstraps_default_workspace_and_reuses_compact_output(tmp_path) ->
     assert second_payload["summary"]["counts"]["observations_created"] == 0
     assert second_payload["summary"]["counts"]["metric_results_created"] == 0
     assert second_payload["summary"]["counts"]["diagnostics_created"] == 0
+    assert second_payload["refresh_plan"]["mode"] == "already_current"
+    market_stage = next(
+        item for item in second_payload["stages"] if item["stage"] == "market_fetch"
+    )
+    assert market_stage["status"] == "skipped"
+
+    full = _run(workspace, submissions, companyfacts, bars, "--refresh-mode", "full")
+    assert full.returncode == 0, full.stderr
+    assert json.loads(full.stdout)["refresh_plan"]["mode"] == "full"
+
+    calls = bars.with_suffix(".calls").read_text(encoding="utf-8").splitlines()
+    alpaca_calls = [item for item in calls if "data.alpaca.markets" in item]
+    sec_calls = [item for item in calls if "/submissions/" in item or "/companyfacts/" in item]
+    assert len(alpaca_calls) == 2
+    assert len(sec_calls) == 6
+    assert all("feed=iex" in item and "adjustment=all" in item for item in alpaca_calls)
+    assert all("/v2/orders" not in item for item in calls)
 
 
 def test_cli_early_known_at_fails_without_success_json_or_traceback(tmp_path) -> None:

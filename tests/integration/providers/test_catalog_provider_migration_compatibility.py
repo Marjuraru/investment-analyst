@@ -107,7 +107,7 @@ def test_catalog_resolved_market_paths_preserve_urls_and_deterministic_ids(tmp_p
 
     assert alpaca.raw_records_created == 3
     assert coinbase.raw_records_created == 3
-    assert len(alpaca_ids) == 3
+    assert len(alpaca_ids) == 4
     assert len(coinbase_ids) == 3
     assert "/v2/stocks/AAPL/bars" in alpaca_transport.calls[0][0]
     assert "feed=iex" in alpaca_transport.calls[0][0]

@@ -21,6 +21,11 @@ from investment_analyst.application.aapl_bootstrap import (
 )
 from investment_analyst.application.aapl_bootstrap_models import (
     AaplBootstrapStage,
+    AaplBootstrapStageStatus,
+    AaplMarketDateInterval,
+    AaplMarketRefreshMode,
+    AaplMarketRefreshPlan,
+    AaplRefreshMode,
     AaplWorkspaceBootstrapRequest,
 )
 from investment_analyst.core.models import DataFrequency, DiagnosticMode
@@ -29,6 +34,7 @@ from investment_analyst.providers.fundamentals.sec_fact_models import (
     TRANSFORMATION_VERSION,
 )
 from investment_analyst.providers.market.alpaca_normalizer import SOURCE_ID
+from investment_analyst.providers.market.alpaca_pipeline import AlpacaImportSummary
 
 INGESTED_AT = datetime(2026, 7, 14, 10, tzinfo=UTC)
 EFFECTIVE = datetime(2026, 7, 14, 11, tzinfo=UTC)
@@ -88,6 +94,26 @@ class StageDouble:
         return self.result_factory(*arguments)
 
 
+class PlannerDouble:
+    """Return one typed refresh plan and record the planning stage."""
+
+    def __init__(self, calls: list[str], plan: AaplMarketRefreshPlan) -> None:
+        self.calls = calls
+        self.result = plan
+        self.arguments: list[tuple[date, date, AaplRefreshMode]] = []
+
+    def plan(
+        self,
+        *,
+        requested_start: date,
+        requested_end: date,
+        refresh_mode: AaplRefreshMode,
+    ) -> AaplMarketRefreshPlan:
+        self.calls.append("market_refresh_planning")
+        self.arguments.append((requested_start, requested_end, refresh_mode))
+        return self.result
+
+
 class ConsolidatedDouble:
     """Return one deterministic unavailable or complete consolidated view."""
 
@@ -122,11 +148,40 @@ class ConsolidatedDouble:
         )
 
 
+def _initial_plan() -> AaplMarketRefreshPlan:
+    return AaplMarketRefreshPlan(
+        requested_start=date(2026, 1, 1),
+        requested_end=date(2026, 1, 26),
+        persisted_earliest=None,
+        persisted_latest=None,
+        fetch_intervals=(AaplMarketDateInterval(start=date(2026, 1, 1), end=date(2026, 1, 26)),),
+        mode=AaplMarketRefreshMode.INITIAL,
+        market_fetch_required=True,
+        reason="No persisted Apple IEX daily bars were found.",
+        traceability_verified=True,
+    )
+
+
+def _current_plan() -> AaplMarketRefreshPlan:
+    return AaplMarketRefreshPlan(
+        requested_start=date(2026, 1, 1),
+        requested_end=date(2026, 1, 26),
+        persisted_earliest=datetime(2026, 1, 1, 5, tzinfo=UTC),
+        persisted_latest=datetime(2026, 1, 26, 5, tzinfo=UTC),
+        fetch_intervals=(),
+        mode=AaplMarketRefreshMode.ALREADY_CURRENT,
+        market_fetch_required=False,
+        reason="The requested range is contained within persisted Apple IEX coverage.",
+        traceability_verified=True,
+    )
+
+
 def _request(**updates: object) -> AaplWorkspaceBootstrapRequest:
     values: dict[str, object] = {
         "market_start": date(2026, 1, 1),
         "market_end": date(2026, 1, 26),
         "fundamental_frequency": DataFrequency.QUARTERLY,
+        "refresh_mode": AaplRefreshMode.AUTO,
         "requested_known_at": None,
         "require_complete": False,
     }
@@ -134,7 +189,7 @@ def _request(**updates: object) -> AaplWorkspaceBootstrapRequest:
     return AaplWorkspaceBootstrapRequest(**values)
 
 
-def _pipeline(*, clock, consolidated=None):
+def _pipeline(*, clock, consolidated=None, plan=None):
     calls: list[str] = []
     storage = StorageDouble()
     sec_fetch = StageDouble(
@@ -164,16 +219,26 @@ def _pipeline(*, clock, consolidated=None):
     market_fetch = StageDouble(
         "market_fetch",
         calls,
-        lambda start, end: SimpleNamespace(
+        lambda start, end: AlpacaImportSummary(
             asset_id="equity:us:aapl",
             source_id=SOURCE_ID,
+            requested_start=start,
+            requested_end=end,
             feed="iex",
+            adjustment="all",
             retrieved_at=INGESTED_AT,
+            request_count=1,
+            bars_received=25,
             raw_records_created=25,
             raw_records_reused=0,
             observations_created=175,
             observations_reused=0,
+            earliest_bar=datetime(2026, 1, 1, 5, tzinfo=UTC),
+            latest_bar=datetime(2026, 1, 26, 5, tzinfo=UTC),
             traceability_verified=True,
+            coverage_receipts_created=1,
+            coverage_receipts_reused=0,
+            empty_intervals_completed=0,
         ),
     )
     fundamental_metrics = StageDouble(
@@ -221,6 +286,7 @@ def _pipeline(*, clock, consolidated=None):
         ),
     )
     consolidated_service = consolidated or ConsolidatedDouble(calls)
+    planner = PlannerDouble(calls, plan or _initial_plan())
     pipeline = AaplWorkspaceBootstrapPipeline(
         storage,
         workspace_id=uuid4(),
@@ -232,6 +298,7 @@ def _pipeline(*, clock, consolidated=None):
         market_statistics_pipeline=market_statistics,
         market_diagnostic_pipeline=market_diagnostic,
         consolidated_service=consolidated_service,
+        market_refresh_planner=planner,
         clock=clock,
     )
     return (
@@ -244,6 +311,8 @@ def _pipeline(*, clock, consolidated=None):
             market_statistics,
             market_diagnostic,
             consolidated_service,
+            market_fetch,
+            planner,
         ),
     )
 
@@ -262,6 +331,7 @@ def test_automatic_known_at_is_captured_once_after_ingestion_and_propagated() ->
     assert calls == [
         "sec_fetch",
         "sec_normalization",
+        "market_refresh_planning",
         "market_fetch",
         "fundamental_metrics",
         "fundamental_diagnostic",
@@ -276,6 +346,14 @@ def test_automatic_known_at_is_captured_once_after_ingestion_and_propagated() ->
     assert analytics[2].arguments[0].query.known_at == EFFECTIVE
     assert analytics[3].arguments[0].query.known_at == EFFECTIVE
     assert analytics[4].requests[0].known_at == EFFECTIVE
+    market_fetch = analytics[5]
+    assert market_fetch.arguments == [
+        (
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2026, 1, 27, tzinfo=UTC),
+        )
+    ]
+    assert analytics[6].arguments == [(date(2026, 1, 1), date(2026, 1, 26), AaplRefreshMode.AUTO)]
 
 
 def test_explicit_known_at_too_early_stops_before_metrics_or_diagnostics() -> None:
@@ -286,7 +364,12 @@ def test_explicit_known_at_too_early_stops_before_metrics_or_diagnostics() -> No
 
     assert captured.value.stage is AaplBootstrapStage.MARKET_FETCH
     assert captured.value.minimum_known_at == INGESTED_AT
-    assert calls == ["sec_fetch", "sec_normalization", "market_fetch"]
+    assert calls == [
+        "sec_fetch",
+        "sec_normalization",
+        "market_refresh_planning",
+        "market_fetch",
+    ]
     assert storage.observations.calls == 1
     assert all(not item.arguments for item in analytics[:4])
     assert analytics[4].requests == []
@@ -306,3 +389,36 @@ def test_failures_stop_later_stages_and_require_complete_is_enforced() -> None:
     pipeline, _storage, _calls, _analytics = _pipeline(clock=lambda: EFFECTIVE)
     with pytest.raises(BootstrapIncompleteError):
         pipeline.run(_request(require_complete=True))
+
+
+def test_already_current_skips_alpaca_but_runs_sec_analytics_and_clock_once() -> None:
+    clock_calls: list[str] = []
+
+    def clock() -> datetime:
+        clock_calls.append("clock")
+        return EFFECTIVE
+
+    pipeline, _storage, calls, analytics = _pipeline(
+        clock=clock,
+        plan=_current_plan(),
+    )
+    summary = pipeline.run(_request())
+
+    assert clock_calls == ["clock"]
+    assert calls == [
+        "sec_fetch",
+        "sec_normalization",
+        "market_refresh_planning",
+        "fundamental_metrics",
+        "fundamental_diagnostic",
+        "market_statistics",
+        "market_diagnostic",
+        "consolidated_query",
+    ]
+    assert analytics[5].arguments == []
+    market_stage = next(
+        item for item in summary.stages if item.stage is AaplBootstrapStage.MARKET_FETCH
+    )
+    assert market_stage.status is AaplBootstrapStageStatus.SKIPPED
+    assert market_stage.generated == market_stage.created == market_stage.reused == 0
+    assert summary.refresh_plan.mode is AaplMarketRefreshMode.ALREADY_CURRENT

@@ -5,11 +5,17 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any, get_args, get_type_hints
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from pydantic import ValidationError
 
 from investment_analyst.providers.http import HttpResponse
+from investment_analyst.providers.market.alpaca_pipeline import (
+    AlpacaMarketFetchReceipt,
+    alpaca_fetch_receipt_id,
+)
 from investment_analyst.providers.market.alpaca_stock import (
     ADJUSTMENT,
     FEED,
@@ -160,11 +166,65 @@ def test_pagination_cycle_is_rejected() -> None:
         _client(transport).fetch_daily_bars("AAPL", START, END)
 
 
+def test_empty_list_and_null_pages_produce_zero_bars() -> None:
+    for body in (
+        b'{"bars": [], "next_page_token": null}',
+        b'{"bars": null, "next_page_token": null}',
+    ):
+        result = _client(QueueTransport([body])).fetch_daily_bars("AAPL", START, END)
+        assert result.bars == ()
+        assert len(result.request_urls) == 1
+
+
+def test_receipt_model_is_strict_deterministic_and_contains_no_any() -> None:
+    values = {
+        "asset_id": "equity:us:aapl",
+        "source_id": "alpaca-market-data:iex:aapl:daily-bars:adjustment-all",
+        "feed": "iex",
+        "adjustment": "all",
+        "requested_start": START,
+        "requested_end": END,
+        "retrieved_at": NOW,
+        "bar_count": 0,
+        "page_count": 1,
+        "traceability_verified": True,
+    }
+    receipt = AlpacaMarketFetchReceipt(**values)
+    identifier = alpaca_fetch_receipt_id(
+        asset_id=receipt.asset_id,
+        source_id=receipt.source_id,
+        feed=receipt.feed,
+        adjustment=receipt.adjustment,
+        requested_start=receipt.requested_start,
+        requested_end=receipt.requested_end,
+    )
+    assert identifier == alpaca_fetch_receipt_id(
+        asset_id=receipt.asset_id,
+        source_id=receipt.source_id,
+        feed=receipt.feed,
+        adjustment=receipt.adjustment,
+        requested_start=receipt.requested_start,
+        requested_end=receipt.requested_end,
+    )
+    with pytest.raises(ValidationError):
+        AlpacaMarketFetchReceipt(**{**values, "requested_end": START})
+    with pytest.raises(ValidationError):
+        AlpacaMarketFetchReceipt(**{**values, "traceability_verified": False})
+    with pytest.raises(ValidationError):
+        AlpacaMarketFetchReceipt(**{**values, "unexpected": True})
+
+    def contains_any(annotation: object) -> bool:
+        return annotation is Any or any(contains_any(item) for item in get_args(annotation))
+
+    assert not any(contains_any(item) for item in get_type_hints(AlpacaMarketFetchReceipt).values())
+
+
 @pytest.mark.parametrize(
     ("body", "message"),
     [
         (b"[]", "must be an object"),
         (b'{"bars": {}, "symbol": "AAPL", "next_page_token": null}', "must be a list"),
+        (b'{"bars": null, "error": "provider failure"}', "provider error"),
         (_document_with_bars([{"t": "2026-07-08T04:00:00Z"}]), "missing required"),
         (_document_with_bars([_bar(o=True)]), "invalid JSON type"),
         (_document_with_bars([_bar(c="NaN")]), "must be finite"),

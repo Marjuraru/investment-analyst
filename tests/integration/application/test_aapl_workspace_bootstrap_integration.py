@@ -4,6 +4,7 @@ import json
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -30,9 +31,13 @@ from investment_analyst.analytics.market.statistics_pipeline import (
 from investment_analyst.application.aapl_bootstrap import (
     AaplWorkspaceBootstrapPipeline,
     BootstrapKnownAtTooEarlyError,
+    BootstrapStageError,
 )
 from investment_analyst.application.aapl_bootstrap_models import (
     AaplBootstrapStage,
+    AaplBootstrapStageStatus,
+    AaplMarketRefreshMode,
+    AaplRefreshMode,
     AaplWorkspaceBootstrapRequest,
 )
 from investment_analyst.application.runtime import (
@@ -77,7 +82,10 @@ from investment_analyst.providers.fundamentals.sec_point_in_time_service import 
 )
 from investment_analyst.providers.http import HttpResponse
 from investment_analyst.providers.market.alpaca_normalizer import ASSET_ID, SOURCE_ID
-from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistoricalPipeline
+from investment_analyst.providers.market.alpaca_pipeline import (
+    ALPACA_FETCH_RECEIPT_SCHEMA,
+    AlpacaHistoricalPipeline,
+)
 from investment_analyst.providers.market.alpaca_stock import (
     AlpacaCredentials,
     AlpacaStockClient,
@@ -94,13 +102,24 @@ COMPUTED = datetime(2026, 7, 14, 10, 5, tzinfo=UTC)
 
 
 class FixtureTransport:
-    """Route official SEC and Alpaca URLs to deterministic local fixture bytes."""
+    """Route official URLs to interval-aware deterministic local fixture bytes."""
 
-    def __init__(self, submissions: bytes, companyfacts: bytes, bars: bytes) -> None:
+    def __init__(
+        self,
+        submissions: bytes,
+        companyfacts: bytes,
+        bars: bytes,
+        *,
+        empty_as_null: bool = False,
+    ) -> None:
         self.submissions = submissions
         self.companyfacts = companyfacts
-        self.bars = bars
+        self.bar_document = json.loads(bars)
+        self.empty_as_null = empty_as_null
         self.calls: list[str] = []
+        self.sec_calls: list[str] = []
+        self.alpaca_calls: list[str] = []
+        self.fail_alpaca_call: int | None = None
 
     def get(
         self,
@@ -112,15 +131,54 @@ class FixtureTransport:
         self.calls.append(url)
         assert timeout_seconds > 0
         if "/submissions/" in url:
+            self.sec_calls.append(url)
             body = self.submissions
         elif "/companyfacts/" in url:
+            self.sec_calls.append(url)
             body = self.companyfacts
         else:
+            self.alpaca_calls.append(url)
+            if self.fail_alpaca_call == len(self.alpaca_calls):
+                raise RuntimeError("controlled Alpaca interval failure")
             assert "data.alpaca.markets" in url
+            assert "/v2/stocks/AAPL/bars" in url
+            assert "/v2/orders" not in url
             assert headers["APCA-API-KEY-ID"] == "test-key"
             assert headers["APCA-API-SECRET-KEY"] == "test-secret"
-            body = self.bars
+            query = parse_qs(urlsplit(url).query)
+            assert query["feed"] == ["iex"]
+            assert query["adjustment"] == ["all"]
+            assert query["timeframe"] == ["1Day"]
+            start = datetime.fromisoformat(query["start"][0])
+            end = datetime.fromisoformat(query["end"][0])
+            selected = [
+                bar
+                for bar in self.bar_document["bars"]
+                if start <= datetime.fromisoformat(bar["t"].replace("Z", "+00:00")) < end
+            ]
+            body = json.dumps(
+                {
+                    "bars": None if self.empty_as_null and not selected else selected,
+                    "symbol": self.bar_document["symbol"],
+                    "next_page_token": None,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
         return HttpResponse(status_code=200, body=body, headers={}, url=url)
+
+    def alpaca_intervals(self) -> tuple[tuple[datetime, datetime], ...]:
+        """Return the exact half-open intervals requested from Alpaca."""
+        intervals = []
+        for url in self.alpaca_calls:
+            query = parse_qs(urlsplit(url).query)
+            intervals.append(
+                (
+                    datetime.fromisoformat(query["start"][0]),
+                    datetime.fromisoformat(query["end"][0]),
+                )
+            )
+        return tuple(intervals)
 
 
 def _load(name: str) -> dict[str, object]:
@@ -182,18 +240,11 @@ def _sec_documents() -> tuple[bytes, bytes]:
 
 
 def _bars() -> bytes:
-    timestamps = [
-        datetime(2026, 1, 1, 5, tzinfo=UTC) + timedelta(days=offset) for offset in range(26)
-    ]
-    timestamps.extend(
-        (
-            datetime(2026, 1, 27, tzinfo=UTC),
-            datetime(2026, 1, 27, 5, tzinfo=UTC),
-        )
-    )
     bars = []
-    for timestamp in timestamps:
-        value = 100
+    first = datetime(2025, 12, 28, 5, tzinfo=UTC)
+    for offset in range(38):
+        timestamp = first + timedelta(days=offset)
+        value = 100 + offset
         bars.append(
             {
                 "t": timestamp.isoformat().replace("+00:00", "Z"),
@@ -201,8 +252,8 @@ def _bars() -> bytes:
                 "h": value + 3,
                 "l": value - 1,
                 "c": value + 2,
-                "v": 1_000_000,
-                "n": 10_000,
+                "v": 1_000_000 + offset * 10_000,
+                "n": 10_000 + offset,
                 "vw": value + 1,
             }
         )
@@ -213,7 +264,41 @@ def _bars() -> bytes:
     ).encode()
 
 
-def _build_pipeline(storage, runtime, workspace_id, transport):
+def _real_case_bars() -> bytes:
+    timestamps = [
+        datetime(2025, 1, 2, 5, tzinfo=UTC) + timedelta(days=offset) for offset in range(24)
+    ]
+    timestamps.append(datetime(2026, 7, 13, 4, tzinfo=UTC))
+    bars = []
+    for offset, timestamp in enumerate(timestamps):
+        value = 150 + offset
+        bars.append(
+            {
+                "t": timestamp.isoformat().replace("+00:00", "Z"),
+                "o": value,
+                "h": value + 3,
+                "l": value - 1,
+                "c": value + 2,
+                "v": 2_000_000 + offset * 10_000,
+                "n": 20_000 + offset,
+                "vw": value + 1,
+            }
+        )
+    return json.dumps(
+        {"bars": bars, "symbol": "AAPL", "next_page_token": None},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+
+
+def _build_pipeline(
+    storage,
+    runtime,
+    workspace_id,
+    transport,
+    *,
+    execution_offset: timedelta = timedelta(),
+):
     sec_configuration = resolve_sec_configuration(runtime.provider_resolver)
     alpaca_configuration = resolve_alpaca_configuration(runtime.provider_resolver)
     sec_client = SecEdgarClient(
@@ -254,28 +339,28 @@ def _build_pipeline(storage, runtime, workspace_id, transport):
             storage,
             point_in_time,
             SecFundamentalMetricEngine(),
-            clock=lambda: COMPUTED,
+            clock=lambda: COMPUTED + execution_offset,
         ),
         fundamental_diagnostic_pipeline=SecAaplFundamentalDiagnosticPipeline(
             storage,
             SecFundamentalDiagnosticSelector(storage),
             SecFundamentalDiagnosticEngine(),
-            clock=lambda: COMPUTED + timedelta(minutes=1),
+            clock=lambda: COMPUTED + execution_offset + timedelta(minutes=1),
         ),
         market_statistics_pipeline=MarketStatisticsPipeline(
             storage,
             history,
             MarketStatisticsEngine(),
-            clock=lambda: COMPUTED + timedelta(minutes=2),
+            clock=lambda: COMPUTED + execution_offset + timedelta(minutes=2),
         ),
         market_diagnostic_pipeline=MarketDiagnosticPipeline(
             storage,
             MarketDiagnosticMetricSelector(storage),
             MarketDiagnosticEngine(),
-            clock=lambda: COMPUTED + timedelta(minutes=3),
+            clock=lambda: COMPUTED + execution_offset + timedelta(minutes=3),
         ),
         consolidated_service=AaplConsolidatedDiagnosticService(storage),
-        clock=lambda: EFFECTIVE,
+        clock=lambda: EFFECTIVE + execution_offset,
     )
 
 
@@ -288,11 +373,18 @@ def _counts(storage) -> tuple[int, int, int, int]:
     )
 
 
-def _request(*, known_at: datetime | None = None) -> AaplWorkspaceBootstrapRequest:
+def _request(
+    *,
+    start: date = date(2026, 1, 1),
+    end: date = date(2026, 1, 26),
+    known_at: datetime | None = None,
+    refresh_mode: AaplRefreshMode = AaplRefreshMode.AUTO,
+) -> AaplWorkspaceBootstrapRequest:
     return AaplWorkspaceBootstrapRequest(
-        market_start=date(2026, 1, 1),
-        market_end=date(2026, 1, 26),
+        market_start=start,
+        market_end=end,
         fundamental_frequency=DataFrequency.QUARTERLY,
+        refresh_mode=refresh_mode,
         requested_known_at=known_at,
         require_complete=True,
     )
@@ -348,7 +440,9 @@ def test_bootstrap_is_complete_idempotent_and_visible_to_workspace_inspection(
     assert first.consolidated.market.diagnostic.as_of == datetime(2026, 1, 26, 5, tzinfo=UTC)
     assert first.consolidated.fundamental.diagnostic is not None
     assert first.consolidated.market.diagnostic.verdict is not DiagnosticVerdict.INSUFFICIENT_DATA
+    assert first.refresh_plan.mode is AaplMarketRefreshMode.INITIAL
     assert second.overall_status is ConsolidatedDiagnosticStatus.COMPLETE
+    assert second.refresh_plan.mode is AaplMarketRefreshMode.ALREADY_CURRENT
     assert counts_after_first == counts_after_second
     assert identifiers_after_first == identifiers_after_second
     assert second.raw_records_created == 0
@@ -359,10 +453,13 @@ def test_bootstrap_is_complete_idempotent_and_visible_to_workspace_inspection(
     assert datetime(2026, 1, 27, tzinfo=UTC) not in market_timestamps
     assert datetime(2026, 1, 27, 5, tzinfo=UTC) not in market_timestamps
     market_stage = next(
-        item for item in first.stages if item.stage is AaplBootstrapStage.MARKET_FETCH
+        item for item in second.stages if item.stage is AaplBootstrapStage.MARKET_FETCH
     )
-    assert market_stage.stage is AaplBootstrapStage.MARKET_FETCH
-    assert len(transport.calls) == 6
+    assert market_stage.status is AaplBootstrapStageStatus.SKIPPED
+    assert market_stage.generated == market_stage.created == market_stage.reused == 0
+    assert len(transport.sec_calls) == 4
+    assert len(transport.alpaca_calls) == 1
+    assert len(transport.calls) == 5
 
     inspection = workspace_service.inspect(workspace_root)
     assert inspection.workspace_id == initialization.manifest.workspace_id
@@ -370,6 +467,171 @@ def test_bootstrap_is_complete_idempotent_and_visible_to_workspace_inspection(
     assert inspection.observation_count == counts_after_second[1]
     assert inspection.metric_result_count == counts_after_second[2]
     assert inspection.diagnostic_result_count == counts_after_second[3]
+
+
+def test_two_automatic_bootstraps_with_distinct_clocks_keep_stable_representative(
+    tmp_path,
+) -> None:
+    workspace_root = tmp_path / "semantic-revisions"
+    workspace_service = WorkspaceService(environ={}, home=tmp_path)
+    initialization = workspace_service.initialize(workspace_root)
+    runtime = ApplicationRuntime.create_default(workspace_service=workspace_service)
+    submissions, companyfacts = _sec_documents()
+    transport = FixtureTransport(submissions, companyfacts, _real_case_bars())
+    request = _request(
+        start=date(2025, 1, 1),
+        end=date(2026, 7, 13),
+    )
+
+    with runtime.open_storage(
+        StorageLocationRequest(workspace=workspace_root),
+        access_mode=WorkspaceAccessMode.READ_WRITE,
+    ) as storage:
+        first = _build_pipeline(
+            storage,
+            runtime,
+            initialization.manifest.workspace_id,
+            transport,
+        ).run(request)
+        metric_ids_after_first = {
+            item.result_id for item in storage.metric_results.list(asset_id=ASSET_ID)
+        }
+        diagnostic_ids_after_first = {
+            item.diagnostic_id for item in storage.diagnostics.list(asset_id=ASSET_ID)
+        }
+        counts_after_first = _counts(storage)
+        alpaca_calls_after_first = len(transport.alpaca_calls)
+
+        second = _build_pipeline(
+            storage,
+            runtime,
+            initialization.manifest.workspace_id,
+            transport,
+            execution_offset=timedelta(days=1),
+        ).run(request)
+        metric_ids_after_second = {
+            item.result_id for item in storage.metric_results.list(asset_id=ASSET_ID)
+        }
+        diagnostic_ids_after_second = {
+            item.diagnostic_id for item in storage.diagnostics.list(asset_id=ASSET_ID)
+        }
+        counts_after_second = _counts(storage)
+
+    assert first.effective_known_at == EFFECTIVE
+    assert second.effective_known_at == EFFECTIVE + timedelta(days=1)
+    assert first.overall_status is ConsolidatedDiagnosticStatus.COMPLETE
+    assert second.overall_status is ConsolidatedDiagnosticStatus.COMPLETE
+    assert first.consolidated.market.diagnostic is not None
+    assert second.consolidated.market.diagnostic == first.consolidated.market.diagnostic
+    assert first.consolidated.market.diagnostic.as_of == datetime(2026, 7, 13, 4, tzinfo=UTC)
+    assert second.consolidated.market.revisions_superseded == 1
+    assert second.consolidated.fundamental.revisions_superseded == 0
+    assert second.refresh_plan.mode is AaplMarketRefreshMode.ALREADY_CURRENT
+    second_market_stage = next(
+        item for item in second.stages if item.stage is AaplBootstrapStage.MARKET_FETCH
+    )
+    assert second_market_stage.status is AaplBootstrapStageStatus.SKIPPED
+    assert len(transport.alpaca_calls) == alpaca_calls_after_first == 1
+    assert len(transport.sec_calls) == 4
+    assert second.metric_results_created > 0
+    assert second.diagnostics_created > 0
+    assert counts_after_second[:2] == counts_after_first[:2]
+    assert counts_after_second[2] > counts_after_first[2]
+    assert counts_after_second[3] > counts_after_first[3]
+    assert metric_ids_after_first < metric_ids_after_second
+    assert diagnostic_ids_after_first < diagnostic_ids_after_second
+    assert second.traceability_verified is True
+    assert second.consolidated.traceability_verified is True
+
+
+def test_empty_real_prefix_receipt_makes_next_run_already_current(tmp_path) -> None:
+    workspace_root = tmp_path / "empty-prefix"
+    workspace_service = WorkspaceService(environ={}, home=tmp_path)
+    initialization = workspace_service.initialize(workspace_root)
+    runtime = ApplicationRuntime.create_default(workspace_service=workspace_service)
+    submissions, companyfacts = _sec_documents()
+    transport = FixtureTransport(
+        submissions,
+        companyfacts,
+        _real_case_bars(),
+        empty_as_null=True,
+    )
+
+    with runtime.open_storage(
+        StorageLocationRequest(workspace=workspace_root),
+        access_mode=WorkspaceAccessMode.READ_WRITE,
+    ) as storage:
+        pipeline = _build_pipeline(
+            storage,
+            runtime,
+            initialization.manifest.workspace_id,
+            transport,
+        )
+        setup = pipeline.run(
+            _request(
+                start=date(2025, 1, 2),
+                end=date(2026, 7, 13),
+            )
+        )
+        assert setup.overall_status is ConsolidatedDiagnosticStatus.COMPLETE
+        transport.alpaca_calls.clear()
+        sec_before = len(transport.sec_calls)
+        observations_before = len(storage.observations.list(asset_id=ASSET_ID))
+        market_records_before = len(storage.raw_records.list(source_id=SOURCE_ID))
+
+        first = pipeline.run(
+            _request(
+                start=date(2025, 1, 1),
+                end=date(2026, 7, 13),
+            )
+        )
+        first_market_stage = next(
+            item for item in first.stages if item.stage is AaplBootstrapStage.MARKET_FETCH
+        )
+        receipt_count = sum(
+            record.schema_version == ALPACA_FETCH_RECEIPT_SCHEMA
+            for record in storage.raw_records.list(source_id=SOURCE_ID)
+        )
+        observations_after_first = len(storage.observations.list(asset_id=ASSET_ID))
+        market_records_after_first = len(storage.raw_records.list(source_id=SOURCE_ID))
+        assert transport.alpaca_intervals() == (
+            (
+                datetime(2025, 1, 1, tzinfo=UTC),
+                datetime(2025, 1, 2, tzinfo=UTC),
+            ),
+        )
+        assert first.refresh_plan.mode is AaplMarketRefreshMode.BACKFILL
+        assert first.overall_status is ConsolidatedDiagnosticStatus.COMPLETE
+        assert first_market_stage.status is AaplBootstrapStageStatus.COMPLETED
+        assert first_market_stage.details.intervals_executed == 1
+        assert first_market_stage.details.bars_processed == 0
+        assert first_market_stage.details.coverage_receipts_created == 1
+        assert first_market_stage.details.empty_intervals_completed == 1
+        assert first.consolidated.market.diagnostic is not None
+        assert first.consolidated.market.diagnostic.as_of == datetime(2026, 7, 13, 4, tzinfo=UTC)
+        assert observations_after_first == observations_before
+        assert market_records_after_first == market_records_before + 1
+        assert receipt_count == 2
+        assert len(transport.sec_calls) == sec_before + 2
+
+        transport.alpaca_calls.clear()
+        second = pipeline.run(
+            _request(
+                start=date(2025, 1, 1),
+                end=date(2026, 7, 13),
+            )
+        )
+        second_market_stage = next(
+            item for item in second.stages if item.stage is AaplBootstrapStage.MARKET_FETCH
+        )
+        assert second.refresh_plan.mode is AaplMarketRefreshMode.ALREADY_CURRENT
+        assert transport.alpaca_calls == []
+        assert second_market_stage.status is AaplBootstrapStageStatus.SKIPPED
+        assert second.raw_records_created == 0
+        assert second.observations_created == 0
+        assert second.overall_status is ConsolidatedDiagnosticStatus.COMPLETE
+        assert second.consolidated.market.diagnostic is not None
+        assert second.consolidated.market.diagnostic.as_of == datetime(2026, 7, 13, 4, tzinfo=UTC)
 
 
 def test_too_early_cut_preserves_ingestion_and_can_resume_without_insufficient_data(
@@ -407,3 +669,145 @@ def test_too_early_cut_preserves_ingestion_and_can_resume_without_insufficient_d
             item.verdict is not DiagnosticVerdict.INSUFFICIENT_DATA
             for item in storage.diagnostics.list()
         )
+
+
+def test_incremental_suffix_and_full_refresh_use_exact_half_open_ranges(tmp_path) -> None:
+    workspace_root = tmp_path / "incremental"
+    workspace_service = WorkspaceService(environ={}, home=tmp_path)
+    initialization = workspace_service.initialize(workspace_root)
+    runtime = ApplicationRuntime.create_default(workspace_service=workspace_service)
+    submissions, companyfacts = _sec_documents()
+    transport = FixtureTransport(submissions, companyfacts, _bars())
+
+    with runtime.open_storage(
+        StorageLocationRequest(workspace=workspace_root),
+        access_mode=WorkspaceAccessMode.READ_WRITE,
+    ) as storage:
+        pipeline = _build_pipeline(
+            storage,
+            runtime,
+            initialization.manifest.workspace_id,
+            transport,
+        )
+        initial = pipeline.run(_request())
+        counts_initial = _counts(storage)
+        extended = pipeline.run(_request(end=date(2026, 1, 28)))
+        counts_extended = _counts(storage)
+        full = pipeline.run(
+            _request(
+                end=date(2026, 1, 28),
+                refresh_mode=AaplRefreshMode.FULL,
+            )
+        )
+        counts_full = _counts(storage)
+
+    assert initial.refresh_plan.mode is AaplMarketRefreshMode.INITIAL
+    assert extended.refresh_plan.mode is AaplMarketRefreshMode.INCREMENTAL
+    assert extended.consolidated.market.diagnostic is not None
+    assert extended.consolidated.market.diagnostic.as_of == datetime(2026, 1, 28, 5, tzinfo=UTC)
+    assert counts_extended[0] == counts_initial[0] + 3
+    assert counts_extended[1] == counts_initial[1] + 14
+    assert full.refresh_plan.mode is AaplMarketRefreshMode.FULL
+    assert full.overall_status is ConsolidatedDiagnosticStatus.COMPLETE
+    assert counts_full[0] == counts_extended[0] + 1
+    assert counts_full[1:] == counts_extended[1:]
+    assert transport.alpaca_intervals() == (
+        (
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2026, 1, 27, tzinfo=UTC),
+        ),
+        (
+            datetime(2026, 1, 27, tzinfo=UTC),
+            datetime(2026, 1, 29, tzinfo=UTC),
+        ),
+        (
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2026, 1, 29, tzinfo=UTC),
+        ),
+    )
+    assert len(transport.sec_calls) == 6
+
+
+def test_backfill_only_requests_prefix(tmp_path) -> None:
+    workspace_root = tmp_path / "backfill"
+    workspace_service = WorkspaceService(environ={}, home=tmp_path)
+    initialization = workspace_service.initialize(workspace_root)
+    runtime = ApplicationRuntime.create_default(workspace_service=workspace_service)
+    submissions, companyfacts = _sec_documents()
+    transport = FixtureTransport(submissions, companyfacts, _bars())
+
+    with runtime.open_storage(
+        StorageLocationRequest(workspace=workspace_root),
+        access_mode=WorkspaceAccessMode.READ_WRITE,
+    ) as storage:
+        pipeline = _build_pipeline(
+            storage,
+            runtime,
+            initialization.manifest.workspace_id,
+            transport,
+        )
+        pipeline.run(_request(start=date(2026, 1, 5), end=date(2026, 1, 28)))
+        backfill = pipeline.run(_request(start=date(2026, 1, 1), end=date(2026, 1, 28)))
+
+    assert backfill.refresh_plan.mode is AaplMarketRefreshMode.BACKFILL
+    assert backfill.overall_status is ConsolidatedDiagnosticStatus.COMPLETE
+    assert transport.alpaca_intervals()[-1] == (
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 1, 5, tzinfo=UTC),
+    )
+
+
+def test_second_interval_failure_persists_prefix_and_resume_fetches_only_suffix(
+    tmp_path,
+) -> None:
+    workspace_root = tmp_path / "resume"
+    workspace_service = WorkspaceService(environ={}, home=tmp_path)
+    initialization = workspace_service.initialize(workspace_root)
+    runtime = ApplicationRuntime.create_default(workspace_service=workspace_service)
+    submissions, companyfacts = _sec_documents()
+    transport = FixtureTransport(submissions, companyfacts, _bars())
+
+    with runtime.open_storage(
+        StorageLocationRequest(workspace=workspace_root),
+        access_mode=WorkspaceAccessMode.READ_WRITE,
+    ) as storage:
+        pipeline = _build_pipeline(
+            storage,
+            runtime,
+            initialization.manifest.workspace_id,
+            transport,
+        )
+        pipeline.run(_request(start=date(2026, 1, 5), end=date(2026, 1, 26)))
+        transport.fail_alpaca_call = len(transport.alpaca_calls) + 2
+        with pytest.raises(BootstrapStageError) as captured:
+            pipeline.run(_request(start=date(2026, 1, 1), end=date(2026, 1, 28)))
+        assert captured.value.stage is AaplBootstrapStage.MARKET_FETCH
+        persisted_dates = {
+            item.observed_at.date()
+            for item in storage.observations.list(asset_id=ASSET_ID)
+            if item.source.source_id == SOURCE_ID and item.observed_at is not None
+        }
+        assert date(2026, 1, 1) in persisted_dates
+        assert date(2026, 1, 27) not in persisted_dates
+
+        transport.fail_alpaca_call = None
+        resumed = pipeline.run(_request(start=date(2026, 1, 1), end=date(2026, 1, 28)))
+
+    attempted = transport.alpaca_intervals()
+    assert attempted[-3:-1] == (
+        (
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2026, 1, 5, tzinfo=UTC),
+        ),
+        (
+            datetime(2026, 1, 27, tzinfo=UTC),
+            datetime(2026, 1, 29, tzinfo=UTC),
+        ),
+    )
+    assert attempted[-1] == (
+        datetime(2026, 1, 27, tzinfo=UTC),
+        datetime(2026, 1, 29, tzinfo=UTC),
+    )
+    assert resumed.refresh_plan.mode is AaplMarketRefreshMode.INCREMENTAL
+    assert resumed.overall_status is ConsolidatedDiagnosticStatus.COMPLETE
+    assert resumed.traceability_verified is True
