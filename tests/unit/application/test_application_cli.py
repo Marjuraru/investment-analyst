@@ -68,11 +68,21 @@ def test_migrated_scripts_use_only_central_storage_composition() -> None:
         assert "dotenv" not in text
 
 
-def test_query_scripts_use_read_only_and_writers_use_read_write() -> None:
+def test_scripts_and_facade_keep_explicit_storage_access_modes() -> None:
     for script_name in _READ_ONLY_SCRIPTS:
         text = (_PROJECT_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
-        assert "WorkspaceAccessMode.READ_ONLY" in text
-        assert "WorkspaceAccessMode.READ_WRITE" not in text
+        if script_name == "query_aapl_diagnostics.py":
+            assert ".query_aapl_diagnostics(" in text
+            assert "WorkspaceAccessMode" not in text
+        else:
+            assert "WorkspaceAccessMode.READ_ONLY" in text
+            assert "WorkspaceAccessMode.READ_WRITE" not in text
     for script_name in _READ_WRITE_SCRIPTS:
         text = (_PROJECT_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
         assert "WorkspaceAccessMode.READ_WRITE" in text
+
+    facade = (_PROJECT_ROOT / "src" / "investment_analyst" / "application" / "facade.py").read_text(
+        encoding="utf-8"
+    )
+    assert facade.count("access_mode=WorkspaceAccessMode.READ_ONLY") == 1
+    assert facade.count("access_mode=WorkspaceAccessMode.READ_WRITE") == 1

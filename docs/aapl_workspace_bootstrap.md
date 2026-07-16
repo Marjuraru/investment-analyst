@@ -5,6 +5,10 @@ existing SEC EDGAR and Alpaca Market Data pipelines. It is an application orches
 it does not duplicate provider parsing, normalization, financial formulas, scoring rules,
 or persistence behavior.
 
+The command delegates composition and execution to
+`InvestmentAnalystApplication.bootstrap_aapl_workspace`. This keeps the CLI output contract stable
+while exposing the same operation to later automation and interface adapters.
+
 ## Stage order
 
 A run uses one read-write `LocalStorage` context and executes these stages once:

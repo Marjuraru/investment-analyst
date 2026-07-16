@@ -5,6 +5,11 @@ location, opens `LocalStorage` in an explicit access mode, loads the static asse
 creates one provider-context resolver. Domain clients and pipelines still receive ordinary typed
 configuration; they do not depend on the runtime, workspace, catalog file, or DuckDB.
 
+`InvestmentAnalystApplication` builds on this runtime and is the stable operation-level facade for
+Apple bootstrap and diagnostic queries. CLI commands and future runner or interface adapters call
+the facade instead of assembling provider and analytical pipelines themselves. See
+`docs/application_facade.md`.
+
 ## Workspace and legacy storage
 
 Every migrated command accepts a mutually exclusive location pair:
