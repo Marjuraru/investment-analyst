@@ -60,5 +60,16 @@ fundamental diagnostics, explicit IEX limitations, and preservation of successfu
 when a later bootstrap stage fails.
 
 The facade does not catch and flatten domain errors. Typed workspace, storage, provider, bootstrap,
-and query errors reach the CLI, runner, or future interface adapter so that each boundary can map
+and query errors reach the CLI, runner, or local interface adapter so that each boundary can map
 them to an appropriate user-facing status without losing the cause.
+
+## Operational adapter
+
+`AaplDailyRunner` is the stateful one-shot adapter over `bootstrap_aapl_workspace(...)`. It adds a
+per-workspace process lock, atomic latest-run state, sanitized operational failures, and read-only
+health without moving those concerns into the analytical facade. See
+[`operational_runner.md`](operational_runner.md) for its CLI and recovery contract.
+
+The loopback-only web adapter composes the same facade and runner through `AaplLocalController`.
+It adds no storage access or provider logic of its own. See
+[`local_interface.md`](local_interface.md) for the UI, scheduler, and persistent-service contract.
