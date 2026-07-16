@@ -7,7 +7,8 @@ Herramienta personal para recolectar, procesar, relacionar, visualizar y explica
 ## Alcance
 
 - Análisis de acciones, ETF y criptomonedas.
-- Diagnósticos de mercado, fundamentales y unificados.
+- Diagnósticos de mercado y fundamentales independientes, con presentación consolidada sin agregar
+  sus resultados.
 - Métricas y resultados transparentes, reproducibles y auditables.
 - Sin compra, venta ni ejecución de órdenes.
 - Sin trading automático ni conexión operativa con brokers.
@@ -17,22 +18,40 @@ Herramienta personal para recolectar, procesar, relacionar, visualizar y explica
 
 - **Transparencia:** cada dato conserva su fuente, timestamp, periodo y fecha de disponibilidad.
 - **Trazabilidad:** cada métrica registra su fórmula, parámetros, unidades, entradas y versión.
-- **Separación:** los análisis de mercado, fundamentales y unificados pueden consultarse independientemente.
+- **Separación:** mercado y fundamentales conservan scores, veredictos, confianza, calidad y
+  evidencia independientes, incluso cuando se presentan juntos.
 - **Independencia de proveedores:** los conectores de datos podrán sustituirse sin modificar el motor analítico.
 - **Determinismo:** el MVP no utiliza un LLM activo ni consume tokens durante su funcionamiento.
 - **Escalabilidad:** la estructura está preparada para crecer sin añadir complejidad innecesaria al inicio.
 
 ## Estado actual
 
-El proyecto contiene únicamente su estructura base. Todavía no incluye:
+El proyecto ya dispone de un flujo básico funcional por CLI, centrado en Apple y ejecutado de forma
+local:
 
-- Conexiones con APIs.
-- Indicadores financieros.
-- Modelos de datos.
-- Diagnósticos.
-- Bases de datos.
-- Alertas.
-- Interfaz gráfica.
+- workspace persistente con DuckDB, RawRecords, observaciones normalizadas, métricas, diagnósticos y
+  exportación Parquet;
+- catálogo central de activos y resolución independiente de proveedores;
+- importación de barras diarias de AAPL mediante Alpaca Market Data IEX, con la limitación explícita
+  de que IEX no equivale a cobertura consolidada SIP;
+- obtención oficial de fundamentales de Apple mediante SEC EDGAR;
+- métricas y diagnósticos deterministas, point-in-time y trazables;
+- bootstrap incremental e idempotente del workspace permanente;
+- consulta diaria de diagnósticos de mercado y fundamentales, presentados por separado en JSON
+  compacto, JSON versionado o texto legible;
+- pruebas unitarias e integraciones locales, además de validación continua con GitHub Actions.
+
+El MVP actual no incluye interfaz gráfica, alertas, programación diaria automática, ejecución de
+órdenes ni recomendaciones de inversión. Nuevos activos, indicadores o fuentes requieren fases de
+diseño y validación independientes.
+
+## Flujos principales
+
+- [Bootstrap del workspace de Apple](docs/aapl_workspace_bootstrap.md): crear o actualizar el
+  workspace real.
+- [Consulta diagnóstica consolidada](docs/consolidated_diagnostic_query.md): consultar el reporte
+  diario point-in-time.
+- [Integración continua](docs/continuous_integration.md): validar automáticamente cada pull request.
 
 ## Entorno mínimo
 
