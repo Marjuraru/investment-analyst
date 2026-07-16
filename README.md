@@ -39,6 +39,8 @@ local:
 - bootstrap incremental e idempotente del workspace permanente;
 - consulta diaria de diagnósticos de mercado y fundamentales, presentados por separado en JSON
   compacto, JSON versionado o texto legible;
+- fachada de aplicación tipada para que CLI, automatización e interfaz reutilicen las mismas
+  operaciones sin duplicar composición;
 - entorno reproducible mediante un lock versionado, pruebas unitarias e integraciones locales,
   cobertura de líneas y ramas, auditoría de dependencias y validación continua con GitHub Actions.
 
@@ -52,6 +54,8 @@ diseño y validación independientes.
   workspace real.
 - [Consulta diagnóstica consolidada](docs/consolidated_diagnostic_query.md): consultar el reporte
   diario point-in-time.
+- [Fachada de aplicación](docs/application_facade.md): invocar bootstrap y consulta mediante una
+  API programática estable.
 - [Integración continua](docs/continuous_integration.md): validar automáticamente cada pull request.
 - [Gestión de dependencias](docs/dependency_management.md): reproducir y actualizar el entorno
   validado.

@@ -9,29 +9,22 @@ from datetime import UTC, date, datetime
 from investment_analyst.analytics.aapl_daily_report_formatter import (
     format_aapl_daily_report,
 )
-from investment_analyst.analytics.aapl_daily_report_service import (
-    AaplDailyReportError,
-    AaplDailyReportService,
-)
+from investment_analyst.analytics.aapl_daily_report_service import AaplDailyReportError
 from investment_analyst.analytics.consolidated_diagnostic_models import (
     ConsolidatedDiagnosticRequest,
     ConsolidatedDiagnosticView,
 )
 from investment_analyst.analytics.consolidated_diagnostic_service import (
-    AaplConsolidatedDiagnosticService,
     ConsolidatedDiagnosticQueryError,
 )
 from investment_analyst.application.cli import (
     add_storage_location_arguments,
     storage_location_from_namespace,
 )
-from investment_analyst.application.runtime import (
-    ApplicationRuntime,
-    ApplicationRuntimeError,
-)
+from investment_analyst.application.facade import InvestmentAnalystApplication
+from investment_analyst.application.runtime import ApplicationRuntimeError
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.storage import StorageError
-from investment_analyst.workspace.models import WorkspaceAccessMode
 from investment_analyst.workspace.service import WorkspaceError
 
 _NOTICE = (
@@ -128,20 +121,16 @@ def main() -> int:
             market_as_of=args.market_as_of,
             fundamental_as_of=args.fundamental_as_of,
         )
-        runtime = ApplicationRuntime.create_default()
-        with runtime.open_storage(
-            storage_location_from_namespace(args),
-            access_mode=WorkspaceAccessMode.READ_ONLY,
-        ) as storage:
-            if args.output_format == "json":
-                view = AaplConsolidatedDiagnosticService(storage).query(request)
-                output = json.dumps(_legacy_payload(view), indent=2, sort_keys=True)
-            else:
-                report = AaplDailyReportService(storage).query(request)
-                if args.output_format == "daily-json":
-                    output = json.dumps(report.to_json_dict(), indent=2, sort_keys=True)
-                else:
-                    output = format_aapl_daily_report(report)
+        report = InvestmentAnalystApplication.create_default().query_aapl_diagnostics(
+            request,
+            location=storage_location_from_namespace(args),
+        )
+        if args.output_format == "json":
+            output = json.dumps(_legacy_payload(report.view), indent=2, sort_keys=True)
+        elif args.output_format == "daily-json":
+            output = json.dumps(report.to_json_dict(), indent=2, sort_keys=True)
+        else:
+            output = format_aapl_daily_report(report)
         print(output)
         return 0
     except (

@@ -4,6 +4,10 @@ This read-only layer displays the persisted Apple market diagnostic and persiste
 fundamental diagnostic together while keeping their meanings independent. It does not calculate a
 combined score, verdict, confidence, quality, ranking, or recommendation.
 
+The command delegates the read-only operation to
+`InvestmentAnalystApplication.query_aapl_diagnostics`, which returns the existing versioned report
+model for CLI, automation, and future interface adapters.
+
 ## Point-in-time selection
 
 A diagnostic is eligible when its source information was available no later than the requested

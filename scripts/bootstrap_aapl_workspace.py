@@ -8,81 +8,22 @@ import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from investment_analyst.analytics.consolidated_diagnostic_service import (
-    AaplConsolidatedDiagnosticService,
-)
-from investment_analyst.analytics.market.diagnostic_pipeline import (
-    MarketDiagnosticPipeline,
-)
-from investment_analyst.analytics.market.diagnostic_rules import MarketDiagnosticEngine
-from investment_analyst.analytics.market.diagnostic_selection import (
-    MarketDiagnosticMetricSelector,
-)
-from investment_analyst.analytics.market.history_service import (
-    HistoricalMarketDataService,
-)
-from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
-from investment_analyst.analytics.market.statistics_pipeline import (
-    MarketStatisticsPipeline,
-)
 from investment_analyst.application.aapl_bootstrap import (
     AaplWorkspaceBootstrapError,
-    AaplWorkspaceBootstrapPipeline,
     BootstrapIncompleteError,
 )
 from investment_analyst.application.aapl_bootstrap_models import (
     AaplRefreshMode,
     AaplWorkspaceBootstrapRequest,
 )
-from investment_analyst.application.runtime import (
-    ApplicationRuntime,
-    ApplicationRuntimeError,
-    StorageLocationRequest,
-)
-from investment_analyst.catalog.provider_configuration import (
-    resolve_alpaca_configuration,
-    resolve_sec_configuration,
-)
+from investment_analyst.application.facade import InvestmentAnalystApplication
+from investment_analyst.application.runtime import ApplicationRuntimeError
 from investment_analyst.core.models import DataFrequency
-from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
-    SecCompanyFactsNormalizer,
-)
-from investment_analyst.providers.fundamentals.sec_diagnostic_engine import (
-    SecFundamentalDiagnosticEngine,
-)
-from investment_analyst.providers.fundamentals.sec_diagnostic_pipeline import (
-    SecAaplFundamentalDiagnosticPipeline,
-)
-from investment_analyst.providers.fundamentals.sec_diagnostic_selection import (
-    SecFundamentalDiagnosticSelector,
-)
-from investment_analyst.providers.fundamentals.sec_edgar import (
-    SecEdgarClient,
-    SecEdgarIdentity,
-)
-from investment_analyst.providers.fundamentals.sec_metric_engine import (
-    SecFundamentalMetricEngine,
-)
-from investment_analyst.providers.fundamentals.sec_metric_pipeline import (
-    SecAaplFundamentalMetricPipeline,
-)
-from investment_analyst.providers.fundamentals.sec_observation_pipeline import (
-    SecAaplObservationPipeline,
-)
-from investment_analyst.providers.fundamentals.sec_pipeline import (
-    SecAaplFundamentalsPipeline,
-)
-from investment_analyst.providers.fundamentals.sec_point_in_time_service import (
-    SecAaplFundamentalPointInTimeService,
-)
-from investment_analyst.providers.http import UrlLibHttpTransport
-from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistoricalPipeline
+from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
 from investment_analyst.providers.market.alpaca_stock import (
     AlpacaCredentials,
-    AlpacaStockClient,
 )
-from investment_analyst.storage import LocalStorage, StorageError
-from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.storage import StorageError
 from investment_analyst.workspace.service import WorkspaceError
 
 _NOTICE = (
@@ -151,67 +92,6 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_pipeline(
-    storage: LocalStorage,
-    *,
-    runtime: ApplicationRuntime,
-    workspace_id,
-    alpaca_credentials: AlpacaCredentials,
-    sec_identity: SecEdgarIdentity,
-) -> AaplWorkspaceBootstrapPipeline:
-    alpaca_configuration = resolve_alpaca_configuration(runtime.provider_resolver)
-    sec_configuration = resolve_sec_configuration(runtime.provider_resolver)
-    transport = UrlLibHttpTransport()
-    sec_client = SecEdgarClient(
-        transport,
-        sec_identity,
-        cik=sec_configuration.cik,
-        ticker=sec_configuration.ticker,
-    )
-    alpaca_client = AlpacaStockClient(transport, alpaca_credentials)
-    point_in_time = SecAaplFundamentalPointInTimeService(storage)
-    history = HistoricalMarketDataService(storage)
-    return AaplWorkspaceBootstrapPipeline(
-        storage,
-        workspace_id=workspace_id,
-        sec_fetch_pipeline=SecAaplFundamentalsPipeline(
-            storage,
-            sec_client,
-            configuration=sec_configuration,
-        ),
-        sec_observation_pipeline=SecAaplObservationPipeline(
-            storage,
-            SecCompanyFactsNormalizer(),
-        ),
-        market_pipeline=AlpacaHistoricalPipeline(
-            storage,
-            alpaca_client,
-            configuration=alpaca_configuration,
-        ),
-        fundamental_metric_pipeline=SecAaplFundamentalMetricPipeline(
-            storage,
-            point_in_time,
-            SecFundamentalMetricEngine(),
-        ),
-        fundamental_diagnostic_pipeline=SecAaplFundamentalDiagnosticPipeline(
-            storage,
-            SecFundamentalDiagnosticSelector(storage),
-            SecFundamentalDiagnosticEngine(),
-        ),
-        market_statistics_pipeline=MarketStatisticsPipeline(
-            storage,
-            history,
-            MarketStatisticsEngine(),
-        ),
-        market_diagnostic_pipeline=MarketDiagnosticPipeline(
-            storage,
-            MarketDiagnosticMetricSelector(storage),
-            MarketDiagnosticEngine(),
-        ),
-        consolidated_service=AaplConsolidatedDiagnosticService(storage),
-    )
-
-
 def _payload(summary, workspace_root: Path) -> dict[str, object]:
     serialized = summary.to_json_dict()
     counts = serialized["counts"]
@@ -264,23 +144,15 @@ def main() -> int:
         )
         credentials = AlpacaCredentials(api_key=api_key, secret_key=secret_key)
         identity = SecEdgarIdentity(sec_user_agent)
-        runtime = ApplicationRuntime.create_default()
-        initialization = runtime.workspace_service.initialize(arguments.workspace)
-        location = StorageLocationRequest(workspace=initialization.paths.root)
-        with runtime.open_storage(
-            location,
-            access_mode=WorkspaceAccessMode.READ_WRITE,
-        ) as storage:
-            summary = _build_pipeline(
-                storage,
-                runtime=runtime,
-                workspace_id=initialization.manifest.workspace_id,
-                alpaca_credentials=credentials,
-                sec_identity=identity,
-            ).run(request)
+        result = InvestmentAnalystApplication.create_default().bootstrap_aapl_workspace(
+            request,
+            workspace=arguments.workspace,
+            alpaca_credentials=credentials,
+            sec_identity=identity,
+        )
         print(
             json.dumps(
-                _payload(summary, initialization.paths.root),
+                _payload(result.summary, result.initialization.paths.root),
                 indent=2,
                 sort_keys=True,
             )
