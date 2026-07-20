@@ -11,6 +11,8 @@ from investment_analyst.core.models import DataFrequency, DataQuality
 from investment_analyst.providers.fundamentals.sec_fact_models import (
     ASSET_ID,
     SEC_FACT_DEFINITIONS,
+    SEC_NORMALIZED_FACT_DEFINITIONS,
+    SEC_RESEARCH_FACT_DEFINITIONS,
     SecFilingMetadata,
     SecFundamentalFact,
 )
@@ -63,6 +65,35 @@ def test_five_exact_fact_definitions() -> None:
             "USD",
         ),
     ]
+
+
+def test_research_fact_catalog_is_additive_and_has_unique_fields_and_tags() -> None:
+    assert [item.field_name for item in SEC_RESEARCH_FACT_DEFINITIONS] == [
+        "fundamental.gross_profit",
+        "fundamental.operating_income",
+        "fundamental.operating_cash_flow",
+        "fundamental.capital_expenditures",
+        "fundamental.share_based_compensation",
+        "fundamental.dividends_paid",
+        "fundamental.share_repurchases",
+        "fundamental.research_and_development",
+        "fundamental.selling_general_and_administrative",
+        "fundamental.cash_and_cash_equivalents",
+        "fundamental.current_assets",
+        "fundamental.current_liabilities",
+        "fundamental.inventory",
+        "fundamental.accounts_receivable",
+        "fundamental.accounts_payable",
+        "fundamental.long_term_debt_current",
+        "fundamental.long_term_debt_noncurrent",
+        "fundamental.marketable_securities_current",
+        "fundamental.marketable_securities_noncurrent",
+    ]
+    fields = [item.field_name for item in SEC_NORMALIZED_FACT_DEFINITIONS]
+    tags = [item.tag for item in SEC_NORMALIZED_FACT_DEFINITIONS]
+    assert SEC_NORMALIZED_FACT_DEFINITIONS[: len(SEC_FACT_DEFINITIONS)] == SEC_FACT_DEFINITIONS
+    assert len(fields) == len(set(fields))
+    assert len(tags) == len(set(tags))
 
 
 @pytest.mark.parametrize("value", [True, 1.25])

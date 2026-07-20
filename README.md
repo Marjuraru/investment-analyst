@@ -35,6 +35,9 @@ local:
 - importación de barras diarias de AAPL mediante Alpaca Market Data IEX, con la limitación explícita
   de que IEX no equivale a cobertura consolidada SIP;
 - obtención oficial de fundamentales de Apple mediante SEC EDGAR;
+- base de investigación fundamental con 19 hechos SEC adicionales y 18 métricas descriptivas
+  versionadas, calculadas point-in-time con `Decimal`, evidencia exacta por input y estadísticas
+  históricas separadas para cambios, media, rango y CAGR válido;
 - métricas y diagnósticos deterministas, point-in-time y trazables;
 - bootstrap incremental e idempotente del workspace permanente;
 - consulta diaria de diagnósticos de mercado y fundamentales, presentados por separado en JSON
@@ -43,14 +46,27 @@ local:
   operaciones sin duplicar composición;
 - ejecución operativa única con lock por workspace, estado atómico versionado, errores acotados y
   health check de solo lectura, preparada para un programador externo;
-- interfaz web local para ejecutar el flujo, consultar el reporte y revisar la evidencia, junto con
-  scheduler diario persistente y unidad de usuario `systemd` generada de forma segura;
+- interfaz web local compacta para ejecutar el flujo, consultar el reporte, revisar la evidencia y
+  explorar OHLC, VWAP, actividad, retorno, volatilidad, volumen relativo, SMA 5 y SMA 20 en un
+  gráfico histórico point-in-time con resolución diaria hasta 2A, semanal para 5A y mensual para
+  Máx.; cada agregado conserva sus sesiones e identidades fuente y la última sesión permanece
+  separada; incorpora evolución trimestral o anual de cinco hechos SEC,
+  ficha fundamental y una matriz compacta de 18 métricas derivadas con fórmulas e inputs auditables;
+  incluye exportaciones exactas CSV/JSON generadas en el navegador, tema oscuro o claro, respuestas
+  comprimidas, cachés de lectura acotadas, scheduler diario persistente y unidad de usuario
+  `systemd` generada de forma segura;
 - entorno reproducible mediante un lock versionado, pruebas unitarias e integraciones locales,
   cobertura de líneas y ramas, auditoría de dependencias y validación continua con GitHub Actions.
 
 El MVP actual no incluye alertas, autenticación o exposición remota, inicio automático desde
 Windows Task Scheduler, ejecución de órdenes ni recomendaciones de inversión. Nuevos activos,
 indicadores o fuentes requieren fases de diseño y validación independientes.
+
+La ampliación de [investigación fundamental](docs/fundamental_research_foundation.md), la
+[estrategia de datos históricos](docs/historical_research_data.md), las
+[referencias de interfaz profesional](docs/professional_analysis_interface.md) y el futuro dominio
+[Cazatiburones](docs/cazatiburones.md) tienen contratos separados para no atribuir a los datos más
+información de la que realmente contienen.
 
 ## Flujos principales
 

@@ -24,9 +24,9 @@ from investment_analyst.workspace.models import WorkspaceAccessMode
 from investment_analyst.workspace.service import WorkspaceError
 
 _NOTICE = (
-    "Normalizes five explicit Apple facts from local SEC snapshots using filing acceptance time "
-    "for point-in-time availability. It does not calculate ratios or diagnostics, execute "
-    "operations, or provide financial advice."
+    "Normalizes the five core Apple facts and the additional research catalog from local SEC "
+    "snapshots using filing acceptance time for point-in-time availability. It does not "
+    "calculate ratios or diagnostics, execute operations, or provide financial advice."
 )
 
 

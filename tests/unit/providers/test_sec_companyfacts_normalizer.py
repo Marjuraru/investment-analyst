@@ -18,8 +18,13 @@ from investment_analyst.providers.fundamentals.sec_fact_models import (
     ASSET_ID,
     COMPANYFACTS_SCHEMA_VERSION,
     COMPANYFACTS_SOURCE_ID,
+    SEC_RESEARCH_FACT_DEFINITIONS,
     SUBMISSIONS_SCHEMA_VERSION,
     SUBMISSIONS_SOURCE_ID,
+    SecFactPeriodType,
+)
+from investment_analyst.providers.fundamentals.sec_query_models import (
+    allowed_sec_fundamental_fields,
 )
 
 RETRIEVED_AT = datetime(2026, 7, 13, 18, tzinfo=UTC)
@@ -120,6 +125,24 @@ def _company_document() -> dict[str, object]:
     }
 
 
+def _company_document_with_research_facts() -> dict[str, object]:
+    document = _company_document()
+    us_gaap = document["facts"]["us-gaap"]
+    for position, definition in enumerate(SEC_RESEARCH_FACT_DEFINITIONS, start=1):
+        if definition.period_type is SecFactPeriodType.DURATION:
+            facts = [
+                _duration_fact(annual=True, value=str(1000 + position)),
+                _duration_fact(annual=False, value=str(200 + position)),
+            ]
+        else:
+            facts = [
+                _instant_fact(annual=True, value=str(5000 + position)),
+                _instant_fact(annual=False, value=str(5100 + position)),
+            ]
+        us_gaap[definition.tag] = {"units": {"USD": facts}}
+    return document
+
+
 def _record(
     *,
     source_id: str,
@@ -185,14 +208,37 @@ def test_extracts_all_five_annual_and_quarterly_fields() -> None:
     assert result.facts_selected == 10
     assert result.annual_count == 5
     assert result.quarterly_count == 5
-    assert set(result.field_counts) == {
+    assert {field_name for field_name, count in result.field_counts.items() if count} == {
         "fundamental.revenue",
         "fundamental.net_income",
         "fundamental.assets",
         "fundamental.liabilities",
         "fundamental.stockholders_equity",
     }
+    assert all(result.field_counts[item.field_name] == 0 for item in SEC_RESEARCH_FACT_DEFINITIONS)
     assert {fact.value for fact in result.facts} >= {Decimal("1000.25"), Decimal("260.50")}
+
+
+def test_extracts_additional_research_catalog_without_expanding_core_query() -> None:
+    result = SecCompanyFactsNormalizer().extract(
+        _company(document=_company_document_with_research_facts()),
+        _submissions(),
+        normalized_at=NORMALIZED_AT,
+    )
+
+    expected_total_fields = 5 + len(SEC_RESEARCH_FACT_DEFINITIONS)
+    assert result.facts_examined == expected_total_fields * 2
+    assert result.facts_selected == expected_total_fields * 2
+    assert result.annual_count == expected_total_fields
+    assert result.quarterly_count == expected_total_fields
+    assert all(result.field_counts[item.field_name] == 2 for item in SEC_RESEARCH_FACT_DEFINITIONS)
+    assert set(allowed_sec_fundamental_fields()) == {
+        "fundamental.revenue",
+        "fundamental.net_income",
+        "fundamental.assets",
+        "fundamental.liabilities",
+        "fundamental.stockholders_equity",
+    }
 
 
 def test_excludes_ytd_comparatives_q4_and_non_usd() -> None:
@@ -334,6 +380,23 @@ def test_observation_uuid_is_snapshot_and_clock_independent_but_value_sensitive(
     assert str(submissions.record_id) in first.source.record_key
     assert first.period_end.tzinfo is UTC
     assert first.frequency in {DataFrequency.ANNUAL, DataFrequency.QUARTERLY}
+
+    annual_revenue = next(
+        fact
+        for fact in normalizer.extract(
+            first_company,
+            submissions,
+            normalized_at=NORMALIZED_AT,
+        ).facts
+        if fact.field_name == "fundamental.revenue" and fact.frequency is DataFrequency.ANNUAL
+    )
+    stable_revenue = sec_fact_to_observation(
+        annual_revenue,
+        first_company,
+        submissions,
+        normalized_at=NORMALIZED_AT,
+    )
+    assert str(stable_revenue.observation_id) == "1854295b-134d-52f3-944e-c3e12cde9c77"
 
     revised_document = _company_document()
     revised_document["facts"]["us-gaap"]["Assets"]["units"]["USD"][0]["val"] = "5001"

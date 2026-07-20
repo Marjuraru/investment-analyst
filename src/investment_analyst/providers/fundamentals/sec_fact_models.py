@@ -76,7 +76,148 @@ SEC_FACT_DEFINITIONS = (
         period_type=SecFactPeriodType.INSTANT,
     ),
 )
-_DEFINITION_BY_FIELD = {item.field_name: item for item in SEC_FACT_DEFINITIONS}
+
+# These additional facts expand the research foundation without changing the
+# existing five-field point-in-time query contract. All values preserve the
+# positive amounts reported by Apple; cash outflows are not sign-inverted here.
+SEC_RESEARCH_FACT_DEFINITIONS = (
+    SecFactDefinition(
+        field_name="fundamental.gross_profit",
+        taxonomy="us-gaap",
+        tag="GrossProfit",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.operating_income",
+        taxonomy="us-gaap",
+        tag="OperatingIncomeLoss",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.operating_cash_flow",
+        taxonomy="us-gaap",
+        tag="NetCashProvidedByUsedInOperatingActivities",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.capital_expenditures",
+        taxonomy="us-gaap",
+        tag="PaymentsToAcquirePropertyPlantAndEquipment",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.share_based_compensation",
+        taxonomy="us-gaap",
+        tag="ShareBasedCompensation",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.dividends_paid",
+        taxonomy="us-gaap",
+        tag="PaymentsOfDividends",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.share_repurchases",
+        taxonomy="us-gaap",
+        tag="PaymentsForRepurchaseOfCommonStock",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.research_and_development",
+        taxonomy="us-gaap",
+        tag="ResearchAndDevelopmentExpense",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.selling_general_and_administrative",
+        taxonomy="us-gaap",
+        tag="SellingGeneralAndAdministrativeExpense",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.cash_and_cash_equivalents",
+        taxonomy="us-gaap",
+        tag="CashAndCashEquivalentsAtCarryingValue",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.current_assets",
+        taxonomy="us-gaap",
+        tag="AssetsCurrent",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.current_liabilities",
+        taxonomy="us-gaap",
+        tag="LiabilitiesCurrent",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.inventory",
+        taxonomy="us-gaap",
+        tag="InventoryNet",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.accounts_receivable",
+        taxonomy="us-gaap",
+        tag="AccountsReceivableNetCurrent",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.accounts_payable",
+        taxonomy="us-gaap",
+        tag="AccountsPayableCurrent",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.long_term_debt_current",
+        taxonomy="us-gaap",
+        tag="LongTermDebtCurrent",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.long_term_debt_noncurrent",
+        taxonomy="us-gaap",
+        tag="LongTermDebtNoncurrent",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.marketable_securities_current",
+        taxonomy="us-gaap",
+        tag="MarketableSecuritiesCurrent",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.marketable_securities_noncurrent",
+        taxonomy="us-gaap",
+        tag="MarketableSecuritiesNoncurrent",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+)
+
+SEC_NORMALIZED_FACT_DEFINITIONS = SEC_FACT_DEFINITIONS + SEC_RESEARCH_FACT_DEFINITIONS
+_DEFINITION_BY_FIELD = {item.field_name: item for item in SEC_NORMALIZED_FACT_DEFINITIONS}
 
 
 class SecFilingMetadata(ContractModel):

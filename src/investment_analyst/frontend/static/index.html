@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="es">
+<html lang="es" data-theme="dark">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="light">
-    <meta name="theme-color" content="#101827">
+    <meta name="color-scheme" content="dark light">
+    <meta name="theme-color" content="#0b111c">
     <title>Apple (AAPL) · Investment Analyst</title>
     <link rel="stylesheet" href="/assets/styles.css">
     <script src="/assets/app.js" defer></script>
@@ -27,12 +27,20 @@
             <span class="nav-index" aria-hidden="true">01</span>
             Resumen
           </a>
-          <a class="nav-link" href="#analisis">
+          <a class="nav-link" href="#mercado">
             <span class="nav-index" aria-hidden="true">02</span>
+            Mercado
+          </a>
+          <a class="nav-link" href="#fundamentales">
+            <span class="nav-index" aria-hidden="true">03</span>
+            Fundamentales
+          </a>
+          <a class="nav-link" href="#analisis">
+            <span class="nav-index" aria-hidden="true">04</span>
             Análisis
           </a>
           <a class="nav-link" href="#operacion">
-            <span class="nav-index" aria-hidden="true">03</span>
+            <span class="nav-index" aria-hidden="true">05</span>
             Operación
           </a>
         </nav>
@@ -58,6 +66,9 @@
           </div>
           <div class="topbar-actions">
             <span id="health-badge" class="badge neutral">Consultando estado</span>
+            <button id="theme-toggle" class="button secondary compact theme-toggle" type="button" aria-pressed="true">
+              Tema claro
+            </button>
             <button id="refresh-overview" class="button secondary compact" type="button">
               Actualizar estado
             </button>
@@ -71,17 +82,6 @@
                 <p class="eyebrow">VISTA GENERAL</p>
                 <h2 id="resumen-titulo">Estado del análisis</h2>
               </div>
-              <p class="section-description">
-                Evidencia local con corte histórico, cálculos deterministas y trazabilidad completa.
-              </p>
-            </div>
-
-            <div class="scope-notice" role="note" aria-label="Alcance de la herramienta">
-              <span class="scope-icon" aria-hidden="true">i</span>
-              <p>
-                <strong>Análisis descriptivo.</strong> Mercado y fundamentales se evalúan por separado.
-                No se genera una recomendación, una puntuación combinada ni se ejecutan órdenes.
-              </p>
             </div>
 
             <div class="overview-grid" aria-label="Estado operativo">
@@ -122,13 +122,327 @@
 
           <div id="global-message" class="message hidden" role="status" aria-live="polite"></div>
 
+          <section id="mercado" class="market-section" aria-labelledby="mercado-titulo">
+            <div class="section-intro analysis-intro">
+              <div>
+                <p class="eyebrow">MERCADO</p>
+                <h2 id="mercado-titulo">Histórico de precio y volumen</h2>
+              </div>
+            </div>
+
+            <article id="market-chart-card" class="market-chart-card" aria-busy="true">
+              <header class="market-chart-header">
+                <div>
+                  <p class="chart-symbol">AAPL <span>· USD</span></p>
+                  <div class="chart-quote-row">
+                    <strong id="chart-latest-close">—</strong>
+                    <span id="chart-range-change" class="chart-change neutral">—</span>
+                  </div>
+                  <p id="chart-latest-date" class="chart-quote-context">Esperando datos locales…</p>
+                </div>
+                <div class="period-selector" role="group" aria-label="Rango del gráfico">
+                  <button class="period-button" type="button" data-period="1m" aria-label="Un mes" aria-pressed="false">1M</button>
+                  <button class="period-button" type="button" data-period="3m" aria-label="Tres meses" aria-pressed="false">3M</button>
+                  <button class="period-button active" type="button" data-period="6m" aria-label="Seis meses" aria-pressed="true">6M</button>
+                  <button class="period-button" type="button" data-period="1y" aria-label="Un año" aria-pressed="false">1A</button>
+                  <button class="period-button" type="button" data-period="2y" aria-label="Dos años" aria-pressed="false">2A</button>
+                  <button class="period-button" type="button" data-period="5y" aria-label="Cinco años" aria-pressed="false">5A</button>
+                  <button class="period-button" type="button" data-period="max" aria-label="Todo el historial local" aria-pressed="false">Máx.</button>
+                </div>
+              </header>
+
+              <div class="market-workbench">
+                <div class="chart-primary">
+                  <div class="chart-toolbar">
+                    <div class="chart-legend" role="group" aria-label="Series visibles">
+                      <span class="series-fixed"><i class="legend-swatch close" aria-hidden="true"></i>Cierre</span>
+                      <button class="series-toggle" type="button" data-series="sma-5" aria-pressed="true">
+                        <i class="legend-swatch sma-five" aria-hidden="true"></i>SMA 5
+                      </button>
+                      <button class="series-toggle" type="button" data-series="sma-20" aria-pressed="true">
+                        <i class="legend-swatch sma-twenty" aria-hidden="true"></i>SMA 20
+                      </button>
+                      <button class="series-toggle" type="button" data-series="volume" aria-pressed="true">
+                        <i class="legend-swatch volume" aria-hidden="true"></i>Volumen
+                      </button>
+                    </div>
+                    <div class="chart-toolbar-actions">
+                      <span id="chart-keyboard-hint" class="chart-keyboard-hint">← → para recorrer sesiones</span>
+                      <button
+                        id="export-market-csv"
+                        class="data-export-button"
+                        type="button"
+                        aria-label="Exportar los intervalos visibles como CSV exacto"
+                        disabled
+                      >
+                        Exportar CSV
+                      </button>
+                    </div>
+                  </div>
+
+                  <p id="chart-empty" class="chart-empty hidden" role="status"></p>
+                  <div
+                    id="market-chart"
+                    class="chart-host"
+                    role="group"
+                    tabindex="0"
+                    aria-label="Gráfico histórico interactivo de AAPL. Usa las flechas izquierda y derecha para recorrer sesiones."
+                    aria-describedby="chart-inspector"
+                  ></div>
+
+                  <dl id="chart-inspector" class="chart-inspector" aria-live="polite">
+                    <div>
+                      <dt id="chart-point-period-label">Sesión</dt>
+                      <dd id="chart-point-date">—</dd>
+                    </div>
+                    <div>
+                      <dt>Apertura</dt>
+                      <dd id="chart-point-open">—</dd>
+                    </div>
+                    <div>
+                      <dt>Máximo</dt>
+                      <dd id="chart-point-high">—</dd>
+                    </div>
+                    <div>
+                      <dt>Mínimo</dt>
+                      <dd id="chart-point-low">—</dd>
+                    </div>
+                    <div>
+                      <dt>Cierre</dt>
+                      <dd id="chart-point-close">—</dd>
+                    </div>
+                    <div>
+                      <dt>SMA 5</dt>
+                      <dd id="chart-point-sma-5">—</dd>
+                    </div>
+                    <div>
+                      <dt>SMA 20</dt>
+                      <dd id="chart-point-sma-20">—</dd>
+                    </div>
+                    <div>
+                      <dt>Volumen</dt>
+                      <dd id="chart-point-volume">—</dd>
+                    </div>
+                  </dl>
+                </div>
+
+                <aside class="market-snapshot" aria-labelledby="snapshot-title">
+                  <div class="snapshot-heading">
+                    <div>
+                      <p class="eyebrow">LECTURA RÁPIDA</p>
+                      <h3 id="snapshot-title">Estadísticas técnicas</h3>
+                    </div>
+                    <span id="snapshot-quality" class="quality-chip">—</span>
+                  </div>
+
+                  <p class="snapshot-group-title">Última sesión</p>
+                  <dl class="snapshot-grid">
+                    <div><dt>Retorno</dt><dd id="snapshot-return-1d">—</dd></div>
+                    <div><dt>VWAP</dt><dd id="snapshot-vwap">—</dd></div>
+                    <div><dt>Apertura</dt><dd id="snapshot-open">—</dd></div>
+                    <div><dt>Máx. / Mín.</dt><dd id="snapshot-day-range">—</dd></div>
+                    <div><dt>Volumen</dt><dd id="snapshot-volume">—</dd></div>
+                    <div><dt>Operaciones</dt><dd id="snapshot-trades">—</dd></div>
+                  </dl>
+
+                  <p class="snapshot-group-title">Riesgo y actividad</p>
+                  <dl class="snapshot-grid">
+                    <div><dt>Volatilidad 20</dt><dd id="snapshot-volatility">—</dd></div>
+                    <div><dt>Vol. relativo 20</dt><dd id="snapshot-relative-volume">—</dd></div>
+                    <div><dt>Dist. SMA 5</dt><dd id="snapshot-sma-5-distance">—</dd></div>
+                    <div><dt>Dist. SMA 20</dt><dd id="snapshot-sma-20-distance">—</dd></div>
+                  </dl>
+
+                  <p class="snapshot-group-title">Rango seleccionado</p>
+                  <dl class="snapshot-grid">
+                    <div><dt>Retorno</dt><dd id="snapshot-range-return">—</dd></div>
+                    <div><dt>Sesiones</dt><dd id="chart-visible-sessions">—</dd></div>
+                    <div><dt>CAGR</dt><dd id="snapshot-range-cagr">—</dd></div>
+                    <div><dt>Máx. drawdown</dt><dd id="snapshot-range-drawdown">—</dd></div>
+                    <div><dt>Máximo</dt><dd id="snapshot-range-high">—</dd></div>
+                    <div><dt>Mínimo</dt><dd id="snapshot-range-low">—</dd></div>
+                    <div><dt>SMA 5</dt><dd id="chart-latest-sma-5">—</dd></div>
+                    <div><dt>SMA 20</dt><dd id="chart-latest-sma-20">—</dd></div>
+                  </dl>
+                </aside>
+              </div>
+
+              <div class="chart-footnote">
+                <p id="chart-status" role="status">Consultando el histórico local…</p>
+              </div>
+
+              <details id="chart-data-disclosure" class="chart-data-disclosure">
+                <summary>Consultar los datos visibles en una tabla</summary>
+                <div class="chart-table-scroll">
+                  <table>
+                    <caption id="chart-data-caption">Sesiones incluidas en el gráfico, ordenadas cronológicamente</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Fecha</th>
+                        <th scope="col">Apertura</th>
+                        <th scope="col">Máximo</th>
+                        <th scope="col">Mínimo</th>
+                        <th scope="col">Cierre</th>
+                        <th scope="col">VWAP</th>
+                        <th scope="col">SMA 5</th>
+                        <th scope="col">SMA 20</th>
+                        <th scope="col">Volumen</th>
+                        <th scope="col">Operaciones</th>
+                      </tr>
+                    </thead>
+                    <tbody id="chart-table-body"></tbody>
+                  </table>
+                </div>
+              </details>
+            </article>
+          </section>
+
+          <section id="fundamentales" class="fundamental-section" aria-labelledby="fundamentales-titulo">
+            <div class="section-intro analysis-intro">
+              <div>
+                <p class="eyebrow">FUNDAMENTALES</p>
+                <h2 id="fundamentales-titulo">Evolución financiera</h2>
+              </div>
+            </div>
+
+            <article id="fundamental-trend-card" class="fundamental-trend-card" aria-busy="true">
+              <header class="fundamental-trend-header">
+                <div>
+                  <p class="chart-symbol">AAPL <span>· SEC EDGAR · Company Facts</span></p>
+                  <h3>Ingresos y resultado neto</h3>
+                  <p id="fundamental-latest-context" class="chart-quote-context">Esperando datos locales…</p>
+                </div>
+                <div class="frequency-selector" role="group" aria-label="Frecuencia fundamental">
+                  <button class="frequency-button active" type="button" data-frequency="quarterly" aria-pressed="true">
+                    Trimestral
+                  </button>
+                  <button class="frequency-button" type="button" data-frequency="annual" aria-pressed="false">
+                    Anual
+                  </button>
+                </div>
+              </header>
+
+              <div class="fundamental-workbench">
+                <div class="fundamental-chart-primary">
+                  <div class="fundamental-chart-toolbar">
+                    <div class="fundamental-legend" aria-label="Series del gráfico">
+                      <span><i class="legend-swatch revenue" aria-hidden="true"></i>Ingresos</span>
+                      <span><i class="legend-swatch net-income" aria-hidden="true"></i>Resultado neto</span>
+                    </div>
+                    <div class="fundamental-toolbar-actions">
+                      <span>USD · miles de millones</span>
+                      <button
+                        id="export-fundamental-csv"
+                        class="data-export-button"
+                        type="button"
+                        aria-label="Exportar los hechos fundamentales visibles como CSV exacto"
+                        disabled
+                      >
+                        Exportar CSV
+                      </button>
+                    </div>
+                  </div>
+                  <p id="fundamental-empty" class="chart-empty hidden" role="status"></p>
+                  <div id="fundamental-chart" class="fundamental-chart-host"></div>
+                </div>
+
+                <aside class="fundamental-snapshot" aria-labelledby="fundamental-snapshot-title">
+                  <div class="snapshot-heading">
+                    <div>
+                      <p class="eyebrow">ÚLTIMO PERÍODO</p>
+                      <h3 id="fundamental-snapshot-title">Ficha fundamental</h3>
+                    </div>
+                    <span id="fundamental-completeness" class="quality-chip">—</span>
+                  </div>
+
+                  <p class="snapshot-group-title">Estado financiero</p>
+                  <dl class="snapshot-grid fundamental-facts-grid">
+                    <div><dt>Ingresos</dt><dd id="fundamental-revenue">—</dd></div>
+                    <div><dt>Resultado neto</dt><dd id="fundamental-net-income">—</dd></div>
+                    <div><dt>Activos</dt><dd id="fundamental-assets">—</dd></div>
+                    <div><dt>Pasivos</dt><dd id="fundamental-liabilities">—</dd></div>
+                    <div><dt>Patrimonio</dt><dd id="fundamental-equity">—</dd></div>
+                    <div><dt>Formulario</dt><dd id="fundamental-form">—</dd></div>
+                  </dl>
+
+                  <p class="snapshot-group-title">Ratios del diagnóstico</p>
+                  <dl class="snapshot-grid fundamental-ratios-grid">
+                    <div><dt>Margen neto</dt><dd id="fundamental-net-margin">—</dd></div>
+                    <div><dt>Crec. ingresos YoY</dt><dd id="fundamental-revenue-growth">—</dd></div>
+                    <div><dt>Pasivos / activos</dt><dd id="fundamental-liabilities-assets">—</dd></div>
+                    <div><dt>Var. resultado YoY</dt><dd id="fundamental-income-growth">—</dd></div>
+                  </dl>
+                </aside>
+              </div>
+
+              <section
+                id="fundamental-research-panel"
+                class="fundamental-research-panel"
+                aria-labelledby="fundamental-research-title"
+                aria-busy="true"
+              >
+                <header class="fundamental-research-header">
+                  <div>
+                    <p class="eyebrow">INVESTIGACIÓN FUNDAMENTAL</p>
+                    <h3 id="fundamental-research-title">Métricas del período</h3>
+                    <p id="fundamental-research-context" class="chart-quote-context">Esperando datos locales…</p>
+                  </div>
+                  <div class="fundamental-research-actions">
+                    <span id="fundamental-research-coverage" class="quality-chip">—</span>
+                    <button
+                      id="export-fundamental-research-csv"
+                      class="data-export-button"
+                      type="button"
+                      aria-label="Exportar las métricas fundamentales con evidencia exacta"
+                      disabled
+                    >
+                      Exportar métricas
+                    </button>
+                  </div>
+                </header>
+
+                <p id="fundamental-research-empty" class="chart-empty hidden" role="status"></p>
+                <div id="fundamental-research-grid" class="fundamental-research-grid"></div>
+
+                <details class="fundamental-research-disclosure">
+                  <summary>Fórmulas y evidencia exacta</summary>
+                  <div id="fundamental-research-audit" class="fundamental-research-audit"></div>
+                </details>
+              </section>
+
+              <div class="chart-footnote fundamental-footnote">
+                <p id="fundamental-status" role="status">Consultando fundamentales locales…</p>
+              </div>
+
+              <details class="chart-data-disclosure">
+                <summary>Consultar períodos y hechos SEC en una tabla</summary>
+                <div class="chart-table-scroll">
+                  <table>
+                    <caption>Períodos fundamentales incluidos, ordenados cronológicamente</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Período</th>
+                        <th scope="col">Ingresos</th>
+                        <th scope="col">Resultado neto</th>
+                        <th scope="col">Activos</th>
+                        <th scope="col">Pasivos</th>
+                        <th scope="col">Patrimonio</th>
+                        <th scope="col">Publicado</th>
+                      </tr>
+                    </thead>
+                    <tbody id="fundamental-table-body"></tbody>
+                  </table>
+                </div>
+              </details>
+            </article>
+          </section>
+
           <section id="analisis" class="analysis-section" aria-labelledby="analisis-titulo">
             <div class="section-intro analysis-intro">
               <div>
                 <p class="eyebrow">ANÁLISIS</p>
                 <h2 id="analisis-titulo">Diagnóstico de Apple</h2>
               </div>
-              <span class="context-tag">Mercado y fundamentales independientes</span>
             </div>
 
             <form id="report-form" class="query-panel">
@@ -178,7 +492,18 @@
                   <p class="eyebrow">RESULTADO VERSIONADO</p>
                   <h3>Lectura independiente por dimensión</h3>
                 </div>
-                <span id="report-status" class="badge neutral">—</span>
+                <div class="report-toolbar-actions">
+                  <span id="report-status" class="badge neutral">—</span>
+                  <button
+                    id="export-report-json"
+                    class="data-export-button"
+                    type="button"
+                    aria-label="Exportar el reporte versionado como JSON exacto"
+                    disabled
+                  >
+                    Exportar JSON
+                  </button>
+                </div>
               </div>
 
               <div class="diagnostic-grid">
@@ -214,9 +539,6 @@
                 <p class="eyebrow">OPERACIÓN</p>
                 <h2 id="operacion-titulo">Actualizar fuentes y cálculos</h2>
               </div>
-              <p class="section-description">
-                Ejecuta el flujo completo solo cuando necesites incorporar evidencia nueva.
-              </p>
             </div>
 
             <details class="operation-panel">

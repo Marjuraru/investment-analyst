@@ -10,6 +10,22 @@ La página permite:
 
 - revisar el workspace, la última ejecución, la trazabilidad y la programación;
 - cargar automáticamente el último reporte elegible al abrir la página;
+- explorar el histórico point-in-time de AAPL con OHLC, VWAP, operaciones, SMA 5, SMA 20 y volumen;
+- consultar en la misma vista el retorno diario, volatilidad diaria de 20 sesiones, volumen relativo
+  de 20 sesiones, distancias a las SMA, extremos, retorno, CAGR y máximo drawdown del rango visible;
+- mostrar u ocultar SMA 5, SMA 20 y volumen sin volver a consultar el almacenamiento;
+- comparar ocho trimestres o cinco años de ingresos y resultado neto, junto con la ficha de balance
+  del último período y los ratios fundamentales seleccionados;
+- consultar 18 métricas fundamentales derivadas del último período, agrupadas por rentabilidad,
+  calidad de beneficios, caja y reinversión, liquidez y distribución al accionista;
+- comparar cada métrica con el período disponible anterior y mostrar CAGR anual cuando sea válido;
+- inspeccionar la fórmula, versión, valor exacto y UUID de cada observación usada por esas métricas;
+- exportar los intervalos de mercado, hechos SEC y métricas derivadas como CSV, además del reporte diagnóstico
+  completo como JSON versionado;
+- alternar entre un tema oscuro de baja luminancia, predeterminado, y el tema claro;
+- cambiar entre 22, 66, 132, 260, 520 y hasta 1.300 sesiones fuente, además de todo el histórico
+  local, mediante las vistas 1M, 3M, 6M, 1A, 2A, 5A y Máx.; hasta 2A se muestran puntos diarios,
+  5A usa semanas ISO completas y Máx. meses calendario UTC;
 - ejecutar manualmente el bootstrap completo de SEC EDGAR y Alpaca Market Data IEX;
 - consultar el reporte diario point-in-time en modo trimestral o anual;
 - seleccionar opcionalmente fechas `as-of` independientes para mercado y fundamentales;
@@ -21,9 +37,11 @@ veredicto, confianza, calidad, recomendación o ranking combinado.
 
 ## Criterios de presentación
 
-La interfaz está orientada al análisis, no al trading. Mantiene el contexto de Apple visible,
-prioriza el diagnóstico y sus métricas, y deja la actualización de fuentes en una sección operativa
-secundaria. La navegación, estados, veredictos, calidad, métricas, mensajes y limitaciones se
+La interfaz está orientada al análisis, no al trading. Mantiene el contexto de Apple visible y usa
+una distribución compacta: gráfico, sesión seleccionada y estadísticas técnicas comparten la vista
+principal; la evolución y ficha fundamental permanecen en un panel propio para no mezclar su
+significado con mercado. La actualización de fuentes permanece en una sección operativa secundaria. La
+navegación, estados, veredictos, calidad, métricas, mensajes y limitaciones se
 presentan en español; se conservan nombres técnicos ampliamente usados como AAPL, SEC EDGAR, IEX,
 SIP, SMA, JSON y point-in-time cuando aportan precisión.
 
@@ -35,16 +53,46 @@ redondeo únicamente para presentación:
 - retornos, volatilidad y ratios porcentuales: porcentaje con hasta dos decimales;
 - volumen relativo y pasivos sobre patrimonio: múltiplo con hasta dos decimales;
 - medias móviles en USD: dos decimales;
+- OHLC y VWAP diarios en USD: dos decimales;
+- hechos SEC en la ficha y el gráfico: miles de millones de USD con hasta un decimal;
+- importes fundamentales derivados: miles de millones de USD con hasta un decimal;
+- márgenes e intensidades fundamentales derivadas: porcentajes con hasta un decimal;
+- current ratio y cash ratio: múltiplos con hasta dos decimales;
+- volumen del gráfico: entero en el detalle y notación compacta con un decimal en el resumen;
+- operaciones: enteros con separador de miles;
 - conteos: enteros con separador de miles.
 
 Los ceros decimales innecesarios se omiten, salvo en importes monetarios. El contrato JSON desplegable
 conserva el `Decimal` completo, las unidades, fórmulas, parámetros, identidades y timestamps para
-auditoría.
+auditoría. El endpoint local `/api/market-chart` entrega `aapl-market-chart-v2`: mantiene los
+decimales como cadenas exactas y separa sesiones fuente de puntos diarios, semanales o mensuales.
+Cada punto agregado conserva todos los `raw_record_ids`, inputs de volumen, operaciones y VWAP,
+además de las observaciones exactas de apertura, máximo, mínimo y cierre. Apertura y cierre proceden
+de la primera y última sesión; máximo y mínimo son los extremos exactos; volumen y operaciones
+completas se suman; VWAP solo se publica cuando todos los inputs existen y se pondera por volumen.
+La calidad usa de forma conservadora el estado más restrictivo del intervalo: `suspect`, `partial`,
+`delayed` y `valid`, en ese orden de precedencia.
+Las SMA se recalculan sobre cierres de la resolución visible. Las estadísticas de rango conservan la
+fórmula versionada, CAGR cuando existen al menos 365 días entre extremos y los inputs exactos del
+máximo drawdown basado en cierres de esa resolución. La última sesión y sus estadísticas diarias se
+mantienen separadas. La tabla OHLC se construye solo al abrirla para no cargar miles de nodos DOM.
+El endpoint `/api/fundamental-research` entrega el contrato exacto
+`aapl-fundamental-research-v1`, incluidas fórmulas, versiones, limitaciones e identidades de inputs.
+La matriz compacta presenta el último período; su exportación conserva todos los períodos acotados
+devueltos por la consulta.
 
-La estructura usa HTML semántico, un enlace para saltar al contenido, controles de al menos 44 px,
+El endpoint `/api/fundamental-research-history` envuelve ese contrato sin modificarlo y añade media,
+mínimo, máximo, rango, cambio frente al período disponible anterior, cambio del horizonte y CAGR.
+Los ratios se comparan mediante diferencias absolutas; no se expresa su cambio relativo. El CAGR
+solo se calcula para series anuales en USD con extremos positivos y utiliza días transcurridos. Las
+series trimestrales no se anualizan porque los flujos discretos pueden ser estacionales.
+
+La estructura usa HTML semántico, un enlace para saltar al contenido, controles táctiles principales
+de al menos 44 px,
 foco visible, texto adicional al color, diseño adaptable y compatibilidad con reducción de movimiento
-y colores forzados. Estos criterios reducen barreras, pero no sustituyen una auditoría formal con
-tecnologías de asistencia.
+y colores forzados. El gráfico SVG se puede recorrer con las flechas, `Inicio` y `Fin`; una tabla
+desplegable expone los intervalos OHLC, VWAP, SMA, volumen y operaciones sin depender de la imagen. Estos criterios reducen barreras,
+pero no sustituyen una auditoría formal con tecnologías de asistencia.
 
 ## Preparación segura
 
@@ -91,6 +139,36 @@ El servidor se vincula exclusivamente a `127.0.0.1`. Valida el encabezado `Host`
 exige JSON para operaciones, limita el cuerpo de cada solicitud y aplica CSP, `no-store`,
 `nosniff` y protección contra frames. No existe una opción para exponerlo a la red local; esta
 primera versión no tiene autenticación remota.
+
+Las respuestas JSON y los assets de tamaño suficiente se entregan con compresión `gzip` cuando el
+navegador la anuncia. Las consultas idénticas de mercado y fundamentales se conservan en cachés
+acotadas de memoria y se invalidan después de cada intento de actualización, incluso si ese intento
+termina con progreso parcial. La caché no escribe ni sustituye evidencia del workspace.
+
+La preferencia visual se guarda únicamente en `localStorage` con una clave versionada. No se envía
+al servidor, no altera cálculos y puede restablecerse borrando los datos locales del sitio.
+
+Las exportaciones se construyen en el navegador a partir de la respuesta exacta que ya está visible.
+No crean archivos dentro del workspace ni realizan una nueva consulta al proveedor. Los CSV usan
+UTF-8, conservan decimales como texto e incluyen identidades de evidencia, versiones de algoritmo,
+`known_at` y trazabilidad. El JSON conserva íntegramente el contrato del reporte diario.
+
+## Personalización analítica prevista
+
+La versión de cierre deberá permitir personalizar indicadores que admitan parámetros, en especial
+ventana, color y visibilidad de medias móviles, y rangos de estadísticas compatibles. Esa
+personalización deberá usar límites tipados, mostrar fórmula y parámetros efectivos, conservar los
+valores exactos y no modificar resultados persistidos ni algoritmos canónicos de forma silenciosa.
+No forma parte todavía de este incremento.
+
+## Expansión a cripto prevista
+
+El catálogo y el pipeline histórico de Coinbase ya reconocen `crypto:btc-usd`, pero la interfaz y el
+runner operativo actuales están acotados a Apple. La integración visual de cripto debe introducir un
+selector de activo y un modo de análisis exclusivamente de mercado: no debe simular fundamentales
+SEC, reutilizar identidades de AAPL ni interpretar sesiones bursátiles para un mercado continuo 24/7.
+Esa ampliación se realizará después de estabilizar la estación analítica de Apple y antes del cierre
+de personalización general.
 
 ## Programación diaria
 
