@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 FIXTURE_DIR = Path("tests/fixtures/sec")
+_DEFAULT_KNOWN_AT = (datetime.now(UTC) + timedelta(days=1)).replace(microsecond=0)
 
 
 def _load(name: str) -> dict[str, object]:
@@ -164,7 +165,7 @@ def _run(
         "quarterly",
     ]
     if "--known-at" not in extra:
-        arguments.extend(("--known-at", "2026-07-20T00:00:00Z"))
+        arguments.extend(("--known-at", _DEFAULT_KNOWN_AT.isoformat().replace("+00:00", "Z")))
     arguments.extend(extra)
     return subprocess.run(
         [sys.executable, "-c", launcher, *arguments],

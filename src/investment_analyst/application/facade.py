@@ -14,6 +14,29 @@ from investment_analyst.analytics.consolidated_diagnostic_models import (
 from investment_analyst.analytics.consolidated_diagnostic_service import (
     AaplConsolidatedDiagnosticService,
 )
+from investment_analyst.analytics.fundamental_trend_models import (
+    AaplFundamentalTrend,
+    AaplFundamentalTrendRequest,
+)
+from investment_analyst.analytics.fundamental_trend_service import AaplFundamentalTrendService
+from investment_analyst.analytics.fundamentals.research_history_models import (
+    AaplFundamentalResearchHistoryResult,
+)
+from investment_analyst.analytics.fundamentals.research_history_service import (
+    AaplFundamentalResearchHistoryService,
+)
+from investment_analyst.analytics.fundamentals.research_models import (
+    AaplFundamentalResearchRequest,
+    AaplFundamentalResearchResult,
+)
+from investment_analyst.analytics.fundamentals.research_service import (
+    AaplFundamentalResearchService,
+)
+from investment_analyst.analytics.market.chart_models import (
+    AaplMarketChart,
+    AaplMarketChartRequest,
+)
+from investment_analyst.analytics.market.chart_service import AaplMarketChartService
 from investment_analyst.analytics.market.diagnostic_pipeline import MarketDiagnosticPipeline
 from investment_analyst.analytics.market.diagnostic_rules import MarketDiagnosticEngine
 from investment_analyst.analytics.market.diagnostic_selection import (
@@ -139,6 +162,65 @@ class InvestmentAnalystApplication:
             access_mode=WorkspaceAccessMode.READ_ONLY,
         ) as storage:
             return AaplDailyReportService(storage).query(request)
+
+    def query_aapl_market_chart(
+        self,
+        request: AaplMarketChartRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> AaplMarketChart:
+        """Return a bounded point-in-time market chart without writes or providers."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return AaplMarketChartService(
+                HistoricalMarketDataService(storage),
+                MarketStatisticsEngine(),
+            ).query(request)
+
+    def query_aapl_fundamental_trend(
+        self,
+        request: AaplFundamentalTrendRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalTrend:
+        """Return bounded point-in-time SEC trends without writes or providers."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return AaplFundamentalTrendService(SecAaplFundamentalPointInTimeService(storage)).query(
+                request
+            )
+
+    def query_aapl_fundamental_research(
+        self,
+        request: AaplFundamentalResearchRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalResearchResult:
+        """Calculate point-in-time research metrics without writes or providers."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return AaplFundamentalResearchService(storage).query(request)
+
+    def query_aapl_fundamental_research_history(
+        self,
+        request: AaplFundamentalResearchRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalResearchHistoryResult:
+        """Calculate historical research statistics without writes or providers."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return AaplFundamentalResearchHistoryService(
+                AaplFundamentalResearchService(storage)
+            ).query(request)
 
     def _build_aapl_bootstrap_pipeline(
         self,

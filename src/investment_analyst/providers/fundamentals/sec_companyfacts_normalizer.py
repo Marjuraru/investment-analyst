@@ -21,7 +21,7 @@ from investment_analyst.providers.fundamentals.sec_fact_models import (
     CIK,
     COMPANYFACTS_SCHEMA_VERSION,
     COMPANYFACTS_SOURCE_ID,
-    SEC_FACT_DEFINITIONS,
+    SEC_NORMALIZED_FACT_DEFINITIONS,
     TRANSFORMATION_VERSION,
     SecFactDefinition,
     SecFactPeriodType,
@@ -98,7 +98,7 @@ class SecFactExtractionResult:
 
 
 class SecCompanyFactsNormalizer:
-    """Extract only the five explicit Apple us-gaap facts required by this step."""
+    """Extract the core and research Apple us-gaap facts selected by the catalog."""
 
     def extract(
         self,
@@ -120,7 +120,7 @@ class SecCompanyFactsNormalizer:
         skipped: Counter[str] = Counter()
         by_context: dict[tuple[object, ...], SecFundamentalFact] = {}
 
-        for definition in SEC_FACT_DEFINITIONS:
+        for definition in SEC_NORMALIZED_FACT_DEFINITIONS:
             concept = us_gaap.get(definition.tag)
             if concept is None:
                 skipped[f"missing_concept:{definition.field_name}"] += 1
@@ -179,7 +179,7 @@ class SecCompanyFactsNormalizer:
                 ),
             )
         )
-        field_counts = {definition.field_name: 0 for definition in SEC_FACT_DEFINITIONS}
+        field_counts = {definition.field_name: 0 for definition in SEC_NORMALIZED_FACT_DEFINITIONS}
         for fact in facts:
             field_counts[fact.field_name] += 1
         annual_count = sum(fact.frequency is DataFrequency.ANNUAL for fact in facts)

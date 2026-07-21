@@ -12,6 +12,7 @@ from investment_analyst.application.cli import (
 
 _PROJECT_ROOT = Path(__file__).parents[3]
 _READ_ONLY_SCRIPTS = (
+    "query_aapl_fundamental_research.py",
     "query_aapl_diagnostics.py",
     "query_market_history.py",
     "query_sec_aapl_fundamentals.py",
@@ -84,7 +85,12 @@ def test_scripts_and_facade_keep_explicit_storage_access_modes() -> None:
     facade = (_PROJECT_ROOT / "src" / "investment_analyst" / "application" / "facade.py").read_text(
         encoding="utf-8"
     )
-    assert facade.count("access_mode=WorkspaceAccessMode.READ_ONLY") == 1
+    assert facade.count("access_mode=WorkspaceAccessMode.READ_ONLY") == 5
+    assert "def query_aapl_diagnostics(" in facade
+    assert "def query_aapl_market_chart(" in facade
+    assert "def query_aapl_fundamental_trend(" in facade
+    assert "def query_aapl_fundamental_research(" in facade
+    assert "def query_aapl_fundamental_research_history(" in facade
     assert facade.count("access_mode=WorkspaceAccessMode.READ_WRITE") == 1
 
 

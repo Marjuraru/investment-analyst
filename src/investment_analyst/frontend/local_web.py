@@ -1,5 +1,6 @@
 """Loopback-only HTTP adapter for the local Apple analysis application."""
 
+import gzip
 import json
 import threading
 from collections.abc import Mapping
@@ -21,6 +22,32 @@ from investment_analyst.analytics.consolidated_diagnostic_models import (
 from investment_analyst.analytics.consolidated_diagnostic_service import (
     ConsolidatedDiagnosticQueryError,
 )
+from investment_analyst.analytics.fundamental_trend_models import (
+    AaplFundamentalTrend,
+    AaplFundamentalTrendRequest,
+)
+from investment_analyst.analytics.fundamental_trend_service import (
+    AaplFundamentalTrendQueryError,
+)
+from investment_analyst.analytics.fundamentals.research_history_models import (
+    AaplFundamentalResearchHistoryResult,
+)
+from investment_analyst.analytics.fundamentals.research_history_service import (
+    FundamentalResearchHistoryError,
+)
+from investment_analyst.analytics.fundamentals.research_models import (
+    AaplFundamentalResearchRequest,
+    AaplFundamentalResearchResult,
+)
+from investment_analyst.analytics.fundamentals.research_service import (
+    FundamentalResearchError,
+)
+from investment_analyst.analytics.market.chart_models import (
+    AaplMarketChart,
+    AaplMarketChartPeriod,
+    AaplMarketChartRequest,
+)
+from investment_analyst.analytics.market.chart_service import AaplMarketChartQueryError
 from investment_analyst.application.aapl_bootstrap import BootstrapIncompleteError
 from investment_analyst.application.aapl_bootstrap_models import AaplWorkspaceBootstrapRequest
 from investment_analyst.application.aapl_daily_runner import (
@@ -46,6 +73,8 @@ from investment_analyst.storage import StorageError
 from investment_analyst.workspace.service import WorkspaceError
 
 _MAX_REQUEST_BYTES = 16_384
+_MAX_READ_CACHE_ENTRIES = 8
+_MIN_GZIP_BYTES = 1_024
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -90,6 +119,42 @@ class _ApplicationOperations(Protocol):
         """Query one persisted report."""
         ...
 
+    def query_aapl_market_chart(
+        self,
+        request: AaplMarketChartRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> AaplMarketChart:
+        """Query one bounded persisted market chart."""
+        ...
+
+    def query_aapl_fundamental_trend(
+        self,
+        request: AaplFundamentalTrendRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalTrend:
+        """Query one bounded persisted SEC fundamental trend."""
+        ...
+
+    def query_aapl_fundamental_research(
+        self,
+        request: AaplFundamentalResearchRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalResearchResult:
+        """Calculate bounded point-in-time fundamental research metrics."""
+        ...
+
+    def query_aapl_fundamental_research_history(
+        self,
+        request: AaplFundamentalResearchRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalResearchHistoryResult:
+        """Calculate bounded historical fundamental research statistics."""
+        ...
+
 
 class _WebOperations(Protocol):
     def overview(self) -> dict[str, object]:
@@ -98,6 +163,28 @@ class _WebOperations(Protocol):
 
     def report(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Return one point-in-time report."""
+        ...
+
+    def market_chart(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return one bounded point-in-time market chart."""
+        ...
+
+    def fundamental_trend(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return one bounded point-in-time SEC fundamental trend."""
+        ...
+
+    def fundamental_research(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Return bounded point-in-time fundamental research metrics."""
+        ...
+
+    def fundamental_research_history(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Return bounded historical fundamental research statistics."""
         ...
 
     def run(self, payload: dict[str, object]) -> dict[str, object]:
@@ -123,6 +210,14 @@ class AaplLocalController:
         self._alpaca_credentials = alpaca_credentials
         self._sec_identity = sec_identity
         self._operation_lock = threading.RLock()
+        self._market_chart_cache: dict[AaplMarketChartRequest, AaplMarketChart] = {}
+        self._fundamental_trend_cache: dict[AaplFundamentalTrendRequest, AaplFundamentalTrend] = {}
+        self._fundamental_research_cache: dict[
+            AaplFundamentalResearchRequest, AaplFundamentalResearchResult
+        ] = {}
+        self._fundamental_research_history_cache: dict[
+            AaplFundamentalResearchRequest, AaplFundamentalResearchHistoryResult
+        ] = {}
 
     @classmethod
     def create_default(
@@ -158,12 +253,18 @@ class AaplLocalController:
     def run_request(self, request: AaplWorkspaceBootstrapRequest) -> AaplDailyRunState:
         """Execute a typed manual or scheduled request through one shared mutex."""
         with self._operation_lock:
-            return self._runner.run(
-                request,
-                workspace=self._workspace,
-                alpaca_credentials=self._alpaca_credentials,
-                sec_identity=self._sec_identity,
-            )
+            try:
+                return self._runner.run(
+                    request,
+                    workspace=self._workspace,
+                    alpaca_credentials=self._alpaca_credentials,
+                    sec_identity=self._sec_identity,
+                )
+            finally:
+                self._market_chart_cache.clear()
+                self._fundamental_trend_cache.clear()
+                self._fundamental_research_cache.clear()
+                self._fundamental_research_history_cache.clear()
 
     def report_request(
         self,
@@ -175,6 +276,77 @@ class AaplLocalController:
                 request,
                 location=StorageLocationRequest(workspace=self._workspace),
             )
+
+    def market_chart_request(self, request: AaplMarketChartRequest) -> AaplMarketChart:
+        """Query persisted market bars and indicators without providers or writes."""
+        with self._operation_lock:
+            cached = self._market_chart_cache.get(request)
+            if cached is not None:
+                return cached
+            chart = self._application.query_aapl_market_chart(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            )
+            if len(self._market_chart_cache) >= _MAX_READ_CACHE_ENTRIES:
+                self._market_chart_cache.pop(next(iter(self._market_chart_cache)))
+            self._market_chart_cache[request] = chart
+            return chart
+
+    def fundamental_trend_request(
+        self,
+        request: AaplFundamentalTrendRequest,
+    ) -> AaplFundamentalTrend:
+        """Query persisted SEC facts without providers, recomputation, or writes."""
+        with self._operation_lock:
+            cached = self._fundamental_trend_cache.get(request)
+            if cached is not None:
+                return cached
+            trend = self._application.query_aapl_fundamental_trend(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            )
+            if len(self._fundamental_trend_cache) >= _MAX_READ_CACHE_ENTRIES:
+                self._fundamental_trend_cache.pop(next(iter(self._fundamental_trend_cache)))
+            self._fundamental_trend_cache[request] = trend
+            return trend
+
+    def fundamental_research_request(
+        self,
+        request: AaplFundamentalResearchRequest,
+    ) -> AaplFundamentalResearchResult:
+        """Calculate cached SEC research metrics without providers or writes."""
+        with self._operation_lock:
+            cached = self._fundamental_research_cache.get(request)
+            if cached is not None:
+                return cached
+            research = self._application.query_aapl_fundamental_research(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            )
+            if len(self._fundamental_research_cache) >= _MAX_READ_CACHE_ENTRIES:
+                self._fundamental_research_cache.pop(next(iter(self._fundamental_research_cache)))
+            self._fundamental_research_cache[request] = research
+            return research
+
+    def fundamental_research_history_request(
+        self,
+        request: AaplFundamentalResearchRequest,
+    ) -> AaplFundamentalResearchHistoryResult:
+        """Calculate cached historical research statistics without writes."""
+        with self._operation_lock:
+            cached = self._fundamental_research_history_cache.get(request)
+            if cached is not None:
+                return cached
+            history = self._application.query_aapl_fundamental_research_history(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            )
+            if len(self._fundamental_research_history_cache) >= _MAX_READ_CACHE_ENTRIES:
+                self._fundamental_research_history_cache.pop(
+                    next(iter(self._fundamental_research_history_cache))
+                )
+            self._fundamental_research_history_cache[request] = history
+            return history
 
 
 class AaplLocalWebApplication:
@@ -219,6 +391,50 @@ class AaplLocalWebApplication:
             fundamental_as_of=_optional_date(fundamental_as_of),
         )
         return self._controller.report_request(request).to_json_dict()
+
+    def market_chart(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Validate query parameters and return the versioned market-chart contract."""
+        allowed = {"known_at", "period"}
+        if set(parameters) - allowed:
+            raise ValueError("market chart query contains unsupported parameters")
+        known_at = _one_parameter(parameters, "known_at", required=True)
+        period = _one_parameter(parameters, "period", required=False)
+        request = AaplMarketChartRequest(
+            known_at=_aware_datetime(known_at),
+            period=period or AaplMarketChartPeriod.SIX_MONTHS,
+        )
+        return self._controller.market_chart_request(request).to_json_dict()
+
+    def fundamental_trend(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Validate query parameters and return the versioned SEC trend contract."""
+        allowed = {"known_at", "frequency"}
+        if set(parameters) - allowed:
+            raise ValueError("fundamental trend query contains unsupported parameters")
+        known_at = _one_parameter(parameters, "known_at", required=True)
+        frequency = _frequency(_one_parameter(parameters, "frequency", required=True))
+        period_limit = 5 if frequency is DataFrequency.ANNUAL else 8
+        request = AaplFundamentalTrendRequest(
+            known_at=_aware_datetime(known_at),
+            frequency=frequency,
+            period_limit=period_limit,
+        )
+        return self._controller.fundamental_trend_request(request).to_json_dict()
+
+    def fundamental_research(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Validate query parameters and return exact derived SEC metrics."""
+        request = _fundamental_research_request(parameters)
+        return self._controller.fundamental_research_request(request).to_json_dict()
+
+    def fundamental_research_history(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Validate query parameters and return historical SEC statistics."""
+        request = _fundamental_research_request(parameters)
+        return self._controller.fundamental_research_history_request(request).to_json_dict()
 
     def run(self, payload: dict[str, object]) -> dict[str, object]:
         """Execute one explicit request and return bounded operational state."""
@@ -291,6 +507,32 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=8)
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(HTTPStatus.OK, server.application.report(parameters))
+                return
+            if parsed.path == "/api/market-chart":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(HTTPStatus.OK, server.application.market_chart(parameters))
+                return
+            if parsed.path == "/api/fundamental-trend":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(HTTPStatus.OK, server.application.fundamental_trend(parameters))
+                return
+            if parsed.path == "/api/fundamental-research":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.fundamental_research(parameters),
+                )
+                return
+            if parsed.path == "/api/fundamental-research-history":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.fundamental_research_history(parameters),
+                )
                 return
             raise _HttpError(HTTPStatus.NOT_FOUND, "not_found", "route not found")
         except Exception as error:  # noqa: BLE001
@@ -375,7 +617,17 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 else HTTPStatus.SERVICE_UNAVAILABLE
             )
             self._send_error(status, error.failure.category, error.failure.message)
-        elif isinstance(error, (AaplDailyReportError, ConsolidatedDiagnosticQueryError)):
+        elif isinstance(
+            error,
+            (
+                AaplDailyReportError,
+                AaplFundamentalTrendQueryError,
+                AaplMarketChartQueryError,
+                ConsolidatedDiagnosticQueryError,
+                FundamentalResearchError,
+                FundamentalResearchHistoryError,
+            ),
+        ):
             self._send_error(HTTPStatus.UNPROCESSABLE_ENTITY, "query_failed", str(error)[:500])
         elif isinstance(error, ValueError):
             self._send_error(HTTPStatus.BAD_REQUEST, "invalid_request", str(error)[:500])
@@ -411,9 +663,20 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
         *,
         head_only: bool,
     ) -> None:
+        accepts_gzip = {
+            item.partition(";")[0].strip().casefold()
+            for item in self.headers.get("Accept-Encoding", "").split(",")
+        }
+        compressible = content_type.startswith(("application/json", "text/"))
+        encoded_body = body
+        if compressible and len(body) >= _MIN_GZIP_BYTES and "gzip" in accepts_gzip:
+            encoded_body = gzip.compress(body, compresslevel=5, mtime=0)
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(len(encoded_body)))
+        if encoded_body is not body:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("Referrer-Policy", "no-referrer")
@@ -421,7 +684,7 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         if not head_only:
-            self.wfile.write(body)
+            self.wfile.write(encoded_body)
 
 
 class _HttpError(RuntimeError):
@@ -469,6 +732,22 @@ def _frequency(value: str | None) -> DataFrequency:
         return mapping[value.casefold()]
     except KeyError as error:
         raise ValueError("fundamental_frequency must be annual or quarterly") from error
+
+
+def _fundamental_research_request(
+    parameters: Mapping[str, tuple[str, ...]],
+) -> AaplFundamentalResearchRequest:
+    allowed = {"known_at", "frequency"}
+    if set(parameters) - allowed:
+        raise ValueError("fundamental research query contains unsupported parameters")
+    known_at = _one_parameter(parameters, "known_at", required=True)
+    frequency = _frequency(_one_parameter(parameters, "frequency", required=True))
+    period_limit = 5 if frequency is DataFrequency.ANNUAL else 8
+    return AaplFundamentalResearchRequest(
+        known_at=_aware_datetime(known_at),
+        frequency=frequency,
+        limit=period_limit,
+    )
 
 
 def _optional_date(value: str | None) -> date | None:
