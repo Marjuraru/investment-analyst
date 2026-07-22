@@ -20,7 +20,7 @@ from investment_analyst.core.models import DataFrequency
 def test_metric_catalog_is_ordered_versioned_and_independent() -> None:
     keys = tuple(definition.metric_key for definition in FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS)
 
-    assert FUNDAMENTAL_RESEARCH_METRIC_COUNT == 18
+    assert FUNDAMENTAL_RESEARCH_METRIC_COUNT == 40
     assert len(keys) == FUNDAMENTAL_RESEARCH_METRIC_COUNT
     assert keys == tuple(sorted(keys))
     assert len(keys) == len(set(keys))

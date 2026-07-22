@@ -12,6 +12,7 @@ from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCD
 from investment_analyst.providers.fundamentals.sec_fact_models import (
     ASSET_ID,
     COMPANYFACTS_SOURCE_ID,
+    get_sec_fact_definition,
 )
 
 _ALLOWED_FREQUENCIES = frozenset({DataFrequency.ANNUAL, DataFrequency.QUARTERLY})
@@ -43,7 +44,7 @@ class FundamentalResearchMetricDefinition(ContractModel):
     metric_key: NonEmptyStr
     display_name_es: NonEmptyStr
     formula: NonEmptyStr
-    unit: Literal["ratio", "USD"]
+    unit: Literal["ratio", "USD", "shares", "USD/shares"]
     input_fields: tuple[FundamentalResearchMetricField, ...]
     algorithm_version: NonEmptyStr
     limitations: tuple[NonEmptyStr, ...] = ()
@@ -70,6 +71,21 @@ def _input(role: str, field_name: str) -> FundamentalResearchMetricField:
 
 FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS = (
     FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.asset_turnover",
+        display_name_es="Rotación de activos",
+        formula="revenue / assets",
+        unit="ratio",
+        input_fields=(
+            _input("assets", "fundamental.assets"),
+            _input("revenue", "fundamental.revenue"),
+        ),
+        algorithm_version="fundamental-research-asset-turnover-v1-decimal34",
+        limitations=(
+            "Usa activos al cierre y no el promedio del período; debe interpretarse con esa "
+            "limitación.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
         metric_key="fundamental.research.capex_to_operating_cash_flow",
         display_name_es="Capex / flujo operativo",
         formula="capital_expenditures / operating_cash_flow",
@@ -94,6 +110,37 @@ FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS = (
         limitations=("No incluye valores negociables ni otras fuentes de liquidez.",),
     ),
     FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.current_financial_debt",
+        display_name_es="Deuda financiera corriente",
+        formula="commercial_paper + long_term_debt_current",
+        unit="USD",
+        input_fields=(
+            _input("commercial_paper", "fundamental.commercial_paper"),
+            _input("long_term_debt_current", "fundamental.long_term_debt_current"),
+        ),
+        algorithm_version="fundamental-research-current-financial-debt-v1-decimal34",
+        limitations=(
+            "Incluye commercial paper y vencimientos corrientes de deuda a largo plazo; "
+            "no incluye cuentas por pagar ni arrendamientos.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.current_financial_debt_share",
+        display_name_es="Deuda con vencimiento corriente / deuda financiera",
+        formula=(
+            "(commercial_paper + long_term_debt_current) / "
+            "(commercial_paper + long_term_debt_current + long_term_debt_noncurrent)"
+        ),
+        unit="ratio",
+        input_fields=(
+            _input("commercial_paper", "fundamental.commercial_paper"),
+            _input("long_term_debt_current", "fundamental.long_term_debt_current"),
+            _input("long_term_debt_noncurrent", "fundamental.long_term_debt_noncurrent"),
+        ),
+        algorithm_version="fundamental-research-current-debt-share-v1-decimal34",
+        limitations=("No incorpora el calendario detallado de vencimientos posteriores.",),
+    ),
+    FundamentalResearchMetricDefinition(
         metric_key="fundamental.research.current_ratio",
         display_name_es="Current ratio",
         formula="current_assets / current_liabilities",
@@ -103,6 +150,138 @@ FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS = (
             _input("current_liabilities", "fundamental.current_liabilities"),
         ),
         algorithm_version="fundamental-research-current-ratio-v1-decimal34",
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.diluted_eps",
+        display_name_es="Beneficio diluido por acción",
+        formula="diluted_earnings_per_share",
+        unit="USD/shares",
+        input_fields=(
+            _input(
+                "diluted_earnings_per_share",
+                "fundamental.diluted_earnings_per_share",
+            ),
+        ),
+        algorithm_version="fundamental-research-diluted-eps-v1-decimal34",
+        limitations=("Usa el EPS diluido declarado por SEC y no una estimación normalizada.",),
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.diluted_shares",
+        display_name_es="Acciones diluidas promedio",
+        formula="weighted_average_diluted_shares",
+        unit="shares",
+        input_fields=(
+            _input(
+                "weighted_average_diluted_shares",
+                "fundamental.weighted_average_diluted_shares",
+            ),
+        ),
+        algorithm_version="fundamental-research-diluted-shares-v1-decimal34",
+        limitations=(
+            "Es el promedio ponderado del período y puede diferir de las acciones al cierre.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.effective_tax_rate",
+        display_name_es="Tasa efectiva de impuesto",
+        formula="income_tax_expense / income_before_tax",
+        unit="ratio",
+        input_fields=(
+            _input("income_before_tax", "fundamental.income_before_tax"),
+            _input("income_tax_expense", "fundamental.income_tax_expense"),
+        ),
+        algorithm_version="fundamental-research-effective-tax-rate-v1-decimal34",
+        limitations=(
+            "Solo se calcula con resultado antes de impuestos positivo y una tasa entre 0 % y "
+            "100 %.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.financial_debt",
+        display_name_es="Deuda financiera",
+        formula="commercial_paper + long_term_debt_current + long_term_debt_noncurrent",
+        unit="USD",
+        input_fields=(
+            _input("commercial_paper", "fundamental.commercial_paper"),
+            _input("long_term_debt_current", "fundamental.long_term_debt_current"),
+            _input("long_term_debt_noncurrent", "fundamental.long_term_debt_noncurrent"),
+        ),
+        algorithm_version="fundamental-research-financial-debt-v1-decimal34",
+        limitations=(
+            "No confunde pasivos operativos con deuda financiera y presenta arrendamientos por "
+            "separado.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.financial_debt_to_assets",
+        display_name_es="Deuda financiera / activos",
+        formula=(
+            "(commercial_paper + long_term_debt_current + long_term_debt_noncurrent) / assets"
+        ),
+        unit="ratio",
+        input_fields=(
+            _input("assets", "fundamental.assets"),
+            _input("commercial_paper", "fundamental.commercial_paper"),
+            _input("long_term_debt_current", "fundamental.long_term_debt_current"),
+            _input("long_term_debt_noncurrent", "fundamental.long_term_debt_noncurrent"),
+        ),
+        algorithm_version="fundamental-research-financial-debt-to-assets-v1-decimal34",
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.financial_debt_to_equity",
+        display_name_es="Deuda financiera / patrimonio",
+        formula=(
+            "(commercial_paper + long_term_debt_current + long_term_debt_noncurrent) / "
+            "stockholders_equity"
+        ),
+        unit="ratio",
+        input_fields=(
+            _input("commercial_paper", "fundamental.commercial_paper"),
+            _input("long_term_debt_current", "fundamental.long_term_debt_current"),
+            _input("long_term_debt_noncurrent", "fundamental.long_term_debt_noncurrent"),
+            _input("stockholders_equity", "fundamental.stockholders_equity"),
+        ),
+        algorithm_version="fundamental-research-financial-debt-to-equity-v1-decimal34",
+        limitations=("No se calcula cuando el patrimonio es nulo o negativo.",),
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.financial_debt_to_free_cash_flow",
+        display_name_es="Deuda financiera / FCF",
+        formula=(
+            "(commercial_paper + long_term_debt_current + long_term_debt_noncurrent) / "
+            "(operating_cash_flow - capital_expenditures)"
+        ),
+        unit="ratio",
+        input_fields=(
+            _input("capital_expenditures", "fundamental.capital_expenditures"),
+            _input("commercial_paper", "fundamental.commercial_paper"),
+            _input("long_term_debt_current", "fundamental.long_term_debt_current"),
+            _input("long_term_debt_noncurrent", "fundamental.long_term_debt_noncurrent"),
+            _input("operating_cash_flow", "fundamental.operating_cash_flow"),
+        ),
+        algorithm_version="fundamental-research-financial-debt-to-fcf-v1-decimal34",
+        limitations=(
+            "Expresa años equivalentes usando el FCF contable de un solo período y solo se "
+            "calcula con FCF positivo.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.fixed_asset_turnover",
+        display_name_es="Rotación de activos fijos",
+        formula="revenue / property_plant_and_equipment_net",
+        unit="ratio",
+        input_fields=(
+            _input(
+                "property_plant_and_equipment_net",
+                "fundamental.property_plant_and_equipment_net",
+            ),
+            _input("revenue", "fundamental.revenue"),
+        ),
+        algorithm_version="fundamental-research-fixed-asset-turnover-v1-decimal34",
+        limitations=(
+            "Usa PP&E neto al cierre y puede ser estructuralmente alto en negocios con activos "
+            "intangibles o producción tercerizada.",
+        ),
     ),
     FundamentalResearchMetricDefinition(
         metric_key="fundamental.research.free_cash_flow",
@@ -136,6 +315,24 @@ FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS = (
         ),
     ),
     FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.free_cash_flow_per_diluted_share",
+        display_name_es="Flujo de caja libre por acción diluida",
+        formula=("(operating_cash_flow - capital_expenditures) / weighted_average_diluted_shares"),
+        unit="USD/shares",
+        input_fields=(
+            _input("capital_expenditures", "fundamental.capital_expenditures"),
+            _input("operating_cash_flow", "fundamental.operating_cash_flow"),
+            _input(
+                "weighted_average_diluted_shares",
+                "fundamental.weighted_average_diluted_shares",
+            ),
+        ),
+        algorithm_version="fundamental-research-fcf-per-diluted-share-v1-decimal34",
+        limitations=(
+            "El flujo de caja libre es una aproximación contable y no equivale a owner earnings.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
         metric_key="fundamental.research.free_cash_flow_to_net_income",
         display_name_es="Flujo de caja libre / resultado neto",
         formula="(operating_cash_flow - capital_expenditures) / net_income",
@@ -162,6 +359,112 @@ FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS = (
             _input("revenue", "fundamental.revenue"),
         ),
         algorithm_version="fundamental-research-gross-margin-v1-decimal34",
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.interest_coverage",
+        display_name_es="Cobertura de intereses",
+        formula="operating_income / interest_expense",
+        unit="ratio",
+        input_fields=(
+            _input("interest_expense", "fundamental.interest_expense"),
+            _input("operating_income", "fundamental.operating_income"),
+        ),
+        algorithm_version="fundamental-research-interest-coverage-v1-decimal34",
+        limitations=(
+            "Solo se calcula cuando el gasto por intereses es positivo; Apple dejó de publicar "
+            "este concepto por separado en períodos recientes.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.lease_liabilities",
+        display_name_es="Pasivos por arrendamientos",
+        formula=(
+            "finance_lease_liability_current + finance_lease_liability_noncurrent + "
+            "operating_lease_liability_current + operating_lease_liability_noncurrent"
+        ),
+        unit="USD",
+        input_fields=(
+            _input(
+                "finance_lease_liability_current",
+                "fundamental.finance_lease_liability_current",
+            ),
+            _input(
+                "finance_lease_liability_noncurrent",
+                "fundamental.finance_lease_liability_noncurrent",
+            ),
+            _input(
+                "operating_lease_liability_current",
+                "fundamental.operating_lease_liability_current",
+            ),
+            _input(
+                "operating_lease_liability_noncurrent",
+                "fundamental.operating_lease_liability_noncurrent",
+            ),
+        ),
+        algorithm_version="fundamental-research-lease-liabilities-v1-decimal34",
+        limitations=(
+            "La SEC publica estos componentes con menor frecuencia que la deuda financiera.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.net_debt",
+        display_name_es="Deuda financiera neta",
+        formula=(
+            "commercial_paper + long_term_debt_current + long_term_debt_noncurrent - "
+            "cash_and_cash_equivalents - marketable_securities_current - "
+            "marketable_securities_noncurrent"
+        ),
+        unit="USD",
+        input_fields=(
+            _input("cash_and_cash_equivalents", "fundamental.cash_and_cash_equivalents"),
+            _input("commercial_paper", "fundamental.commercial_paper"),
+            _input("long_term_debt_current", "fundamental.long_term_debt_current"),
+            _input("long_term_debt_noncurrent", "fundamental.long_term_debt_noncurrent"),
+            _input(
+                "marketable_securities_current",
+                "fundamental.marketable_securities_current",
+            ),
+            _input(
+                "marketable_securities_noncurrent",
+                "fundamental.marketable_securities_noncurrent",
+            ),
+        ),
+        algorithm_version="fundamental-research-net-debt-v1-decimal34",
+        limitations=(
+            "Un valor negativo representa caja y valores negociables superiores a la deuda "
+            "financiera; no incluye arrendamientos.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.net_debt_to_free_cash_flow",
+        display_name_es="Deuda financiera neta / FCF",
+        formula=(
+            "(commercial_paper + long_term_debt_current + long_term_debt_noncurrent - "
+            "cash_and_cash_equivalents - marketable_securities_current - "
+            "marketable_securities_noncurrent) / "
+            "(operating_cash_flow - capital_expenditures)"
+        ),
+        unit="ratio",
+        input_fields=(
+            _input("capital_expenditures", "fundamental.capital_expenditures"),
+            _input("cash_and_cash_equivalents", "fundamental.cash_and_cash_equivalents"),
+            _input("commercial_paper", "fundamental.commercial_paper"),
+            _input("long_term_debt_current", "fundamental.long_term_debt_current"),
+            _input("long_term_debt_noncurrent", "fundamental.long_term_debt_noncurrent"),
+            _input(
+                "marketable_securities_current",
+                "fundamental.marketable_securities_current",
+            ),
+            _input(
+                "marketable_securities_noncurrent",
+                "fundamental.marketable_securities_noncurrent",
+            ),
+            _input("operating_cash_flow", "fundamental.operating_cash_flow"),
+        ),
+        algorithm_version="fundamental-research-net-debt-to-fcf-v1-decimal34",
+        limitations=(
+            "Puede ser negativa cuando existe caja neta; usa el FCF contable de un solo período.",
+        ),
     ),
     FundamentalResearchMetricDefinition(
         metric_key="fundamental.research.net_liquid_assets",
@@ -253,6 +556,85 @@ FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS = (
         algorithm_version="fundamental-research-r-and-d-to-revenue-v1-decimal34",
     ),
     FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.return_on_assets_ending_balance",
+        display_name_es="Rentabilidad sobre activos al cierre",
+        formula="net_income / assets",
+        unit="ratio",
+        input_fields=(
+            _input("assets", "fundamental.assets"),
+            _input("net_income", "fundamental.net_income"),
+        ),
+        algorithm_version="fundamental-research-roa-ending-v1-decimal34",
+        limitations=(
+            "Usa activos al cierre porque esta versión todavía no promedia saldos iniciales y "
+            "finales.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.return_on_equity_ending_balance",
+        display_name_es="Rentabilidad sobre patrimonio al cierre",
+        formula="net_income / stockholders_equity",
+        unit="ratio",
+        input_fields=(
+            _input("net_income", "fundamental.net_income"),
+            _input("stockholders_equity", "fundamental.stockholders_equity"),
+        ),
+        algorithm_version="fundamental-research-roe-ending-v1-decimal34",
+        limitations=(
+            "Usa patrimonio al cierre; recompras intensas pueden elevar el resultado y requieren "
+            "interpretación conjunta con la evolución del patrimonio y las acciones.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.return_on_invested_capital_ending_balance",
+        display_name_es="ROIC aproximado sobre capital al cierre",
+        formula=(
+            "operating_income * (1 - income_tax_expense / income_before_tax) / "
+            "(stockholders_equity + commercial_paper + long_term_debt_current + "
+            "long_term_debt_noncurrent - cash_and_cash_equivalents - "
+            "marketable_securities_current - marketable_securities_noncurrent)"
+        ),
+        unit="ratio",
+        input_fields=(
+            _input("cash_and_cash_equivalents", "fundamental.cash_and_cash_equivalents"),
+            _input("commercial_paper", "fundamental.commercial_paper"),
+            _input("income_before_tax", "fundamental.income_before_tax"),
+            _input("income_tax_expense", "fundamental.income_tax_expense"),
+            _input("long_term_debt_current", "fundamental.long_term_debt_current"),
+            _input("long_term_debt_noncurrent", "fundamental.long_term_debt_noncurrent"),
+            _input(
+                "marketable_securities_current",
+                "fundamental.marketable_securities_current",
+            ),
+            _input(
+                "marketable_securities_noncurrent",
+                "fundamental.marketable_securities_noncurrent",
+            ),
+            _input("operating_income", "fundamental.operating_income"),
+            _input("stockholders_equity", "fundamental.stockholders_equity"),
+        ),
+        algorithm_version="fundamental-research-roic-ending-v1-decimal34",
+        limitations=(
+            "Es una aproximación reproducible: usa NOPAT derivado, capital al cierre y resta "
+            "efectivo y valores negociables; no usa capital promedio ni ajustes sectoriales.",
+            "Solo se calcula con tasa fiscal entre 0 % y 100 % y capital invertido positivo.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.revenue_per_diluted_share",
+        display_name_es="Ingresos por acción diluida",
+        formula="revenue / weighted_average_diluted_shares",
+        unit="USD/shares",
+        input_fields=(
+            _input("revenue", "fundamental.revenue"),
+            _input(
+                "weighted_average_diluted_shares",
+                "fundamental.weighted_average_diluted_shares",
+            ),
+        ),
+        algorithm_version="fundamental-research-revenue-per-diluted-share-v1-decimal34",
+    ),
+    FundamentalResearchMetricDefinition(
         metric_key="fundamental.research.selling_general_and_administrative_to_revenue",
         display_name_es="SG&A / ingresos",
         formula="selling_general_and_administrative / revenue",
@@ -308,6 +690,53 @@ FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS = (
         limitations=("Solo se calcula cuando el flujo de caja libre es positivo.",),
     ),
     FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.shares_outstanding",
+        display_name_es="Acciones en circulación",
+        formula="shares_outstanding",
+        unit="shares",
+        input_fields=(_input("shares_outstanding", "fundamental.shares_outstanding"),),
+        algorithm_version="fundamental-research-shares-outstanding-v1-decimal34",
+        limitations=(
+            "Representa las acciones al cierre y no el promedio diluido usado para el EPS.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
+        metric_key="fundamental.research.total_financial_obligations",
+        display_name_es="Deuda financiera + arrendamientos",
+        formula=(
+            "commercial_paper + long_term_debt_current + long_term_debt_noncurrent + "
+            "finance_lease_liability_current + finance_lease_liability_noncurrent + "
+            "operating_lease_liability_current + operating_lease_liability_noncurrent"
+        ),
+        unit="USD",
+        input_fields=(
+            _input("commercial_paper", "fundamental.commercial_paper"),
+            _input(
+                "finance_lease_liability_current",
+                "fundamental.finance_lease_liability_current",
+            ),
+            _input(
+                "finance_lease_liability_noncurrent",
+                "fundamental.finance_lease_liability_noncurrent",
+            ),
+            _input("long_term_debt_current", "fundamental.long_term_debt_current"),
+            _input("long_term_debt_noncurrent", "fundamental.long_term_debt_noncurrent"),
+            _input(
+                "operating_lease_liability_current",
+                "fundamental.operating_lease_liability_current",
+            ),
+            _input(
+                "operating_lease_liability_noncurrent",
+                "fundamental.operating_lease_liability_noncurrent",
+            ),
+        ),
+        algorithm_version="fundamental-research-total-financial-obligations-v1-decimal34",
+        limitations=(
+            "Mantiene deuda financiera y arrendamientos identificables; no suma pasivos "
+            "operativos como cuentas por pagar.",
+        ),
+    ),
+    FundamentalResearchMetricDefinition(
         metric_key="fundamental.research.working_capital",
         display_name_es="Capital de trabajo",
         formula="current_assets - current_liabilities",
@@ -331,6 +760,8 @@ FUNDAMENTAL_RESEARCH_LIMITATIONS = (
     "Los flujos trimestrales son periodos discretos; no se calculan TTM ni trimestres "
     "desde acumulados.",
     "Las métricas son descriptivas y no producen recomendación, ranking ni puntuación agregada.",
+    "Los retornos sobre activos, patrimonio y capital invertido usan saldos al cierre; no son "
+    "retornos sobre saldos promedio.",
     "No se incluyen valoración, estimaciones, comparables ni ajustes sectoriales en esta versión.",
 )
 
@@ -377,7 +808,7 @@ class FundamentalResearchMetricInput(ContractModel):
     field_name: NonEmptyStr
     observation_id: UUID
     value: FinancialDecimal
-    unit: Literal["USD"] = "USD"
+    unit: Literal["USD", "shares", "USD/shares"] = "USD"
     available_at: UTCDateTime
 
     @model_validator(mode="after")
@@ -396,7 +827,7 @@ class FundamentalResearchMetricValue(ContractModel):
     metric_key: NonEmptyStr
     display_name_es: NonEmptyStr
     value: FinancialDecimal
-    unit: Literal["ratio", "USD"]
+    unit: Literal["ratio", "USD", "shares", "USD/shares"]
     frequency: DataFrequency
     period_end: UTCDateTime
     available_at: UTCDateTime
@@ -425,6 +856,7 @@ class FundamentalResearchMetricValue(ContractModel):
             raise ValueError("research metric value must be finite")
         roles = tuple(item.role for item in self.inputs)
         fields = tuple(item.field_name for item in self.inputs)
+        units = tuple(item.unit for item in self.inputs)
         identifiers = tuple(item.observation_id for item in self.inputs)
         if roles != tuple(sorted(roles)):
             raise ValueError("research metric inputs must be ordered by role")
@@ -434,6 +866,9 @@ class FundamentalResearchMetricValue(ContractModel):
             raise ValueError("research metric input roles do not match its definition")
         if fields != tuple(item.field_name for item in definition.input_fields):
             raise ValueError("research metric input fields do not match its definition")
+        expected_units = tuple(get_sec_fact_definition(field_name).unit for field_name in fields)
+        if units != expected_units:
+            raise ValueError("research metric input units do not match their field definitions")
         if self.available_at != max(item.available_at for item in self.inputs):
             raise ValueError("research metric availability must match its latest input")
         return self
@@ -532,7 +967,7 @@ class AaplFundamentalResearchResult(ContractModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["aapl-fundamental-research-v1"] = "aapl-fundamental-research-v1"
+    schema_version: Literal["aapl-fundamental-research-v2"] = "aapl-fundamental-research-v2"
     asset_id: Literal["equity:us:aapl"] = ASSET_ID
     source_id: Literal["sec-edgar:aapl:companyfacts"] = COMPANYFACTS_SOURCE_ID
     request: AaplFundamentalResearchRequest

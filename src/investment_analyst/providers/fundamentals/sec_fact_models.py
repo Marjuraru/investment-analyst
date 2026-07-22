@@ -82,6 +82,27 @@ SEC_FACT_DEFINITIONS = (
 # positive amounts reported by Apple; cash outflows are not sign-inverted here.
 SEC_RESEARCH_FACT_DEFINITIONS = (
     SecFactDefinition(
+        field_name="fundamental.diluted_earnings_per_share",
+        taxonomy="us-gaap",
+        tag="EarningsPerShareDiluted",
+        unit="USD/shares",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.weighted_average_diluted_shares",
+        taxonomy="us-gaap",
+        tag="WeightedAverageNumberOfDilutedSharesOutstanding",
+        unit="shares",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.shares_outstanding",
+        taxonomy="us-gaap",
+        tag="CommonStockSharesOutstanding",
+        unit="shares",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
         field_name="fundamental.gross_profit",
         taxonomy="us-gaap",
         tag="GrossProfit",
@@ -214,6 +235,72 @@ SEC_RESEARCH_FACT_DEFINITIONS = (
         unit="USD",
         period_type=SecFactPeriodType.INSTANT,
     ),
+    SecFactDefinition(
+        field_name="fundamental.commercial_paper",
+        taxonomy="us-gaap",
+        tag="CommercialPaper",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.interest_expense",
+        taxonomy="us-gaap",
+        tag="InterestExpense",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.income_before_tax",
+        taxonomy="us-gaap",
+        tag=(
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItems"
+            "NoncontrollingInterest"
+        ),
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.income_tax_expense",
+        taxonomy="us-gaap",
+        tag="IncomeTaxExpenseBenefit",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.property_plant_and_equipment_net",
+        taxonomy="us-gaap",
+        tag="PropertyPlantAndEquipmentNet",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.operating_lease_liability_current",
+        taxonomy="us-gaap",
+        tag="OperatingLeaseLiabilityCurrent",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.operating_lease_liability_noncurrent",
+        taxonomy="us-gaap",
+        tag="OperatingLeaseLiabilityNoncurrent",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.finance_lease_liability_current",
+        taxonomy="us-gaap",
+        tag="FinanceLeaseLiabilityCurrent",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.finance_lease_liability_noncurrent",
+        taxonomy="us-gaap",
+        tag="FinanceLeaseLiabilityNoncurrent",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
 )
 
 SEC_NORMALIZED_FACT_DEFINITIONS = SEC_FACT_DEFINITIONS + SEC_RESEARCH_FACT_DEFINITIONS
@@ -296,8 +383,8 @@ class SecFundamentalFact(ContractModel):
             raise ValueError("asset_id must identify Apple")
         if self.taxonomy != definition.taxonomy or self.tag != definition.tag:
             raise ValueError("taxonomy and tag must match the selected field definition")
-        if self.unit != "USD" or self.unit != definition.unit:
-            raise ValueError("unit must be USD")
+        if self.unit != definition.unit:
+            raise ValueError("unit must match the selected field definition")
         if not self.value.is_finite():
             raise ValueError("value must be a finite Decimal")
         if self.form not in _ALLOWED_FORMS:

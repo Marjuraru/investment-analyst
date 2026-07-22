@@ -106,6 +106,15 @@ def _prepared_documents(
             "StockholdersEquity": {
                 "units": {"USD": [instant(True, "2000"), instant(False, "2050")]}
             },
+            "EarningsPerShareDiluted": {
+                "units": {"USD/shares": [duration(True, "5.10"), duration(False, "1.30")]}
+            },
+            "WeightedAverageNumberOfDilutedSharesOutstanding": {
+                "units": {"shares": [duration(True, "100"), duration(False, "90")]}
+            },
+            "CommonStockSharesOutstanding": {
+                "units": {"shares": [instant(True, "95"), instant(False, "85")]}
+            },
         },
         "dei": companyfacts["facts"]["dei"],
     }
@@ -197,11 +206,11 @@ def test_pipeline_creates_reuses_and_versions_observations(tmp_path: Path) -> No
         first = pipeline.run()
 
         assert first.filings_indexed == 2
-        assert first.facts_selected == 10
-        assert first.observations_created == 10
+        assert first.facts_selected == 16
+        assert first.observations_created == 16
         assert first.observations_reused == 0
-        assert first.annual_count == 5
-        assert first.quarterly_count == 5
+        assert first.annual_count == 8
+        assert first.quarterly_count == 8
         assert first.raw_records_created == 0
         assert first.metric_results_created == 0
         assert first.diagnostics_created == 0
@@ -209,10 +218,17 @@ def test_pipeline_creates_reuses_and_versions_observations(tmp_path: Path) -> No
         first_ids = {
             item.observation_id for item in storage.observations.list(asset_id="equity:us:aapl")
         }
+        units_by_field = {
+            item.field_name: item.unit
+            for item in storage.observations.list(asset_id="equity:us:aapl")
+        }
+        assert units_by_field["fundamental.diluted_earnings_per_share"] == "USD/shares"
+        assert units_by_field["fundamental.weighted_average_diluted_shares"] == "shares"
+        assert units_by_field["fundamental.shares_outstanding"] == "shares"
 
         second = pipeline.run()
         assert second.observations_created == 0
-        assert second.observations_reused == 10
+        assert second.observations_reused == 16
         assert {
             item.observation_id for item in storage.observations.list(asset_id="equity:us:aapl")
         } == first_ids
@@ -224,7 +240,7 @@ def test_pipeline_creates_reuses_and_versions_observations(tmp_path: Path) -> No
         )
         same_facts = pipeline.run()
         assert same_facts.observations_created == 0
-        assert same_facts.observations_reused == 10
+        assert same_facts.observations_reused == 16
 
         _store_snapshots(
             storage,
@@ -234,10 +250,10 @@ def test_pipeline_creates_reuses_and_versions_observations(tmp_path: Path) -> No
         )
         corrected = pipeline.run()
         assert corrected.observations_created == 1
-        assert corrected.observations_reused == 9
-        assert len(storage.observations.list(asset_id="equity:us:aapl")) == 11
+        assert corrected.observations_reused == 15
+        assert len(storage.observations.list(asset_id="equity:us:aapl")) == 17
         assert storage.observations.get(market_observation.observation_id) == market_observation
         assert storage.metric_results.list() == []
         assert storage.diagnostics.list() == []
         assert len(storage.raw_records.list(source_id="sec-edgar:aapl:companyfacts")) == 3
-        assert json.loads(json.dumps(corrected.to_json_dict()))["facts_selected"] == 10
+        assert json.loads(json.dumps(corrected.to_json_dict()))["facts_selected"] == 16

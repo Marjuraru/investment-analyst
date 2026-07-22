@@ -105,7 +105,7 @@ def test_script_emits_exact_evidence_and_does_not_modify_storage(tmp_path: Path)
     payload = json.loads(completed.stdout)["result"]
     metrics = {item["metric_key"]: item for item in payload["periods"][0]["metrics"]}
     current_ratio = metrics["fundamental.research.current_ratio"]
-    assert payload["schema_version"] == "aapl-fundamental-research-v1"
+    assert payload["schema_version"] == "aapl-fundamental-research-v2"
     assert payload["traceability_verified"] is True
     assert current_ratio["value"] == "2"
     assert {item["observation_id"] for item in current_ratio["inputs"]} == {

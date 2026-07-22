@@ -19,6 +19,12 @@ from investment_analyst.analytics.fundamental_trend_models import (
     AaplFundamentalTrendRequest,
 )
 from investment_analyst.analytics.fundamental_trend_service import AaplFundamentalTrendService
+from investment_analyst.analytics.fundamentals.analysis_models import (
+    AaplFundamentalAnalysisResult,
+)
+from investment_analyst.analytics.fundamentals.analysis_service import (
+    AaplFundamentalAnalysisService,
+)
 from investment_analyst.analytics.fundamentals.research_history_models import (
     AaplFundamentalResearchHistoryResult,
 )
@@ -220,6 +226,21 @@ class InvestmentAnalystApplication:
         ) as storage:
             return AaplFundamentalResearchHistoryService(
                 AaplFundamentalResearchService(storage)
+            ).query(request)
+
+    def query_aapl_fundamental_analysis(
+        self,
+        request: AaplFundamentalResearchRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalAnalysisResult:
+        """Organize exact history into non-overlapping analytical sections."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return AaplFundamentalAnalysisService(
+                AaplFundamentalResearchHistoryService(AaplFundamentalResearchService(storage))
             ).query(request)
 
     def _build_aapl_bootstrap_pipeline(

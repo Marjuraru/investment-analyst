@@ -133,15 +133,15 @@ class SecCompanyFactsNormalizer:
                 concept_mapping.get("units"),
                 f"document.facts.us-gaap.{definition.tag}.units",
             )
-            usd_facts = units.get("USD")
-            if usd_facts is None:
-                skipped[f"missing_usd_unit:{definition.field_name}"] += 1
+            unit_facts = units.get(definition.unit)
+            if unit_facts is None:
+                skipped[f"missing_expected_unit:{definition.field_name}"] += 1
                 continue
-            if not isinstance(usd_facts, list):
+            if not isinstance(unit_facts, list):
                 raise MalformedSecCompanyFactsError(
-                    f"USD facts for {definition.tag} must be a list"
+                    f"{definition.unit} facts for {definition.tag} must be a list"
                 )
-            for position, raw_fact in enumerate(usd_facts):
+            for position, raw_fact in enumerate(unit_facts):
                 examined += 1
                 candidate, reason = _parse_candidate(
                     definition,
@@ -271,7 +271,7 @@ def sec_fact_to_observation(
         asset_id=ASSET_ID,
         field_name=fact.field_name,
         value=fact.value,
-        unit="USD",
+        unit=fact.unit,
         frequency=fact.frequency,
         observed_at=_date_at_utc_midnight(fact.period_end),
         period_start=(
@@ -302,8 +302,11 @@ def _parse_candidate(
     normalized_at: datetime,
     position: int,
 ) -> tuple[SecFundamentalFact | None, str]:
-    fact = _require_mapping(raw_fact, f"{definition.tag}.USD[{position}]")
-    value = _parse_decimal(fact.get("val"), f"{definition.tag}.USD[{position}].val")
+    fact = _require_mapping(raw_fact, f"{definition.tag}.{definition.unit}[{position}]")
+    value = _parse_decimal(
+        fact.get("val"),
+        f"{definition.tag}.{definition.unit}[{position}].val",
+    )
     accession = _require_string(fact.get("accn"), "accn")
 
     fiscal_year_value = fact.get("fy")

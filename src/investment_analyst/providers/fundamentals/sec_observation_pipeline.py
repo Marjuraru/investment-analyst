@@ -25,6 +25,7 @@ from investment_analyst.providers.fundamentals.sec_fact_models import (
     SUBMISSIONS_SCHEMA_VERSION,
     SUBMISSIONS_SOURCE_ID,
     TRANSFORMATION_VERSION,
+    get_sec_fact_definition,
 )
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import RecordNotFoundError, StorageError
@@ -391,8 +392,14 @@ def _validate_candidate(observation: NormalizedObservation, normalized_at: datet
         raise SecObservationTraceabilityError("SEC observation must belong to Apple")
     if observation.source.source_id != COMPANYFACTS_SOURCE_ID:
         raise SecObservationTraceabilityError("SEC observation source is incorrect")
-    if observation.unit != "USD":
-        raise SecObservationTraceabilityError("SEC observation unit must be USD")
+    try:
+        expected_unit = get_sec_fact_definition(observation.field_name).unit
+    except ValueError as error:
+        raise SecObservationTraceabilityError("SEC observation field is unsupported") from error
+    if observation.unit != expected_unit:
+        raise SecObservationTraceabilityError(
+            "SEC observation unit does not match its field definition"
+        )
     if observation.frequency not in {DataFrequency.ANNUAL, DataFrequency.QUARTERLY}:
         raise SecObservationTraceabilityError("SEC observation frequency is invalid")
     if observation.quality is not DataQuality.VALID:

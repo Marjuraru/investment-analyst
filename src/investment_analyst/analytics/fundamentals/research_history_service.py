@@ -21,6 +21,7 @@ from investment_analyst.analytics.fundamentals.research_models import (
 from investment_analyst.core.models import DataFrequency
 
 _DAYS_PER_YEAR = Decimal("365.2425")
+_LEVEL_UNITS = frozenset({"USD", "shares", "USD/shares"})
 
 
 class _ResearchOperations(Protocol):
@@ -110,7 +111,7 @@ def _history(
     latest_change_rate: Decimal | None = None
     horizon_change_rate: Decimal | None = None
     compound_annual_growth_rate: Decimal | None = None
-    if definition.unit == "USD" and previous is not None:
+    if definition.unit in _LEVEL_UNITS and previous is not None:
         if previous.value > 0:
             latest_change_rate = latest.value / previous.value - 1
         if first.value > 0:

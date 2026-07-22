@@ -35,9 +35,12 @@ local:
 - importación de barras diarias de AAPL mediante Alpaca Market Data IEX, con la limitación explícita
   de que IEX no equivale a cobertura consolidada SIP;
 - obtención oficial de fundamentales de Apple mediante SEC EDGAR;
-- base de investigación fundamental con 19 hechos SEC adicionales y 18 métricas descriptivas
+- base de investigación fundamental con 31 hechos SEC adicionales y 40 métricas descriptivas
   versionadas, calculadas point-in-time con `Decimal`, evidencia exacta por input y estadísticas
-  históricas separadas para cambios, media, rango y CAGR válido;
+  históricas separadas para cambios, media, rango y CAGR válido; cada métrica aparece una sola vez,
+  agrupada por crecimiento y datos por acción, rentabilidad, retornos y eficiencia, calidad del
+  beneficio, liquidez y balance, deuda y solvencia, caja y reinversión o asignación de capital, sin
+  producir un score o recomendación;
 - métricas y diagnósticos deterministas, point-in-time y trazables;
 - bootstrap incremental e idempotente del workspace permanente;
 - consulta diaria de diagnósticos de mercado y fundamentales, presentados por separado en JSON
@@ -47,11 +50,15 @@ local:
 - ejecución operativa única con lock por workspace, estado atómico versionado, errores acotados y
   health check de solo lectura, preparada para un programador externo;
 - interfaz web local compacta para ejecutar el flujo, consultar el reporte, revisar la evidencia y
-  explorar OHLC, VWAP, actividad, retorno, volatilidad, volumen relativo, SMA 5 y SMA 20 en un
-  gráfico histórico point-in-time con resolución diaria hasta 2A, semanal para 5A y mensual para
-  Máx.; cada agregado conserva sus sesiones e identidades fuente y la última sesión permanece
-  separada; incorpora evolución trimestral o anual de cinco hechos SEC,
-  ficha fundamental y una matriz compacta de 18 métricas derivadas con fórmulas e inputs auditables;
+  explorar OHLC, VWAP, actividad, retorno, volatilidad, volumen relativo y tres SMA configurables
+  por ventana y color —5, 20 y 50 de forma predeterminada—, con escala de precio lineal o logarítmica,
+  gráfico de línea o velas, zoom exclusivo con la rueda del mouse, desplazamiento horizontal por
+  arrastre e intervalos reales de un día, una semana o
+  un mes sobre todo el histórico local point-in-time; el modo automático usa resolución mensual
+  para ese historial completo; cada agregado conserva sus días e identidades fuente y el último cierre permanece
+  separado; incorpora evolución trimestral o anual de cinco hechos SEC, una clasificación
+  empresarial visible que declara cuando la evidencia aún no es suficiente, ficha fundamental y
+  una matriz compacta de 40 métricas derivadas con fórmulas e inputs auditables;
   incluye exportaciones exactas CSV/JSON generadas en el navegador, tema oscuro o claro, respuestas
   comprimidas, cachés de lectura acotadas, scheduler diario persistente y unidad de usuario
   `systemd` generada de forma segura;

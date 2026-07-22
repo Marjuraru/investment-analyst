@@ -198,8 +198,11 @@ def _validate_observation(observation: NormalizedObservation) -> None:
         raise MalformedFundamentalResearchObservationError(
             "SEC research observation must belong to Apple"
         )
-    if observation.unit != "USD":
-        raise MalformedFundamentalResearchObservationError("SEC research observation must use USD")
+    definition = get_sec_fact_definition(observation.field_name)
+    if observation.unit != definition.unit:
+        raise MalformedFundamentalResearchObservationError(
+            "SEC research observation unit does not match its field definition"
+        )
     if not observation.value.is_finite():
         raise MalformedFundamentalResearchObservationError(
             "SEC research observation value must be finite"
@@ -208,7 +211,6 @@ def _validate_observation(observation: NormalizedObservation) -> None:
         raise MalformedFundamentalResearchObservationError(
             "SEC research observation lacks period_end"
         )
-    definition = get_sec_fact_definition(observation.field_name)
     record_key = _record_key(observation)
     if _required_string(record_key, "taxonomy") != definition.taxonomy:
         raise MalformedFundamentalResearchObservationError(
@@ -331,6 +333,7 @@ def _calculate_metric(
             field_name=observation.field_name,
             observation_id=observation.observation_id,
             value=observation.value,
+            unit=observation.unit,
             available_at=observation.available_at,
         )
         for role, observation in selected
@@ -357,23 +360,58 @@ def _formula(
     metric_key: str,
     values: dict[str, Decimal],
 ) -> tuple[Decimal | None, str]:
+    if metric_key == "fundamental.research.asset_turnover":
+        return _positive_ratio(values["revenue"], values["assets"])
     if metric_key == "fundamental.research.capex_to_operating_cash_flow":
         denominator = values["operating_cash_flow"]
         return _positive_ratio(values["capital_expenditures"], denominator)
     if metric_key == "fundamental.research.cash_ratio":
         return _positive_ratio(values["cash_and_cash_equivalents"], values["current_liabilities"])
+    if metric_key == "fundamental.research.current_financial_debt":
+        return _current_financial_debt(values), ""
+    if metric_key == "fundamental.research.current_financial_debt_share":
+        return _positive_ratio(_current_financial_debt(values), _financial_debt(values))
     if metric_key == "fundamental.research.current_ratio":
         return _positive_ratio(values["current_assets"], values["current_liabilities"])
+    if metric_key == "fundamental.research.diluted_eps":
+        return values["diluted_earnings_per_share"], ""
+    if metric_key == "fundamental.research.diluted_shares":
+        return values["weighted_average_diluted_shares"], ""
+    if metric_key == "fundamental.research.effective_tax_rate":
+        return _effective_tax_rate(values)
+    if metric_key == "fundamental.research.financial_debt":
+        return _financial_debt(values), ""
+    if metric_key == "fundamental.research.financial_debt_to_assets":
+        return _positive_ratio(_financial_debt(values), values["assets"])
+    if metric_key == "fundamental.research.financial_debt_to_equity":
+        return _positive_ratio(_financial_debt(values), values["stockholders_equity"])
+    if metric_key == "fundamental.research.financial_debt_to_free_cash_flow":
+        free_cash_flow = values["operating_cash_flow"] - values["capital_expenditures"]
+        return _positive_ratio(_financial_debt(values), free_cash_flow)
+    if metric_key == "fundamental.research.fixed_asset_turnover":
+        return _positive_ratio(values["revenue"], values["property_plant_and_equipment_net"])
     if metric_key == "fundamental.research.free_cash_flow":
         return values["operating_cash_flow"] - values["capital_expenditures"], ""
     if metric_key == "fundamental.research.free_cash_flow_margin":
         free_cash_flow = values["operating_cash_flow"] - values["capital_expenditures"]
         return _positive_ratio(free_cash_flow, values["revenue"])
+    if metric_key == "fundamental.research.free_cash_flow_per_diluted_share":
+        free_cash_flow = values["operating_cash_flow"] - values["capital_expenditures"]
+        return _positive_ratio(free_cash_flow, values["weighted_average_diluted_shares"])
     if metric_key == "fundamental.research.free_cash_flow_to_net_income":
         free_cash_flow = values["operating_cash_flow"] - values["capital_expenditures"]
         return _positive_ratio(free_cash_flow, values["net_income"])
     if metric_key == "fundamental.research.gross_margin":
         return _positive_ratio(values["gross_profit"], values["revenue"])
+    if metric_key == "fundamental.research.interest_coverage":
+        return _positive_ratio(values["operating_income"], values["interest_expense"])
+    if metric_key == "fundamental.research.lease_liabilities":
+        return _lease_liabilities(values), ""
+    if metric_key == "fundamental.research.net_debt":
+        return _net_debt(values), ""
+    if metric_key == "fundamental.research.net_debt_to_free_cash_flow":
+        free_cash_flow = values["operating_cash_flow"] - values["capital_expenditures"]
+        return _positive_ratio(_net_debt(values), free_cash_flow)
     if metric_key == "fundamental.research.net_liquid_assets":
         return (
             values["cash_and_cash_equivalents"]
@@ -393,6 +431,23 @@ def _formula(
         return _positive_ratio(values["operating_income"], values["revenue"])
     if metric_key == "fundamental.research.research_and_development_to_revenue":
         return _positive_ratio(values["research_and_development"], values["revenue"])
+    if metric_key == "fundamental.research.return_on_assets_ending_balance":
+        return _positive_ratio(values["net_income"], values["assets"])
+    if metric_key == "fundamental.research.return_on_equity_ending_balance":
+        return _positive_ratio(values["net_income"], values["stockholders_equity"])
+    if metric_key == "fundamental.research.return_on_invested_capital_ending_balance":
+        tax_rate, reason = _effective_tax_rate(values)
+        if tax_rate is None:
+            return None, reason
+        nopat = values["operating_income"] * (Decimal(1) - tax_rate)
+        invested_capital = (
+            values["stockholders_equity"]
+            + _financial_debt(values)
+            - _liquid_financial_assets(values)
+        )
+        return _positive_ratio(nopat, invested_capital)
+    if metric_key == "fundamental.research.revenue_per_diluted_share":
+        return _positive_ratio(values["revenue"], values["weighted_average_diluted_shares"])
     if metric_key == ("fundamental.research.selling_general_and_administrative_to_revenue"):
         return _positive_ratio(values["selling_general_and_administrative"], values["revenue"])
     if metric_key == "fundamental.research.share_based_compensation_to_revenue":
@@ -403,11 +458,53 @@ def _formula(
         numerator = values["dividends_paid"] + values["share_repurchases"]
         denominator = values["operating_cash_flow"] - values["capital_expenditures"]
         return _positive_ratio(numerator, denominator)
+    if metric_key == "fundamental.research.shares_outstanding":
+        return values["shares_outstanding"], ""
+    if metric_key == "fundamental.research.total_financial_obligations":
+        return _financial_debt(values) + _lease_liabilities(values), ""
     if metric_key == "fundamental.research.working_capital":
         return values["current_assets"] - values["current_liabilities"], ""
     raise FundamentalResearchComputationError(
         f"unsupported fundamental research formula: {metric_key}"
     )
+
+
+def _current_financial_debt(values: dict[str, Decimal]) -> Decimal:
+    return values["commercial_paper"] + values["long_term_debt_current"]
+
+
+def _financial_debt(values: dict[str, Decimal]) -> Decimal:
+    return _current_financial_debt(values) + values["long_term_debt_noncurrent"]
+
+
+def _liquid_financial_assets(values: dict[str, Decimal]) -> Decimal:
+    return (
+        values["cash_and_cash_equivalents"]
+        + values["marketable_securities_current"]
+        + values["marketable_securities_noncurrent"]
+    )
+
+
+def _lease_liabilities(values: dict[str, Decimal]) -> Decimal:
+    return (
+        values["finance_lease_liability_current"]
+        + values["finance_lease_liability_noncurrent"]
+        + values["operating_lease_liability_current"]
+        + values["operating_lease_liability_noncurrent"]
+    )
+
+
+def _net_debt(values: dict[str, Decimal]) -> Decimal:
+    return _financial_debt(values) - _liquid_financial_assets(values)
+
+
+def _effective_tax_rate(values: dict[str, Decimal]) -> tuple[Decimal | None, str]:
+    rate, reason = _positive_ratio(values["income_tax_expense"], values["income_before_tax"])
+    if rate is None:
+        return None, reason
+    if rate < 0 or rate > 1:
+        return None, "tax_rate_out_of_range"
+    return rate, ""
 
 
 def _positive_ratio(numerator: Decimal, denominator: Decimal) -> tuple[Decimal | None, str]:

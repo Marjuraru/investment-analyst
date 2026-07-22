@@ -14,11 +14,13 @@ forzar demasiadas barras en pantalla aumenta cálculos, bloquea el navegador y c
 
 Aplicación al proyecto:
 
-- controles compactos de rango separados de las series SMA y volumen;
-- rangos 1M, 3M, 6M, 1A, 2A, 5A y Máx.;
-- cobertura local y número de sesiones siempre visibles;
+- historial local completo como universo de consulta permanente;
+- tipo de gráfico e intervalo de cada barra separados del zoom visible;
+- zoom local centrado en el cursor, con alternativa por teclado y restablecimiento explícito;
+- desplazamiento horizontal mediante arrastre cuando existe una vista ampliada;
+- cobertura local y número de días con datos siempre visibles;
 - tabla exacta cargada solo cuando el analista la abre;
-- agregación semanal para 5A y mensual para Máx. antes de ingerir décadas completas.
+- agregación diaria, semanal o mensual antes de dibujar el historial completo.
 
 No se integra la librería de TradingView: requiere su propio acuerdo de uso y no proporciona los
 datos de mercado. El gráfico local conserva su contrato, fuente y evidencia propios.
@@ -32,10 +34,11 @@ subyacente y guardar plantillas reutilizables.
 Aplicación al proyecto:
 
 - mantener gráfico, estadísticas rápidas y tabla auditable en una misma herramienta;
-- conservar personalización futura de SMA, color y visibilidad como configuración explícita;
+- conservar ventana, color y visibilidad de las SMA como configuración explícita y local;
 - permitir más adelante graficar métricas fundamentales históricas sin mezclarlas con el precio en
   una puntuación;
-- estudiar plantillas locales por tipo de análisis, comparación normalizada y escala logarítmica.
+- usar escala lineal o logarítmica sin modificar valores exactos, y estudiar plantillas locales por
+  tipo de análisis y comparación normalizada.
 
 ## Estadísticas del rango
 
@@ -43,25 +46,41 @@ El gráfico publica retorno total, CAGR cuando los extremos abarcan al menos 365
 drawdown basado en cierres. El drawdown conserva los UUID y timestamps exactos del pico y valle. No
 es una estimación intradía ni una recomendación de riesgo.
 
-## Resolución automática implementada
+## Historial completo e intervalos implementados
 
-El contrato `aapl-market-chart-v2` usa puntos diarios hasta 2A, semanas ISO completas para 5A y
-meses calendario UTC para Máx. Nunca reescribe ni persiste nuevas barras: agrega en memoria la
-selección point-in-time. Conserva todas las identidades fuente, evita intervalos iniciales truncados
-cuando se aplica un límite y mantiene la última sesión diaria aparte del gráfico agregado.
+El contrato `aapl-market-chart-v5` permite pedir explícitamente 1 día, 1 semana o 1 mes y tres
+ventanas SMA. En modo
+automático conserva su política compatible por rango, pero la interfaz solicita siempre el historial
+completo y por ello usa meses calendario UTC. Los rangos anteriores permanecen disponibles solo en
+el endpoint por compatibilidad. Nunca reescribe ni persiste nuevas barras: agrega en memoria la
+selección point-in-time y mantiene el último cierre diario aparte del gráfico agregado.
 
-OHLC, volumen, operaciones, VWAP, calidad y SMA tienen reglas versionadas. Las estadísticas del
-rango se calculan sobre los cierres visibles, por lo que el máximo drawdown declara explícitamente
-su resolución. El trabajo de estadísticas rápidas diarias se limita a las últimas 21 sesiones.
+OHLC, volumen, operaciones, VWAP, calidad y SMA tienen reglas versionadas. Las tres SMA aceptan
+ventanas configurables y acotadas, conservan sus inputs exactos y cargan contexto anterior al rango
+consultado; sus colores y visibilidad son preferencias locales del navegador. Las estadísticas del
+rango se calculan sobre los cierres consultados, por lo que el máximo drawdown declara explícitamente
+su resolución. El trabajo de estadísticas rápidas diarias se limita a los últimos 21 días con datos.
+La escala logarítmica se aplica solo a la posición visual de precios positivos; detalle, tabla,
+estadísticas y exportaciones conservan los mismos decimales exactos. Alternar la escala no consulta
+de nuevo el workspace.
+La misma respuesta puede mostrarse como línea de cierre o velas OHLC sin perder medias, volumen ni
+evidencia. Las velas se dibujan en rutas SVG agrupadas por dirección para evitar miles de nodos DOM.
+El zoom recorta únicamente el viewport del navegador: no altera el corte, los valores ni las
+estadísticas del rango consultado, y la tabla y el CSV de mercado siguen el tramo visible.
+Cambiar a semana o mes sí solicita una agregación nueva y cada vela conserva las barras diarias que
+la componen. La vela del calendario vigente se marca como «En curso» y con contorno discontinuo;
+las anteriores nunca se recortan artificialmente para encajar en el rango.
 
 ## Orden de expansión
 
 1. Rangos largos, estadísticas exactas y carga diferida de evidencia. Completado.
 2. Agregación OHLCV semanal y mensual con contratos e identidades deterministas. Completado.
-3. Ventanas y colores configurables para medias e indicadores.
-4. Escala lineal/logarítmica, comparación normalizada y plantillas locales.
-5. Gráficas históricas de márgenes, caja, crecimiento, valoración y datos por acción.
-6. Herramientas de anotación y eventos corporativos, sin ejecución de órdenes.
+3. Ventanas, colores y visibilidad configurables para las tres SMA. Completado.
+4. Escala lineal/logarítmica, línea/velas e intervalos diario/semanal/mensual. Completado.
+5. Ingestión intradía base de 1 minuto y agregaciones 5/15/30/45 min y 1/2/4/5 h.
+6. Comparación normalizada y plantillas locales.
+7. Gráficas históricas de márgenes, caja, crecimiento, valoración y datos por acción.
+8. Herramientas de anotación y eventos corporativos, sin ejecución de órdenes.
 
 El backfill de cinco años o de toda la vida de AAPL debe ocurrir después del punto 2 para mantener
 una interfaz rápida y respuestas acotadas.

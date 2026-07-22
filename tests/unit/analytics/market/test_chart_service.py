@@ -16,6 +16,7 @@ from investment_analyst.analytics.market.bar_models import (
 from investment_analyst.analytics.market.bar_schemas import ALPACA_SOURCE_ID
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChart,
+    AaplMarketChartInterval,
     AaplMarketChartPeriod,
     AaplMarketChartRequest,
     AaplMarketChartResolution,
@@ -183,11 +184,12 @@ def test_daily_chart_is_bounded_exact_and_uses_resolution_sma() -> None:
         )
     )
 
-    assert chart.schema_version == "aapl-market-chart-v2"
+    assert chart.schema_version == "aapl-market-chart-v5"
     assert chart.source_id == ALPACA_SOURCE_ID
     assert chart.session_limit == 22
     assert chart.resolution is AaplMarketChartResolution.DAILY
-    assert chart.resolution_policy_version == "market-chart-resolution-policy-v1"
+    assert chart.interval is AaplMarketChartInterval.AUTOMATIC
+    assert chart.resolution_policy_version == "market-chart-resolution-policy-v2"
     assert len(chart.points) == 22
     assert chart.latest_session == chart.points[-1]
     assert chart.points[0].close == Decimal("348.001")
@@ -200,13 +202,17 @@ def test_daily_chart_is_bounded_exact_and_uses_resolution_sma() -> None:
     assert chart.points[0].raw_record_ids == (UUID(int=2481),)
     assert chart.points[0].volume_input_observation_ids == (UUID(int=2486),)
     assert chart.points[-1].close == Decimal("369.001")
-    assert chart.points[0].sma_5 is not None
-    assert chart.points[0].sma_5.value == Decimal("346.001")
-    assert chart.points[0].sma_5.resolution is AaplMarketChartResolution.DAILY
-    assert len(chart.points[0].sma_5.input_observation_ids) == 5
-    assert chart.points[0].sma_20 is not None
-    assert chart.points[0].sma_20.value == Decimal("338.501")
-    assert len(chart.points[0].sma_20.input_observation_ids) == 20
+    assert chart.sma_windows == (5, 20, 50)
+    assert chart.points[0].short_sma is not None
+    assert chart.points[0].short_sma.value == Decimal("346.001")
+    assert chart.points[0].short_sma.resolution is AaplMarketChartResolution.DAILY
+    assert len(chart.points[0].short_sma.input_observation_ids) == 5
+    assert chart.points[0].long_sma is not None
+    assert chart.points[0].long_sma.value == Decimal("338.501")
+    assert len(chart.points[0].long_sma.input_observation_ids) == 20
+    assert chart.points[0].third_sma is not None
+    assert chart.points[0].third_sma.value == Decimal("323.501")
+    assert len(chart.points[0].third_sma.input_observation_ids) == 50
     with localcontext(Context(prec=34)):
         expected_range_return = Decimal("369.001") / Decimal("348.001") - Decimal("1")
     assert chart.range_statistics.return_rate == expected_range_return
@@ -246,9 +252,10 @@ def test_chart_preserves_warmup_and_empty_history_semantics() -> None:
         AaplMarketChartRequest(known_at=known_at)
     )
 
-    assert short_chart.points[3].sma_5 is None
-    assert short_chart.points[4].sma_5 is not None
-    assert all(point.sma_20 is None for point in short_chart.points)
+    assert short_chart.points[3].short_sma is None
+    assert short_chart.points[4].short_sma is not None
+    assert all(point.long_sma is None for point in short_chart.points)
+    assert all(point.third_sma is None for point in short_chart.points)
     assert empty_chart.points == ()
     assert empty_chart.latest_statistics == ()
     assert empty_chart.range_statistics.point_count == 0
@@ -258,6 +265,87 @@ def test_chart_preserves_warmup_and_empty_history_semantics() -> None:
     assert empty_chart.coverage.earliest_available_timestamp is None
     assert empty_chart.latest_session is None
     assert empty_chart.traceability_verified
+
+
+def test_chart_uses_requested_sma_windows_with_exact_preceding_context() -> None:
+    chart = AaplMarketChartService(_FakeHistory(270), MarketStatisticsEngine()).query(
+        AaplMarketChartRequest(
+            known_at=datetime(2026, 1, 1, tzinfo=UTC),
+            period=AaplMarketChartPeriod.ONE_MONTH,
+            short_sma_window=10,
+            long_sma_window=50,
+            third_sma_window=100,
+        )
+    )
+
+    first = chart.points[0]
+    assert chart.sma_windows == (10, 50, 100)
+    assert first.short_sma is not None
+    assert first.short_sma.window == 10
+    assert first.short_sma.value == Decimal("343.501")
+    assert len(first.short_sma.input_observation_ids) == 10
+    assert first.long_sma is not None
+    assert first.long_sma.window == 50
+    assert first.long_sma.value == Decimal("323.501")
+    assert len(first.long_sma.input_observation_ids) == 50
+    assert first.third_sma is not None
+    assert first.third_sma.window == 100
+    assert first.third_sma.value == Decimal("298.501")
+    assert len(first.third_sma.input_observation_ids) == 100
+    assert chart.latest_session is not None
+    assert chart.latest_session.short_sma is not None
+    assert chart.latest_session.short_sma.window == 10
+    assert chart.latest_session.long_sma is not None
+    assert chart.latest_session.long_sma.window == 50
+    assert chart.latest_session.third_sma is not None
+    assert chart.latest_session.third_sma.window == 100
+    assert "SMA 10, SMA 50, and SMA 100" in chart.limitations[4]
+
+
+def test_chart_uses_explicit_weekly_and_monthly_intervals_without_partial_buckets() -> None:
+    service = AaplMarketChartService(_FakeHistory(270), MarketStatisticsEngine())
+    known_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+    weekly = service.query(
+        AaplMarketChartRequest(
+            known_at=known_at,
+            period=AaplMarketChartPeriod.ONE_MONTH,
+            interval=AaplMarketChartInterval.ONE_WEEK,
+        )
+    )
+    monthly = service.query(
+        AaplMarketChartRequest(
+            known_at=known_at,
+            period=AaplMarketChartPeriod.ONE_MONTH,
+            interval=AaplMarketChartInterval.ONE_MONTH,
+        )
+    )
+    ongoing_week = service.query(
+        AaplMarketChartRequest(
+            known_at=datetime(2025, 9, 28, 12, tzinfo=UTC),
+            period=AaplMarketChartPeriod.ONE_MONTH,
+            interval=AaplMarketChartInterval.ONE_WEEK,
+        )
+    )
+
+    assert weekly.interval is AaplMarketChartInterval.ONE_WEEK
+    assert weekly.resolution is AaplMarketChartResolution.WEEKLY
+    assert weekly.coverage.selected_sessions <= weekly.session_limit
+    assert all(
+        point.period_start_timestamp.date().isocalendar()[:2]
+        == point.timestamp.date().isocalendar()[:2]
+        for point in weekly.points
+    )
+    assert monthly.interval is AaplMarketChartInterval.ONE_MONTH
+    assert monthly.resolution is AaplMarketChartResolution.MONTHLY
+    assert len(monthly.points) == 1
+    assert monthly.coverage.selected_sessions == monthly.points[0].source_session_count
+    assert monthly.coverage.selected_sessions > monthly.session_limit
+    assert monthly.points[0].period_start_timestamp.month == monthly.points[0].timestamp.month
+    assert all(point.calendar_interval_closed for point in ongoing_week.points[:-1])
+    assert not ongoing_week.points[-1].calendar_interval_closed
+    assert ongoing_week.latest_session is not None
+    assert ongoing_week.latest_session.calendar_interval_closed
 
 
 def test_long_ranges_are_bounded_and_publish_cagr_and_drawdown_evidence() -> None:
@@ -374,8 +462,8 @@ def test_weekly_aggregation_preserves_exact_ohlcv_and_daily_latest_session() -> 
     assert chart.latest_session is not None
     assert chart.latest_session.resolution is AaplMarketChartResolution.DAILY
     assert chart.latest_session.timestamp == second.timestamp
-    assert chart.latest_session.sma_5 is not None
-    assert chart.latest_session.sma_5.value == Decimal("99")
+    assert chart.latest_session.short_sma is not None
+    assert chart.latest_session.short_sma.value == Decimal("99")
     assert chart.range_statistics.return_rate == Decimal("-0.1666666666666666666666666666666667")
     assert chart.range_statistics.maximum_drawdown_rate == Decimal(
         "-0.1666666666666666666666666666666667"
@@ -416,6 +504,45 @@ def test_chart_request_rejects_unsupported_cut_and_period() -> None:
         AaplMarketChartRequest(known_at=datetime(1969, 12, 31, tzinfo=UTC))
     with pytest.raises(ValidationError, match="period"):
         AaplMarketChartRequest.model_validate({"known_at": "2026-01-01T00:00:00Z", "period": "all"})
+    with pytest.raises(ValidationError, match="interval"):
+        AaplMarketChartRequest.model_validate(
+            {"known_at": "2026-01-01T00:00:00Z", "interval": "1h"}
+        )
+    with pytest.raises(ValidationError, match="integers"):
+        AaplMarketChartRequest(
+            known_at=datetime(2026, 1, 1, tzinfo=UTC),
+            short_sma_window=True,
+        )
+    with pytest.raises(ValidationError, match="smaller"):
+        AaplMarketChartRequest(
+            known_at=datetime(2026, 1, 1, tzinfo=UTC),
+            short_sma_window=50,
+            long_sma_window=20,
+        )
+    with pytest.raises(ValidationError, match="less than or equal to 200"):
+        AaplMarketChartRequest(
+            known_at=datetime(2026, 1, 1, tzinfo=UTC),
+            short_sma_window=201,
+            long_sma_window=400,
+        )
+    with pytest.raises(ValidationError, match="third_sma_window"):
+        AaplMarketChartRequest(
+            known_at=datetime(2026, 1, 1, tzinfo=UTC),
+            third_sma_window=True,
+        )
+    with pytest.raises(ValidationError, match="smaller than third"):
+        AaplMarketChartRequest(
+            known_at=datetime(2026, 1, 1, tzinfo=UTC),
+            long_sma_window=50,
+            third_sma_window=50,
+        )
+
+    legacy_request = AaplMarketChartRequest(
+        known_at=datetime(2026, 1, 1, tzinfo=UTC),
+        short_sma_window=10,
+        long_sma_window=50,
+    )
+    assert legacy_request.third_sma_window == 50
 
     assert (
         AaplMarketChartRequest(
@@ -423,6 +550,14 @@ def test_chart_request_rejects_unsupported_cut_and_period() -> None:
             period=AaplMarketChartPeriod.TWO_YEARS,
         ).session_limit
         == 520
+    )
+    assert (
+        AaplMarketChartRequest(
+            known_at=datetime(2026, 1, 1, tzinfo=UTC),
+            period=AaplMarketChartPeriod.ONE_MONTH,
+            interval=AaplMarketChartInterval.ONE_MONTH,
+        ).resolution
+        is AaplMarketChartResolution.MONTHLY
     )
     assert (
         AaplMarketChartRequest(

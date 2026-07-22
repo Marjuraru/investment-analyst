@@ -21,7 +21,7 @@ MAX_MARKET_CHART_SESSIONS = 20_000
 
 
 class AaplMarketChartPeriod(StrEnum):
-    """Supported display ranges expressed as bounded trading-session counts."""
+    """Supported display ranges expressed as target trading-session counts."""
 
     ONE_MONTH = "1m"
     THREE_MONTHS = "3m"
@@ -30,6 +30,15 @@ class AaplMarketChartPeriod(StrEnum):
     TWO_YEARS = "2y"
     FIVE_YEARS = "5y"
     MAXIMUM = "max"
+
+
+class AaplMarketChartInterval(StrEnum):
+    """Supported source-faithful intervals for one displayed OHLCV point."""
+
+    AUTOMATIC = "auto"
+    ONE_DAY = "1d"
+    ONE_WEEK = "1w"
+    ONE_MONTH = "1mo"
 
 
 class AaplMarketChartResolution(StrEnum):
@@ -60,6 +69,21 @@ _RESOLUTIONS = {
     AaplMarketChartPeriod.MAXIMUM: AaplMarketChartResolution.MONTHLY,
 }
 
+_INTERVAL_RESOLUTIONS = {
+    AaplMarketChartInterval.ONE_DAY: AaplMarketChartResolution.DAILY,
+    AaplMarketChartInterval.ONE_WEEK: AaplMarketChartResolution.WEEKLY,
+    AaplMarketChartInterval.ONE_MONTH: AaplMarketChartResolution.MONTHLY,
+}
+
+
+def _chart_resolution(
+    period: AaplMarketChartPeriod,
+    interval: AaplMarketChartInterval,
+) -> AaplMarketChartResolution:
+    if interval is AaplMarketChartInterval.AUTOMATIC:
+        return _RESOLUTIONS[period]
+    return _INTERVAL_RESOLUTIONS[interval]
+
 
 class AaplMarketChartRequest(ContractModel):
     """Request one bounded chart at an explicit point-in-time cut."""
@@ -68,6 +92,23 @@ class AaplMarketChartRequest(ContractModel):
 
     known_at: UTCDateTime
     period: AaplMarketChartPeriod = AaplMarketChartPeriod.SIX_MONTHS
+    interval: AaplMarketChartInterval = AaplMarketChartInterval.AUTOMATIC
+    short_sma_window: int = Field(default=5, ge=2, le=200)
+    long_sma_window: int = Field(default=20, ge=3, le=400)
+    third_sma_window: int = Field(default=50, ge=4, le=400)
+
+    @field_validator(
+        "short_sma_window",
+        "long_sma_window",
+        "third_sma_window",
+        mode="before",
+    )
+    @classmethod
+    def validate_sma_window_type(cls, value: object) -> object:
+        """Reject booleans and coercible strings before integer bounds are applied."""
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("chart SMA windows must be integers")
+        return value
 
     @field_validator("known_at")
     @classmethod
@@ -77,15 +118,27 @@ class AaplMarketChartRequest(ContractModel):
             raise ValueError("known_at must be later than 1970-01-01T00:00:00Z")
         return value
 
+    @model_validator(mode="after")
+    def validate_sma_order(self) -> "AaplMarketChartRequest":
+        """Keep the analytical roles ordered and computational work bounded."""
+        if self.short_sma_window >= self.long_sma_window:
+            raise ValueError("short_sma_window must be smaller than long_sma_window")
+        if (
+            "third_sma_window" in self.model_fields_set
+            and self.long_sma_window >= self.third_sma_window
+        ):
+            raise ValueError("long_sma_window must be smaller than third_sma_window")
+        return self
+
     @property
     def session_limit(self) -> int:
-        """Return the fixed maximum number of source trading sessions."""
+        """Return the target number of source trading sessions for the range."""
         return _SESSION_LIMITS[self.period]
 
     @property
     def resolution(self) -> AaplMarketChartResolution:
-        """Return the deterministic display resolution for the requested range."""
-        return _RESOLUTIONS[self.period]
+        """Return the deterministic resolution for the range and explicit interval."""
+        return _chart_resolution(self.period, self.interval)
 
 
 class AaplMarketChartSma(ContractModel):
@@ -94,11 +147,19 @@ class AaplMarketChartSma(ContractModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     value: FinancialDecimal
-    window: Literal[5, 20]
+    window: int = Field(ge=2, le=400)
     resolution: AaplMarketChartResolution
     available_at: UTCDateTime
     input_observation_ids: tuple[UUID, ...]
     algorithm_version: Literal["market-chart-sma-v2-decimal34"]
+
+    @field_validator("window", mode="before")
+    @classmethod
+    def validate_window_type(cls, value: object) -> object:
+        """Reject booleans and coercible values in exact calculation evidence."""
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("chart SMA window must be an integer")
+        return value
 
     @field_validator("value")
     @classmethod
@@ -128,6 +189,7 @@ class AaplMarketChartPoint(ContractModel):
     timestamp: UTCDateTime
     bar_available_at: UTCDateTime
     source_session_count: int = Field(ge=1, le=31)
+    calendar_interval_closed: bool
     open: FinancialDecimal
     high: FinancialDecimal
     low: FinancialDecimal
@@ -144,11 +206,20 @@ class AaplMarketChartPoint(ContractModel):
     volume_input_observation_ids: tuple[UUID, ...]
     trade_count_input_observation_ids: tuple[UUID, ...] = ()
     vwap_input_observation_ids: tuple[UUID, ...] = ()
-    sma_5: AaplMarketChartSma | None = None
-    sma_20: AaplMarketChartSma | None = None
+    short_sma: AaplMarketChartSma | None = None
+    long_sma: AaplMarketChartSma | None = None
+    third_sma: AaplMarketChartSma | None = None
     aggregation_algorithm_version: Literal["market-chart-ohlcv-v1-decimal34"] = (
         "market-chart-ohlcv-v1-decimal34"
     )
+
+    @field_validator("calendar_interval_closed", mode="before")
+    @classmethod
+    def validate_calendar_interval_closed_type(cls, value: object) -> object:
+        """Keep interval state explicit instead of accepting truthy coercions."""
+        if not isinstance(value, bool):
+            raise ValueError("calendar_interval_closed must be a boolean")
+        return value
 
     @model_validator(mode="after")
     def validate_values(self) -> "AaplMarketChartPoint":
@@ -156,7 +227,11 @@ class AaplMarketChartPoint(ContractModel):
         if self.period_start_timestamp > self.timestamp:
             raise ValueError("chart interval timestamps are reversed")
         if self.resolution is AaplMarketChartResolution.DAILY:
-            if self.source_session_count != 1 or self.period_start_timestamp != self.timestamp:
+            if (
+                self.source_session_count != 1
+                or self.period_start_timestamp != self.timestamp
+                or not self.calendar_interval_closed
+            ):
                 raise ValueError("daily chart points must contain exactly one source session")
         elif self.resolution is AaplMarketChartResolution.WEEKLY:
             start_week = self.period_start_timestamp.date().isocalendar()[:2]
@@ -206,11 +281,13 @@ class AaplMarketChartPoint(ContractModel):
         ):
             if len(set(items)) != len(items):
                 raise ValueError("chart optional evidence IDs must be unique")
-        if self.sma_5 is not None and self.sma_5.window != 5:
-            raise ValueError("sma_5 must use a five-session window")
-        if self.sma_20 is not None and self.sma_20.window != 20:
-            raise ValueError("sma_20 must use a twenty-session window")
-        for sma in (self.sma_5, self.sma_20):
+        if (
+            self.short_sma is not None
+            and self.long_sma is not None
+            and self.short_sma.window >= self.long_sma.window
+        ):
+            raise ValueError("short chart SMA window must be smaller than long SMA window")
+        for sma in (self.short_sma, self.long_sma, self.third_sma):
             if sma is not None and sma.resolution is not self.resolution:
                 raise ValueError("chart SMA resolution must match its point")
         return self
@@ -396,22 +473,23 @@ class AaplMarketChart(ContractModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
-    schema_version: Literal["aapl-market-chart-v2"] = "aapl-market-chart-v2"
+    schema_version: Literal["aapl-market-chart-v5"] = "aapl-market-chart-v5"
     asset_id: Literal["equity:us:aapl"] = "equity:us:aapl"
     source_id: Literal["alpaca-market-data:iex:aapl:daily-bars:adjustment-all"] = (
         "alpaca-market-data:iex:aapl:daily-bars:adjustment-all"
     )
     known_at: UTCDateTime
     period: AaplMarketChartPeriod
+    interval: AaplMarketChartInterval
     session_limit: int = Field(ge=1, le=MAX_MARKET_CHART_SESSIONS)
     resolution: AaplMarketChartResolution
-    resolution_policy_version: Literal["market-chart-resolution-policy-v1"] = (
-        "market-chart-resolution-policy-v1"
+    resolution_policy_version: Literal["market-chart-resolution-policy-v2"] = (
+        "market-chart-resolution-policy-v2"
     )
     price_field: Literal["close"] = "close"
     price_unit: Literal["USD"] = "USD"
     volume_unit: Literal["shares"] = "shares"
-    sma_windows: tuple[Literal[5, 20], Literal[5, 20]] = (5, 20)
+    sma_windows: tuple[int, int, int] = (5, 20, 50)
     points: tuple[AaplMarketChartPoint, ...]
     latest_session: AaplMarketChartPoint | None = None
     range_statistics: AaplMarketChartRangeStatistics
@@ -420,15 +498,32 @@ class AaplMarketChart(ContractModel):
     traceability_verified: Literal[True] = True
     limitations: tuple[NonEmptyStr, ...]
 
+    @field_validator("sma_windows", mode="before")
+    @classmethod
+    def validate_sma_window_types(cls, value: object) -> object:
+        """Reject coercion in the public chart-window contract."""
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            raise ValueError("chart SMA windows must contain exactly three integers")
+        if any(isinstance(item, bool) or not isinstance(item, int) for item in value):
+            raise ValueError("chart SMA windows must contain exactly three integers")
+        return value
+
     @model_validator(mode="after")
     def validate_chart(self) -> "AaplMarketChart":
         """Validate order, scope, boundedness, availability, and coverage."""
         if self.session_limit != _SESSION_LIMITS[self.period]:
             raise ValueError("session_limit does not match the requested period")
-        if self.resolution is not _RESOLUTIONS[self.period]:
-            raise ValueError("resolution does not match the requested period")
-        if self.sma_windows != (5, 20):
-            raise ValueError("chart SMA windows must remain 5 and 20 points")
+        if self.resolution is not _chart_resolution(self.period, self.interval):
+            raise ValueError("resolution does not match the requested period and interval")
+        short_window, long_window, third_window = self.sma_windows
+        if (
+            not 2 <= short_window <= 200
+            or not 3 <= long_window <= 400
+            or not 4 <= third_window <= 400
+        ):
+            raise ValueError("chart SMA windows are outside supported bounds")
+        if short_window >= long_window:
+            raise ValueError("short chart SMA window must be smaller than long SMA window")
         if len(self.points) != self.coverage.displayed_points:
             raise ValueError("point count must match displayed-point coverage")
         if len(self.points) != self.range_statistics.point_count:
@@ -450,7 +545,13 @@ class AaplMarketChart(ContractModel):
                 raise ValueError("chart point resolution does not match the chart")
             if point.timestamp >= self.known_at or point.bar_available_at > self.known_at:
                 raise ValueError("chart point is outside the requested point-in-time cut")
-            for sma in (point.sma_5, point.sma_20):
+            if point.short_sma is not None and point.short_sma.window != short_window:
+                raise ValueError("short chart SMA does not match the requested window")
+            if point.long_sma is not None and point.long_sma.window != long_window:
+                raise ValueError("long chart SMA does not match the requested window")
+            if point.third_sma is not None and point.third_sma.window != third_window:
+                raise ValueError("third chart SMA does not match the requested window")
+            for sma in (point.short_sma, point.long_sma, point.third_sma):
                 if sma is not None and sma.available_at > self.known_at:
                     raise ValueError("chart SMA was not available at known_at")
         if self.latest_session is None:
@@ -466,6 +567,28 @@ class AaplMarketChart(ContractModel):
                 raise ValueError("latest_session is outside the requested point-in-time cut")
             if not self.points or self.latest_session.timestamp != self.points[-1].timestamp:
                 raise ValueError("latest_session must match the latest displayed interval")
+            if (
+                self.latest_session.short_sma is not None
+                and self.latest_session.short_sma.window != short_window
+            ):
+                raise ValueError("latest short SMA does not match the requested window")
+            if (
+                self.latest_session.long_sma is not None
+                and self.latest_session.long_sma.window != long_window
+            ):
+                raise ValueError("latest long SMA does not match the requested window")
+            if (
+                self.latest_session.third_sma is not None
+                and self.latest_session.third_sma.window != third_window
+            ):
+                raise ValueError("latest third SMA does not match the requested window")
+            for sma in (
+                self.latest_session.short_sma,
+                self.latest_session.long_sma,
+                self.latest_session.third_sma,
+            ):
+                if sma is not None and sma.available_at > self.known_at:
+                    raise ValueError("latest chart SMA was not available at known_at")
         expected_statistics = {
             "market.history.simple_return_1d": (
                 "market-simple-return-1d-v1-decimal34",

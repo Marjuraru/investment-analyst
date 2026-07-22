@@ -35,6 +35,11 @@ _AVAILABLE_AT = datetime(2025, 10, 31, 20, tzinfo=UTC)
 _VALUES = {
     "fundamental.revenue": "1000",
     "fundamental.net_income": "200",
+    "fundamental.assets": "2000",
+    "fundamental.stockholders_equity": "800",
+    "fundamental.diluted_earnings_per_share": "5.25",
+    "fundamental.weighted_average_diluted_shares": "100",
+    "fundamental.shares_outstanding": "95",
     "fundamental.gross_profit": "400",
     "fundamental.operating_income": "250",
     "fundamental.operating_cash_flow": "300",
@@ -47,10 +52,19 @@ _VALUES = {
     "fundamental.cash_and_cash_equivalents": "200",
     "fundamental.current_assets": "500",
     "fundamental.current_liabilities": "250",
+    "fundamental.commercial_paper": "50",
     "fundamental.long_term_debt_current": "20",
     "fundamental.long_term_debt_noncurrent": "180",
     "fundamental.marketable_securities_current": "100",
     "fundamental.marketable_securities_noncurrent": "50",
+    "fundamental.interest_expense": "25",
+    "fundamental.income_before_tax": "250",
+    "fundamental.income_tax_expense": "50",
+    "fundamental.property_plant_and_equipment_net": "400",
+    "fundamental.operating_lease_liability_current": "10",
+    "fundamental.operating_lease_liability_noncurrent": "40",
+    "fundamental.finance_lease_liability_current": "5",
+    "fundamental.finance_lease_liability_noncurrent": "15",
 }
 
 
@@ -89,9 +103,11 @@ def _observation(
     available_at: datetime = _AVAILABLE_AT,
     observation_id: UUID | None = None,
     raw_record_id: UUID | None = None,
+    unit: str | None = None,
     record_key_updates: dict[str, object] | None = None,
 ) -> NormalizedObservation:
     definition = get_sec_fact_definition(field_name)
+    resolved_unit = unit or definition.unit
     raw_id = raw_record_id or uuid4()
     period_start = (
         datetime.combine(
@@ -106,7 +122,7 @@ def _observation(
         "accession_number": "0000320193-25-000001",
         "taxonomy": definition.taxonomy,
         "tag": definition.tag,
-        "unit": "USD",
+        "unit": resolved_unit,
         "period": period_end.isoformat(),
         "companyfacts_record_id": str(raw_id),
         "submissions_record_id": str(uuid4()),
@@ -122,7 +138,7 @@ def _observation(
         asset_id=ASSET_ID,
         field_name=field_name,
         value=Decimal(value),
-        unit="USD",
+        unit=resolved_unit,
         frequency=DataFrequency.ANNUAL,
         observed_at=datetime.combine(period_end, datetime.min.time(), tzinfo=UTC),
         period_start=period_start,
@@ -168,28 +184,52 @@ def test_all_published_formulas_use_exact_traceable_inputs() -> None:
     values = _metric_values(result)
 
     assert values == {
+        "fundamental.research.asset_turnover": Decimal("0.5"),
         "fundamental.research.capex_to_operating_cash_flow": Decimal(
             "0.3333333333333333333333333333333333"
         ),
         "fundamental.research.cash_ratio": Decimal("0.8"),
+        "fundamental.research.current_financial_debt": Decimal("70"),
+        "fundamental.research.current_financial_debt_share": Decimal("0.28"),
         "fundamental.research.current_ratio": Decimal("2"),
+        "fundamental.research.diluted_eps": Decimal("5.25"),
+        "fundamental.research.diluted_shares": Decimal("100"),
+        "fundamental.research.effective_tax_rate": Decimal("0.2"),
+        "fundamental.research.financial_debt": Decimal("250"),
+        "fundamental.research.financial_debt_to_assets": Decimal("0.125"),
+        "fundamental.research.financial_debt_to_equity": Decimal("0.3125"),
+        "fundamental.research.financial_debt_to_free_cash_flow": Decimal("1.25"),
+        "fundamental.research.fixed_asset_turnover": Decimal("2.5"),
         "fundamental.research.free_cash_flow": Decimal("200"),
         "fundamental.research.free_cash_flow_margin": Decimal("0.2"),
+        "fundamental.research.free_cash_flow_per_diluted_share": Decimal("2"),
         "fundamental.research.free_cash_flow_to_net_income": Decimal("1"),
         "fundamental.research.gross_margin": Decimal("0.4"),
+        "fundamental.research.interest_coverage": Decimal("10"),
+        "fundamental.research.lease_liabilities": Decimal("70"),
+        "fundamental.research.net_debt": Decimal("-100"),
+        "fundamental.research.net_debt_to_free_cash_flow": Decimal("-0.5"),
         "fundamental.research.net_liquid_assets": Decimal("150"),
         "fundamental.research.net_margin": Decimal("0.2"),
         "fundamental.research.operating_cash_flow_margin": Decimal("0.3"),
         "fundamental.research.operating_cash_flow_to_net_income": Decimal("1.5"),
         "fundamental.research.operating_margin": Decimal("0.25"),
         "fundamental.research.research_and_development_to_revenue": Decimal("0.08"),
+        "fundamental.research.return_on_assets_ending_balance": Decimal("0.1"),
+        "fundamental.research.return_on_equity_ending_balance": Decimal("0.25"),
+        "fundamental.research.return_on_invested_capital_ending_balance": Decimal(
+            "0.2857142857142857142857142857142857"
+        ),
+        "fundamental.research.revenue_per_diluted_share": Decimal("10"),
         "fundamental.research.selling_general_and_administrative_to_revenue": Decimal("0.06"),
         "fundamental.research.share_based_compensation_to_revenue": Decimal("0.02"),
         "fundamental.research.shareholder_distributions": Decimal("150"),
         "fundamental.research.shareholder_distributions_to_free_cash_flow": Decimal("0.75"),
+        "fundamental.research.shares_outstanding": Decimal("95"),
+        "fundamental.research.total_financial_obligations": Decimal("320"),
         "fundamental.research.working_capital": Decimal("250"),
     }
-    assert result.coverage.metrics_returned == 18
+    assert result.coverage.metrics_returned == 40
     assert result.coverage.observations_selected == len(_VALUES)
     assert result.traceability_verified
     assert storage.observations.calls == 1
@@ -269,6 +309,38 @@ def test_non_positive_denominators_are_visible_and_safe() -> None:
     )
 
 
+def test_invalid_tax_rate_skips_effective_rate_and_roic_without_hiding_other_returns() -> None:
+    observations = [
+        _observation("fundamental.assets", "2000"),
+        _observation("fundamental.net_income", "200"),
+        _observation("fundamental.income_before_tax", "100"),
+        _observation("fundamental.income_tax_expense", "120"),
+        _observation("fundamental.operating_income", "250"),
+        _observation("fundamental.stockholders_equity", "800"),
+        _observation("fundamental.commercial_paper", "50"),
+        _observation("fundamental.long_term_debt_current", "20"),
+        _observation("fundamental.long_term_debt_noncurrent", "180"),
+        _observation("fundamental.cash_and_cash_equivalents", "200"),
+        _observation("fundamental.marketable_securities_current", "100"),
+        _observation("fundamental.marketable_securities_noncurrent", "50"),
+    ]
+
+    result = AaplFundamentalResearchService(_Storage(observations)).query(  # type: ignore[arg-type]
+        _request()
+    )
+
+    values = _metric_values(result)
+    assert values["fundamental.research.return_on_assets_ending_balance"] == Decimal("0.1")
+    assert "fundamental.research.effective_tax_rate" not in values
+    assert "fundamental.research.return_on_invested_capital_ending_balance" not in values
+    assert (
+        result.coverage.skipped_counts[
+            "fundamental.research.effective_tax_rate:tax_rate_out_of_range"
+        ]
+        == 1
+    )
+
+
 def test_non_positive_net_income_skips_conversion_but_preserves_other_metrics() -> None:
     observations = [
         _observation("fundamental.revenue", "1000"),
@@ -304,6 +376,28 @@ def test_non_positive_net_income_skips_conversion_but_preserves_other_metrics() 
     )
 
 
+def test_zero_diluted_shares_skip_per_share_calculations_without_infinity() -> None:
+    observations = [
+        _observation("fundamental.revenue", "1000"),
+        _observation("fundamental.operating_cash_flow", "300"),
+        _observation("fundamental.capital_expenditures", "100"),
+        _observation("fundamental.weighted_average_diluted_shares", "0"),
+    ]
+
+    result = AaplFundamentalResearchService(_Storage(observations)).query(  # type: ignore[arg-type]
+        _request()
+    )
+
+    assert "fundamental.research.revenue_per_diluted_share" not in _metric_values(result)
+    assert "fundamental.research.free_cash_flow_per_diluted_share" not in _metric_values(result)
+    assert (
+        result.coverage.skipped_counts[
+            "fundamental.research.revenue_per_diluted_share:non_positive_denominator"
+        ]
+        == 1
+    )
+
+
 def test_malformed_evidence_is_rejected_before_calculation() -> None:
     observation = _observation(
         "fundamental.current_assets",
@@ -313,5 +407,15 @@ def test_malformed_evidence_is_rejected_before_calculation() -> None:
 
     with pytest.raises(MalformedFundamentalResearchObservationError, match="tag"):
         AaplFundamentalResearchService(_Storage([observation])).query(  # type: ignore[arg-type]
+            _request()
+        )
+
+    wrong_unit = _observation(
+        "fundamental.diluted_earnings_per_share",
+        "2.01",
+        unit="USD",
+    )
+    with pytest.raises(MalformedFundamentalResearchObservationError, match="unit"):
+        AaplFundamentalResearchService(_Storage([wrong_unit])).query(  # type: ignore[arg-type]
             _request()
         )
