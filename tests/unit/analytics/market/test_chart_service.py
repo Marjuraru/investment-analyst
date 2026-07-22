@@ -13,7 +13,7 @@ from investment_analyst.analytics.market.bar_models import (
     MarketBarCoverage,
     MarketBarSeries,
 )
-from investment_analyst.analytics.market.bar_schemas import ALPACA_SOURCE_ID
+from investment_analyst.analytics.market.bar_schemas import ALPACA_SOURCE_ID, COINBASE_SOURCE_ID
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChart,
     AaplMarketChartInterval,
@@ -21,8 +21,12 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
     AaplMarketChartResolution,
     AaplMarketChartSma,
+    BtcMarketChartRequest,
 )
-from investment_analyst.analytics.market.chart_service import AaplMarketChartService
+from investment_analyst.analytics.market.chart_service import (
+    AaplMarketChartService,
+    BtcMarketChartService,
+)
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
 from investment_analyst.analytics.market.statistics_models import (
     MarketStatisticsComputation,
@@ -241,6 +245,37 @@ def test_daily_chart_is_bounded_exact_and_uses_resolution_sma() -> None:
     assert history.queries[0].end == known_at
     assert history.queries[0].known_at == known_at
     assert statistics.series_counts == [21]
+
+
+def test_btc_chart_uses_coinbase_scope_without_changing_apple_contract() -> None:
+    history = _FakeHistory(270, discarded_revisions=2)
+    known_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+    chart = BtcMarketChartService(history, MarketStatisticsEngine()).query(
+        BtcMarketChartRequest(
+            known_at=known_at,
+            period=AaplMarketChartPeriod.ONE_MONTH,
+        )
+    )
+
+    assert chart.schema_version == "btc-market-chart-v1"
+    assert chart.asset_id == "crypto:btc-usd"
+    assert chart.source_id == COINBASE_SOURCE_ID
+    assert chart.volume_unit == "BTC"
+    assert chart.sma_windows == (5, 20, 50)
+    assert len(chart.points) == 22
+    assert history.queries == [
+        HistoricalBarQuery(
+            asset_id="crypto:btc-usd",
+            source_id=COINBASE_SOURCE_ID,
+            start=datetime(1970, 1, 1, tzinfo=UTC),
+            end=known_at,
+            known_at=known_at,
+        )
+    ]
+    assert "one crypto venue" in chart.limitations[0]
+    assert all(item.asset_id == "crypto:btc-usd" for item in chart.latest_statistics)
+    assert all(item.source_id == COINBASE_SOURCE_ID for item in chart.latest_statistics)
 
 
 def test_chart_preserves_warmup_and_empty_history_semantics() -> None:

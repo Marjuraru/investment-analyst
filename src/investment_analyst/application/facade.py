@@ -1,4 +1,4 @@
-"""Stable application facade for Apple bootstrap and diagnostic queries."""
+"""Stable application facade for local investment-analysis workflows."""
 
 from collections.abc import Callable
 from pathlib import Path
@@ -41,8 +41,13 @@ from investment_analyst.analytics.fundamentals.research_service import (
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChart,
     AaplMarketChartRequest,
+    BtcMarketChart,
+    BtcMarketChartRequest,
 )
-from investment_analyst.analytics.market.chart_service import AaplMarketChartService
+from investment_analyst.analytics.market.chart_service import (
+    AaplMarketChartService,
+    BtcMarketChartService,
+)
 from investment_analyst.analytics.market.diagnostic_pipeline import MarketDiagnosticPipeline
 from investment_analyst.analytics.market.diagnostic_rules import MarketDiagnosticEngine
 from investment_analyst.analytics.market.diagnostic_selection import (
@@ -56,12 +61,21 @@ from investment_analyst.application.aapl_bootstrap_models import (
     AaplWorkspaceBootstrapRequest,
     AaplWorkspaceBootstrapSummary,
 )
+from investment_analyst.application.btc_refresh import BtcMarketRefreshPipeline
+from investment_analyst.application.btc_refresh_models import (
+    BtcMarketRefreshRequest,
+    BtcMarketRefreshSummary,
+)
+from investment_analyst.application.btc_refresh_planner import BtcMarketRefreshPlanner
 from investment_analyst.application.runtime import ApplicationRuntime, StorageLocationRequest
 from investment_analyst.catalog.provider_configuration import (
     resolve_alpaca_configuration,
+    resolve_coinbase_configuration,
     resolve_sec_configuration,
 )
 from investment_analyst.core.models.base import ContractModel
+from investment_analyst.providers.crypto.coinbase_exchange import CoinbaseExchangeClient
+from investment_analyst.providers.crypto.coinbase_pipeline import CoinbaseHistoricalPipeline
 from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
     SecCompanyFactsNormalizer,
 )
@@ -184,6 +198,54 @@ class InvestmentAnalystApplication:
                 HistoricalMarketDataService(storage),
                 MarketStatisticsEngine(),
             ).query(request)
+
+    def query_btc_market_chart(
+        self,
+        request: BtcMarketChartRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BtcMarketChart:
+        """Return a bounded point-in-time Coinbase BTC-USD chart without writes."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return BtcMarketChartService(
+                HistoricalMarketDataService(storage),
+                MarketStatisticsEngine(),
+            ).query(request)
+
+    def refresh_btc_market(
+        self,
+        request: BtcMarketRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BtcMarketRefreshSummary:
+        """Incrementally update Coinbase BTC-USD and persist independent market analytics."""
+        configuration = resolve_coinbase_configuration(self._runtime.provider_resolver)
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_WRITE,
+        ) as storage:
+            history = HistoricalMarketDataService(storage)
+            return BtcMarketRefreshPipeline(
+                refresh_planner=BtcMarketRefreshPlanner(storage),
+                market_pipeline=CoinbaseHistoricalPipeline(
+                    storage,
+                    CoinbaseExchangeClient(self._transport_factory()),
+                    configuration=configuration,
+                ),
+                statistics_pipeline=MarketStatisticsPipeline(
+                    storage,
+                    history,
+                    MarketStatisticsEngine(),
+                ),
+                diagnostic_pipeline=MarketDiagnosticPipeline(
+                    storage,
+                    MarketDiagnosticMetricSelector(storage),
+                    MarketDiagnosticEngine(),
+                ),
+            ).run(request)
 
     def query_aapl_fundamental_trend(
         self,

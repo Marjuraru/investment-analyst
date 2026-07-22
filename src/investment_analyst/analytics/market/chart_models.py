@@ -1,4 +1,4 @@
-"""Strict point-in-time contracts for the bounded Apple market chart."""
+"""Strict point-in-time contracts for bounded Apple and Bitcoin market charts."""
 
 from datetime import UTC, datetime
 from decimal import Context, Decimal, localcontext
@@ -139,6 +139,10 @@ class AaplMarketChartRequest(ContractModel):
     def resolution(self) -> AaplMarketChartResolution:
         """Return the deterministic resolution for the range and explicit interval."""
         return _chart_resolution(self.period, self.interval)
+
+
+class BtcMarketChartRequest(AaplMarketChartRequest):
+    """Request one bounded BTC-USD chart at an explicit point-in-time cut."""
 
 
 class AaplMarketChartSma(ContractModel):
@@ -705,3 +709,14 @@ class AaplMarketChart(ContractModel):
     def to_json_dict(self) -> dict[str, object]:
         """Return an explicit JSON-compatible contract with exact decimals as strings."""
         return self.model_dump(mode="json")
+
+
+class BtcMarketChart(AaplMarketChart):
+    """Versioned BTC-USD chart contract over Coinbase Exchange daily candles."""
+
+    schema_version: Literal["btc-market-chart-v1"] = "btc-market-chart-v1"
+    asset_id: Literal["crypto:btc-usd"] = "crypto:btc-usd"
+    source_id: Literal["coinbase-exchange:btc-usd:daily-candles"] = (
+        "coinbase-exchange:btc-usd:daily-candles"
+    )
+    volume_unit: Literal["BTC"] = "BTC"

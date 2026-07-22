@@ -12,7 +12,10 @@ from investment_analyst.analytics.fundamental_trend_models import AaplFundamenta
 from investment_analyst.analytics.fundamentals.research_models import (
     AaplFundamentalResearchRequest,
 )
-from investment_analyst.analytics.market.chart_models import AaplMarketChartRequest
+from investment_analyst.analytics.market.chart_models import (
+    AaplMarketChartRequest,
+    BtcMarketChartRequest,
+)
 from investment_analyst.application.facade import InvestmentAnalystApplication
 from investment_analyst.application.runtime import ApplicationRuntime, StorageLocationRequest
 from investment_analyst.core.models import DataFrequency
@@ -78,6 +81,27 @@ def test_chart_query_is_empty_bounded_and_read_only(tmp_path: Path) -> None:
     assert chart.schema_version == "aapl-market-chart-v5"
     assert chart.points == ()
     assert chart.session_limit == 132
+    assert chart.traceability_verified
+    assert storage_paths.database_path.read_bytes() == database_before
+
+
+def test_btc_chart_query_is_empty_bounded_and_read_only(tmp_path: Path) -> None:
+    root = tmp_path / "legacy-btc-chart"
+    storage_paths = StoragePaths.from_root(root)
+    with LocalStorage(storage_paths):
+        pass
+    database_before = storage_paths.database_path.read_bytes()
+
+    chart = _application(tmp_path).query_btc_market_chart(
+        BtcMarketChartRequest(known_at=datetime(2026, 7, 14, 4, 41, 55, tzinfo=UTC)),
+        location=StorageLocationRequest(legacy_root=root),
+    )
+
+    assert chart.schema_version == "btc-market-chart-v1"
+    assert chart.asset_id == "crypto:btc-usd"
+    assert chart.source_id == "coinbase-exchange:btc-usd:daily-candles"
+    assert chart.volume_unit == "BTC"
+    assert chart.points == ()
     assert chart.traceability_verified
     assert storage_paths.database_path.read_bytes() == database_before
 

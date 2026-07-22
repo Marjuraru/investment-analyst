@@ -1,7 +1,7 @@
 # Interfaz local y operación continua
 
-La interfaz local convierte los flujos existentes de Apple en una herramienta básica utilizable
-desde el navegador. El mismo proceso puede ejecutar una programación diaria. No añade fórmulas,
+La interfaz local convierte los flujos existentes de Apple y BTC-USD en una herramienta básica
+utilizable desde el navegador. El proceso de Apple puede ejecutar una programación diaria. No añade fórmulas,
 scores combinados, recomendaciones, Trading API ni un LLM activo.
 
 ## Capacidades
@@ -12,6 +12,8 @@ La página permite:
 - cargar automáticamente el último reporte elegible al abrir la página;
 - explorar el histórico point-in-time de AAPL con OHLC, VWAP, operaciones, tres SMA configurables y
   volumen;
+- alternar a BTC-USD y explorar todo el histórico diario persistido de Coinbase Exchange con OHLC,
+  volumen en BTC, retornos, volatilidad, volumen relativo y las mismas herramientas de gráfico;
 - consultar en la misma vista el retorno diario, volatilidad diaria de 20 días con datos, volumen
   relativo de 20 días, distancias a las SMA, extremos, retorno, CAGR y máximo drawdown del rango
   consultado;
@@ -39,6 +41,8 @@ La página permite:
 - alternar entre un tema oscuro de baja luminancia, predeterminado, y el tema claro;
 - ampliar o reducir localmente el tramo visible sin descartar datos de la consulta completa;
 - ejecutar manualmente el bootstrap completo de SEC EDGAR y Alpaca Market Data IEX;
+- ejecutar una actualización Coinbase exclusivamente de mercado, incremental por los bordes del
+  histórico o completa, sin credenciales y sin crear fundamentales ficticios;
 - consultar el reporte diario point-in-time en modo trimestral o anual;
 - seleccionar opcionalmente fechas `as-of` independientes para mercado y fundamentales;
 - ver diagnósticos, métricas, frescura, limitaciones y el contrato JSON versionado;
@@ -49,7 +53,7 @@ veredicto, confianza, calidad, recomendación o ranking combinado.
 
 ## Criterios de presentación
 
-La interfaz está orientada al análisis, no al trading. Mantiene el contexto de Apple visible y usa
+La interfaz está orientada al análisis, no al trading. Mantiene el contexto del activo visible y usa
 una distribución compacta: gráfico, fecha seleccionada y estadísticas técnicas comparten la vista
 principal; la evolución y ficha fundamental permanecen en un panel propio para no mezclar su
 significado con mercado. La actualización de fuentes permanece en una sección operativa secundaria. La
@@ -74,13 +78,15 @@ redondeo únicamente para presentación:
 - cobertura, rotación y deuda frente a patrimonio o FCF: múltiplos con hasta dos decimales;
 - EPS, ingresos y flujo de caja por acción: USD por acción con hasta dos decimales;
 - acciones promedio y en circulación: miles de millones con hasta dos decimales;
-- volumen del gráfico: entero en el detalle y notación compacta con un decimal en el resumen;
+- volumen del gráfico: acciones enteras para AAPL y hasta dos decimales de BTC; ambos usan notación
+  compacta con un decimal en el resumen;
 - operaciones: enteros con separador de miles;
 - conteos: enteros con separador de miles.
 
 Los ceros decimales innecesarios se omiten, salvo en importes monetarios. El contrato JSON desplegable
 conserva el `Decimal` completo, las unidades, fórmulas, parámetros, identidades y timestamps para
-auditoría. El endpoint local `/api/market-chart` entrega `aapl-market-chart-v5`: acepta
+auditoría. El endpoint local `/api/market-chart` entrega `aapl-market-chart-v5` para Apple y
+`btc-market-chart-v1` para Bitcoin mediante `asset_id=crypto:btc-usd`: acepta
 `interval=auto|1d|1w|1mo`, además de
 `short_sma_window`, `long_sma_window` y `third_sma_window`. La interfaz exige ventanas crecientes
 entre 2 y 400; el tercer parámetro conserva un valor predeterminado compatible para solicitudes
@@ -217,14 +223,25 @@ y disponibilidad point-in-time explícitos. A partir de esa base podrán agregar
 intervalos mayores sobre todo el historial disponible, conservando OHLCV, cobertura y UUID de entrada
 sin alterar la historia diaria.
 
-## Expansión a cripto prevista
+## Integración actual de cripto
 
-El catálogo y el pipeline histórico de Coinbase ya reconocen `crypto:btc-usd`, pero la interfaz y el
-runner operativo actuales están acotados a Apple. La integración visual de cripto debe introducir un
-selector de activo y un modo de análisis exclusivamente de mercado: no debe simular fundamentales
-SEC, reutilizar identidades de AAPL ni interpretar sesiones bursátiles para un mercado continuo 24/7.
-Esa ampliación se realizará después de estabilizar la estación analítica de Apple y antes del cierre
-de personalización general.
+El selector de activo admite `crypto:btc-usd`. Esta vista usa únicamente velas diarias públicas de
+Coinbase Exchange: representa un solo mercado, no un precio agregado de todo el ecosistema. La
+interfaz oculta fundamentos SEC y clasificaciones empresariales al seleccionar Bitcoin; no reutiliza
+identidades de AAPL ni interpreta sesiones bursátiles en un mercado 24/7.
+
+La sección Operación cambia al flujo BTC-USD y ofrece actualización incremental automática o rango
+completo. El rango público es inclusivo y solo admite días UTC terminados. El plan automático detecta
+únicamente prefijos y sufijos fuera de las velas persistidas; no inventa huecos internos. Después de
+importar conserva `RawRecord`, observaciones, métricas y diagnóstico de mercado independientes y
+devuelve `btc-market-refresh-v1` con conteos, corte efectivo y trazabilidad. La programación diaria
+persistente sigue siendo de Apple en esta versión; Coinbase se actualiza manualmente desde la página.
+
+Todo el OHLCV solicitado se conserva para la gráfica y los cálculos de consulta. La actualización
+operativa persiste estadísticas únicamente sobre los 90 días calendario finales del rango: cubre
+holgadamente las ventanas técnicas actuales de 20 días y evita recalcular once años en cada corte
+diario. El contrato declara `analytics_start`, `analytics_end` y `analytics_lookback_days`; esta
+optimización no recorta los datos históricos guardados ni la vista de máximo histórico.
 
 ## Programación diaria
 

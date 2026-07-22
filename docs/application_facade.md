@@ -1,15 +1,19 @@
 # Application facade
 
-`InvestmentAnalystApplication` is the stable programmatic entry point for the current Apple MVP.
+`InvestmentAnalystApplication` is the stable programmatic entry point for the local application.
 It lets later runners and user interfaces invoke supported operations without importing provider,
 storage, or analytical pipeline implementations.
 
-The facade currently exposes two operations:
+The facade exposes the following operation groups:
 
 - `bootstrap_aapl_workspace(...)` initializes or reuses one workspace and executes the complete
   resumable SEC EDGAR and Alpaca Market Data pipeline with one writer connection.
 - `query_aapl_diagnostics(...)` opens existing storage in read-only mode and returns the versioned
   `AaplDailyDiagnosticReport` from persisted evidence.
+- read-only Apple fundamental and market-chart queries plus the bounded BTC-USD chart query;
+- `refresh_btc_market(...)` opens one existing workspace with a single writer, plans missing
+  Coinbase daily-candle edges, imports append-only evidence, and persists independent market
+  statistics and a diagnostic without invoking SEC or Alpaca.
 
 The existing CLI scripts are adapters over these methods. Their arguments, exit codes, JSON output,
 and text output remain unchanged.

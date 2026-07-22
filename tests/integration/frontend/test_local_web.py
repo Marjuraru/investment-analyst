@@ -36,8 +36,14 @@ from investment_analyst.analytics.fundamentals.research_models import (
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChart,
     AaplMarketChartRequest,
+    BtcMarketChart,
+    BtcMarketChartRequest,
 )
 from investment_analyst.application.aapl_bootstrap_models import AaplWorkspaceBootstrapRequest
+from investment_analyst.application.btc_refresh_models import (
+    BtcMarketRefreshRequest,
+    BtcMarketRefreshSummary,
+)
 from investment_analyst.application.operational_models import (
     AaplDailyRunState,
     AaplOperationalHealth,
@@ -94,6 +100,10 @@ class _FakeApplication:
         self.locations: list[StorageLocationRequest] = []
         self.chart_requests: list[AaplMarketChartRequest] = []
         self.chart_locations: list[StorageLocationRequest] = []
+        self.btc_chart_requests: list[BtcMarketChartRequest] = []
+        self.btc_chart_locations: list[StorageLocationRequest] = []
+        self.btc_refresh_requests: list[BtcMarketRefreshRequest] = []
+        self.btc_refresh_locations: list[StorageLocationRequest] = []
         self.trend_requests: list[AaplFundamentalTrendRequest] = []
         self.trend_locations: list[StorageLocationRequest] = []
         self.research_requests: list[AaplFundamentalResearchRequest] = []
@@ -132,6 +142,50 @@ class _FakeApplication:
                     "period": request.period.value,
                     "interval": request.interval.value,
                     "points": [],
+                }
+            ),
+        )
+
+    def query_btc_market_chart(
+        self,
+        request: BtcMarketChartRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BtcMarketChart:
+        self.btc_chart_requests.append(request)
+        self.btc_chart_locations.append(location)
+        return cast(
+            BtcMarketChart,
+            _JsonResult(
+                {
+                    "schema_version": "btc-market-chart-v1",
+                    "asset_id": "crypto:btc-usd",
+                    "period": request.period.value,
+                    "interval": request.interval.value,
+                    "points": [],
+                }
+            ),
+        )
+
+    def refresh_btc_market(
+        self,
+        request: BtcMarketRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BtcMarketRefreshSummary:
+        self.btc_refresh_requests.append(request)
+        self.btc_refresh_locations.append(location)
+        return cast(
+            BtcMarketRefreshSummary,
+            _JsonResult(
+                {
+                    "schema_version": "btc-market-refresh-v1",
+                    "asset_id": "crypto:btc-usd",
+                    "effective_known_at": "2026-07-16T15:47:00+00:00",
+                    "refresh_plan": {"mode": "incremental"},
+                    "candles_received": 1,
+                    "metric_results_created": 7,
+                    "traceability_verified": True,
                 }
             ),
         )
@@ -543,6 +597,37 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
                 f"{urlencode({'known_at': '2026-07-16T15:46:09Z', 'period': 'max'})}"
             )
         )
+        btc_chart_parameters = urlencode(
+            {
+                "asset_id": "crypto:btc-usd",
+                "known_at": "2026-07-16T15:46:09Z",
+                "period": "max",
+                "interval": "1d",
+            }
+        )
+        btc_chart_status, btc_chart, _ = _json_request(
+            Request(f"{root}/api/market-chart?{btc_chart_parameters}")
+        )
+        cached_btc_chart_status, cached_btc_chart, _ = _json_request(
+            Request(f"{root}/api/market-chart?{btc_chart_parameters}")
+        )
+        btc_refresh_payload = json.dumps(
+            {
+                "asset_id": "crypto:btc-usd",
+                "market_start": "2015-07-20",
+                "market_end": "2026-07-15",
+                "refresh_mode": "auto",
+                "requested_known_at": None,
+            }
+        ).encode("utf-8")
+        btc_refresh_status, btc_refresh, _ = _json_request(
+            Request(
+                f"{root}/api/market-refresh",
+                data=btc_refresh_payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
         trend_status, trend, _ = _json_request(
             Request(
                 f"{root}/api/fundamental-trend?"
@@ -614,6 +699,25 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert application.chart_requests[1].interval.value == "auto"
     assert application.chart_requests[1].session_limit == 20_000
     assert len(application.chart_requests) == 2
+    assert btc_chart_status == 200
+    assert btc_chart["schema_version"] == "btc-market-chart-v1"
+    assert btc_chart["asset_id"] == "crypto:btc-usd"
+    assert cached_btc_chart_status == 200
+    assert cached_btc_chart == btc_chart
+    assert len(application.btc_chart_requests) == 1
+    assert application.btc_chart_requests[0].interval.value == "1d"
+    assert application.btc_chart_requests[0].session_limit == 20_000
+    assert application.btc_chart_locations[0].workspace == workspace.resolve()
+    assert btc_refresh_status == 200
+    assert btc_refresh["schema_version"] == "btc-market-refresh-v1"
+    assert btc_refresh["traceability_verified"] is True
+    assert application.btc_refresh_requests == [
+        BtcMarketRefreshRequest(
+            market_start=date(2015, 7, 20),
+            market_end=date(2026, 7, 15),
+        )
+    ]
+    assert application.btc_refresh_locations[0].workspace == workspace.resolve()
     assert trend_status == 200
     assert trend["schema_version"] == "aapl-fundamental-trend-v1"
     assert trend["frequency"] == "quarterly"
@@ -658,6 +762,7 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
         sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
     )
     chart_request = AaplMarketChartRequest(known_at=datetime(2026, 7, 16, tzinfo=UTC))
+    btc_chart_request = BtcMarketChartRequest(known_at=datetime(2026, 7, 16, tzinfo=UTC))
     trend_request = AaplFundamentalTrendRequest(
         known_at=datetime(2026, 7, 16, tzinfo=UTC),
         frequency=DataFrequency.QUARTERLY,
@@ -680,6 +785,8 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
 
     controller.market_chart_request(chart_request)
     controller.market_chart_request(chart_request)
+    controller.btc_market_chart_request(btc_chart_request)
+    controller.btc_market_chart_request(btc_chart_request)
     controller.fundamental_trend_request(trend_request)
     controller.fundamental_trend_request(trend_request)
     controller.fundamental_research_request(research_request)
@@ -690,12 +797,14 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
     controller.fundamental_analysis_request(research_request)
     controller.run_payload(run_payload)
     controller.market_chart_request(chart_request)
+    controller.btc_market_chart_request(btc_chart_request)
     controller.fundamental_trend_request(trend_request)
     controller.fundamental_research_request(research_request)
     controller.fundamental_research_history_request(research_request)
     controller.fundamental_analysis_request(research_request)
 
     assert len(application.chart_requests) == 2
+    assert len(application.btc_chart_requests) == 2
     assert len(application.trend_requests) == 2
     assert len(application.research_requests) == 2
     assert len(application.research_history_requests) == 2
@@ -797,6 +906,11 @@ def test_local_api_rejects_invalid_typed_run_without_calling_runner(tmp_path: Pa
         chart_interval_status, chart_interval, _ = _json_request(
             Request(f"{root}/api/market-chart?known_at=2026-07-16T15%3A46%3A09Z&interval=1h")
         )
+        chart_asset_status, chart_asset, _ = _json_request(
+            Request(
+                f"{root}/api/market-chart?known_at=2026-07-16T15%3A46%3A09Z&asset_id=crypto:eth-usd"
+            )
+        )
         trend_status, trend, _ = _json_request(
             Request(
                 f"{root}/api/fundamental-trend?known_at=2026-07-16T15%3A46%3A09Z&frequency=monthly"
@@ -832,6 +946,8 @@ def test_local_api_rejects_invalid_typed_run_without_calling_runner(tmp_path: Pa
     assert chart_window["error"]["code"] == "invalid_request"
     assert chart_interval_status == 400
     assert chart_interval["error"]["code"] == "invalid_request"
+    assert chart_asset_status == 400
+    assert chart_asset["error"]["code"] == "invalid_request"
     assert trend_status == 400
     assert trend["error"]["code"] == "invalid_request"
     assert research_status == 400
