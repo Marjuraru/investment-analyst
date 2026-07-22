@@ -48,5 +48,12 @@ python scripts/fetch_coinbase_history.py \
 explicit and existing data is not deleted.
 
 These candles represent Coinbase Exchange only, not an aggregate of the entire cryptocurrency market.
-WebSockets, live updates, indicators, metrics, and real diagnostics are not implemented. The importer
-performs data analysis only, executes no orders, and does not constitute financial advice.
+
+La interfaz local ofrece además el flujo integrado recomendado: selecciona `BTC-USD`, abre
+`Operación` y ejecuta una actualización automática o completa. Ese flujo usa fechas inclusivas,
+reutiliza las identidades persistidas, calcula estadísticas y un diagnóstico de mercado point-in-time
+y devuelve el contrato trazable `btc-market-refresh-v1`. El script anterior se conserva como
+importador técnico de bajo nivel y mantiene su contrato de fin exclusivo.
+
+No se implementan WebSockets ni ejecución de órdenes. La salida no constituye asesoramiento
+financiero.

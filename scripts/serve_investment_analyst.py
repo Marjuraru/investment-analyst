@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serve the loopback Apple UI and its optional daily scheduler."""
+"""Serve the loopback analysis UI and its optional Apple daily scheduler."""
 
 import argparse
 import os

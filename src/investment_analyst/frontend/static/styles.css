@@ -360,6 +360,43 @@ h4 {
   flex-shrink: 0;
 }
 
+.asset-selector {
+  display: inline-flex;
+  gap: 0.15rem;
+  padding: 0.2rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-subtle);
+}
+
+.asset-selector-button {
+  min-height: 36px;
+  padding: 0.35rem 0.7rem;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-strong);
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-weight: 760;
+}
+
+.asset-selector-button:hover {
+  background: var(--control-hover);
+  color: var(--ink-strong);
+}
+
+.asset-selector-button.active {
+  background: var(--surface-dark-raised);
+  color: #fff;
+  box-shadow: 0 2px 7px rgb(16 24 39 / 16%);
+}
+
+.asset-selector-button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
 main,
 footer {
   width: min(1280px, 100%);
@@ -2735,6 +2772,16 @@ footer p:last-child {
     display: grid;
     width: 100%;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .asset-selector {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .asset-selector-button {
+    min-height: 44px;
+    flex: 1;
   }
 
   .topbar-actions .badge {

@@ -50,7 +50,10 @@ local:
 - ejecución operativa única con lock por workspace, estado atómico versionado, errores acotados y
   health check de solo lectura, preparada para un programador externo;
 - interfaz web local compacta para ejecutar el flujo, consultar el reporte, revisar la evidencia y
-  explorar OHLC, VWAP, actividad, retorno, volatilidad, volumen relativo y tres SMA configurables
+  alternar entre Apple y Bitcoin; BTC-USD usa el histórico diario público de Coinbase Exchange y
+  un modo exclusivamente de mercado, sin inventar fundamentales. Permite actualizarlo de forma
+  incremental y auditable desde la propia página. Para ambos activos permite explorar OHLC,
+  actividad, retorno, volatilidad, volumen relativo y tres SMA configurables
   por ventana y color —5, 20 y 50 de forma predeterminada—, con escala de precio lineal o logarítmica,
   gráfico de línea o velas, zoom exclusivo con la rueda del mouse, desplazamiento horizontal por
   arrastre e intervalos reales de un día, una semana o
@@ -66,7 +69,8 @@ local:
   cobertura de líneas y ramas, auditoría de dependencias y validación continua con GitHub Actions.
 
 El MVP actual no incluye alertas, autenticación o exposición remota, inicio automático desde
-Windows Task Scheduler, ejecución de órdenes ni recomendaciones de inversión. Nuevos activos,
+Windows Task Scheduler, ejecución de órdenes ni recomendaciones de inversión. La programación
+continua actualiza Apple; BTC-USD se actualiza manualmente desde la misma interfaz. Nuevos activos,
 indicadores o fuentes requieren fases de diseño y validación independientes.
 
 La ampliación de [investigación fundamental](docs/fundamental_research_foundation.md), la

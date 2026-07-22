@@ -1,4 +1,4 @@
-"""Loopback-only HTTP adapter for the local Apple analysis application."""
+"""Loopback-only HTTP adapter for the local investment-analysis application."""
 
 import gzip
 import json
@@ -50,8 +50,13 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartInterval,
     AaplMarketChartPeriod,
     AaplMarketChartRequest,
+    BtcMarketChart,
+    BtcMarketChartRequest,
 )
-from investment_analyst.analytics.market.chart_service import AaplMarketChartQueryError
+from investment_analyst.analytics.market.chart_service import (
+    AaplMarketChartQueryError,
+    BtcMarketChartQueryError,
+)
 from investment_analyst.application.aapl_bootstrap import BootstrapIncompleteError
 from investment_analyst.application.aapl_bootstrap_models import AaplWorkspaceBootstrapRequest
 from investment_analyst.application.aapl_daily_runner import (
@@ -59,6 +64,14 @@ from investment_analyst.application.aapl_daily_runner import (
     AaplDailyRunner,
 )
 from investment_analyst.application.aapl_scheduler import AaplDailyScheduler
+from investment_analyst.application.btc_refresh import (
+    BtcMarketKnownAtTooEarlyError,
+    BtcMarketRefreshError,
+)
+from investment_analyst.application.btc_refresh_models import (
+    BtcMarketRefreshRequest,
+    BtcMarketRefreshSummary,
+)
 from investment_analyst.application.facade import InvestmentAnalystApplication
 from investment_analyst.application.operational_models import (
     AaplDailyRunRequestSnapshot,
@@ -130,6 +143,24 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> AaplMarketChart:
         """Query one bounded persisted market chart."""
+        ...
+
+    def query_btc_market_chart(
+        self,
+        request: BtcMarketChartRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BtcMarketChart:
+        """Query one bounded persisted Coinbase chart."""
+        ...
+
+    def refresh_btc_market(
+        self,
+        request: BtcMarketRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BtcMarketRefreshSummary:
+        """Update Coinbase BTC-USD and persist independent market analytics."""
         ...
 
     def query_aapl_fundamental_trend(
@@ -211,6 +242,10 @@ class _WebOperations(Protocol):
         """Execute one manual refresh."""
         ...
 
+    def market_refresh(self, payload: dict[str, object]) -> dict[str, object]:
+        """Execute one manual market-only refresh."""
+        ...
+
 
 class AaplLocalController:
     """Serialize in-process reads and writes over existing application boundaries."""
@@ -231,6 +266,7 @@ class AaplLocalController:
         self._sec_identity = sec_identity
         self._operation_lock = threading.RLock()
         self._market_chart_cache: dict[AaplMarketChartRequest, AaplMarketChart] = {}
+        self._btc_market_chart_cache: dict[BtcMarketChartRequest, BtcMarketChart] = {}
         self._fundamental_trend_cache: dict[AaplFundamentalTrendRequest, AaplFundamentalTrend] = {}
         self._fundamental_research_cache: dict[
             AaplFundamentalResearchRequest, AaplFundamentalResearchResult
@@ -285,6 +321,7 @@ class AaplLocalController:
                 )
             finally:
                 self._market_chart_cache.clear()
+                self._btc_market_chart_cache.clear()
                 self._fundamental_trend_cache.clear()
                 self._fundamental_research_cache.clear()
                 self._fundamental_research_history_cache.clear()
@@ -315,6 +352,35 @@ class AaplLocalController:
                 self._market_chart_cache.pop(next(iter(self._market_chart_cache)))
             self._market_chart_cache[request] = chart
             return chart
+
+    def btc_market_chart_request(self, request: BtcMarketChartRequest) -> BtcMarketChart:
+        """Query persisted Coinbase bars and indicators without providers or writes."""
+        with self._operation_lock:
+            cached = self._btc_market_chart_cache.get(request)
+            if cached is not None:
+                return cached
+            chart = self._application.query_btc_market_chart(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            )
+            if len(self._btc_market_chart_cache) >= _MAX_READ_CACHE_ENTRIES:
+                self._btc_market_chart_cache.pop(next(iter(self._btc_market_chart_cache)))
+            self._btc_market_chart_cache[request] = chart
+            return chart
+
+    def btc_market_refresh_request(
+        self,
+        request: BtcMarketRefreshRequest,
+    ) -> BtcMarketRefreshSummary:
+        """Execute one Coinbase-only refresh through the shared writer mutex."""
+        with self._operation_lock:
+            try:
+                return self._application.refresh_btc_market(
+                    request,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                )
+            finally:
+                self._btc_market_chart_cache.clear()
 
     def fundamental_trend_request(
         self,
@@ -437,6 +503,7 @@ class AaplLocalWebApplication:
     def market_chart(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate query parameters and return the versioned market-chart contract."""
         allowed = {
+            "asset_id",
             "known_at",
             "period",
             "interval",
@@ -446,13 +513,14 @@ class AaplLocalWebApplication:
         }
         if set(parameters) - allowed:
             raise ValueError("market chart query contains unsupported parameters")
+        asset_id = _one_parameter(parameters, "asset_id", required=False) or "equity:us:aapl"
         known_at = _one_parameter(parameters, "known_at", required=True)
         period = _one_parameter(parameters, "period", required=False)
         interval = _one_parameter(parameters, "interval", required=False)
         short_sma_window = _one_parameter(parameters, "short_sma_window", required=False)
         long_sma_window = _one_parameter(parameters, "long_sma_window", required=False)
         third_sma_window = _one_parameter(parameters, "third_sma_window", required=False)
-        request_parameters = {
+        request_parameters: dict[str, object] = {
             "known_at": _aware_datetime(known_at),
             "period": period or AaplMarketChartPeriod.SIX_MONTHS,
             "interval": interval or AaplMarketChartInterval.AUTOMATIC,
@@ -473,8 +541,13 @@ class AaplLocalWebApplication:
                 name="third_sma_window",
                 default=50,
             )
-        request = AaplMarketChartRequest.model_validate(request_parameters)
-        return self._controller.market_chart_request(request).to_json_dict()
+        if asset_id == "equity:us:aapl":
+            request = AaplMarketChartRequest.model_validate(request_parameters)
+            return self._controller.market_chart_request(request).to_json_dict()
+        if asset_id == "crypto:btc-usd":
+            request = BtcMarketChartRequest.model_validate(request_parameters)
+            return self._controller.btc_market_chart_request(request).to_json_dict()
+        raise ValueError("market chart asset_id is not supported")
 
     def fundamental_trend(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate query parameters and return the versioned SEC trend contract."""
@@ -518,6 +591,11 @@ class AaplLocalWebApplication:
     def run(self, payload: dict[str, object]) -> dict[str, object]:
         """Execute one explicit request and return bounded operational state."""
         return self._controller.run_payload(payload).to_json_dict()
+
+    def market_refresh(self, payload: dict[str, object]) -> dict[str, object]:
+        """Validate and execute one explicit Coinbase-only refresh."""
+        request = BtcMarketRefreshRequest.model_validate(payload)
+        return self._controller.btc_market_refresh_request(request).to_json_dict()
 
 
 class AaplLocalHttpServer(ThreadingHTTPServer):
@@ -588,7 +666,7 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, server.application.report(parameters))
                 return
             if parsed.path == "/api/market-chart":
-                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=8)
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=9)
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(HTTPStatus.OK, server.application.market_chart(parameters))
                 return
@@ -629,11 +707,15 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
         try:
             self._require_loopback_host()
             parsed = urlsplit(self.path)
-            if parsed.path != "/api/run" or parsed.query:
+            if parsed.query or parsed.path not in {"/api/run", "/api/market-refresh"}:
                 raise _HttpError(HTTPStatus.NOT_FOUND, "not_found", "route not found")
             payload = self._read_json_object()
             server = cast(AaplLocalHttpServer, self.server)
-            self._send_json(HTTPStatus.OK, server.application.run(payload))
+            if parsed.path == "/api/run":
+                response = server.application.run(payload)
+            else:
+                response = server.application.market_refresh(payload)
+            self._send_json(HTTPStatus.OK, response)
         except Exception as error:  # noqa: BLE001
             self._send_mapped_error(error)
 
@@ -704,12 +786,25 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 else HTTPStatus.SERVICE_UNAVAILABLE
             )
             self._send_error(status, error.failure.category, error.failure.message)
+        elif isinstance(error, BtcMarketKnownAtTooEarlyError):
+            self._send_error(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "known_at_too_early",
+                str(error)[:500],
+            )
+        elif isinstance(error, BtcMarketRefreshError):
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "market_refresh_failed",
+                str(error)[:500],
+            )
         elif isinstance(
             error,
             (
                 AaplDailyReportError,
                 AaplFundamentalTrendQueryError,
                 AaplMarketChartQueryError,
+                BtcMarketChartQueryError,
                 ConsolidatedDiagnosticQueryError,
                 FundamentalResearchError,
                 FundamentalResearchHistoryError,

@@ -1,8 +1,8 @@
-"""Read-only construction of the bounded point-in-time Apple market chart."""
+"""Read-only construction of bounded point-in-time market charts."""
 
 from datetime import UTC, datetime
 from decimal import Context, Decimal, localcontext
-from typing import Protocol
+from typing import Protocol, TypeVar
 from uuid import UUID
 
 from investment_analyst.analytics.market.bar_models import (
@@ -11,7 +11,7 @@ from investment_analyst.analytics.market.bar_models import (
     MarketBarCoverage,
     MarketBarSeries,
 )
-from investment_analyst.analytics.market.bar_schemas import ALPACA_SOURCE_ID
+from investment_analyst.analytics.market.bar_schemas import ALPACA_SOURCE_ID, COINBASE_SOURCE_ID
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChart,
     AaplMarketChartCoverage,
@@ -21,6 +21,8 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
     AaplMarketChartResolution,
     AaplMarketChartSma,
+    BtcMarketChart,
+    BtcMarketChartRequest,
 )
 from investment_analyst.analytics.market.history_service import MarketHistoryError
 from investment_analyst.analytics.market.statistics_definitions import (
@@ -37,6 +39,7 @@ from investment_analyst.analytics.market.statistics_models import (
 from investment_analyst.core.models import DataQuality
 
 _AAPL_ASSET_ID = "equity:us:aapl"
+_BTC_ASSET_ID = "crypto:btc-usd"
 _HISTORY_START = datetime(1970, 1, 1, tzinfo=UTC)
 _DAYS_PER_YEAR = Decimal("365.2425")
 _SMA_ALGORITHM = "market-chart-sma-v2-decimal34"
@@ -53,8 +56,14 @@ _QUALITY_PRIORITY = {
     DataQuality.PARTIAL: 2,
     DataQuality.SUSPECT: 3,
 }
-_BASE_LIMITATIONS = (
-    "Alpaca Market Data IEX covers one exchange and is not consolidated SIP coverage.",
+_AAPL_SOURCE_LIMITATION = (
+    "Alpaca Market Data IEX covers one exchange and is not consolidated SIP coverage."
+)
+_BTC_SOURCE_LIMITATION = (
+    "Coinbase Exchange covers one crypto venue, not an aggregate BTC-USD market; its daily "
+    "candles provide base-asset volume but no trade count or VWAP."
+)
+_COMMON_LIMITATIONS = (
     (
         "Aggregated open and close use the first and last source sessions; high and low "
         "use exact extrema; volume and complete trade counts are summed."
@@ -78,7 +87,11 @@ _BASE_LIMITATIONS = (
 )
 
 
-def _limitations(request: AaplMarketChartRequest) -> tuple[str, ...]:
+def _limitations(
+    request: AaplMarketChartRequest,
+    *,
+    source_limitation: str,
+) -> tuple[str, ...]:
     if request.interval is AaplMarketChartInterval.AUTOMATIC:
         resolution_limitation = (
             "Automatic interval uses daily points through two years, ISO-calendar weeks for "
@@ -92,20 +105,27 @@ def _limitations(request: AaplMarketChartRequest) -> tuple[str, ...]:
             "only evidence available at known_at and is identified as ongoing."
         )
     return (
-        _BASE_LIMITATIONS[0],
+        source_limitation,
         resolution_limitation,
-        *_BASE_LIMITATIONS[1:3],
+        *_COMMON_LIMITATIONS[:2],
         (
             f"SMA {request.short_sma_window}, SMA {request.long_sma_window}, and SMA "
             f"{request.third_sma_window} use "
             "displayed-resolution closes and include the current point."
         ),
-        *_BASE_LIMITATIONS[3:],
+        *_COMMON_LIMITATIONS[2:],
     )
 
 
 class AaplMarketChartQueryError(RuntimeError):
     """Raised when stored evidence cannot produce a valid chart contract."""
+
+
+class BtcMarketChartQueryError(RuntimeError):
+    """Raised when stored Coinbase evidence cannot produce a valid chart contract."""
+
+
+_ChartResult = TypeVar("_ChartResult", AaplMarketChart, BtcMarketChart)
 
 
 class _HistoryOperations(Protocol):
@@ -137,9 +157,29 @@ class AaplMarketChartService:
 
     def query(self, request: AaplMarketChartRequest) -> AaplMarketChart:
         """Return a bounded chart at the deterministic resolution for its range."""
-        query = HistoricalBarQuery(
+        return self._query_scoped(
+            request,
             asset_id=_AAPL_ASSET_ID,
             source_id=ALPACA_SOURCE_ID,
+            volume_unit="shares",
+            source_limitation=_AAPL_SOURCE_LIMITATION,
+            result_model=AaplMarketChart,
+        )
+
+    def _query_scoped(
+        self,
+        request: AaplMarketChartRequest,
+        *,
+        asset_id: str,
+        source_id: str,
+        volume_unit: str,
+        source_limitation: str,
+        result_model: type[_ChartResult],
+    ) -> _ChartResult:
+        """Build one chart using an explicit immutable asset and source scope."""
+        query = HistoricalBarQuery(
+            asset_id=asset_id,
+            source_id=source_id,
             start=_HISTORY_START,
             end=request.known_at,
             known_at=request.known_at,
@@ -193,7 +233,10 @@ class AaplMarketChartService:
         latest_session = daily_tail[-1] if daily_tail else None
         total = len(series.bars)
         selected = len(selected_bars)
-        return AaplMarketChart(
+        return result_model(
+            asset_id=asset_id,
+            source_id=source_id,
+            volume_unit=volume_unit,
             known_at=request.known_at,
             period=request.period,
             interval=request.interval,
@@ -220,7 +263,7 @@ class AaplMarketChartService:
                 earliest_selected_timestamp=selected_bars[0].timestamp if selected_bars else None,
                 latest_selected_timestamp=selected_bars[-1].timestamp if selected_bars else None,
             ),
-            limitations=_limitations(request),
+            limitations=_limitations(request, source_limitation=source_limitation),
         )
 
     @staticmethod
@@ -532,3 +575,23 @@ class AaplMarketChartService:
             maximum_drawdown_input_observation_ids=drawdown_inputs,
             algorithm_version=_RANGE_ALGORITHM,
         )
+
+
+class BtcMarketChartService(AaplMarketChartService):
+    """Compose stored Coinbase BTC-USD bars without writes or provider calls."""
+
+    def query(self, request: BtcMarketChartRequest) -> BtcMarketChart:
+        """Return one bounded BTC-USD chart with an asset-specific contract."""
+        try:
+            return self._query_scoped(
+                request,
+                asset_id=_BTC_ASSET_ID,
+                source_id=COINBASE_SOURCE_ID,
+                volume_unit="BTC",
+                source_limitation=_BTC_SOURCE_LIMITATION,
+                result_model=BtcMarketChart,
+            )
+        except AaplMarketChartQueryError as error:
+            raise BtcMarketChartQueryError(
+                "stored Coinbase market history could not be charted"
+            ) from error

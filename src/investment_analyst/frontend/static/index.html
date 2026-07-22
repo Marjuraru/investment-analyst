@@ -32,11 +32,11 @@
             <span class="nav-index" aria-hidden="true">02</span>
             Mercado
           </a>
-          <a class="nav-link" href="#fundamentales">
+          <a class="nav-link" href="#fundamentales" data-apple-only>
             <span class="nav-index" aria-hidden="true">03</span>
             Fundamentales
           </a>
-          <a class="nav-link" href="#analisis">
+          <a class="nav-link" href="#analisis" data-apple-only>
             <span class="nav-index" aria-hidden="true">04</span>
             Análisis
           </a>
@@ -50,22 +50,27 @@
           <p>Fuentes verificables</p>
           <span>SEC EDGAR</span>
           <span>Alpaca Market Data · IEX</span>
+          <span>Coinbase Exchange · BTC-USD</span>
         </div>
       </aside>
 
       <div class="workspace">
         <header class="topbar">
           <div class="asset-context">
-            <p class="breadcrumb">Análisis de acciones <span aria-hidden="true">/</span> Estados Unidos</p>
+            <p id="asset-breadcrumb" class="breadcrumb">Análisis de acciones <span aria-hidden="true">/</span> Estados Unidos</p>
             <div class="asset-heading">
-              <span class="asset-symbol" aria-hidden="true">AAPL</span>
+              <span id="asset-symbol" class="asset-symbol" aria-hidden="true">AAPL</span>
               <div>
-                <h1>Apple Inc.</h1>
-                <p>NASDAQ · USD · Datos diarios</p>
+                <h1 id="asset-name">Apple Inc.</h1>
+                <p id="asset-meta">NASDAQ · USD · Datos diarios</p>
               </div>
             </div>
           </div>
           <div class="topbar-actions">
+            <div class="asset-selector" role="group" aria-label="Activo de mercado">
+              <button class="asset-selector-button active" type="button" data-market-asset="equity:us:aapl" aria-pressed="true">AAPL</button>
+              <button class="asset-selector-button" type="button" data-market-asset="crypto:btc-usd" aria-pressed="false">BTC-USD</button>
+            </div>
             <span id="health-badge" class="badge neutral">Consultando estado</span>
             <button id="theme-toggle" class="button secondary compact theme-toggle" type="button" aria-pressed="true">
               Tema claro
@@ -97,7 +102,7 @@
               <article class="status-card">
                 <div class="status-label">
                   <span class="status-dot" aria-hidden="true"></span>
-                  Última actualización
+                  Última actualización Apple
                 </div>
                 <strong id="run-status">—</strong>
                 <small id="run-time">—</small>
@@ -105,7 +110,7 @@
               <article class="status-card">
                 <div class="status-label">
                   <span class="status-dot" aria-hidden="true"></span>
-                  Próxima ejecución
+                  Próxima actualización Apple
                 </div>
                 <strong id="schedule-status">—</strong>
                 <small id="schedule-next">—</small>
@@ -134,7 +139,7 @@
             <article id="market-chart-card" class="market-chart-card" aria-busy="true">
               <header class="market-chart-header">
                 <div>
-                  <p class="chart-symbol">AAPL <span>· USD</span></p>
+                  <p class="chart-symbol"><span id="market-chart-symbol">AAPL</span> <span>· USD</span></p>
                   <div class="chart-quote-row">
                     <strong id="chart-latest-close">—</strong>
                     <span id="chart-range-change" class="chart-change neutral">—</span>
@@ -279,7 +284,7 @@
                       <dd id="chart-point-sma-50">—</dd>
                     </div>
                     <div>
-                      <dt>Volumen</dt>
+                      <dt id="chart-point-volume-label">Volumen</dt>
                       <dd id="chart-point-volume">—</dd>
                     </div>
                   </dl>
@@ -300,7 +305,7 @@
                     <div><dt>VWAP</dt><dd id="snapshot-vwap">—</dd></div>
                     <div><dt>Apertura</dt><dd id="snapshot-open">—</dd></div>
                     <div><dt>Máx. / Mín.</dt><dd id="snapshot-day-range">—</dd></div>
-                    <div><dt>Volumen</dt><dd id="snapshot-volume">—</dd></div>
+                    <div><dt id="snapshot-volume-label">Volumen</dt><dd id="snapshot-volume">—</dd></div>
                     <div><dt>Operaciones</dt><dd id="snapshot-trades">—</dd></div>
                   </dl>
 
@@ -348,7 +353,7 @@
                         <th id="chart-table-sma-short-label" scope="col">SMA 5</th>
                         <th id="chart-table-sma-long-label" scope="col">SMA 20</th>
                         <th id="chart-table-sma-third-label" scope="col">SMA 50</th>
-                        <th scope="col">Volumen</th>
+                        <th id="chart-table-volume-label" scope="col">Volumen</th>
                         <th scope="col">Operaciones</th>
                       </tr>
                     </thead>
@@ -359,7 +364,7 @@
             </article>
           </section>
 
-          <section id="fundamentales" class="fundamental-section" aria-labelledby="fundamentales-titulo">
+          <section id="fundamentales" class="fundamental-section" aria-labelledby="fundamentales-titulo" data-apple-only>
             <div class="section-intro analysis-intro">
               <div>
                 <p class="eyebrow">FUNDAMENTALES</p>
@@ -525,7 +530,7 @@
             </article>
           </section>
 
-          <section id="analisis" class="analysis-section" aria-labelledby="analisis-titulo">
+          <section id="analisis" class="analysis-section" aria-labelledby="analisis-titulo" data-apple-only>
             <div class="section-intro analysis-intro">
               <div>
                 <p class="eyebrow">ANÁLISIS</p>
@@ -625,7 +630,7 @@
             <div class="section-intro">
               <div>
                 <p class="eyebrow">OPERACIÓN</p>
-                <h2 id="operacion-titulo">Actualizar fuentes y cálculos</h2>
+                <h2 id="operacion-titulo">Actualizar Apple</h2>
               </div>
             </div>
 
@@ -633,7 +638,7 @@
               <summary>
                 <span>
                   <strong>Configuración de la actualización</strong>
-                  <small>SEC EDGAR + Alpaca Market Data IEX</small>
+                  <small id="run-source-label">SEC EDGAR + Alpaca Market Data IEX</small>
                 </span>
                 <span class="summary-action">Abrir</span>
               </summary>
@@ -647,7 +652,7 @@
                     <span>Fin del histórico de mercado</span>
                     <input id="market-end" name="market_end" type="date" required>
                   </label>
-                  <label class="field">
+                  <label class="field" data-apple-run-only>
                     <span>Frecuencia fundamental</span>
                     <select id="run-frequency" name="fundamental_frequency">
                       <option value="quarterly">Trimestral</option>
@@ -673,7 +678,7 @@
                   >
                   <small id="run-known-at-help">Déjalo vacío para que el flujo determine el corte UTC.</small>
                 </label>
-                <label class="check-row">
+                <label class="check-row" data-apple-run-only>
                   <input id="require-complete" name="require_complete" type="checkbox" checked>
                   <span>
                     <strong>Exigir un resultado completo</strong>
@@ -681,7 +686,7 @@
                   </span>
                 </label>
                 <div class="run-actions">
-                  <p>SEC se consulta en cada ejecución, aunque el mercado ya esté actualizado.</p>
+                  <p id="run-note">SEC se consulta en cada ejecución, aunque el mercado ya esté actualizado.</p>
                   <button id="run-button" class="button primary" type="submit">Ejecutar actualización</button>
                 </div>
               </form>
@@ -691,8 +696,8 @@
 
         <footer>
           <p>
-            Mercado: Alpaca Market Data IEX, ajuste total. IEX cubre un solo mercado y no equivale
-            a SIP consolidado. Fundamentales: SEC EDGAR oficial.
+            Mercado: Alpaca Market Data IEX para AAPL y Coinbase Exchange para BTC-USD; ambas son
+            coberturas de un mercado, no agregados consolidados. Fundamentales: SEC EDGAR oficial.
           </p>
           <p>Uso local · Sin ejecución de órdenes · No constituye asesoramiento financiero</p>
         </footer>
