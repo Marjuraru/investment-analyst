@@ -20,8 +20,9 @@ from investment_analyst.providers.fundamentals.sec_fact_models import (
     COMPANYFACTS_SOURCE_ID,
 )
 
-HISTORY_ALGORITHM_VERSION = "fundamental-research-history-v1-decimal34"
+HISTORY_ALGORITHM_VERSION = "fundamental-research-history-v2-decimal34"
 _DAYS_PER_YEAR = Decimal("365.2425")
+_LEVEL_UNITS = frozenset({"USD", "shares", "USD/shares"})
 
 
 class FundamentalResearchHistoryFormula(ContractModel):
@@ -33,7 +34,7 @@ class FundamentalResearchHistoryFormula(ContractModel):
     display_name_es: NonEmptyStr
     formula: NonEmptyStr
     availability_rule: NonEmptyStr
-    algorithm_version: Literal["fundamental-research-history-v1-decimal34"] = (
+    algorithm_version: Literal["fundamental-research-history-v2-decimal34"] = (
         HISTORY_ALGORITHM_VERSION
     )
 
@@ -50,7 +51,8 @@ FUNDAMENTAL_RESEARCH_HISTORY_FORMULAS = (
         display_name_es="CAGR",
         formula="(latest / earliest) ** (365.2425 / elapsed_days) - 1",
         availability_rule=(
-            "Solo para frecuencia anual, unidad USD, extremos positivos y al menos dos puntos."
+            "Solo para frecuencia anual, unidades de nivel, extremos positivos y al menos "
+            "dos puntos."
         ),
     ),
     FundamentalResearchHistoryFormula(
@@ -63,7 +65,7 @@ FUNDAMENTAL_RESEARCH_HISTORY_FORMULAS = (
         statistic_key="horizon_change_rate",
         display_name_es="Variación del horizonte",
         formula="latest / earliest - 1",
-        availability_rule="Solo para unidad USD y un valor inicial positivo.",
+        availability_rule="Solo para unidades de nivel y un valor inicial positivo.",
     ),
     FundamentalResearchHistoryFormula(
         statistic_key="latest_change_from_previous_available",
@@ -75,7 +77,7 @@ FUNDAMENTAL_RESEARCH_HISTORY_FORMULAS = (
         statistic_key="latest_change_rate_from_previous_available",
         display_name_es="Variación frente al período disponible anterior",
         formula="latest / previous_available - 1",
-        availability_rule="Solo para unidad USD y un valor anterior positivo.",
+        availability_rule="Solo para unidades de nivel y un valor anterior positivo.",
     ),
     FundamentalResearchHistoryFormula(
         statistic_key="range",
@@ -147,7 +149,7 @@ class FundamentalResearchHistoryStatistics(ContractModel):
     horizon_change: FinancialDecimal | None = None
     horizon_change_rate: FinancialDecimal | None = None
     compound_annual_growth_rate: FinancialDecimal | None = None
-    algorithm_version: Literal["fundamental-research-history-v1-decimal34"] = (
+    algorithm_version: Literal["fundamental-research-history-v2-decimal34"] = (
         HISTORY_ALGORITHM_VERSION
     )
 
@@ -236,7 +238,7 @@ class FundamentalResearchMetricHistory(ContractModel):
 
     metric_key: NonEmptyStr
     display_name_es: NonEmptyStr
-    unit: Literal["ratio", "USD"]
+    unit: Literal["ratio", "USD", "shares", "USD/shares"]
     frequency: DataFrequency
     points: tuple[FundamentalResearchHistoryPoint, ...]
     statistics: FundamentalResearchHistoryStatistics
@@ -283,7 +285,7 @@ class FundamentalResearchMetricHistory(ContractModel):
             if previous_value is not None:
                 latest_delta = values[-1] - previous_value
                 horizon_delta = values[-1] - values[0]
-                if self.unit == "USD":
+                if self.unit in _LEVEL_UNITS:
                     if previous_value > 0:
                         latest_rate = values[-1] / previous_value - 1
                     if values[0] > 0:
@@ -347,12 +349,12 @@ class AaplFundamentalResearchHistoryCoverage(ContractModel):
 
 
 class AaplFundamentalResearchHistoryResult(ContractModel):
-    """Versioned historical lens over one exact research result."""
+    """Versioned historical view over one exact research result."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["aapl-fundamental-research-history-v1"] = (
-        "aapl-fundamental-research-history-v1"
+    schema_version: Literal["aapl-fundamental-research-history-v2"] = (
+        "aapl-fundamental-research-history-v2"
     )
     asset_id: Literal["equity:us:aapl"] = ASSET_ID
     source_id: Literal["sec-edgar:aapl:companyfacts"] = COMPANYFACTS_SOURCE_ID

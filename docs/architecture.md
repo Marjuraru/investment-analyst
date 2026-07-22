@@ -26,10 +26,26 @@ SEC normalizadas. Selecciona revisiones por `available_at` y `known_at`, calcula
 dígitos y devuelve los UUID de todos los inputs. En esta etapa no persiste resultados ni altera las
 cinco variables del contrato fundamental original.
 
+La vista fundamental unificada organiza el resultado histórico exacto por tipo de análisis:
+crecimiento y datos por acción, rentabilidad, retornos y eficiencia, calidad del beneficio, liquidez
+y balance, deuda y solvencia, caja y reinversión y asignación de capital.
+Cada métrica pertenece a una sola sección, conserva su relevancia y disponibilidad y no se duplica
+por autor o método de inversión. La clasificación empresarial expone sus categorías y requisitos,
+pero no asigna una categoría sin una regla versionada y evidencia suficiente. Esta capa no recalcula
+cifras, no introduce umbrales y no se combina con mercado ni con el futuro dominio macro.
+
 El gráfico local agrega en memoria las barras diarias ya seleccionadas point-in-time. Su contrato
-v2 conserva puntos diarios hasta 2A, semanas ISO para 5A y meses UTC para Máx., sin crear una nueva
-frecuencia persistida ni modificar identidades. Todo intervalo agregado retiene las identidades de
-sus sesiones fuente y reglas versionadas para OHLCV, VWAP, calidad y SMA.
+v5 conserva por compatibilidad los rangos históricos, añade intervalos explícitos diarios,
+semanales y mensuales; la interfaz solicita siempre `max`. No crea una nueva frecuencia persistida
+ni modifica identidades. También publica tres SMA configurables sin alterar las dos SMA canónicas del
+diagnóstico. Todo intervalo agregado retiene las identidades de sus días fuente y reglas versionadas
+para OHLCV, VWAP, calidad y SMA.
+
+La política de cobertura amplia se aplica por dominio. El RawRecord conserva el payload completo y
+la capa normalizada promueve todos los campos verificables del contrato activo: las barras Alpaca
+diarias ya conservan OHLC, volumen, número de operaciones y VWAP. Incorporar quotes, trades,
+corporate actions, opciones o cobertura SIP exige fuentes y contratos independientes; no se
+inventan a partir de una barra ni se atribuyen al feed IEX.
 
 ## Diagnósticos separados y presentación consolidada
 Los diagnósticos de mercado y fundamental se calculan de forma independiente y

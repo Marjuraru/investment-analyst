@@ -29,6 +29,9 @@ from investment_analyst.analytics.fundamental_trend_models import (
 from investment_analyst.analytics.fundamental_trend_service import (
     AaplFundamentalTrendQueryError,
 )
+from investment_analyst.analytics.fundamentals.analysis_models import (
+    AaplFundamentalAnalysisResult,
+)
 from investment_analyst.analytics.fundamentals.research_history_models import (
     AaplFundamentalResearchHistoryResult,
 )
@@ -44,6 +47,7 @@ from investment_analyst.analytics.fundamentals.research_service import (
 )
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChart,
+    AaplMarketChartInterval,
     AaplMarketChartPeriod,
     AaplMarketChartRequest,
 )
@@ -155,6 +159,15 @@ class _ApplicationOperations(Protocol):
         """Calculate bounded historical fundamental research statistics."""
         ...
 
+    def query_aapl_fundamental_analysis(
+        self,
+        request: AaplFundamentalResearchRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalAnalysisResult:
+        """Organize exact research evidence into analytical sections."""
+        ...
+
 
 class _WebOperations(Protocol):
     def overview(self) -> dict[str, object]:
@@ -187,6 +200,13 @@ class _WebOperations(Protocol):
         """Return bounded historical fundamental research statistics."""
         ...
 
+    def fundamental_analysis(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Return one unified fundamental analysis."""
+        ...
+
     def run(self, payload: dict[str, object]) -> dict[str, object]:
         """Execute one manual refresh."""
         ...
@@ -217,6 +237,9 @@ class AaplLocalController:
         ] = {}
         self._fundamental_research_history_cache: dict[
             AaplFundamentalResearchRequest, AaplFundamentalResearchHistoryResult
+        ] = {}
+        self._fundamental_analysis_cache: dict[
+            AaplFundamentalResearchRequest, AaplFundamentalAnalysisResult
         ] = {}
 
     @classmethod
@@ -265,6 +288,7 @@ class AaplLocalController:
                 self._fundamental_trend_cache.clear()
                 self._fundamental_research_cache.clear()
                 self._fundamental_research_history_cache.clear()
+                self._fundamental_analysis_cache.clear()
 
     def report_request(
         self,
@@ -348,6 +372,24 @@ class AaplLocalController:
             self._fundamental_research_history_cache[request] = history
             return history
 
+    def fundamental_analysis_request(
+        self,
+        request: AaplFundamentalResearchRequest,
+    ) -> AaplFundamentalAnalysisResult:
+        """Return cached analytical sections without providers or writes."""
+        with self._operation_lock:
+            cached = self._fundamental_analysis_cache.get(request)
+            if cached is not None:
+                return cached
+            analysis = self._application.query_aapl_fundamental_analysis(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            )
+            if len(self._fundamental_analysis_cache) >= _MAX_READ_CACHE_ENTRIES:
+                self._fundamental_analysis_cache.pop(next(iter(self._fundamental_analysis_cache)))
+            self._fundamental_analysis_cache[request] = analysis
+            return analysis
+
 
 class AaplLocalWebApplication:
     """JSON-safe local UI operations over the controller and optional scheduler."""
@@ -394,15 +436,44 @@ class AaplLocalWebApplication:
 
     def market_chart(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate query parameters and return the versioned market-chart contract."""
-        allowed = {"known_at", "period"}
+        allowed = {
+            "known_at",
+            "period",
+            "interval",
+            "short_sma_window",
+            "long_sma_window",
+            "third_sma_window",
+        }
         if set(parameters) - allowed:
             raise ValueError("market chart query contains unsupported parameters")
         known_at = _one_parameter(parameters, "known_at", required=True)
         period = _one_parameter(parameters, "period", required=False)
-        request = AaplMarketChartRequest(
-            known_at=_aware_datetime(known_at),
-            period=period or AaplMarketChartPeriod.SIX_MONTHS,
-        )
+        interval = _one_parameter(parameters, "interval", required=False)
+        short_sma_window = _one_parameter(parameters, "short_sma_window", required=False)
+        long_sma_window = _one_parameter(parameters, "long_sma_window", required=False)
+        third_sma_window = _one_parameter(parameters, "third_sma_window", required=False)
+        request_parameters = {
+            "known_at": _aware_datetime(known_at),
+            "period": period or AaplMarketChartPeriod.SIX_MONTHS,
+            "interval": interval or AaplMarketChartInterval.AUTOMATIC,
+            "short_sma_window": _integer_parameter(
+                short_sma_window,
+                name="short_sma_window",
+                default=5,
+            ),
+            "long_sma_window": _integer_parameter(
+                long_sma_window,
+                name="long_sma_window",
+                default=20,
+            ),
+        }
+        if third_sma_window is not None:
+            request_parameters["third_sma_window"] = _integer_parameter(
+                third_sma_window,
+                name="third_sma_window",
+                default=50,
+            )
+        request = AaplMarketChartRequest.model_validate(request_parameters)
         return self._controller.market_chart_request(request).to_json_dict()
 
     def fundamental_trend(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
@@ -435,6 +506,14 @@ class AaplLocalWebApplication:
         """Validate query parameters and return historical SEC statistics."""
         request = _fundamental_research_request(parameters)
         return self._controller.fundamental_research_history_request(request).to_json_dict()
+
+    def fundamental_analysis(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Validate query parameters and return unified analytical sections."""
+        request = _fundamental_research_request(parameters)
+        return self._controller.fundamental_analysis_request(request).to_json_dict()
 
     def run(self, payload: dict[str, object]) -> dict[str, object]:
         """Execute one explicit request and return bounded operational state."""
@@ -509,7 +588,7 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, server.application.report(parameters))
                 return
             if parsed.path == "/api/market-chart":
-                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=8)
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(HTTPStatus.OK, server.application.market_chart(parameters))
                 return
@@ -532,6 +611,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     HTTPStatus.OK,
                     server.application.fundamental_research_history(parameters),
+                )
+                return
+            if parsed.path == "/api/fundamental-analysis":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.fundamental_analysis(parameters),
                 )
                 return
             raise _HttpError(HTTPStatus.NOT_FOUND, "not_found", "route not found")
@@ -722,6 +809,14 @@ def _aware_datetime(value: str | None) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("known_at must include timezone information")
     return parsed.astimezone(UTC)
+
+
+def _integer_parameter(value: str | None, *, name: str, default: int) -> int:
+    if value is None:
+        return default
+    if not value.isascii() or not value.isdecimal():
+        raise ValueError(f"{name} must be an integer")
+    return int(value)
 
 
 def _frequency(value: str | None) -> DataFrequency:

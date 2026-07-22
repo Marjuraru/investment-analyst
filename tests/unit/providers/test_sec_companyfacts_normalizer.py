@@ -139,7 +139,7 @@ def _company_document_with_research_facts() -> dict[str, object]:
                 _instant_fact(annual=True, value=str(5000 + position)),
                 _instant_fact(annual=False, value=str(5100 + position)),
             ]
-        us_gaap[definition.tag] = {"units": {"USD": facts}}
+        us_gaap[definition.tag] = {"units": {definition.unit: facts}}
     return document
 
 
@@ -232,6 +232,10 @@ def test_extracts_additional_research_catalog_without_expanding_core_query() -> 
     assert result.annual_count == expected_total_fields
     assert result.quarterly_count == expected_total_fields
     assert all(result.field_counts[item.field_name] == 2 for item in SEC_RESEARCH_FACT_DEFINITIONS)
+    units = {fact.field_name: fact.unit for fact in result.facts}
+    assert units["fundamental.diluted_earnings_per_share"] == "USD/shares"
+    assert units["fundamental.weighted_average_diluted_shares"] == "shares"
+    assert units["fundamental.shares_outstanding"] == "shares"
     assert set(allowed_sec_fundamental_fields()) == {
         "fundamental.revenue",
         "fundamental.net_income",
@@ -380,6 +384,26 @@ def test_observation_uuid_is_snapshot_and_clock_independent_but_value_sensitive(
     assert str(submissions.record_id) in first.source.record_key
     assert first.period_end.tzinfo is UTC
     assert first.frequency in {DataFrequency.ANNUAL, DataFrequency.QUARTERLY}
+
+    research_company = _company(document=_company_document_with_research_facts())
+    research_facts = normalizer.extract(
+        research_company,
+        submissions,
+        normalized_at=NORMALIZED_AT,
+    ).facts
+    diluted_eps = next(
+        fact
+        for fact in research_facts
+        if fact.field_name == "fundamental.diluted_earnings_per_share"
+        and fact.frequency is DataFrequency.ANNUAL
+    )
+    diluted_eps_observation = sec_fact_to_observation(
+        diluted_eps,
+        research_company,
+        submissions,
+        normalized_at=NORMALIZED_AT,
+    )
+    assert diluted_eps_observation.unit == "USD/shares"
 
     annual_revenue = next(
         fact

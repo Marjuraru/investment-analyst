@@ -25,6 +25,7 @@ from investment_analyst.analytics.fundamentals.research_models import (
     get_fundamental_research_metric_definition,
 )
 from investment_analyst.core.models import DataFrequency
+from investment_analyst.providers.fundamentals.sec_fact_models import get_sec_fact_definition
 
 
 class _Research:
@@ -58,6 +59,7 @@ def _metric(
                 f"{metric_key}:{period_end.isoformat()}:{field.role}",
             ),
             value=Decimal("1"),
+            unit=get_sec_fact_definition(field.field_name).unit,
             available_at=available_at,
         )
         for field in definition.input_fields
@@ -190,6 +192,34 @@ def test_quarterly_usd_history_does_not_annualize_seasonal_values() -> None:
     assert result.coverage.series_with_cagr == 0
 
 
+def test_annual_per_share_and_share_count_histories_publish_growth_rates() -> None:
+    dates = (
+        datetime(2023, 9, 30, tzinfo=UTC),
+        datetime(2024, 9, 28, tzinfo=UTC),
+    )
+    eps = "fundamental.research.diluted_eps"
+    shares = "fundamental.research.shares_outstanding"
+    research = _research_result(
+        (
+            (eps, "5", dates[0]),
+            (shares, "100", dates[0]),
+            (eps, "6", dates[1]),
+            (shares, "95", dates[1]),
+        )
+    )
+
+    result = AaplFundamentalResearchHistoryService(_Research(research)).query(research.request)
+    histories = {item.metric_key: item for item in result.series}
+
+    assert histories[eps].unit == "USD/shares"
+    assert histories[eps].statistics.latest_change_rate_from_previous_available == Decimal("0.2")
+    assert histories[eps].statistics.compound_annual_growth_rate is not None
+    assert histories[shares].unit == "shares"
+    assert histories[shares].statistics.latest_change_rate_from_previous_available == Decimal(
+        "-0.05"
+    )
+
+
 def test_non_positive_currency_comparisons_keep_absolute_changes_only() -> None:
     metric_key = "fundamental.research.working_capital"
     research = _research_result(
@@ -221,7 +251,7 @@ def test_single_point_history_has_no_comparison_and_preserves_exact_json() -> No
     assert statistics.latest_change_from_previous_available is None
     assert statistics.horizon_change is None
     assert statistics.elapsed_days == 0
-    assert payload["schema_version"] == "aapl-fundamental-research-history-v1"
+    assert payload["schema_version"] == "aapl-fundamental-research-history-v2"
     assert payload["series"][0]["points"][0]["value"] == "0.893200"
     assert payload["series"][0]["statistics"]["arithmetic_mean"] == "0.893200"
     assert payload["series"][0]["statistics"]["algorithm_version"] == (HISTORY_ALGORITHM_VERSION)

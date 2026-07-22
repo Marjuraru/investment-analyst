@@ -69,6 +69,9 @@ def test_five_exact_fact_definitions() -> None:
 
 def test_research_fact_catalog_is_additive_and_has_unique_fields_and_tags() -> None:
     assert [item.field_name for item in SEC_RESEARCH_FACT_DEFINITIONS] == [
+        "fundamental.diluted_earnings_per_share",
+        "fundamental.weighted_average_diluted_shares",
+        "fundamental.shares_outstanding",
         "fundamental.gross_profit",
         "fundamental.operating_income",
         "fundamental.operating_cash_flow",
@@ -88,6 +91,15 @@ def test_research_fact_catalog_is_additive_and_has_unique_fields_and_tags() -> N
         "fundamental.long_term_debt_noncurrent",
         "fundamental.marketable_securities_current",
         "fundamental.marketable_securities_noncurrent",
+        "fundamental.commercial_paper",
+        "fundamental.interest_expense",
+        "fundamental.income_before_tax",
+        "fundamental.income_tax_expense",
+        "fundamental.property_plant_and_equipment_net",
+        "fundamental.operating_lease_liability_current",
+        "fundamental.operating_lease_liability_noncurrent",
+        "fundamental.finance_lease_liability_current",
+        "fundamental.finance_lease_liability_noncurrent",
     ]
     fields = [item.field_name for item in SEC_NORMALIZED_FACT_DEFINITIONS]
     tags = [item.tag for item in SEC_NORMALIZED_FACT_DEFINITIONS]
@@ -128,13 +140,30 @@ def test_instant_fact_rejects_start() -> None:
     ("field", "value", "message"),
     [
         ("asset_id", "equity:us:other", "Apple"),
-        ("unit", "EUR", "USD"),
+        ("unit", "EUR", "field definition"),
         ("frequency", DataFrequency.DAY_1, "quarterly or annual"),
     ],
 )
 def test_fact_rejects_scope_violations(field: str, value: object, message: str) -> None:
     with pytest.raises(ValidationError, match=message):
         _fact(**{field: value})
+
+
+def test_non_currency_fact_requires_its_exact_declared_unit() -> None:
+    diluted_eps = _fact(
+        field_name="fundamental.diluted_earnings_per_share",
+        tag="EarningsPerShareDiluted",
+        unit="USD/shares",
+        value="2.01",
+    )
+
+    assert diluted_eps.unit == "USD/shares"
+    with pytest.raises(ValidationError, match="field definition"):
+        _fact(
+            field_name="fundamental.diluted_earnings_per_share",
+            tag="EarningsPerShareDiluted",
+            unit="USD",
+        )
 
 
 def test_filing_metadata_amendment_and_timezone_validation() -> None:

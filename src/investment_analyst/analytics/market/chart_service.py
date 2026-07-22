@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 from decimal import Context, Decimal, localcontext
-from typing import Literal, Protocol
+from typing import Protocol
 from uuid import UUID
 
 from investment_analyst.analytics.market.bar_models import (
@@ -15,6 +15,7 @@ from investment_analyst.analytics.market.bar_schemas import ALPACA_SOURCE_ID
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChart,
     AaplMarketChartCoverage,
+    AaplMarketChartInterval,
     AaplMarketChartPoint,
     AaplMarketChartRangeStatistics,
     AaplMarketChartRequest,
@@ -52,12 +53,8 @@ _QUALITY_PRIORITY = {
     DataQuality.PARTIAL: 2,
     DataQuality.SUSPECT: 3,
 }
-_LIMITATIONS = (
+_BASE_LIMITATIONS = (
     "Alpaca Market Data IEX covers one exchange and is not consolidated SIP coverage.",
-    (
-        "Ranges through two years use daily points; five years uses ISO-calendar weeks; "
-        "maximum uses UTC-calendar months."
-    ),
     (
         "Aggregated open and close use the first and last source sessions; high and low "
         "use exact extrema; volume and complete trade counts are summed."
@@ -66,7 +63,6 @@ _LIMITATIONS = (
         "Aggregated VWAP is volume-weighted from daily VWAP inputs only when every source "
         "session supplies VWAP and total volume is positive."
     ),
-    "SMA 5 and SMA 20 use displayed-resolution closes and include the current point.",
     "Ranges are bounded by available source trading sessions, not calendar-day estimates.",
     "Range CAGR is shown only when displayed endpoints span at least 365 calendar days.",
     (
@@ -80,6 +76,32 @@ _LIMITATIONS = (
     ),
     "The chart is descriptive analytical output, not financial advice or a recommendation.",
 )
+
+
+def _limitations(request: AaplMarketChartRequest) -> tuple[str, ...]:
+    if request.interval is AaplMarketChartInterval.AUTOMATIC:
+        resolution_limitation = (
+            "Automatic interval uses daily points through two years, ISO-calendar weeks for "
+            "five years, and UTC-calendar months for maximum."
+        )
+    else:
+        resolution_limitation = (
+            f"The requested {request.interval.value} interval uses complete "
+            f"{request.resolution.value} UTC-calendar groups built from stored daily bars. "
+            "Earlier groups are not truncated by the range; the current calendar group contains "
+            "only evidence available at known_at and is identified as ongoing."
+        )
+    return (
+        _BASE_LIMITATIONS[0],
+        resolution_limitation,
+        *_BASE_LIMITATIONS[1:3],
+        (
+            f"SMA {request.short_sma_window}, SMA {request.long_sma_window}, and SMA "
+            f"{request.third_sma_window} use "
+            "displayed-resolution closes and include the current point."
+        ),
+        *_BASE_LIMITATIONS[3:],
+    )
 
 
 class AaplMarketChartQueryError(RuntimeError):
@@ -141,13 +163,32 @@ class AaplMarketChartService:
         groups = self._group_bars(series.bars, request.resolution)
         selected_group_start = self._selected_group_start(groups, request.session_limit)
         selected_groups = groups[selected_group_start:]
-        context_groups = groups[max(0, selected_group_start - 19) :]
-        context_points = self._build_points(context_groups, request.resolution)
+        maximum_sma_window = max(
+            request.short_sma_window,
+            request.long_sma_window,
+            request.third_sma_window,
+        )
+        context_groups = groups[max(0, selected_group_start - (maximum_sma_window - 1)) :]
+        context_points = self._build_points(
+            context_groups,
+            request.resolution,
+            request.short_sma_window,
+            request.long_sma_window,
+            request.third_sma_window,
+            request.known_at,
+        )
         points = context_points[-len(selected_groups) :] if selected_groups else ()
         selected_bars = tuple(bar for group in selected_groups for bar in group)
         daily_tail = self._build_points(
-            self._group_bars(series.bars[-20:], AaplMarketChartResolution.DAILY),
+            self._group_bars(
+                series.bars[-maximum_sma_window:],
+                AaplMarketChartResolution.DAILY,
+            ),
             AaplMarketChartResolution.DAILY,
+            request.short_sma_window,
+            request.long_sma_window,
+            request.third_sma_window,
+            request.known_at,
         )
         latest_session = daily_tail[-1] if daily_tail else None
         total = len(series.bars)
@@ -155,8 +196,14 @@ class AaplMarketChartService:
         return AaplMarketChart(
             known_at=request.known_at,
             period=request.period,
+            interval=request.interval,
             session_limit=request.session_limit,
             resolution=request.resolution,
+            sma_windows=(
+                request.short_sma_window,
+                request.long_sma_window,
+                request.third_sma_window,
+            ),
             points=points,
             latest_session=latest_session,
             range_statistics=self._range_statistics(points, request.resolution),
@@ -173,7 +220,7 @@ class AaplMarketChartService:
                 earliest_selected_timestamp=selected_bars[0].timestamp if selected_bars else None,
                 latest_selected_timestamp=selected_bars[-1].timestamp if selected_bars else None,
             ),
-            limitations=_LIMITATIONS,
+            limitations=_limitations(request),
         )
 
     @staticmethod
@@ -208,6 +255,10 @@ class AaplMarketChartService:
         cls,
         groups: tuple[tuple[MarketBar, ...], ...],
         resolution: AaplMarketChartResolution,
+        short_sma_window: int,
+        long_sma_window: int,
+        third_sma_window: int,
+        known_at: datetime,
     ) -> tuple[AaplMarketChartPoint, ...]:
         points: list[AaplMarketChartPoint] = []
         for group in groups:
@@ -246,6 +297,11 @@ class AaplMarketChartService:
                 timestamp=latest.timestamp,
                 bar_available_at=available_at,
                 source_session_count=len(group),
+                calendar_interval_closed=cls._calendar_interval_closed(
+                    resolution,
+                    latest.timestamp,
+                    known_at,
+                ),
                 open=first.open,
                 high=highest.high,
                 low=lowest.low,
@@ -268,26 +324,47 @@ class AaplMarketChartService:
                 vwap_input_observation_ids=(
                     tuple(bar.observation_ids["vwap"] for bar in group) if vwap is not None else ()
                 ),
-                sma_5=cls._sma(
+                short_sma=cls._sma(
                     points,
                     latest.close,
                     close_observation_id,
                     available_at,
                     resolution,
-                    5,
+                    short_sma_window,
                 ),
-                sma_20=cls._sma(
+                long_sma=cls._sma(
                     points,
                     latest.close,
                     close_observation_id,
                     available_at,
                     resolution,
-                    20,
+                    long_sma_window,
+                ),
+                third_sma=cls._sma(
+                    points,
+                    latest.close,
+                    close_observation_id,
+                    available_at,
+                    resolution,
+                    third_sma_window,
                 ),
                 aggregation_algorithm_version=_AGGREGATION_ALGORITHM,
             )
             points.append(point)
         return tuple(points)
+
+    @staticmethod
+    def _calendar_interval_closed(
+        resolution: AaplMarketChartResolution,
+        timestamp: datetime,
+        known_at: datetime,
+    ) -> bool:
+        """Distinguish an ongoing weekly/monthly candle from a range truncation."""
+        if resolution is AaplMarketChartResolution.DAILY:
+            return True
+        if resolution is AaplMarketChartResolution.WEEKLY:
+            return timestamp.date().isocalendar()[:2] != known_at.date().isocalendar()[:2]
+        return (timestamp.year, timestamp.month) != (known_at.year, known_at.month)
 
     @staticmethod
     def _selected_group_start(
@@ -299,6 +376,8 @@ class AaplMarketChartService:
         for index in range(len(groups) - 1, -1, -1):
             next_count = selected_sessions + len(groups[index])
             if next_count > session_limit:
+                if selected_sessions == 0:
+                    return index
                 return index + 1
             selected_sessions = next_count
         return 0
@@ -332,7 +411,7 @@ class AaplMarketChartService:
         current_close_observation_id: UUID,
         current_available_at: datetime,
         resolution: AaplMarketChartResolution,
-        window: Literal[5, 20],
+        window: int,
     ) -> AaplMarketChartSma | None:
         if len(prior_points) + 1 < window:
             return None

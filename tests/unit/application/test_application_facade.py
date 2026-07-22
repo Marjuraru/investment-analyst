@@ -75,7 +75,7 @@ def test_chart_query_is_empty_bounded_and_read_only(tmp_path: Path) -> None:
         location=StorageLocationRequest(legacy_root=root),
     )
 
-    assert chart.schema_version == "aapl-market-chart-v2"
+    assert chart.schema_version == "aapl-market-chart-v5"
     assert chart.points == ()
     assert chart.session_limit == 132
     assert chart.traceability_verified
@@ -121,7 +121,7 @@ def test_fundamental_research_query_is_empty_bounded_and_read_only(tmp_path: Pat
         location=StorageLocationRequest(legacy_root=root),
     )
 
-    assert research.schema_version == "aapl-fundamental-research-v1"
+    assert research.schema_version == "aapl-fundamental-research-v2"
     assert research.periods == ()
     assert research.coverage.output_periods == 0
     assert research.traceability_verified
@@ -145,11 +145,47 @@ def test_fundamental_research_history_is_empty_bounded_and_read_only(tmp_path: P
         location=StorageLocationRequest(legacy_root=root),
     )
 
-    assert history.schema_version == "aapl-fundamental-research-history-v1"
-    assert history.research.schema_version == "aapl-fundamental-research-v1"
+    assert history.schema_version == "aapl-fundamental-research-history-v2"
+    assert history.research.schema_version == "aapl-fundamental-research-v2"
     assert history.series == ()
     assert history.coverage.series_returned == 0
     assert history.traceability_verified
+    assert storage_paths.database_path.read_bytes() == database_before
+
+
+def test_fundamental_analysis_is_empty_bounded_and_read_only(tmp_path: Path) -> None:
+    root = tmp_path / "legacy-fundamental-analysis"
+    storage_paths = StoragePaths.from_root(root)
+    with LocalStorage(storage_paths):
+        pass
+    database_before = storage_paths.database_path.read_bytes()
+    request = AaplFundamentalResearchRequest(
+        known_at=datetime(2026, 7, 14, 4, 41, 55, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+        limit=5,
+    )
+
+    analysis = _application(tmp_path).query_aapl_fundamental_analysis(
+        request,
+        location=StorageLocationRequest(legacy_root=root),
+    )
+
+    assert analysis.schema_version == "aapl-fundamental-analysis-v1"
+    assert analysis.history.research.periods == ()
+    assert tuple(item.definition.section_key for item in analysis.sections) == (
+        "growth_and_per_share",
+        "profitability",
+        "returns_and_efficiency",
+        "earnings_quality",
+        "liquidity_and_balance",
+        "debt_and_solvency",
+        "cash_and_reinvestment",
+        "capital_allocation",
+    )
+    assert all(item.coverage.latest_period_metrics == 0 for item in analysis.sections)
+    assert analysis.coverage.expected_metrics == 40
+    assert analysis.classification.status == "insufficient_evidence"
+    assert analysis.traceability_verified
     assert storage_paths.database_path.read_bytes() == database_before
 
 
