@@ -175,10 +175,10 @@
                       <label class="chart-interval-control">
                         <span>Intervalo</span>
                         <select id="chart-interval" aria-label="Intervalo de cada punto o vela">
-                          <option value="auto">Automático</option>
-                          <option value="1d">1 día</option>
-                          <option value="1w">1 semana</option>
-                          <option value="1mo">1 mes</option>
+                          <option value="auto">Automático · último año</option>
+                          <option value="1d">1 día · último año</option>
+                          <option value="1w">1 semana · últimos 5 años</option>
+                          <option value="1mo">1 mes · historial completo</option>
                         </select>
                       </label>
                       <details id="chart-settings" class="chart-settings">
@@ -318,7 +318,7 @@
                     <div><dt id="snapshot-sma-third-distance-label">Dist. SMA 50</dt><dd id="snapshot-sma-50-distance">—</dd></div>
                   </dl>
 
-                  <p class="snapshot-group-title">Historial completo</p>
+                  <p id="snapshot-range-title" class="snapshot-group-title">Último año</p>
                   <dl class="snapshot-grid">
                     <div><dt>Retorno</dt><dd id="snapshot-range-return">—</dd></div>
                     <div><dt>Días con datos</dt><dd id="chart-visible-sessions">—</dd></div>

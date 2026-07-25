@@ -1,10 +1,15 @@
 """Tests for immutable canonical raw-record files."""
 
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
-from investment_analyst.storage import RecordConflictError, StorageError
+from investment_analyst.storage import (
+    RecordConflictError,
+    RecordNotFoundError,
+    StorageError,
+)
 
 from .conftest import make_raw_record
 
@@ -26,6 +31,23 @@ def test_save_and_recover_raw_record(storage) -> None:
 
     assert recovered == record
     assert _indexed_path(storage, record.record_id).is_file()
+
+
+def test_recover_raw_records_in_one_verified_batch(storage) -> None:
+    first = make_raw_record()
+    second = make_raw_record()
+    storage.raw_records.save(first)
+    storage.raw_records.save(second)
+
+    recovered = storage.raw_records.get_many([second.record_id, first.record_id, second.record_id])
+
+    assert recovered == {
+        first.record_id: first,
+        second.record_id: second,
+    }
+    assert storage.raw_records.get_many([]) == {}
+    with pytest.raises(RecordNotFoundError, match="was not found"):
+        storage.raw_records.get_many([first.record_id, uuid4()])
 
 
 def test_raw_path_is_partitioned_and_safe(storage) -> None:
@@ -50,6 +72,9 @@ def test_checksum_detects_raw_file_modification(storage) -> None:
 
     with pytest.raises(StorageError, match="checksum mismatch"):
         storage.raw_records.get(record.record_id)
+
+    with pytest.raises(StorageError, match="checksum mismatch"):
+        storage.raw_records.get_many([record.record_id])
 
 
 def test_raw_save_is_idempotent_for_identical_content(storage) -> None:

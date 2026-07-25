@@ -1,6 +1,7 @@
 """Immutable canonical JSON storage for original records."""
 
 import re
+from collections.abc import Collection
 from datetime import datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -16,7 +17,6 @@ from investment_analyst.storage.errors import (
 from investment_analyst.storage.paths import StoragePaths
 from investment_analyst.storage.serialization import (
     canonical_json_bytes,
-    canonical_json_text,
     model_from_json,
     sha256_hex,
 )
@@ -31,9 +31,8 @@ def _safe_source_component(source_id: str) -> str:
 
 
 def _ensure_within(base: Path, candidate: Path) -> Path:
-    base_resolved = base.resolve()
     candidate_resolved = candidate.resolve()
-    if not candidate_resolved.is_relative_to(base_resolved):
+    if not candidate_resolved.is_relative_to(base):
         raise StorageError("raw record path escapes the configured raw directory")
     return candidate_resolved
 
@@ -49,6 +48,7 @@ class JsonRawRecordRepository:
         read_only: bool = False,
     ) -> None:
         self._paths = paths
+        self._raw_root = paths.raw_dir.resolve()
         self._connection = connection
         self._read_only = read_only
 
@@ -68,7 +68,7 @@ class JsonRawRecordRepository:
             return record
 
         relative_path = self._relative_path(record)
-        target = _ensure_within(self._paths.raw_dir, self._paths.raw_dir / relative_path)
+        target = _ensure_within(self._raw_root, self._raw_root / relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
             existing_bytes = target.read_bytes()
@@ -117,11 +117,36 @@ class JsonRawRecordRepository:
         row = self._index_row(record_id)
         if row is None:
             raise RecordNotFoundError(f"raw record {record_id} was not found")
-        data = self._verify_file(row[0], row[1], row[2])
-        record = model_from_json(RawRecord, data)
+        record = self._verify_file(row[0], row[1], row[2])
         if record.record_id != record_id:
             raise StorageError("stored raw record identifier does not match its index")
         return record
+
+    def get_many(self, record_ids: Collection[UUID]) -> dict[UUID, RawRecord]:
+        ordered_ids = tuple(sorted(set(record_ids), key=str))
+        if not ordered_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in ordered_ids)
+        rows = self._connection.execute(
+            f"""
+            SELECT record_id, relative_path, checksum_sha256, document_json
+            FROM raw_record_index
+            WHERE record_id IN ({placeholders})
+            """,  # noqa: S608
+            [str(record_id) for record_id in ordered_ids],
+        ).fetchall()
+        indexed = {UUID(row[0]): (row[1], row[2], row[3]) for row in rows}
+        missing = [record_id for record_id in ordered_ids if record_id not in indexed]
+        if missing:
+            raise RecordNotFoundError(f"raw record {missing[0]} was not found")
+
+        records: dict[UUID, RawRecord] = {}
+        for record_id in ordered_ids:
+            record = self._verify_file(*indexed[record_id])
+            if record.record_id != record_id:
+                raise StorageError("stored raw record identifier does not match its index")
+            records[record_id] = record
+        return records
 
     def list(
         self,
@@ -146,7 +171,9 @@ class JsonRawRecordRepository:
             f"SELECT record_id FROM raw_record_index{where} ORDER BY received_at, record_id",
             parameters,
         ).fetchall()
-        return [self.get(UUID(row[0])) for row in rows]
+        record_ids = [UUID(row[0]) for row in rows]
+        records = self.get_many(record_ids)
+        return [records[record_id] for record_id in record_ids]
 
     def _relative_path(self, record: RawRecord) -> Path:
         received_date = record.received_at.date().isoformat()
@@ -169,14 +196,19 @@ class JsonRawRecordRepository:
             return None
         return row[0], row[1], row[2]
 
-    def _verify_file(self, relative_path: str, checksum: str, document_json: str) -> bytes:
-        target = _ensure_within(self._paths.raw_dir, self._paths.raw_dir / relative_path)
+    def _verify_file(
+        self,
+        relative_path: str,
+        checksum: str,
+        document_json: str,
+    ) -> RawRecord:
+        target = _ensure_within(self._raw_root, self._raw_root / relative_path)
         if not target.is_file():
             raise StorageError(f"indexed raw record file is missing: {relative_path}")
         data = target.read_bytes()
         if sha256_hex(data) != checksum:
             raise StorageError(f"checksum mismatch for raw record file: {relative_path}")
-        record = model_from_json(RawRecord, data)
-        if canonical_json_text(record) != document_json:
+        if data.decode("utf-8") != document_json:
             raise StorageError(f"raw record index does not match file: {relative_path}")
-        return data
+        record = model_from_json(RawRecord, data)
+        return record

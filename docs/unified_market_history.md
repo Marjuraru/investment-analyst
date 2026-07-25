@@ -26,12 +26,17 @@ UUID as a hidden tiebreaker. Coverage reports candidate, selected, and discarded
 The time filter is half-open: `start <= timestamp < end`. Missing bars are left missing. The layer does
 not infer exchange calendars, weekends, holidays, or absent crypto intervals.
 
-## Current MVP limitation
+## Bounded reads and evidence verification
 
-The existing observation repository filters by asset and availability. The service then performs the
-remaining source, timestamp, frequency, field, and point-in-time filtering in memory. This is isolated
-inside `HistoricalMarketDataService`, so it can later be replaced by optimized SQL without changing
-`HistoricalBarQuery`, `MarketBar`, or `MarketBarSeries`.
+The observation repository applies asset, daily-frequency, availability, and half-open observed-time
+filters in DuckDB before deserializing documents. The service repeats the source, timestamp, frequency,
+and point-in-time checks on the typed observations so storage filtering cannot weaken domain
+validation.
+
+Raw-record index rows are retrieved in one bulk operation for each history query. Every selected file
+is still read and checked against its indexed SHA-256 checksum and canonical JSON before its typed
+record participates in reconstruction. This removes per-bar database round trips without caching,
+skipping, or weakening traceability.
 
 ## Command-line query
 

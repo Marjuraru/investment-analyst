@@ -1,11 +1,13 @@
 """Typed repository contracts for core data models."""
 
+from collections.abc import Collection
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
 from investment_analyst.core.models import (
     Asset,
+    DataFrequency,
     DiagnosticMode,
     DiagnosticResult,
     MetricDefinition,
@@ -43,6 +45,8 @@ class RawRecordRepository(Protocol):
 
     def get(self, record_id: UUID) -> RawRecord: ...
 
+    def get_many(self, record_ids: Collection[UUID]) -> dict[UUID, RawRecord]: ...
+
     def list(
         self,
         *,
@@ -63,6 +67,9 @@ class ObservationRepository(Protocol):
         self,
         *,
         asset_id: str | None = None,
+        frequency: DataFrequency | None = None,
+        observed_from: datetime | None = None,
+        observed_before: datetime | None = None,
         available_from: datetime | None = None,
         available_to: datetime | None = None,
     ) -> list[NormalizedObservation]: ...

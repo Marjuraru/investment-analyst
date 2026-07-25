@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from investment_analyst.core.models import DiagnosticMode
+from investment_analyst.core.models import DataFrequency, DiagnosticMode
 from investment_analyst.storage import RecordConflictError
 
 from .conftest import (
@@ -177,3 +177,45 @@ def test_filters_observations_metrics_and_diagnostics(storage) -> None:
     assert observation_ids == [observations[1].observation_id]
     assert metric_ids == [metrics[0].result_id, metrics[1].result_id]
     assert diagnostic_ids == [diagnostics[0].diagnostic_id, diagnostics[1].diagnostic_id]
+
+
+def test_observation_filters_include_frequency_and_half_open_observed_range(storage) -> None:
+    observed_start = datetime(2026, 7, 9, tzinfo=UTC)
+    observed_end = datetime(2026, 7, 11, tzinfo=UTC)
+    raw_record = make_raw_record()
+    observations = [
+        make_observation(
+            raw_record_id=raw_record.record_id,
+            observed_at=observed_start - timedelta(seconds=1),
+        ),
+        make_observation(
+            raw_record_id=raw_record.record_id,
+            observed_at=observed_start,
+        ),
+        make_observation(
+            raw_record_id=raw_record.record_id,
+            observed_at=observed_end - timedelta(seconds=1),
+        ),
+        make_observation(
+            raw_record_id=raw_record.record_id,
+            observed_at=observed_end,
+        ),
+        make_observation(
+            raw_record_id=raw_record.record_id,
+            frequency=DataFrequency.HOUR_1,
+            observed_at=observed_start,
+        ),
+    ]
+    for observation in observations:
+        storage.observations.save(observation)
+
+    result = storage.observations.list(
+        frequency=DataFrequency.DAY_1,
+        observed_from=observed_start,
+        observed_before=observed_end,
+    )
+
+    assert {item.observation_id for item in result} == {
+        observations[1].observation_id,
+        observations[2].observation_id,
+    }

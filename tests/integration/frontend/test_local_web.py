@@ -405,9 +405,11 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'data-chart-type="candlestick"' in html
     assert 'id="chart-interval"' in html
     assert 'id="chart-zoom-reset"' in html
-    assert "Historial completo" in html
+    assert 'id="snapshot-range-title"' in html
+    assert "Último año" in html
     assert 'rel="icon"' in html
-    assert '<option value="1w">1 semana</option>' in html
+    assert '<option value="1w">1 semana · últimos 5 años</option>' in html
+    assert '<option value="1mo">1 mes · historial completo</option>' in html
     assert "Consultar los datos visibles en una tabla" in html
     assert "Estadísticas técnicas" in html
     assert "Volatilidad 20" in html
@@ -436,8 +438,14 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'class="period-selector"' not in html
     assert 'class="period-button' not in html
     assert "data-period=" not in html
-    assert 'const MARKET_CHART_PERIOD = "max";' in javascript
-    assert "period: MARKET_CHART_PERIOD" in javascript
+    assert 'auto: "1y"' in javascript
+    assert '"1d": "1y"' in javascript
+    assert '"1w": "5y"' in javascript
+    assert '"1mo": "max"' in javascript
+    assert "period: requestedPeriod" in javascript
+    assert "chart.period !== requestedPeriod" in javascript
+    assert "chart.coverage.earliest_selected_timestamp" in javascript
+    assert "chart.coverage.latest_selected_timestamp" in javascript
     assert 'id="snapshot-range-cagr"' in html
     assert 'id="snapshot-range-drawdown"' in html
     assert 'id="chart-data-disclosure"' in html

@@ -36,7 +36,17 @@ const FUNDAMENTAL_CHART_LAYOUT = Object.freeze({
   bottom: 276,
 });
 
-const MARKET_CHART_PERIOD = "max";
+const MARKET_CHART_PERIOD_BY_INTERVAL = Object.freeze({
+  auto: "1y",
+  "1d": "1y",
+  "1w": "5y",
+  "1mo": "max",
+});
+const MARKET_CHART_PERIOD_LABELS = Object.freeze({
+  "1y": "Último año",
+  "5y": "Últimos cinco años",
+  max: "Historial completo",
+});
 const MARKET_ASSETS = Object.freeze({
   "equity:us:aapl": Object.freeze({
     symbol: "AAPL",
@@ -383,6 +393,14 @@ const chartSeriesVisibility = {
 
 function marketAssetPresentation() {
   return MARKET_ASSETS[selectedMarketAsset];
+}
+
+function marketChartPeriod() {
+  return MARKET_CHART_PERIOD_BY_INTERVAL[chartSettings.interval] || "1y";
+}
+
+function marketChartPeriodLabel(period) {
+  return MARKET_CHART_PERIOD_LABELS[period] || "Rango consultado";
 }
 
 function applySelectedMarketAsset() {
@@ -1816,12 +1834,13 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
     marketChartRenderFrame = null;
   }
   const asset = marketAssetPresentation();
+  const requestedPeriod = marketChartPeriod();
   if (
     chart.asset_id !== selectedMarketAsset ||
     chart.source_id !== asset.sourceId ||
     chart.schema_version !== asset.schemaVersion ||
     chart.volume_unit !== asset.volumeUnit ||
-    chart.period !== MARKET_CHART_PERIOD ||
+    chart.period !== requestedPeriod ||
     !Array.isArray(chart.sma_windows) ||
     chart.sma_windows.length !== 3 ||
     chart.sma_windows[0] !== chartSettings.shortWindow ||
@@ -1878,9 +1897,11 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
     ? formatCurrency(latestPoint.third_sma.value)
     : "—";
   byId("chart-visible-sessions").textContent = formatInteger(chart.coverage.selected_sessions);
+  const periodLabel = marketChartPeriodLabel(chart.period);
+  byId("snapshot-range-title").textContent = periodLabel;
   renderMarketSnapshot(chart, latest, latestPoint);
-  const coverageStart = formatCalendarDate(chart.coverage.earliest_available_timestamp);
-  const coverageEnd = formatCalendarDate(chart.coverage.latest_available_timestamp);
+  const coverageStart = formatCalendarDate(chart.coverage.earliest_selected_timestamp);
+  const coverageEnd = formatCalendarDate(chart.coverage.latest_selected_timestamp);
   const resolutionText = marketResolution(chart.resolution);
   byId("chart-point-period-label").textContent = resolutionText.singular;
   byId("chart-keyboard-hint").textContent =
@@ -1894,7 +1915,7 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
   const viewportStatus = marketChartIsZoomed()
     ? ` · mostrando ${formatInteger(points.length)} de ${formatInteger(allPoints.length)} puntos`
     : "";
-  byId("chart-status").textContent = `Historial completo: ${formatInteger(chart.coverage.selected_sessions)} días con datos en ${formatInteger(chart.coverage.displayed_points)} puntos ${resolutionText.adjective}${viewportStatus} · fechas ${coverageStart}–${coverageEnd} · ${formatInteger(chart.coverage.discarded_revisions)} revisiones descartadas${currentInterval} · corte ${formatInstant(chart.known_at)}`;
+  byId("chart-status").textContent = `${periodLabel}: ${formatInteger(chart.coverage.selected_sessions)} días con datos en ${formatInteger(chart.coverage.displayed_points)} puntos ${resolutionText.adjective}${viewportStatus} · fechas ${coverageStart}–${coverageEnd} · ${formatInteger(chart.coverage.discarded_revisions)} revisiones descartadas${currentInterval} · corte ${formatInstant(chart.known_at)}`;
   renderChartSvg(points, chart.resolution);
   const disclosure = byId("chart-data-disclosure");
   if (disclosure.open) renderChartTable(points);
@@ -1921,10 +1942,11 @@ async function queryMarketChart() {
   setChartBusy(true);
   setExportAvailable("export-market-csv", false);
   byId("chart-status").textContent = "Consultando el histórico local…";
+  const requestedPeriod = marketChartPeriod();
   const parameters = new URLSearchParams({
     asset_id: selectedMarketAsset,
     known_at: byId("report-known-at").value.trim(),
-    period: MARKET_CHART_PERIOD,
+    period: requestedPeriod,
     interval: chartSettings.interval,
     short_sma_window: String(chartSettings.shortWindow),
     long_sma_window: String(chartSettings.longWindow),

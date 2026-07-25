@@ -93,9 +93,12 @@ entre 2 y 400; el tercer parámetro conserva un valor predeterminado compatible 
 anteriores,
 mantiene los
 decimales como cadenas exactas y separa días fuente de puntos diarios, semanales o mensuales.
-La interfaz solicita siempre `period=max`; los demás rangos permanecen únicamente en el contrato
-HTTP por compatibilidad con clientes existentes. En modo automático, el historial completo se
-presenta por meses; un intervalo explícito se calcula sobre toda la evidencia local disponible.
+La interfaz limita la carga inicial a `period=1y`, tanto en modo automático como con intervalo
+diario. Al seleccionar una semana amplía la consulta a `period=5y`; el intervalo mensual es la
+acción explícita que solicita `period=max` y permite cargar todo el histórico local disponible.
+El contrato HTTP conserva los demás rangos compatibles. Esta progresión evita incluir miles de
+sesiones diarias de BTC-USD en la respuesta inicial, sin recortar la evidencia persistida ni impedir
+el acceso al historial completo.
 Para no truncar una vela por el límite del rango, un intervalo semanal o mensual puede incluir un
 bloque completo que supere ligeramente el objetivo de días. La vela del calendario vigente sí puede
 estar en curso: contiene únicamente la evidencia disponible en `known_at` y se identifica como tal.

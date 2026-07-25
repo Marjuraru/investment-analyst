@@ -1,6 +1,7 @@
 """Point-in-time reconstruction of provider-independent stored market bars."""
 
 from collections import defaultdict
+from collections.abc import Collection
 from datetime import datetime
 from uuid import UUID
 
@@ -55,6 +56,9 @@ class HistoricalMarketDataService:
         schema = self._schema(query.source_id)
         observations = self._storage.observations.list(
             asset_id=query.asset_id,
+            frequency=DataFrequency.DAY_1,
+            observed_from=query.start,
+            observed_before=query.end,
             available_to=query.known_at,
         )
         scoped = self._scope_observations(observations, query)
@@ -73,8 +77,15 @@ class HistoricalMarketDataService:
         for observation in scoped:
             grouped[observation.raw_record_id].append(observation)
 
+        raw_records = self._get_raw_records(grouped)
         candidates = [
-            self._build_candidate(raw_record_id, group, schema, query)
+            self._build_candidate(
+                raw_record_id,
+                group,
+                raw_records[raw_record_id],
+                schema,
+                query,
+            )
             for raw_record_id, group in sorted(grouped.items(), key=lambda item: str(item[0]))
         ]
         selected, discarded = self._select_revisions(candidates)
@@ -120,6 +131,7 @@ class HistoricalMarketDataService:
         self,
         raw_record_id: UUID,
         observations: list[NormalizedObservation],
+        raw_record: RawRecord,
         schema: MarketBarSchema,
         query: HistoricalBarQuery,
     ) -> MarketBar:
@@ -137,7 +149,6 @@ class HistoricalMarketDataService:
                 f"raw record {raw_record_id} is missing required fields: {', '.join(missing)}"
             )
         self._verify_observations(raw_record_id, by_field, schema, query)
-        raw_record = self._get_raw_record(raw_record_id)
         first = by_field[schema.required_fields[0]]
         self._verify_raw_record(raw_record, first, query)
 
@@ -198,11 +209,14 @@ class HistoricalMarketDataService:
                     f"{observation.quality.value!r}; expected {schema.expected_quality.value!r}"
                 )
 
-    def _get_raw_record(self, raw_record_id: UUID) -> RawRecord:
+    def _get_raw_records(
+        self,
+        raw_record_ids: Collection[UUID],
+    ) -> dict[UUID, RawRecord]:
         try:
-            return self._storage.raw_records.get(raw_record_id)
+            return self._storage.raw_records.get_many(raw_record_ids)
         except (RecordNotFoundError, StorageError) as error:
-            raise TraceabilityError(f"raw record {raw_record_id} cannot be verified") from error
+            raise TraceabilityError(f"raw records cannot be verified: {error}") from error
 
     @staticmethod
     def _verify_raw_record(

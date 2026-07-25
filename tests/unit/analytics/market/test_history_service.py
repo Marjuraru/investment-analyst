@@ -161,6 +161,27 @@ def test_complete_supported_bars(
     assert result.traceability_verified
 
 
+def test_history_uses_bulk_raw_record_verification(tmp_path, monkeypatch) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        for day in (2, 3):
+            _store_version(
+                storage,
+                asset_id="crypto:btc-usd",
+                source_id=COINBASE_SOURCE_ID,
+                timestamp=datetime(2026, 7, day, tzinfo=UTC),
+                available_at=datetime(2026, 7, day, 1, tzinfo=UTC),
+            )
+
+        def reject_single_record_reads(_record_id: UUID) -> RawRecord:
+            raise AssertionError("historical reconstruction must use get_many")
+
+        monkeypatch.setattr(storage.raw_records, "get", reject_single_record_reads)
+        result = HistoricalMarketDataService(storage).query(_query())
+
+    assert [bar.timestamp.day for bar in result.bars] == [2, 3]
+    assert result.traceability_verified
+
+
 def test_asset_source_and_end_exclusive_filters(tmp_path) -> None:
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
         _store_version(
