@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from investment_analyst.core.models import (
     Asset,
+    DataFrequency,
     DiagnosticMode,
     DiagnosticResult,
     MetricDefinition,
@@ -216,6 +217,9 @@ class DuckDBObservationRepository:
         self,
         *,
         asset_id: str | None = None,
+        frequency: DataFrequency | None = None,
+        observed_from: datetime | None = None,
+        observed_before: datetime | None = None,
         available_from: datetime | None = None,
         available_to: datetime | None = None,
     ) -> list[NormalizedObservation]:
@@ -224,6 +228,15 @@ class DuckDBObservationRepository:
         if asset_id is not None:
             clauses.append("asset_id = ?")
             parameters.append(asset_id)
+        if frequency is not None:
+            clauses.append("frequency = ?")
+            parameters.append(frequency.value)
+        if observed_from is not None:
+            clauses.append("observed_at >= ?")
+            parameters.append(observed_from)
+        if observed_before is not None:
+            clauses.append("observed_at < ?")
+            parameters.append(observed_before)
         if available_from is not None:
             clauses.append("available_at >= ?")
             parameters.append(available_from)
