@@ -13,7 +13,7 @@ const DEFAULT_CHART_SETTINGS = Object.freeze({
   longColor: "#a695df",
   thirdColor: "#d778aa",
   priceScale: "linear",
-  chartType: "line",
+  chartType: "candlestick",
   interval: "auto",
 });
 const CHART_WIDTH = 1000;
@@ -479,7 +479,8 @@ function normalizeChartSettings(candidate) {
   const thirdWindow = Number(candidate.thirdWindow ?? DEFAULT_CHART_SETTINGS.thirdWindow);
   const thirdColor = candidate.thirdColor ?? DEFAULT_CHART_SETTINGS.thirdColor;
   const priceScale = candidate.priceScale === undefined ? "linear" : candidate.priceScale;
-  const chartType = candidate.chartType === undefined ? "line" : candidate.chartType;
+  const chartType =
+    candidate.chartType === undefined ? DEFAULT_CHART_SETTINGS.chartType : candidate.chartType;
   const interval = candidate.interval === undefined ? "auto" : candidate.interval;
   const colorPattern = /^#[0-9a-f]{6}$/i;
   if (
@@ -1168,9 +1169,8 @@ function marketChartIsZoomed() {
   return total > 0 && (start > 0 || end < total);
 }
 
-function updateMarketChartZoomControl() {
+function updateMarketChartZoomState() {
   const zoomed = marketChartIsZoomed();
-  byId("chart-zoom-reset").disabled = !zoomed;
   byId("market-chart").classList.toggle("is-zoomed", zoomed);
 }
 
@@ -1857,7 +1857,7 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
   const allPoints = chart.points || [];
   const points = visibleMarketChartPoints();
   setExportAvailable("export-market-csv", points.length > 0);
-  updateMarketChartZoomControl();
+  updateMarketChartZoomState();
   const empty = byId("chart-empty");
   if (!allPoints.length) {
     resetMarketSnapshot();
@@ -1904,8 +1904,6 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
   const coverageEnd = formatCalendarDate(chart.coverage.latest_selected_timestamp);
   const resolutionText = marketResolution(chart.resolution);
   byId("chart-point-period-label").textContent = resolutionText.singular;
-  byId("chart-keyboard-hint").textContent =
-    "Rueda: zoom · Arrastrar: desplazar · ← → recorrer";
   byId("market-chart").setAttribute(
     "aria-label",
     `Gráfico histórico interactivo de ${asset.symbol} con puntos ${resolutionText.adjective}. Usa la rueda del mouse o las teclas más y menos para cambiar el zoom, arrastra horizontalmente para desplazar la vista, cero para restablecerla y las flechas para recorrer los puntos.`,
@@ -1929,8 +1927,7 @@ function setChartBusy(busy) {
     button.disabled = busy;
   }
   byId("chart-interval").disabled = busy;
-  if (busy) byId("chart-zoom-reset").disabled = true;
-  else updateMarketChartZoomControl();
+  updateMarketChartZoomState();
   for (const control of document.querySelectorAll("#chart-settings-form input, #chart-settings-form select, #chart-settings-form button")) {
     control.disabled = busy;
   }
@@ -1957,7 +1954,7 @@ async function queryMarketChart() {
   } catch (error) {
     marketChartPayload = null;
     marketChartViewport = null;
-    updateMarketChartZoomControl();
+    updateMarketChartZoomState();
     setExportAvailable("export-market-csv", false);
     byId("market-chart").replaceChildren();
     byId("chart-table-body").replaceChildren();
@@ -2976,7 +2973,6 @@ byId("chart-data-disclosure").addEventListener("toggle", (event) => {
     renderChartTable(visibleMarketChartPoints());
   }
 });
-byId("chart-zoom-reset").addEventListener("click", resetMarketChartZoom);
 byId("market-chart").addEventListener("wheel", handleMarketChartWheel, { passive: false });
 byId("theme-toggle").addEventListener("click", () => {
   const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";

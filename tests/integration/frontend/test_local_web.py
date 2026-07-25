@@ -403,8 +403,10 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert '<option value="logarithmic">Logarítmica</option>' in html
     assert 'data-chart-type="line"' in html
     assert 'data-chart-type="candlestick"' in html
+    assert 'class="chart-type-button active" type="button" data-chart-type="candlestick"' in html
     assert 'id="chart-interval"' in html
-    assert 'id="chart-zoom-reset"' in html
+    assert 'id="chart-zoom-reset"' not in html
+    assert "Rueda: zoom · Arrastrar: desplazar · ← → recorrer" not in html
     assert 'id="snapshot-range-title"' in html
     assert "Último año" in html
     assert 'rel="icon"' in html
@@ -498,6 +500,7 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "long_sma_window: String(chartSettings.longWindow)" in javascript
     assert "third_sma_window: String(chartSettings.thirdWindow)" in javascript
     assert 'priceScale: "linear"' in javascript
+    assert 'chartType: "candlestick"' in javascript
     assert 'chartSettings.priceScale === "logarithmic" ? Math.log' in javascript
     assert "for (const price of prices)" in javascript
     assert "Number.POSITIVE_INFINITY" in javascript
@@ -518,6 +521,7 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "maximumFractionDigits: 2" in javascript
     assert ".market-chart-card" in stylesheet
     assert ".chart-settings" in stylesheet
+    assert "width: 184px;" in stylesheet
     assert ".chart-settings-panel select" in stylesheet
     assert ".candlestick-bodies.positive" in stylesheet
     assert ".candlestick-bodies.negative" in stylesheet

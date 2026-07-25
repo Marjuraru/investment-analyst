@@ -211,7 +211,8 @@ visible; restablecer el zoom vuelve a incluir el rango consultado completo. El J
 ## Personalización analítica
 
 Las tres medias móviles ya permiten personalizar ventana, color y visibilidad; el gráfico también
-permite elegir escala lineal o logarítmica, línea o velas e intervalo diario, semanal o mensual. Esta personalización
+permite elegir escala lineal o logarítmica, línea o velas —con velas como vista predeterminada— e
+intervalo diario, semanal o mensual. Esta personalización
 usa límites tipados, muestra los parámetros efectivos, conserva fórmula, valores exactos y evidencia
 y no modifica resultados persistidos ni algoritmos canónicos. Quedan para expansiones posteriores
 los parámetros de otras estadísticas y las plantillas reutilizables de indicadores.

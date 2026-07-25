@@ -165,12 +165,11 @@
                       <button class="series-toggle" type="button" data-series="volume" aria-pressed="true">
                         <i class="legend-swatch volume" aria-hidden="true"></i>Volumen
                       </button>
-                      <span id="chart-keyboard-hint" class="chart-keyboard-hint">Rueda: zoom · Arrastrar: desplazar · ← → recorrer</span>
                     </div>
                     <div class="chart-toolbar-actions">
                       <div class="chart-type-selector" role="group" aria-label="Tipo de gráfico">
-                        <button class="chart-type-button active" type="button" data-chart-type="line" aria-pressed="true">Línea</button>
-                        <button class="chart-type-button" type="button" data-chart-type="candlestick" aria-pressed="false">Velas</button>
+                        <button class="chart-type-button" type="button" data-chart-type="line" aria-pressed="false">Línea</button>
+                        <button class="chart-type-button active" type="button" data-chart-type="candlestick" aria-pressed="true">Velas</button>
                       </div>
                       <label class="chart-interval-control">
                         <span>Intervalo</span>
@@ -219,15 +218,6 @@
                           </div>
                         </form>
                       </details>
-                      <button
-                        id="chart-zoom-reset"
-                        class="data-export-button chart-zoom-reset"
-                        type="button"
-                        aria-label="Restablecer el zoom y mostrar todo el rango consultado"
-                        disabled
-                      >
-                        Restablecer zoom
-                      </button>
                       <button
                         id="export-market-csv"
                         class="data-export-button"

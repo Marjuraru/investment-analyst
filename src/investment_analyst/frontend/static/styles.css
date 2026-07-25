@@ -802,7 +802,8 @@ section {
 }
 
 .chart-interval-control select {
-  width: 88px;
+  width: 184px;
+  max-width: 100%;
   min-height: 32px;
   padding: 0.25rem 0.35rem;
   border: 1px solid var(--line-strong);
@@ -957,10 +958,6 @@ section {
   opacity: 0.45;
 }
 
-.chart-zoom-reset:not(:disabled) {
-  color: var(--muted-strong);
-}
-
 .chart-legend {
   display: flex;
   align-items: center;
@@ -1001,13 +998,6 @@ section {
 .series-toggle[aria-pressed="false"] {
   color: #8995a3;
   opacity: 0.6;
-}
-
-.chart-keyboard-hint {
-  flex-shrink: 0;
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 0.6rem;
 }
 
 .legend-swatch {
@@ -2663,10 +2653,6 @@ footer p:last-child {
   .chart-toolbar-actions {
     width: 100%;
     flex-wrap: wrap;
-  }
-
-  .chart-keyboard-hint {
-    display: none;
   }
 
   .frequency-selector {
