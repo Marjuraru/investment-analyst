@@ -57,8 +57,9 @@ local:
   por ventana y color —5, 20 y 50 de forma predeterminada—, con escala de precio lineal o logarítmica,
   gráfico de línea o velas, zoom exclusivo con la rueda del mouse, desplazamiento horizontal por
   arrastre e intervalos reales de un día, una semana o
-  un mes sobre todo el histórico local point-in-time; el modo automático usa resolución mensual
-  para ese historial completo; cada agregado conserva sus días e identidades fuente y el último cierre permanece
+  un mes: la carga inicial y diaria se limita al último año, la semanal amplía a cinco años y la
+  mensual permite consultar todo el histórico local point-in-time; cada agregado conserva sus días
+  e identidades fuente y el último cierre permanece
   separado; incorpora evolución trimestral o anual de cinco hechos SEC, una clasificación
   empresarial visible que declara cuando la evidencia aún no es suficiente, ficha fundamental y
   una matriz compacta de 40 métricas derivadas con fórmulas e inputs auditables;
