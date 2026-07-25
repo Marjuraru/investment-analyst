@@ -216,15 +216,17 @@ usa límites tipados, muestra los parámetros efectivos, conserva fórmula, valo
 y no modifica resultados persistidos ni algoritmos canónicos. Quedan para expansiones posteriores
 los parámetros de otras estadísticas y las plantillas reutilizables de indicadores.
 
-## Intervalos intradía previstos
+## Base intradía
 
-El workspace canónico actual conserva barras diarias de Alpaca Market Data IEX. Por ello, los
-intervalos de 1, 5, 15, 30 y 45 minutos y de 1, 2, 4 y 5 horas no se muestran todavía: una barra
-diaria no contiene evidencia suficiente para reconstruirlos. La expansión intradía deberá ingerir
-barras base de un minuto con una identidad de fuente nueva, zona horaria de NASDAQ, límites de sesión
-y disponibilidad point-in-time explícitos. A partir de esa base podrán agregarse de forma exacta los
-intervalos mayores sobre todo el historial disponible, conservando OHLCV, cobertura y UUID de entrada
-sin alterar la historia diaria.
+La historia diaria de AAPL y BTC-USD permanece intacta. Ya existe una fuente paralela de velas
+BTC-USD de un minuto de Coinbase Exchange, mercado 24/7, con identidad y disponibilidad point-in-time
+propias. Sobre esa evidencia se agregan localmente intervalos fijos UTC de 1, 5, 15, 30 y 45 minutos
+y de 1, 2, 4 y 5 horas, conservando OHLCV, calidad, completitud y UUID de entrada.
+
+La interfaz web todavía presenta intervalos diarios, semanales y mensuales. La base intradía se usa
+por CLI durante esta fase para validar persistencia, rendimiento e idempotencia antes de conectar
+controles visuales o programación incremental. No se reconstruyen minutos a partir de barras diarias
+ni se aplican las estadísticas diarias a esta fuente.
 
 ## Integración actual de cripto
 

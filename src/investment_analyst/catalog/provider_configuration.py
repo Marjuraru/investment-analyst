@@ -6,7 +6,13 @@ from investment_analyst.providers.asset_config import (
     CoinbaseAssetConfiguration,
     SecAssetConfiguration,
 )
-from investment_analyst.providers.crypto.coinbase_exchange import DAILY_GRANULARITY_SECONDS
+from investment_analyst.providers.crypto.coinbase_exchange import (
+    DAILY_GRANULARITY_SECONDS,
+    MINUTE_GRANULARITY_SECONDS,
+)
+from investment_analyst.providers.crypto.coinbase_intraday_normalizer import (
+    SOURCE_ID as COINBASE_INTRADAY_SOURCE_ID,
+)
 from investment_analyst.providers.crypto.coinbase_normalizer import (
     ASSET_ID as COINBASE_ASSET_ID,
 )
@@ -58,6 +64,26 @@ def resolve_coinbase_configuration(
         product_id=context.require_identifier("product_id"),
         source_id=COINBASE_SOURCE_ID,
         granularity_seconds=DAILY_GRANULARITY_SECONDS,
+    )
+
+
+def resolve_coinbase_intraday_configuration(
+    resolver: ProviderAssetContextResolver,
+    *,
+    asset_id: str = COINBASE_ASSET_ID,
+) -> CoinbaseAssetConfiguration:
+    """Resolve the separate Coinbase one-minute candle configuration."""
+    context = resolver.resolve(
+        asset_id,
+        provider="coinbase",
+        required_namespaces=("product_id",),
+        required_capabilities=("market.minute_bars",),
+    )
+    return CoinbaseAssetConfiguration(
+        asset_id=context.asset.asset_id,
+        product_id=context.require_identifier("product_id"),
+        source_id=COINBASE_INTRADAY_SOURCE_ID,
+        granularity_seconds=MINUTE_GRANULARITY_SECONDS,
     )
 
 

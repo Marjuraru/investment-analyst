@@ -81,8 +81,8 @@ class MarketBar(ContractModel):
     @model_validator(mode="after")
     def validate_bar(self) -> "MarketBar":
         """Validate daily OHLCV consistency and exact observation traceability."""
-        if self.frequency is not DataFrequency.DAY_1:
-            raise ValueError("MarketBar frequency must be DAY_1")
+        if self.frequency not in {DataFrequency.MINUTE_1, DataFrequency.DAY_1}:
+            raise ValueError("MarketBar frequency must be MINUTE_1 or DAY_1")
         if min(self.open, self.high, self.low, self.close) <= 0:
             raise ValueError("market bar prices must be greater than zero")
         if self.volume < 0:

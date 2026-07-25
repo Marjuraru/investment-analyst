@@ -34,6 +34,10 @@ local:
 - catálogo central de activos y resolución independiente de proveedores;
 - importación de barras diarias de AAPL mediante Alpaca Market Data IEX, con la limitación explícita
   de que IEX no equivale a cobertura consolidada SIP;
+- base intradía separada para BTC-USD mediante velas públicas de un minuto de Coinbase Exchange,
+  con ingestión append-only e idempotente, reconstrucción point-in-time y agregaciones locales
+  deterministas de 1/5/15/30/45 minutos y 1/2/4/5 horas; esta base todavía no sustituye la ruta
+  diaria de la interfaz;
 - obtención oficial de fundamentales de Apple mediante SEC EDGAR;
 - base de investigación fundamental con 31 hechos SEC adicionales y 40 métricas descriptivas
   versionadas, calculadas point-in-time con `Decimal`, evidencia exacta por input y estadísticas
@@ -92,6 +96,8 @@ información de la que realmente contienen.
   su estado y preparar la programación local.
 - [Interfaz y operación continua](docs/local_interface.md): usar la herramienta en el navegador y
   mantener el servicio local mediante `systemd --user`.
+- [Base intradía de Coinbase](docs/coinbase_intraday.md): importar ventanas acotadas de un minuto y
+  consultar agregaciones trazables sin mezclar la historia diaria.
 - [Integración continua](docs/continuous_integration.md): validar automáticamente cada pull request.
 - [Gestión de dependencias](docs/dependency_management.md): reproducir y actualizar el entorno
   validado.

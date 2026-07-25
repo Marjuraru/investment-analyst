@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from investment_analyst.catalog.provider_configuration import (
     resolve_alpaca_configuration,
     resolve_coinbase_configuration,
+    resolve_coinbase_intraday_configuration,
     resolve_sec_configuration,
 )
 from investment_analyst.catalog.provider_context import (
@@ -18,7 +19,13 @@ from investment_analyst.providers.asset_config import (
     CoinbaseAssetConfiguration,
     SecAssetConfiguration,
 )
-from investment_analyst.providers.crypto.coinbase_exchange import DAILY_GRANULARITY_SECONDS
+from investment_analyst.providers.crypto.coinbase_exchange import (
+    DAILY_GRANULARITY_SECONDS,
+    MINUTE_GRANULARITY_SECONDS,
+)
+from investment_analyst.providers.crypto.coinbase_intraday_normalizer import (
+    SOURCE_ID as COINBASE_INTRADAY_SOURCE_ID,
+)
 from investment_analyst.providers.crypto.coinbase_normalizer import (
     ASSET_ID as COINBASE_ASSET_ID,
 )
@@ -42,6 +49,7 @@ def _resolver() -> ProviderAssetContextResolver:
 def test_factories_preserve_current_provider_and_persisted_identities() -> None:
     alpaca = resolve_alpaca_configuration(_resolver())
     coinbase = resolve_coinbase_configuration(_resolver())
+    coinbase_intraday = resolve_coinbase_intraday_configuration(_resolver())
     sec = resolve_sec_configuration(_resolver())
 
     assert alpaca == AlpacaAssetConfiguration(
@@ -56,6 +64,12 @@ def test_factories_preserve_current_provider_and_persisted_identities() -> None:
         product_id=PRODUCT_ID,
         source_id=SOURCE_ID,
         granularity_seconds=DAILY_GRANULARITY_SECONDS,
+    )
+    assert coinbase_intraday == CoinbaseAssetConfiguration(
+        asset_id=COINBASE_ASSET_ID,
+        product_id=PRODUCT_ID,
+        source_id=COINBASE_INTRADAY_SOURCE_ID,
+        granularity_seconds=MINUTE_GRANULARITY_SECONDS,
     )
     assert sec == SecAssetConfiguration(
         asset_id=APPLE_ASSET_ID,
@@ -94,5 +108,7 @@ def test_invalid_provider_asset_pairs_fail_before_client_construction() -> None:
 
     with pytest.raises(ProviderAssetNotConfiguredError):
         resolve_coinbase_configuration(resolver, asset_id=APPLE_ASSET_ID)
+    with pytest.raises(ProviderAssetNotConfiguredError):
+        resolve_coinbase_intraday_configuration(resolver, asset_id=APPLE_ASSET_ID)
     with pytest.raises(ProviderAssetNotConfiguredError):
         resolve_sec_configuration(resolver, asset_id=COINBASE_ASSET_ID)

@@ -14,7 +14,8 @@
       "provider_bindings": [
         {
           "capabilities": [
-            "market.daily_bars"
+            "market.daily_bars",
+            "market.minute_bars"
           ],
           "identifier": "BTC-USD",
           "namespace": "product_id",

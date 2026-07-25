@@ -6,6 +6,7 @@ from decimal import Context, Decimal, localcontext
 from uuid import UUID
 
 from investment_analyst.analytics.market.bar_models import MarketBar, MarketBarSeries
+from investment_analyst.analytics.market.bar_schemas import get_market_bar_schema
 from investment_analyst.analytics.market.statistics_definitions import (
     RELATIVE_VOLUME_KEY,
     SIMPLE_RETURN_KEY,
@@ -17,7 +18,7 @@ from investment_analyst.analytics.market.statistics_models import (
     MarketStatisticsRequest,
     MetricCalculation,
 )
-from investment_analyst.core.models import DataQuality
+from investment_analyst.core.models import DataFrequency, DataQuality
 
 _RETURN_ALGORITHM = "market-simple-return-1d-v1-decimal34"
 _SMA_ALGORITHM = "market-sma-v1-decimal34"
@@ -122,6 +123,16 @@ class MarketStatisticsEngine:
             raise MarketStatisticsTraceabilityError("bar series traceability is not verified")
         if series.query != request.query:
             raise MarketStatisticsTraceabilityError("series query does not match request query")
+        try:
+            source_frequency = get_market_bar_schema(request.query.source_id).frequency
+        except ValueError as error:
+            raise MarketStatisticsTraceabilityError(
+                "daily market statistics require a registered source"
+            ) from error
+        if source_frequency is not DataFrequency.DAY_1:
+            raise MarketStatisticsTraceabilityError(
+                "daily market statistics require a DAY_1 source"
+            )
         timestamps = [bar.timestamp for bar in series.bars]
         if timestamps != sorted(timestamps) or len(timestamps) != len(set(timestamps)):
             raise MarketStatisticsTraceabilityError("bar series must be ordered and unique")
@@ -132,6 +143,10 @@ class MarketStatisticsEngine:
                 )
             if bar.available_at > request.query.known_at:
                 raise MarketStatisticsTraceabilityError("bar was not available at known_at")
+            if bar.frequency is not DataFrequency.DAY_1:
+                raise MarketStatisticsTraceabilityError(
+                    "daily market statistics require DAY_1 bars"
+                )
 
     @staticmethod
     def _simple_returns(
