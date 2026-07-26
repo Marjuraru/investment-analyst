@@ -77,10 +77,14 @@ las anteriores nunca se recortan artificialmente para encajar en el rango.
 3. Ventanas, colores y visibilidad configurables para las tres SMA. Completado.
 4. Escala lineal/logarítmica, línea/velas e intervalos diario/semanal/mensual. Completado.
 5. Ingestión intradía base de 1 minuto y agregaciones 5/15/30/45 min y 1/2/4/5 h. Base
-   BTC-USD/Coinbase completada; integración visual y programación incremental pendientes.
-6. Comparación normalizada y plantillas locales.
-7. Gráficas históricas de márgenes, caja, crecimiento, valoración y datos por acción.
-8. Herramientas de anotación y eventos corporativos, sin ejecución de órdenes.
+   BTC-USD/Coinbase e integración visual acotada a 24 horas completadas; programación incremental
+   pendiente.
+6. Integración BVL/SMV gratuita por fases: catálogo e identidad, mercado diario diferido,
+   fundamentales y operación independiente. Investigación y arquitectura completadas; conectores
+   pendientes.
+7. Comparación normalizada y plantillas locales.
+8. Gráficas históricas de márgenes, caja, crecimiento, valoración y datos por acción.
+9. Herramientas de anotación y eventos corporativos, sin ejecución de órdenes.
 
 El backfill de cinco años o de toda la vida de AAPL debe ocurrir después del punto 2 para mantener
 una interfaz rápida y respuestas acotadas.

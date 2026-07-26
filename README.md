@@ -36,8 +36,8 @@ local:
   de que IEX no equivale a cobertura consolidada SIP;
 - base intradía separada para BTC-USD mediante velas públicas de un minuto de Coinbase Exchange,
   con ingestión append-only e idempotente, reconstrucción point-in-time y agregaciones locales
-  deterministas de 1/5/15/30/45 minutos y 1/2/4/5 horas; esta base todavía no sustituye la ruta
-  diaria de la interfaz;
+  deterministas de 1/5/15/30/45 minutos y 1/2/4/5 horas; la interfaz permite consultarlas en una
+  ventana acotada de 24 horas sin sustituir la ruta diaria;
 - obtención oficial de fundamentales de Apple mediante SEC EDGAR;
 - base de investigación fundamental con 31 hechos SEC adicionales y 40 métricas descriptivas
   versionadas, calculadas point-in-time con `Decimal`, evidencia exacta por input y estadísticas
@@ -61,7 +61,8 @@ local:
   por ventana y color —5, 20 y 50 de forma predeterminada—, con escala de precio lineal o logarítmica,
   gráfico de línea o velas, zoom exclusivo con la rueda del mouse, desplazamiento horizontal por
   arrastre e intervalos reales de un día, una semana o
-  un mes: la carga inicial y diaria se limita al último año, la semanal amplía a cinco años y la
+  un mes, además de intervalos intradía de BTC entre 1 minuto y 5 horas sobre las últimas 24 horas:
+  la carga inicial y diaria se limita al último año, la semanal amplía a cinco años y la
   mensual permite consultar todo el histórico local point-in-time; cada agregado conserva sus días
   e identidades fuente y el último cierre permanece
   separado; incorpora evolución trimestral o anual de cinco hechos SEC, una clasificación
@@ -97,7 +98,9 @@ información de la que realmente contienen.
 - [Interfaz y operación continua](docs/local_interface.md): usar la herramienta en el navegador y
   mantener el servicio local mediante `systemd --user`.
 - [Base intradía de Coinbase](docs/coinbase_intraday.md): importar ventanas acotadas de un minuto y
-  consultar agregaciones trazables sin mezclar la historia diaria.
+  consultar agregaciones trazables por CLI o interfaz sin mezclar la historia diaria.
+- [Estrategia BVL/SMV](docs/bvl_market_strategy.md): plan gratuito por fases para identidad,
+  cotización diferida, fundamentales y futura sustitución de proveedores.
 - [Integración continua](docs/continuous_integration.md): validar automáticamente cada pull request.
 - [Gestión de dependencias](docs/dependency_management.md): reproducir y actualizar el entorno
   validado.

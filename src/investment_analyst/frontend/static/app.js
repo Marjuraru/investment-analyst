@@ -42,10 +42,31 @@ const MARKET_CHART_PERIOD_BY_INTERVAL = Object.freeze({
   "1w": "5y",
   "1mo": "max",
 });
+const DAILY_MARKET_INTERVALS = Object.freeze([
+  Object.freeze({ value: "auto", label: "Automático · último año" }),
+  Object.freeze({ value: "1d", label: "1 día · último año" }),
+  Object.freeze({ value: "1w", label: "1 semana · últimos 5 años" }),
+  Object.freeze({ value: "1mo", label: "1 mes · historial completo" }),
+]);
+const BTC_INTRADAY_INTERVALS = Object.freeze([
+  Object.freeze({ value: "1m", label: "1 min · últimas 24 h" }),
+  Object.freeze({ value: "5m", label: "5 min · últimas 24 h" }),
+  Object.freeze({ value: "15m", label: "15 min · últimas 24 h" }),
+  Object.freeze({ value: "30m", label: "30 min · últimas 24 h" }),
+  Object.freeze({ value: "45m", label: "45 min · últimas 24 h" }),
+  Object.freeze({ value: "1h", label: "1 hora · últimas 24 h" }),
+  Object.freeze({ value: "2h", label: "2 horas · últimas 24 h" }),
+  Object.freeze({ value: "4h", label: "4 horas · últimas 24 h" }),
+  Object.freeze({ value: "5h", label: "5 horas · últimas 24 h" }),
+]);
+const BTC_INTRADAY_INTERVAL_VALUES = new Set(
+  BTC_INTRADAY_INTERVALS.map((interval) => interval.value),
+);
 const MARKET_CHART_PERIOD_LABELS = Object.freeze({
   "1y": "Último año",
   "5y": "Últimos cinco años",
   max: "Historial completo",
+  "24h": "Últimas 24 horas",
 });
 const MARKET_ASSETS = Object.freeze({
   "equity:us:aapl": Object.freeze({
@@ -67,6 +88,8 @@ const MARKET_ASSETS = Object.freeze({
     meta: "Coinbase Exchange · USD · Mercado 24/7",
     sourceId: "coinbase-exchange:btc-usd:daily-candles",
     schemaVersion: "btc-market-chart-v1",
+    intradaySourceId: "coinbase-exchange:btc-usd:minute-1-candles",
+    intradaySchemaVersion: "btc-intraday-chart-v1",
     volumeUnit: "BTC",
     volumeLabel: "BTC",
     defaultMarketStart: "2015-07-20",
@@ -78,6 +101,15 @@ const MARKET_RESOLUTION_PRESENTATION = Object.freeze({
   daily: Object.freeze({ singular: "día", plural: "días", adjective: "diarios" }),
   weekly: Object.freeze({ singular: "semana", plural: "semanas", adjective: "semanales" }),
   monthly: Object.freeze({ singular: "mes", plural: "meses", adjective: "mensuales" }),
+  "1m": Object.freeze({ singular: "minuto", plural: "minutos", adjective: "de 1 minuto" }),
+  "5m": Object.freeze({ singular: "intervalo", plural: "intervalos", adjective: "de 5 minutos" }),
+  "15m": Object.freeze({ singular: "intervalo", plural: "intervalos", adjective: "de 15 minutos" }),
+  "30m": Object.freeze({ singular: "intervalo", plural: "intervalos", adjective: "de 30 minutos" }),
+  "45m": Object.freeze({ singular: "intervalo", plural: "intervalos", adjective: "de 45 minutos" }),
+  "1h": Object.freeze({ singular: "hora", plural: "horas", adjective: "de 1 hora" }),
+  "2h": Object.freeze({ singular: "intervalo", plural: "intervalos", adjective: "de 2 horas" }),
+  "4h": Object.freeze({ singular: "intervalo", plural: "intervalos", adjective: "de 4 horas" }),
+  "5h": Object.freeze({ singular: "intervalo", plural: "intervalos", adjective: "de 5 horas" }),
 });
 
 const STATUS_LABELS = Object.freeze({
@@ -362,6 +394,8 @@ const ERROR_MESSAGES = Object.freeze({
   run_active: "Ya existe una actualización en curso para este espacio de datos.",
   known_at_too_early: "El corte elegido es anterior a los datos de Coinbase recién obtenidos.",
   market_refresh_failed: "No fue posible actualizar BTC-USD desde Coinbase. Inténtalo nuevamente.",
+  market_intraday_refresh_failed:
+    "No fue posible actualizar las velas intradía de BTC-USD. Los datos diarios ya guardados no se pierden.",
   operational_error: "La operación local no está disponible. Revisa el estado del espacio de datos.",
   unexpected_error: "La interfaz local encontró un error inesperado.",
 });
@@ -395,7 +429,12 @@ function marketAssetPresentation() {
   return MARKET_ASSETS[selectedMarketAsset];
 }
 
+function isBtcIntradayInterval(value = chartSettings.interval) {
+  return selectedMarketAsset === "crypto:btc-usd" && BTC_INTRADAY_INTERVAL_VALUES.has(value);
+}
+
 function marketChartPeriod() {
+  if (isBtcIntradayInterval()) return "24h";
   return MARKET_CHART_PERIOD_BY_INTERVAL[chartSettings.interval] || "1y";
 }
 
@@ -405,6 +444,22 @@ function marketChartPeriodLabel(period) {
 
 function applySelectedMarketAsset() {
   const presentation = marketAssetPresentation();
+  if (!presentation.intradaySourceId && BTC_INTRADAY_INTERVAL_VALUES.has(chartSettings.interval)) {
+    chartSettings = { ...chartSettings, interval: DEFAULT_CHART_SETTINGS.interval };
+  }
+  const intervalSelect = byId("chart-interval");
+  const intervals = presentation.intradaySourceId
+    ? [...BTC_INTRADAY_INTERVALS, ...DAILY_MARKET_INTERVALS]
+    : DAILY_MARKET_INTERVALS;
+  intervalSelect.replaceChildren(
+    ...intervals.map((interval) => {
+      const option = document.createElement("option");
+      option.value = interval.value;
+      option.textContent = interval.label;
+      return option;
+    }),
+  );
+  intervalSelect.value = chartSettings.interval;
   byId("asset-breadcrumb").textContent = presentation.breadcrumb;
   byId("asset-symbol").textContent = presentation.symbol;
   byId("asset-name").textContent = presentation.name;
@@ -428,10 +483,13 @@ function applySelectedMarketAsset() {
     : "Coinbase Exchange · BTC-USD diario";
   byId("run-note").textContent = presentation.hasFundamentals
     ? "SEC se consulta en cada ejecución, aunque el mercado ya esté actualizado."
-    : "Solo actualiza mercado BTC-USD; no simula fundamentales ni ejecuta operaciones.";
+    : isBtcIntradayInterval()
+      ? "Actualiza primero el histórico diario y después las últimas 24 horas intradía."
+      : "Solo actualiza mercado BTC-USD; no simula fundamentales ni ejecuta operaciones.";
   byId("run-button").textContent = presentation.hasFundamentals
     ? "Ejecutar actualización"
     : "Actualizar BTC-USD";
+  const refreshIntraday = isBtcIntradayInterval();
   byId("market-start").value = marketStartByAsset.get(selectedMarketAsset);
   for (const button of document.querySelectorAll(".asset-selector-button")) {
     const active = button.dataset.marketAsset === selectedMarketAsset;
@@ -500,7 +558,13 @@ function normalizeChartSettings(candidate) {
     !colorPattern.test(thirdColor) ||
     !["linear", "logarithmic"].includes(priceScale) ||
     !["line", "candlestick"].includes(chartType) ||
-    !["auto", "1d", "1w", "1mo"].includes(interval)
+    ![
+      "auto",
+      "1d",
+      "1w",
+      "1mo",
+      ...BTC_INTRADAY_INTERVAL_VALUES,
+    ].includes(interval)
   ) {
     return null;
   }
@@ -547,8 +611,12 @@ function applyChartSettings() {
   byId("sma-third-color").value = chartSettings.thirdColor;
   byId("chart-price-scale").value = chartSettings.priceScale;
   byId("chart-interval").value = chartSettings.interval;
-  byId("chart-settings-summary").textContent =
-    chartSettings.priceScale === "logarithmic"
+  const intraday = isBtcIntradayInterval();
+  byId("chart-settings-summary").textContent = intraday
+    ? chartSettings.priceScale === "logarithmic"
+      ? "Escala · Logarítmica"
+      : "Escala · Lineal"
+    : chartSettings.priceScale === "logarithmic"
       ? "Indicadores · Logarítmica"
       : "Indicadores · Lineal";
   document.documentElement.style.setProperty("--series-sma-5", chartSettings.shortColor);
@@ -558,6 +626,9 @@ function applyChartSettings() {
     const active = button.dataset.chartType === chartSettings.chartType;
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
+  }
+  for (const element of document.querySelectorAll("[data-sma-only]")) {
+    element.classList.toggle("hidden", intraday);
   }
   const candlesticks = chartSettings.chartType === "candlestick";
   byId("price-series-legend-label").textContent = candlesticks ? "Velas" : "Cierre";
@@ -583,12 +654,18 @@ function initializeChartSettings() {
       chartSettings = { ...DEFAULT_CHART_SETTINGS };
     }
   }
+  if (BTC_INTRADAY_INTERVAL_VALUES.has(chartSettings.interval)) {
+    chartSettings = { ...chartSettings, interval: DEFAULT_CHART_SETTINGS.interval };
+  }
   applyChartSettings();
 }
 
 function persistChartSettings() {
   try {
-    window.localStorage.setItem(CHART_SETTINGS_STORAGE_KEY, JSON.stringify(chartSettings));
+    const storedSettings = BTC_INTRADAY_INTERVAL_VALUES.has(chartSettings.interval)
+      ? { ...chartSettings, interval: DEFAULT_CHART_SETTINGS.interval }
+      : chartSettings;
+    window.localStorage.setItem(CHART_SETTINGS_STORAGE_KEY, JSON.stringify(storedSettings));
   } catch (error) {
     if (!(error instanceof DOMException)) throw error;
   }
@@ -980,16 +1057,34 @@ function formatCalendarDate(value) {
   }).format(parsed);
 }
 
+function formatMarketTimestamp(value) {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.valueOf())) return value;
+  return new Intl.DateTimeFormat(LOCALE, {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "UTC",
+  }).format(parsed);
+}
+
 function marketResolution(value) {
   return MARKET_RESOLUTION_PRESENTATION[value] || MARKET_RESOLUTION_PRESENTATION.daily;
 }
 
 function formatMarketInterval(point) {
-  const end = formatCalendarDate(point.timestamp);
+  const intraday = BTC_INTRADAY_INTERVAL_VALUES.has(point.resolution);
+  const end = intraday
+    ? formatMarketTimestamp(point.timestamp)
+    : formatCalendarDate(point.timestamp);
   const interval =
     !point.period_start_timestamp || point.period_start_timestamp === point.timestamp
       ? end
-      : `${formatCalendarDate(point.period_start_timestamp)}–${end}`;
+      : `${intraday ? formatMarketTimestamp(point.period_start_timestamp) : formatCalendarDate(point.period_start_timestamp)}–${end}`;
+  if (point.interval_complete === false) return `${interval} · Incompleto`;
   return point.calendar_interval_closed ? interval : `${interval} · En curso`;
 }
 
@@ -1422,7 +1517,7 @@ function addPriceGrid(svg, minimum, maximum, yPosition, inverseScale) {
   svg.appendChild(grid);
 }
 
-function addDateAxis(svg, points) {
+function addDateAxis(svg, points, resolution) {
   const axis = svgElement("g", { class: "chart-date-axis", "aria-hidden": "true" });
   const labelCount = Math.min(points.length, 5);
   const indexes = new Set();
@@ -1434,7 +1529,9 @@ function addDateAxis(svg, points) {
       svgElement(
         "text",
         { x: chartX(index, points.length), y: CHART_HEIGHT - 7, "text-anchor": "middle" },
-        formatCalendarDate(points[index].timestamp),
+        BTC_INTRADAY_INTERVAL_VALUES.has(resolution)
+          ? formatMarketTimestamp(points[index].timestamp)
+          : formatCalendarDate(points[index].timestamp),
       ),
     );
   }
@@ -1484,6 +1581,7 @@ function renderChartSvg(points, resolution) {
   });
   const resolutionText = marketResolution(resolution);
   const asset = marketAssetPresentation();
+  const intraday = isBtcIntradayInterval();
   svg.append(
     svgElement(
       "title",
@@ -1493,7 +1591,9 @@ function renderChartSvg(points, resolution) {
     svgElement(
       "desc",
       { id: "market-chart-svg-description" },
-      `${chartSettings.chartType === "candlestick" ? "Velas OHLC" : "Línea de cierre"}, SMA de ${chartSettings.shortWindow}, ${chartSettings.longWindow} y ${chartSettings.thirdWindow} ${resolutionText.plural}, escala ${chartSettings.priceScale === "logarithmic" ? "logarítmica" : "lineal"} y barras de volumen.`,
+      intraday
+        ? `${chartSettings.chartType === "candlestick" ? "Velas OHLC" : "Línea de cierre"} ${resolutionText.adjective}, escala ${chartSettings.priceScale === "logarithmic" ? "logarítmica" : "lineal"} y barras de volumen.`
+        : `${chartSettings.chartType === "candlestick" ? "Velas OHLC" : "Línea de cierre"}, SMA de ${chartSettings.shortWindow}, ${chartSettings.longWindow} y ${chartSettings.thirdWindow} ${resolutionText.plural}, escala ${chartSettings.priceScale === "logarithmic" ? "logarítmica" : "lineal"} y barras de volumen.`,
     ),
   );
   addPriceGrid(svg, minimum, maximum, yPrice, inverseScale);
@@ -1573,7 +1673,7 @@ function renderChartSvg(points, resolution) {
       "aria-hidden": "true",
     }),
   );
-  addDateAxis(svg, points);
+  addDateAxis(svg, points, resolution);
 
   const host = byId("market-chart");
   host.replaceChildren(svg);
@@ -1683,13 +1783,19 @@ function updateChartSelection(index, points, values, yPosition) {
   byId("chart-point-close").textContent = formatCurrency(point.close);
   byId("chart-point-sma-5").textContent = point.short_sma
     ? formatCurrency(point.short_sma.value)
-    : "En calentamiento";
+    : isBtcIntradayInterval()
+      ? "No aplica"
+      : "En calentamiento";
   byId("chart-point-sma-20").textContent = point.long_sma
     ? formatCurrency(point.long_sma.value)
-    : "En calentamiento";
+    : isBtcIntradayInterval()
+      ? "No aplica"
+      : "En calentamiento";
   byId("chart-point-sma-50").textContent = point.third_sma
     ? formatCurrency(point.third_sma.value)
-    : "En calentamiento";
+    : isBtcIntradayInterval()
+      ? "No aplica"
+      : "En calentamiento";
   byId("chart-point-volume").textContent = formatMarketVolume(point.volume);
   byId("chart-point-volume").title = `Valor exacto: ${point.volume} ${marketAssetPresentation().volumeLabel}`;
 }
@@ -1725,6 +1831,95 @@ function renderChartTable(points) {
 
 function chartStatistic(chart, metricKey) {
   return (chart.latest_statistics || []).find((item) => item.metric_key === metricKey) || null;
+}
+
+function normalizeBtcIntradayChart(payload) {
+  const asset = marketAssetPresentation();
+  if (
+    payload?.schema_version !== asset.intradaySchemaVersion ||
+    payload.asset_id !== selectedMarketAsset ||
+    payload.source_id !== asset.intradaySourceId ||
+    payload.interval !== chartSettings.interval ||
+    payload.lookback_hours !== 24 ||
+    payload.traceability_verified !== true ||
+    !Array.isArray(payload.bars)
+  ) {
+    throw new Error("La respuesta intradía local no coincide con la consulta solicitada.");
+  }
+  const points = payload.bars.map((bar) => {
+    if (
+      bar.asset_id !== payload.asset_id ||
+      bar.source_id !== payload.source_id ||
+      bar.interval !== payload.interval ||
+      typeof bar.interval_complete !== "boolean"
+    ) {
+      throw new Error("Una vela intradía está fuera del contrato solicitado.");
+    }
+    return {
+      resolution: bar.interval,
+      period_start_timestamp: bar.period_start,
+      timestamp: bar.period_start,
+      period_end_timestamp: bar.period_end,
+      bar_available_at: bar.available_at,
+      source_session_count: bar.source_bar_count,
+      calendar_interval_closed: true,
+      interval_complete: bar.interval_complete,
+      open: bar.open,
+      high: bar.high,
+      low: bar.low,
+      close: bar.close,
+      volume: bar.volume,
+      trade_count: bar.trade_count,
+      vwap: bar.vwap,
+      quality: bar.quality,
+      raw_record_ids: bar.raw_record_ids,
+      open_observation_id: bar.open_observation_id,
+      high_observation_id: bar.high_observation_id,
+      low_observation_id: bar.low_observation_id,
+      close_observation_id: bar.close_observation_id,
+      volume_input_observation_ids: bar.volume_input_observation_ids,
+      trade_count_input_observation_ids: bar.trade_count_input_observation_ids,
+      vwap_input_observation_ids: bar.vwap_input_observation_ids,
+      short_sma: null,
+      long_sma: null,
+      third_sma: null,
+      aggregation_algorithm_version: bar.aggregation_algorithm_version,
+    };
+  });
+  return {
+    schema_version: payload.schema_version,
+    asset_id: payload.asset_id,
+    source_id: payload.source_id,
+    known_at: payload.known_at,
+    period: "24h",
+    interval: payload.interval,
+    resolution: payload.interval,
+    resolution_policy_version: "fixed-utc-intraday-v1",
+    sma_windows: [
+      chartSettings.shortWindow,
+      chartSettings.longWindow,
+      chartSettings.thirdWindow,
+    ],
+    volume_unit: "BTC",
+    points,
+    latest_session: points.at(-1) || null,
+    latest_statistics: [],
+    range_statistics: {},
+    coverage: {
+      selected_sessions: payload.source_bar_count,
+      displayed_points: points.length,
+      discarded_revisions: 0,
+      earliest_selected_timestamp: points[0]?.timestamp || null,
+      latest_selected_timestamp: points.at(-1)?.timestamp || null,
+    },
+    intraday_coverage: {
+      complete_interval_count: payload.complete_interval_count,
+      incomplete_interval_count: payload.incomplete_interval_count,
+      start: payload.start,
+      end: payload.end,
+    },
+    traceability_verified: payload.traceability_verified,
+  };
 }
 
 function renderMarketSnapshot(chart, latestSession, latestPoint) {
@@ -1835,10 +2030,13 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
   }
   const asset = marketAssetPresentation();
   const requestedPeriod = marketChartPeriod();
+  const intraday = isBtcIntradayInterval();
+  const expectedSourceId = intraday ? asset.intradaySourceId : asset.sourceId;
+  const expectedSchemaVersion = intraday ? asset.intradaySchemaVersion : asset.schemaVersion;
   if (
     chart.asset_id !== selectedMarketAsset ||
-    chart.source_id !== asset.sourceId ||
-    chart.schema_version !== asset.schemaVersion ||
+    chart.source_id !== expectedSourceId ||
+    chart.schema_version !== expectedSchemaVersion ||
     chart.volume_unit !== asset.volumeUnit ||
     chart.period !== requestedPeriod ||
     !Array.isArray(chart.sma_windows) ||
@@ -1846,7 +2044,8 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
     chart.sma_windows[0] !== chartSettings.shortWindow ||
     chart.sma_windows[1] !== chartSettings.longWindow ||
     chart.sma_windows[2] !== chartSettings.thirdWindow ||
-    chart.interval !== chartSettings.interval
+    chart.interval !== chartSettings.interval ||
+    chart.traceability_verified !== true
   ) {
     throw new Error("El gráfico local no respetó la configuración de medias móviles solicitada.");
   }
@@ -1865,7 +2064,9 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
     byId("chart-range-change").textContent = "—";
     byId("chart-range-change").className = "chart-change neutral";
     byId("chart-latest-date").textContent = "Sin datos locales para el corte seleccionado";
-    empty.textContent = "No hay precios disponibles para este corte histórico.";
+    empty.textContent = intraday
+      ? "No hay velas intradía locales para este corte. Usa «Actualizar BTC-USD» para importar las últimas 24 horas."
+      : "No hay precios disponibles para este corte histórico.";
     empty.classList.remove("hidden");
     byId("market-chart").replaceChildren();
     byId("chart-table-body").replaceChildren();
@@ -1883,9 +2084,13 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
   const oneDayReturn = chartStatistic(chart, "market.history.simple_return_1d");
   const dailyChange = numericValue(oneDayReturn?.value);
   byId("chart-latest-close").textContent = formatCurrency(latest.close);
-  byId("chart-latest-date").textContent = `Cierre del ${formatCalendarDate(latest.timestamp)}`;
+  byId("chart-latest-date").textContent = intraday
+    ? `Apertura de vela: ${formatMarketTimestamp(latest.timestamp)} UTC`
+    : `Cierre del ${formatCalendarDate(latest.timestamp)}`;
   const change = byId("chart-range-change");
-  change.textContent = `${formatRangeChange(dailyChange)} variación diaria`;
+  change.textContent = intraday
+    ? `${formatInteger(chart.coverage.displayed_points)} velas locales`
+    : `${formatRangeChange(dailyChange)} variación diaria`;
   change.className = `chart-change ${dailyChange > 0 ? "positive" : dailyChange < 0 ? "negative" : "neutral"}`;
   byId("chart-latest-sma-5").textContent = latestPoint.short_sma
     ? formatCurrency(latestPoint.short_sma.value)
@@ -1897,11 +2102,18 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
     ? formatCurrency(latestPoint.third_sma.value)
     : "—";
   byId("chart-visible-sessions").textContent = formatInteger(chart.coverage.selected_sessions);
+  byId("chart-visible-sessions-label").textContent = intraday
+    ? "Minutos fuente"
+    : "Días con datos";
   const periodLabel = marketChartPeriodLabel(chart.period);
   byId("snapshot-range-title").textContent = periodLabel;
   renderMarketSnapshot(chart, latest, latestPoint);
-  const coverageStart = formatCalendarDate(chart.coverage.earliest_selected_timestamp);
-  const coverageEnd = formatCalendarDate(chart.coverage.latest_selected_timestamp);
+  const coverageStart = intraday
+    ? formatMarketTimestamp(chart.coverage.earliest_selected_timestamp)
+    : formatCalendarDate(chart.coverage.earliest_selected_timestamp);
+  const coverageEnd = intraday
+    ? formatMarketTimestamp(chart.coverage.latest_selected_timestamp)
+    : formatCalendarDate(chart.coverage.latest_selected_timestamp);
   const resolutionText = marketResolution(chart.resolution);
   byId("chart-point-period-label").textContent = resolutionText.singular;
   byId("market-chart").setAttribute(
@@ -1913,7 +2125,9 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
   const viewportStatus = marketChartIsZoomed()
     ? ` · mostrando ${formatInteger(points.length)} de ${formatInteger(allPoints.length)} puntos`
     : "";
-  byId("chart-status").textContent = `${periodLabel}: ${formatInteger(chart.coverage.selected_sessions)} días con datos en ${formatInteger(chart.coverage.displayed_points)} puntos ${resolutionText.adjective}${viewportStatus} · fechas ${coverageStart}–${coverageEnd} · ${formatInteger(chart.coverage.discarded_revisions)} revisiones descartadas${currentInterval} · corte ${formatInstant(chart.known_at)}`;
+  byId("chart-status").textContent = intraday
+    ? `${periodLabel}: ${formatInteger(chart.coverage.selected_sessions)} minutos fuente en ${formatInteger(chart.coverage.displayed_points)} velas ${resolutionText.adjective}${viewportStatus} · ${formatInteger(chart.intraday_coverage.complete_interval_count)} completas y ${formatInteger(chart.intraday_coverage.incomplete_interval_count)} incompletas · ${coverageStart}–${coverageEnd} UTC · corte ${formatInstant(chart.known_at)}`
+    : `${periodLabel}: ${formatInteger(chart.coverage.selected_sessions)} días con datos en ${formatInteger(chart.coverage.displayed_points)} puntos ${resolutionText.adjective}${viewportStatus} · fechas ${coverageStart}–${coverageEnd} · ${formatInteger(chart.coverage.discarded_revisions)} revisiones descartadas${currentInterval} · corte ${formatInstant(chart.known_at)}`;
   renderChartSvg(points, chart.resolution);
   const disclosure = byId("chart-data-disclosure");
   if (disclosure.open) renderChartTable(points);
@@ -1940,17 +2154,23 @@ async function queryMarketChart() {
   setExportAvailable("export-market-csv", false);
   byId("chart-status").textContent = "Consultando el histórico local…";
   const requestedPeriod = marketChartPeriod();
+  const intraday = isBtcIntradayInterval();
   const parameters = new URLSearchParams({
     asset_id: selectedMarketAsset,
     known_at: byId("report-known-at").value.trim(),
-    period: requestedPeriod,
     interval: chartSettings.interval,
-    short_sma_window: String(chartSettings.shortWindow),
-    long_sma_window: String(chartSettings.longWindow),
-    third_sma_window: String(chartSettings.thirdWindow),
   });
+  if (!intraday) {
+    parameters.set("period", requestedPeriod);
+    parameters.set("short_sma_window", String(chartSettings.shortWindow));
+    parameters.set("long_sma_window", String(chartSettings.longWindow));
+    parameters.set("third_sma_window", String(chartSettings.thirdWindow));
+  }
   try {
-    renderMarketChart(await api(`/api/market-chart?${parameters.toString()}`));
+    const payload = await api(
+      `${intraday ? "/api/market-intraday" : "/api/market-chart"}?${parameters.toString()}`,
+    );
+    renderMarketChart(intraday ? normalizeBtcIntradayChart(payload) : payload);
   } catch (error) {
     marketChartPayload = null;
     marketChartViewport = null;
@@ -1960,6 +2180,10 @@ async function queryMarketChart() {
     byId("chart-table-body").replaceChildren();
     const empty = byId("chart-empty");
     empty.textContent = error.message;
+    if (intraday && error.message.includes("No historical bars")) {
+      empty.textContent =
+        "No hay velas intradía locales para este corte. Usa «Actualizar BTC-USD» para importar las últimas 24 horas.";
+    }
     empty.classList.remove("hidden");
     byId("chart-status").textContent = "El gráfico no pudo construirse para el corte solicitado.";
   } finally {
@@ -2864,7 +3088,9 @@ byId("run-form").addEventListener("submit", async (event) => {
   setMessage(
     presentation.hasFundamentals
       ? "La actualización puede tardar. SEC se consulta en cada ejecución."
-      : "Actualizando velas diarias de Coinbase y estadísticas de BTC-USD…",
+      : refreshIntraday
+        ? "Actualizando primero el histórico diario y después 24 horas de velas intradía…"
+        : "Actualizando velas diarias de Coinbase y estadísticas de BTC-USD…",
   );
   const knownAt = byId("run-known-at").value.trim();
   try {
@@ -2902,16 +3128,34 @@ byId("run-form").addEventListener("submit", async (event) => {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      byId("report-known-at").value = summary.effective_known_at;
-      knownAtByAsset.set(selectedMarketAsset, summary.effective_known_at);
+      let effectiveKnownAt = summary.effective_known_at;
+      let intradaySummary = null;
+      if (refreshIntraday) {
+        intradaySummary = await api("/api/market-intraday-refresh", {
+          method: "POST",
+          body: JSON.stringify({
+            asset_id: selectedMarketAsset,
+            hours: 24,
+            requested_end: null,
+          }),
+        });
+        effectiveKnownAt = intradaySummary.retrieved_at;
+      }
+      byId("report-known-at").value = effectiveKnownAt;
+      knownAtByAsset.set(selectedMarketAsset, effectiveKnownAt);
       const mode = translated(
         summary.refresh_plan.mode,
         STATUS_LABELS,
         summary.refresh_plan.mode,
       );
+      const intradayText = intradaySummary
+        ? ` ${formatInteger(intradaySummary.candles_received)} velas de 1 minuto procesadas; `
+          + `${formatInteger(intradaySummary.raw_records_created)} nuevas y `
+          + `${formatInteger(intradaySummary.raw_records_reused)} reutilizadas.`
+        : "";
       setMessage(
-        `${mode}. ${formatInteger(summary.candles_received)} velas procesadas; `
-        + `${formatInteger(summary.metric_results_created)} métricas nuevas. `
+        `${mode}. ${formatInteger(summary.candles_received)} velas diarias procesadas; `
+        + `${formatInteger(summary.metric_results_created)} métricas nuevas.${intradayText} `
         + "Trazabilidad verificada.",
       );
       await queryMarketChart();
@@ -2992,6 +3236,7 @@ for (const button of document.querySelectorAll(".asset-selector-button")) {
     marketChartViewport = null;
     marketChartDrag = null;
     applySelectedMarketAsset();
+    applyChartSettings();
     const activeAppleLink = document.querySelector(".nav-link.active[data-apple-only]");
     if (activeAppleLink) {
       activeAppleLink.classList.remove("active");
@@ -3027,6 +3272,7 @@ for (const button of document.querySelectorAll(".chart-type-button")) {
 
 byId("chart-interval").addEventListener("change", async (event) => {
   chartSettings = { ...chartSettings, interval: event.target.value };
+  applySelectedMarketAsset();
   applyChartSettings();
   persistChartSettings();
   await queryMarketChart();

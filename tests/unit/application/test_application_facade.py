@@ -16,6 +16,8 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
     BtcMarketChartRequest,
 )
+from investment_analyst.analytics.market.intraday_models import IntradayInterval
+from investment_analyst.application.btc_intraday_models import BtcIntradayChartRequest
 from investment_analyst.application.facade import InvestmentAnalystApplication
 from investment_analyst.application.runtime import ApplicationRuntime, StorageLocationRequest
 from investment_analyst.core.models import DataFrequency
@@ -102,6 +104,33 @@ def test_btc_chart_query_is_empty_bounded_and_read_only(tmp_path: Path) -> None:
     assert chart.source_id == "coinbase-exchange:btc-usd:daily-candles"
     assert chart.volume_unit == "BTC"
     assert chart.points == ()
+    assert chart.traceability_verified
+    assert storage_paths.database_path.read_bytes() == database_before
+
+
+def test_btc_intraday_chart_query_is_empty_bounded_and_read_only(tmp_path: Path) -> None:
+    root = tmp_path / "legacy-btc-intraday-chart"
+    storage_paths = StoragePaths.from_root(root)
+    with LocalStorage(storage_paths):
+        pass
+    database_before = storage_paths.database_path.read_bytes()
+
+    chart = _application(tmp_path).query_btc_intraday_chart(
+        BtcIntradayChartRequest(
+            known_at=datetime(2026, 7, 14, 4, 41, 55, tzinfo=UTC),
+            interval=IntradayInterval.MINUTE_5,
+        ),
+        location=StorageLocationRequest(legacy_root=root),
+    )
+
+    assert chart.schema_version == "btc-intraday-chart-v1"
+    assert chart.asset_id == "crypto:btc-usd"
+    assert chart.source_id == "coinbase-exchange:btc-usd:minute-1-candles"
+    assert chart.interval is IntradayInterval.MINUTE_5
+    assert chart.start.isoformat() == "2026-07-13T04:41:00+00:00"
+    assert chart.end.isoformat() == "2026-07-14T04:41:00+00:00"
+    assert chart.bars == ()
+    assert chart.source_bar_count == 0
     assert chart.traceability_verified
     assert storage_paths.database_path.read_bytes() == database_before
 

@@ -1,6 +1,7 @@
 """Stable application facade for local investment-analysis workflows."""
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -61,6 +62,16 @@ from investment_analyst.application.aapl_bootstrap_models import (
     AaplWorkspaceBootstrapRequest,
     AaplWorkspaceBootstrapSummary,
 )
+from investment_analyst.application.btc_intraday import (
+    query_btc_intraday_chart,
+    refresh_btc_intraday,
+)
+from investment_analyst.application.btc_intraday_models import (
+    BtcIntradayChart,
+    BtcIntradayChartRequest,
+    BtcIntradayRefreshRequest,
+    BtcIntradayRefreshSummary,
+)
 from investment_analyst.application.btc_refresh import BtcMarketRefreshPipeline
 from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshRequest,
@@ -71,11 +82,15 @@ from investment_analyst.application.runtime import ApplicationRuntime, StorageLo
 from investment_analyst.catalog.provider_configuration import (
     resolve_alpaca_configuration,
     resolve_coinbase_configuration,
+    resolve_coinbase_intraday_configuration,
     resolve_sec_configuration,
 )
 from investment_analyst.core.models.base import ContractModel
 from investment_analyst.providers.crypto.coinbase_exchange import CoinbaseExchangeClient
-from investment_analyst.providers.crypto.coinbase_pipeline import CoinbaseHistoricalPipeline
+from investment_analyst.providers.crypto.coinbase_pipeline import (
+    CoinbaseHistoricalPipeline,
+    CoinbaseIntradayPipeline,
+)
 from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
     SecCompanyFactsNormalizer,
 )
@@ -214,6 +229,41 @@ class InvestmentAnalystApplication:
                 HistoricalMarketDataService(storage),
                 MarketStatisticsEngine(),
             ).query(request)
+
+    def query_btc_intraday_chart(
+        self,
+        request: BtcIntradayChartRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BtcIntradayChart:
+        """Return the latest bounded point-in-time BTC-USD intraday chart."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return query_btc_intraday_chart(storage, request)
+
+    def refresh_btc_intraday(
+        self,
+        request: BtcIntradayRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BtcIntradayRefreshSummary:
+        """Import one explicit 24-hour minute window without daily analytics."""
+        configuration = resolve_coinbase_intraday_configuration(self._runtime.provider_resolver)
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_WRITE,
+        ) as storage:
+            return refresh_btc_intraday(
+                CoinbaseIntradayPipeline(
+                    storage,
+                    CoinbaseExchangeClient(self._transport_factory()),
+                    configuration=configuration,
+                ),
+                request,
+                now=datetime.now(UTC),
+            )
 
     def refresh_btc_market(
         self,

@@ -74,9 +74,26 @@ acota la reconstrucción de observaciones de un minuto aunque el workspace crezc
 La consulta es de solo lectura y no contacta al proveedor. Devuelve conteos de buckets completos e
 incompletos, las barras solicitadas y `traceability_verified: true`.
 
+## Integración web acotada
+
+La interfaz de BTC expone los nueve intervalos intradía sobre una ventana fija de las últimas 24
+horas. La consulta `GET /api/market-intraday` es de solo lectura, acepta `known_at` e `interval`,
+excluye el minuto fuente aún en curso y devuelve como máximo 1.440 velas. La respuesta versionada
+`btc-intraday-chart-v1` conserva completitud, calidad, conteos y toda la evidencia de agregación.
+
+Cuando está seleccionado un intervalo intradía, la acción manual de actualización ejecuta primero
+el flujo diario existente y luego `POST /api/market-intraday-refresh`. Esta segunda operación importa
+exactamente 24 horas de minutos completos y devuelve `btc-intraday-refresh-v1` con registros y
+observaciones creados o reutilizados. Si falla, no revierte el progreso diario ya persistido.
+
+La selección de intervalo no contacta al proveedor ni escribe en el workspace. Los datos intradía
+no calculan ni simulan las SMA, estadísticas o diagnósticos diarios; la interfaz deja esos valores
+sin publicar.
+
 ## Límites de esta fase
 
-- La interfaz web aún no consume la fuente intradía.
 - El scheduler persistente continúa ejecutando únicamente el flujo diario de Apple.
 - No existe backfill automático intradía ni calendario de sesiones para AAPL.
+- La actualización intradía es explícita y mantiene solo una ventana por ejecución; el histórico
+  append-only anterior no se elimina.
 - No se mezclan resultados diarios e intradía, ni mercado y fundamentales.

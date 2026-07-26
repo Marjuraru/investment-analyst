@@ -64,6 +64,16 @@ from investment_analyst.application.aapl_daily_runner import (
     AaplDailyRunner,
 )
 from investment_analyst.application.aapl_scheduler import AaplDailyScheduler
+from investment_analyst.application.btc_intraday import (
+    BtcIntradayChartQueryError,
+    BtcIntradayRefreshError,
+)
+from investment_analyst.application.btc_intraday_models import (
+    BtcIntradayChart,
+    BtcIntradayChartRequest,
+    BtcIntradayRefreshRequest,
+    BtcIntradayRefreshSummary,
+)
 from investment_analyst.application.btc_refresh import (
     BtcMarketKnownAtTooEarlyError,
     BtcMarketRefreshError,
@@ -154,6 +164,24 @@ class _ApplicationOperations(Protocol):
         """Query one bounded persisted Coinbase chart."""
         ...
 
+    def query_btc_intraday_chart(
+        self,
+        request: BtcIntradayChartRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BtcIntradayChart:
+        """Query one bounded persisted Coinbase intraday chart."""
+        ...
+
+    def refresh_btc_intraday(
+        self,
+        request: BtcIntradayRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BtcIntradayRefreshSummary:
+        """Import one bounded Coinbase one-minute window."""
+        ...
+
     def refresh_btc_market(
         self,
         request: BtcMarketRefreshRequest,
@@ -213,6 +241,10 @@ class _WebOperations(Protocol):
         """Return one bounded point-in-time market chart."""
         ...
 
+    def market_intraday(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return one bounded point-in-time intraday chart."""
+        ...
+
     def fundamental_trend(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Return one bounded point-in-time SEC fundamental trend."""
         ...
@@ -246,6 +278,10 @@ class _WebOperations(Protocol):
         """Execute one manual market-only refresh."""
         ...
 
+    def market_intraday_refresh(self, payload: dict[str, object]) -> dict[str, object]:
+        """Execute one manual intraday market refresh."""
+        ...
+
 
 class AaplLocalController:
     """Serialize in-process reads and writes over existing application boundaries."""
@@ -267,6 +303,7 @@ class AaplLocalController:
         self._operation_lock = threading.RLock()
         self._market_chart_cache: dict[AaplMarketChartRequest, AaplMarketChart] = {}
         self._btc_market_chart_cache: dict[BtcMarketChartRequest, BtcMarketChart] = {}
+        self._btc_intraday_chart_cache: dict[BtcIntradayChartRequest, BtcIntradayChart] = {}
         self._fundamental_trend_cache: dict[AaplFundamentalTrendRequest, AaplFundamentalTrend] = {}
         self._fundamental_research_cache: dict[
             AaplFundamentalResearchRequest, AaplFundamentalResearchResult
@@ -322,6 +359,7 @@ class AaplLocalController:
             finally:
                 self._market_chart_cache.clear()
                 self._btc_market_chart_cache.clear()
+                self._btc_intraday_chart_cache.clear()
                 self._fundamental_trend_cache.clear()
                 self._fundamental_research_cache.clear()
                 self._fundamental_research_history_cache.clear()
@@ -368,6 +406,24 @@ class AaplLocalController:
             self._btc_market_chart_cache[request] = chart
             return chart
 
+    def btc_intraday_chart_request(
+        self,
+        request: BtcIntradayChartRequest,
+    ) -> BtcIntradayChart:
+        """Query cached, persisted Coinbase one-minute evidence without writes."""
+        with self._operation_lock:
+            cached = self._btc_intraday_chart_cache.get(request)
+            if cached is not None:
+                return cached
+            chart = self._application.query_btc_intraday_chart(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            )
+            if len(self._btc_intraday_chart_cache) >= _MAX_READ_CACHE_ENTRIES:
+                self._btc_intraday_chart_cache.pop(next(iter(self._btc_intraday_chart_cache)))
+            self._btc_intraday_chart_cache[request] = chart
+            return chart
+
     def btc_market_refresh_request(
         self,
         request: BtcMarketRefreshRequest,
@@ -381,6 +437,20 @@ class AaplLocalController:
                 )
             finally:
                 self._btc_market_chart_cache.clear()
+
+    def btc_intraday_refresh_request(
+        self,
+        request: BtcIntradayRefreshRequest,
+    ) -> BtcIntradayRefreshSummary:
+        """Execute one bounded Coinbase minute refresh through the writer mutex."""
+        with self._operation_lock:
+            try:
+                return self._application.refresh_btc_intraday(
+                    request,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                )
+            finally:
+                self._btc_intraday_chart_cache.clear()
 
     def fundamental_trend_request(
         self,
@@ -549,6 +619,22 @@ class AaplLocalWebApplication:
             return self._controller.btc_market_chart_request(request).to_json_dict()
         raise ValueError("market chart asset_id is not supported")
 
+    def market_intraday(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Validate and return the fixed 24-hour BTC-USD intraday chart."""
+        allowed = {"asset_id", "known_at", "interval"}
+        if set(parameters) - allowed:
+            raise ValueError("intraday market query contains unsupported parameters")
+        asset_id = _one_parameter(parameters, "asset_id", required=False) or "crypto:btc-usd"
+        if asset_id != "crypto:btc-usd":
+            raise ValueError("intraday market asset_id is not supported")
+        known_at = _one_parameter(parameters, "known_at", required=True)
+        interval = _one_parameter(parameters, "interval", required=True)
+        request = BtcIntradayChartRequest(
+            known_at=_aware_datetime(known_at),
+            interval=interval,
+        )
+        return self._controller.btc_intraday_chart_request(request).to_json_dict()
+
     def fundamental_trend(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate query parameters and return the versioned SEC trend contract."""
         allowed = {"known_at", "frequency"}
@@ -596,6 +682,11 @@ class AaplLocalWebApplication:
         """Validate and execute one explicit Coinbase-only refresh."""
         request = BtcMarketRefreshRequest.model_validate(payload)
         return self._controller.btc_market_refresh_request(request).to_json_dict()
+
+    def market_intraday_refresh(self, payload: dict[str, object]) -> dict[str, object]:
+        """Validate and execute one explicit bounded Coinbase minute refresh."""
+        request = BtcIntradayRefreshRequest.model_validate(payload)
+        return self._controller.btc_intraday_refresh_request(request).to_json_dict()
 
 
 class AaplLocalHttpServer(ThreadingHTTPServer):
@@ -670,6 +761,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(HTTPStatus.OK, server.application.market_chart(parameters))
                 return
+            if parsed.path == "/api/market-intraday":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.market_intraday(parameters),
+                )
+                return
             if parsed.path == "/api/fundamental-trend":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
                 parameters = {key: tuple(values) for key, values in raw.items()}
@@ -707,14 +806,20 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
         try:
             self._require_loopback_host()
             parsed = urlsplit(self.path)
-            if parsed.query or parsed.path not in {"/api/run", "/api/market-refresh"}:
+            if parsed.query or parsed.path not in {
+                "/api/run",
+                "/api/market-refresh",
+                "/api/market-intraday-refresh",
+            }:
                 raise _HttpError(HTTPStatus.NOT_FOUND, "not_found", "route not found")
             payload = self._read_json_object()
             server = cast(AaplLocalHttpServer, self.server)
             if parsed.path == "/api/run":
                 response = server.application.run(payload)
-            else:
+            elif parsed.path == "/api/market-refresh":
                 response = server.application.market_refresh(payload)
+            else:
+                response = server.application.market_intraday_refresh(payload)
             self._send_json(HTTPStatus.OK, response)
         except Exception as error:  # noqa: BLE001
             self._send_mapped_error(error)
@@ -798,12 +903,19 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 "market_refresh_failed",
                 str(error)[:500],
             )
+        elif isinstance(error, BtcIntradayRefreshError):
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "market_intraday_refresh_failed",
+                str(error)[:500],
+            )
         elif isinstance(
             error,
             (
                 AaplDailyReportError,
                 AaplFundamentalTrendQueryError,
                 AaplMarketChartQueryError,
+                BtcIntradayChartQueryError,
                 BtcMarketChartQueryError,
                 ConsolidatedDiagnosticQueryError,
                 FundamentalResearchError,
