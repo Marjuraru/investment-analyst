@@ -39,7 +39,14 @@ from investment_analyst.analytics.market.chart_models import (
     BtcMarketChart,
     BtcMarketChartRequest,
 )
+from investment_analyst.analytics.market.intraday_models import IntradayInterval
 from investment_analyst.application.aapl_bootstrap_models import AaplWorkspaceBootstrapRequest
+from investment_analyst.application.btc_intraday_models import (
+    BtcIntradayChart,
+    BtcIntradayChartRequest,
+    BtcIntradayRefreshRequest,
+    BtcIntradayRefreshSummary,
+)
 from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshRequest,
     BtcMarketRefreshSummary,
@@ -102,6 +109,10 @@ class _FakeApplication:
         self.chart_locations: list[StorageLocationRequest] = []
         self.btc_chart_requests: list[BtcMarketChartRequest] = []
         self.btc_chart_locations: list[StorageLocationRequest] = []
+        self.btc_intraday_chart_requests: list[BtcIntradayChartRequest] = []
+        self.btc_intraday_chart_locations: list[StorageLocationRequest] = []
+        self.btc_intraday_refresh_requests: list[BtcIntradayRefreshRequest] = []
+        self.btc_intraday_refresh_locations: list[StorageLocationRequest] = []
         self.btc_refresh_requests: list[BtcMarketRefreshRequest] = []
         self.btc_refresh_locations: list[StorageLocationRequest] = []
         self.trend_requests: list[AaplFundamentalTrendRequest] = []
@@ -185,6 +196,67 @@ class _FakeApplication:
                     "refresh_plan": {"mode": "incremental"},
                     "candles_received": 1,
                     "metric_results_created": 7,
+                    "traceability_verified": True,
+                }
+            ),
+        )
+
+    def query_btc_intraday_chart(
+        self,
+        request: BtcIntradayChartRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BtcIntradayChart:
+        self.btc_intraday_chart_requests.append(request)
+        self.btc_intraday_chart_locations.append(location)
+        return cast(
+            BtcIntradayChart,
+            _JsonResult(
+                {
+                    "schema_version": "btc-intraday-chart-v1",
+                    "asset_id": "crypto:btc-usd",
+                    "source_id": "coinbase-exchange:btc-usd:minute-1-candles",
+                    "known_at": request.known_at.isoformat(),
+                    "start": request.query_start.isoformat(),
+                    "end": request.query_end.isoformat(),
+                    "lookback_hours": 24,
+                    "interval": request.interval.value,
+                    "bars": [],
+                    "source_bar_count": 0,
+                    "complete_interval_count": 0,
+                    "incomplete_interval_count": 0,
+                    "traceability_verified": True,
+                }
+            ),
+        )
+
+    def refresh_btc_intraday(
+        self,
+        request: BtcIntradayRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BtcIntradayRefreshSummary:
+        self.btc_intraday_refresh_requests.append(request)
+        self.btc_intraday_refresh_locations.append(location)
+        return cast(
+            BtcIntradayRefreshSummary,
+            _JsonResult(
+                {
+                    "schema_version": "btc-intraday-refresh-v1",
+                    "asset_id": "crypto:btc-usd",
+                    "source_id": "coinbase-exchange:btc-usd:minute-1-candles",
+                    "requested_start": "2026-07-15T15:46:00+00:00",
+                    "requested_end": "2026-07-16T15:46:00+00:00",
+                    "retrieved_at": "2026-07-16T15:47:00+00:00",
+                    "request_count": 5,
+                    "candles_received": 1_440,
+                    "raw_records_created": 1_440,
+                    "raw_records_reused": 0,
+                    "observations_created": 7_200,
+                    "observations_reused": 0,
+                    "missing_intervals": [],
+                    "earliest_candle": "2026-07-15T15:46:00+00:00",
+                    "latest_candle": "2026-07-16T15:45:00+00:00",
                     "traceability_verified": True,
                 }
             ),
@@ -403,8 +475,10 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert '<option value="logarithmic">Logarítmica</option>' in html
     assert 'data-chart-type="line"' in html
     assert 'data-chart-type="candlestick"' in html
+    assert 'class="chart-type-button active" type="button" data-chart-type="candlestick"' in html
     assert 'id="chart-interval"' in html
-    assert 'id="chart-zoom-reset"' in html
+    assert 'id="chart-zoom-reset"' not in html
+    assert "Rueda: zoom · Arrastrar: desplazar · ← → recorrer" not in html
     assert 'id="snapshot-range-title"' in html
     assert "Último año" in html
     assert 'rel="icon"' in html
@@ -420,6 +494,11 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "Métricas por área" in html
     assert "Fórmulas y evidencia exacta" in html
     assert "Tema claro" in html
+    assert 'id="lima-clock"' in html
+    assert 'id="new-york-clock"' in html
+    assert 'id="nyse-session-status"' in html
+    assert "09:30–16:00 ET · lunes a viernes" in html
+    assert "no evalúa feriados ni cierres" in html
     assert 'id="export-market-csv"' in html
     assert 'id="export-fundamental-csv"' in html
     assert 'id="export-fundamental-research-csv"' in html
@@ -434,7 +513,10 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "formatConfidence(diagnostic.confidence)" in javascript
     assert "JSON.stringify(report, null, 2)" in javascript
     assert "await queryReport();" in javascript
-    assert "api(`/api/market-chart?${parameters.toString()}`)" in javascript
+    assert 'intraday ? "/api/market-intraday" : "/api/market-chart"' in javascript
+    assert "normalizeBtcIntradayChart(payload)" in javascript
+    assert "market-intraday-refresh" in javascript
+    assert '"5m", label: "5 min · últimas 24 h"' in javascript
     assert 'class="period-selector"' not in html
     assert 'class="period-button' not in html
     assert "data-period=" not in html
@@ -442,7 +524,7 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert '"1d": "1y"' in javascript
     assert '"1w": "5y"' in javascript
     assert '"1mo": "max"' in javascript
-    assert "period: requestedPeriod" in javascript
+    assert 'parameters.set("period", requestedPeriod)' in javascript
     assert "chart.period !== requestedPeriod" in javascript
     assert "chart.coverage.earliest_selected_timestamp" in javascript
     assert "chart.coverage.latest_selected_timestamp" in javascript
@@ -459,6 +541,12 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "host.setPointerCapture" in javascript
     assert "event.preventDefault()" in javascript
     assert "MINIMUM_CHART_VIEW_POINTS" in javascript
+    assert 'const DEFAULT_TIME_ZONE = "America/Lima"' in javascript
+    assert 'const NEW_YORK_TIME_ZONE = "America/New_York"' in javascript
+    assert "function newYorkRegularSessionState" in javascript
+    assert 'document.addEventListener("visibilitychange", startMarketClocks)' in javascript
+    assert "window.setTimeout(startMarketClocks, delay)" in javascript
+    assert ".market-clock-grid" in stylesheet
     assert "window.requestAnimationFrame" in javascript
     assert 'event.key === "0"' in javascript
     assert "marketCsvRows(marketChartPayload, points)" in javascript
@@ -494,10 +582,11 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "window.localStorage.setItem(THEME_STORAGE_KEY, theme)" in javascript
     assert "window.localStorage.setItem(CHART_SETTINGS_STORAGE_KEY" in javascript
     assert "chart.sma_windows[0] !== chartSettings.shortWindow" in javascript
-    assert "short_sma_window: String(chartSettings.shortWindow)" in javascript
-    assert "long_sma_window: String(chartSettings.longWindow)" in javascript
-    assert "third_sma_window: String(chartSettings.thirdWindow)" in javascript
+    assert 'parameters.set("short_sma_window", String(chartSettings.shortWindow))' in javascript
+    assert 'parameters.set("long_sma_window", String(chartSettings.longWindow))' in javascript
+    assert 'parameters.set("third_sma_window", String(chartSettings.thirdWindow))' in javascript
     assert 'priceScale: "linear"' in javascript
+    assert 'chartType: "candlestick"' in javascript
     assert 'chartSettings.priceScale === "logarithmic" ? Math.log' in javascript
     assert "for (const price of prices)" in javascript
     assert "Number.POSITIVE_INFINITY" in javascript
@@ -518,6 +607,7 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "maximumFractionDigits: 2" in javascript
     assert ".market-chart-card" in stylesheet
     assert ".chart-settings" in stylesheet
+    assert "width: 184px;" in stylesheet
     assert ".chart-settings-panel select" in stylesheet
     assert ".candlestick-bodies.positive" in stylesheet
     assert ".candlestick-bodies.negative" in stylesheet
@@ -619,6 +709,19 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
         cached_btc_chart_status, cached_btc_chart, _ = _json_request(
             Request(f"{root}/api/market-chart?{btc_chart_parameters}")
         )
+        btc_intraday_parameters = urlencode(
+            {
+                "asset_id": "crypto:btc-usd",
+                "known_at": "2026-07-16T15:46:09Z",
+                "interval": "5m",
+            }
+        )
+        btc_intraday_status, btc_intraday, _ = _json_request(
+            Request(f"{root}/api/market-intraday?{btc_intraday_parameters}")
+        )
+        cached_btc_intraday_status, cached_btc_intraday, _ = _json_request(
+            Request(f"{root}/api/market-intraday?{btc_intraday_parameters}")
+        )
         btc_refresh_payload = json.dumps(
             {
                 "asset_id": "crypto:btc-usd",
@@ -632,6 +735,21 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
             Request(
                 f"{root}/api/market-refresh",
                 data=btc_refresh_payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        btc_intraday_refresh_payload = json.dumps(
+            {
+                "asset_id": "crypto:btc-usd",
+                "hours": 24,
+                "requested_end": "2026-07-16T15:46:00Z",
+            }
+        ).encode("utf-8")
+        btc_intraday_refresh_status, btc_intraday_refresh, _ = _json_request(
+            Request(
+                f"{root}/api/market-intraday-refresh",
+                data=btc_intraday_refresh_payload,
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
@@ -716,6 +834,17 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert application.btc_chart_requests[0].interval.value == "1d"
     assert application.btc_chart_requests[0].session_limit == 20_000
     assert application.btc_chart_locations[0].workspace == workspace.resolve()
+    assert btc_intraday_status == 200
+    assert btc_intraday["schema_version"] == "btc-intraday-chart-v1"
+    assert btc_intraday["interval"] == "5m"
+    assert cached_btc_intraday_status == 200
+    assert cached_btc_intraday == btc_intraday
+    assert len(application.btc_intraday_chart_requests) == 1
+    assert application.btc_intraday_chart_requests[0].interval is IntradayInterval.MINUTE_5
+    assert application.btc_intraday_chart_requests[0].query_start.isoformat() == (
+        "2026-07-15T15:46:00+00:00"
+    )
+    assert application.btc_intraday_chart_locations[0].workspace == workspace.resolve()
     assert btc_refresh_status == 200
     assert btc_refresh["schema_version"] == "btc-market-refresh-v1"
     assert btc_refresh["traceability_verified"] is True
@@ -726,6 +855,15 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
         )
     ]
     assert application.btc_refresh_locations[0].workspace == workspace.resolve()
+    assert btc_intraday_refresh_status == 200
+    assert btc_intraday_refresh["schema_version"] == "btc-intraday-refresh-v1"
+    assert btc_intraday_refresh["traceability_verified"] is True
+    assert application.btc_intraday_refresh_requests == [
+        BtcIntradayRefreshRequest(
+            requested_end=datetime(2026, 7, 16, 15, 46, tzinfo=UTC),
+        )
+    ]
+    assert application.btc_intraday_refresh_locations[0].workspace == workspace.resolve()
     assert trend_status == 200
     assert trend["schema_version"] == "aapl-fundamental-trend-v1"
     assert trend["frequency"] == "quarterly"
@@ -771,6 +909,10 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
     )
     chart_request = AaplMarketChartRequest(known_at=datetime(2026, 7, 16, tzinfo=UTC))
     btc_chart_request = BtcMarketChartRequest(known_at=datetime(2026, 7, 16, tzinfo=UTC))
+    btc_intraday_chart_request = BtcIntradayChartRequest(
+        known_at=datetime(2026, 7, 16, tzinfo=UTC),
+        interval=IntradayInterval.MINUTE_5,
+    )
     trend_request = AaplFundamentalTrendRequest(
         known_at=datetime(2026, 7, 16, tzinfo=UTC),
         frequency=DataFrequency.QUARTERLY,
@@ -795,6 +937,8 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
     controller.market_chart_request(chart_request)
     controller.btc_market_chart_request(btc_chart_request)
     controller.btc_market_chart_request(btc_chart_request)
+    controller.btc_intraday_chart_request(btc_intraday_chart_request)
+    controller.btc_intraday_chart_request(btc_intraday_chart_request)
     controller.fundamental_trend_request(trend_request)
     controller.fundamental_trend_request(trend_request)
     controller.fundamental_research_request(research_request)
@@ -806,6 +950,7 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
     controller.run_payload(run_payload)
     controller.market_chart_request(chart_request)
     controller.btc_market_chart_request(btc_chart_request)
+    controller.btc_intraday_chart_request(btc_intraday_chart_request)
     controller.fundamental_trend_request(trend_request)
     controller.fundamental_research_request(research_request)
     controller.fundamental_research_history_request(research_request)
@@ -813,6 +958,7 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
 
     assert len(application.chart_requests) == 2
     assert len(application.btc_chart_requests) == 2
+    assert len(application.btc_intraday_chart_requests) == 2
     assert len(application.trend_requests) == 2
     assert len(application.research_requests) == 2
     assert len(application.research_history_requests) == 2
@@ -919,6 +1065,23 @@ def test_local_api_rejects_invalid_typed_run_without_calling_runner(tmp_path: Pa
                 f"{root}/api/market-chart?known_at=2026-07-16T15%3A46%3A09Z&asset_id=crypto:eth-usd"
             )
         )
+        intraday_interval_status, intraday_interval, _ = _json_request(
+            Request(f"{root}/api/market-intraday?known_at=2026-07-16T15%3A46%3A09Z&interval=1d")
+        )
+        intraday_asset_status, intraday_asset, _ = _json_request(
+            Request(
+                f"{root}/api/market-intraday?"
+                "asset_id=equity:us:aapl&known_at=2026-07-16T15%3A46%3A09Z&interval=5m"
+            )
+        )
+        intraday_refresh_status, intraday_refresh, _ = _json_request(
+            Request(
+                f"{root}/api/market-intraday-refresh",
+                data=b'{"asset_id":"crypto:btc-usd","hours":25,"requested_end":null}',
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
         trend_status, trend, _ = _json_request(
             Request(
                 f"{root}/api/fundamental-trend?known_at=2026-07-16T15%3A46%3A09Z&frequency=monthly"
@@ -956,6 +1119,12 @@ def test_local_api_rejects_invalid_typed_run_without_calling_runner(tmp_path: Pa
     assert chart_interval["error"]["code"] == "invalid_request"
     assert chart_asset_status == 400
     assert chart_asset["error"]["code"] == "invalid_request"
+    assert intraday_interval_status == 400
+    assert intraday_interval["error"]["code"] == "invalid_request"
+    assert intraday_asset_status == 400
+    assert intraday_asset["error"]["code"] == "invalid_request"
+    assert intraday_refresh_status == 400
+    assert intraday_refresh["error"]["code"] == "invalid_request"
     assert trend_status == 400
     assert trend["error"]["code"] == "invalid_request"
     assert research_status == 400

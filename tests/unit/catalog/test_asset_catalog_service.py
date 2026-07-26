@@ -64,6 +64,9 @@ def test_default_catalog_loads_and_lists_deterministically() -> None:
         "crypto:btc-usd",
         "equity:us:aapl",
     ]
+    assert [asset.asset_id for asset in service.list_assets(capability="market.minute_bars")] == [
+        "crypto:btc-usd"
+    ]
 
 
 def test_default_catalog_resource_is_canonical_utf8_json() -> None:
@@ -134,6 +137,7 @@ def test_coinbase_asset_and_product_binding_are_available() -> None:
         )
         == bitcoin
     )
+    assert service.supports(bitcoin.asset_id, "market.minute_bars")
 
 
 def test_typed_not_found_errors() -> None:

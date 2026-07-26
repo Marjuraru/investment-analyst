@@ -23,6 +23,7 @@ class HttpResponse:
     body: bytes
     headers: Mapping[str, str]
     url: str
+    body_truncated: bool = False
 
 
 class HttpRequestError(RuntimeError):
@@ -52,6 +53,7 @@ class HttpTransport(Protocol):
         *,
         headers: Mapping[str, str],
         timeout_seconds: float,
+        max_response_bytes: int | None = None,
     ) -> HttpResponse:
         """Perform one logical GET request."""
         ...
@@ -69,12 +71,19 @@ class UrlLibHttpTransport:
         *,
         headers: Mapping[str, str],
         timeout_seconds: float,
+        max_response_bytes: int | None = None,
     ) -> HttpResponse:
         """Fetch bytes over HTTPS, retrying only transient failures."""
         if urlsplit(url).scheme.lower() != "https":
             raise HttpRequestError(url, "only HTTPS URLs are allowed")
         if timeout_seconds <= 0:
             raise HttpRequestError(url, "timeout_seconds must be greater than zero")
+        if max_response_bytes is not None and (
+            isinstance(max_response_bytes, bool)
+            or not isinstance(max_response_bytes, int)
+            or max_response_bytes <= 0
+        ):
+            raise HttpRequestError(url, "max_response_bytes must be a positive integer")
 
         request = Request(url, headers=dict(headers), method="GET")
         for attempt in range(_MAX_ATTEMPTS):
@@ -83,11 +92,19 @@ class UrlLibHttpTransport:
                     response_headers = MappingProxyType(
                         {str(key): str(value) for key, value in response.headers.items()}
                     )
+                    if max_response_bytes is None:
+                        body = response.read()
+                        body_truncated = False
+                    else:
+                        candidate = response.read(max_response_bytes + 1)
+                        body = candidate[:max_response_bytes]
+                        body_truncated = len(candidate) > max_response_bytes
                     return HttpResponse(
                         status_code=int(response.status),
-                        body=response.read(),
+                        body=body,
                         headers=response_headers,
                         url=str(response.geturl()),
+                        body_truncated=body_truncated,
                     )
             except HTTPError as error:
                 if error.code not in _RETRYABLE_STATUS_CODES or attempt == _MAX_ATTEMPTS - 1:

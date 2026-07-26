@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from investment_analyst.providers.crypto.coinbase_exchange import (
+    MINUTE_GRANULARITY_SECONDS,
     CoinbaseExchangeClient,
     CoinbaseExchangeError,
 )
@@ -188,3 +189,39 @@ def test_chunks_ranges_larger_than_three_hundred_days() -> None:
     assert len(result.request_urls) == 2
     assert len(transport.calls) == 2
     assert all("granularity=86400" in call[0] for call in transport.calls)
+
+
+def test_fetches_and_chunks_aligned_one_minute_candles() -> None:
+    transport = FakeTransport([b"[]", b"[]"])
+    result = _client(transport).fetch_candles(
+        "BTC-USD",
+        datetime(2026, 7, 12, 0, 0, tzinfo=UTC),
+        datetime(2026, 7, 12, 5, 1, tzinfo=UTC),
+        granularity_seconds=MINUTE_GRANULARITY_SECONDS,
+    )
+
+    assert result.granularity_seconds == MINUTE_GRANULARITY_SECONDS
+    assert len(result.request_urls) == 2
+    assert len(transport.calls) == 2
+    assert all("granularity=60" in call[0] for call in transport.calls)
+
+
+@pytest.mark.parametrize("granularity", [True, 1, 120, 2_700])
+def test_rejects_unsupported_candle_granularity(granularity: int) -> None:
+    with pytest.raises(CoinbaseExchangeError, match="granularity"):
+        _client(FakeTransport([b"[]"])).fetch_candles(
+            "BTC-USD",
+            datetime(2026, 7, 12, tzinfo=UTC),
+            datetime(2026, 7, 12, 0, 1, tzinfo=UTC),
+            granularity_seconds=granularity,
+        )
+
+
+def test_rejects_ranges_not_aligned_to_candle_granularity() -> None:
+    with pytest.raises(CoinbaseExchangeError, match="align"):
+        _client(FakeTransport([b"[]"])).fetch_candles(
+            "BTC-USD",
+            datetime(2026, 7, 12, 0, 0, 1, tzinfo=UTC),
+            datetime(2026, 7, 12, 0, 1, tzinfo=UTC),
+            granularity_seconds=MINUTE_GRANULARITY_SECONDS,
+        )

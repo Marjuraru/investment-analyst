@@ -9,6 +9,7 @@ import pytest
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
 from investment_analyst.analytics.market.bar_schemas import (
     ALPACA_SOURCE_ID,
+    COINBASE_INTRADAY_SOURCE_ID,
     COINBASE_SOURCE_ID,
     SIMULATED_SOURCE_ID,
     get_market_bar_schema,
@@ -99,7 +100,7 @@ def _store_version(
             "field_name": field_name,
             "value": _VALUES[field_name],
             "unit": schema.units[field_name],
-            "frequency": DataFrequency.DAY_1,
+            "frequency": schema.frequency,
             "observed_at": timestamp,
             "available_at": available_at,
             "normalized_at": available_at + timedelta(minutes=1),
@@ -123,6 +124,35 @@ def test_empty_query_and_unsupported_source(tmp_path) -> None:
         assert result.coverage.bar_count == 0
         with pytest.raises(UnsupportedMarketSourceError):
             service.query(_query(source_id="unknown:source"))
+
+
+def test_reconstructs_registered_minute_source_point_in_time(tmp_path) -> None:
+    timestamp = datetime(2026, 7, 12, 11, 55, tzinfo=UTC)
+    available = datetime(2026, 7, 12, 12, tzinfo=UTC)
+    query = _query(
+        source_id=COINBASE_INTRADAY_SOURCE_ID,
+        start=timestamp,
+        end=timestamp + timedelta(minutes=1),
+        known_at=available,
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        raw, observations = _store_version(
+            storage,
+            asset_id=query.asset_id,
+            source_id=query.source_id,
+            timestamp=timestamp,
+            available_at=available,
+        )
+        result = HistoricalMarketDataService(storage).query(query)
+
+    assert len(result.bars) == 1
+    assert result.bars[0].frequency is DataFrequency.MINUTE_1
+    assert result.bars[0].timestamp == timestamp
+    assert result.bars[0].raw_record_id == raw.record_id
+    assert result.bars[0].observation_ids == {
+        observation.field_name: observation.observation_id for observation in observations
+    }
+    assert result.traceability_verified
 
 
 @pytest.mark.parametrize(

@@ -49,11 +49,10 @@ es una estimación intradía ni una recomendación de riesgo.
 ## Historial completo e intervalos implementados
 
 El contrato `aapl-market-chart-v5` permite pedir explícitamente 1 día, 1 semana o 1 mes y tres
-ventanas SMA. En modo
-automático conserva su política compatible por rango, pero la interfaz solicita siempre el historial
-completo y por ello usa meses calendario UTC. Los rangos anteriores permanecen disponibles solo en
-el endpoint por compatibilidad. Nunca reescribe ni persiste nuevas barras: agrega en memoria la
-selección point-in-time y mantiene el último cierre diario aparte del gráfico agregado.
+ventanas SMA. La interfaz inicia con el último año en resolución diaria, amplía a cinco años al
+elegir semana y solicita todo el histórico local solo al elegir mes. Los rangos anteriores permanecen
+disponibles en el endpoint por compatibilidad. Nunca reescribe ni persiste nuevas barras: agrega en
+memoria la selección point-in-time y mantiene el último cierre diario aparte del gráfico agregado.
 
 OHLC, volumen, operaciones, VWAP, calidad y SMA tienen reglas versionadas. Las tres SMA aceptan
 ventanas configurables y acotadas, conservan sus inputs exactos y cargan contexto anterior al rango
@@ -77,10 +76,15 @@ las anteriores nunca se recortan artificialmente para encajar en el rango.
 2. Agregación OHLCV semanal y mensual con contratos e identidades deterministas. Completado.
 3. Ventanas, colores y visibilidad configurables para las tres SMA. Completado.
 4. Escala lineal/logarítmica, línea/velas e intervalos diario/semanal/mensual. Completado.
-5. Ingestión intradía base de 1 minuto y agregaciones 5/15/30/45 min y 1/2/4/5 h.
-6. Comparación normalizada y plantillas locales.
-7. Gráficas históricas de márgenes, caja, crecimiento, valoración y datos por acción.
-8. Herramientas de anotación y eventos corporativos, sin ejecución de órdenes.
+5. Ingestión intradía base de 1 minuto y agregaciones 5/15/30/45 min y 1/2/4/5 h. Base
+   BTC-USD/Coinbase e integración visual acotada a 24 horas completadas; programación incremental
+   pendiente.
+6. Integración BVL/SMV gratuita por fases: catálogo e identidad, mercado diario diferido,
+   fundamentales y operación independiente. Investigación y arquitectura completadas; conectores
+   pendientes.
+7. Comparación normalizada y plantillas locales.
+8. Gráficas históricas de márgenes, caja, crecimiento, valoración y datos por acción.
+9. Herramientas de anotación y eventos corporativos, sin ejecución de órdenes.
 
 El backfill de cinco años o de toda la vida de AAPL debe ocurrir después del punto 2 para mantener
 una interfaz rápida y respuestas acotadas.

@@ -24,8 +24,10 @@ class FakeResponse:
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, size: int | None = None) -> bytes:
+        if size is None:
+            return self._body
+        return self._body[:size]
 
     def geturl(self) -> str:
         return self._url
@@ -62,6 +64,36 @@ def test_returns_successful_response(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.status_code == 200
     assert response.body == b'{"ok":true}'
     assert response.headers["Content-Type"] == "application/json"
+    assert response.body_truncated is False
+
+
+def test_can_bound_response_body_without_reading_the_remainder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(request: object, timeout: float) -> FakeResponse:
+        return FakeResponse(body=b"0123456789")
+
+    monkeypatch.setattr(http_module, "urlopen", fake_urlopen)
+    response = UrlLibHttpTransport().get(
+        "https://example.test/data",
+        headers={},
+        timeout_seconds=2.0,
+        max_response_bytes=4,
+    )
+
+    assert response.body == b"0123"
+    assert response.body_truncated is True
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+def test_rejects_invalid_response_limit(limit: int | float) -> None:
+    with pytest.raises(HttpRequestError, match="max_response_bytes"):
+        UrlLibHttpTransport().get(
+            "https://example.test/data",
+            headers={},
+            timeout_seconds=1.0,
+            max_response_bytes=limit,
+        )
 
 
 @pytest.mark.parametrize("status", [429, 503])

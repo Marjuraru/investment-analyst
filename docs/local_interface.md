@@ -9,11 +9,13 @@ scores combinados, recomendaciones, Trading API ni un LLM activo.
 La página permite:
 
 - revisar el workspace, la última ejecución, la trazabilidad y la programación;
+- ver simultáneamente la hora de Lima y Wall Street, junto con el estado de la ventana regular
+  09:30–16:00 ET de NYSE;
 - cargar automáticamente el último reporte elegible al abrir la página;
 - explorar el histórico point-in-time de AAPL con OHLC, VWAP, operaciones, tres SMA configurables y
   volumen;
-- alternar a BTC-USD y explorar todo el histórico diario persistido de Coinbase Exchange con OHLC,
-  volumen en BTC, retornos, volatilidad, volumen relativo y las mismas herramientas de gráfico;
+- alternar a BTC-USD y explorar el histórico diario persistido de Coinbase Exchange o una ventana
+  intradía local de 24 horas con OHLC y volumen en BTC;
 - consultar en la misma vista el retorno diario, volatilidad diaria de 20 días con datos, volumen
   relativo de 20 días, distancias a las SMA, extremos, retorno, CAGR y máximo drawdown del rango
   consultado;
@@ -21,10 +23,11 @@ La página permite:
   y preferencia local persistente; también permite mostrar u ocultar cada SMA y el volumen;
 - alternar el eje de precios entre escala lineal y logarítmica sin volver a consultar el workspace;
 - alternar entre línea de cierre y velas OHLC sin repetir la consulta, conservando medias y volumen;
-- consultar siempre todo el histórico local y cambiar únicamente el intervalo de cada punto o vela:
-  automático, 1 día, 1 semana o 1 mes;
+- consultar un año por defecto, ampliar a cinco años al elegir semana y solicitar el histórico
+  completo solo al elegir mes; BTC añade intervalos de 1/5/15/30/45 minutos y 1/2/4/5 horas sobre
+  las últimas 24 horas;
 - ampliar el gráfico alrededor del cursor con la rueda del mouse o con `+` y `-`, y restablecer la
-  vista con `0` o el control visible, sin consultar nuevamente el servicio;
+  vista con `0`, sin consultar nuevamente el servicio;
 - desplazar horizontalmente la vista ampliada mediante arrastre con el botón izquierdo;
 - comparar ocho trimestres o cinco años de ingresos y resultado neto, junto con la ficha de balance
   del último período y los ratios fundamentales seleccionados;
@@ -43,6 +46,8 @@ La página permite:
 - ejecutar manualmente el bootstrap completo de SEC EDGAR y Alpaca Market Data IEX;
 - ejecutar una actualización Coinbase exclusivamente de mercado, incremental por los bordes del
   histórico o completa, sin credenciales y sin crear fundamentales ficticios;
+- importar explícitamente las últimas 24 horas de BTC-USD de un minuto cuando se selecciona una
+  resolución intradía;
 - consultar el reporte diario point-in-time en modo trimestral o anual;
 - seleccionar opcionalmente fechas `as-of` independientes para mercado y fundamentales;
 - ver diagnósticos, métricas, frescura, limitaciones y el contrato JSON versionado;
@@ -50,6 +55,19 @@ La página permite:
 
 Mercado y fundamentales se muestran en tarjetas separadas. La interfaz no calcula ni muestra un
 veredicto, confianza, calidad, recomendación o ranking combinado.
+
+## Relojes de mercado
+
+Los relojes se calculan enteramente en el navegador con las zonas IANA `America/Lima` y
+`America/New_York`. No realizan consultas de red y una única actualización, alineada al cambio de
+minuto, se pausa cuando la pestaña deja de estar visible. Esto permite reflejar automáticamente los
+cambios de horario de verano de Nueva York sin fijar una diferencia horaria estática.
+
+La tarjeta NYSE describe exclusivamente la sesión regular publicada de 09:30 a 16:00 ET y distingue
+si la hora de Nueva York está antes, dentro o después de esa ventana. No afirma que el mercado esté
+operando: fines de semana se identifican, pero los feriados y cierres anticipados todavía no se
+evalúan. Un calendario oficial versionado será un contrato separado antes de convertir el gadget en
+un estado operativo de mercado.
 
 ## Criterios de presentación
 
@@ -99,6 +117,11 @@ acción explícita que solicita `period=max` y permite cargar todo el histórico
 El contrato HTTP conserva los demás rangos compatibles. Esta progresión evita incluir miles de
 sesiones diarias de BTC-USD en la respuesta inicial, sin recortar la evidencia persistida ni impedir
 el acceso al historial completo.
+El endpoint separado `/api/market-intraday` entrega `btc-intraday-chart-v1` únicamente para
+`crypto:btc-usd`. Acepta los nueve intervalos fijos, consulta una ventana de 24 horas y excluye el
+minuto todavía en curso. No acepta rangos arbitrarios desde el navegador ni reutiliza el contrato
+diario. La actualización `POST /api/market-intraday-refresh` se ejecuta solo por una acción explícita,
+importa como máximo 1.440 minutos y expone conteos creados/reutilizados para auditar idempotencia.
 Para no truncar una vela por el límite del rango, un intervalo semanal o mensual puede incluir un
 bloque completo que supere ligeramente el objetivo de días. La vela del calendario vigente sí puede
 estar en curso: contiene únicamente la evidencia disponible en `known_at` y se identifica como tal.
@@ -211,20 +234,24 @@ visible; restablecer el zoom vuelve a incluir el rango consultado completo. El J
 ## Personalización analítica
 
 Las tres medias móviles ya permiten personalizar ventana, color y visibilidad; el gráfico también
-permite elegir escala lineal o logarítmica, línea o velas e intervalo diario, semanal o mensual. Esta personalización
+permite elegir escala lineal o logarítmica, línea o velas —con velas como vista predeterminada— e
+intervalo diario, semanal o mensual, además de intervalos fijos intradía para BTC. Esta personalización
 usa límites tipados, muestra los parámetros efectivos, conserva fórmula, valores exactos y evidencia
 y no modifica resultados persistidos ni algoritmos canónicos. Quedan para expansiones posteriores
 los parámetros de otras estadísticas y las plantillas reutilizables de indicadores.
 
-## Intervalos intradía previstos
+## Base intradía
 
-El workspace canónico actual conserva barras diarias de Alpaca Market Data IEX. Por ello, los
-intervalos de 1, 5, 15, 30 y 45 minutos y de 1, 2, 4 y 5 horas no se muestran todavía: una barra
-diaria no contiene evidencia suficiente para reconstruirlos. La expansión intradía deberá ingerir
-barras base de un minuto con una identidad de fuente nueva, zona horaria de NASDAQ, límites de sesión
-y disponibilidad point-in-time explícitos. A partir de esa base podrán agregarse de forma exacta los
-intervalos mayores sobre todo el historial disponible, conservando OHLCV, cobertura y UUID de entrada
-sin alterar la historia diaria.
+La historia diaria de AAPL y BTC-USD permanece intacta. Ya existe una fuente paralela de velas
+BTC-USD de un minuto de Coinbase Exchange, mercado 24/7, con identidad y disponibilidad point-in-time
+propias. Sobre esa evidencia se agregan localmente intervalos fijos UTC de 1, 5, 15, 30 y 45 minutos
+y de 1, 2, 4 y 5 horas, conservando OHLCV, calidad, completitud y UUID de entrada.
+
+La interfaz presenta la fuente intradía solo cuando el activo seleccionado es BTC. Cambiar el
+intervalo consulta exclusivamente el workspace; la acción de actualización ejecuta primero el flujo
+diario y después importa 24 horas de minutos completos. Un fallo de la segunda etapa no elimina el
+progreso diario. No se reconstruyen minutos a partir de barras diarias ni se aplican las SMA,
+estadísticas o diagnósticos diarios a esta fuente.
 
 ## Integración actual de cripto
 

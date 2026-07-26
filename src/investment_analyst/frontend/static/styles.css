@@ -492,6 +492,104 @@ section {
   white-space: nowrap;
 }
 
+.market-clock-panel {
+  margin-top: 0.8rem;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.market-clock-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0.9rem 0.65rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.market-clock-heading .eyebrow {
+  margin-bottom: 0.2rem;
+}
+
+.market-clock-heading h3 {
+  font-size: 0.9rem;
+}
+
+.market-clock-heading > p {
+  margin-bottom: 0;
+  color: var(--muted);
+  font-size: 0.65rem;
+}
+
+.market-clock-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.market-clock-card {
+  min-width: 0;
+  padding: 0.72rem 0.9rem;
+  border-right: 1px solid var(--line);
+}
+
+.market-clock-card:last-child {
+  border-right: 0;
+}
+
+.market-clock-card > span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 760;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.market-clock-card time,
+.market-session-status {
+  display: block;
+  margin-top: 0.42rem;
+  color: var(--ink-strong);
+  font-size: clamp(1.05rem, 2vw, 1.32rem);
+  font-variant-numeric: tabular-nums;
+  font-weight: 760;
+  letter-spacing: 0.015em;
+}
+
+.market-clock-card small {
+  display: block;
+  margin-top: 0.18rem;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.65rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.market-session-status {
+  font-size: 0.82rem;
+  letter-spacing: 0;
+}
+
+.market-session-status.open {
+  color: var(--positive);
+}
+
+.market-session-status.neutral {
+  color: var(--ink-strong);
+}
+
+.market-clock-note {
+  margin-bottom: 0;
+  padding: 0.5rem 0.9rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
 .badge,
 .trace-seal,
 .diagnostic-verdict {
@@ -802,7 +900,8 @@ section {
 }
 
 .chart-interval-control select {
-  width: 88px;
+  width: 184px;
+  max-width: 100%;
   min-height: 32px;
   padding: 0.25rem 0.35rem;
   border: 1px solid var(--line-strong);
@@ -957,10 +1056,6 @@ section {
   opacity: 0.45;
 }
 
-.chart-zoom-reset:not(:disabled) {
-  color: var(--muted-strong);
-}
-
 .chart-legend {
   display: flex;
   align-items: center;
@@ -1001,13 +1096,6 @@ section {
 .series-toggle[aria-pressed="false"] {
   color: #8995a3;
   opacity: 0.6;
-}
-
-.chart-keyboard-hint {
-  flex-shrink: 0;
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 0.6rem;
 }
 
 .legend-swatch {
@@ -2571,6 +2659,25 @@ footer p:last-child {
     --sidebar-width: 0px;
   }
 
+  .market-clock-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .market-clock-card {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .market-clock-card:last-child {
+    border-bottom: 0;
+  }
+
+  .market-clock-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
   .sidebar {
     position: static;
     display: grid;
@@ -2663,10 +2770,6 @@ footer p:last-child {
   .chart-toolbar-actions {
     width: 100%;
     flex-wrap: wrap;
-  }
-
-  .chart-keyboard-hint {
-    display: none;
   }
 
   .frequency-selector {

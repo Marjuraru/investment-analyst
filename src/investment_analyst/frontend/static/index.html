@@ -124,6 +124,39 @@
                 <small id="known-at-status">—</small>
               </article>
             </div>
+
+            <div class="market-clock-panel" aria-labelledby="market-clock-title">
+              <div class="market-clock-heading">
+                <div>
+                  <p class="eyebrow">RELOJES DE MERCADO</p>
+                  <h3 id="market-clock-title">Horas clave</h3>
+                </div>
+                <p>Actualización local, sin consultas de red.</p>
+              </div>
+              <div class="market-clock-grid">
+                <article class="market-clock-card">
+                  <span>Lima</span>
+                  <time id="lima-clock" datetime="">--:--</time>
+                  <small id="lima-clock-date">America/Lima</small>
+                </article>
+                <article class="market-clock-card">
+                  <span>Nueva York · Wall Street</span>
+                  <time id="new-york-clock" datetime="">--:--</time>
+                  <small id="new-york-clock-date">America/New_York</small>
+                </article>
+                <article class="market-clock-card nyse-session-card">
+                  <span>NYSE · sesión regular</span>
+                  <strong id="nyse-session-status" class="market-session-status neutral">
+                    Calculando…
+                  </strong>
+                  <small>09:30–16:00 ET · lunes a viernes</small>
+                </article>
+              </div>
+              <p class="market-clock-note">
+                El estado se calcula sobre la ventana regular; no evalúa feriados ni cierres
+                anticipados.
+              </p>
+            </div>
           </section>
 
           <div id="global-message" class="message hidden" role="status" aria-live="polite"></div>
@@ -153,24 +186,23 @@
                   <div class="chart-toolbar">
                     <div class="chart-legend" role="group" aria-label="Series visibles">
                       <span class="series-fixed"><i id="price-series-swatch" class="legend-swatch close" aria-hidden="true"></i><span id="price-series-legend-label">Cierre</span></span>
-                      <button class="series-toggle" type="button" data-series="sma-5" aria-pressed="true">
+                      <button class="series-toggle" type="button" data-series="sma-5" data-sma-only aria-pressed="true">
                         <i class="legend-swatch sma-five" aria-hidden="true"></i><span id="sma-short-legend-label">SMA 5</span>
                       </button>
-                      <button class="series-toggle" type="button" data-series="sma-20" aria-pressed="true">
+                      <button class="series-toggle" type="button" data-series="sma-20" data-sma-only aria-pressed="true">
                         <i class="legend-swatch sma-twenty" aria-hidden="true"></i><span id="sma-long-legend-label">SMA 20</span>
                       </button>
-                      <button class="series-toggle" type="button" data-series="sma-50" aria-pressed="true">
+                      <button class="series-toggle" type="button" data-series="sma-50" data-sma-only aria-pressed="true">
                         <i class="legend-swatch sma-fifty" aria-hidden="true"></i><span id="sma-third-legend-label">SMA 50</span>
                       </button>
                       <button class="series-toggle" type="button" data-series="volume" aria-pressed="true">
                         <i class="legend-swatch volume" aria-hidden="true"></i>Volumen
                       </button>
-                      <span id="chart-keyboard-hint" class="chart-keyboard-hint">Rueda: zoom · Arrastrar: desplazar · ← → recorrer</span>
                     </div>
                     <div class="chart-toolbar-actions">
                       <div class="chart-type-selector" role="group" aria-label="Tipo de gráfico">
-                        <button class="chart-type-button active" type="button" data-chart-type="line" aria-pressed="true">Línea</button>
-                        <button class="chart-type-button" type="button" data-chart-type="candlestick" aria-pressed="false">Velas</button>
+                        <button class="chart-type-button" type="button" data-chart-type="line" aria-pressed="false">Línea</button>
+                        <button class="chart-type-button active" type="button" data-chart-type="candlestick" aria-pressed="true">Velas</button>
                       </div>
                       <label class="chart-interval-control">
                         <span>Intervalo</span>
@@ -184,21 +216,21 @@
                       <details id="chart-settings" class="chart-settings">
                         <summary id="chart-settings-summary">Indicadores · Lineal</summary>
                         <form id="chart-settings-form" class="chart-settings-panel">
-                          <label>
+                          <label data-sma-only>
                             <span>SMA rápida</span>
                             <span class="chart-setting-inputs">
                               <input id="sma-short-window" type="number" min="2" max="200" step="1" value="5" inputmode="numeric" aria-label="Ventana de la SMA rápida" />
                               <input id="sma-short-color" type="color" value="#e29951" aria-label="Color de la SMA rápida" />
                             </span>
                           </label>
-                          <label>
+                          <label data-sma-only>
                             <span>SMA media</span>
                             <span class="chart-setting-inputs">
                               <input id="sma-long-window" type="number" min="3" max="399" step="1" value="20" inputmode="numeric" aria-label="Ventana de la SMA media" />
                               <input id="sma-long-color" type="color" value="#a695df" aria-label="Color de la SMA media" />
                             </span>
                           </label>
-                          <label>
+                          <label data-sma-only>
                             <span>SMA lenta</span>
                             <span class="chart-setting-inputs">
                               <input id="sma-third-window" type="number" min="4" max="400" step="1" value="50" inputmode="numeric" aria-label="Ventana de la SMA lenta" />
@@ -219,15 +251,6 @@
                           </div>
                         </form>
                       </details>
-                      <button
-                        id="chart-zoom-reset"
-                        class="data-export-button chart-zoom-reset"
-                        type="button"
-                        aria-label="Restablecer el zoom y mostrar todo el rango consultado"
-                        disabled
-                      >
-                        Restablecer zoom
-                      </button>
                       <button
                         id="export-market-csv"
                         class="data-export-button"
@@ -321,7 +344,7 @@
                   <p id="snapshot-range-title" class="snapshot-group-title">Último año</p>
                   <dl class="snapshot-grid">
                     <div><dt>Retorno</dt><dd id="snapshot-range-return">—</dd></div>
-                    <div><dt>Días con datos</dt><dd id="chart-visible-sessions">—</dd></div>
+                    <div><dt id="chart-visible-sessions-label">Días con datos</dt><dd id="chart-visible-sessions">—</dd></div>
                     <div><dt>CAGR</dt><dd id="snapshot-range-cagr">—</dd></div>
                     <div><dt>Máx. drawdown</dt><dd id="snapshot-range-drawdown">—</dd></div>
                     <div><dt>Máximo</dt><dd id="snapshot-range-high">—</dd></div>

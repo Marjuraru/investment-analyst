@@ -1,17 +1,33 @@
-"""Auditable local import pipeline for Coinbase BTC-USD daily candles."""
+"""Auditable local import pipelines for Coinbase BTC-USD candles."""
 
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 from urllib.parse import parse_qs, urlsplit
 
-from investment_analyst.core.models import NormalizedObservation, RawRecord
+from investment_analyst.core.models import (
+    Asset,
+    DataFrequency,
+    NormalizedObservation,
+    RawRecord,
+    SourceDefinition,
+)
 from investment_analyst.providers.asset_config import CoinbaseAssetConfiguration
 from investment_analyst.providers.crypto.coinbase_exchange import (
     DAILY_GRANULARITY_SECONDS,
+    MINUTE_GRANULARITY_SECONDS,
     CoinbaseCandle,
     CoinbaseExchangeClient,
+)
+from investment_analyst.providers.crypto.coinbase_intraday_normalizer import (
+    SOURCE_ID as INTRADAY_SOURCE_ID,
+)
+from investment_analyst.providers.crypto.coinbase_intraday_normalizer import (
+    candle_to_intraday_observations,
+    candle_to_intraday_raw_record,
+    create_coinbase_intraday_source,
 )
 from investment_analyst.providers.crypto.coinbase_normalizer import (
     ASSET_ID,
@@ -24,6 +40,26 @@ from investment_analyst.providers.crypto.coinbase_normalizer import (
 )
 from investment_analyst.storage.errors import RecordNotFoundError, StorageError
 from investment_analyst.storage.local import LocalStorage
+
+
+class _RawRecordFactory(Protocol):
+    def __call__(
+        self,
+        candle: CoinbaseCandle,
+        *,
+        retrieved_at: datetime,
+        request_url: str,
+    ) -> RawRecord: ...
+
+
+class _ObservationFactory(Protocol):
+    def __call__(
+        self,
+        candle: CoinbaseCandle,
+        raw_record: RawRecord,
+        *,
+        normalized_at: datetime,
+    ) -> tuple[NormalizedObservation, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,44 +107,55 @@ class CoinbaseImportSummary:
         }
 
 
-class CoinbaseHistoricalPipeline:
-    """Import real public Coinbase candles without calculating analytics."""
+class _CoinbaseCandlePipeline:
+    """Shared append-only persistence for one explicit Coinbase candle contract."""
 
     def __init__(
         self,
         storage: LocalStorage,
         client: CoinbaseExchangeClient,
         *,
-        configuration: CoinbaseAssetConfiguration | None = None,
+        configuration: CoinbaseAssetConfiguration,
+        expected_configuration: CoinbaseAssetConfiguration,
+        frequency: DataFrequency,
+        period: timedelta,
+        asset_factory: Callable[[], Asset],
+        source_factory: Callable[[], SourceDefinition],
+        raw_record_factory: _RawRecordFactory,
+        observation_factory: _ObservationFactory,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._storage = storage
         self._client = client
-        self._configuration = configuration or CoinbaseAssetConfiguration(
-            asset_id=ASSET_ID,
-            product_id=PRODUCT_ID,
-            source_id=SOURCE_ID,
-            granularity_seconds=DAILY_GRANULARITY_SECONDS,
-        )
-        if self._configuration != CoinbaseAssetConfiguration(
-            asset_id=ASSET_ID,
-            product_id=PRODUCT_ID,
-            source_id=SOURCE_ID,
-            granularity_seconds=DAILY_GRANULARITY_SECONDS,
-        ):
+        self._configuration = configuration
+        if self._configuration != expected_configuration:
             raise StorageError(
                 "Coinbase configuration does not match the current persisted identity"
             )
+        self._frequency = frequency
+        self._period = period
+        self._asset_factory = asset_factory
+        self._source_factory = source_factory
+        self._raw_record_factory = raw_record_factory
+        self._observation_factory = observation_factory
         self._clock = clock
 
     def run(self, start: datetime, end: datetime) -> CoinbaseImportSummary:
         """Fetch BTC-USD, persist raw and normalized data, and verify traceability."""
         self._storage.require_open()
-        fetch = self._client.fetch_daily_candles(self._configuration.product_id, start, end)
-        if fetch.product_id != self._configuration.product_id:
+        fetch = self._client.fetch_candles(
+            self._configuration.product_id,
+            start,
+            end,
+            granularity_seconds=self._configuration.granularity_seconds,
+        )
+        if (
+            fetch.product_id != self._configuration.product_id
+            or fetch.granularity_seconds != self._configuration.granularity_seconds
+        ):
             raise StorageError("Coinbase fetch result does not match the resolved configuration")
-        self._storage.assets.upsert(create_coinbase_asset())
-        self._storage.sources.upsert(create_coinbase_source())
+        self._storage.assets.upsert(self._asset_factory())
+        self._storage.sources.upsert(self._source_factory())
 
         raw_created = 0
         raw_reused = 0
@@ -120,7 +167,7 @@ class CoinbaseHistoricalPipeline:
 
         for candle in fetch.candles:
             request_url = _request_url_for_candle(candle, fetch.request_urls)
-            candidate = candle_to_raw_record(
+            candidate = self._raw_record_factory(
                 candle,
                 retrieved_at=fetch.retrieved_at,
                 request_url=request_url,
@@ -134,7 +181,7 @@ class CoinbaseHistoricalPipeline:
                 raw_created += 1
             stored_records.append(stored_record)
 
-            candidates = candle_to_observations(
+            candidates = self._observation_factory(
                 candle,
                 stored_record,
                 normalized_at=normalized_at,
@@ -150,10 +197,11 @@ class CoinbaseHistoricalPipeline:
                 stored_observations.append(stored_observation)
 
         self._verify_traceability(stored_records, stored_observations)
-        missing = _missing_daily_intervals(
+        missing = _missing_intervals(
             fetch.requested_start,
             fetch.requested_end,
             fetch.candles,
+            self._period,
         )
         candle_times = tuple(candle.start for candle in fetch.candles)
         return CoinbaseImportSummary(
@@ -179,9 +227,9 @@ class CoinbaseHistoricalPipeline:
         records: list[RawRecord],
         observations: list[NormalizedObservation],
     ) -> None:
-        if self._storage.assets.get(ASSET_ID) != create_coinbase_asset():
+        if self._storage.assets.get(self._configuration.asset_id) != self._asset_factory():
             raise StorageError("Coinbase asset round-trip verification failed")
-        if self._storage.sources.get(SOURCE_ID) != create_coinbase_source():
+        if self._storage.sources.get(self._configuration.source_id) != self._source_factory():
             raise StorageError("Coinbase source round-trip verification failed")
         record_by_id = {record.record_id: record for record in records}
         if len(record_by_id) != len(records):
@@ -200,6 +248,8 @@ class CoinbaseHistoricalPipeline:
                 raise StorageError("raw record payload is not an object")
             if record.payload.get("product_id") != self._configuration.product_id:
                 raise StorageError("raw record payload does not represent BTC-USD")
+            if record.payload.get("granularity_seconds") != self._configuration.granularity_seconds:
+                raise StorageError("raw record payload has the wrong candle granularity")
             if counts[record.record_id] != 5:
                 raise StorageError("each raw Coinbase candle must have five observations")
             _require_utc(record.event_time, "raw event_time")
@@ -221,9 +271,11 @@ class CoinbaseHistoricalPipeline:
             if observation.source != record.source:
                 raise StorageError("observation source does not match its raw record")
             if observation.period_start is None or observation.period_end is None:
-                raise StorageError("Coinbase observation must have an explicit daily period")
-            if observation.period_end != observation.period_start + timedelta(days=1):
-                raise StorageError("Coinbase observation period is not exactly one day")
+                raise StorageError("Coinbase observation must have an explicit candle period")
+            if observation.period_end != observation.period_start + self._period:
+                raise StorageError("Coinbase observation period has the wrong duration")
+            if observation.frequency is not self._frequency:
+                raise StorageError("Coinbase observation has the wrong frequency")
             if record.available_at > observation.normalized_at:
                 raise StorageError("observation uses information after normalized_at")
             for value, label in (
@@ -234,6 +286,70 @@ class CoinbaseHistoricalPipeline:
                 (observation.normalized_at, "normalized_at"),
             ):
                 _require_utc(value, f"observation {label}")
+
+
+class CoinbaseHistoricalPipeline(_CoinbaseCandlePipeline):
+    """Import the existing Coinbase daily dataset without changing its identity."""
+
+    def __init__(
+        self,
+        storage: LocalStorage,
+        client: CoinbaseExchangeClient,
+        *,
+        configuration: CoinbaseAssetConfiguration | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        expected = CoinbaseAssetConfiguration(
+            asset_id=ASSET_ID,
+            product_id=PRODUCT_ID,
+            source_id=SOURCE_ID,
+            granularity_seconds=DAILY_GRANULARITY_SECONDS,
+        )
+        super().__init__(
+            storage,
+            client,
+            configuration=configuration or expected,
+            expected_configuration=expected,
+            frequency=DataFrequency.DAY_1,
+            period=timedelta(days=1),
+            asset_factory=create_coinbase_asset,
+            source_factory=create_coinbase_source,
+            raw_record_factory=candle_to_raw_record,
+            observation_factory=candle_to_observations,
+            clock=clock,
+        )
+
+
+class CoinbaseIntradayPipeline(_CoinbaseCandlePipeline):
+    """Import the separate Coinbase one-minute dataset without daily analytics."""
+
+    def __init__(
+        self,
+        storage: LocalStorage,
+        client: CoinbaseExchangeClient,
+        *,
+        configuration: CoinbaseAssetConfiguration | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        expected = CoinbaseAssetConfiguration(
+            asset_id=ASSET_ID,
+            product_id=PRODUCT_ID,
+            source_id=INTRADAY_SOURCE_ID,
+            granularity_seconds=MINUTE_GRANULARITY_SECONDS,
+        )
+        super().__init__(
+            storage,
+            client,
+            configuration=configuration or expected,
+            expected_configuration=expected,
+            frequency=DataFrequency.MINUTE_1,
+            period=timedelta(minutes=1),
+            asset_factory=create_coinbase_asset,
+            source_factory=create_coinbase_intraday_source,
+            raw_record_factory=candle_to_intraday_raw_record,
+            observation_factory=candle_to_intraday_observations,
+            clock=clock,
+        )
 
 
 def _request_url_for_candle(candle: CoinbaseCandle, request_urls: tuple[str, ...]) -> str:
@@ -251,10 +367,11 @@ def _request_url_for_candle(candle: CoinbaseCandle, request_urls: tuple[str, ...
     raise StorageError("no recorded Coinbase request URL covers a returned candle")
 
 
-def _missing_daily_intervals(
+def _missing_intervals(
     start: datetime,
     end: datetime,
     candles: tuple[CoinbaseCandle, ...],
+    period: timedelta,
 ) -> tuple[datetime, ...]:
     present = {candle.start for candle in candles}
     missing: list[datetime] = []
@@ -262,7 +379,7 @@ def _missing_daily_intervals(
     while cursor < end:
         if cursor not in present:
             missing.append(cursor)
-        cursor += timedelta(days=1)
+        cursor += period
     return tuple(missing)
 
 

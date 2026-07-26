@@ -34,6 +34,12 @@ local:
 - catálogo central de activos y resolución independiente de proveedores;
 - importación de barras diarias de AAPL mediante Alpaca Market Data IEX, con la limitación explícita
   de que IEX no equivale a cobertura consolidada SIP;
+- base intradía separada para BTC-USD mediante velas públicas de un minuto de Coinbase Exchange,
+  con ingestión append-only e idempotente, reconstrucción point-in-time y agregaciones locales
+  deterministas de 1/5/15/30/45 minutos y 1/2/4/5 horas; la interfaz permite consultarlas en una
+  ventana acotada de 24 horas sin sustituir la ruta diaria;
+- sondeo acotado y de solo lectura de las rutas oficiales SMV/BVL candidatas, sin persistencia ni
+  activación prematura de un conector de mercado peruano;
 - obtención oficial de fundamentales de Apple mediante SEC EDGAR;
 - base de investigación fundamental con 31 hechos SEC adicionales y 40 métricas descriptivas
   versionadas, calculadas point-in-time con `Decimal`, evidencia exacta por input y estadísticas
@@ -57,13 +63,15 @@ local:
   por ventana y color —5, 20 y 50 de forma predeterminada—, con escala de precio lineal o logarítmica,
   gráfico de línea o velas, zoom exclusivo con la rueda del mouse, desplazamiento horizontal por
   arrastre e intervalos reales de un día, una semana o
-  un mes: la carga inicial y diaria se limita al último año, la semanal amplía a cinco años y la
+  un mes, además de intervalos intradía de BTC entre 1 minuto y 5 horas sobre las últimas 24 horas:
+  la carga inicial y diaria se limita al último año, la semanal amplía a cinco años y la
   mensual permite consultar todo el histórico local point-in-time; cada agregado conserva sus días
   e identidades fuente y el último cierre permanece
   separado; incorpora evolución trimestral o anual de cinco hechos SEC, una clasificación
   empresarial visible que declara cuando la evidencia aún no es suficiente, ficha fundamental y
   una matriz compacta de 40 métricas derivadas con fórmulas e inputs auditables;
-  incluye exportaciones exactas CSV/JSON generadas en el navegador, tema oscuro o claro, respuestas
+  incluye relojes locales de Lima y Wall Street con la ventana regular NYSE explícita,
+  exportaciones exactas CSV/JSON generadas en el navegador, tema oscuro o claro, respuestas
   comprimidas, cachés de lectura acotadas, scheduler diario persistente y unidad de usuario
   `systemd` generada de forma segura;
 - entorno reproducible mediante un lock versionado, pruebas unitarias e integraciones locales,
@@ -92,6 +100,10 @@ información de la que realmente contienen.
   su estado y preparar la programación local.
 - [Interfaz y operación continua](docs/local_interface.md): usar la herramienta en el navegador y
   mantener el servicio local mediante `systemd --user`.
+- [Base intradía de Coinbase](docs/coinbase_intraday.md): importar ventanas acotadas de un minuto y
+  consultar agregaciones trazables por CLI o interfaz sin mezclar la historia diaria.
+- [Estrategia BVL/SMV](docs/bvl_market_strategy.md): plan gratuito por fases para identidad,
+  cotización diferida, fundamentales y futura sustitución de proveedores.
 - [Integración continua](docs/continuous_integration.md): validar automáticamente cada pull request.
 - [Gestión de dependencias](docs/dependency_management.md): reproducir y actualizar el entorno
   validado.
