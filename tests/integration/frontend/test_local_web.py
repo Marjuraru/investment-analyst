@@ -494,6 +494,11 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "Métricas por área" in html
     assert "Fórmulas y evidencia exacta" in html
     assert "Tema claro" in html
+    assert 'id="lima-clock"' in html
+    assert 'id="new-york-clock"' in html
+    assert 'id="nyse-session-status"' in html
+    assert "09:30–16:00 ET · lunes a viernes" in html
+    assert "no evalúa feriados ni cierres" in html
     assert 'id="export-market-csv"' in html
     assert 'id="export-fundamental-csv"' in html
     assert 'id="export-fundamental-research-csv"' in html
@@ -536,6 +541,12 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "host.setPointerCapture" in javascript
     assert "event.preventDefault()" in javascript
     assert "MINIMUM_CHART_VIEW_POINTS" in javascript
+    assert 'const DEFAULT_TIME_ZONE = "America/Lima"' in javascript
+    assert 'const NEW_YORK_TIME_ZONE = "America/New_York"' in javascript
+    assert "function newYorkRegularSessionState" in javascript
+    assert 'document.addEventListener("visibilitychange", startMarketClocks)' in javascript
+    assert "window.setTimeout(startMarketClocks, delay)" in javascript
+    assert ".market-clock-grid" in stylesheet
     assert "window.requestAnimationFrame" in javascript
     assert 'event.key === "0"' in javascript
     assert "marketCsvRows(marketChartPayload, points)" in javascript

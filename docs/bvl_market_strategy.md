@@ -126,6 +126,26 @@ antes de promoverlo.
 Criterio de salida: al menos una ruta oficial de catálogo/fundamentales y una de cierres de mercado
 con licencia o condiciones compatibles, cobertura reciente comprobada y sin credenciales pagadas.
 
+#### Primer control reproducible
+
+El comando siguiente ejecuta el primer smoke test de fase 0:
+
+```bash
+.venv/bin/python scripts/probe_peru_official_sources.py
+```
+
+Comprueba, en orden estable, la ficha de valores inscritos de SMV, el boletín diario de renta
+variable BVL y sus notas. Cada lectura se limita a 65.536 bytes, exige HTTPS y el host oficial,
+valida marcadores mínimos y emite un hash SHA-256 del prefijo inspeccionado. El JSON no contiene el
+documento fuente y declara `persistence_performed=false`; por tanto, no toca el workspace ni crea
+activos, observaciones o identidades prematuras.
+
+El resultado diferencia disponibilidad de autorización: SMV se registra como Open Data ODbL,
+mientras los dos documentos BVL permanecen en
+`public_document_terms_review_required`. Este control completa la prueba técnica inicial de esas
+tres rutas, pero no satisface por sí solo el criterio de salida de la fase 0 ni autoriza ingestión
+automatizada del boletín completo.
+
 ### Fase 1 — catálogo peruano
 
 1. Crear adaptadores SMV para empresas y valores.

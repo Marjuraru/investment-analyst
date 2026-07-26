@@ -124,6 +124,39 @@
                 <small id="known-at-status">—</small>
               </article>
             </div>
+
+            <div class="market-clock-panel" aria-labelledby="market-clock-title">
+              <div class="market-clock-heading">
+                <div>
+                  <p class="eyebrow">RELOJES DE MERCADO</p>
+                  <h3 id="market-clock-title">Horas clave</h3>
+                </div>
+                <p>Actualización local, sin consultas de red.</p>
+              </div>
+              <div class="market-clock-grid">
+                <article class="market-clock-card">
+                  <span>Lima</span>
+                  <time id="lima-clock" datetime="">--:--</time>
+                  <small id="lima-clock-date">America/Lima</small>
+                </article>
+                <article class="market-clock-card">
+                  <span>Nueva York · Wall Street</span>
+                  <time id="new-york-clock" datetime="">--:--</time>
+                  <small id="new-york-clock-date">America/New_York</small>
+                </article>
+                <article class="market-clock-card nyse-session-card">
+                  <span>NYSE · sesión regular</span>
+                  <strong id="nyse-session-status" class="market-session-status neutral">
+                    Calculando…
+                  </strong>
+                  <small>09:30–16:00 ET · lunes a viernes</small>
+                </article>
+              </div>
+              <p class="market-clock-note">
+                El estado se calcula sobre la ventana regular; no evalúa feriados ni cierres
+                anticipados.
+              </p>
+            </div>
           </section>
 
           <div id="global-message" class="message hidden" role="status" aria-live="polite"></div>

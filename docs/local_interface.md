@@ -9,6 +9,8 @@ scores combinados, recomendaciones, Trading API ni un LLM activo.
 La página permite:
 
 - revisar el workspace, la última ejecución, la trazabilidad y la programación;
+- ver simultáneamente la hora de Lima y Wall Street, junto con el estado de la ventana regular
+  09:30–16:00 ET de NYSE;
 - cargar automáticamente el último reporte elegible al abrir la página;
 - explorar el histórico point-in-time de AAPL con OHLC, VWAP, operaciones, tres SMA configurables y
   volumen;
@@ -53,6 +55,19 @@ La página permite:
 
 Mercado y fundamentales se muestran en tarjetas separadas. La interfaz no calcula ni muestra un
 veredicto, confianza, calidad, recomendación o ranking combinado.
+
+## Relojes de mercado
+
+Los relojes se calculan enteramente en el navegador con las zonas IANA `America/Lima` y
+`America/New_York`. No realizan consultas de red y una única actualización, alineada al cambio de
+minuto, se pausa cuando la pestaña deja de estar visible. Esto permite reflejar automáticamente los
+cambios de horario de verano de Nueva York sin fijar una diferencia horaria estática.
+
+La tarjeta NYSE describe exclusivamente la sesión regular publicada de 09:30 a 16:00 ET y distingue
+si la hora de Nueva York está antes, dentro o después de esa ventana. No afirma que el mercado esté
+operando: fines de semana se identifican, pero los feriados y cierres anticipados todavía no se
+evalúan. Un calendario oficial versionado será un contrato separado antes de convertir el gadget en
+un estado operativo de mercado.
 
 ## Criterios de presentación
 

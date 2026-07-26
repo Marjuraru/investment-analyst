@@ -2,6 +2,10 @@
 
 const LOCALE = "es-PE";
 const DEFAULT_TIME_ZONE = "America/Lima";
+const NEW_YORK_TIME_ZONE = "America/New_York";
+const MARKET_CLOCK_REFRESH_MS = 60_000;
+const NYSE_CORE_OPEN_MINUTES = 9 * 60 + 30;
+const NYSE_CORE_CLOSE_MINUTES = 16 * 60;
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const THEME_STORAGE_KEY = "investment-analyst-theme-v1";
 const CHART_SETTINGS_STORAGE_KEY = "investment-analyst-chart-settings-v1";
@@ -34,6 +38,50 @@ const FUNDAMENTAL_CHART_LAYOUT = Object.freeze({
   right: 20,
   top: 24,
   bottom: 276,
+});
+const MARKET_CLOCK_DEFINITIONS = Object.freeze([
+  Object.freeze({
+    timeElementId: "lima-clock",
+    dateElementId: "lima-clock-date",
+    timeZone: DEFAULT_TIME_ZONE,
+  }),
+  Object.freeze({
+    timeElementId: "new-york-clock",
+    dateElementId: "new-york-clock-date",
+    timeZone: NEW_YORK_TIME_ZONE,
+  }),
+]);
+const MARKET_CLOCK_FORMATTERS = new Map(
+  MARKET_CLOCK_DEFINITIONS.map((definition) => [
+    definition.timeZone,
+    Object.freeze({
+      time: new Intl.DateTimeFormat(LOCALE, {
+        timeZone: definition.timeZone,
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      }),
+      date: new Intl.DateTimeFormat(LOCALE, {
+        timeZone: definition.timeZone,
+        weekday: "long",
+        day: "2-digit",
+        month: "long",
+      }),
+    }),
+  ]),
+);
+const NEW_YORK_SESSION_PARTS_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: NEW_YORK_TIME_ZONE,
+  weekday: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+const NYSE_SESSION_STATES = Object.freeze({
+  weekend: Object.freeze({ label: "Fuera de sesión · fin de semana", tone: "neutral" }),
+  before: Object.freeze({ label: "Antes de apertura regular", tone: "neutral" }),
+  open: Object.freeze({ label: "Dentro de sesión regular", tone: "open" }),
+  after: Object.freeze({ label: "Después del cierre regular", tone: "neutral" }),
 });
 
 const MARKET_CHART_PERIOD_BY_INTERVAL = Object.freeze({
@@ -2935,6 +2983,55 @@ function applyOverview(payload) {
   setMessage(operationalIssues.join(" · "), operationalIssues.length > 0);
 }
 
+function newYorkRegularSessionState(now) {
+  const parts = Object.fromEntries(
+    NEW_YORK_SESSION_PARTS_FORMATTER.formatToParts(now)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+  if (parts.weekday === "Sat" || parts.weekday === "Sun") {
+    return NYSE_SESSION_STATES.weekend;
+  }
+  const minutes = Number(parts.hour) * 60 + Number(parts.minute);
+  if (minutes < NYSE_CORE_OPEN_MINUTES) {
+    return NYSE_SESSION_STATES.before;
+  }
+  if (minutes < NYSE_CORE_CLOSE_MINUTES) {
+    return NYSE_SESSION_STATES.open;
+  }
+  return NYSE_SESSION_STATES.after;
+}
+
+function renderMarketClocks(now = new Date()) {
+  const instant = now.toISOString();
+  for (const definition of MARKET_CLOCK_DEFINITIONS) {
+    const formatters = MARKET_CLOCK_FORMATTERS.get(definition.timeZone);
+    const timeElement = byId(definition.timeElementId);
+    timeElement.dateTime = instant;
+    timeElement.textContent = formatters.time.format(now);
+    byId(definition.dateElementId).textContent = formatters.date.format(now);
+  }
+  const session = newYorkRegularSessionState(now);
+  const status = byId("nyse-session-status");
+  status.textContent = session.label;
+  status.className = `market-session-status ${session.tone}`;
+}
+
+let marketClockTimer = null;
+
+function startMarketClocks() {
+  if (marketClockTimer !== null) {
+    window.clearTimeout(marketClockTimer);
+    marketClockTimer = null;
+  }
+  const now = new Date();
+  renderMarketClocks(now);
+  if (!document.hidden) {
+    const delay = MARKET_CLOCK_REFRESH_MS - (now.getTime() % MARKET_CLOCK_REFRESH_MS) + 25;
+    marketClockTimer = window.setTimeout(startMarketClocks, delay);
+  }
+}
+
 async function refreshOverview() {
   const button = byId("refresh-overview");
   setButtonBusy(button, true, "Actualizando…", "Actualizar estado");
@@ -3205,6 +3302,7 @@ byId("report-form").addEventListener("submit", async (event) => {
 });
 
 byId("refresh-overview").addEventListener("click", refreshOverview);
+document.addEventListener("visibilitychange", startMarketClocks);
 byId("export-market-csv").addEventListener("click", exportMarketCsv);
 byId("export-fundamental-csv").addEventListener("click", exportFundamentalCsv);
 byId("export-fundamental-research-csv").addEventListener(
@@ -3357,6 +3455,7 @@ async function initialize() {
   initializeTheme();
   initializeChartSettings();
   applySelectedMarketAsset();
+  startMarketClocks();
   await refreshOverview();
   await Promise.all([
     queryReport(),

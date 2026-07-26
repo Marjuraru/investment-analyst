@@ -38,6 +38,8 @@ local:
   con ingestión append-only e idempotente, reconstrucción point-in-time y agregaciones locales
   deterministas de 1/5/15/30/45 minutos y 1/2/4/5 horas; la interfaz permite consultarlas en una
   ventana acotada de 24 horas sin sustituir la ruta diaria;
+- sondeo acotado y de solo lectura de las rutas oficiales SMV/BVL candidatas, sin persistencia ni
+  activación prematura de un conector de mercado peruano;
 - obtención oficial de fundamentales de Apple mediante SEC EDGAR;
 - base de investigación fundamental con 31 hechos SEC adicionales y 40 métricas descriptivas
   versionadas, calculadas point-in-time con `Decimal`, evidencia exacta por input y estadísticas
@@ -68,7 +70,8 @@ local:
   separado; incorpora evolución trimestral o anual de cinco hechos SEC, una clasificación
   empresarial visible que declara cuando la evidencia aún no es suficiente, ficha fundamental y
   una matriz compacta de 40 métricas derivadas con fórmulas e inputs auditables;
-  incluye exportaciones exactas CSV/JSON generadas en el navegador, tema oscuro o claro, respuestas
+  incluye relojes locales de Lima y Wall Street con la ventana regular NYSE explícita,
+  exportaciones exactas CSV/JSON generadas en el navegador, tema oscuro o claro, respuestas
   comprimidas, cachés de lectura acotadas, scheduler diario persistente y unidad de usuario
   `systemd` generada de forma segura;
 - entorno reproducible mediante un lock versionado, pruebas unitarias e integraciones locales,
