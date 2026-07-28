@@ -1,10 +1,11 @@
-"""Prevalidated idempotent persistence for Apple fundamental diagnostics."""
+"""Prevalidated idempotent persistence for SEC issuer diagnostics."""
 
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 
 from investment_analyst.core.models import DiagnosticMode, DiagnosticResult
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_diagnostic_engine import (
     SecFundamentalDiagnosticEngine,
     SecFundamentalDiagnosticTraceabilityError,
@@ -18,12 +19,14 @@ from investment_analyst.providers.fundamentals.sec_diagnostic_models import (
 from investment_analyst.providers.fundamentals.sec_diagnostic_selection import (
     SecFundamentalDiagnosticSelector,
 )
-from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID
+from investment_analyst.providers.fundamentals.sec_raw_records import (
+    aapl_sec_configuration,
+)
 from investment_analyst.storage import LocalStorage, StorageError
 
 
 class SecFundamentalDiagnosticPipelineError(RuntimeError):
-    """Base error for Apple fundamental diagnostic persistence."""
+    """Base error for SEC issuer fundamental diagnostic persistence."""
 
 
 class SecFundamentalDiagnosticIdentityConflictError(SecFundamentalDiagnosticPipelineError):
@@ -63,7 +66,7 @@ def _same_identity(existing: DiagnosticResult, expected: DiagnosticResult) -> bo
     return all(getattr(existing, field) == getattr(expected, field) for field in fields)
 
 
-class SecAaplFundamentalDiagnosticPipeline:
+class SecIssuerFundamentalDiagnosticPipeline:
     """Select, compute, prevalidate, and persist one fundamental diagnostic."""
 
     def __init__(
@@ -72,12 +75,14 @@ class SecAaplFundamentalDiagnosticPipeline:
         selector: SecFundamentalDiagnosticSelector,
         engine: SecFundamentalDiagnosticEngine,
         *,
+        configuration: SecAssetConfiguration | None = None,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         storage.require_open()
         self._storage = storage
         self._selector = selector
         self._engine = engine
+        self._configuration = configuration or aapl_sec_configuration()
         self._clock = clock
 
     def run(
@@ -86,6 +91,10 @@ class SecAaplFundamentalDiagnosticPipeline:
     ) -> SecFundamentalDiagnosticRunSummary:
         """Execute one logically prevalidated and idempotent diagnostic run."""
         self._storage.require_open()
+        if request.asset_id != self._configuration.asset_id:
+            raise SecFundamentalDiagnosticPipelineError(
+                "request asset_id does not match the configured SEC issuer"
+            )
         counts_before = self._counts()
         selection = self._selector.select(request)
         computed_at = _utc(self._clock(), "computed_at")
@@ -96,19 +105,25 @@ class SecAaplFundamentalDiagnosticPipeline:
         )
 
         try:
-            verify_fundamental_diagnostic_computation(computation)
+            verify_fundamental_diagnostic_computation(
+                computation,
+                self._configuration,
+            )
         except SecFundamentalDiagnosticTraceabilityError as error:
             raise SecFundamentalDiagnosticPipelineTraceabilityError(
                 "generated fundamental diagnostic failed pre-persistence validation"
             ) from error
         diagnostic = computation.diagnostic
-        if diagnostic.diagnostic_id != fundamental_diagnostic_id(selection):
+        if diagnostic.diagnostic_id != fundamental_diagnostic_id(
+            selection,
+            algorithm_version=self._engine.algorithm_version,
+        ):
             raise SecFundamentalDiagnosticPipelineTraceabilityError(
                 "diagnostic identity does not match selected metrics"
             )
 
         existing_diagnostics = self._storage.diagnostics.list(
-            asset_id=ASSET_ID,
+            asset_id=request.asset_id,
             mode=DiagnosticMode.FUNDAMENTAL,
         )
         existing_by_id = {item.diagnostic_id: item for item in existing_diagnostics}
@@ -159,7 +174,7 @@ class SecAaplFundamentalDiagnosticPipeline:
             )
 
         return SecFundamentalDiagnosticRunSummary(
-            asset_id=ASSET_ID,
+            asset_id=request.asset_id,
             known_at=request.known_at,
             frequency=request.frequency,
             target_period_end=selection.target_period_end,
@@ -239,3 +254,6 @@ def diagnostic_score_matches_components(result: DiagnosticResult) -> bool:
         Decimal("0"),
     )
     return abs(total - result.final_score) <= Decimal("0.0001")
+
+
+SecAaplFundamentalDiagnosticPipeline = SecIssuerFundamentalDiagnosticPipeline

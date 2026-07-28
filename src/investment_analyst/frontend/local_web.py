@@ -65,6 +65,10 @@ from investment_analyst.application.aapl_daily_runner import (
     AaplDailyRunner,
 )
 from investment_analyst.application.aapl_scheduler import AaplDailyScheduler
+from investment_analyst.application.analysis_capabilities import (
+    FundamentalAnalysisMode,
+    MarketAnalysisMode,
+)
 from investment_analyst.application.btc_intraday import (
     BtcIntradayChartQueryError,
     BtcIntradayRefreshError,
@@ -106,8 +110,17 @@ from investment_analyst.application.operational_state import (
     AaplOperationalStateError,
 )
 from investment_analyst.application.runtime import ApplicationRuntimeError, StorageLocationRequest
+from investment_analyst.application.sec_fundamental_refresh import (
+    SecIssuerFundamentalKnownAtTooEarlyError,
+    SecIssuerFundamentalRefreshError,
+)
+from investment_analyst.application.sec_fundamental_refresh_models import (
+    SecIssuerFundamentalRefreshRequest,
+    SecIssuerFundamentalRefreshSummary,
+)
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
+from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID as APPLE_ASSET_ID
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
 from investment_analyst.storage import StorageError
 from investment_analyst.workspace.service import WorkspaceError
@@ -237,6 +250,16 @@ class _ApplicationOperations(Protocol):
         """Query one bounded persisted SEC fundamental trend."""
         ...
 
+    def query_sec_fundamental_trend(
+        self,
+        request: AaplFundamentalTrendRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalTrend:
+        """Query one bounded catalog-backed SEC fundamental trend."""
+        ...
+
     def query_aapl_fundamental_research(
         self,
         request: AaplFundamentalResearchRequest,
@@ -244,6 +267,16 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> AaplFundamentalResearchResult:
         """Calculate bounded point-in-time fundamental research metrics."""
+        ...
+
+    def query_sec_fundamental_research(
+        self,
+        request: AaplFundamentalResearchRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalResearchResult:
+        """Calculate bounded point-in-time research for one SEC issuer."""
         ...
 
     def query_aapl_fundamental_research_history(
@@ -255,6 +288,16 @@ class _ApplicationOperations(Protocol):
         """Calculate bounded historical fundamental research statistics."""
         ...
 
+    def query_sec_fundamental_research_history(
+        self,
+        request: AaplFundamentalResearchRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalResearchHistoryResult:
+        """Calculate bounded historical research for one SEC issuer."""
+        ...
+
     def query_aapl_fundamental_analysis(
         self,
         request: AaplFundamentalResearchRequest,
@@ -262,6 +305,26 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> AaplFundamentalAnalysisResult:
         """Organize exact research evidence into analytical sections."""
+        ...
+
+    def query_sec_fundamental_analysis(
+        self,
+        request: AaplFundamentalResearchRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalAnalysisResult:
+        """Organize one SEC issuer's evidence into analytical sections."""
+        ...
+
+    def refresh_sec_fundamentals(
+        self,
+        request: SecIssuerFundamentalRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        sec_identity: SecEdgarIdentity,
+    ) -> SecIssuerFundamentalRefreshSummary:
+        """Refresh one catalog-backed SEC issuer independently from market."""
         ...
 
 
@@ -323,6 +386,10 @@ class _WebOperations(Protocol):
         """Execute one manual intraday market refresh."""
         ...
 
+    def fundamental_refresh(self, payload: dict[str, object]) -> dict[str, object]:
+        """Execute one manual SEC issuer refresh."""
+        ...
+
 
 class AaplLocalController:
     """Serialize in-process reads and writes over existing application boundaries."""
@@ -348,15 +415,17 @@ class AaplLocalController:
             tuple[str, AaplMarketChartRequest], ListedMarketChart
         ] = {}
         self._btc_intraday_chart_cache: dict[BtcIntradayChartRequest, BtcIntradayChart] = {}
-        self._fundamental_trend_cache: dict[AaplFundamentalTrendRequest, AaplFundamentalTrend] = {}
+        self._fundamental_trend_cache: dict[
+            tuple[str, AaplFundamentalTrendRequest], AaplFundamentalTrend
+        ] = {}
         self._fundamental_research_cache: dict[
-            AaplFundamentalResearchRequest, AaplFundamentalResearchResult
+            tuple[str, AaplFundamentalResearchRequest], AaplFundamentalResearchResult
         ] = {}
         self._fundamental_research_history_cache: dict[
-            AaplFundamentalResearchRequest, AaplFundamentalResearchHistoryResult
+            tuple[str, AaplFundamentalResearchRequest], AaplFundamentalResearchHistoryResult
         ] = {}
         self._fundamental_analysis_cache: dict[
-            AaplFundamentalResearchRequest, AaplFundamentalAnalysisResult
+            tuple[str, AaplFundamentalResearchRequest], AaplFundamentalAnalysisResult
         ] = {}
         self._market_assets = self._application.list_market_assets()
 
@@ -538,78 +607,112 @@ class AaplLocalController:
             finally:
                 self._btc_intraday_chart_cache.clear()
 
+    def sec_fundamental_refresh_request(
+        self,
+        request: SecIssuerFundamentalRefreshRequest,
+    ) -> SecIssuerFundamentalRefreshSummary:
+        """Execute one SEC-only issuer refresh through the shared writer mutex."""
+        with self._operation_lock:
+            try:
+                return self._application.refresh_sec_fundamentals(
+                    request,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                    sec_identity=self._sec_identity,
+                )
+            finally:
+                self._fundamental_trend_cache.clear()
+                self._fundamental_research_cache.clear()
+                self._fundamental_research_history_cache.clear()
+                self._fundamental_analysis_cache.clear()
+
     def fundamental_trend_request(
         self,
         request: AaplFundamentalTrendRequest,
+        *,
+        asset_id: str = APPLE_ASSET_ID,
     ) -> AaplFundamentalTrend:
         """Query persisted SEC facts without providers, recomputation, or writes."""
+        cache_key = (asset_id, request)
         with self._operation_lock:
-            cached = self._fundamental_trend_cache.get(request)
+            cached = self._fundamental_trend_cache.get(cache_key)
             if cached is not None:
                 return cached
-            trend = self._application.query_aapl_fundamental_trend(
+            trend = self._application.query_sec_fundamental_trend(
                 request,
+                asset_id=asset_id,
                 location=StorageLocationRequest(workspace=self._workspace),
             )
             if len(self._fundamental_trend_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._fundamental_trend_cache.pop(next(iter(self._fundamental_trend_cache)))
-            self._fundamental_trend_cache[request] = trend
+            self._fundamental_trend_cache[cache_key] = trend
             return trend
 
     def fundamental_research_request(
         self,
         request: AaplFundamentalResearchRequest,
+        *,
+        asset_id: str = APPLE_ASSET_ID,
     ) -> AaplFundamentalResearchResult:
         """Calculate cached SEC research metrics without providers or writes."""
+        cache_key = (asset_id, request)
         with self._operation_lock:
-            cached = self._fundamental_research_cache.get(request)
+            cached = self._fundamental_research_cache.get(cache_key)
             if cached is not None:
                 return cached
-            research = self._application.query_aapl_fundamental_research(
+            research = self._application.query_sec_fundamental_research(
                 request,
+                asset_id=asset_id,
                 location=StorageLocationRequest(workspace=self._workspace),
             )
             if len(self._fundamental_research_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._fundamental_research_cache.pop(next(iter(self._fundamental_research_cache)))
-            self._fundamental_research_cache[request] = research
+            self._fundamental_research_cache[cache_key] = research
             return research
 
     def fundamental_research_history_request(
         self,
         request: AaplFundamentalResearchRequest,
+        *,
+        asset_id: str = APPLE_ASSET_ID,
     ) -> AaplFundamentalResearchHistoryResult:
         """Calculate cached historical research statistics without writes."""
+        cache_key = (asset_id, request)
         with self._operation_lock:
-            cached = self._fundamental_research_history_cache.get(request)
+            cached = self._fundamental_research_history_cache.get(cache_key)
             if cached is not None:
                 return cached
-            history = self._application.query_aapl_fundamental_research_history(
+            history = self._application.query_sec_fundamental_research_history(
                 request,
+                asset_id=asset_id,
                 location=StorageLocationRequest(workspace=self._workspace),
             )
             if len(self._fundamental_research_history_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._fundamental_research_history_cache.pop(
                     next(iter(self._fundamental_research_history_cache))
                 )
-            self._fundamental_research_history_cache[request] = history
+            self._fundamental_research_history_cache[cache_key] = history
             return history
 
     def fundamental_analysis_request(
         self,
         request: AaplFundamentalResearchRequest,
+        *,
+        asset_id: str = APPLE_ASSET_ID,
     ) -> AaplFundamentalAnalysisResult:
         """Return cached analytical sections without providers or writes."""
+        cache_key = (asset_id, request)
         with self._operation_lock:
-            cached = self._fundamental_analysis_cache.get(request)
+            cached = self._fundamental_analysis_cache.get(cache_key)
             if cached is not None:
                 return cached
-            analysis = self._application.query_aapl_fundamental_analysis(
+            analysis = self._application.query_sec_fundamental_analysis(
                 request,
+                asset_id=asset_id,
                 location=StorageLocationRequest(workspace=self._workspace),
             )
             if len(self._fundamental_analysis_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._fundamental_analysis_cache.pop(next(iter(self._fundamental_analysis_cache)))
-            self._fundamental_analysis_cache[request] = analysis
+            self._fundamental_analysis_cache[cache_key] = analysis
             return analysis
 
 
@@ -701,14 +804,20 @@ class AaplLocalWebApplication:
                 name="third_sma_window",
                 default=50,
             )
-        if asset_id == "equity:us:aapl":
+        descriptor = self._market_asset(asset_id)
+        if descriptor.refresh_kind == "complete_analysis":
             request = AaplMarketChartRequest.model_validate(request_parameters)
             return self._controller.market_chart_request(request).to_json_dict()
-        if asset_id == "crypto:btc-usd":
+        if (
+            descriptor.analysis.market_mode is MarketAnalysisMode.CRYPTO_SPOT
+            and descriptor.provider == "coinbase"
+        ):
             request = BtcMarketChartRequest.model_validate(request_parameters)
             return self._controller.btc_market_chart_request(request).to_json_dict()
-        descriptor = self._market_asset(asset_id)
-        if descriptor.provider == "alpaca":
+        if (
+            descriptor.analysis.market_mode is MarketAnalysisMode.LISTED_SECURITY
+            and descriptor.provider == "alpaca"
+        ):
             request = AaplMarketChartRequest.model_validate(request_parameters)
             return self._controller.listed_market_chart_request(
                 asset_id,
@@ -722,7 +831,12 @@ class AaplLocalWebApplication:
         if set(parameters) - allowed:
             raise ValueError("intraday market query contains unsupported parameters")
         asset_id = _one_parameter(parameters, "asset_id", required=False) or "crypto:btc-usd"
-        if asset_id != "crypto:btc-usd":
+        descriptor = self._market_asset(asset_id)
+        if (
+            descriptor.analysis.market_mode is not MarketAnalysisMode.CRYPTO_SPOT
+            or not descriptor.supports_intraday
+            or descriptor.provider != "coinbase"
+        ):
             raise ValueError("intraday market asset_id is not supported")
         known_at = _one_parameter(parameters, "known_at", required=True)
         interval = _one_parameter(parameters, "interval", required=True)
@@ -734,9 +848,10 @@ class AaplLocalWebApplication:
 
     def fundamental_trend(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate query parameters and return the versioned SEC trend contract."""
-        allowed = {"known_at", "frequency"}
+        allowed = {"asset_id", "known_at", "frequency"}
         if set(parameters) - allowed:
             raise ValueError("fundamental trend query contains unsupported parameters")
+        descriptor = self._fundamental_asset(parameters)
         known_at = _one_parameter(parameters, "known_at", required=True)
         frequency = _frequency(_one_parameter(parameters, "frequency", required=True))
         period_limit = 5 if frequency is DataFrequency.ANNUAL else 8
@@ -745,31 +860,46 @@ class AaplLocalWebApplication:
             frequency=frequency,
             period_limit=period_limit,
         )
-        return self._controller.fundamental_trend_request(request).to_json_dict()
+        return self._controller.fundamental_trend_request(
+            request,
+            asset_id=descriptor.asset_id,
+        ).to_json_dict()
 
     def fundamental_research(
         self,
         parameters: Mapping[str, tuple[str, ...]],
     ) -> dict[str, object]:
         """Validate query parameters and return exact derived SEC metrics."""
+        descriptor = self._fundamental_asset(parameters)
         request = _fundamental_research_request(parameters)
-        return self._controller.fundamental_research_request(request).to_json_dict()
+        return self._controller.fundamental_research_request(
+            request,
+            asset_id=descriptor.asset_id,
+        ).to_json_dict()
 
     def fundamental_research_history(
         self,
         parameters: Mapping[str, tuple[str, ...]],
     ) -> dict[str, object]:
         """Validate query parameters and return historical SEC statistics."""
+        descriptor = self._fundamental_asset(parameters)
         request = _fundamental_research_request(parameters)
-        return self._controller.fundamental_research_history_request(request).to_json_dict()
+        return self._controller.fundamental_research_history_request(
+            request,
+            asset_id=descriptor.asset_id,
+        ).to_json_dict()
 
     def fundamental_analysis(
         self,
         parameters: Mapping[str, tuple[str, ...]],
     ) -> dict[str, object]:
         """Validate query parameters and return unified analytical sections."""
+        descriptor = self._fundamental_asset(parameters)
         request = _fundamental_research_request(parameters)
-        return self._controller.fundamental_analysis_request(request).to_json_dict()
+        return self._controller.fundamental_analysis_request(
+            request,
+            asset_id=descriptor.asset_id,
+        ).to_json_dict()
 
     def run(self, payload: dict[str, object]) -> dict[str, object]:
         """Execute one explicit request and return bounded operational state."""
@@ -778,11 +908,18 @@ class AaplLocalWebApplication:
     def market_refresh(self, payload: dict[str, object]) -> dict[str, object]:
         """Validate and execute one explicit market-only refresh."""
         asset_id = payload.get("asset_id")
-        if asset_id == "crypto:btc-usd":
+        descriptor = self._market_asset(asset_id)
+        if (
+            descriptor.analysis.market_mode is MarketAnalysisMode.CRYPTO_SPOT
+            and descriptor.provider == "coinbase"
+        ):
             request = BtcMarketRefreshRequest.model_validate(payload)
             return self._controller.btc_market_refresh_request(request).to_json_dict()
-        descriptor = self._market_asset(asset_id)
-        if descriptor.provider == "alpaca" and descriptor.refresh_kind == "market_only":
+        if (
+            descriptor.analysis.market_mode is MarketAnalysisMode.LISTED_SECURITY
+            and descriptor.provider == "alpaca"
+            and descriptor.refresh_kind == "market_only"
+        ):
             request = ListedMarketRefreshRequest.model_validate(payload)
             return self._controller.listed_market_refresh_request(request).to_json_dict()
         raise ValueError("market refresh asset_id is not supported")
@@ -791,6 +928,14 @@ class AaplLocalWebApplication:
         """Validate and execute one explicit bounded Coinbase minute refresh."""
         request = BtcIntradayRefreshRequest.model_validate(payload)
         return self._controller.btc_intraday_refresh_request(request).to_json_dict()
+
+    def fundamental_refresh(self, payload: dict[str, object]) -> dict[str, object]:
+        """Validate and execute one explicit SEC-only issuer refresh."""
+        descriptor = self._fundamental_descriptor(payload.get("asset_id"))
+        request = SecIssuerFundamentalRefreshRequest.model_validate(payload)
+        if request.asset_id != descriptor.asset_id:
+            raise ValueError("fundamental refresh asset_id is inconsistent")
+        return self._controller.sec_fundamental_refresh_request(request).to_json_dict()
 
     def _market_asset(self, asset_id: object) -> MarketAssetDescriptor:
         """Resolve one visible asset without maintaining a second allowlist."""
@@ -802,6 +947,24 @@ class AaplLocalWebApplication:
         if len(candidates) != 1:
             raise ValueError("market asset_id is not supported")
         return candidates[0]
+
+    def _fundamental_asset(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> MarketAssetDescriptor:
+        """Reject fundamental queries without a configured corporate issuer."""
+        asset_id = _one_parameter(parameters, "asset_id", required=False) or APPLE_ASSET_ID
+        return self._fundamental_descriptor(asset_id)
+
+    def _fundamental_descriptor(self, asset_id: object) -> MarketAssetDescriptor:
+        """Resolve one visible corporate issuer with an enabled SEC presentation."""
+        descriptor = self._market_asset(asset_id)
+        if (
+            not descriptor.has_fundamentals
+            or descriptor.analysis.fundamental_mode is not FundamentalAnalysisMode.CORPORATE
+        ):
+            raise ValueError("fundamental analysis is not available for asset_id")
+        return descriptor
 
 
 class AaplLocalHttpServer(ThreadingHTTPServer):
@@ -928,6 +1091,7 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 "/api/run",
                 "/api/market-refresh",
                 "/api/market-intraday-refresh",
+                "/api/fundamental-refresh",
             }:
                 raise _HttpError(HTTPStatus.NOT_FOUND, "not_found", "route not found")
             payload = self._read_json_object()
@@ -936,6 +1100,8 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 response = server.application.run(payload)
             elif parsed.path == "/api/market-refresh":
                 response = server.application.market_refresh(payload)
+            elif parsed.path == "/api/fundamental-refresh":
+                response = server.application.fundamental_refresh(payload)
             else:
                 response = server.application.market_intraday_refresh(payload)
             self._send_json(HTTPStatus.OK, response)
@@ -1011,7 +1177,11 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
             self._send_error(status, error.failure.category, error.failure.message)
         elif isinstance(
             error,
-            (BtcMarketKnownAtTooEarlyError, ListedMarketKnownAtTooEarlyError),
+            (
+                BtcMarketKnownAtTooEarlyError,
+                ListedMarketKnownAtTooEarlyError,
+                SecIssuerFundamentalKnownAtTooEarlyError,
+            ),
         ):
             self._send_error(
                 HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -1022,6 +1192,12 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
             self._send_error(
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 "market_refresh_failed",
+                str(error)[:500],
+            )
+        elif isinstance(error, SecIssuerFundamentalRefreshError):
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "fundamental_refresh_failed",
                 str(error)[:500],
             )
         elif isinstance(error, BtcIntradayRefreshError):
@@ -1160,7 +1336,7 @@ def _frequency(value: str | None) -> DataFrequency:
 def _fundamental_research_request(
     parameters: Mapping[str, tuple[str, ...]],
 ) -> AaplFundamentalResearchRequest:
-    allowed = {"known_at", "frequency"}
+    allowed = {"asset_id", "known_at", "frequency"}
     if set(parameters) - allowed:
         raise ValueError("fundamental research query contains unsupported parameters")
     known_at = _one_parameter(parameters, "known_at", required=True)

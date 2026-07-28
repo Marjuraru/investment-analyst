@@ -26,6 +26,11 @@ SEC normalizadas. Selecciona revisiones por `available_at` y `known_at`, calcula
 dígitos y devuelve los UUID de todos los inputs. En esta etapa no persiste resultados ni altera las
 cinco variables del contrato fundamental original.
 
+La ingestión corporativa SEC se compone por `asset_id` en un refresh independiente de mercado:
+snapshots, normalización, cinco métricas persistidas y diagnóstico fundamental. Cada etapa recibe la
+misma configuración inmutable de emisor y usa una sola conexión writer. Los fallos tardíos conservan
+el progreso append-only anterior; no existe un rollback global que elimine evidencia válida.
+
 La vista fundamental unificada organiza el resultado histórico exacto por tipo de análisis:
 crecimiento y datos por acción, rentabilidad, retornos y eficiencia, calidad del beneficio, liquidez
 y balance, deuda y solvencia, caja y reinversión y asignación de capital.

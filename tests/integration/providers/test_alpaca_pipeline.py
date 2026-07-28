@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from investment_analyst.core.models import AssetClass
 from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
 from investment_analyst.providers.http import HttpResponse
 from investment_analyst.providers.market.alpaca_normalizer import ASSET_ID, SOURCE_ID
@@ -154,6 +155,8 @@ def test_catalog_asset_configuration_preserves_independent_bvn_identity(tmp_path
         adjustment="all",
         source_id="alpaca-market-data:iex:bvn:daily-bars:adjustment-all",
         name="Compañía de Minas Buenaventura S.A.A.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
         exchange="NYSE",
     )
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:

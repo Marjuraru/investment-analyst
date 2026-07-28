@@ -5,10 +5,15 @@ from typing import Literal
 
 from pydantic import ConfigDict, Field, model_validator
 
+from investment_analyst.application.analysis_capabilities import (
+    AssetAnalysisCapabilities,
+    analysis_capabilities_for,
+)
 from investment_analyst.catalog.provider_configuration import (
     resolve_alpaca_configuration,
     resolve_coinbase_configuration,
     resolve_coinbase_intraday_configuration,
+    resolve_sec_configuration,
 )
 from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
 from investment_analyst.catalog.service import AssetCatalogService
@@ -22,6 +27,7 @@ _COINBASE_HISTORY_START = date(2015, 7, 20)
 _DAILY_MARKET_CAPABILITY = "market.daily_bars"
 _MINUTE_MARKET_CAPABILITY = "market.minute_bars"
 _FUNDAMENTAL_CAPABILITIES = frozenset({"fundamentals.company_facts", "fundamentals.submissions"})
+_COMPLETE_ANALYSIS_ASSET_IDS = frozenset({APPLE_ASSET_ID})
 
 
 class MarketAssetDescriptor(ContractModel):
@@ -41,11 +47,12 @@ class MarketAssetDescriptor(ContractModel):
     chart_schema_version: NonEmptyStr
     volume_unit: NonEmptyStr
     default_market_start: date
+    analysis: AssetAnalysisCapabilities
     has_fundamentals: bool
     supports_intraday: bool
     intraday_source_id: NonEmptyStr | None = None
     intraday_schema_version: NonEmptyStr | None = None
-    refresh_kind: Literal["aapl_complete", "market_only"]
+    refresh_kind: Literal["complete_analysis", "market_only"]
 
     @model_validator(mode="after")
     def validate_capabilities(self) -> "MarketAssetDescriptor":
@@ -53,8 +60,18 @@ class MarketAssetDescriptor(ContractModel):
         intraday_fields = (self.intraday_source_id, self.intraday_schema_version)
         if self.supports_intraday != all(value is not None for value in intraday_fields):
             raise ValueError("intraday support requires both source and schema identities")
-        if self.refresh_kind == "aapl_complete" and not self.has_fundamentals:
-            raise ValueError("complete Apple refresh requires fundamental capability")
+        if self.analysis.asset_id != self.asset_id:
+            raise ValueError("analysis capabilities must match descriptor asset_id")
+        if self.analysis.asset_class is not self.asset_class:
+            raise ValueError("analysis capabilities must match descriptor asset_class")
+        if (self.analysis.exchange or "UNKNOWN") != self.exchange:
+            raise ValueError("analysis capabilities must match descriptor exchange")
+        if self.analysis.market_data_configured is not True:
+            raise ValueError("visible market assets require configured market data")
+        if self.has_fundamentals and not self.analysis.fundamental_data_configured:
+            raise ValueError("fundamental analysis requires declared fundamental data")
+        if self.refresh_kind == "complete_analysis" and not self.has_fundamentals:
+            raise ValueError("complete refresh requires fundamental capability")
         return self
 
 
@@ -63,7 +80,7 @@ class MarketAssetUniverse(ContractModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["market-asset-universe-v1"] = "market-asset-universe-v1"
+    schema_version: Literal["market-asset-universe-v2"] = "market-asset-universe-v2"
     catalog_version: int = Field(ge=1)
     assets: tuple[MarketAssetDescriptor, ...]
 
@@ -117,7 +134,15 @@ def _descriptor(
     capabilities = frozenset(
         capability for candidate in asset.provider_bindings for capability in candidate.capabilities
     )
-    has_fundamentals = _FUNDAMENTAL_CAPABILITIES.issubset(capabilities)
+    fundamental_pipeline_available = (
+        asset.asset_class is AssetClass.EQUITY and _FUNDAMENTAL_CAPABILITIES.issubset(capabilities)
+    )
+    if fundamental_pipeline_available:
+        resolve_sec_configuration(resolver, asset_id=asset_id)
+    complete_refresh_available = (
+        asset.asset_id in _COMPLETE_ANALYSIS_ASSET_IDS and fundamental_pipeline_available
+    )
+    analysis = analysis_capabilities_for(asset)
 
     if binding.provider == "alpaca":
         configuration = resolve_alpaca_configuration(resolver, asset_id=asset_id)
@@ -138,9 +163,10 @@ def _descriptor(
             ),
             volume_unit="shares",
             default_market_start=_ALPACA_HISTORY_START,
-            has_fundamentals=has_fundamentals,
+            analysis=analysis,
+            has_fundamentals=fundamental_pipeline_available,
             supports_intraday=False,
-            refresh_kind=("aapl_complete" if asset.asset_id == APPLE_ASSET_ID else "market_only"),
+            refresh_kind=("complete_analysis" if complete_refresh_available else "market_only"),
         )
 
     if binding.provider == "coinbase" and asset.asset_id == BITCOIN_ASSET_ID:
@@ -159,6 +185,7 @@ def _descriptor(
             chart_schema_version="btc-market-chart-v1",
             volume_unit="BTC",
             default_market_start=_COINBASE_HISTORY_START,
+            analysis=analysis,
             has_fundamentals=False,
             supports_intraday=_MINUTE_MARKET_CAPABILITY in binding.capabilities,
             intraday_source_id=intraday.source_id,

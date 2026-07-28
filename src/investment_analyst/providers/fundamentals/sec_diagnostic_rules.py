@@ -1,4 +1,4 @@
-"""Published Decimal-only rules for Apple fundamental diagnostics."""
+"""Published Decimal-only rules for SEC issuer fundamental diagnostics."""
 
 from datetime import datetime
 from decimal import Context, Decimal, localcontext
@@ -11,6 +11,7 @@ from investment_analyst.core.models import (
 )
 
 ALGORITHM_VERSION = "sec-aapl-fundamental-diagnostic-v1.1-decimal34"
+GENERIC_ALGORITHM_VERSION = "sec-fundamental-diagnostic-v2-decimal34"
 SCORE_TOLERANCE = Decimal("0.0001")
 POSITIVE_THRESHOLD = Decimal("65")
 NEUTRAL_THRESHOLD = Decimal("40")

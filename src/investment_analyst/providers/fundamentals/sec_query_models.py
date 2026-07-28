@@ -19,7 +19,7 @@ _ALLOWED_FREQUENCIES = frozenset({DataFrequency.ANNUAL, DataFrequency.QUARTERLY}
 
 
 class SecFundamentalQuery(ContractModel):
-    """Read-only point-in-time query for selected Apple SEC facts."""
+    """Read-only point-in-time query for selected SEC issuer facts."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -40,9 +40,7 @@ class SecFundamentalQuery(ContractModel):
 
     @model_validator(mode="after")
     def validate_scope(self) -> "SecFundamentalQuery":
-        """Validate the fixed Apple scope and inclusive period range."""
-        if self.asset_id != ASSET_ID:
-            raise ValueError("asset_id must identify Apple")
+        """Validate the supported frequency and inclusive period range."""
         if self.frequency not in _ALLOWED_FREQUENCIES:
             raise ValueError("frequency must be annual or quarterly")
         if (
@@ -192,7 +190,7 @@ class SecFundamentalPeriodView(ContractModel):
 
 
 class SecFundamentalPointInTimeResult(ContractModel):
-    """Auditable point-in-time view of locally stored Apple SEC observations."""
+    """Auditable point-in-time view of one locally stored SEC issuer."""
 
     model_config = ConfigDict(frozen=True)
 

@@ -6,6 +6,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from investment_analyst.core.models import (
     Asset,
+    AssetClass,
     DataFrequency,
     DataQuality,
     NormalizedObservation,
@@ -46,6 +47,10 @@ def _default_configuration() -> AlpacaAssetConfiguration:
         feed=FEED,
         adjustment=ADJUSTMENT,
         source_id=SOURCE_ID,
+        name="Apple Inc.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NASDAQ",
     )
 
 

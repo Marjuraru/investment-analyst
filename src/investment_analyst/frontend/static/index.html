@@ -32,11 +32,11 @@
             <span class="nav-index" aria-hidden="true">02</span>
             Mercado
           </a>
-          <a class="nav-link" href="#fundamentales" data-apple-only>
+          <a class="nav-link" href="#fundamentales" data-fundamental-only>
             <span class="nav-index" aria-hidden="true">03</span>
             Fundamentales
           </a>
-          <a class="nav-link" href="#analisis" data-apple-only>
+          <a class="nav-link" href="#analisis" data-complete-analysis-only>
             <span class="nav-index" aria-hidden="true">04</span>
             Análisis
           </a>
@@ -264,7 +264,7 @@
                     class="chart-host"
                     role="group"
                     tabindex="0"
-                    aria-label="Gráfico histórico interactivo de AAPL. Usa la rueda del mouse para cambiar el zoom, arrastra horizontalmente para desplazar la vista y usa las flechas para recorrer fechas."
+                    aria-label="Gráfico histórico interactivo. Usa la rueda del mouse para cambiar el zoom, arrastra horizontalmente para desplazar la vista y usa las flechas para recorrer fechas."
                     aria-describedby="chart-inspector"
                   ></div>
 
@@ -382,7 +382,7 @@
             </article>
           </section>
 
-          <section id="fundamentales" class="fundamental-section" aria-labelledby="fundamentales-titulo" data-apple-only>
+          <section id="fundamentales" class="fundamental-section" aria-labelledby="fundamentales-titulo" data-fundamental-only>
             <div class="section-intro analysis-intro">
               <div>
                 <p class="eyebrow">FUNDAMENTALES</p>
@@ -393,7 +393,10 @@
             <article id="fundamental-trend-card" class="fundamental-trend-card" aria-busy="true">
               <header class="fundamental-trend-header">
                 <div>
-                  <p class="chart-symbol">AAPL <span>· SEC EDGAR · Company Facts</span></p>
+                  <p class="chart-symbol">
+                    <span id="fundamental-chart-symbol">AAPL</span>
+                    <span>· SEC EDGAR · Company Facts</span>
+                  </p>
                   <h3>Ingresos y resultado neto</h3>
                   <p id="fundamental-latest-context" class="chart-quote-context">Esperando datos locales…</p>
                 </div>
@@ -548,7 +551,7 @@
             </article>
           </section>
 
-          <section id="analisis" class="analysis-section" aria-labelledby="analisis-titulo" data-apple-only>
+          <section id="analisis" class="analysis-section" aria-labelledby="analisis-titulo" data-complete-analysis-only>
             <div class="section-intro analysis-intro">
               <div>
                 <p class="eyebrow">ANÁLISIS</p>
@@ -670,7 +673,7 @@
                     <span>Fin del histórico de mercado</span>
                     <input id="market-end" name="market_end" type="date" required>
                   </label>
-                  <label class="field" data-apple-run-only>
+                  <label class="field" data-fundamental-run-only>
                     <span>Frecuencia fundamental</span>
                     <select id="run-frequency" name="fundamental_frequency">
                       <option value="quarterly">Trimestral</option>
@@ -696,7 +699,7 @@
                   >
                   <small id="run-known-at-help">Déjalo vacío para que el flujo determine el corte UTC.</small>
                 </label>
-                <label class="check-row" data-apple-run-only>
+                <label class="check-row" data-complete-run-only>
                   <input id="require-complete" name="require_complete" type="checkbox" checked>
                   <span>
                     <strong>Exigir un resultado completo</strong>

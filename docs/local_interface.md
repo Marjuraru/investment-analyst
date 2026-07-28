@@ -47,8 +47,8 @@ La página permite:
 - ampliar o reducir localmente el tramo visible sin descartar datos de la consulta completa;
 - ejecutar manualmente el bootstrap completo de SEC EDGAR y Alpaca Market Data IEX;
 - ejecutar una actualización exclusivamente de mercado, incremental por los bordes del histórico
-  o completa, para BTC-USD o los activos Alpaca que no tienen fundamentales implementados, sin
-  crear fundamentales ficticios;
+  o completa, para BTC-USD o cualquier activo Alpaca visible; si una empresa también declara SEC,
+  ambos writers se ejecutan en orden y conservan evidencia independiente;
 - importar explícitamente las últimas 24 horas de BTC-USD de un minuto cuando se selecciona una
   resolución intradía;
 - consultar el reporte diario point-in-time en modo trimestral o anual;
@@ -145,7 +145,10 @@ mantienen separadas. La tabla OHLC se construye solo al abrirla para no cargar m
 El endpoint `/api/fundamental-research` entrega el contrato exacto
 `aapl-fundamental-research-v2`, incluidas fórmulas, versiones, limitaciones e identidades de inputs.
 La matriz compacta presenta el último período; su exportación conserva todos los períodos acotados
-devueltos por la consulta.
+devueltos por la consulta. Los endpoints fundamentales aceptan `asset_id`; la interfaz lo envía
+siempre y el servidor rechaza activos sin un pipeline fundamental completo antes de invocar los
+servicios SEC configurados. La omisión conserva AAPL como valor compatible para clientes locales
+anteriores.
 
 El endpoint `/api/fundamental-research-history` envuelve ese contrato sin modificarlo y añade media,
 mínimo, máximo, rango, cambio frente al período disponible anterior, cambio del horizonte y CAGR.
@@ -260,11 +263,17 @@ estadísticas o diagnósticos diarios a esta fuente.
 
 ## Universo de mercado
 
-El endpoint `/api/market-assets` entrega `market-asset-universe-v1`, generado directamente desde el
+El endpoint `/api/market-assets` entrega `market-asset-universe-v2`, generado directamente desde el
 catálogo central y las configuraciones tipadas de proveedores. El navegador construye el selector
 con esa respuesta; no mantiene otra lista de símbolos. Cada descriptor declara identidad canónica,
 símbolo del proveedor, fuente, esquema de gráfico, fecha inicial soportada, unidad de volumen,
-capacidad intradía y tipo de actualización.
+capacidad intradía, tipo de actualización y un perfil analítico por familia. La interfaz decide si
+un intervalo es intradía a partir de la capacidad del descriptor, no comparando el ID con Bitcoin.
+
+El perfil separa empresas cotizadas, fondos cotizados y criptoactivos. También distingue análisis
+corporativo, análisis de fondos y análisis de red/token; por ello una criptomoneda nunca muestra por
+accidente fundamentales SEC. El mismo contrato admite futuras acciones de BVL como empresas
+cotizadas sin asignarles un proveedor estadounidense.
 
 Apple conserva la actualización completa SEC + Alpaca. Los demás activos Alpaca visibles utilizan
 el contrato genérico `listed-market-refresh-v1`, exclusivamente de mercado, y comparten gráfico,
@@ -272,6 +281,33 @@ estadísticas y diagnóstico sin una ruta HTTP por símbolo. Su cobertura gratui
 una sola bolsa y no el mercado consolidado SIP. El catálogo inicial contiene AMD, Barrick (`B`),
 BVN, CDE, HYMC, INTC, MSTR, MU, MUX, NEM, PLTR, SCCO, TSM, GBTC, GLD e IBIT, además de AAPL y
 BTC-USD.
+
+AMD, Intel, Strategy, Micron, Palantir, CDE, HYMC, MUX, NEM y SCCO ya declaran una fuente corporativa
+SEC. El backend web dispone de lectura y actualización SEC genéricas por `asset_id`:
+`/api/fundamental-refresh` ejecuta el writer independiente y tendencia, investigación, historia y
+análisis usan cachés aisladas por emisor. Para otro emisor la tendencia publica
+`sec-fundamental-trend-v2`; Apple conserva `aapl-fundamental-trend-v1`. La disponibilidad visual se
+deriva de las capacidades y vinculaciones SEC completas del catálogo, no de una lista adicional de
+símbolos en la interfaz o el backend.
+
+El smoke real de AMD del 28 de julio de 2026 procesó dos documentos oficiales, 883 observaciones y
+23 métricas persistidas del diagnóstico base. La repetición reutilizó exactamente los dos raw, las
+883 observaciones, las 23 métricas y el diagnóstico, sin crear duplicados. La investigación ampliada
+obtuvo 25 de 40 métricas en el período más reciente y 26 series históricas.
+
+El smoke real anual de Intel del mismo día procesó dos documentos oficiales, 687 observaciones y 19
+métricas base. MSTR, MU y PLTR produjeron respectivamente 477, 873 y 559 observaciones y 27, 39 y 28
+métricas base. Las repeticiones reutilizaron toda la evidencia sin crear duplicados. Estos emisores
+publican `has_fundamentals=true` y `refresh_kind=market_only`: la interfaz muestra su análisis
+corporativo y, al actualizar, ejecuta primero su mercado Alpaca y después SEC como dos operaciones
+independientes. No utiliza el bootstrap ni la consulta diagnóstica consolidada de Apple. Los
+conceptos ausentes permanecen visibles como faltantes; no se rellenan con cero ni con datos de otro
+emisor.
+
+CDE, HYMC, MUX, NEM y SCCO produjeron en sus smokes reales 873, 633, 845, 569 y 1224 observaciones.
+La cobertura diagnóstica incompleta se muestra como tal y no impide consultar la evidencia
+disponible. Barrick continúa solo con mercado porque sus formularios 40-F/IFRS requieren un
+normalizador distinto.
 
 ## Integración actual de cripto
 

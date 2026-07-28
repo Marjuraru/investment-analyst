@@ -1,16 +1,17 @@
-"""Build a deterministic filing index from an Apple SEC submissions snapshot."""
+"""Build a deterministic filing index from one SEC submissions snapshot."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
 from investment_analyst.core.models import RawRecord
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_fact_models import (
-    ASSET_ID,
-    CIK,
     SUBMISSIONS_SCHEMA_VERSION,
-    SUBMISSIONS_SOURCE_ID,
     SecFilingMetadata,
+)
+from investment_analyst.providers.fundamentals.sec_raw_records import (
+    aapl_sec_configuration,
 )
 
 _ALLOWED_FORMS = frozenset({"10-K", "10-K/A", "10-Q", "10-Q/A"})
@@ -38,14 +39,21 @@ class AmbiguousSecFilingError(SecFilingIndexError):
 
 @dataclass(frozen=True, slots=True)
 class SecFilingIndex:
-    """Immutable, ordered index of supported Apple SEC filings."""
+    """Immutable, ordered index of one issuer's supported SEC filings."""
 
     _filings: tuple[SecFilingMetadata, ...]
 
     @classmethod
-    def from_raw_record(cls, record: RawRecord) -> "SecFilingIndex":
+    def from_raw_record(
+        cls,
+        record: RawRecord,
+        configuration: SecAssetConfiguration | None = None,
+    ) -> "SecFilingIndex":
         """Validate a submissions RawRecord and index supported accessions."""
-        recent = _validate_record_and_get_recent(record)
+        recent = _validate_record_and_get_recent(
+            record,
+            configuration or aapl_sec_configuration(),
+        )
         columns = {name: _require_list(recent, name) for name in _COLUMNS}
         lengths = {len(values) for values in columns.values()}
         if len(lengths) != 1:
@@ -88,10 +96,13 @@ class SecFilingIndex:
         return self._filings
 
 
-def _validate_record_and_get_recent(record: RawRecord) -> Mapping[str, object]:
-    if record.asset_id != ASSET_ID:
-        raise MalformedSecSubmissionsError("submissions RawRecord must belong to Apple")
-    if record.source.source_id != SUBMISSIONS_SOURCE_ID:
+def _validate_record_and_get_recent(
+    record: RawRecord,
+    configuration: SecAssetConfiguration,
+) -> Mapping[str, object]:
+    if record.asset_id != configuration.asset_id:
+        raise MalformedSecSubmissionsError("submissions RawRecord must match the configured asset")
+    if record.source.source_id != configuration.submissions_source_id:
         raise MalformedSecSubmissionsError("submissions RawRecord has an unexpected source")
     if record.schema_version != SUBMISSIONS_SCHEMA_VERSION:
         raise MalformedSecSubmissionsError("submissions RawRecord has an unexpected schema")
@@ -101,11 +112,26 @@ def _validate_record_and_get_recent(record: RawRecord) -> Mapping[str, object]:
         raise MalformedSecSubmissionsError("submissions payload is missing required fields")
     if payload["document_type"] != "submissions":
         raise MalformedSecSubmissionsError("document_type must be submissions")
-    if _normalize_cik(payload["cik"]) != CIK:
-        raise MalformedSecSubmissionsError("submissions payload CIK does not identify Apple")
-    if _require_string(payload["entity_name"], "entity_name").casefold() != "apple inc.":
-        raise MalformedSecSubmissionsError("submissions payload entity does not identify Apple")
+    if _normalize_cik(payload["cik"]) != configuration.cik:
+        raise MalformedSecSubmissionsError(
+            "submissions payload CIK does not match the configured issuer"
+        )
+    payload_entity_name = _require_string(payload["entity_name"], "entity_name")
     document = _require_mapping(payload["document"], "document")
+    if _normalize_cik(document.get("cik")) != configuration.cik:
+        raise MalformedSecSubmissionsError(
+            "submissions document CIK does not match the configured issuer"
+        )
+    document_entity_name = _require_string(document.get("name"), "document.name")
+    if document_entity_name.casefold() != payload_entity_name.casefold():
+        raise MalformedSecSubmissionsError(
+            "submissions payload and document entity names are inconsistent"
+        )
+    tickers = _require_list(document, "tickers")
+    if configuration.ticker not in tickers:
+        raise MalformedSecSubmissionsError(
+            "submissions document does not include the configured ticker"
+        )
     filings = _require_mapping(document.get("filings"), "document.filings")
     return _require_mapping(filings.get("recent"), "document.filings.recent")
 

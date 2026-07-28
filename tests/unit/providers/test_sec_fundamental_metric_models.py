@@ -69,11 +69,6 @@ def test_request_normalizes_offset_and_accepts_range() -> None:
             "frequency": DataFrequency.DAY_1,
         },
         {
-            "asset_id": "equity:us:msft",
-            "known_at": datetime(2026, 1, 1, tzinfo=UTC),
-            "frequency": DataFrequency.ANNUAL,
-        },
-        {
             "known_at": datetime(2026, 1, 1, tzinfo=UTC),
             "frequency": DataFrequency.ANNUAL,
             "start_period_end": date(2025, 12, 31),
@@ -99,6 +94,18 @@ def test_request_normalizes_offset_and_accepts_range() -> None:
 def test_request_rejects_invalid_values(values: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         SecFundamentalMetricRequest.model_validate(values)
+
+
+def test_request_and_candidate_accept_an_explicit_sec_issuer_asset() -> None:
+    request = SecFundamentalMetricRequest(
+        asset_id="equity:us:amd",
+        known_at=datetime(2026, 1, 1, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+    )
+    candidate = _candidate(asset_id=request.asset_id)
+
+    assert request.asset_id == "equity:us:amd"
+    assert candidate.asset_id == request.asset_id
 
 
 def test_request_rejects_extra_fields() -> None:

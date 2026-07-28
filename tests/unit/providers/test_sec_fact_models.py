@@ -139,7 +139,6 @@ def test_instant_fact_rejects_start() -> None:
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("asset_id", "equity:us:other", "Apple"),
         ("unit", "EUR", "field definition"),
         ("frequency", DataFrequency.DAY_1, "quarterly or annual"),
     ],
@@ -147,6 +146,10 @@ def test_instant_fact_rejects_start() -> None:
 def test_fact_rejects_scope_violations(field: str, value: object, message: str) -> None:
     with pytest.raises(ValidationError, match=message):
         _fact(**{field: value})
+
+
+def test_fact_identity_supports_another_configured_equity() -> None:
+    assert _fact(asset_id="equity:us:amd").asset_id == "equity:us:amd"
 
 
 def test_non_currency_fact_requires_its_exact_declared_unit() -> None:

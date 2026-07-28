@@ -1,12 +1,12 @@
-# Apple SEC fundamental metrics
+# SEC issuer fundamental metrics
 
-This step computes descriptive fundamental ratios from the normalized Apple SEC observations already
-stored locally. It does not read SEC raw snapshots, rebuild Company Facts, call the internet, or use
-market prices.
+This step computes descriptive fundamental ratios from the normalized observations of one configured
+SEC issuer already stored locally. It does not read SEC raw snapshots, rebuild Company Facts, call
+the internet, or use market prices. The current CLI remains the Apple composition.
 
 ## Point-in-time source
 
-The pipeline calls the Apple SEC point-in-time service once with the requested `known_at`. Only
+The pipeline calls the configured SEC point-in-time service once with the requested `known_at`. Only
 observations whose filing acceptance time is at or before that timestamp can enter a calculation.
 The service selects the then-current revision for each field and reporting period. The local
 `normalized_at` timestamp remains audit metadata and does not decide public availability.

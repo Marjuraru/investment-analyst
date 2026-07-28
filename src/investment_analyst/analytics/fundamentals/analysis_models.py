@@ -572,15 +572,18 @@ FUNDAMENTAL_ANALYSIS_LIMITATIONS = (
     "El análisis no emite recomendación, ranking, valor intrínseco ni señal de compra o venta.",
 )
 
+AAPL_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION = "aapl-fundamental-analysis-v1"
+GENERIC_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION = "sec-fundamental-analysis-v2"
+
 
 class AaplFundamentalAnalysisResult(ContractModel):
-    """Versioned unified analysis over exact fundamental research history."""
+    """Versioned unified analysis over one SEC issuer's exact research history."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["aapl-fundamental-analysis-v1"] = "aapl-fundamental-analysis-v1"
-    asset_id: Literal["equity:us:aapl"] = ASSET_ID
-    source_id: Literal["sec-edgar:aapl:companyfacts"] = COMPANYFACTS_SOURCE_ID
+    schema_version: NonEmptyStr = AAPL_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION
+    asset_id: NonEmptyStr = ASSET_ID
+    source_id: NonEmptyStr = COMPANYFACTS_SOURCE_ID
     request: AaplFundamentalResearchRequest
     history: AaplFundamentalResearchHistoryResult
     classification: CompanyClassificationView = CompanyClassificationView()
@@ -592,6 +595,15 @@ class AaplFundamentalAnalysisResult(ContractModel):
     @model_validator(mode="after")
     def validate_result(self) -> "AaplFundamentalAnalysisResult":
         """Preserve exact history and one non-overlapping complete metric catalog."""
+        expected_schema = (
+            AAPL_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION
+            if self.asset_id == ASSET_ID
+            else GENERIC_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION
+        )
+        if self.schema_version != expected_schema:
+            raise ValueError("analysis schema version does not match its asset scope")
+        if self.asset_id != self.history.asset_id or self.source_id != self.history.source_id:
+            raise ValueError("analysis identity must match the embedded history")
         if self.request != self.history.request:
             raise ValueError("fundamental analysis request must match embedded history")
         if self.limitations != FUNDAMENTAL_ANALYSIS_LIMITATIONS:
@@ -645,8 +657,12 @@ class AaplFundamentalAnalysisResult(ContractModel):
         }
 
 
+FundamentalAnalysisResult = AaplFundamentalAnalysisResult
+
+
 __all__ = [
     "AaplFundamentalAnalysisResult",
+    "AAPL_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION",
     "COMPANY_CATEGORY_DEFINITIONS",
     "COMPANY_CLASSIFICATION_MISSING_REQUIREMENTS",
     "FUNDAMENTAL_ANALYSIS_LIMITATIONS",
@@ -658,8 +674,10 @@ __all__ = [
     "CompanyClassificationView",
     "COMPANY_CLASSIFICATION_ALGORITHM_VERSION",
     "FundamentalAnalysisCoverage",
+    "FundamentalAnalysisResult",
     "FundamentalAnalysisMetricReference",
     "FundamentalAnalysisSectionDefinition",
     "FundamentalAnalysisSectionKey",
     "FundamentalAnalysisSectionView",
+    "GENERIC_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION",
 ]

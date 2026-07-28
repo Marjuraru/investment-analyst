@@ -10,7 +10,14 @@ The facade exposes the following operation groups:
   resumable SEC EDGAR and Alpaca Market Data pipeline with one writer connection.
 - `query_aapl_diagnostics(...)` opens existing storage in read-only mode and returns the versioned
   `AaplDailyDiagnosticReport` from persisted evidence.
-- read-only Apple fundamental and market-chart queries plus the bounded BTC-USD chart query;
+- read-only Apple-compatible fundamental queries plus
+  `query_sec_fundamental_trend(...)`,
+  `query_sec_fundamental_research(...)`,
+  `query_sec_fundamental_research_history(...)` and
+  `query_sec_fundamental_analysis(...)` for one catalog-backed SEC issuer;
+- read-only listed-market, Apple and bounded BTC-USD chart queries;
+- `refresh_sec_fundamentals(...)` resolves one catalog-backed corporate issuer, then uses one writer
+  connection for SEC snapshots, observations, metrics, and its independent fundamental diagnostic;
 - `refresh_btc_market(...)` opens one existing workspace with a single writer, plans missing
   Coinbase daily-candle edges, imports append-only evidence, and persists independent market
   statistics and a diagnostic without invoking SEC or Alpaca.
@@ -28,6 +35,17 @@ workspace identity.
 Query receives a `ConsolidatedDiagnosticRequest` and a mutually exclusive
 `StorageLocationRequest`. It returns the existing versioned report model. It never initializes a
 workspace, invokes a provider, recomputes analytics, or persists data.
+
+The generic SEC research methods additionally require one canonical `asset_id`. They resolve its
+CIK, ticker, source identities and corporate capabilities from the injected catalog before opening
+storage. A missing SEC binding therefore fails without creating a workspace or database. The
+historical `query_aapl_*` methods delegate with `equity:us:aapl` and preserve their exact existing
+schemas.
+
+The generic SEC refresh requires `SecIssuerFundamentalRefreshRequest`, an existing storage location,
+and an explicit `SecEdgarIdentity`. It never accepts or constructs Alpaca credentials. SEC is queried
+on every run because filings and Company Facts revisions can appear independently from local market
+coverage. A failure identifies its stage and does not roll back successful earlier stages.
 
 ```python
 from datetime import UTC, datetime
@@ -75,5 +93,7 @@ health without moving those concerns into the analytical facade. See
 [`operational_runner.md`](operational_runner.md) for its CLI and recovery contract.
 
 The loopback-only web adapter composes the same facade and runner through `AaplLocalController`.
-It adds no storage access or provider logic of its own. See
+Its SEC trend, research, history, and analysis reads are keyed by `asset_id`, and its independent
+fundamental refresh delegates to `refresh_sec_fundamentals(...)` with the same writer mutex. It adds
+no storage access or provider logic of its own. See
 [`local_interface.md`](local_interface.md) for the UI, scheduler, and persistent-service contract.

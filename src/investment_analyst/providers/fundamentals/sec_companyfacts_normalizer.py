@@ -1,4 +1,4 @@
-"""Select explicit Apple SEC Company Facts and normalize them into observations."""
+"""Select explicit SEC Company Facts and normalize them into observations."""
 
 import json
 from collections import Counter
@@ -16,11 +16,10 @@ from investment_analyst.core.models import (
     RawRecord,
     SourceReference,
 )
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_fact_models import (
     ASSET_ID,
-    CIK,
     COMPANYFACTS_SCHEMA_VERSION,
-    COMPANYFACTS_SOURCE_ID,
     SEC_NORMALIZED_FACT_DEFINITIONS,
     TRANSFORMATION_VERSION,
     SecFactDefinition,
@@ -28,8 +27,12 @@ from investment_analyst.providers.fundamentals.sec_fact_models import (
     SecFundamentalFact,
 )
 from investment_analyst.providers.fundamentals.sec_filing_index import SecFilingIndex
+from investment_analyst.providers.fundamentals.sec_raw_records import (
+    aapl_sec_configuration,
+)
 
 _OBSERVATION_NAMESPACE = UUID("80bb1c78-73b5-5390-b3dd-6da82dcf8a2e")
+GENERIC_TRANSFORMATION_VERSION = "sec-companyfacts-normalizer-v2"
 
 
 class SecCompanyFactsNormalizationError(ValueError):
@@ -98,7 +101,21 @@ class SecFactExtractionResult:
 
 
 class SecCompanyFactsNormalizer:
-    """Extract the core and research Apple us-gaap facts selected by the catalog."""
+    """Extract selected corporate us-gaap facts for one configured issuer."""
+
+    def __init__(self, configuration: SecAssetConfiguration | None = None) -> None:
+        self._configuration = configuration or aapl_sec_configuration()
+        self._transformation_version = sec_transformation_version(self._configuration)
+
+    @property
+    def configuration(self) -> SecAssetConfiguration:
+        """Return the immutable issuer configuration used by this normalizer."""
+        return self._configuration
+
+    @property
+    def transformation_version(self) -> str:
+        """Return the exact algorithm identity used for generated observations."""
+        return self._transformation_version
 
     def extract(
         self,
@@ -109,8 +126,11 @@ class SecCompanyFactsNormalizer:
     ) -> SecFactExtractionResult:
         """Select annual and discrete quarterly facts point-in-time."""
         normalized_at = _utc_datetime(normalized_at, "normalized_at")
-        document = _validate_companyfacts_record(companyfacts_record)
-        filing_index = SecFilingIndex.from_raw_record(submissions_record)
+        document = _validate_companyfacts_record(companyfacts_record, self._configuration)
+        filing_index = SecFilingIndex.from_raw_record(
+            submissions_record,
+            self._configuration,
+        )
         us_gaap = _require_mapping(
             _require_mapping(document.get("facts"), "document.facts").get("us-gaap"),
             "document.facts.us-gaap",
@@ -149,6 +169,7 @@ class SecCompanyFactsNormalizer:
                     filing_index,
                     companyfacts_record,
                     submissions_record,
+                    self._configuration,
                     normalized_at=normalized_at,
                     position=position,
                 )
@@ -208,11 +229,16 @@ def sec_fact_to_observation(
     submissions_record: RawRecord,
     *,
     normalized_at: datetime,
+    configuration: SecAssetConfiguration | None = None,
 ) -> NormalizedObservation:
     """Convert one selected SEC fact into a stable normalized observation."""
+    resolved = configuration or aapl_sec_configuration()
+    transformation_version = sec_transformation_version(resolved)
     normalized_at = _utc_datetime(normalized_at, "normalized_at")
-    _validate_companyfacts_record(companyfacts_record)
-    SecFilingIndex.from_raw_record(submissions_record)
+    _validate_companyfacts_record(companyfacts_record, resolved)
+    SecFilingIndex.from_raw_record(submissions_record, resolved)
+    if fact.asset_id != resolved.asset_id:
+        raise SecCompanyFactsNormalizationError("fact does not match the configured SEC asset")
     if fact.companyfacts_record_id != companyfacts_record.record_id:
         raise SecCompanyFactsNormalizationError(
             "fact does not reference the supplied Company Facts RawRecord"
@@ -228,7 +254,7 @@ def sec_fact_to_observation(
 
     identity = json.dumps(
         {
-            "source_id": COMPANYFACTS_SOURCE_ID,
+            "source_id": resolved.companyfacts_source_id,
             "asset_id": fact.asset_id,
             "field_name": fact.field_name,
             "taxonomy": fact.taxonomy,
@@ -242,7 +268,7 @@ def sec_fact_to_observation(
             "period_start": fact.period_start.isoformat() if fact.period_start else None,
             "period_end": fact.period_end.isoformat(),
             "acceptance_at": fact.acceptance_at.isoformat(),
-            "transformation_version": TRANSFORMATION_VERSION,
+            "transformation_version": transformation_version,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -268,7 +294,7 @@ def sec_fact_to_observation(
     return NormalizedObservation(
         observation_id=uuid5(_OBSERVATION_NAMESPACE, identity),
         raw_record_id=companyfacts_record.record_id,
-        asset_id=ASSET_ID,
+        asset_id=resolved.asset_id,
         field_name=fact.field_name,
         value=fact.value,
         unit=fact.unit,
@@ -281,14 +307,14 @@ def sec_fact_to_observation(
         available_at=fact.acceptance_at,
         normalized_at=normalized_at,
         source=SourceReference(
-            source_id=COMPANYFACTS_SOURCE_ID,
+            source_id=resolved.companyfacts_source_id,
             record_key=record_key,
             retrieved_at=companyfacts_record.source.retrieved_at,
             raw_uri=companyfacts_record.source.raw_uri,
             checksum_sha256=companyfacts_record.source.checksum_sha256,
         ),
         quality=DataQuality.VALID,
-        transformation_version=TRANSFORMATION_VERSION,
+        transformation_version=transformation_version,
     )
 
 
@@ -298,6 +324,7 @@ def _parse_candidate(
     filing_index: SecFilingIndex,
     companyfacts_record: RawRecord,
     submissions_record: RawRecord,
+    configuration: SecAssetConfiguration,
     *,
     normalized_at: datetime,
     position: int,
@@ -316,7 +343,12 @@ def _parse_candidate(
         return None, "missing_fiscal_year"
 
     fiscal_year = _parse_year(fiscal_year_value)
-    fiscal_period = _require_string(fact.get("fp"), "fp")
+    fiscal_period_value = fact.get("fp")
+    if fiscal_period_value is None or (
+        isinstance(fiscal_period_value, str) and not fiscal_period_value.strip()
+    ):
+        return None, "missing_fiscal_period"
+    fiscal_period = _require_string(fiscal_period_value, "fp")
     form = _require_string(fact.get("form"), "form")
     filed_date = _parse_date(fact.get("filed"), "filed")
     period_end = _parse_date(fact.get("end"), "end")
@@ -354,7 +386,7 @@ def _parse_candidate(
 
     return (
         SecFundamentalFact(
-            asset_id=ASSET_ID,
+            asset_id=configuration.asset_id,
             companyfacts_record_id=companyfacts_record.record_id,
             submissions_record_id=submissions_record.record_id,
             field_name=definition.field_name,
@@ -378,10 +410,15 @@ def _parse_candidate(
     )
 
 
-def _validate_companyfacts_record(record: RawRecord) -> Mapping[str, object]:
-    if record.asset_id != ASSET_ID:
-        raise MalformedSecCompanyFactsError("Company Facts RawRecord must belong to Apple")
-    if record.source.source_id != COMPANYFACTS_SOURCE_ID:
+def _validate_companyfacts_record(
+    record: RawRecord,
+    configuration: SecAssetConfiguration,
+) -> Mapping[str, object]:
+    if record.asset_id != configuration.asset_id:
+        raise MalformedSecCompanyFactsError(
+            "Company Facts RawRecord must match the configured asset"
+        )
+    if record.source.source_id != configuration.companyfacts_source_id:
         raise MalformedSecCompanyFactsError("Company Facts RawRecord has an unexpected source")
     if record.schema_version != COMPANYFACTS_SCHEMA_VERSION:
         raise MalformedSecCompanyFactsError("Company Facts RawRecord has an unexpected schema")
@@ -391,19 +428,31 @@ def _validate_companyfacts_record(record: RawRecord) -> Mapping[str, object]:
         raise MalformedSecCompanyFactsError("Company Facts payload is missing required fields")
     if payload["document_type"] != "company_facts":
         raise MalformedSecCompanyFactsError("document_type must be company_facts")
-    if _normalize_cik(payload["cik"]) != CIK:
-        raise MalformedSecCompanyFactsError("Company Facts CIK does not identify Apple")
-    if _require_string(payload["entity_name"], "entity_name").casefold() != "apple inc.":
-        raise MalformedSecCompanyFactsError("Company Facts entity does not identify Apple")
+    if _normalize_cik(payload["cik"]) != configuration.cik:
+        raise MalformedSecCompanyFactsError(
+            "Company Facts CIK does not match the configured issuer"
+        )
+    payload_entity_name = _require_string(payload["entity_name"], "entity_name")
     document = _require_mapping(payload["document"], "document")
-    if _normalize_cik(document.get("cik")) != CIK:
-        raise MalformedSecCompanyFactsError("Company Facts document CIK is invalid")
+    if _normalize_cik(document.get("cik")) != configuration.cik:
+        raise MalformedSecCompanyFactsError(
+            "Company Facts document CIK does not match the configured issuer"
+        )
     entity_name = _require_string(document.get("entityName"), "document.entityName")
-    if entity_name.casefold() != "apple inc.":
-        raise MalformedSecCompanyFactsError("Company Facts document entity is invalid")
+    if entity_name.casefold() != payload_entity_name.casefold():
+        raise MalformedSecCompanyFactsError(
+            "Company Facts payload and document entity names are inconsistent"
+        )
     if not isinstance(document.get("facts"), Mapping):
         raise MalformedSecCompanyFactsError("document.facts must be an object")
     return document
+
+
+def sec_transformation_version(configuration: SecAssetConfiguration) -> str:
+    """Preserve Apple observation IDs while versioning the generic algorithm."""
+    if configuration.asset_id == ASSET_ID:
+        return TRANSFORMATION_VERSION
+    return GENERIC_TRANSFORMATION_VERSION
 
 
 def _fact_context(fact: SecFundamentalFact) -> tuple[object, ...]:

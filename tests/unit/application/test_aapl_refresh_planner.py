@@ -13,7 +13,7 @@ from investment_analyst.application.aapl_bootstrap_models import (
     AaplRefreshMode,
 )
 from investment_analyst.application.aapl_refresh_planner import AaplMarketRefreshPlanner
-from investment_analyst.core.models import DataFrequency
+from investment_analyst.core.models import AssetClass, DataFrequency
 from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
 from investment_analyst.providers.market.alpaca_normalizer import ASSET_ID, SOURCE_ID
 from investment_analyst.providers.market.alpaca_pipeline import (
@@ -153,6 +153,8 @@ def test_planner_scopes_coverage_to_one_catalog_backed_alpaca_asset() -> None:
         adjustment="all",
         source_id=source_id,
         name="Compañía de Minas Buenaventura S.A.A.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
         exchange="NYSE",
     )
     storage = StorageDouble(

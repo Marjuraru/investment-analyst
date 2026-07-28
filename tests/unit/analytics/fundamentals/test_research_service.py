@@ -6,20 +6,34 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 
+from investment_analyst.analytics.fundamentals.analysis_service import (
+    SecIssuerFundamentalAnalysisService,
+)
+from investment_analyst.analytics.fundamentals.research_history_service import (
+    SecIssuerFundamentalResearchHistoryService,
+)
 from investment_analyst.analytics.fundamentals.research_models import (
     AaplFundamentalResearchRequest,
+    AaplFundamentalResearchResult,
 )
 from investment_analyst.analytics.fundamentals.research_service import (
     AaplFundamentalResearchService,
     AmbiguousFundamentalResearchRevisionError,
     MalformedFundamentalResearchObservationError,
+    SecIssuerFundamentalResearchService,
 )
 from investment_analyst.core.models import (
+    AssetClass,
     DataFrequency,
     DataQuality,
     NormalizedObservation,
     SourceReference,
+)
+from investment_analyst.providers.asset_config import SecAssetConfiguration
+from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
+    GENERIC_TRANSFORMATION_VERSION,
 )
 from investment_analyst.providers.fundamentals.sec_fact_models import (
     ASSET_ID,
@@ -105,6 +119,9 @@ def _observation(
     raw_record_id: UUID | None = None,
     unit: str | None = None,
     record_key_updates: dict[str, object] | None = None,
+    asset_id: str = ASSET_ID,
+    source_id: str = COMPANYFACTS_SOURCE_ID,
+    transformation_version: str = TRANSFORMATION_VERSION,
 ) -> NormalizedObservation:
     definition = get_sec_fact_definition(field_name)
     resolved_unit = unit or definition.unit
@@ -135,7 +152,7 @@ def _observation(
     return NormalizedObservation(
         observation_id=observation_id or uuid4(),
         raw_record_id=raw_id,
-        asset_id=ASSET_ID,
+        asset_id=asset_id,
         field_name=field_name,
         value=Decimal(value),
         unit=resolved_unit,
@@ -146,12 +163,12 @@ def _observation(
         available_at=available_at,
         normalized_at=max(available_at, datetime(2025, 11, 1, tzinfo=UTC)),
         source=SourceReference(
-            source_id=COMPANYFACTS_SOURCE_ID,
+            source_id=source_id,
             record_key=json.dumps(key, separators=(",", ":"), sort_keys=True),
             retrieved_at=max(available_at, datetime(2025, 11, 1, tzinfo=UTC)),
         ),
         quality=DataQuality.VALID,
-        transformation_version=TRANSFORMATION_VERSION,
+        transformation_version=transformation_version,
     )
 
 
@@ -242,6 +259,94 @@ def test_all_published_formulas_use_exact_traceable_inputs() -> None:
         for metric in result.periods[0].metrics
         for item in metric.inputs
     )
+
+
+def test_configured_issuer_isolated_through_research_history_and_analysis() -> None:
+    amd = SecAssetConfiguration(
+        asset_id="equity:us:amd",
+        cik="0000002488",
+        ticker="AMD",
+        submissions_source_id="sec-edgar:amd:submissions",
+        companyfacts_source_id="sec-edgar:amd:companyfacts",
+        name="Advanced Micro Devices, Inc.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NASDAQ",
+    )
+    apple_observations = [_observation(field_name, value) for field_name, value in _VALUES.items()]
+    amd_observations = [
+        _observation(
+            field_name,
+            value,
+            asset_id=amd.asset_id,
+            source_id=amd.companyfacts_source_id,
+            transformation_version=GENERIC_TRANSFORMATION_VERSION,
+        )
+        for field_name, value in _VALUES.items()
+    ]
+    wrong_source = _observation(
+        "fundamental.revenue",
+        "999999",
+        asset_id=amd.asset_id,
+        source_id=COMPANYFACTS_SOURCE_ID,
+        transformation_version=GENERIC_TRANSFORMATION_VERSION,
+    )
+    storage = _Storage([*apple_observations, *amd_observations, wrong_source])
+    research_service = SecIssuerFundamentalResearchService(
+        storage,  # type: ignore[arg-type]
+        amd,
+    )
+
+    research = research_service.query(_request())
+    history = SecIssuerFundamentalResearchHistoryService(research_service).query(_request())
+    analysis = SecIssuerFundamentalAnalysisService(
+        SecIssuerFundamentalResearchHistoryService(research_service)
+    ).query(_request())
+    apple = AaplFundamentalResearchService(storage).query(  # type: ignore[arg-type]
+        _request()
+    )
+
+    assert research_service.configuration == amd
+    assert research.schema_version == "sec-fundamental-research-v3"
+    assert research.asset_id == amd.asset_id
+    assert research.source_id == amd.companyfacts_source_id
+    assert research.coverage.observations_examined == len(amd_observations) + 1
+    assert research.coverage.observations_eligible == len(amd_observations)
+    assert research.coverage.metrics_returned == 40
+    amd_ids = {item.observation_id for item in amd_observations}
+    assert {
+        item.observation_id for metric in research.periods[0].metrics for item in metric.inputs
+    } <= amd_ids
+    generic_interest = next(
+        item
+        for item in research.definitions
+        if item.metric_key == "fundamental.research.interest_coverage"
+    )
+    assert "Apple" not in " ".join(generic_interest.limitations)
+    assert history.schema_version == "sec-fundamental-research-history-v3"
+    assert history.asset_id == amd.asset_id
+    assert history.research == research
+    assert analysis.schema_version == "sec-fundamental-analysis-v2"
+    assert analysis.asset_id == amd.asset_id
+    assert analysis.source_id == amd.companyfacts_source_id
+    assert analysis.coverage.latest_period_metrics == 40
+    assert apple.schema_version == "aapl-fundamental-research-v2"
+    apple_interest = next(
+        item
+        for item in apple.definitions
+        if item.metric_key == "fundamental.research.interest_coverage"
+    )
+    assert "Apple" in " ".join(apple_interest.limitations)
+
+    tampered = research.to_json_dict()
+    generic_interest_metric = next(
+        item
+        for item in tampered["periods"][0]["metrics"]  # type: ignore[index]
+        if item["metric_key"] == "fundamental.research.interest_coverage"
+    )
+    generic_interest_metric["limitations"] = list(apple_interest.limitations)
+    with pytest.raises(ValidationError, match="issuer contract"):
+        AaplFundamentalResearchResult.model_validate(tampered)
 
 
 def test_revision_selection_is_point_in_time_and_range_is_inclusive() -> None:

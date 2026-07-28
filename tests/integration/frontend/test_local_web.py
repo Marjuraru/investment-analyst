@@ -63,6 +63,10 @@ from investment_analyst.application.operational_models import (
     AaplOperationalHealth,
 )
 from investment_analyst.application.runtime import StorageLocationRequest
+from investment_analyst.application.sec_fundamental_refresh_models import (
+    SecIssuerFundamentalRefreshRequest,
+    SecIssuerFundamentalRefreshSummary,
+)
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.frontend.local_web import (
     AaplLocalController,
@@ -127,13 +131,20 @@ class _FakeApplication:
         self.listed_refresh_requests: list[ListedMarketRefreshRequest] = []
         self.listed_refresh_locations: list[StorageLocationRequest] = []
         self.trend_requests: list[AaplFundamentalTrendRequest] = []
+        self.trend_asset_ids: list[str] = []
         self.trend_locations: list[StorageLocationRequest] = []
         self.research_requests: list[AaplFundamentalResearchRequest] = []
+        self.research_asset_ids: list[str] = []
         self.research_locations: list[StorageLocationRequest] = []
         self.research_history_requests: list[AaplFundamentalResearchRequest] = []
+        self.research_history_asset_ids: list[str] = []
         self.research_history_locations: list[StorageLocationRequest] = []
         self.analysis_requests: list[AaplFundamentalResearchRequest] = []
+        self.analysis_asset_ids: list[str] = []
         self.analysis_locations: list[StorageLocationRequest] = []
+        self.fundamental_refresh_requests: list[SecIssuerFundamentalRefreshRequest] = []
+        self.fundamental_refresh_locations: list[StorageLocationRequest] = []
+        self.fundamental_refresh_identities: list[SecEdgarIdentity] = []
 
     def list_market_assets(self) -> MarketAssetUniverse:
         return InvestmentAnalystApplication.create_default().list_market_assets()
@@ -327,19 +338,26 @@ class _FakeApplication:
             ),
         )
 
-    def query_aapl_fundamental_trend(
+    def query_sec_fundamental_trend(
         self,
         request: AaplFundamentalTrendRequest,
         *,
+        asset_id: str,
         location: StorageLocationRequest,
     ) -> AaplFundamentalTrend:
         self.trend_requests.append(request)
+        self.trend_asset_ids.append(asset_id)
         self.trend_locations.append(location)
         return cast(
             AaplFundamentalTrend,
             _JsonResult(
                 {
-                    "schema_version": "aapl-fundamental-trend-v1",
+                    "schema_version": (
+                        "aapl-fundamental-trend-v1"
+                        if asset_id == "equity:us:aapl"
+                        else "sec-fundamental-trend-v2"
+                    ),
+                    "asset_id": asset_id,
                     "frequency": request.frequency.value,
                     "period_limit": request.period_limit,
                     "periods": [],
@@ -347,19 +365,26 @@ class _FakeApplication:
             ),
         )
 
-    def query_aapl_fundamental_research(
+    def query_sec_fundamental_research(
         self,
         request: AaplFundamentalResearchRequest,
         *,
+        asset_id: str,
         location: StorageLocationRequest,
     ) -> AaplFundamentalResearchResult:
         self.research_requests.append(request)
+        self.research_asset_ids.append(asset_id)
         self.research_locations.append(location)
         return cast(
             AaplFundamentalResearchResult,
             _JsonResult(
                 {
-                    "schema_version": "aapl-fundamental-research-v2",
+                    "schema_version": (
+                        "aapl-fundamental-research-v2"
+                        if asset_id == "equity:us:aapl"
+                        else "sec-fundamental-research-v3"
+                    ),
+                    "asset_id": asset_id,
                     "frequency": request.frequency.value,
                     "period_limit": request.limit,
                     "periods": [],
@@ -367,53 +392,111 @@ class _FakeApplication:
             ),
         )
 
-    def query_aapl_fundamental_research_history(
+    def query_sec_fundamental_research_history(
         self,
         request: AaplFundamentalResearchRequest,
         *,
+        asset_id: str,
         location: StorageLocationRequest,
     ) -> AaplFundamentalResearchHistoryResult:
         self.research_history_requests.append(request)
+        self.research_history_asset_ids.append(asset_id)
         self.research_history_locations.append(location)
         return cast(
             AaplFundamentalResearchHistoryResult,
             _JsonResult(
                 {
-                    "schema_version": "aapl-fundamental-research-history-v2",
+                    "schema_version": (
+                        "aapl-fundamental-research-history-v2"
+                        if asset_id == "equity:us:aapl"
+                        else "sec-fundamental-research-history-v3"
+                    ),
+                    "asset_id": asset_id,
                     "request": {
                         "frequency": request.frequency.value,
                         "limit": request.limit,
                     },
-                    "research": {"schema_version": "aapl-fundamental-research-v2"},
+                    "research": {
+                        "schema_version": (
+                            "aapl-fundamental-research-v2"
+                            if asset_id == "equity:us:aapl"
+                            else "sec-fundamental-research-v3"
+                        )
+                    },
                     "series": [],
                 }
             ),
         )
 
-    def query_aapl_fundamental_analysis(
+    def query_sec_fundamental_analysis(
         self,
         request: AaplFundamentalResearchRequest,
         *,
+        asset_id: str,
         location: StorageLocationRequest,
     ) -> AaplFundamentalAnalysisResult:
         self.analysis_requests.append(request)
+        self.analysis_asset_ids.append(asset_id)
         self.analysis_locations.append(location)
         return cast(
             AaplFundamentalAnalysisResult,
             _JsonResult(
                 {
-                    "schema_version": "aapl-fundamental-analysis-v1",
+                    "schema_version": (
+                        "aapl-fundamental-analysis-v1"
+                        if asset_id == "equity:us:aapl"
+                        else "sec-fundamental-analysis-v2"
+                    ),
+                    "asset_id": asset_id,
                     "request": {
                         "frequency": request.frequency.value,
                         "limit": request.limit,
                     },
                     "history": {
-                        "schema_version": "aapl-fundamental-research-history-v2",
-                        "research": {"schema_version": "aapl-fundamental-research-v2"},
+                        "schema_version": (
+                            "aapl-fundamental-research-history-v2"
+                            if asset_id == "equity:us:aapl"
+                            else "sec-fundamental-research-history-v3"
+                        ),
+                        "research": {
+                            "schema_version": (
+                                "aapl-fundamental-research-v2"
+                                if asset_id == "equity:us:aapl"
+                                else "sec-fundamental-research-v3"
+                            )
+                        },
                         "series": [],
                     },
                     "classification": {"status": "insufficient_evidence"},
                     "sections": [],
+                }
+            ),
+        )
+
+    def refresh_sec_fundamentals(
+        self,
+        request: SecIssuerFundamentalRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        sec_identity: SecEdgarIdentity,
+    ) -> SecIssuerFundamentalRefreshSummary:
+        self.fundamental_refresh_requests.append(request)
+        self.fundamental_refresh_locations.append(location)
+        self.fundamental_refresh_identities.append(sec_identity)
+        return cast(
+            SecIssuerFundamentalRefreshSummary,
+            _JsonResult(
+                {
+                    "schema_version": "sec-issuer-fundamental-refresh-v1",
+                    "asset_id": request.asset_id,
+                    "effective_known_at": (
+                        request.requested_known_at.isoformat()
+                        if request.requested_known_at is not None
+                        else "2026-07-16T15:47:00+00:00"
+                    ),
+                    "metric_results_created": 3,
+                    "diagnostics_created": 1,
+                    "traceability_verified": True,
                 }
             ),
         )
@@ -557,6 +640,7 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "Volatilidad 20" in html
     assert "Vol. relativo 20" in html
     assert "Evolución financiera" in html
+    assert 'id="fundamental-chart-symbol">AAPL</span>' in html
     assert "Ingresos y resultado neto" in html
     assert "Ficha fundamental" in html
     assert "Métricas por área" in html
@@ -574,6 +658,9 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'id="export-fundamental-csv"' in html
     assert 'id="export-fundamental-research-csv"' in html
     assert 'id="export-report-json"' in html
+    assert 'byId("fundamental-chart-symbol").textContent = presentation.symbol;' in javascript
+    assert "Evolución fundamental de ${marketAssetPresentation().name}" in javascript
+    assert 'byId("market-chart").setAttribute(' in javascript
     assert javascript_content_type == "text/javascript; charset=utf-8"
     assert stylesheet_content_type == "text/css; charset=utf-8"
     assert '"market.history.relative_volume"' in javascript
@@ -587,6 +674,8 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'intraday ? "/api/market-intraday" : "/api/market-chart"' in javascript
     assert "normalizeBtcIntradayChart(payload)" in javascript
     assert "market-intraday-refresh" in javascript
+    assert "fundamental-refresh" in javascript
+    assert "data-complete-analysis-only" in html
     assert '"5m", label: "5 min · últimas 24 h"' in javascript
     assert 'class="period-selector"' not in html
     assert 'class="period-button' not in html
@@ -631,6 +720,9 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "renderFundamentalTrend" in javascript
     assert "api(`/api/fundamental-trend?${parameters.toString()}`)" in javascript
     assert "api(`/api/fundamental-analysis?${parameters.toString()}`)" in javascript
+    assert "asset_id: selectedMarketAsset" in javascript
+    assert "data-fundamental-only" in html
+    assert "data-apple-only" not in html
     assert '"fundamental.research.free_cash_flow_margin"' in javascript
     assert '"fundamental.research.operating_cash_flow_to_net_income"' in javascript
     assert "function renderFundamentalResearch(payload)" in javascript
@@ -655,6 +747,10 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'id="market-asset-select"' in html
     assert 'api("/api/market-assets")' in javascript
     assert "marketAssetFromDescriptor(descriptor)" in javascript
+    assert "descriptor.analysis.market_mode" in javascript
+    assert "function isIntradayInterval" in javascript
+    assert "const presentation = marketAssets[selectedMarketAsset];" in javascript
+    assert 'selectedMarketAsset === "crypto:btc-usd"' not in javascript
     assert "MARKET_ASSETS" not in javascript
     assert "chart.sma_windows[0] !== chartSettings.shortWindow" in javascript
     assert 'parameters.set("short_sma_window", String(chartSettings.shortWindow))' in javascript
@@ -705,6 +801,8 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "min-height: 44px" in stylesheet
     assert "prefers-reduced-motion" in stylesheet
     assert "forced-colors: active" in stylesheet
+    startup = javascript[javascript.index("async function initialize()") :]
+    assert startup.index("await loadMarketAssets();") < startup.index("initializeChartSettings();")
 
 
 def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Path) -> None:
@@ -858,6 +956,21 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
                 method="POST",
             )
         )
+        fundamental_refresh_payload = json.dumps(
+            {
+                "asset_id": "equity:us:aapl",
+                "frequency": "quarterly",
+                "requested_known_at": "2026-07-16T15:46:09Z",
+            }
+        ).encode("utf-8")
+        fundamental_refresh_status, fundamental_refresh, _ = _json_request(
+            Request(
+                f"{root}/api/fundamental-refresh",
+                data=fundamental_refresh_payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
         trend_status, trend, _ = _json_request(
             Request(
                 f"{root}/api/fundamental-trend?"
@@ -905,9 +1018,30 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert overview["operational"]["status"] == "ready"
     assert overview["scheduler"] == {"enabled": False}
     assert assets_status == 200
-    assert assets["schema_version"] == "market-asset-universe-v1"
+    assert assets["schema_version"] == "market-asset-universe-v2"
     assert assets["catalog_version"] == 1
     assert len(assets["assets"]) == 18
+    assets_by_id = {item["asset_id"]: item for item in assets["assets"]}
+    assert assets_by_id["equity:us:aapl"]["analysis"]["fundamental_mode"] == "corporate"
+    assert assets_by_id["equity:us:amd"]["has_fundamentals"] is True
+    assert assets_by_id["equity:us:amd"]["refresh_kind"] == "market_only"
+    assert assets_by_id["equity:us:intc"]["has_fundamentals"] is True
+    assert assets_by_id["equity:us:intc"]["refresh_kind"] == "market_only"
+    for asset_id in ("equity:us:mstr", "equity:us:mu", "equity:us:pltr"):
+        assert assets_by_id[asset_id]["has_fundamentals"] is True
+        assert assets_by_id[asset_id]["refresh_kind"] == "market_only"
+    for asset_id in (
+        "equity:us:cde",
+        "equity:us:hymc",
+        "equity:us:mux",
+        "equity:us:nem",
+        "equity:us:scco",
+    ):
+        assert assets_by_id[asset_id]["has_fundamentals"] is True
+        assert assets_by_id[asset_id]["refresh_kind"] == "market_only"
+    assert assets_by_id["equity:us:b"]["has_fundamentals"] is False
+    assert assets_by_id["etf:us:ibit"]["analysis"]["fundamental_mode"] == "investment_fund"
+    assert assets_by_id["crypto:btc-usd"]["analysis"]["market_mode"] == "crypto_spot"
     assert run_status == 200 and run["status"] == "succeeded"
     assert runner.requests[0].market_start == date(2025, 1, 1)
     assert runner.requests[0].market_end == date(2026, 7, 15)
@@ -981,10 +1115,25 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
         )
     ]
     assert application.btc_intraday_refresh_locations[0].workspace == workspace.resolve()
+    assert fundamental_refresh_status == 200
+    assert fundamental_refresh["schema_version"] == "sec-issuer-fundamental-refresh-v1"
+    assert fundamental_refresh["asset_id"] == "equity:us:aapl"
+    assert application.fundamental_refresh_requests == [
+        SecIssuerFundamentalRefreshRequest(
+            asset_id="equity:us:aapl",
+            frequency=DataFrequency.QUARTERLY,
+            requested_known_at=datetime(2026, 7, 16, 15, 46, 9, tzinfo=UTC),
+        )
+    ]
+    assert application.fundamental_refresh_locations[0].workspace == workspace.resolve()
+    assert application.fundamental_refresh_identities == [
+        SecEdgarIdentity("Investment Analyst tests@example.com")
+    ]
     assert trend_status == 200
     assert trend["schema_version"] == "aapl-fundamental-trend-v1"
     assert trend["frequency"] == "quarterly"
     assert trend["period_limit"] == 8
+    assert application.trend_asset_ids == ["equity:us:aapl"]
     assert application.trend_requests[0].known_at.isoformat() == "2026-07-16T15:46:09+00:00"
     assert application.trend_locations[0].workspace == workspace.resolve()
     assert research_status == 200
@@ -994,6 +1143,7 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert cached_research_status == 200
     assert cached_research == research
     assert len(application.research_requests) == 1
+    assert application.research_asset_ids == ["equity:us:aapl"]
     assert application.research_requests[0].known_at.isoformat() == ("2026-07-16T15:46:09+00:00")
     assert application.research_locations[0].workspace == workspace.resolve()
     assert history_status == 200
@@ -1003,6 +1153,7 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert cached_history_status == 200
     assert cached_history == history
     assert len(application.research_history_requests) == 1
+    assert application.research_history_asset_ids == ["equity:us:aapl"]
     assert application.research_history_locations[0].workspace == workspace.resolve()
     assert analysis_status == 200
     assert analysis["schema_version"] == "aapl-fundamental-analysis-v1"
@@ -1011,7 +1162,63 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert cached_analysis_status == 200
     assert cached_analysis == analysis
     assert len(application.analysis_requests) == 1
+    assert application.analysis_asset_ids == ["equity:us:aapl"]
     assert application.analysis_locations[0].workspace == workspace.resolve()
+
+
+def test_local_api_serves_and_refreshes_enabled_amd_fundamentals_independently(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    workspace = tmp_path / "workspace"
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=workspace,
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+
+    with _server(AaplLocalWebApplication(controller, None)) as (_, root):
+        query = urlencode(
+            {
+                "asset_id": "equity:us:amd",
+                "known_at": "2026-07-16T15:46:09Z",
+                "frequency": "annual",
+            }
+        )
+        trend_status, trend, _ = _json_request(Request(f"{root}/api/fundamental-trend?{query}"))
+        analysis_status, analysis, _ = _json_request(
+            Request(f"{root}/api/fundamental-analysis?{query}")
+        )
+        refresh_status, refresh, _ = _json_request(
+            Request(
+                f"{root}/api/fundamental-refresh",
+                data=json.dumps(
+                    {
+                        "asset_id": "equity:us:amd",
+                        "frequency": "annual",
+                        "requested_known_at": None,
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert trend_status == 200
+    assert trend["schema_version"] == "sec-fundamental-trend-v2"
+    assert trend["asset_id"] == "equity:us:amd"
+    assert analysis_status == 200
+    assert analysis["schema_version"] == "sec-fundamental-analysis-v2"
+    assert analysis["asset_id"] == "equity:us:amd"
+    assert refresh_status == 200
+    assert refresh["schema_version"] == "sec-issuer-fundamental-refresh-v1"
+    assert refresh["asset_id"] == "equity:us:amd"
+    assert application.trend_asset_ids == ["equity:us:amd"]
+    assert application.analysis_asset_ids == ["equity:us:amd"]
+    assert application.fundamental_refresh_requests[0].asset_id == "equity:us:amd"
+    assert application.fundamental_refresh_locations[0].workspace == workspace.resolve()
 
 
 def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: Path) -> None:
@@ -1081,6 +1288,48 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
     assert len(application.research_history_requests) == 2
     assert len(application.analysis_requests) == 2
     assert len(runner.requests) == 1
+
+
+def test_fundamental_read_caches_are_isolated_by_sec_asset(tmp_path: Path) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    trend_request = AaplFundamentalTrendRequest(
+        known_at=datetime(2026, 7, 16, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+        period_limit=5,
+    )
+    research_request = AaplFundamentalResearchRequest(
+        known_at=datetime(2026, 7, 16, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+        limit=5,
+    )
+
+    for asset_id in ("equity:us:aapl", "equity:us:amd"):
+        controller.fundamental_trend_request(trend_request, asset_id=asset_id)
+        controller.fundamental_trend_request(trend_request, asset_id=asset_id)
+        controller.fundamental_research_request(research_request, asset_id=asset_id)
+        controller.fundamental_research_request(research_request, asset_id=asset_id)
+        controller.fundamental_research_history_request(
+            research_request,
+            asset_id=asset_id,
+        )
+        controller.fundamental_research_history_request(
+            research_request,
+            asset_id=asset_id,
+        )
+        controller.fundamental_analysis_request(research_request, asset_id=asset_id)
+        controller.fundamental_analysis_request(research_request, asset_id=asset_id)
+
+    assert application.trend_asset_ids == ["equity:us:aapl", "equity:us:amd"]
+    assert application.research_asset_ids == ["equity:us:aapl", "equity:us:amd"]
+    assert application.research_history_asset_ids == ["equity:us:aapl", "equity:us:amd"]
+    assert application.analysis_asset_ids == ["equity:us:aapl", "equity:us:amd"]
 
 
 def test_local_api_rejects_cross_host_unsafe_content_and_invalid_payload() -> None:
@@ -1221,6 +1470,24 @@ def test_local_api_rejects_invalid_typed_run_without_calling_runner(tmp_path: Pa
                 f"{root}/api/fundamental-analysis?known_at=2026-07-16T15%3A46%3A09Z&frequency=monthly"
             )
         )
+        cross_asset_status, cross_asset, _ = _json_request(
+            Request(
+                f"{root}/api/fundamental-analysis?"
+                "asset_id=equity:us:b"
+                "&known_at=2026-07-16T15%3A46%3A09Z"
+                "&frequency=quarterly"
+            )
+        )
+        fundamental_refresh_status, fundamental_refresh, _ = _json_request(
+            Request(
+                f"{root}/api/fundamental-refresh",
+                data=(
+                    b'{"asset_id":"equity:us:b","frequency":"quarterly","requested_known_at":null}'
+                ),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
 
     assert status == 400
     assert payload["error"]["code"] == "invalid_request"
@@ -1250,6 +1517,10 @@ def test_local_api_rejects_invalid_typed_run_without_calling_runner(tmp_path: Pa
     assert history["error"]["code"] == "invalid_request"
     assert analysis_status == 400
     assert analysis["error"]["code"] == "invalid_request"
+    assert cross_asset_status == 400
+    assert cross_asset["error"]["code"] == "invalid_request"
+    assert fundamental_refresh_status == 400
+    assert fundamental_refresh["error"]["code"] == "invalid_request"
     assert runner.requests == []
 
 

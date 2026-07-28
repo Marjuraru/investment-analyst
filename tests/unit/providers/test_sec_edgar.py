@@ -1,4 +1,4 @@
-"""Unit tests for the fixed Apple SEC EDGAR client."""
+"""Unit tests for the configurable SEC EDGAR client."""
 
 import hashlib
 import json
@@ -11,6 +11,7 @@ import pytest
 from investment_analyst.providers.fundamentals.sec_edgar import (
     APPLE_CIK,
     APPLE_ENTITY_NAME,
+    APPLE_TICKER,
     SecDocumentType,
     SecEdgarClient,
     SecEdgarError,
@@ -113,6 +114,86 @@ def test_client_uses_exact_headers_two_requests_and_pause() -> None:
         assert "Authorization" not in headers
         assert "tests@example.com" not in url
         assert timeout == 30.0
+
+
+def test_client_fetches_a_second_issuer_with_isolated_paths_and_identity() -> None:
+    amd_cik = "0000002488"
+    amd_name = "Advanced Micro Devices, Inc."
+    submissions = _replace_json(
+        SUBMISSIONS,
+        cik="2488",
+        name=amd_name,
+        tickers=["AMD"],
+        exchanges=["Nasdaq"],
+    )
+    company_facts = _replace_json(
+        COMPANY_FACTS,
+        cik=amd_cik,
+        entityName=amd_name,
+    )
+    transport = QueueTransport([submissions, company_facts])
+    client = SecEdgarClient(
+        transport,
+        SecEdgarIdentity("Investment Analyst tests@example.com"),
+        cik=amd_cik,
+        ticker="AMD",
+        sleep=lambda _: None,
+        clock=lambda: RETRIEVED_AT,
+    )
+
+    result = client.fetch_issuer_documents()
+
+    assert result.cik == amd_cik
+    assert result.ticker == "AMD"
+    assert result.entity_name == amd_name
+    assert [call[0] for call in transport.calls] == [
+        f"https://data.sec.gov/submissions/CIK{amd_cik}.json",
+        f"https://data.sec.gov/api/xbrl/companyfacts/CIK{amd_cik}.json",
+    ]
+    with pytest.raises(SecEdgarError, match="Apple fetch"):
+        client.fetch_aapl_issuer_documents()
+
+
+@pytest.mark.parametrize(
+    ("submissions_name", "companyfacts_name"),
+    [
+        ("MICRON TECHNOLOGY INC", "Micron Technology, Inc."),
+        ("HYCROFT MINING HOLDING CORP", "Hycroft Mining Holding Corporation"),
+        ("NEWMONT Corp /DE/", "Newmont Corporation"),
+        ("SOUTHERN COPPER CORP/", "Southern Copper Corporation"),
+    ],
+)
+def test_client_accepts_legal_entity_name_variants_for_the_same_cik(
+    submissions_name: str,
+    companyfacts_name: str,
+) -> None:
+    submissions = _replace_json(SUBMISSIONS, name=submissions_name)
+    company_facts = _replace_json(COMPANY_FACTS, entityName=companyfacts_name)
+
+    result = _client(QueueTransport([submissions, company_facts])).fetch_issuer_documents()
+
+    assert result.cik == APPLE_CIK
+    assert result.entity_name == submissions_name
+    assert tuple(document.entity_name for document in result.documents) == (
+        submissions_name,
+        companyfacts_name,
+    )
+
+
+def test_generic_client_rejects_a_response_for_another_configured_ticker() -> None:
+    client = SecEdgarClient(
+        QueueTransport([SUBMISSIONS, COMPANY_FACTS]),
+        SecEdgarIdentity("Investment Analyst tests@example.com"),
+        cik=APPLE_CIK,
+        ticker="AMD",
+        sleep=lambda _: None,
+        clock=lambda: RETRIEVED_AT,
+    )
+
+    with pytest.raises(SecEdgarError, match="configured ticker AMD"):
+        client.fetch_issuer_documents()
+
+    assert APPLE_TICKER == "AAPL"
 
 
 def test_client_preserves_numbers_as_strings_without_float() -> None:

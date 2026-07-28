@@ -21,6 +21,8 @@ from investment_analyst.providers.fundamentals.sec_fact_models import (
 )
 
 HISTORY_ALGORITHM_VERSION = "fundamental-research-history-v2-decimal34"
+AAPL_FUNDAMENTAL_RESEARCH_HISTORY_SCHEMA_VERSION = "aapl-fundamental-research-history-v2"
+GENERIC_FUNDAMENTAL_RESEARCH_HISTORY_SCHEMA_VERSION = "sec-fundamental-research-history-v3"
 _DAYS_PER_YEAR = Decimal("365.2425")
 _LEVEL_UNITS = frozenset({"USD", "shares", "USD/shares"})
 
@@ -349,15 +351,13 @@ class AaplFundamentalResearchHistoryCoverage(ContractModel):
 
 
 class AaplFundamentalResearchHistoryResult(ContractModel):
-    """Versioned historical view over one exact research result."""
+    """Versioned historical view over one exact SEC issuer research result."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["aapl-fundamental-research-history-v2"] = (
-        "aapl-fundamental-research-history-v2"
-    )
-    asset_id: Literal["equity:us:aapl"] = ASSET_ID
-    source_id: Literal["sec-edgar:aapl:companyfacts"] = COMPANYFACTS_SOURCE_ID
+    schema_version: NonEmptyStr = AAPL_FUNDAMENTAL_RESEARCH_HISTORY_SCHEMA_VERSION
+    asset_id: NonEmptyStr = ASSET_ID
+    source_id: NonEmptyStr = COMPANYFACTS_SOURCE_ID
     request: AaplFundamentalResearchRequest
     research: AaplFundamentalResearchResult
     formulas: tuple[FundamentalResearchHistoryFormula, ...] = FUNDAMENTAL_RESEARCH_HISTORY_FORMULAS
@@ -369,6 +369,15 @@ class AaplFundamentalResearchHistoryResult(ContractModel):
     @model_validator(mode="after")
     def validate_result(self) -> "AaplFundamentalResearchHistoryResult":
         """Tie every historical point to the exact embedded research result."""
+        expected_schema = (
+            AAPL_FUNDAMENTAL_RESEARCH_HISTORY_SCHEMA_VERSION
+            if self.asset_id == ASSET_ID
+            else GENERIC_FUNDAMENTAL_RESEARCH_HISTORY_SCHEMA_VERSION
+        )
+        if self.schema_version != expected_schema:
+            raise ValueError("historical schema version does not match its asset scope")
+        if self.asset_id != self.research.asset_id or self.source_id != self.research.source_id:
+            raise ValueError("historical identity must match the embedded research result")
         if self.request != self.research.request:
             raise ValueError("historical request must match the embedded research request")
         if self.formulas != FUNDAMENTAL_RESEARCH_HISTORY_FORMULAS:
@@ -434,14 +443,22 @@ def _optional_decimal(value: FinancialDecimal | None) -> str | None:
     return str(value) if value is not None else None
 
 
+FundamentalResearchHistoryCoverage = AaplFundamentalResearchHistoryCoverage
+FundamentalResearchHistoryResult = AaplFundamentalResearchHistoryResult
+
+
 __all__ = [
     "AaplFundamentalResearchHistoryCoverage",
     "AaplFundamentalResearchHistoryResult",
+    "AAPL_FUNDAMENTAL_RESEARCH_HISTORY_SCHEMA_VERSION",
     "FUNDAMENTAL_RESEARCH_HISTORY_FORMULAS",
     "FUNDAMENTAL_RESEARCH_HISTORY_LIMITATIONS",
     "FundamentalResearchHistoryFormula",
     "FundamentalResearchHistoryPoint",
+    "FundamentalResearchHistoryCoverage",
+    "FundamentalResearchHistoryResult",
     "FundamentalResearchHistoryStatistics",
     "FundamentalResearchMetricHistory",
     "HISTORY_ALGORITHM_VERSION",
+    "GENERIC_FUNDAMENTAL_RESEARCH_HISTORY_SCHEMA_VERSION",
 ]

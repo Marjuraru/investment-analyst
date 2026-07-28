@@ -1,4 +1,4 @@
-"""Integration tests for persisted Apple fundamental diagnostics."""
+"""Integration tests for persisted SEC issuer fundamental diagnostics."""
 
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -6,7 +6,8 @@ from uuid import uuid4
 
 import pytest
 
-from investment_analyst.core.models import DataFrequency, DataQuality, MetricResult
+from investment_analyst.core.models import AssetClass, DataFrequency, DataQuality, MetricResult
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_diagnostic_engine import (
     SecFundamentalDiagnosticEngine,
 )
@@ -16,6 +17,7 @@ from investment_analyst.providers.fundamentals.sec_diagnostic_models import (
 from investment_analyst.providers.fundamentals.sec_diagnostic_pipeline import (
     SecAaplFundamentalDiagnosticPipeline,
     SecFundamentalDiagnosticPipelineTraceabilityError,
+    SecIssuerFundamentalDiagnosticPipeline,
 )
 from investment_analyst.providers.fundamentals.sec_diagnostic_selection import (
     SecFundamentalDiagnosticSelector,
@@ -27,6 +29,9 @@ from investment_analyst.providers.fundamentals.sec_metric_models import (
 )
 from investment_analyst.providers.fundamentals.sec_metric_pipeline import (
     sec_fundamental_metric_result_id,
+)
+from investment_analyst.providers.fundamentals.sec_raw_records import (
+    aapl_sec_configuration,
 )
 from investment_analyst.storage import LocalStorage, StoragePaths
 
@@ -56,7 +61,9 @@ def _metric_result(
     frequency: DataFrequency = DataFrequency.ANNUAL,
     period_end: datetime | None = None,
     available_at: datetime | None = None,
+    configuration: SecAssetConfiguration | None = None,
 ) -> MetricResult:
+    resolved = configuration or aapl_sec_configuration()
     definition = get_sec_fundamental_metric_definition(metric_name)
     period_end = period_end or datetime(2025, 9, 27, tzinfo=UTC)
     available_at = available_at or datetime(2025, 10, 31, tzinfo=UTC)
@@ -64,7 +71,7 @@ def _metric_result(
         SecFundamentalMetricInput(role=role, observation_id=uuid4()) for role in _ROLES[metric_name]
     )
     candidate = SecFundamentalMetricCandidate(
-        asset_id="equity:us:aapl",
+        asset_id=resolved.asset_id,
         metric_name=metric_name,
         value=Decimal(value),
         unit="ratio",
@@ -89,7 +96,7 @@ def _metric_result(
         available_at=available_at,
         computed_at=max(datetime(2025, 11, 1, tzinfo=UTC), available_at),
         parameters={
-            "source_id": "sec-edgar:aapl:companyfacts",
+            "source_id": resolved.companyfacts_source_id,
             "frequency": frequency.value,
             "period_end": period_end.isoformat(),
             "comparison": definition.comparison.value,
@@ -110,9 +117,16 @@ def _seed_metrics(
     storage: LocalStorage,
     *,
     frequency: DataFrequency = DataFrequency.ANNUAL,
+    configuration: SecAssetConfiguration | None = None,
 ) -> tuple[MetricResult, ...]:
     results = tuple(
-        _metric_result(name, value, frequency=frequency) for name, value in _VALUES.items()
+        _metric_result(
+            name,
+            value,
+            frequency=frequency,
+            configuration=configuration,
+        )
+        for name, value in _VALUES.items()
     )
     for result in results:
         storage.metric_results.save(result)
@@ -131,6 +145,7 @@ class _CountingSelector(SecFundamentalDiagnosticSelector):
 
 class _CountingEngine(SecFundamentalDiagnosticEngine):
     def __init__(self) -> None:
+        super().__init__()
         self.calls = 0
 
     def compute(self, request, selection, *, computed_at):
@@ -277,3 +292,58 @@ def test_empty_metric_store_persists_coherent_insufficient_diagnostic(tmp_path) 
         assert summary.final_score == 0
         assert summary.confidence == 0
         assert summary.diagnostics_created == 1
+
+
+def test_two_sec_issuers_persist_isolated_diagnostics(tmp_path) -> None:
+    amd = SecAssetConfiguration(
+        asset_id="equity:us:amd",
+        cik="0000002488",
+        ticker="AMD",
+        submissions_source_id="sec-edgar:amd:submissions",
+        companyfacts_source_id="sec-edgar:amd:companyfacts",
+        name="Advanced Micro Devices, Inc.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NASDAQ",
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        _seed_metrics(storage)
+        _seed_metrics(storage, configuration=amd)
+        apple_pipeline = SecAaplFundamentalDiagnosticPipeline(
+            storage,
+            SecFundamentalDiagnosticSelector(storage),
+            SecFundamentalDiagnosticEngine(),
+            clock=lambda: datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        amd_pipeline = SecIssuerFundamentalDiagnosticPipeline(
+            storage,
+            SecFundamentalDiagnosticSelector(storage, amd),
+            SecFundamentalDiagnosticEngine(amd),
+            configuration=amd,
+            clock=lambda: datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+        apple = apple_pipeline.run(
+            SecFundamentalDiagnosticRequest(
+                known_at=datetime(2026, 1, 1, tzinfo=UTC),
+                frequency=DataFrequency.ANNUAL,
+            )
+        )
+        amd_request = SecFundamentalDiagnosticRequest(
+            asset_id=amd.asset_id,
+            known_at=datetime(2026, 1, 1, tzinfo=UTC),
+            frequency=DataFrequency.ANNUAL,
+        )
+        amd_first = amd_pipeline.run(amd_request)
+        amd_second = amd_pipeline.run(amd_request)
+
+        apple_diagnostics = storage.diagnostics.list(asset_id="equity:us:aapl")
+        amd_diagnostics = storage.diagnostics.list(asset_id=amd.asset_id)
+        assert apple.diagnostics_created == 1
+        assert amd_first.diagnostics_created == 1
+        assert amd_second.diagnostics_created == 0
+        assert amd_second.diagnostics_reused == 1
+        assert len(apple_diagnostics) == len(amd_diagnostics) == 1
+        assert apple.diagnostic_id != amd_first.diagnostic_id
+        assert amd_diagnostics[0].algorithm_version == ("sec-fundamental-diagnostic-v2-decimal34")
+        assert amd_diagnostics[0].summary.startswith("Advanced Micro Devices, Inc.")

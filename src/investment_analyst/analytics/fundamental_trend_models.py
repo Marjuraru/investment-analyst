@@ -1,4 +1,4 @@
-"""Strict contracts for bounded point-in-time Apple fundamental trends."""
+"""Strict contracts for bounded point-in-time SEC issuer fundamental trends."""
 
 from datetime import UTC, datetime
 from typing import Literal
@@ -22,6 +22,16 @@ FUNDAMENTAL_TREND_LIMITATIONS = (
     "Balance-sheet facts and flow facts retain their distinct accounting meanings.",
     "This view does not include valuation, estimates, peer comparison, or recommendations.",
 )
+
+AAPL_FUNDAMENTAL_TREND_SCHEMA_VERSION = "aapl-fundamental-trend-v1"
+GENERIC_FUNDAMENTAL_TREND_SCHEMA_VERSION = "sec-fundamental-trend-v2"
+
+
+def fundamental_trend_schema_version(asset_id: str) -> str:
+    """Preserve Apple's historical schema while versioning generic SEC output."""
+    if asset_id == ASSET_ID:
+        return AAPL_FUNDAMENTAL_TREND_SCHEMA_VERSION
+    return GENERIC_FUNDAMENTAL_TREND_SCHEMA_VERSION
 
 
 class AaplFundamentalTrendRequest(ContractModel):
@@ -89,13 +99,13 @@ class AaplFundamentalTrendCoverage(ContractModel):
 
 
 class AaplFundamentalTrend(ContractModel):
-    """Versioned exact-data contract for the local fundamental trend view."""
+    """Versioned exact-data contract for one SEC issuer's fundamental trend."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
-    schema_version: Literal["aapl-fundamental-trend-v1"] = "aapl-fundamental-trend-v1"
-    asset_id: Literal["equity:us:aapl"] = ASSET_ID
-    source_id: Literal["sec-edgar:aapl:companyfacts"] = COMPANYFACTS_SOURCE_ID
+    schema_version: NonEmptyStr = AAPL_FUNDAMENTAL_TREND_SCHEMA_VERSION
+    asset_id: NonEmptyStr = ASSET_ID
+    source_id: NonEmptyStr = COMPANYFACTS_SOURCE_ID
     request: AaplFundamentalTrendRequest
     periods: tuple[SecFundamentalPeriodView, ...]
     coverage: AaplFundamentalTrendCoverage
@@ -105,6 +115,10 @@ class AaplFundamentalTrend(ContractModel):
     @model_validator(mode="after")
     def validate_trend(self) -> "AaplFundamentalTrend":
         """Validate boundedness, order, point-in-time availability, and source scope."""
+        if self.schema_version != fundamental_trend_schema_version(self.asset_id):
+            raise ValueError("fundamental trend schema version does not match its asset scope")
+        if self.asset_id == ASSET_ID and self.source_id != COMPANYFACTS_SOURCE_ID:
+            raise ValueError("Apple fundamental trend must preserve its historical source identity")
         if len(self.periods) != self.coverage.periods_returned:
             raise ValueError("fundamental period count must match coverage")
         if len(self.periods) > self.request.period_limit:
@@ -152,8 +166,11 @@ class AaplFundamentalTrend(ContractModel):
 
 
 __all__ = [
+    "AAPL_FUNDAMENTAL_TREND_SCHEMA_VERSION",
     "AaplFundamentalTrend",
     "AaplFundamentalTrendCoverage",
     "AaplFundamentalTrendRequest",
     "FUNDAMENTAL_TREND_LIMITATIONS",
+    "GENERIC_FUNDAMENTAL_TREND_SCHEMA_VERSION",
+    "fundamental_trend_schema_version",
 ]

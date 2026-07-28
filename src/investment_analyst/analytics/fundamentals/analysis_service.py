@@ -3,7 +3,9 @@
 from typing import Protocol
 
 from investment_analyst.analytics.fundamentals.analysis_models import (
+    AAPL_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION,
     FUNDAMENTAL_ANALYSIS_SECTION_DEFINITIONS,
+    GENERIC_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION,
     AaplFundamentalAnalysisResult,
     FundamentalAnalysisCoverage,
     FundamentalAnalysisSectionView,
@@ -16,6 +18,7 @@ from investment_analyst.analytics.fundamentals.research_models import (
     AaplFundamentalResearchRequest,
 )
 from investment_analyst.core.models import DataFrequency
+from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID
 
 
 class _HistoryOperations(Protocol):
@@ -27,7 +30,7 @@ class _HistoryOperations(Protocol):
         ...
 
 
-class AaplFundamentalAnalysisService:
+class SecIssuerFundamentalAnalysisService:
     """Organize each metric once without thresholds, scores, or recommendations."""
 
     def __init__(self, history: _HistoryOperations) -> None:
@@ -81,6 +84,13 @@ class AaplFundamentalAnalysisService:
             )
 
         return AaplFundamentalAnalysisResult(
+            schema_version=(
+                AAPL_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION
+                if history.asset_id == ASSET_ID
+                else GENERIC_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION
+            ),
+            asset_id=history.asset_id,
+            source_id=history.source_id,
             request=request,
             history=history,
             classification=classify_company(classification_history),
@@ -96,4 +106,10 @@ class AaplFundamentalAnalysisService:
         )
 
 
-__all__ = ["AaplFundamentalAnalysisService"]
+AaplFundamentalAnalysisService = SecIssuerFundamentalAnalysisService
+
+
+__all__ = [
+    "AaplFundamentalAnalysisService",
+    "SecIssuerFundamentalAnalysisService",
+]

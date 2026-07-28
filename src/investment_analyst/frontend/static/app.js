@@ -479,19 +479,24 @@ function marketAssetFromDescriptor(descriptor) {
     volumeUnit: descriptor.volume_unit,
     volumeLabel,
     defaultMarketStart: descriptor.default_market_start,
+    analysisFamily: descriptor.analysis.family,
+    marketMode: descriptor.analysis.market_mode,
+    fundamentalMode: descriptor.analysis.fundamental_mode,
     hasFundamentals: descriptor.has_fundamentals,
     refreshKind: descriptor.refresh_kind,
     refreshLabel: `Actualizar ${descriptor.symbol}`,
-    refreshSource: descriptor.refresh_kind === "aapl_complete"
+    refreshSource: descriptor.refresh_kind === "complete_analysis"
       ? "SEC EDGAR + Alpaca Market Data · IEX parcial"
-      : `${providerLabel} · ${descriptor.provider_identifier}`,
+      : descriptor.has_fundamentals
+        ? `${providerLabel} · ${descriptor.provider_identifier} + SEC EDGAR`
+        : `${providerLabel} · ${descriptor.provider_identifier}`,
   });
 }
 
 async function loadMarketAssets() {
   const payload = await api("/api/market-assets");
   if (
-    payload.schema_version !== "market-asset-universe-v1"
+    payload.schema_version !== "market-asset-universe-v2"
     || !Array.isArray(payload.assets)
     || payload.assets.length === 0
   ) {
@@ -522,12 +527,14 @@ async function loadMarketAssets() {
   selector.value = selectedMarketAsset;
 }
 
-function isBtcIntradayInterval(value = chartSettings.interval) {
-  return selectedMarketAsset === "crypto:btc-usd" && BTC_INTRADAY_INTERVAL_VALUES.has(value);
+function isIntradayInterval(value = chartSettings.interval) {
+  const presentation = marketAssets[selectedMarketAsset];
+  return Boolean(presentation?.intradaySourceId)
+    && BTC_INTRADAY_INTERVAL_VALUES.has(value);
 }
 
 function marketChartPeriod() {
-  if (isBtcIntradayInterval()) return "24h";
+  if (isIntradayInterval()) return "24h";
   return MARKET_CHART_PERIOD_BY_INTERVAL[chartSettings.interval] || "1y";
 }
 
@@ -558,23 +565,36 @@ function applySelectedMarketAsset() {
   byId("asset-name").textContent = presentation.name;
   byId("asset-meta").textContent = presentation.meta;
   byId("market-chart-symbol").textContent = presentation.symbol;
+  byId("market-chart").setAttribute(
+    "aria-label",
+    `Gráfico histórico interactivo de ${presentation.symbol}. Usa la rueda del mouse para cambiar el zoom, arrastra horizontalmente para desplazar la vista y usa las flechas para recorrer fechas.`,
+  );
+  byId("fundamental-chart-symbol").textContent = presentation.symbol;
   byId("chart-point-volume-label").textContent = `Volumen (${presentation.volumeLabel})`;
   byId("snapshot-volume-label").textContent = `Volumen (${presentation.volumeLabel})`;
   byId("chart-table-volume-label").textContent = `Volumen (${presentation.volumeLabel})`;
   document.title = `${presentation.name} (${presentation.symbol}) · Investment Analyst`;
-  for (const element of document.querySelectorAll("[data-apple-only]")) {
+  for (const element of document.querySelectorAll("[data-fundamental-only]")) {
     element.classList.toggle("hidden", !presentation.hasFundamentals);
   }
-  for (const element of document.querySelectorAll("[data-apple-run-only]")) {
+  for (const element of document.querySelectorAll("[data-complete-run-only]")) {
+    element.classList.toggle("hidden", presentation.refreshKind !== "complete_analysis");
+  }
+  for (const element of document.querySelectorAll("[data-fundamental-run-only]")) {
     element.classList.toggle("hidden", !presentation.hasFundamentals);
+  }
+  for (const element of document.querySelectorAll("[data-complete-analysis-only]")) {
+    element.classList.toggle("hidden", presentation.refreshKind !== "complete_analysis");
   }
   byId("operacion-titulo").textContent = presentation.refreshLabel;
   byId("run-source-label").textContent = presentation.refreshSource;
-  byId("run-note").textContent = presentation.hasFundamentals
+  byId("run-note").textContent = presentation.refreshKind === "complete_analysis"
     ? "SEC se consulta en cada ejecución, aunque el mercado ya esté actualizado."
-    : isBtcIntradayInterval()
-      ? "Actualiza primero el histórico diario y después las últimas 24 horas intradía."
-      : `Solo actualiza mercado ${presentation.symbol}; no simula fundamentales ni ejecuta operaciones.`;
+    : presentation.hasFundamentals
+      ? "Mercado y SEC se actualizan de forma independiente y conservan trazabilidad separada."
+      : isIntradayInterval()
+        ? "Actualiza primero el histórico diario y después las últimas 24 horas intradía."
+        : `Solo actualiza mercado ${presentation.symbol}; no simula fundamentales ni ejecuta operaciones.`;
   byId("run-button").textContent = presentation.hasFundamentals
     ? "Ejecutar actualización"
     : presentation.refreshLabel;
@@ -695,7 +715,7 @@ function applyChartSettings() {
   byId("sma-third-color").value = chartSettings.thirdColor;
   byId("chart-price-scale").value = chartSettings.priceScale;
   byId("chart-interval").value = chartSettings.interval;
-  const intraday = isBtcIntradayInterval();
+  const intraday = isIntradayInterval();
   byId("chart-settings-summary").textContent = intraday
     ? chartSettings.priceScale === "logarithmic"
       ? "Escala · Logarítmica"
@@ -906,7 +926,7 @@ function exportMarketCsv() {
     "third_sma_input_observation_ids",
     "traceability_verified",
   ];
-  const assetName = marketChartPayload.asset_id === "crypto:btc-usd" ? "btc-usd" : "aapl";
+  const assetName = safeFilePart(marketAssetPresentation().symbol.toLocaleLowerCase("es"));
   const filename = `${assetName}-mercado-${safeFilePart(marketChartPayload.period)}-${safeFilePart(marketChartPayload.known_at)}.csv`;
   downloadText(
     filename,
@@ -990,7 +1010,7 @@ function exportFundamentalCsv() {
     "superseded_count",
     "traceability_verified",
   ];
-  const filename = `aapl-fundamentales-${safeFilePart(fundamentalTrendPayload.frequency)}-${safeFilePart(fundamentalTrendPayload.known_at)}.csv`;
+  const filename = `${safeFilePart(marketAssetPresentation().symbol)}-fundamentales-${safeFilePart(fundamentalTrendPayload.frequency)}-${safeFilePart(fundamentalTrendPayload.known_at)}.csv`;
   downloadText(
     filename,
     csvDocument(columns, fundamentalCsvRows(fundamentalTrendPayload)),
@@ -1076,7 +1096,7 @@ function exportFundamentalResearchCsv() {
     "traceability_verified",
   ];
   const request = research.request || {};
-  const filename = `aapl-metricas-fundamentales-${safeFilePart(request.frequency)}-${safeFilePart(request.known_at)}.csv`;
+  const filename = `${safeFilePart(marketAssetPresentation().symbol)}-metricas-fundamentales-${safeFilePart(request.frequency)}-${safeFilePart(request.known_at)}.csv`;
   downloadText(
     filename,
     csvDocument(columns, fundamentalResearchCsvRows(fundamentalResearchPayload)),
@@ -1665,7 +1685,7 @@ function renderChartSvg(points, resolution) {
   });
   const resolutionText = marketResolution(resolution);
   const asset = marketAssetPresentation();
-  const intraday = isBtcIntradayInterval();
+  const intraday = isIntradayInterval();
   svg.append(
     svgElement(
       "title",
@@ -1867,17 +1887,17 @@ function updateChartSelection(index, points, values, yPosition) {
   byId("chart-point-close").textContent = formatCurrency(point.close);
   byId("chart-point-sma-5").textContent = point.short_sma
     ? formatCurrency(point.short_sma.value)
-    : isBtcIntradayInterval()
+    : isIntradayInterval()
       ? "No aplica"
       : "En calentamiento";
   byId("chart-point-sma-20").textContent = point.long_sma
     ? formatCurrency(point.long_sma.value)
-    : isBtcIntradayInterval()
+    : isIntradayInterval()
       ? "No aplica"
       : "En calentamiento";
   byId("chart-point-sma-50").textContent = point.third_sma
     ? formatCurrency(point.third_sma.value)
-    : isBtcIntradayInterval()
+    : isIntradayInterval()
       ? "No aplica"
       : "En calentamiento";
   byId("chart-point-volume").textContent = formatMarketVolume(point.volume);
@@ -2114,7 +2134,7 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
   }
   const asset = marketAssetPresentation();
   const requestedPeriod = marketChartPeriod();
-  const intraday = isBtcIntradayInterval();
+  const intraday = isIntradayInterval();
   const expectedSourceId = intraday ? asset.intradaySourceId : asset.sourceId;
   const expectedSchemaVersion = intraday ? asset.intradaySchemaVersion : asset.schemaVersion;
   if (
@@ -2236,7 +2256,7 @@ async function queryMarketChart() {
   setExportAvailable("export-market-csv", false);
   byId("chart-status").textContent = "Consultando el histórico local…";
   const requestedPeriod = marketChartPeriod();
-  const intraday = isBtcIntradayInterval();
+  const intraday = isIntradayInterval();
   const parameters = new URLSearchParams({
     asset_id: selectedMarketAsset,
     known_at: byId("report-known-at").value.trim(),
@@ -2709,7 +2729,11 @@ function renderFundamentalChart(periods) {
     "aria-labelledby": "fundamental-chart-title fundamental-chart-description",
   });
   svg.append(
-    svgElement("title", { id: "fundamental-chart-title" }, "Evolución fundamental de Apple"),
+    svgElement(
+      "title",
+      { id: "fundamental-chart-title" },
+      `Evolución fundamental de ${marketAssetPresentation().name}`,
+    ),
     svgElement(
       "desc",
       { id: "fundamental-chart-description" },
@@ -2913,6 +2937,7 @@ async function queryFundamentalTrend() {
   setExportAvailable("export-fundamental-csv", false);
   byId("fundamental-status").textContent = "Consultando fundamentales locales…";
   const parameters = new URLSearchParams({
+    asset_id: selectedMarketAsset,
     known_at: byId("report-known-at").value.trim(),
     frequency: selectedFundamentalFrequency,
   });
@@ -2937,6 +2962,7 @@ async function queryFundamentalResearch() {
   setFundamentalBusy(true);
   setExportAvailable("export-fundamental-research-csv", false);
   const parameters = new URLSearchParams({
+    asset_id: selectedMarketAsset,
     known_at: byId("report-known-at").value.trim(),
     frequency: selectedFundamentalFrequency,
   });
@@ -3222,7 +3248,7 @@ byId("run-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = byId("run-button");
   const presentation = marketAssetPresentation();
-  const refreshIntraday = isBtcIntradayInterval();
+  const refreshIntraday = isIntradayInterval();
   const idleLabel = presentation.hasFundamentals
     ? "Ejecutar actualización"
     : presentation.refreshLabel;
@@ -3237,9 +3263,9 @@ byId("run-form").addEventListener("submit", async (event) => {
   );
   const knownAt = byId("run-known-at").value.trim();
   try {
-    if (presentation.hasFundamentals) {
+    if (presentation.refreshKind === "complete_analysis") {
       const payload = {
-        asset_id: "equity:us:aapl",
+        asset_id: selectedMarketAsset,
         market_start: byId("market-start").value,
         market_end: byId("market-end").value,
         fundamental_frequency: byId("run-frequency").value,
@@ -3284,6 +3310,18 @@ byId("run-form").addEventListener("submit", async (event) => {
         });
         effectiveKnownAt = intradaySummary.retrieved_at;
       }
+      let fundamentalSummary = null;
+      if (presentation.hasFundamentals) {
+        fundamentalSummary = await api("/api/fundamental-refresh", {
+          method: "POST",
+          body: JSON.stringify({
+            asset_id: selectedMarketAsset,
+            frequency: byId("run-frequency").value,
+            requested_known_at: knownAt || null,
+          }),
+        });
+        effectiveKnownAt = fundamentalSummary.effective_known_at;
+      }
       byId("report-known-at").value = effectiveKnownAt;
       knownAtByAsset.set(selectedMarketAsset, effectiveKnownAt);
       const mode = translated(
@@ -3297,12 +3335,21 @@ byId("run-form").addEventListener("submit", async (event) => {
           + `${formatInteger(intradaySummary.raw_records_reused)} reutilizadas.`
         : "";
       const dailyBars = summary.candles_received ?? summary.bars_received ?? 0;
+      const fundamentalText = fundamentalSummary
+        ? ` ${formatInteger(fundamentalSummary.metric_results_created)} métricas fundamentales `
+          + `y ${formatInteger(fundamentalSummary.diagnostics_created)} diagnóstico procesados.`
+        : "";
       setMessage(
         `${mode}. ${formatInteger(dailyBars)} velas diarias procesadas; `
         + `${formatInteger(summary.metric_results_created)} métricas nuevas.${intradayText} `
-        + "Trazabilidad verificada.",
+        + `${fundamentalText} Trazabilidad verificada.`,
       );
-      await queryMarketChart();
+      await Promise.all([
+        queryMarketChart(),
+        ...(presentation.hasFundamentals
+          ? [queryFundamentalTrend(), queryFundamentalResearch()]
+          : []),
+      ]);
     }
   } catch (error) {
     setMessage(error.message, true);
@@ -3381,15 +3428,22 @@ byId("market-asset-select").addEventListener("change", async (event) => {
   marketChartDrag = null;
   applySelectedMarketAsset();
   applyChartSettings();
-  const activeAppleLink = document.querySelector(".nav-link.active[data-apple-only]");
-  if (activeAppleLink) {
-    activeAppleLink.classList.remove("active");
-    activeAppleLink.removeAttribute("aria-current");
+  const activeFundamentalLink = document.querySelector(
+    ".nav-link.active[data-fundamental-only], .nav-link.active[data-complete-analysis-only]",
+  );
+  if (activeFundamentalLink) {
+    activeFundamentalLink.classList.remove("active");
+    activeFundamentalLink.removeAttribute("aria-current");
     const marketLink = document.querySelector('.nav-link[href="#mercado"]');
     marketLink.classList.add("active");
     marketLink.setAttribute("aria-current", "page");
   }
-  await queryMarketChart();
+  await Promise.all([
+    queryMarketChart(),
+    ...(marketAssetPresentation().hasFundamentals
+      ? [queryFundamentalTrend(), queryFundamentalResearch()]
+      : []),
+  ]);
 });
 
 for (const button of document.querySelectorAll(".series-toggle")) {
@@ -3476,7 +3530,7 @@ for (const button of document.querySelectorAll(".frequency-button")) {
     await Promise.all([
       queryFundamentalTrend(),
       queryFundamentalResearch(),
-      queryReport(),
+      ...(marketAssetPresentation().refreshKind === "complete_analysis" ? [queryReport()] : []),
     ]);
   });
 }
@@ -3498,8 +3552,8 @@ byId("report-known-at").value = new Date().toISOString();
 
 async function initialize() {
   initializeTheme();
-  initializeChartSettings();
   await loadMarketAssets();
+  initializeChartSettings();
   applySelectedMarketAsset();
   startMarketClocks();
   await refreshOverview();

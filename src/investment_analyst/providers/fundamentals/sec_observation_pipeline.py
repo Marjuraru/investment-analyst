@@ -1,4 +1,4 @@
-"""Persist selected Apple SEC fundamental observations without analytics."""
+"""Persist selected SEC corporate observations without analytics."""
 
 import json
 from collections.abc import Callable, Mapping
@@ -13,18 +13,15 @@ from investment_analyst.core.models import (
     NormalizedObservation,
     RawRecord,
 )
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
     SecCompanyFactsNormalizer,
     SecFactExtractionResult,
     sec_fact_to_observation,
 )
 from investment_analyst.providers.fundamentals.sec_fact_models import (
-    ASSET_ID,
     COMPANYFACTS_SCHEMA_VERSION,
-    COMPANYFACTS_SOURCE_ID,
     SUBMISSIONS_SCHEMA_VERSION,
-    SUBMISSIONS_SOURCE_ID,
-    TRANSFORMATION_VERSION,
     get_sec_fact_definition,
 )
 from investment_analyst.storage import LocalStorage
@@ -49,7 +46,7 @@ class SecObservationTraceabilityError(SecObservationPipelineError):
 
 @dataclass(frozen=True, slots=True)
 class SecObservationImportSummary:
-    """Compact result of one local Apple SEC fact normalization run."""
+    """Compact result of one local SEC issuer normalization run."""
 
     asset_id: str
     submissions_record_id: UUID
@@ -114,18 +111,24 @@ class SecObservationImportSummary:
         }
 
 
-class SecAaplObservationPipeline:
-    """Normalize the latest local Apple SEC snapshots into append-only observations."""
+class SecIssuerObservationPipeline:
+    """Normalize one issuer's latest SEC snapshots into append-only observations."""
 
     def __init__(
         self,
         storage: LocalStorage,
         normalizer: SecCompanyFactsNormalizer,
         *,
+        configuration: SecAssetConfiguration | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._storage = storage
         self._normalizer = normalizer
+        self._configuration = configuration or normalizer.configuration
+        if self._configuration != normalizer.configuration:
+            raise SecObservationPipelineError(
+                "normalizer and observation pipeline configurations must match"
+            )
         self._clock = clock
 
     def run(self) -> SecObservationImportSummary:
@@ -140,11 +143,11 @@ class SecAaplObservationPipeline:
         diagnostic_ids_before = {item.diagnostic_id for item in self._storage.diagnostics.list()}
 
         submissions_record = self._select_snapshot(
-            source_id=SUBMISSIONS_SOURCE_ID,
+            source_id=self._configuration.submissions_source_id,
             schema_version=SUBMISSIONS_SCHEMA_VERSION,
         )
         companyfacts_record = self._select_snapshot(
-            source_id=COMPANYFACTS_SOURCE_ID,
+            source_id=self._configuration.companyfacts_source_id,
             schema_version=COMPANYFACTS_SCHEMA_VERSION,
         )
         extraction = self._normalizer.extract(
@@ -222,7 +225,7 @@ class SecAaplObservationPipeline:
             raise SecObservationTraceabilityError("normalization changed DiagnosticResults")
 
         return SecObservationImportSummary(
-            asset_id=ASSET_ID,
+            asset_id=self._configuration.asset_id,
             submissions_record_id=submissions_record.record_id,
             companyfacts_record_id=companyfacts_record.record_id,
             normalized_at=normalized_at,
@@ -248,7 +251,10 @@ class SecAaplObservationPipeline:
         candidates = [
             record
             for record in self._storage.raw_records.list(source_id=source_id)
-            if record.asset_id == ASSET_ID and record.schema_version == schema_version
+            if (
+                record.asset_id == self._configuration.asset_id
+                and record.schema_version == schema_version
+            )
         ]
         if not candidates:
             raise SecSnapshotSelectionError(f"no compatible local snapshot for {source_id}")
@@ -275,8 +281,14 @@ class SecAaplObservationPipeline:
                 companyfacts_record,
                 submissions_record,
                 normalized_at=normalized_at,
+                configuration=self._configuration,
             )
-            _validate_candidate(candidate, normalized_at)
+            _validate_candidate(
+                candidate,
+                normalized_at,
+                configuration=self._configuration,
+                transformation_version=self._normalizer.transformation_version,
+            )
             existing = by_id.get(candidate.observation_id)
             if existing is None:
                 by_id[candidate.observation_id] = candidate
@@ -307,7 +319,12 @@ class SecAaplObservationPipeline:
             dict[UUID, NormalizedObservation],
         ],
     ) -> None:
-        _validate_candidate(observation, observation.normalized_at)
+        _validate_candidate(
+            observation,
+            observation.normalized_at,
+            configuration=self._configuration,
+            transformation_version=self._normalizer.transformation_version,
+        )
         key = _record_key(observation)
 
         try:
@@ -359,6 +376,7 @@ class SecAaplObservationPipeline:
                         companyfacts_record,
                         submissions_record,
                         normalized_at=observation.normalized_at,
+                        configuration=self._configuration,
                     )
                     for fact in extraction.facts
                 )
@@ -387,10 +405,16 @@ class SecAaplObservationPipeline:
                 )
 
 
-def _validate_candidate(observation: NormalizedObservation, normalized_at: datetime) -> None:
-    if observation.asset_id != ASSET_ID:
-        raise SecObservationTraceabilityError("SEC observation must belong to Apple")
-    if observation.source.source_id != COMPANYFACTS_SOURCE_ID:
+def _validate_candidate(
+    observation: NormalizedObservation,
+    normalized_at: datetime,
+    *,
+    configuration: SecAssetConfiguration,
+    transformation_version: str,
+) -> None:
+    if observation.asset_id != configuration.asset_id:
+        raise SecObservationTraceabilityError("SEC observation must match the configured asset")
+    if observation.source.source_id != configuration.companyfacts_source_id:
         raise SecObservationTraceabilityError("SEC observation source is incorrect")
     try:
         expected_unit = get_sec_fact_definition(observation.field_name).unit
@@ -404,7 +428,7 @@ def _validate_candidate(observation: NormalizedObservation, normalized_at: datet
         raise SecObservationTraceabilityError("SEC observation frequency is invalid")
     if observation.quality is not DataQuality.VALID:
         raise SecObservationTraceabilityError("SEC observation quality must be VALID")
-    if observation.transformation_version != TRANSFORMATION_VERSION:
+    if observation.transformation_version != transformation_version:
         raise SecObservationTraceabilityError("SEC observation transformation version is invalid")
     if observation.available_at > normalized_at:
         raise SecObservationTraceabilityError("SEC observation uses a future filing")
@@ -418,6 +442,9 @@ def _validate_candidate(observation: NormalizedObservation, normalized_at: datet
     ):
         if timestamp is not None and timestamp.utcoffset() != UTC.utcoffset(timestamp):
             raise SecObservationTraceabilityError("SEC observation timestamps must be UTC")
+
+
+SecAaplObservationPipeline = SecIssuerObservationPipeline
 
 
 def _semantic_identity(observation: NormalizedObservation) -> tuple[object, ...]:

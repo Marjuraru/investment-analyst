@@ -26,6 +26,7 @@ from investment_analyst.application.listed_market_refresh import (
 from investment_analyst.application.listed_market_refresh_models import (
     ListedMarketRefreshRequest,
 )
+from investment_analyst.core.models import AssetClass
 from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
 from investment_analyst.providers.http import HttpResponse
 from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistoricalPipeline
@@ -45,6 +46,8 @@ _CONFIGURATION = AlpacaAssetConfiguration(
     adjustment="all",
     source_id="alpaca-market-data:iex:bvn:daily-bars:adjustment-all",
     name="Compañía de Minas Buenaventura S.A.A.",
+    asset_class=AssetClass.EQUITY,
+    quote_currency="USD",
     exchange="NYSE",
 )
 

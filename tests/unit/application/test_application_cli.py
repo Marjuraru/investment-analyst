@@ -26,6 +26,7 @@ _READ_WRITE_SCRIPTS = (
     "fetch_coinbase_history.py",
     "fetch_sec_aapl_fundamentals.py",
     "normalize_sec_aapl_fundamentals.py",
+    "refresh_sec_fundamentals.py",
     "run_aapl_complete_snapshot.py",
 )
 
@@ -80,7 +81,11 @@ def test_scripts_and_facade_keep_explicit_storage_access_modes() -> None:
             assert "WorkspaceAccessMode.READ_WRITE" not in text
     for script_name in _READ_WRITE_SCRIPTS:
         text = (_PROJECT_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
-        assert "WorkspaceAccessMode.READ_WRITE" in text
+        if script_name == "refresh_sec_fundamentals.py":
+            assert ".refresh_sec_fundamentals(" in text
+            assert "WorkspaceAccessMode" not in text
+        else:
+            assert "WorkspaceAccessMode.READ_WRITE" in text
 
     facade = (_PROJECT_ROOT / "src" / "investment_analyst" / "application" / "facade.py").read_text(
         encoding="utf-8"
@@ -93,12 +98,17 @@ def test_scripts_and_facade_keep_explicit_storage_access_modes() -> None:
     assert "def query_btc_intraday_chart(" in facade
     assert "def refresh_btc_market(" in facade
     assert "def refresh_listed_market(" in facade
+    assert "def refresh_sec_fundamentals(" in facade
     assert "def refresh_btc_intraday(" in facade
     assert "def query_aapl_fundamental_trend(" in facade
+    assert "def query_sec_fundamental_trend(" in facade
     assert "def query_aapl_fundamental_research(" in facade
     assert "def query_aapl_fundamental_research_history(" in facade
     assert "def query_aapl_fundamental_analysis(" in facade
-    assert facade.count("access_mode=WorkspaceAccessMode.READ_WRITE") == 4
+    assert "def query_sec_fundamental_research(" in facade
+    assert "def query_sec_fundamental_research_history(" in facade
+    assert "def query_sec_fundamental_analysis(" in facade
+    assert facade.count("access_mode=WorkspaceAccessMode.READ_WRITE") == 5
 
 
 def test_operational_cli_delegates_without_direct_storage_or_dotenv() -> None:

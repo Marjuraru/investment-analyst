@@ -20,7 +20,17 @@ from investment_analyst.analytics.market.intraday_models import IntradayInterval
 from investment_analyst.application.btc_intraday_models import BtcIntradayChartRequest
 from investment_analyst.application.facade import InvestmentAnalystApplication
 from investment_analyst.application.runtime import ApplicationRuntime, StorageLocationRequest
-from investment_analyst.core.models import DataFrequency
+from investment_analyst.catalog.models import (
+    AssetCatalogDocument,
+    CatalogAsset,
+    ProviderBinding,
+)
+from investment_analyst.catalog.provider_context import (
+    ProviderAssetContextResolver,
+    ProviderAssetNotConfiguredError,
+)
+from investment_analyst.catalog.service import AssetCatalogService
+from investment_analyst.core.models import AssetClass, DataFrequency
 from investment_analyst.providers.http import HttpTransport
 from investment_analyst.storage import LocalStorage, StoragePaths
 from investment_analyst.workspace.service import (
@@ -46,6 +56,52 @@ def _application(home: Path) -> InvestmentAnalystApplication:
     )
     return InvestmentAnalystApplication(
         runtime,
+        transport_factory=_unexpected_transport,
+    )
+
+
+def _sec_issuer_application(home: Path) -> InvestmentAnalystApplication:
+    capabilities = (
+        "fundamentals.company_facts",
+        "fundamentals.submissions",
+    )
+    catalog = AssetCatalogService(
+        AssetCatalogDocument(
+            catalog_version=1,
+            assets=(
+                CatalogAsset(
+                    asset_id="equity:us:amd",
+                    symbol="AMD",
+                    name="Advanced Micro Devices, Inc.",
+                    asset_class=AssetClass.EQUITY,
+                    quote_currency="USD",
+                    exchange="NASDAQ",
+                    provider_symbols={},
+                    aliases=("AMD",),
+                    provider_bindings=(
+                        ProviderBinding(
+                            provider="sec",
+                            namespace="cik",
+                            identifier="0000002488",
+                            capabilities=capabilities,
+                        ),
+                        ProviderBinding(
+                            provider="sec",
+                            namespace="ticker",
+                            identifier="AMD",
+                            capabilities=capabilities,
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    return InvestmentAnalystApplication(
+        ApplicationRuntime(
+            WorkspaceService(environ={}, home=home),
+            catalog,
+            ProviderAssetContextResolver(catalog),
+        ),
         transport_factory=_unexpected_transport,
     )
 
@@ -240,6 +296,91 @@ def test_fundamental_analysis_is_empty_bounded_and_read_only(tmp_path: Path) -> 
     assert analysis.classification.status == "insufficient_evidence"
     assert analysis.traceability_verified
     assert storage_paths.database_path.read_bytes() == database_before
+
+
+def test_sec_issuer_facade_is_catalog_backed_read_only_and_versioned(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "legacy-sec-issuer"
+    storage_paths = StoragePaths.from_root(root)
+    with LocalStorage(storage_paths):
+        pass
+    database_before = storage_paths.database_path.read_bytes()
+    request = AaplFundamentalResearchRequest(
+        known_at=datetime(2026, 7, 14, 4, 41, 55, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+        limit=5,
+    )
+    application = _sec_issuer_application(tmp_path)
+    location = StorageLocationRequest(legacy_root=root)
+
+    trend = application.query_sec_fundamental_trend(
+        AaplFundamentalTrendRequest(
+            known_at=request.known_at,
+            frequency=request.frequency,
+            period_limit=5,
+        ),
+        asset_id="equity:us:amd",
+        location=location,
+    )
+    research = application.query_sec_fundamental_research(
+        request,
+        asset_id="equity:us:amd",
+        location=location,
+    )
+    history = application.query_sec_fundamental_research_history(
+        request,
+        asset_id="equity:us:amd",
+        location=location,
+    )
+    analysis = application.query_sec_fundamental_analysis(
+        request,
+        asset_id="equity:us:amd",
+        location=location,
+    )
+
+    assert trend.schema_version == "sec-fundamental-trend-v2"
+    assert research.schema_version == "sec-fundamental-research-v3"
+    assert history.schema_version == "sec-fundamental-research-history-v3"
+    assert analysis.schema_version == "sec-fundamental-analysis-v2"
+    assert (
+        trend.asset_id
+        == research.asset_id
+        == history.asset_id
+        == analysis.asset_id
+        == ("equity:us:amd")
+    )
+    assert (
+        trend.source_id
+        == research.source_id
+        == history.source_id
+        == analysis.source_id
+        == "sec-edgar:amd:companyfacts"
+    )
+    assert trend.periods == ()
+    assert research.periods == ()
+    assert history.series == ()
+    assert analysis.coverage.latest_period_metrics == 0
+    assert storage_paths.database_path.read_bytes() == database_before
+
+
+def test_sec_issuer_facade_rejects_missing_catalog_binding_before_storage(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing-sec-storage"
+    request = AaplFundamentalResearchRequest(
+        known_at=datetime(2026, 7, 14, 4, 41, 55, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+    )
+
+    with pytest.raises(ProviderAssetNotConfiguredError):
+        _application(tmp_path).query_sec_fundamental_analysis(
+            request,
+            asset_id="equity:us:b",
+            location=StorageLocationRequest(legacy_root=missing),
+        )
+
+    assert not missing.exists()
 
 
 def test_query_missing_workspace_fails_without_creating_it(tmp_path: Path) -> None:

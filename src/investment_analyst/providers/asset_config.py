@@ -1,5 +1,7 @@
 """Strict typed provider configurations resolved before client construction."""
 
+import re
+
 from pydantic import ConfigDict, StrictInt, field_validator, model_validator
 
 from investment_analyst.core.models import AssetClass
@@ -8,6 +10,22 @@ from investment_analyst.core.models.base import ContractModel, NonEmptyStr
 
 class ProviderConfigurationError(ValueError):
     """Raised when a resolved provider configuration is inconsistent."""
+
+
+_SEC_TICKER_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9.-]{0,31}$")
+
+
+def sec_source_ids(ticker: str) -> tuple[str, str]:
+    """Derive deterministic issuer-specific SEC source IDs."""
+    if ticker != ticker.strip() or not _SEC_TICKER_PATTERN.fullmatch(ticker):
+        raise ProviderConfigurationError(
+            "SEC ticker must use upper-case letters, digits, dot, or dash"
+        )
+    slug = ticker.casefold()
+    return (
+        f"sec-edgar:{slug}:submissions",
+        f"sec-edgar:{slug}:companyfacts",
+    )
 
 
 class AlpacaAssetConfiguration(ContractModel):
@@ -20,10 +38,10 @@ class AlpacaAssetConfiguration(ContractModel):
     feed: NonEmptyStr
     adjustment: NonEmptyStr
     source_id: NonEmptyStr
-    name: NonEmptyStr = "Apple Inc."
-    asset_class: AssetClass = AssetClass.EQUITY
-    quote_currency: NonEmptyStr = "USD"
-    exchange: NonEmptyStr = "NASDAQ"
+    name: NonEmptyStr
+    asset_class: AssetClass
+    quote_currency: NonEmptyStr
+    exchange: NonEmptyStr
 
 
 class CoinbaseAssetConfiguration(ContractModel):
@@ -46,7 +64,7 @@ class CoinbaseAssetConfiguration(ContractModel):
 
 
 class SecAssetConfiguration(ContractModel):
-    """Fixed issuer identifiers required by the current Apple SEC flow."""
+    """Catalog-backed identifiers and metadata required by one SEC issuer."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -55,6 +73,10 @@ class SecAssetConfiguration(ContractModel):
     ticker: NonEmptyStr
     submissions_source_id: NonEmptyStr
     companyfacts_source_id: NonEmptyStr
+    name: NonEmptyStr
+    asset_class: AssetClass
+    quote_currency: NonEmptyStr
+    exchange: NonEmptyStr
 
     @field_validator("cik")
     @classmethod
@@ -66,7 +88,14 @@ class SecAssetConfiguration(ContractModel):
 
     @model_validator(mode="after")
     def validate_sources(self) -> "SecAssetConfiguration":
-        """Require distinct source identifiers for the two SEC datasets."""
+        """Keep corporate scope and issuer-specific source identities explicit."""
+        if self.asset_class is not AssetClass.EQUITY:
+            raise ValueError("SEC corporate configuration requires an equity asset")
+        expected_submissions, expected_companyfacts = sec_source_ids(self.ticker)
+        if self.submissions_source_id != expected_submissions:
+            raise ValueError("SEC submissions source_id does not match the configured ticker")
+        if self.companyfacts_source_id != expected_companyfacts:
+            raise ValueError("SEC companyfacts source_id does not match the configured ticker")
         if self.submissions_source_id == self.companyfacts_source_id:
             raise ValueError("SEC source identifiers must be distinct")
         return self

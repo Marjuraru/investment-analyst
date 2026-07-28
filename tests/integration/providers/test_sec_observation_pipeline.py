@@ -1,4 +1,4 @@
-"""Integration tests for offline Apple SEC fundamental observation persistence."""
+"""Integration tests for offline multiissuer SEC observation persistence."""
 
 import json
 from collections.abc import Mapping
@@ -6,21 +6,26 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from investment_analyst.core.models import (
+    AssetClass,
     DataFrequency,
     DataQuality,
     NormalizedObservation,
     RawRecord,
 )
 from investment_analyst.core.models.source import SourceReference
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
     SecCompanyFactsNormalizer,
 )
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarClient, SecEdgarIdentity
 from investment_analyst.providers.fundamentals.sec_observation_pipeline import (
     SecAaplObservationPipeline,
+    SecIssuerObservationPipeline,
 )
 from investment_analyst.providers.fundamentals.sec_raw_records import (
+    aapl_sec_configuration,
     create_sec_aapl_asset,
+    create_sec_asset,
     get_sec_source_definitions,
     sec_document_to_raw_record,
 )
@@ -62,7 +67,9 @@ def _prepared_documents(
     *,
     marker: str,
     annual_assets: str = "5000",
+    configuration: SecAssetConfiguration | None = None,
 ) -> tuple[bytes, bytes]:
+    resolved = configuration or aapl_sec_configuration()
     submissions = _load_fixture("aapl_submissions.json")
     recent = submissions["filings"]["recent"]
     recent["acceptanceDateTime"] = [
@@ -118,6 +125,13 @@ def _prepared_documents(
         },
         "dei": companyfacts["facts"]["dei"],
     }
+    if resolved.asset_id != aapl_sec_configuration().asset_id:
+        submissions = json.loads(json.dumps(submissions).replace("0000320193", resolved.cik))
+        submissions["cik"] = resolved.cik
+        submissions["name"] = resolved.name
+        submissions["tickers"] = [resolved.ticker]
+        companyfacts = json.loads(json.dumps(companyfacts).replace("0000320193", resolved.cik))
+        companyfacts["entityName"] = resolved.name
     return (
         json.dumps(submissions, separators=(",", ":"), sort_keys=True).encode(),
         json.dumps(companyfacts, separators=(",", ":"), sort_keys=True).encode(),
@@ -130,23 +144,33 @@ def _store_snapshots(
     retrieved_at: datetime,
     marker: str,
     annual_assets: str = "5000",
+    configuration: SecAssetConfiguration | None = None,
 ) -> tuple[RawRecord, RawRecord]:
+    resolved = configuration or aapl_sec_configuration()
     submissions, companyfacts = _prepared_documents(
         marker=marker,
         annual_assets=annual_assets,
+        configuration=resolved,
     )
     client = SecEdgarClient(
         FixtureTransport(submissions, companyfacts),
         SecEdgarIdentity("Investment Analyst integration@example.com"),
+        cik=resolved.cik,
+        ticker=resolved.ticker,
         sleep=lambda _: None,
         clock=lambda: retrieved_at,
     )
     records = tuple(
-        sec_document_to_raw_record(document)
-        for document in client.fetch_aapl_issuer_documents().documents
+        sec_document_to_raw_record(document, resolved)
+        for document in client.fetch_issuer_documents().documents
     )
-    storage.assets.upsert(create_sec_aapl_asset())
-    for source in get_sec_source_definitions():
+    asset = (
+        create_sec_aapl_asset()
+        if resolved.asset_id == aapl_sec_configuration().asset_id
+        else create_sec_asset(resolved)
+    )
+    storage.assets.upsert(asset)
+    for source in get_sec_source_definitions(resolved):
         storage.sources.upsert(source)
     for record in records:
         try:
@@ -257,3 +281,60 @@ def test_pipeline_creates_reuses_and_versions_observations(tmp_path: Path) -> No
         assert storage.diagnostics.list() == []
         assert len(storage.raw_records.list(source_id="sec-edgar:aapl:companyfacts")) == 3
         assert json.loads(json.dumps(corrected.to_json_dict()))["facts_selected"] == 16
+
+
+def test_observation_pipeline_keeps_two_sec_issuers_isolated(tmp_path: Path) -> None:
+    amd = SecAssetConfiguration(
+        asset_id="equity:us:amd",
+        cik="0000002488",
+        ticker="AMD",
+        submissions_source_id="sec-edgar:amd:submissions",
+        companyfacts_source_id="sec-edgar:amd:companyfacts",
+        name="Advanced Micro Devices, Inc.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NASDAQ",
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        _store_snapshots(
+            storage,
+            retrieved_at=FIRST_RETRIEVAL,
+            marker="Apple snapshot",
+        )
+        apple_pipeline = SecAaplObservationPipeline(
+            storage,
+            SecCompanyFactsNormalizer(),
+            clock=lambda: NORMALIZED_AT,
+        )
+        apple_summary = apple_pipeline.run()
+
+        _store_snapshots(
+            storage,
+            retrieved_at=FIRST_RETRIEVAL,
+            marker="AMD snapshot",
+            configuration=amd,
+        )
+        amd_pipeline = SecIssuerObservationPipeline(
+            storage,
+            SecCompanyFactsNormalizer(amd),
+            configuration=amd,
+            clock=lambda: NORMALIZED_AT,
+        )
+        amd_first = amd_pipeline.run()
+        amd_second = amd_pipeline.run()
+
+        apple_observations = storage.observations.list(asset_id="equity:us:aapl")
+        amd_observations = storage.observations.list(asset_id=amd.asset_id)
+        assert apple_summary.observations_created == 16
+        assert amd_first.observations_created == 16
+        assert amd_second.observations_created == 0
+        assert amd_second.observations_reused == 16
+        assert len(apple_observations) == 16
+        assert len(amd_observations) == 16
+        assert {item.observation_id for item in apple_observations}.isdisjoint(
+            {item.observation_id for item in amd_observations}
+        )
+        assert {item.source.source_id for item in amd_observations} == {amd.companyfacts_source_id}
+        assert storage.metric_results.list() == []
+        assert storage.diagnostics.list() == []

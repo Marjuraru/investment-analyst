@@ -11,6 +11,7 @@ from uuid import UUID, uuid5
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from investment_analyst.core.models import (
+    AssetClass,
     DataQuality,
     NormalizedObservation,
     RawRecord,
@@ -265,6 +266,10 @@ class AlpacaHistoricalPipeline:
             feed=FEED,
             adjustment=ADJUSTMENT,
             source_id=SOURCE_ID,
+            name="Apple Inc.",
+            asset_class=AssetClass.EQUITY,
+            quote_currency="USD",
+            exchange="NASDAQ",
         )
         if self._configuration.source_id != (
             f"alpaca-market-data:iex:{self._configuration.symbol.lower()}:daily-bars:adjustment-all"

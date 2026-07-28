@@ -1,4 +1,4 @@
-"""Point-in-time selection of persisted Apple fundamental metric revisions."""
+"""Point-in-time selection of persisted SEC issuer metric revisions."""
 
 from collections import defaultdict
 from collections.abc import Iterable
@@ -7,15 +7,12 @@ from decimal import Decimal
 from uuid import UUID
 
 from investment_analyst.core.models import DataFrequency, DataQuality, MetricResult
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_diagnostic_models import (
     SecFundamentalDiagnosticInput,
     SecFundamentalDiagnosticMetric,
     SecFundamentalDiagnosticRequest,
     SecFundamentalDiagnosticSelection,
-)
-from investment_analyst.providers.fundamentals.sec_fact_models import (
-    ASSET_ID,
-    COMPANYFACTS_SOURCE_ID,
 )
 from investment_analyst.providers.fundamentals.sec_metric_models import (
     SEC_FUNDAMENTAL_METRIC_DEFINITIONS,
@@ -25,6 +22,9 @@ from investment_analyst.providers.fundamentals.sec_metric_models import (
 )
 from investment_analyst.providers.fundamentals.sec_metric_pipeline import (
     sec_fundamental_metric_result_id,
+)
+from investment_analyst.providers.fundamentals.sec_raw_records import (
+    aapl_sec_configuration,
 )
 from investment_analyst.storage import LocalStorage
 
@@ -167,9 +167,12 @@ def _semantic_identity(metric: SecFundamentalDiagnosticMetric) -> tuple[object, 
     )
 
 
-def _validate_metric(result: MetricResult) -> SecFundamentalDiagnosticMetric:
+def _validate_metric(
+    result: MetricResult,
+    configuration: SecAssetConfiguration,
+) -> SecFundamentalDiagnosticMetric:
     definition = get_sec_fundamental_metric_definition(result.metric_key)
-    if result.asset_id != ASSET_ID:
+    if result.asset_id != configuration.asset_id:
         raise MalformedFundamentalMetricError("fundamental metric belongs to another asset")
     if result.unit != definition.unit or result.unit != "ratio":
         raise MalformedFundamentalMetricError("fundamental metric unit is not ratio")
@@ -185,7 +188,7 @@ def _validate_metric(result: MetricResult) -> SecFundamentalDiagnosticMetric:
         raise MalformedFundamentalMetricError("fundamental metric timestamps must be UTC")
 
     source_id = _text_parameter(result, "source_id")
-    if source_id != COMPANYFACTS_SOURCE_ID:
+    if source_id != configuration.companyfacts_source_id:
         raise MalformedFundamentalMetricError("fundamental metric source is not Company Facts")
     frequency = _metric_frequency(result)
     period_end = _datetime_parameter(result, "period_end")
@@ -276,9 +279,19 @@ def _validate_metric(result: MetricResult) -> SecFundamentalDiagnosticMetric:
 class SecFundamentalDiagnosticSelector:
     """Select one unambiguous point-in-time fundamental metric period."""
 
-    def __init__(self, storage: LocalStorage) -> None:
+    def __init__(
+        self,
+        storage: LocalStorage,
+        configuration: SecAssetConfiguration | None = None,
+    ) -> None:
         storage.require_open()
         self._storage = storage
+        self._configuration = configuration or aapl_sec_configuration()
+
+    @property
+    def configuration(self) -> SecAssetConfiguration:
+        """Return the immutable SEC issuer configuration used by this selector."""
+        return self._configuration
 
     def select(
         self,
@@ -286,15 +299,30 @@ class SecFundamentalDiagnosticSelector:
     ) -> SecFundamentalDiagnosticSelection:
         """Read persisted metrics once and select the requested current revisions."""
         self._storage.require_open()
+        if request.asset_id != self._configuration.asset_id:
+            raise SecFundamentalDiagnosticSelectionError(
+                "request asset_id does not match the configured SEC issuer"
+            )
         results = tuple(self._storage.metric_results.list(asset_id=request.asset_id))
-        return self.select_from_results(request, results)
+        return self.select_from_results(
+            request,
+            results,
+            configuration=self._configuration,
+        )
 
     @staticmethod
     def select_from_results(
         request: SecFundamentalDiagnosticRequest,
         results: Iterable[MetricResult],
+        *,
+        configuration: SecAssetConfiguration | None = None,
     ) -> SecFundamentalDiagnosticSelection:
         """Select from an explicit collection without additional storage access."""
+        resolved = configuration or aapl_sec_configuration()
+        if request.asset_id != resolved.asset_id:
+            raise SecFundamentalDiagnosticSelectionError(
+                "request asset_id does not match the configured SEC issuer"
+            )
         result_tuple = tuple(results)
         eligible: list[SecFundamentalDiagnosticMetric] = []
         for result in result_tuple:
@@ -304,7 +332,7 @@ class SecFundamentalDiagnosticSelector:
                 continue
             if result.available_at > request.known_at:
                 continue
-            metric = _validate_metric(result)
+            metric = _validate_metric(result, resolved)
             if metric.frequency is not request.frequency:
                 continue
             eligible.append(metric)

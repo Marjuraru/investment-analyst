@@ -26,8 +26,9 @@ Herramienta personal para recolectar, procesar, relacionar, visualizar y explica
 
 ## Estado actual
 
-El proyecto ya dispone de un flujo básico funcional por CLI, centrado en Apple y ejecutado de forma
-local:
+El proyecto ya dispone de un flujo básico funcional local. Apple conserva el bootstrap y la
+experiencia web completa; la actualización fundamental SEC también puede ejecutarse por CLI para
+emisores corporativos declarados en el catálogo:
 
 - workspace persistente con DuckDB, RawRecords, observaciones normalizadas, métricas, diagnósticos y
   exportación Parquet;
@@ -40,7 +41,10 @@ local:
   ventana acotada de 24 horas sin sustituir la ruta diaria;
 - sondeo acotado y de solo lectura de las rutas oficiales SMV/BVL candidatas, sin persistencia ni
   activación prematura de un conector de mercado peruano;
-- obtención oficial de fundamentales de Apple mediante SEC EDGAR;
+- obtención oficial de fundamentales mediante SEC EDGAR; Apple conserva el flujo completo histórico
+  y diez emisores genéricos —AMD, Intel, Strategy, Micron, Palantir, CDE, HYMC, MUX, NEM y SCCO—
+  reutilizan refresh, consultas, cachés y presentación web por `asset_id`, validados contra sus
+  filings reales sin mezclar mercado ni emisores;
 - base de investigación fundamental con 31 hechos SEC adicionales y 40 métricas descriptivas
   versionadas, calculadas point-in-time con `Decimal`, evidencia exacta por input y estadísticas
   históricas separadas para cambios, media, rango y CAGR válido; cada métrica aparece una sola vez,
@@ -107,6 +111,8 @@ información de la que realmente contienen.
   mantener el servicio local mediante `systemd --user`.
 - [Base intradía de Coinbase](docs/coinbase_intraday.md): importar ventanas acotadas de un minuto y
   consultar agregaciones trazables por CLI o interfaz sin mezclar la historia diaria.
+- [Refresh fundamental SEC por emisor](docs/sec_issuer_refresh.md): actualizar snapshots,
+  observaciones, métricas y diagnóstico de una empresa configurada sin acoplarla a su mercado.
 - [Estrategia BVL/SMV](docs/bvl_market_strategy.md): plan gratuito por fases para identidad,
   cotización diferida, fundamentales y futura sustitución de proveedores.
 - [Integración continua](docs/continuous_integration.md): validar automáticamente cada pull request.

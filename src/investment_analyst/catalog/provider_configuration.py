@@ -5,6 +5,7 @@ from investment_analyst.providers.asset_config import (
     AlpacaAssetConfiguration,
     CoinbaseAssetConfiguration,
     SecAssetConfiguration,
+    sec_source_ids,
 )
 from investment_analyst.providers.crypto.coinbase_exchange import (
     DAILY_GRANULARITY_SECONDS,
@@ -18,10 +19,6 @@ from investment_analyst.providers.crypto.coinbase_normalizer import (
 )
 from investment_analyst.providers.crypto.coinbase_normalizer import SOURCE_ID as COINBASE_SOURCE_ID
 from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID as APPLE_ASSET_ID
-from investment_analyst.providers.fundamentals.sec_raw_records import (
-    COMPANY_FACTS_SOURCE_ID,
-    SUBMISSIONS_SOURCE_ID,
-)
 from investment_analyst.providers.market.alpaca_normalizer import alpaca_source_id
 from investment_analyst.providers.market.alpaca_stock import ADJUSTMENT, FEED
 
@@ -96,7 +93,7 @@ def resolve_sec_configuration(
     *,
     asset_id: str = APPLE_ASSET_ID,
 ) -> SecAssetConfiguration:
-    """Resolve the current Apple SEC issuer configuration once."""
+    """Resolve one catalog-backed SEC corporate issuer configuration."""
     context = resolver.resolve(
         asset_id,
         provider="sec",
@@ -106,10 +103,16 @@ def resolve_sec_configuration(
             "fundamentals.submissions",
         ),
     )
+    ticker = context.require_identifier("ticker")
+    submissions_source_id, companyfacts_source_id = sec_source_ids(ticker)
     return SecAssetConfiguration(
         asset_id=context.asset.asset_id,
         cik=context.require_identifier("cik"),
-        ticker=context.require_identifier("ticker"),
-        submissions_source_id=SUBMISSIONS_SOURCE_ID,
-        companyfacts_source_id=COMPANY_FACTS_SOURCE_ID,
+        ticker=ticker,
+        submissions_source_id=submissions_source_id,
+        companyfacts_source_id=companyfacts_source_id,
+        name=context.asset.name,
+        asset_class=context.asset.asset_class,
+        quote_currency=context.asset.quote_currency,
+        exchange=context.asset.exchange or "UNKNOWN",
     )

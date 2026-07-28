@@ -1,4 +1,4 @@
-"""Strict models for auditable Apple SEC fundamental metrics."""
+"""Strict models for auditable SEC issuer fundamental metrics."""
 
 from datetime import date
 from decimal import Decimal
@@ -36,7 +36,7 @@ class SecMetricComparison(StrEnum):
 
 
 class SecFundamentalMetricRequest(ContractModel):
-    """Point-in-time request for Apple fundamental metrics."""
+    """Point-in-time request for one SEC issuer's fundamental metrics."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
@@ -57,9 +57,7 @@ class SecFundamentalMetricRequest(ContractModel):
 
     @model_validator(mode="after")
     def validate_scope(self) -> "SecFundamentalMetricRequest":
-        """Validate the fixed Apple scope and inclusive period range."""
-        if self.asset_id != ASSET_ID:
-            raise ValueError("asset_id must identify Apple")
+        """Validate the supported frequency and inclusive period range."""
         if self.frequency not in _ALLOWED_FREQUENCIES:
             raise ValueError("frequency must be annual or quarterly")
         if (
@@ -180,8 +178,6 @@ class SecFundamentalMetricCandidate(ContractModel):
         definition = _DEFINITION_BY_NAME.get(self.metric_name)
         if definition is None:
             raise ValueError("metric_name is not supported")
-        if self.asset_id != ASSET_ID:
-            raise ValueError("asset_id must identify Apple")
         if self.frequency not in _ALLOWED_FREQUENCIES:
             raise ValueError("frequency must be annual or quarterly")
         if self.unit != definition.unit or self.formula != definition.formula:
