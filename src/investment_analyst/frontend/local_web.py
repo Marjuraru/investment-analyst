@@ -52,6 +52,7 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
     BtcMarketChart,
     BtcMarketChartRequest,
+    ListedMarketChart,
 )
 from investment_analyst.analytics.market.chart_service import (
     AaplMarketChartQueryError,
@@ -83,6 +84,18 @@ from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshSummary,
 )
 from investment_analyst.application.facade import InvestmentAnalystApplication
+from investment_analyst.application.listed_market_refresh import (
+    ListedMarketKnownAtTooEarlyError,
+    ListedMarketRefreshError,
+)
+from investment_analyst.application.listed_market_refresh_models import (
+    ListedMarketRefreshRequest,
+    ListedMarketRefreshSummary,
+)
+from investment_analyst.application.market_universe import (
+    MarketAssetDescriptor,
+    MarketAssetUniverse,
+)
 from investment_analyst.application.operational_models import (
     AaplDailyRunRequestSnapshot,
     AaplDailyRunState,
@@ -137,6 +150,10 @@ class _RunnerOperations(Protocol):
 
 
 class _ApplicationOperations(Protocol):
+    def list_market_assets(self) -> MarketAssetUniverse:
+        """Return the catalog-backed assets supported by the local market UI."""
+        ...
+
     def query_aapl_diagnostics(
         self,
         request: ConsolidatedDiagnosticRequest,
@@ -164,6 +181,16 @@ class _ApplicationOperations(Protocol):
         """Query one bounded persisted Coinbase chart."""
         ...
 
+    def query_listed_market_chart(
+        self,
+        request: AaplMarketChartRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> ListedMarketChart:
+        """Query one bounded catalog-backed Alpaca chart."""
+        ...
+
     def query_btc_intraday_chart(
         self,
         request: BtcIntradayChartRequest,
@@ -189,6 +216,16 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> BtcMarketRefreshSummary:
         """Update Coinbase BTC-USD and persist independent market analytics."""
+        ...
+
+    def refresh_listed_market(
+        self,
+        request: ListedMarketRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        alpaca_credentials: AlpacaCredentials,
+    ) -> ListedMarketRefreshSummary:
+        """Update one Alpaca listed asset and persist independent analytics."""
         ...
 
     def query_aapl_fundamental_trend(
@@ -229,6 +266,10 @@ class _ApplicationOperations(Protocol):
 
 
 class _WebOperations(Protocol):
+    def market_assets(self) -> dict[str, object]:
+        """Return the catalog-backed market watchlist."""
+        ...
+
     def overview(self) -> dict[str, object]:
         """Return operational and scheduler state."""
         ...
@@ -303,6 +344,9 @@ class AaplLocalController:
         self._operation_lock = threading.RLock()
         self._market_chart_cache: dict[AaplMarketChartRequest, AaplMarketChart] = {}
         self._btc_market_chart_cache: dict[BtcMarketChartRequest, BtcMarketChart] = {}
+        self._listed_market_chart_cache: dict[
+            tuple[str, AaplMarketChartRequest], ListedMarketChart
+        ] = {}
         self._btc_intraday_chart_cache: dict[BtcIntradayChartRequest, BtcIntradayChart] = {}
         self._fundamental_trend_cache: dict[AaplFundamentalTrendRequest, AaplFundamentalTrend] = {}
         self._fundamental_research_cache: dict[
@@ -314,6 +358,7 @@ class AaplLocalController:
         self._fundamental_analysis_cache: dict[
             AaplFundamentalResearchRequest, AaplFundamentalAnalysisResult
         ] = {}
+        self._market_assets = self._application.list_market_assets()
 
     @classmethod
     def create_default(
@@ -341,6 +386,10 @@ class AaplLocalController:
         with self._operation_lock:
             return self._runner.inspect(workspace=self._workspace)
 
+    def market_assets(self) -> MarketAssetUniverse:
+        """Return the immutable market universe resolved at process startup."""
+        return self._market_assets
+
     def run_payload(self, payload: dict[str, object]) -> AaplDailyRunState:
         """Validate the stable request snapshot and execute it once."""
         snapshot = AaplDailyRunRequestSnapshot.model_validate(payload)
@@ -359,6 +408,7 @@ class AaplLocalController:
             finally:
                 self._market_chart_cache.clear()
                 self._btc_market_chart_cache.clear()
+                self._listed_market_chart_cache.clear()
                 self._btc_intraday_chart_cache.clear()
                 self._fundamental_trend_cache.clear()
                 self._fundamental_research_cache.clear()
@@ -406,6 +456,27 @@ class AaplLocalController:
             self._btc_market_chart_cache[request] = chart
             return chart
 
+    def listed_market_chart_request(
+        self,
+        asset_id: str,
+        request: AaplMarketChartRequest,
+    ) -> ListedMarketChart:
+        """Query one cached catalog-backed Alpaca chart without writes."""
+        cache_key = (asset_id, request)
+        with self._operation_lock:
+            cached = self._listed_market_chart_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            chart = self._application.query_listed_market_chart(
+                request,
+                asset_id=asset_id,
+                location=StorageLocationRequest(workspace=self._workspace),
+            )
+            if len(self._listed_market_chart_cache) >= _MAX_READ_CACHE_ENTRIES:
+                self._listed_market_chart_cache.pop(next(iter(self._listed_market_chart_cache)))
+            self._listed_market_chart_cache[cache_key] = chart
+            return chart
+
     def btc_intraday_chart_request(
         self,
         request: BtcIntradayChartRequest,
@@ -437,6 +508,21 @@ class AaplLocalController:
                 )
             finally:
                 self._btc_market_chart_cache.clear()
+
+    def listed_market_refresh_request(
+        self,
+        request: ListedMarketRefreshRequest,
+    ) -> ListedMarketRefreshSummary:
+        """Execute one Alpaca market-only refresh through the writer mutex."""
+        with self._operation_lock:
+            try:
+                return self._application.refresh_listed_market(
+                    request,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                    alpaca_credentials=self._alpaca_credentials,
+                )
+            finally:
+                self._listed_market_chart_cache.clear()
 
     def btc_intraday_refresh_request(
         self,
@@ -548,6 +634,10 @@ class AaplLocalWebApplication:
             "scheduler": scheduler,
         }
 
+    def market_assets(self) -> dict[str, object]:
+        """Return one immutable catalog-driven watchlist."""
+        return self._controller.market_assets().to_json_dict()
+
     def report(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate query parameters and return the versioned report contract."""
         allowed = {
@@ -617,6 +707,13 @@ class AaplLocalWebApplication:
         if asset_id == "crypto:btc-usd":
             request = BtcMarketChartRequest.model_validate(request_parameters)
             return self._controller.btc_market_chart_request(request).to_json_dict()
+        descriptor = self._market_asset(asset_id)
+        if descriptor.provider == "alpaca":
+            request = AaplMarketChartRequest.model_validate(request_parameters)
+            return self._controller.listed_market_chart_request(
+                asset_id,
+                request,
+            ).to_json_dict()
         raise ValueError("market chart asset_id is not supported")
 
     def market_intraday(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
@@ -679,14 +776,32 @@ class AaplLocalWebApplication:
         return self._controller.run_payload(payload).to_json_dict()
 
     def market_refresh(self, payload: dict[str, object]) -> dict[str, object]:
-        """Validate and execute one explicit Coinbase-only refresh."""
-        request = BtcMarketRefreshRequest.model_validate(payload)
-        return self._controller.btc_market_refresh_request(request).to_json_dict()
+        """Validate and execute one explicit market-only refresh."""
+        asset_id = payload.get("asset_id")
+        if asset_id == "crypto:btc-usd":
+            request = BtcMarketRefreshRequest.model_validate(payload)
+            return self._controller.btc_market_refresh_request(request).to_json_dict()
+        descriptor = self._market_asset(asset_id)
+        if descriptor.provider == "alpaca" and descriptor.refresh_kind == "market_only":
+            request = ListedMarketRefreshRequest.model_validate(payload)
+            return self._controller.listed_market_refresh_request(request).to_json_dict()
+        raise ValueError("market refresh asset_id is not supported")
 
     def market_intraday_refresh(self, payload: dict[str, object]) -> dict[str, object]:
         """Validate and execute one explicit bounded Coinbase minute refresh."""
         request = BtcIntradayRefreshRequest.model_validate(payload)
         return self._controller.btc_intraday_refresh_request(request).to_json_dict()
+
+    def _market_asset(self, asset_id: object) -> MarketAssetDescriptor:
+        """Resolve one visible asset without maintaining a second allowlist."""
+        if not isinstance(asset_id, str):
+            raise ValueError("market asset_id must be a string")
+        candidates = tuple(
+            item for item in self._controller.market_assets().assets if item.asset_id == asset_id
+        )
+        if len(candidates) != 1:
+            raise ValueError("market asset_id is not supported")
+        return candidates[0]
 
 
 class AaplLocalHttpServer(ThreadingHTTPServer):
@@ -750,6 +865,9 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 )
             if parsed.path == "/api/overview":
                 self._send_json(HTTPStatus.OK, server.application.overview())
+                return
+            if parsed.path == "/api/market-assets":
+                self._send_json(HTTPStatus.OK, server.application.market_assets())
                 return
             if parsed.path == "/api/report":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=8)
@@ -891,13 +1009,16 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 else HTTPStatus.SERVICE_UNAVAILABLE
             )
             self._send_error(status, error.failure.category, error.failure.message)
-        elif isinstance(error, BtcMarketKnownAtTooEarlyError):
+        elif isinstance(
+            error,
+            (BtcMarketKnownAtTooEarlyError, ListedMarketKnownAtTooEarlyError),
+        ):
             self._send_error(
                 HTTPStatus.UNPROCESSABLE_ENTITY,
                 "known_at_too_early",
                 str(error)[:500],
             )
-        elif isinstance(error, BtcMarketRefreshError):
+        elif isinstance(error, (ListedMarketRefreshError, BtcMarketRefreshError)):
             self._send_error(
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 "market_refresh_failed",

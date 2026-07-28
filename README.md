@@ -56,9 +56,12 @@ local:
 - ejecución operativa única con lock por workspace, estado atómico versionado, errores acotados y
   health check de solo lectura, preparada para un programador externo;
 - interfaz web local compacta para ejecutar el flujo, consultar el reporte, revisar la evidencia y
-  alternar entre Apple y Bitcoin; BTC-USD usa el histórico diario público de Coinbase Exchange y
-  un modo exclusivamente de mercado, sin inventar fundamentales. Permite actualizarlo de forma
-  incremental y auditable desde la propia página. Para ambos activos permite explorar OHLC,
+  seleccionar desde un catálogo central Apple, Bitcoin y una lista inicial de acciones y ETF
+  estadounidenses disponible mediante Alpaca IEX gratuito. Incluye AMD, Barrick (`B`), BVN, CDE,
+  HYMC, INTC, MSTR, MU, MUX, NEM, PLTR, SCCO, TSM, GBTC, GLD e IBIT sin codificar una ruta distinta
+  por símbolo. BTC-USD usa el histórico diario público de Coinbase Exchange y un modo exclusivamente
+  de mercado, sin inventar fundamentales. Cada activo de mercado puede actualizarse de forma
+  incremental y auditable desde la propia página. La interfaz permite explorar OHLC,
   actividad, retorno, volatilidad, volumen relativo y tres SMA configurables
   por ventana y color —5, 20 y 50 de forma predeterminada—, con escala de precio lineal o logarítmica,
   gráfico de línea o velas, zoom exclusivo con la rueda del mouse, desplazamiento horizontal por
@@ -79,11 +82,13 @@ local:
 
 El MVP actual no incluye alertas, autenticación o exposición remota, inicio automático desde
 Windows Task Scheduler, ejecución de órdenes ni recomendaciones de inversión. La programación
-continua actualiza Apple; BTC-USD se actualiza manualmente desde la misma interfaz. Nuevos activos,
-indicadores o fuentes requieren fases de diseño y validación independientes.
+continua actualiza Apple; BTC-USD y los demás activos de mercado se actualizan manualmente desde la
+misma interfaz. Activos fuera del catálogo, indicadores o fuentes nuevas requieren fases de diseño
+y validación independientes.
 
 La ampliación de [investigación fundamental](docs/fundamental_research_foundation.md), la
-[estrategia de datos históricos](docs/historical_research_data.md), las
+[estrategia de datos históricos](docs/historical_research_data.md), la
+[estrategia de historia larga y noticias](docs/research_information_strategy.md), las
 [referencias de interfaz profesional](docs/professional_analysis_interface.md) y el futuro dominio
 [Cazatiburones](docs/cazatiburones.md) tienen contratos separados para no atribuir a los datos más
 información de la que realmente contienen.

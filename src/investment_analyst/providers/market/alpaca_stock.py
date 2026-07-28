@@ -1,4 +1,4 @@
-"""Read-only Alpaca Market Data client for historical AAPL daily bars."""
+"""Read-only Alpaca Market Data client for catalog-backed daily stock bars."""
 
 import json
 import re
@@ -49,7 +49,7 @@ class AlpacaCredentials:
 
 @dataclass(frozen=True, slots=True)
 class AlpacaStockBar:
-    """Validated immutable AAPL bar from the Alpaca IEX market-data feed."""
+    """Validated immutable listed-asset bar from the Alpaca IEX feed."""
 
     symbol: str
     timestamp: datetime
@@ -63,8 +63,8 @@ class AlpacaStockBar:
     raw_values: Mapping[str, str]
 
     def __post_init__(self) -> None:
-        if self.symbol != SUPPORTED_SYMBOL or not _SYMBOL_PATTERN.fullmatch(self.symbol):
-            raise AlpacaStockError("only the AAPL symbol is supported")
+        if not _SYMBOL_PATTERN.fullmatch(self.symbol):
+            raise AlpacaStockError("Alpaca symbol has an invalid format")
         timestamp = _utc_datetime(self.timestamp, field_name="timestamp")
         object.__setattr__(self, "timestamp", timestamp)
 
@@ -161,9 +161,9 @@ class AlpacaStockClient:
         start: datetime,
         end: datetime,
     ) -> AlpacaStockFetchResult:
-        """Fetch all pages, then validate, filter, order, and deduplicate AAPL bars."""
-        if symbol != SUPPORTED_SYMBOL:
-            raise AlpacaStockError("only AAPL is supported in this project step")
+        """Fetch all pages, then validate, filter, order, and deduplicate one symbol."""
+        if not _SYMBOL_PATTERN.fullmatch(symbol):
+            raise AlpacaStockError("Alpaca symbol has an invalid format")
         requested_start = _utc_datetime(start, field_name="start")
         requested_end = _utc_datetime(end, field_name="end")
         if requested_start >= requested_end:
@@ -202,7 +202,7 @@ class AlpacaStockClient:
                     bars_by_timestamp[bar.timestamp] = bar
                 elif existing != bar:
                     raise AlpacaStockError(
-                        f"conflicting AAPL bars were returned for {bar.timestamp.isoformat()}"
+                        f"conflicting {symbol} bars were returned for {bar.timestamp.isoformat()}"
                     )
             if next_page_token is None:
                 break
@@ -291,9 +291,9 @@ def _parse_page(symbol: str, body: bytes) -> tuple[tuple[AlpacaStockBar, ...], s
         raise AlpacaStockError("Alpaca response bars must be a list or null")
     response_symbol = decoded.get("symbol")
     if response_symbol is not None and response_symbol != symbol:
-        raise AlpacaStockError("Alpaca response symbol does not match AAPL")
+        raise AlpacaStockError("Alpaca response symbol does not match the request")
     if bars and response_symbol != symbol:
-        raise AlpacaStockError("non-empty Alpaca responses must identify the AAPL symbol")
+        raise AlpacaStockError("non-empty Alpaca responses must identify the requested symbol")
     if len(bars) > _MAX_BARS_PER_RESPONSE:
         raise AlpacaStockError("Alpaca returned an unjustified number of bars")
     next_page_token = decoded.get("next_page_token")

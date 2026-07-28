@@ -81,6 +81,24 @@ def test_factories_preserve_current_provider_and_persisted_identities() -> None:
     assert len(sec.cik) == 10
 
 
+def test_alpaca_configuration_scales_from_catalog_without_changing_apple_identity() -> None:
+    resolver = _resolver()
+
+    bvn = resolve_alpaca_configuration(resolver, asset_id="equity:us:bvn")
+    gld = resolve_alpaca_configuration(resolver, asset_id="etf:us:gld")
+
+    assert (bvn.symbol, bvn.source_id, bvn.exchange) == (
+        "BVN",
+        "alpaca-market-data:iex:bvn:daily-bars:adjustment-all",
+        "NYSE",
+    )
+    assert (gld.symbol, gld.source_id, gld.asset_class.value) == (
+        "GLD",
+        "alpaca-market-data:iex:gld:daily-bars:adjustment-all",
+        "etf",
+    )
+
+
 def test_configurations_are_strict_frozen_and_preserve_identifier_text() -> None:
     configuration = resolve_sec_configuration(_resolver())
 

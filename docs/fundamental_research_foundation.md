@@ -111,10 +111,15 @@ investigación para ampliar datos y reglas, pero no crean paneles duplicados ni 
 interfaz.
 
 La clasificación empresarial muestra desde el inicio las categorías crecimiento lento, empresa
-estable, crecimiento rápido, cíclica, recuperación y activo oculto. Aunque ya existen series por
-acción, todavía faltan reglas de crecimiento comparable, sensibilidad cíclica, evidencia de
-reestructuración y valoración de activos; por ello, el contrato devuelve explícitamente
-`insufficient_evidence` y no inventa una categoría.
+estable, crecimiento rápido, cíclica, recuperación y activo oculto. La regla cuantitativa v1 puede
+clasificar las tres primeras cuando existen al menos cuatro ejercicios y tres años comparables con
+CAGR positivo de EPS diluido e ingresos por acción. Publica los rangos, períodos, valores,
+versiones e identidades de observación usados. Si los dos indicadores no coinciden en una única
+categoría o la historia no alcanza, devuelve `insufficient_evidence` en lugar de aproximar.
+
+Las categorías cíclica, recuperación y activo oculto permanecen sin asignación automática: exigen
+respectivamente series macro o sectoriales versionadas, evidencia de reestructuración y continuidad,
+o una tasación identificable de activos. No se deducen solo de Company Facts.
 
 El endpoint local `/api/fundamental-analysis` devuelve `aapl-fundamental-analysis-v1` e incorpora sin
 alteraciones el historial `aapl-fundamental-research-history-v2`, por lo que cada métrica conserva
@@ -128,8 +133,9 @@ frecuencias y vintages separados. Tampoco se mezclarán con el dominio
 [`Cazatiburones`](cazatiburones.md), que exige filings de propiedad o evidencia on-chain propia.
 
 No se generará una puntuación conjunta de "gurús", recomendación o valor intrínseco falsamente
-preciso. La siguiente ampliación fundamental requiere crecimiento comparable, retornos sobre saldos
-promedio, valoración, clasificación empresarial y sus ajustes sectoriales explícitos.
+preciso. La siguiente ampliación fundamental requiere retornos sobre saldos promedio, valoración,
+ajustes sectoriales explícitos y la evidencia externa necesaria para las tres categorías aún no
+resueltas.
 
 El mantenimiento económico de capex no es un hecho SEC directamente observable. Por ello, el FCF
 contable y cualquier aproximación a owner earnings deberán permanecer claramente diferenciados.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch Apple IEX daily bars into an explicit local storage root."""
+"""Fetch catalog-backed Alpaca IEX daily bars into explicit local storage."""
 
 import argparse
 import json
@@ -40,13 +40,18 @@ def _parse_date(value: str) -> datetime:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     add_storage_location_arguments(parser)
+    parser.add_argument(
+        "--asset-id",
+        default="equity:us:aapl",
+        help="Catalog asset with Alpaca market.daily_bars capability.",
+    )
     parser.add_argument("--start", required=True, type=_parse_date)
     parser.add_argument("--end", required=True, type=_parse_date)
     return parser
 
 
 def main() -> int:
-    """Run the read-only Alpaca Market Data import and print one JSON document."""
+    """Run the Alpaca Market Data import and print one JSON document."""
     arguments = _parser().parse_args()
     api_key = os.environ.get("ALPACA_API_KEY", "")
     secret_key = os.environ.get("ALPACA_API_SECRET", "")
@@ -65,7 +70,10 @@ def main() -> int:
 
     try:
         runtime = ApplicationRuntime.create_default()
-        configuration = resolve_alpaca_configuration(runtime.provider_resolver)
+        configuration = resolve_alpaca_configuration(
+            runtime.provider_resolver,
+            asset_id=arguments.asset_id,
+        )
         credentials = AlpacaCredentials(api_key=api_key, secret_key=secret_key)
         client = AlpacaStockClient(UrlLibHttpTransport(), credentials)
         with runtime.open_storage(

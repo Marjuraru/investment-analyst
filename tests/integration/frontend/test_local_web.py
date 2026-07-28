@@ -38,6 +38,7 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
     BtcMarketChart,
     BtcMarketChartRequest,
+    ListedMarketChart,
 )
 from investment_analyst.analytics.market.intraday_models import IntradayInterval
 from investment_analyst.application.aapl_bootstrap_models import AaplWorkspaceBootstrapRequest
@@ -51,6 +52,12 @@ from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshRequest,
     BtcMarketRefreshSummary,
 )
+from investment_analyst.application.facade import InvestmentAnalystApplication
+from investment_analyst.application.listed_market_refresh_models import (
+    ListedMarketRefreshRequest,
+    ListedMarketRefreshSummary,
+)
+from investment_analyst.application.market_universe import MarketAssetUniverse
 from investment_analyst.application.operational_models import (
     AaplDailyRunState,
     AaplOperationalHealth,
@@ -115,6 +122,10 @@ class _FakeApplication:
         self.btc_intraday_refresh_locations: list[StorageLocationRequest] = []
         self.btc_refresh_requests: list[BtcMarketRefreshRequest] = []
         self.btc_refresh_locations: list[StorageLocationRequest] = []
+        self.listed_chart_requests: list[tuple[str, AaplMarketChartRequest]] = []
+        self.listed_chart_locations: list[StorageLocationRequest] = []
+        self.listed_refresh_requests: list[ListedMarketRefreshRequest] = []
+        self.listed_refresh_locations: list[StorageLocationRequest] = []
         self.trend_requests: list[AaplFundamentalTrendRequest] = []
         self.trend_locations: list[StorageLocationRequest] = []
         self.research_requests: list[AaplFundamentalResearchRequest] = []
@@ -123,6 +134,9 @@ class _FakeApplication:
         self.research_history_locations: list[StorageLocationRequest] = []
         self.analysis_requests: list[AaplFundamentalResearchRequest] = []
         self.analysis_locations: list[StorageLocationRequest] = []
+
+    def list_market_assets(self) -> MarketAssetUniverse:
+        return InvestmentAnalystApplication.create_default().list_market_assets()
 
     def query_aapl_diagnostics(
         self,
@@ -178,6 +192,32 @@ class _FakeApplication:
             ),
         )
 
+    def query_listed_market_chart(
+        self,
+        request: AaplMarketChartRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> ListedMarketChart:
+        self.listed_chart_requests.append((asset_id, request))
+        self.listed_chart_locations.append(location)
+        return cast(
+            ListedMarketChart,
+            _JsonResult(
+                {
+                    "schema_version": "listed-market-chart-v1",
+                    "asset_id": asset_id,
+                    "source_id": (
+                        f"alpaca-market-data:iex:{asset_id.rsplit(':', 1)[-1]}:"
+                        "daily-bars:adjustment-all"
+                    ),
+                    "period": request.period.value,
+                    "interval": request.interval.value,
+                    "points": [],
+                }
+            ),
+        )
+
     def refresh_btc_market(
         self,
         request: BtcMarketRefreshRequest,
@@ -195,6 +235,31 @@ class _FakeApplication:
                     "effective_known_at": "2026-07-16T15:47:00+00:00",
                     "refresh_plan": {"mode": "incremental"},
                     "candles_received": 1,
+                    "metric_results_created": 7,
+                    "traceability_verified": True,
+                }
+            ),
+        )
+
+    def refresh_listed_market(
+        self,
+        request: ListedMarketRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        alpaca_credentials: AlpacaCredentials,
+    ) -> ListedMarketRefreshSummary:
+        del alpaca_credentials
+        self.listed_refresh_requests.append(request)
+        self.listed_refresh_locations.append(location)
+        return cast(
+            ListedMarketRefreshSummary,
+            _JsonResult(
+                {
+                    "schema_version": "listed-market-refresh-v1",
+                    "asset_id": request.asset_id,
+                    "effective_known_at": "2026-07-16T15:47:00+00:00",
+                    "refresh_plan": {"mode": "incremental"},
+                    "bars_received": 1,
                     "metric_results_created": 7,
                     "traceability_verified": True,
                 }
@@ -355,6 +420,9 @@ class _FakeApplication:
 
 
 class _ExplodingApplication:
+    def market_assets(self) -> dict[str, object]:
+        raise RuntimeError("unexpected SECRET detail")
+
     def overview(self) -> dict[str, object]:
         raise RuntimeError("unexpected SECRET detail")
 
@@ -497,8 +565,11 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'id="lima-clock"' in html
     assert 'id="new-york-clock"' in html
     assert 'id="nyse-session-status"' in html
-    assert "09:30–16:00 ET · lunes a viernes" in html
+    assert "09:30–16:00 ET" in html
     assert "no evalúa feriados ni cierres" in html
+    assert 'class="market-clock-strip"' in html
+    assert html.index('class="market-clock-strip"') < html.index('<main id="contenido"')
+    assert "market-clock-panel" not in html
     assert 'id="export-market-csv"' in html
     assert 'id="export-fundamental-csv"' in html
     assert 'id="export-fundamental-research-csv"' in html
@@ -546,7 +617,7 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "function newYorkRegularSessionState" in javascript
     assert 'document.addEventListener("visibilitychange", startMarketClocks)' in javascript
     assert "window.setTimeout(startMarketClocks, delay)" in javascript
-    assert ".market-clock-grid" in stylesheet
+    assert ".market-clock-strip" in stylesheet
     assert "window.requestAnimationFrame" in javascript
     assert 'event.key === "0"' in javascript
     assert "marketCsvRows(marketChartPayload, points)" in javascript
@@ -581,6 +652,10 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "latest_change_from_previous_available" in javascript
     assert "window.localStorage.setItem(THEME_STORAGE_KEY, theme)" in javascript
     assert "window.localStorage.setItem(CHART_SETTINGS_STORAGE_KEY" in javascript
+    assert 'id="market-asset-select"' in html
+    assert 'api("/api/market-assets")' in javascript
+    assert "marketAssetFromDescriptor(descriptor)" in javascript
+    assert "MARKET_ASSETS" not in javascript
     assert "chart.sma_windows[0] !== chartSettings.shortWindow" in javascript
     assert 'parameters.set("short_sma_window", String(chartSettings.shortWindow))' in javascript
     assert 'parameters.set("long_sma_window", String(chartSettings.longWindow))' in javascript
@@ -647,6 +722,7 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
 
     with _server(web) as (_, root):
         overview_status, overview, _ = _json_request(Request(f"{root}/api/overview"))
+        assets_status, assets, _ = _json_request(Request(f"{root}/api/market-assets"))
         payload = json.dumps(
             {
                 "asset_id": "equity:us:aapl",
@@ -709,6 +785,17 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
         cached_btc_chart_status, cached_btc_chart, _ = _json_request(
             Request(f"{root}/api/market-chart?{btc_chart_parameters}")
         )
+        listed_chart_parameters = urlencode(
+            {
+                "asset_id": "equity:us:bvn",
+                "known_at": "2026-07-16T15:46:09Z",
+                "period": "1y",
+                "interval": "1d",
+            }
+        )
+        listed_chart_status, listed_chart, _ = _json_request(
+            Request(f"{root}/api/market-chart?{listed_chart_parameters}")
+        )
         btc_intraday_parameters = urlencode(
             {
                 "asset_id": "crypto:btc-usd",
@@ -735,6 +822,23 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
             Request(
                 f"{root}/api/market-refresh",
                 data=btc_refresh_payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        listed_refresh_payload = json.dumps(
+            {
+                "asset_id": "equity:us:bvn",
+                "market_start": "2016-01-01",
+                "market_end": "2026-07-15",
+                "refresh_mode": "auto",
+                "requested_known_at": None,
+            }
+        ).encode("utf-8")
+        listed_refresh_status, listed_refresh, _ = _json_request(
+            Request(
+                f"{root}/api/market-refresh",
+                data=listed_refresh_payload,
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
@@ -800,6 +904,10 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert overview_status == 200
     assert overview["operational"]["status"] == "ready"
     assert overview["scheduler"] == {"enabled": False}
+    assert assets_status == 200
+    assert assets["schema_version"] == "market-asset-universe-v1"
+    assert assets["catalog_version"] == 1
+    assert len(assets["assets"]) == 18
     assert run_status == 200 and run["status"] == "succeeded"
     assert runner.requests[0].market_start == date(2025, 1, 1)
     assert runner.requests[0].market_end == date(2026, 7, 15)
@@ -834,6 +942,11 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert application.btc_chart_requests[0].interval.value == "1d"
     assert application.btc_chart_requests[0].session_limit == 20_000
     assert application.btc_chart_locations[0].workspace == workspace.resolve()
+    assert listed_chart_status == 200
+    assert listed_chart["schema_version"] == "listed-market-chart-v1"
+    assert listed_chart["asset_id"] == "equity:us:bvn"
+    assert application.listed_chart_requests[0][0] == "equity:us:bvn"
+    assert application.listed_chart_locations[0].workspace == workspace.resolve()
     assert btc_intraday_status == 200
     assert btc_intraday["schema_version"] == "btc-intraday-chart-v1"
     assert btc_intraday["interval"] == "5m"
@@ -855,6 +968,10 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
         )
     ]
     assert application.btc_refresh_locations[0].workspace == workspace.resolve()
+    assert listed_refresh_status == 200
+    assert listed_refresh["schema_version"] == "listed-market-refresh-v1"
+    assert application.listed_refresh_requests[0].asset_id == "equity:us:bvn"
+    assert application.listed_refresh_locations[0].workspace == workspace.resolve()
     assert btc_intraday_refresh_status == 200
     assert btc_intraday_refresh["schema_version"] == "btc-intraday-refresh-v1"
     assert btc_intraday_refresh["traceability_verified"] is True

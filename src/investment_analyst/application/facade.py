@@ -44,10 +44,12 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
     BtcMarketChart,
     BtcMarketChartRequest,
+    ListedMarketChart,
 )
 from investment_analyst.analytics.market.chart_service import (
     AaplMarketChartService,
     BtcMarketChartService,
+    ListedMarketChartService,
 )
 from investment_analyst.analytics.market.diagnostic_pipeline import MarketDiagnosticPipeline
 from investment_analyst.analytics.market.diagnostic_rules import MarketDiagnosticEngine
@@ -62,6 +64,7 @@ from investment_analyst.application.aapl_bootstrap_models import (
     AaplWorkspaceBootstrapRequest,
     AaplWorkspaceBootstrapSummary,
 )
+from investment_analyst.application.aapl_refresh_planner import AaplMarketRefreshPlanner
 from investment_analyst.application.btc_intraday import (
     query_btc_intraday_chart,
     refresh_btc_intraday,
@@ -78,6 +81,15 @@ from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshSummary,
 )
 from investment_analyst.application.btc_refresh_planner import BtcMarketRefreshPlanner
+from investment_analyst.application.listed_market_refresh import ListedMarketRefreshPipeline
+from investment_analyst.application.listed_market_refresh_models import (
+    ListedMarketRefreshRequest,
+    ListedMarketRefreshSummary,
+)
+from investment_analyst.application.market_universe import (
+    MarketAssetUniverse,
+    build_market_asset_universe,
+)
 from investment_analyst.application.runtime import ApplicationRuntime, StorageLocationRequest
 from investment_analyst.catalog.provider_configuration import (
     resolve_alpaca_configuration,
@@ -159,6 +171,13 @@ class InvestmentAnalystApplication:
         """Create the production facade without opening storage or reading credentials."""
         return cls(ApplicationRuntime.create_default())
 
+    def list_market_assets(self) -> MarketAssetUniverse:
+        """Return the deterministic catalog-backed market watchlist without storage I/O."""
+        return build_market_asset_universe(
+            self._runtime.catalog,
+            self._runtime.provider_resolver,
+        )
+
     def bootstrap_aapl_workspace(
         self,
         request: AaplWorkspaceBootstrapRequest,
@@ -230,6 +249,31 @@ class InvestmentAnalystApplication:
                 MarketStatisticsEngine(),
             ).query(request)
 
+    def query_listed_market_chart(
+        self,
+        request: AaplMarketChartRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> ListedMarketChart:
+        """Return a bounded point-in-time chart for one catalog-backed Alpaca asset."""
+        configuration = resolve_alpaca_configuration(
+            self._runtime.provider_resolver,
+            asset_id=asset_id,
+        )
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return ListedMarketChartService(
+                HistoricalMarketDataService(storage),
+                MarketStatisticsEngine(),
+            ).query(
+                request,
+                asset_id=configuration.asset_id,
+                source_id=configuration.source_id,
+            )
+
     def query_btc_intraday_chart(
         self,
         request: BtcIntradayChartRequest,
@@ -283,6 +327,46 @@ class InvestmentAnalystApplication:
                 market_pipeline=CoinbaseHistoricalPipeline(
                     storage,
                     CoinbaseExchangeClient(self._transport_factory()),
+                    configuration=configuration,
+                ),
+                statistics_pipeline=MarketStatisticsPipeline(
+                    storage,
+                    history,
+                    MarketStatisticsEngine(),
+                ),
+                diagnostic_pipeline=MarketDiagnosticPipeline(
+                    storage,
+                    MarketDiagnosticMetricSelector(storage),
+                    MarketDiagnosticEngine(),
+                ),
+            ).run(request)
+
+    def refresh_listed_market(
+        self,
+        request: ListedMarketRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        alpaca_credentials: AlpacaCredentials,
+    ) -> ListedMarketRefreshSummary:
+        """Incrementally update one catalog-backed Alpaca market asset."""
+        configuration = resolve_alpaca_configuration(
+            self._runtime.provider_resolver,
+            asset_id=request.asset_id,
+        )
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_WRITE,
+        ) as storage:
+            history = HistoricalMarketDataService(storage)
+            return ListedMarketRefreshPipeline(
+                configuration=configuration,
+                refresh_planner=AaplMarketRefreshPlanner(
+                    storage,
+                    configuration=configuration,
+                ),
+                market_pipeline=AlpacaHistoricalPipeline(
+                    storage,
+                    AlpacaStockClient(self._transport_factory(), alpaca_credentials),
                     configuration=configuration,
                 ),
                 statistics_pipeline=MarketStatisticsPipeline(

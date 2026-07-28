@@ -247,7 +247,7 @@ class AlpacaImportSummary:
 
 
 class AlpacaHistoricalPipeline:
-    """Persist real AAPL IEX bars without calculating analytics."""
+    """Persist real catalog-backed Alpaca IEX bars without calculating analytics."""
 
     def __init__(
         self,
@@ -266,18 +266,14 @@ class AlpacaHistoricalPipeline:
             adjustment=ADJUSTMENT,
             source_id=SOURCE_ID,
         )
-        if self._configuration != AlpacaAssetConfiguration(
-            asset_id=ASSET_ID,
-            symbol=SYMBOL,
-            feed=FEED,
-            adjustment=ADJUSTMENT,
-            source_id=SOURCE_ID,
+        if self._configuration.source_id != (
+            f"alpaca-market-data:iex:{self._configuration.symbol.lower()}:daily-bars:adjustment-all"
         ):
-            raise StorageError("Alpaca configuration does not match the current persisted identity")
+            raise StorageError("Alpaca configuration has an inconsistent source identity")
         self._clock = clock
 
     def run(self, start: datetime, end: datetime) -> AlpacaImportSummary:
-        """Fetch AAPL, persist raw and normalized data, and verify traceability."""
+        """Fetch one symbol, persist raw and normalized data, and verify traceability."""
         self._storage.require_open()
         metric_ids_before = {result.result_id for result in self._storage.metric_results.list()}
         diagnostic_ids_before = {
@@ -290,8 +286,8 @@ class AlpacaHistoricalPipeline:
             or fetch.adjustment != self._configuration.adjustment
         ):
             raise StorageError("Alpaca fetch result does not match the resolved configuration")
-        self._storage.assets.upsert(create_alpaca_asset())
-        self._storage.sources.upsert(create_alpaca_source())
+        self._storage.assets.upsert(create_alpaca_asset(self._configuration))
+        self._storage.sources.upsert(create_alpaca_source(self._configuration))
 
         raw_created = 0
         raw_reused = 0
@@ -307,6 +303,7 @@ class AlpacaHistoricalPipeline:
                 bar,
                 retrieved_at=fetch.retrieved_at,
                 request_url=request_url,
+                configuration=self._configuration,
             )
             try:
                 stored_record = self._storage.raw_records.get(candidate.record_id)
@@ -321,6 +318,7 @@ class AlpacaHistoricalPipeline:
                 bar,
                 stored_record,
                 normalized_at=normalized_at,
+                configuration=self._configuration,
             ):
                 try:
                     stored_observation = self._storage.observations.get(observation.observation_id)
@@ -405,9 +403,13 @@ class AlpacaHistoricalPipeline:
         records: list[RawRecord],
         observations: list[NormalizedObservation],
     ) -> None:
-        if self._storage.assets.get(ASSET_ID) != create_alpaca_asset():
+        if self._storage.assets.get(self._configuration.asset_id) != create_alpaca_asset(
+            self._configuration
+        ):
             raise StorageError("Alpaca asset round-trip verification failed")
-        if self._storage.sources.get(SOURCE_ID) != create_alpaca_source():
+        if self._storage.sources.get(self._configuration.source_id) != create_alpaca_source(
+            self._configuration
+        ):
             raise StorageError("Alpaca source round-trip verification failed")
         record_by_id = {record.record_id: record for record in records}
         if len(record_by_id) != len(records):
@@ -426,7 +428,7 @@ class AlpacaHistoricalPipeline:
                 not isinstance(record.payload, dict)
                 or record.payload.get("symbol") != self._configuration.symbol
             ):
-                raise StorageError("Alpaca raw record payload does not represent AAPL")
+                raise StorageError("Alpaca raw record payload does not represent the symbol")
             if counts[record.record_id] != 7:
                 raise StorageError("each raw Alpaca bar must have seven observations")
             _require_utc(record.event_time, "raw event_time")

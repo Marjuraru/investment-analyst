@@ -8,12 +8,14 @@ from investment_analyst.analytics.fundamentals.analysis_models import (
     FundamentalAnalysisCoverage,
     FundamentalAnalysisSectionView,
 )
+from investment_analyst.analytics.fundamentals.company_classification import classify_company
 from investment_analyst.analytics.fundamentals.research_history_models import (
     AaplFundamentalResearchHistoryResult,
 )
 from investment_analyst.analytics.fundamentals.research_models import (
     AaplFundamentalResearchRequest,
 )
+from investment_analyst.core.models import DataFrequency
 
 
 class _HistoryOperations(Protocol):
@@ -34,6 +36,14 @@ class AaplFundamentalAnalysisService:
     def query(self, request: AaplFundamentalResearchRequest) -> AaplFundamentalAnalysisResult:
         """Return versioned analytical sections over one embedded history result."""
         history = self._history.query(request)
+        classification_history = self._history.query(
+            AaplFundamentalResearchRequest(
+                known_at=request.known_at,
+                frequency=DataFrequency.ANNUAL,
+                end_period_end=request.end_period_end,
+                limit=5,
+            )
+        )
         latest_period = history.research.periods[-1] if history.research.periods else None
         latest_metric_keys = (
             {metric.metric_key for metric in latest_period.metrics}
@@ -73,6 +83,7 @@ class AaplFundamentalAnalysisService:
         return AaplFundamentalAnalysisResult(
             request=request,
             history=history,
+            classification=classify_company(classification_history),
             sections=tuple(sections),
             coverage=FundamentalAnalysisCoverage(
                 expected_metrics=sum(item.coverage.expected_metrics for item in sections),

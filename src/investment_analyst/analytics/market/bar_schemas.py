@@ -1,5 +1,6 @@
 """Explicit stored-bar schemas for each supported market-data source."""
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -9,6 +10,9 @@ from investment_analyst.core.models.enums import DataFrequency, DataQuality
 COINBASE_SOURCE_ID = "coinbase-exchange:btc-usd:daily-candles"
 COINBASE_INTRADAY_SOURCE_ID = "coinbase-exchange:btc-usd:minute-1-candles"
 ALPACA_SOURCE_ID = "alpaca-market-data:iex:aapl:daily-bars:adjustment-all"
+_ALPACA_SOURCE_PATTERN = re.compile(
+    r"^alpaca-market-data:iex:[a-z][a-z0-9.-]{0,15}:daily-bars:adjustment-all$"
+)
 SIMULATED_SOURCE_ID = "simulated:daily-bars"
 
 
@@ -96,6 +100,15 @@ _SCHEMAS = {
 
 def get_market_bar_schema(source_id: str) -> MarketBarSchema:
     """Return the exact schema for a supported source or fail explicitly."""
+    if _ALPACA_SOURCE_PATTERN.fullmatch(source_id):
+        return MarketBarSchema(
+            source_id=source_id,
+            frequency=_ALPACA_SCHEMA.frequency,
+            required_fields=_ALPACA_SCHEMA.required_fields,
+            optional_fields=_ALPACA_SCHEMA.optional_fields,
+            units=_ALPACA_SCHEMA.units,
+            expected_quality=_ALPACA_SCHEMA.expected_quality,
+        )
     try:
         return _SCHEMAS[source_id]
     except KeyError as error:

@@ -1,5 +1,6 @@
 """Strict point-in-time contracts for bounded Apple and Bitcoin market charts."""
 
+import re
 from datetime import UTC, datetime
 from decimal import Context, Decimal, localcontext
 from enum import StrEnum
@@ -18,6 +19,9 @@ from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCD
 _HISTORY_START = datetime(1970, 1, 1, tzinfo=UTC)
 _DAYS_PER_YEAR = Decimal("365.2425")
 MAX_MARKET_CHART_SESSIONS = 20_000
+_LISTED_SOURCE_PATTERN = re.compile(
+    r"^alpaca-market-data:iex:[a-z][a-z0-9.-]{0,15}:daily-bars:adjustment-all$"
+)
 
 
 class AaplMarketChartPeriod(StrEnum):
@@ -720,3 +724,19 @@ class BtcMarketChart(AaplMarketChart):
         "coinbase-exchange:btc-usd:daily-candles"
     )
     volume_unit: Literal["BTC"] = "BTC"
+
+
+class ListedMarketChart(AaplMarketChart):
+    """Versioned chart contract for a catalog-backed Alpaca listed asset."""
+
+    schema_version: Literal["listed-market-chart-v1"] = "listed-market-chart-v1"
+    asset_id: NonEmptyStr
+    source_id: NonEmptyStr
+    volume_unit: Literal["shares"] = "shares"
+
+    @model_validator(mode="after")
+    def validate_listed_scope(self) -> "ListedMarketChart":
+        """Require the exact Alpaca IEX daily-bar source family."""
+        if not _LISTED_SOURCE_PATTERN.fullmatch(self.source_id):
+            raise ValueError("listed market chart requires an Alpaca IEX daily-bar source")
+        return self

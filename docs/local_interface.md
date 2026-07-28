@@ -1,8 +1,8 @@
 # Interfaz local y operación continua
 
-La interfaz local convierte los flujos existentes de Apple y BTC-USD en una herramienta básica
-utilizable desde el navegador. El proceso de Apple puede ejecutar una programación diaria. No añade fórmulas,
-scores combinados, recomendaciones, Trading API ni un LLM activo.
+La interfaz local convierte los flujos existentes de mercado, Apple y BTC-USD en una herramienta
+básica utilizable desde el navegador. El proceso completo de Apple puede ejecutar una programación
+diaria. No añade fórmulas, scores combinados, recomendaciones, Trading API ni un LLM activo.
 
 ## Capacidades
 
@@ -12,10 +12,12 @@ La página permite:
 - ver simultáneamente la hora de Lima y Wall Street, junto con el estado de la ventana regular
   09:30–16:00 ET de NYSE;
 - cargar automáticamente el último reporte elegible al abrir la página;
-- explorar el histórico point-in-time de AAPL con OHLC, VWAP, operaciones, tres SMA configurables y
-  volumen;
-- alternar a BTC-USD y explorar el histórico diario persistido de Coinbase Exchange o una ventana
-  intradía local de 24 horas con OHLC y volumen en BTC;
+- seleccionar desde el catálogo central AAPL, BTC-USD y una lista inicial de acciones y ETF
+  estadounidenses sin mantener símbolos duplicados en la interfaz;
+- explorar el histórico point-in-time de cada activo con OHLC, VWAP cuando la fuente lo entrega,
+  operaciones, tres SMA configurables y volumen;
+- usar en BTC-USD el histórico diario persistido de Coinbase Exchange o una ventana intradía local
+  de 24 horas con OHLC y volumen en BTC;
 - consultar en la misma vista el retorno diario, volatilidad diaria de 20 días con datos, volumen
   relativo de 20 días, distancias a las SMA, extremos, retorno, CAGR y máximo drawdown del rango
   consultado;
@@ -44,8 +46,9 @@ La página permite:
 - alternar entre un tema oscuro de baja luminancia, predeterminado, y el tema claro;
 - ampliar o reducir localmente el tramo visible sin descartar datos de la consulta completa;
 - ejecutar manualmente el bootstrap completo de SEC EDGAR y Alpaca Market Data IEX;
-- ejecutar una actualización Coinbase exclusivamente de mercado, incremental por los bordes del
-  histórico o completa, sin credenciales y sin crear fundamentales ficticios;
+- ejecutar una actualización exclusivamente de mercado, incremental por los bordes del histórico
+  o completa, para BTC-USD o los activos Alpaca que no tienen fundamentales implementados, sin
+  crear fundamentales ficticios;
 - importar explícitamente las últimas 24 horas de BTC-USD de un minuto cuando se selecciona una
   resolución intradía;
 - consultar el reporte diario point-in-time en modo trimestral o anual;
@@ -63,11 +66,12 @@ Los relojes se calculan enteramente en el navegador con las zonas IANA `America/
 minuto, se pausa cuando la pestaña deja de estar visible. Esto permite reflejar automáticamente los
 cambios de horario de verano de Nueva York sin fijar una diferencia horaria estática.
 
-La tarjeta NYSE describe exclusivamente la sesión regular publicada de 09:30 a 16:00 ET y distingue
-si la hora de Nueva York está antes, dentro o después de esa ventana. No afirma que el mercado esté
-operando: fines de semana se identifican, pero los feriados y cierres anticipados todavía no se
-evalúan. Un calendario oficial versionado será un contrato separado antes de convertir el gadget en
-un estado operativo de mercado.
+La franja compacta del encabezado muestra ambas horas y describe exclusivamente la sesión regular
+NYSE publicada de 09:30 a 16:00 ET. Distingue si Nueva York está antes, dentro o después de esa
+ventana sin ocupar otra tarjeta del área analítica. No afirma que el mercado esté operando: fines de
+semana se identifican, pero los feriados y cierres anticipados todavía no se evalúan. Esta
+limitación permanece disponible para tecnologías de asistencia. Un calendario oficial versionado
+será un contrato separado antes de convertir el estado horario en un estado operativo de mercado.
 
 ## Criterios de presentación
 
@@ -96,16 +100,16 @@ redondeo únicamente para presentación:
 - cobertura, rotación y deuda frente a patrimonio o FCF: múltiplos con hasta dos decimales;
 - EPS, ingresos y flujo de caja por acción: USD por acción con hasta dos decimales;
 - acciones promedio y en circulación: miles de millones con hasta dos decimales;
-- volumen del gráfico: acciones enteras para AAPL y hasta dos decimales de BTC; ambos usan notación
-  compacta con un decimal en el resumen;
+- volumen del gráfico: acciones o participaciones enteras para activos Alpaca y hasta dos decimales
+  de BTC; ambos usan notación compacta con un decimal en el resumen;
 - operaciones: enteros con separador de miles;
 - conteos: enteros con separador de miles.
 
 Los ceros decimales innecesarios se omiten, salvo en importes monetarios. El contrato JSON desplegable
 conserva el `Decimal` completo, las unidades, fórmulas, parámetros, identidades y timestamps para
-auditoría. El endpoint local `/api/market-chart` entrega `aapl-market-chart-v5` para Apple y
-`btc-market-chart-v1` para Bitcoin mediante `asset_id=crypto:btc-usd`: acepta
-`interval=auto|1d|1w|1mo`, además de
+auditoría. El endpoint local `/api/market-chart` entrega `aapl-market-chart-v5` para Apple,
+`listed-market-chart-v1` para los demás activos Alpaca y `btc-market-chart-v1` para Bitcoin:
+acepta `asset_id`, `interval=auto|1d|1w|1mo`, además de
 `short_sma_window`, `long_sma_window` y `third_sma_window`. La interfaz exige ventanas crecientes
 entre 2 y 400; el tercer parámetro conserva un valor predeterminado compatible para solicitudes
 anteriores,
@@ -242,10 +246,11 @@ los parámetros de otras estadísticas y las plantillas reutilizables de indicad
 
 ## Base intradía
 
-La historia diaria de AAPL y BTC-USD permanece intacta. Ya existe una fuente paralela de velas
-BTC-USD de un minuto de Coinbase Exchange, mercado 24/7, con identidad y disponibilidad point-in-time
-propias. Sobre esa evidencia se agregan localmente intervalos fijos UTC de 1, 5, 15, 30 y 45 minutos
-y de 1, 2, 4 y 5 horas, conservando OHLCV, calidad, completitud y UUID de entrada.
+La historia diaria de los activos Alpaca y BTC-USD permanece separada por identidad y fuente. Existe
+una fuente paralela de velas BTC-USD de un minuto de Coinbase Exchange, mercado 24/7, con identidad
+y disponibilidad point-in-time propias. Sobre esa evidencia se agregan localmente intervalos fijos
+UTC de 1, 5, 15, 30 y 45 minutos y de 1, 2, 4 y 5 horas, conservando OHLCV, calidad, completitud y
+UUID de entrada.
 
 La interfaz presenta la fuente intradía solo cuando el activo seleccionado es BTC. Cambiar el
 intervalo consulta exclusivamente el workspace; la acción de actualización ejecuta primero el flujo
@@ -253,12 +258,27 @@ diario y después importa 24 horas de minutos completos. Un fallo de la segunda 
 progreso diario. No se reconstruyen minutos a partir de barras diarias ni se aplican las SMA,
 estadísticas o diagnósticos diarios a esta fuente.
 
+## Universo de mercado
+
+El endpoint `/api/market-assets` entrega `market-asset-universe-v1`, generado directamente desde el
+catálogo central y las configuraciones tipadas de proveedores. El navegador construye el selector
+con esa respuesta; no mantiene otra lista de símbolos. Cada descriptor declara identidad canónica,
+símbolo del proveedor, fuente, esquema de gráfico, fecha inicial soportada, unidad de volumen,
+capacidad intradía y tipo de actualización.
+
+Apple conserva la actualización completa SEC + Alpaca. Los demás activos Alpaca visibles utilizan
+el contrato genérico `listed-market-refresh-v1`, exclusivamente de mercado, y comparten gráfico,
+estadísticas y diagnóstico sin una ruta HTTP por símbolo. Su cobertura gratuita es Alpaca IEX:
+una sola bolsa y no el mercado consolidado SIP. El catálogo inicial contiene AMD, Barrick (`B`),
+BVN, CDE, HYMC, INTC, MSTR, MU, MUX, NEM, PLTR, SCCO, TSM, GBTC, GLD e IBIT, además de AAPL y
+BTC-USD.
+
 ## Integración actual de cripto
 
-El selector de activo admite `crypto:btc-usd`. Esta vista usa únicamente velas diarias públicas de
-Coinbase Exchange: representa un solo mercado, no un precio agregado de todo el ecosistema. La
-interfaz oculta fundamentos SEC y clasificaciones empresariales al seleccionar Bitcoin; no reutiliza
-identidades de AAPL ni interpreta sesiones bursátiles en un mercado 24/7.
+El descriptor `crypto:btc-usd` usa únicamente velas diarias públicas de Coinbase Exchange:
+representa un solo mercado, no un precio agregado de todo el ecosistema. La interfaz oculta
+fundamentos SEC y clasificaciones empresariales al seleccionar Bitcoin; no reutiliza identidades de
+AAPL ni interpreta sesiones bursátiles en un mercado 24/7.
 
 La sección Operación cambia al flujo BTC-USD y ofrece actualización incremental automática o rango
 completo. El rango público es inclusivo y solo admite días UTC terminados. El plan automático detecta

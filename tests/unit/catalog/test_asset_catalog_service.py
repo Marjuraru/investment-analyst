@@ -23,6 +23,27 @@ from investment_analyst.catalog.service import (
 )
 from investment_analyst.core.models import AssetClass
 
+_DEFAULT_ASSET_IDS = [
+    "crypto:btc-usd",
+    "equity:us:aapl",
+    "equity:us:amd",
+    "equity:us:b",
+    "equity:us:bvn",
+    "equity:us:cde",
+    "equity:us:hymc",
+    "equity:us:intc",
+    "equity:us:mstr",
+    "equity:us:mu",
+    "equity:us:mux",
+    "equity:us:nem",
+    "equity:us:pltr",
+    "equity:us:scco",
+    "equity:us:tsm",
+    "etf:us:gbtc",
+    "etf:us:gld",
+    "etf:us:ibit",
+]
+
 
 def _catalog_asset(
     *,
@@ -55,15 +76,11 @@ def _binding(identifier: str) -> ProviderBinding:
 def test_default_catalog_loads_and_lists_deterministically() -> None:
     service = AssetCatalogService.load_default()
     assert service.catalog_version == 1
-    assert [asset.asset_id for asset in service.list_assets()] == [
-        "crypto:btc-usd",
-        "equity:us:aapl",
-    ]
+    assert [asset.asset_id for asset in service.list_assets()] == _DEFAULT_ASSET_IDS
     assert service.list_assets(asset_type=AssetClass.EQUITY)[0].symbol == "AAPL"
-    assert [asset.asset_id for asset in service.list_assets(capability="market.daily_bars")] == [
-        "crypto:btc-usd",
-        "equity:us:aapl",
-    ]
+    assert [
+        asset.asset_id for asset in service.list_assets(capability="market.daily_bars")
+    ] == _DEFAULT_ASSET_IDS
     assert [asset.asset_id for asset in service.list_assets(capability="market.minute_bars")] == [
         "crypto:btc-usd"
     ]

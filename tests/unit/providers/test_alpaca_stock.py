@@ -60,8 +60,13 @@ def _client(transport: QueueTransport) -> AlpacaStockClient:
     return AlpacaStockClient(transport, _credentials(), clock=lambda: NOW)
 
 
-def _document_with_bars(bars: list[dict[str, object]], token: str | None = None) -> bytes:
-    return json.dumps({"bars": bars, "symbol": "AAPL", "next_page_token": token}).encode()
+def _document_with_bars(
+    bars: list[dict[str, object]],
+    token: str | None = None,
+    *,
+    symbol: str = "AAPL",
+) -> bytes:
+    return json.dumps({"bars": bars, "symbol": symbol, "next_page_token": token}).encode()
 
 
 def _bar(**changes: object) -> dict[str, object]:
@@ -127,6 +132,16 @@ def test_fetch_parses_decimal_filters_orders_and_uses_required_request_values() 
     assert "test-key" not in url
     assert "test-secret" not in url
     assert timeout > 0
+
+
+def test_fetch_supports_another_valid_catalog_symbol_without_special_case_logic() -> None:
+    transport = QueueTransport([_document_with_bars([_bar()], symbol="BVN")])
+
+    result = _client(transport).fetch_daily_bars("BVN", START, END)
+
+    assert result.symbol == "BVN"
+    assert result.bars[0].symbol == "BVN"
+    assert urlsplit(transport.calls[0][0]).path == "/v2/stocks/BVN/bars"
 
 
 def test_identical_duplicates_are_removed() -> None:
@@ -260,8 +275,8 @@ def test_rejects_naive_and_invalid_ranges() -> None:
         client.fetch_daily_bars("AAPL", datetime(2026, 7, 7), END)
     with pytest.raises(AlpacaStockError, match="earlier"):
         client.fetch_daily_bars("AAPL", END, END)
-    with pytest.raises(AlpacaStockError, match="only AAPL"):
-        client.fetch_daily_bars("MSFT", START, END)
+    with pytest.raises(AlpacaStockError, match="invalid format"):
+        client.fetch_daily_bars("invalid symbol", START, END)
 
 
 def test_source_contains_no_trading_endpoint_urls() -> None:
