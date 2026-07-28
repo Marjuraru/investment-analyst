@@ -22,7 +22,7 @@ from investment_analyst.providers.fundamentals.sec_raw_records import (
     COMPANY_FACTS_SOURCE_ID,
     SUBMISSIONS_SOURCE_ID,
 )
-from investment_analyst.providers.market.alpaca_normalizer import SOURCE_ID as ALPACA_SOURCE_ID
+from investment_analyst.providers.market.alpaca_normalizer import alpaca_source_id
 from investment_analyst.providers.market.alpaca_stock import ADJUSTMENT, FEED
 
 
@@ -31,7 +31,7 @@ def resolve_alpaca_configuration(
     *,
     asset_id: str = APPLE_ASSET_ID,
 ) -> AlpacaAssetConfiguration:
-    """Resolve the current Apple Alpaca IEX configuration once."""
+    """Resolve one catalog-backed Alpaca IEX configuration."""
     context = resolver.resolve(
         asset_id,
         provider="alpaca",
@@ -43,7 +43,11 @@ def resolve_alpaca_configuration(
         symbol=context.require_identifier("symbol"),
         feed=FEED,
         adjustment=ADJUSTMENT,
-        source_id=ALPACA_SOURCE_ID,
+        source_id=alpaca_source_id(context.require_identifier("symbol")),
+        name=context.asset.name,
+        asset_class=context.asset.asset_class,
+        quote_currency=context.asset.quote_currency,
+        exchange=context.asset.exchange or "UNKNOWN",
     )
 
 

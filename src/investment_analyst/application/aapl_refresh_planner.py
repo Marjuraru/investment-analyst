@@ -1,4 +1,4 @@
-"""Read-only planning for incremental Apple IEX market refreshes."""
+"""Read-only planning for incremental catalog-backed Alpaca IEX refreshes."""
 
 from datetime import UTC, date, datetime, time, timedelta
 
@@ -9,6 +9,7 @@ from investment_analyst.application.aapl_bootstrap_models import (
     AaplRefreshMode,
 )
 from investment_analyst.core.models import DataFrequency
+from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID
 from investment_analyst.providers.market.alpaca_normalizer import SOURCE_ID
 from investment_analyst.providers.market.alpaca_pipeline import (
@@ -24,9 +25,17 @@ from investment_analyst.time_intervals import inclusive_utc_date_bounds
 class AaplMarketRefreshPlanner:
     """Plan missing prefix and suffix intervals from bars and fetch receipts."""
 
-    def __init__(self, storage: LocalStorage) -> None:
+    def __init__(
+        self,
+        storage: LocalStorage,
+        *,
+        configuration: AlpacaAssetConfiguration | None = None,
+    ) -> None:
         storage.require_open()
         self._storage = storage
+        self._asset_id = configuration.asset_id if configuration is not None else ASSET_ID
+        self._source_id = configuration.source_id if configuration is not None else SOURCE_ID
+        self._symbol = configuration.symbol if configuration is not None else "AAPL"
 
     def plan(
         self,
@@ -60,7 +69,9 @@ class AaplMarketRefreshPlanner:
                 persisted_latest=None,
                 fetch_intervals=(AaplMarketDateInterval(start=requested_start, end=requested_end),),
                 mode=AaplMarketRefreshMode.INITIAL,
-                reason="No persisted Apple IEX bars or completed fetch receipts were found.",
+                reason=(
+                    f"No persisted {self._symbol} IEX bars or completed fetch receipts were found."
+                ),
             )
 
         requested_start_at, requested_end_at = inclusive_utc_date_bounds(
@@ -100,8 +111,8 @@ class AaplMarketRefreshPlanner:
                 fetch_intervals=(),
                 mode=AaplMarketRefreshMode.ALREADY_CURRENT,
                 reason=(
-                    "The requested range is covered by persisted Apple IEX bars and completed "
-                    "fetch receipts."
+                    f"The requested range is covered by persisted {self._symbol} IEX bars "
+                    "and completed fetch receipts."
                 ),
             )
 
@@ -124,15 +135,33 @@ class AaplMarketRefreshPlanner:
             reason=reason,
         )
 
+    def latest_available_at(self) -> datetime | None:
+        """Return the latest availability cut for this exact asset and source."""
+        candidates = [
+            observation.available_at.astimezone(UTC)
+            for observation in self._storage.observations.list(asset_id=self._asset_id)
+            if observation.asset_id == self._asset_id
+            and observation.source.source_id == self._source_id
+        ]
+        for record in self._storage.raw_records.list(source_id=self._source_id):
+            receipt = alpaca_fetch_receipt_from_raw_record(record)
+            if (
+                receipt is not None
+                and receipt.asset_id == self._asset_id
+                and receipt.source_id == self._source_id
+            ):
+                candidates.append(receipt.retrieved_at.astimezone(UTC))
+        return max(candidates, default=None)
+
     def _persisted_timestamps(self) -> tuple[datetime, ...]:
-        observations = self._storage.observations.list(asset_id=ASSET_ID)
+        observations = self._storage.observations.list(asset_id=self._asset_id)
         return tuple(
             sorted(
                 {
                     observation.observed_at.astimezone(UTC)
                     for observation in observations
-                    if observation.asset_id == ASSET_ID
-                    and observation.source.source_id == SOURCE_ID
+                    if observation.asset_id == self._asset_id
+                    and observation.source.source_id == self._source_id
                     and observation.frequency is DataFrequency.DAY_1
                     and observation.observed_at is not None
                     and observation.observed_at.tzinfo is not None
@@ -162,8 +191,8 @@ class AaplMarketRefreshPlanner:
             if receipt is None:
                 continue
             if (
-                receipt.asset_id != ASSET_ID
-                or receipt.source_id != SOURCE_ID
+                receipt.asset_id != self._asset_id
+                or receipt.source_id != self._source_id
                 or receipt.feed != FEED
                 or receipt.adjustment != ADJUSTMENT
                 or receipt.interval_semantics != ALPACA_INTERVAL_SEMANTICS

@@ -2,6 +2,7 @@
 
 from pydantic import ConfigDict, StrictInt, field_validator, model_validator
 
+from investment_analyst.core.models import AssetClass
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
 
 
@@ -10,7 +11,7 @@ class ProviderConfigurationError(ValueError):
 
 
 class AlpacaAssetConfiguration(ContractModel):
-    """Fixed market-data identifiers required by the current Alpaca flow."""
+    """Catalog-backed identifiers and metadata required by one Alpaca asset."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -19,6 +20,10 @@ class AlpacaAssetConfiguration(ContractModel):
     feed: NonEmptyStr
     adjustment: NonEmptyStr
     source_id: NonEmptyStr
+    name: NonEmptyStr = "Apple Inc."
+    asset_class: AssetClass = AssetClass.EQUITY
+    quote_currency: NonEmptyStr = "USD"
+    exchange: NonEmptyStr = "NASDAQ"
 
 
 class CoinbaseAssetConfiguration(ContractModel):
