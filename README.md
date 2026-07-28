@@ -95,7 +95,9 @@ y validación independientes.
 La ampliación de [investigación fundamental](docs/fundamental_research_foundation.md), la
 [estrategia de datos históricos](docs/historical_research_data.md), la
 [estrategia de historia larga y noticias](docs/research_information_strategy.md), las
-[referencias de interfaz profesional](docs/professional_analysis_interface.md) y el futuro dominio
+[referencias de interfaz profesional](docs/professional_analysis_interface.md), la
+[hoja de ruta integral](docs/product_roadmap.md), el diseño de
+[screening y alertas automáticas](docs/automated_screening_alerts.md) y el futuro dominio
 [Cazatiburones](docs/cazatiburones.md) tienen contratos separados para no atribuir a los datos más
 información de la que realmente contienen.
 
@@ -117,6 +119,10 @@ información de la que realmente contienen.
   observaciones, métricas y diagnóstico de una empresa configurada sin acoplarla a su mercado.
 - [Estrategia BVL/SMV](docs/bvl_market_strategy.md): plan gratuito por fases para identidad,
   cotización diferida, fundamentales y futura sustitución de proveedores.
+- [Hoja de ruta del producto](docs/product_roadmap.md): orden de integración, mercados,
+  fundamentales, macro, noticias, Cazatiburones, interfaz, IA y operación 24/7.
+- [Screening y alertas](docs/automated_screening_alerts.md): evaluación determinista y de bajo
+  consumo de candidatos para revisión, notificaciones y enriquecimiento cualitativo opcional.
 - [Integración continua](docs/continuous_integration.md): validar automáticamente cada pull request.
 - [Gestión de dependencias](docs/dependency_management.md): reproducir y actualizar el entorno
   validado.
