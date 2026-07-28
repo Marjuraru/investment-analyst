@@ -40,6 +40,9 @@ local:
   ventana acotada de 24 horas sin sustituir la ruta diaria;
 - sondeo acotado y de solo lectura de las rutas oficiales SMV/BVL candidatas, sin persistencia ni
   activación prematura de un conector de mercado peruano;
+- primer conector macro FRED/ALFRED por vintage explícito: conserva respuestas oficiales
+  append-only sin `asset_id`, protege la API key y permite una reconstrucción local point-in-time
+  con disponibilidad diaria conservadora, todavía sin catálogo automático, UI ni diagnósticos;
 - obtención oficial de fundamentales de Apple mediante SEC EDGAR;
 - base de investigación fundamental con 31 hechos SEC adicionales y 40 métricas descriptivas
   versionadas, calculadas point-in-time con `Decimal`, evidencia exacta por input y estadísticas
@@ -109,6 +112,8 @@ información de la que realmente contienen.
   consultar agregaciones trazables por CLI o interfaz sin mezclar la historia diaria.
 - [Estrategia BVL/SMV](docs/bvl_market_strategy.md): plan gratuito por fases para identidad,
   cotización diferida, fundamentales y futura sustitución de proveedores.
+- [Conector FRED/ALFRED point-in-time](docs/fred_alfred_point_in_time.md): importar vintages
+  explícitos y consultar revisiones históricas sin mezclar macro con activos.
 - [Integración continua](docs/continuous_integration.md): validar automáticamente cada pull request.
 - [Gestión de dependencias](docs/dependency_management.md): reproducir y actualizar el entorno
   validado.
