@@ -39,8 +39,10 @@ emisores corporativos declarados en el catálogo:
   con ingestión append-only e idempotente, reconstrucción point-in-time y agregaciones locales
   deterministas de 1/5/15/30/45 minutos y 1/2/4/5 horas; la interfaz permite consultarlas en una
   ventana acotada de 24 horas sin sustituir la ruta diaria;
-- sondeo acotado y de solo lectura de las rutas oficiales SMV/BVL candidatas, sin persistencia ni
-  activación prematura de un conector de mercado peruano;
+- sondeo acotado de las rutas oficiales SMV/BVL y lector tipado de solo lectura del boletín diario
+  BVL para `CVERDEC1`, `BVN`, `SCCO`, `VOLCABC1`, `MINSURI1` y `POMALCC1`; valida el documento
+  completo, conserva moneda y decimales originales y emite metadatos auditables sin persistencia ni
+  activación prematura de identidades peruanas;
 - obtención oficial de fundamentales mediante SEC EDGAR; Apple conserva el flujo completo histórico
   y diez emisores genéricos —AMD, Intel, Strategy, Micron, Palantir, CDE, HYMC, MUX, NEM y SCCO—
   reutilizan refresh, consultas, cachés y presentación web por `asset_id`, validados contra sus

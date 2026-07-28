@@ -147,6 +147,31 @@ ambigüedad o cambio estructural. La incorporación al catálogo central y la pe
 quedan para el siguiente checkpoint, después de resolver ISIN, clase y términos aplicables mediante
 SMV. Esta separación evita producir una serie histórica con identidades prematuras.
 
+#### Ejecución del lector
+
+El checkpoint se ejecuta con:
+
+```bash
+.venv/bin/python scripts/inspect_bvl_daily_bulletin.py
+```
+
+La lista predeterminada contiene los seis nemónicos confirmados. Puede reemplazarse de forma
+explícita, por ejemplo:
+
+```bash
+.venv/bin/python scripts/inspect_bvl_daily_bulletin.py --symbols CVERDEC1 MINSURI1
+```
+
+El lector limita la respuesta a 5.000.000 de bytes y exige que no haya truncamiento, una única fecha
+de publicación, la ruta HTTPS exacta, contenido HTML y una sola tabla con el contrato completo de
+17 columnas. El reporte incluye fecha del boletín y recuperación, URL, tamaño y SHA-256 del
+documento, número de filas detectadas, cotizaciones seleccionadas y nemónicos ausentes. No incluye
+el HTML y declara `persistence_performed=false`.
+
+Este comando es una inspección técnica puntual, no una autorización de redistribución ni una
+dependencia de producción. Hasta resolver identidad y condiciones aplicables, no se programa, no
+recorre históricos y no escribe en el workspace permanente.
+
 ### Fase 0 — validación contractual gratuita
 
 1. Registrar una matriz reproducible de disponibilidad, licencia, límites y campos de cada dataset
