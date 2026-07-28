@@ -113,6 +113,40 @@ antes de promoverlo.
 
 ## Plan de ejecución
 
+### Checkpoint operativo del 28 de julio de 2026
+
+Este checkpoint inicia BVL sin adelantar identidades ni persistencia que todavía dependan del
+catálogo SMV y de una revisión contractual:
+
+1. Implementar un lector tipado del boletín diario oficial de renta variable que descargue el
+   documento completo con un límite explícito, valide URL, tipo de contenido y estructura, y
+   calcule su SHA-256.
+2. Extraer la fecha publicada por BVL y la tabla de cotizaciones mediante sus encabezados, no por
+   posiciones globales del HTML.
+3. Normalizar exclusivamente dentro del reporte de inspección: nemónico, moneda original, fecha
+   previa, OHLC, variación, mejores propuestas, promedio, cantidad, monto, operaciones, frecuencia
+   y variación anual. Los números usarán `Decimal`; los puntos de relleno y celdas vacías serán
+   ausencia, nunca cero.
+4. Exponer una CLI de solo lectura que permita filtrar nemónicos y emita JSON sin incluir el HTML.
+   La ejecución no escribirá en el workspace ni creará todavía `asset_id`, `RawRecord`,
+   observaciones o series históricas.
+5. Proteger con pruebas offline el éxito, datos ausentes, moneda, decimales, fecha, duplicados,
+   cambios de estructura, tamaño máximo y filtrado.
+6. Ejecutar el lector contra la fuente real y conservar en Git únicamente código, pruebas,
+   documentación y metadatos reproducibles; no se versionará el documento descargado.
+
+La lista inicial solicitada se resolverá contra identificadores oficiales. El boletín consultado el
+28 de julio de 2026 confirmó `CVERDEC1`, `BVN`, `SCCO`, `VOLCABC1`, `MINSURI1` y `POMALCC1`.
+“FCA” permanece sin mapear hasta obtener una coincidencia inequívoca en SMV/BVL. `BVN` y `SCCO` en
+BVL no se confundirán con sus cotizaciones estadounidenses ya existentes: mercado, moneda, clase e
+identidad permanecerán separados.
+
+El criterio de salida de este checkpoint es un reporte repetible, estricto, limitado y sin efectos
+laterales que pueda leer esos nemónicos desde el boletín vigente y falle de forma visible ante
+ambigüedad o cambio estructural. La incorporación al catálogo central y la persistencia point-in-time
+quedan para el siguiente checkpoint, después de resolver ISIN, clase y términos aplicables mediante
+SMV. Esta separación evita producir una serie histórica con identidades prematuras.
+
 ### Fase 0 — validación contractual gratuita
 
 1. Registrar una matriz reproducible de disponibilidad, licencia, límites y campos de cada dataset
