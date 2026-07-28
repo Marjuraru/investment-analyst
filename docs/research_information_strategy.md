@@ -114,7 +114,9 @@ uso será contexto, pruebas de robustez y relaciones transparentes.
 ## Fases
 
 1. Completar el universo multi-activo y sus fuentes de mercado actuales.
-2. Añadir un catálogo de series macro con FRED/ALFRED y una prueba de vintages.
+2. Completar el [conector FRED/ALFRED](fred_alfred_point_in_time.md): el corte inicial ya importa
+   vintages explícitos y prueba la selección point-in-time; faltan catálogo versionado,
+   descubrimiento paginado de revisiones, reanudación y almacenamiento macro normalizado.
 3. Incorporar índices y factores históricos de investigación con licencias documentadas.
 4. Definir y probar ingestión de noticias primarias y descubrimiento GDELT en un workspace temporal.
 5. Crear búsqueda local y una línea temporal que relacione documentos y datos sin inferir causalidad.

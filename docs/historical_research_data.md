@@ -62,7 +62,8 @@ alterar sus diagnósticos fundamentales o de mercado.
 
 ## Ruta de implementación
 
-1. Prototipo local separado con French y FRED/ALFRED, sin UI ni predicción productiva.
+1. Completar el [prototipo FRED/ALFRED point-in-time](fred_alfred_point_in_time.md), cuyo primer
+   corte local ya conserva vintages explícitos sin UI ni predicción; French permanece pendiente.
 2. Catálogo de datasets, licencias, vintages y pruebas contra look-ahead.
 3. Motor de features reproducible y evaluación walk-forward con particiones temporales.
 4. Baselines simples, costos, delistings, drift, intervalos de incertidumbre y comparación fuera de

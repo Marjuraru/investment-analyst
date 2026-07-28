@@ -60,6 +60,9 @@ núcleo. Nada de esa infraestructura se incluye en el MVP.
 Los datasets centenarios destinados a investigación y modelado seguirán la
 [estrategia de datos históricos](historical_research_data.md): workspace separado, licencias
 registradas, vintages point-in-time y evaluación temporal sin contaminar el pipeline operativo.
+El primer [conector FRED/ALFRED](fred_alfred_point_in_time.md) persiste cada snapshot macro como
+RawRecord sin `asset_id` y lo consulta por `available_at`; no reutiliza el contrato de barras ni
+crea métricas o diagnósticos de activos.
 
 ## Prohibición actual de ejecución de órdenes
 El sistema no ejecuta operaciones ni se integra con brokers. Solo produce
