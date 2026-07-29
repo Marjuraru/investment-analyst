@@ -57,13 +57,14 @@ Los diagnósticos de mercado y fundamental se calculan de forma independiente y
 pueden consultarse por separado. La consulta consolidada los presenta juntos sin
 mezclar su significado, sus fuentes ni producir una puntuación agregada.
 
-## Screening y alertas futuras
+## Screening y alertas
 
-El futuro motor de [screening y alertas](automated_screening_alerts.md) consumirá resultados
-persistidos o consultas point-in-time después de un refresh exitoso. Evaluará condiciones
-versionadas de forma trivaluada y conservará evidencia exacta; no recalculará datos mediante el
-frontend ni producirá una puntuación conjunta. Los eventos analíticos y los intentos de notificación
-tendrán identidades separadas para poder reintentar un canal sin duplicar el candidato.
+El motor de [screening y alertas](automated_screening_alerts.md) consume resultados persistidos
+después de un refresh exitoso y con evidencia nueva. Evalúa condiciones versionadas de forma
+trivaluada, conserva evidencia exacta y ofrece un replay point-in-time de solo lectura; no recalcula
+datos mediante el frontend ni produce una puntuación conjunta. Los eventos analíticos y los futuros
+intentos de notificación tienen identidades separadas para poder reintentar un canal sin duplicar el
+candidato.
 
 ## Escalabilidad futura
 La modularidad y el desacoplamiento permiten incorporar más adelante Docker,

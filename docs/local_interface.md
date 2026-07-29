@@ -58,6 +58,9 @@ La página permite:
 - consultar el reporte diario point-in-time en modo trimestral o anual;
 - seleccionar opcionalmente fechas `as-of` independientes para mercado y fundamentales;
 - ver diagnósticos, métricas, frescura, limitaciones y el contrato JSON versionado;
+- editar reglas de screening mediante revisiones locales auditadas y restaurar sus valores
+  iniciales sin borrar historia;
+- ejecutar un replay point-in-time de frecuencia y ruido sobre el activo seleccionado;
 - mantener actualizaciones diarias de la watchlist mientras el servicio está activo.
 
 Mercado y fundamentales se muestran en tarjetas separadas. La interfaz no calcula ni muestra un
@@ -426,6 +429,20 @@ del sistema. La bandeja local recomienda revisar la evidencia operativa; no reco
 vender. El monitor trabaja con el intento ya persistido: no carga gráficos, no abre el frontend, no
 consulta proveedores y funciona con el navegador cerrado.
 
+## Reglas y replay analítico
+
+El panel **Reglas de screening** carga bajo demanda el registro local. Permite cambiar el estado,
+los umbrales de entrada y salida, las confirmaciones y la espera entre candidatos. El servidor
+valida el contrato completo, rechaza floats para valores financieros, usa el fingerprint mostrado
+como lock optimista y crea una revisión append-only solo si el contenido cambió. Restaurar los
+valores iniciales crea otra revisión; no elimina el historial.
+
+El botón **Replay** usa el activo seleccionado y hasta 200 cortes point-in-time persistidos. Es una
+consulta de solo lectura: muestra cortes, coincidencias, candidatos simulados y condiciones no
+evaluables. No consulta proveedores, no modifica resultados operativos y no estima retornos ni
+precisión predictiva. Una regla modificada se utiliza automáticamente en el siguiente intento con
+evidencia nueva; los intentos ya recibidos permanecen intactos.
+
 ## Servicio persistente con systemd
 
 El instalador genera una unidad privada y revisable. No ejecuta `systemctl`, no utiliza `sudo` y no
@@ -472,7 +489,11 @@ Todos permanecen dentro del workspace seleccionado:
 - `state/aapl_local_service.lock`: exclusión del proceso UI/scheduler;
 - `state/multi_asset_schedule_state_v1.json`: historial de intentos por job y su evidencia compacta;
 - `state/operational_alert_state_v1.json`: resultados trivaluados y eventos deduplicados de la
-  bandeja local.
+  bandeja local;
+- `state/analytical_screening_state_v1.json`: resultados, recibos, candidatos y transiciones
+  analíticas append-only;
+- `state/analytical_rule_registry_state_v1.json`: revisiones locales completas de reglas con
+  fingerprints encadenados.
 
 Los archivos de estado son contratos operativos versionados y privados. La evidencia financiera
 append-only continúa en el almacenamiento normal del workspace; las alertas no la sustituyen ni

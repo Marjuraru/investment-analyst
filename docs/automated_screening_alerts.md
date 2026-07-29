@@ -14,9 +14,9 @@ mezclará diagnósticos mediante una puntuación arbitraria. Su mensaje será eq
 
 ## Decisión de implementación
 
-Conviene preparar el contrato ahora e implementarlo por etapas después del scheduler multi-activo.
-No conviene esperar a la IA: las condiciones numéricas son más baratas, auditables y reproducibles
-mediante un motor determinista.
+El primer monitor numérico ya está integrado después del scheduler multi-activo. No depende de la
+IA: las condiciones numéricas son más baratas, auditables y reproducibles mediante un motor
+determinista.
 
 La IA será un enriquecimiento opcional posterior. Podrá explicar documentos y contexto únicamente
 después de una activación determinista o una acción explícita.
@@ -66,7 +66,15 @@ evaluaciones separadas. No se calcula un score o diagnóstico combinado.
 
 ## Contratos conceptuales
 
-Los nombres siguientes describen responsabilidades; no fijan todavía un esquema de almacenamiento.
+Los contratos implementados usan un estado adicional
+`state/analytical_screening_state_v1.json`. Es append-only para resultados, recibos y transiciones;
+los eventos conservan su estado proyectado y nunca modifican el almacenamiento financiero.
+
+La configuración usa `state/analytical_rule_registry_state_v1.json`. Cada cambio guarda una
+revisión completa, encadenada por fingerprint y con escritura atómica privada. El catálogo
+empaquetado continúa siendo la fuente de contratos inmutables —métrica, operador, algoritmo,
+unidad, parámetros y calidad—; la interfaz solo permite modificar estado, umbrales,
+confirmaciones y cooldown.
 
 ### Regla de screening
 
@@ -256,7 +264,7 @@ se invoca durante ciclos sin candidatos.
 El feedback manual no cambiará automáticamente umbrales ni entrenará un modelo durante la primera
 versión.
 
-## Backtesting de reglas
+## Replay histórico de reglas
 
 Antes de habilitar una regla analítica:
 
@@ -268,8 +276,17 @@ Antes de habilitar una regla analítica:
 - inspeccionar falsos positivos;
 - no seleccionar umbrales exclusivamente por el mejor resultado histórico.
 
-El backtest valida comportamiento y ruido. No convierte la regla en recomendación o estrategia de
-ejecución.
+El replay point-in-time ya está implementado como una operación local de solo lectura. Reproduce
+entre 20 y 500 cortes persistidos, selecciona revisiones por `available_at` en fundamentales y por
+el `known_at` exacto en mercado, y simula confirmaciones, histéresis, cooldown, aperturas y
+resoluciones. Devuelve frecuencia de coincidencias y cobertura, pero no calcula retorno posterior,
+rentabilidad ni precisión predictiva.
+
+Los cambios de una regla se aplican únicamente a evidencia nueva del scheduler. No reescriben
+resultados, recibos o candidatos históricos. Para inspeccionar evidencia anterior se ejecuta este
+replay explícito con la versión configurada actual. Un candidato de una versión anterior conserva
+su fingerprint y no puede cerrarse silenciosamente con otra semántica; el analista puede resolverlo
+desde la bandeja.
 
 ## Canales
 
@@ -330,12 +347,35 @@ por frescura y presupuestos observados por proveedor sin alterar resultados ya p
 
 ### Etapa B — Screening analítico
 
-- mercado y fundamentales actuales;
-- editor básico de reglas;
-- plantillas por tipo de análisis;
-- deduplicación, histéresis y cooldown;
-- backtesting de ruido;
-- activación manual por regla.
+Primer corte determinista implementado localmente el 29 de julio de 2026:
+
+- contratos estrictos de regla, condición, solicitud, resultado trivaluado y evidencia;
+- motor puro sin I/O que recibe una instantánea métrica ya seleccionada point-in-time;
+- validación de activo, clase, fuente, período común, disponibilidad, algoritmo, unidad, parámetros
+  y calidad;
+- identidad reproducible independiente de `computed_at`;
+- plantilla silenciosa de actividad relativa de mercado para acciones, ETF y cripto;
+- plantilla silenciosa trimestral de balance, margen y crecimiento para acciones;
+- ausencia como `not_evaluable`, sin convertirla en cero;
+- mercado y fundamentales evaluados por separado, sin score ni recomendación;
+- persistencia atómica de resultados, recibos por intento, candidatos y transiciones;
+- conexión al scheduler únicamente tras éxito, cobertura completa y evidencia nueva;
+- selección del corte métrico exacto por activo, fuente, `known_at`, período, algoritmo, parámetros,
+  unidad y calidad;
+- confirmaciones consecutivas por períodos distintos, histéresis de entrada/salida y cooldown;
+- replay y reinicio idempotentes sin reconsultar proveedores ni releer métricas de intentos ya
+  procesados;
+- bandeja analítica separada de las incidencias operativas, con evidencia exacta y estados
+  `new`, `seen`, `dismissed`, `resolved` o `silenced`;
+- resolución automática con actor `system_evidence` cuando la evidencia cruza el umbral de salida.
+- registro local versionado con locking optimista y restauración de valores iniciales sin borrar
+  revisiones;
+- editor compacto de estado, umbrales, histéresis, confirmaciones y cooldown;
+- replay histórico acotado y de solo lectura por regla y activo;
+- resolución dinámica de la versión vigente en cada nuevo intento del scheduler.
+
+Pendiente en esta etapa: ampliar el catálogo de reglas y observar varios ciclos silenciosos reales
+antes de habilitar cualquier canal externo.
 
 ### Etapa C — Valoración y notificaciones
 

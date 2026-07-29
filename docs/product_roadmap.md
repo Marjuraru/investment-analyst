@@ -54,6 +54,8 @@ Checkpoint base auditado: 29 de julio de 2026, `main` en `e53f1c8`.
 - operación multi-activo: refresh manual generalizado, pero programación persistente centrada en
   Apple;
 - fundamentales BVL: requieren el futuro adaptador SMV y no reutilizan el perfil SEC del ADR;
+- screening automático y bandejas locales implementados; catálogo ampliado y notificaciones
+  externas pendientes.
 
 ### Diseñado, no implementado
 
@@ -64,7 +66,6 @@ Checkpoint base auditado: 29 de julio de 2026, `main` en `e53f1c8`.
 - catálogo macro y workspace de historia larga;
 - corpus y búsqueda de noticias;
 - dominio Cazatiburones;
-- screening automático, bandeja de alertas y notificaciones;
 - IA cualitativa opcional y laboratorio predictivo;
 - autenticación o exposición remota segura.
 
@@ -292,7 +293,12 @@ La implementación se divide en:
 1. alertas operativas y modo silencioso después del scheduler multi-activo —base local completada
    el 29 de julio de 2026 con motor trivaluado, replay, deduplicación, transiciones auditadas y
    cierre automático tras una recuperación completa del mismo trabajo—;
-2. reglas de mercado y fundamentales con métricas existentes;
+2. reglas de mercado y fundamentales con métricas existentes —primer monitor local completado con
+   motor puro, contratos point-in-time, dos plantillas silenciosas, persistencia, deduplicación,
+   confirmaciones, histéresis, cooldown, bandeja separada y conexión al scheduler solo ante
+   evidencia nueva; también incluye editor versionado, restauración auditable, locking optimista y
+   replay histórico acotado de frecuencia y ruido; queda ampliar el catálogo y observarlo durante
+   varios ciclos silenciosos—;
 3. reglas de valoración, técnicas y plantillas configurables;
 4. eventos, filings, noticias y Cazatiburones;
 5. resumen opcional mediante IA solo después de una activación determinista.
@@ -404,4 +410,5 @@ local, sin elevar artificialmente el mínimo global antes de cubrir el código h
 
 1. resolver el contrato de persistencia del mercado BVL e integrar cierres diarios;
 2. diseñar el workspace macro columnar y el backfill reanudable para series diarias;
-3. iniciar screening analítico con reglas independientes de mercado y fundamentales.
+3. validar durante varios ciclos el screening silencioso y ampliar reglas con backtesting
+   point-in-time antes de activar notificaciones.

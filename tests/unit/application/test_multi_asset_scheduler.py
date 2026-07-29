@@ -215,7 +215,7 @@ def test_scheduler_retries_observer_without_rerunning_provider_job(tmp_path: Pat
     )
 
     scheduler.tick()
-    assert scheduler.status().issues == ("operational alert monitor could not persist its result",)
+    assert scheduler.status().issues == ("scheduled job observer could not persist its result",)
     assert scheduler.tick() == ()
 
     assert provider_calls == 1

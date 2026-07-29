@@ -837,7 +837,7 @@ class MultiAssetScheduler:
             self._observer(attempt)
         except Exception:  # noqa: BLE001
             self._pending_notifications[attempt.attempt_id] = attempt
-            self._observer_issue = "operational alert monitor could not persist its result"
+            self._observer_issue = "scheduled job observer could not persist its result"
         else:
             self._pending_notifications.pop(attempt.attempt_id, None)
             if not self._pending_notifications:

@@ -11,6 +11,13 @@ from pathlib import Path
 from types import FrameType
 from uuid import uuid4
 
+from investment_analyst.alerts.analytical_backtest import AnalyticalBacktestService
+from investment_analyst.alerts.analytical_monitor import AnalyticalScreeningMonitor
+from investment_analyst.alerts.analytical_rule_catalog import INITIAL_ANALYTICAL_RULES
+from investment_analyst.alerts.analytical_rule_registry import (
+    AnalyticalRuleRegistryStore,
+)
+from investment_analyst.alerts.analytical_state import AnalyticalScreeningStateStore
 from investment_analyst.application.aapl_bootstrap_models import AaplRefreshMode
 from investment_analyst.application.aapl_daily_runner import AaplDailyRunner
 from investment_analyst.application.aapl_scheduler import (
@@ -28,6 +35,7 @@ from investment_analyst.application.operational_alerts import (
 )
 from investment_analyst.application.operational_state import AaplOperationalStateError
 from investment_analyst.application.runtime import ApplicationRuntime, ApplicationRuntimeError
+from investment_analyst.application.scheduled_observers import ScheduledJobObserverChain
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.frontend.local_schedule_jobs import (
     LocalWatchlistScheduleConfig,
@@ -46,6 +54,8 @@ from investment_analyst.workspace.service import WorkspaceError
 
 _SCHEDULE_STATE_FILE = "multi_asset_schedule_state_v1.json"
 _ALERT_STATE_FILE = "operational_alert_state_v1.json"
+_ANALYTICAL_STATE_FILE = "analytical_screening_state_v1.json"
+_ANALYTICAL_RULE_REGISTRY_FILE = "analytical_rule_registry_state_v1.json"
 _SERVICE_LOCK_FILE = "aapl_local_service.lock"
 
 
@@ -159,6 +169,16 @@ def _serve(
 
     scheduler: MultiAssetScheduler | None = None
     alert_store = OperationalAlertStateStore(paths.state_root / _ALERT_STATE_FILE)
+    analytical_store = AnalyticalScreeningStateStore(paths.state_root / _ANALYTICAL_STATE_FILE)
+    analytical_rule_store = AnalyticalRuleRegistryStore(
+        paths.state_root / _ANALYTICAL_RULE_REGISTRY_FILE,
+        INITIAL_ANALYTICAL_RULES,
+    )
+    analytical_backtest = AnalyticalBacktestService(
+        runtime,
+        paths.root,
+        analytical_rule_store,
+    )
     if not arguments.no_scheduler:
         selected_asset_ids = tuple(
             sorted(
@@ -190,17 +210,37 @@ def _serve(
             ),
         )
         schedule_store = MultiAssetScheduleStateStore(paths.state_root / _SCHEDULE_STATE_FILE)
+        schedule_attempts = schedule_store.load().attempts
         alert_monitor = OperationalAlertMonitor(alert_store)
-        alert_monitor.reconcile(schedule_store.load().attempts)
+        alert_monitor.reconcile(schedule_attempts)
+        analytical_monitor = AnalyticalScreeningMonitor(
+            analytical_store,
+            runtime,
+            paths.root,
+            analytical_rule_store.rules,
+        )
+        analytical_monitor.reconcile(schedule_attempts)
         scheduler = MultiAssetScheduler(
             jobs,
             schedule_store,
-            observer=alert_monitor,
+            observer=ScheduledJobObserverChain(
+                (
+                    alert_monitor,
+                    analytical_monitor,
+                )
+            ),
         )
 
     server = AaplLocalHttpServer(
         ("127.0.0.1", arguments.port),
-        AaplLocalWebApplication(controller, scheduler, alert_store),
+        AaplLocalWebApplication(
+            controller,
+            scheduler,
+            alert_store,
+            analytical_store,
+            analytical_rule_store,
+            analytical_backtest,
+        ),
     )
     stop_event = threading.Event()
     scheduler_thread: threading.Thread | None = None

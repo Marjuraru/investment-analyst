@@ -153,6 +153,14 @@
               <article class="status-card">
                 <div class="status-label">
                   <span class="status-dot" aria-hidden="true"></span>
+                  Candidatos
+                </div>
+                <strong id="candidate-status">—</strong>
+                <small id="candidate-latest">Modo silencioso</small>
+              </article>
+              <article class="status-card">
+                <div class="status-label">
+                  <span class="status-dot" aria-hidden="true"></span>
                   Alertas
                 </div>
                 <strong id="alert-status">—</strong>
@@ -662,6 +670,32 @@
                 <h2 id="operacion-titulo">Actualizar activo</h2>
               </div>
             </div>
+
+            <details id="screening-rules-panel" class="operation-panel screening-rules-panel">
+              <summary>
+                <span>
+                  <strong>Reglas de screening</strong>
+                  <small id="screening-rules-summary">Umbrales, confirmaciones y replay histórico</small>
+                </span>
+                <span class="summary-action">Abrir</span>
+              </summary>
+              <div id="screening-rules" class="screening-rules" aria-live="polite">
+                <p>Cargando reglas configuradas…</p>
+              </div>
+            </details>
+
+            <details id="candidate-inbox-panel" class="operation-panel candidate-inbox-panel">
+              <summary>
+                <span>
+                  <strong>Candidatos analíticos</strong>
+                  <small id="candidate-inbox-summary">Screening determinista en modo silencioso</small>
+                </span>
+                <span class="summary-action">Abrir</span>
+              </summary>
+              <div id="candidate-inbox" class="alert-inbox candidate-inbox" aria-live="polite">
+                <p>No hay candidatos analíticos registrados.</p>
+              </div>
+            </details>
 
             <details id="alert-inbox-panel" class="operation-panel alert-inbox-panel">
               <summary>

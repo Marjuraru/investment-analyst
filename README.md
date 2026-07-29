@@ -76,6 +76,16 @@ emisores corporativos declarados en el catálogo:
   persiste resultados e identidades deterministas, detecta cobertura incompleta, deduplica eventos
   y ofrece una bandeja local con transiciones auditadas de vista, descartada o resuelta, sin IA,
   notificaciones externas, gráficos ni consultas adicionales a proveedores;
+- monitor de screening analítico determinista: contratos estrictos y un motor puro evalúan
+  instantáneas point-in-time de mercado o fundamentales mediante condiciones `met`, `not_met` o
+  `not_evaluable`, validan fuente, activo, período, algoritmo, unidad y calidad, y producen una
+  identidad reproducible sin mezclar dominios ni calcular un score. El scheduler lo invoca solo
+  después de evidencia nueva y completa; resultados, recibos y candidatos se guardan en
+  `state/analytical_screening_state_v1.json`. La bandeja analítica separada aplica confirmaciones,
+  histéresis, cooldown, deduplicación y transiciones auditadas, incluso tras reiniciar. Un registro
+  local adicional versiona cambios de estado, umbrales, histéresis, confirmaciones y cooldown con
+  locking optimista; la interfaz permite restaurar valores iniciales sin borrar el historial y
+  ejecutar un replay point-in-time de solo lectura por regla y activo;
 - interfaz web local compacta para ejecutar el flujo, consultar el reporte, revisar la evidencia y
   seleccionar desde un catálogo central Apple, Bitcoin y una lista inicial de acciones y ETF
   estadounidenses disponible mediante Alpaca IEX gratuito. Incluye AMD, Barrick (`B`), BVN, CDE,
@@ -102,9 +112,13 @@ emisores corporativos declarados en el catálogo:
 - entorno reproducible mediante un lock versionado, pruebas unitarias e integraciones locales,
   cobertura de líneas y ramas, auditoría de dependencias y validación continua con GitHub Actions.
 
-El MVP actual incluye únicamente alertas operativas locales en modo silencioso. Todavía no incluye
-reglas analíticas de oportunidad, notificaciones externas, autenticación o exposición remota,
-inicio automático desde Windows Task Scheduler, ejecución de órdenes ni recomendaciones de
+El MVP actual entrega alertas operativas persistentes y una primera bandeja analítica local en modo
+silencioso. Las plantillas iniciales cubren actividad relativa de mercado y una condición conjunta
+trimestral de balance, margen y crecimiento; ya pueden versionarse desde la interfaz y validarse
+mediante replay histórico de frecuencia, cobertura y ruido. Todavía faltan reglas adicionales,
+observación silenciosa durante varios ciclos y canales de notificación. Tampoco existen
+autenticación o exposición remota, inicio automático desde Windows Task Scheduler, ejecución de
+órdenes ni recomendaciones de
 inversión. La programación continua actualiza la watchlist visible mediante los conectores ya
 configurados; puede limitarse a activos explícitos. Activos fuera del catálogo, indicadores o
 fuentes nuevas requieren fases de diseño y validación independientes.

@@ -16,6 +16,16 @@ from uuid import UUID
 
 import pytest
 
+from investment_analyst.alerts.analytical_backtest import (
+    AnalyticalBacktestRequest,
+    AnalyticalBacktestResult,
+    AnalyticalBacktestService,
+)
+from investment_analyst.alerts.analytical_rule_catalog import INITIAL_ANALYTICAL_RULES
+from investment_analyst.alerts.analytical_rule_registry import (
+    AnalyticalRuleRegistryStore,
+)
+from investment_analyst.alerts.analytical_state import AnalyticalScreeningStateStore
 from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagnosticReport
 from investment_analyst.analytics.consolidated_diagnostic_models import (
     ConsolidatedDiagnosticRequest,
@@ -122,6 +132,26 @@ class _FakeRunner:
             "issues": [],
         }
         return cast(AaplOperationalHealth, _JsonResult(payload))
+
+
+class _FakeAnalyticalBacktest:
+    def __init__(self) -> None:
+        self.requests: list[AnalyticalBacktestRequest] = []
+
+    def run(self, request: AnalyticalBacktestRequest) -> AnalyticalBacktestResult:
+        self.requests.append(request)
+        return cast(
+            AnalyticalBacktestResult,
+            _JsonResult(
+                {
+                    "schema_version": "analytical-backtest-result-v1",
+                    "asset_id": request.asset_id,
+                    "rule": {"rule_id": request.rule_id},
+                    "evaluations": [],
+                    "total_available_cuts": 0,
+                }
+            ),
+        )
 
 
 class _FakeApplication:
@@ -656,6 +686,15 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "Ingresos y resultado neto" in html
     assert "Ficha fundamental" in html
     assert "Métricas por área" in html
+    assert 'id="candidate-inbox-panel"' in html
+    assert 'id="candidate-status"' in html
+    assert 'api("/api/candidates?limit=50")' in javascript
+    assert 'api("/api/candidates/transition"' in javascript
+    assert 'id="screening-rules-panel"' in html
+    assert 'api("/api/screening-rules")' in javascript
+    assert 'api("/api/screening-rules/update"' in javascript
+    assert "api(`/api/screening-backtest?" in javascript
+    assert ".screening-backtest-grid" in stylesheet
     assert "Fórmulas y evidencia exacta" in html
     assert "Tema claro" in html
     assert 'id="lima-clock"' in html
@@ -1196,20 +1235,134 @@ def test_local_api_exposes_empty_persistent_alert_inbox(tmp_path: Path) -> None:
         sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
     )
     alerts = OperationalAlertStateStore(tmp_path / "state" / "alerts.json")
+    candidates = AnalyticalScreeningStateStore(tmp_path / "state" / "analytical.json")
 
-    with _server(AaplLocalWebApplication(controller, None, alerts)) as (_, root):
+    with _server(AaplLocalWebApplication(controller, None, alerts, candidates)) as (_, root):
         overview_status, overview, _ = _json_request(Request(f"{root}/api/overview"))
         inbox_status, inbox, _ = _json_request(Request(f"{root}/api/alerts?limit=10"))
         invalid_status, invalid, _ = _json_request(Request(f"{root}/api/alerts?limit=0"))
+        candidate_status, candidate_inbox, _ = _json_request(
+            Request(f"{root}/api/candidates?limit=10")
+        )
+        invalid_candidate_status, invalid_candidate, _ = _json_request(
+            Request(f"{root}/api/candidates?unknown=true")
+        )
+        missing_candidate_status, missing_candidate, _ = _json_request(
+            Request(
+                f"{root}/api/candidates/transition",
+                data=json.dumps(
+                    {
+                        "candidate_id": "00000000-0000-4000-8000-000000000001",
+                        "status": "seen",
+                    }
+                ).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
 
     assert overview_status == 200
     assert overview["alerts"]["enabled"] is True
     assert overview["alerts"]["silent_mode"] is True
+    assert overview["candidates"]["enabled"] is True
+    assert overview["candidates"]["silent_mode"] is True
     assert inbox_status == 200
     assert inbox["total"] == 0
     assert inbox["events"] == []
     assert invalid_status == 400
     assert invalid["error"]["code"] == "invalid_request"
+    assert candidate_status == 200
+    assert candidate_inbox["total"] == 0
+    assert candidate_inbox["items"] == []
+    assert invalid_candidate_status == 400
+    assert invalid_candidate["error"]["code"] == "invalid_request"
+    assert missing_candidate_status == 400
+    assert missing_candidate["error"]["code"] == "invalid_request"
+
+
+def test_local_api_versions_rule_updates_and_rejects_stale_edits(tmp_path: Path) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    rule_path = tmp_path / "state" / "rules.json"
+    rules = AnalyticalRuleRegistryStore(rule_path, INITIAL_ANALYTICAL_RULES)
+    backtest = _FakeAnalyticalBacktest()
+
+    with _server(
+        AaplLocalWebApplication(
+            controller,
+            None,
+            analytical_rule_store=rules,
+            analytical_backtest=cast(AnalyticalBacktestService, backtest),
+        )
+    ) as (_, root):
+        initial_status, initial, _ = _json_request(Request(f"{root}/api/screening-rules"))
+        configuration = initial["configurations"][1]
+        rule = configuration["rule"]
+        payload = {
+            "schema_version": "analytical-rule-configuration-update-v1",
+            "rule_id": rule["rule_id"],
+            "expected_fingerprint": configuration["fingerprint"],
+            "state": "silent",
+            "confirmations_required": 3,
+            "cooldown_seconds": rule["cooldown_seconds"],
+            "conditions": [
+                {
+                    "condition_id": rule["conditions"][0]["condition_id"],
+                    "threshold": "2.0",
+                    "exit_threshold": "1.6",
+                }
+            ],
+        }
+        changed_status, changed, _ = _json_request(
+            Request(
+                f"{root}/api/screening-rules/update",
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        stale_status, stale, _ = _json_request(
+            Request(
+                f"{root}/api/screening-rules/update",
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        final_status, final, _ = _json_request(Request(f"{root}/api/screening-rules"))
+        replay_status, replay, _ = _json_request(
+            Request(
+                f"{root}/api/screening-backtest?"
+                + urlencode(
+                    {
+                        "rule_id": rule["rule_id"],
+                        "asset_id": "equity:us:mu",
+                        "max_cuts": 80,
+                    }
+                )
+            )
+        )
+
+    assert initial_status == 200
+    assert initial["total_revisions"] == 0
+    assert changed_status == 200
+    assert changed["changed"] is True
+    assert changed["configuration"]["rule"]["rule_version"] == "1.0.local.1"
+    assert stale_status == 409
+    assert stale["error"]["code"] == "rule_conflict"
+    assert final_status == 200
+    assert final["total_revisions"] == 1
+    assert replay_status == 200
+    assert replay["asset_id"] == "equity:us:mu"
+    assert backtest.requests[0].max_cuts == 80
+    if not rule_path.is_relative_to("/mnt"):
+        assert rule_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_local_api_audits_alert_inbox_transitions(tmp_path: Path) -> None:
