@@ -134,6 +134,11 @@ class SecIssuerFundamentalRefreshPipeline:
             raise SecIssuerFundamentalRefreshError(
                 "request asset_id does not match the configured SEC issuer"
             )
+        if request.frequency.value not in self._configuration.supported_frequencies:
+            supported = ", ".join(self._configuration.supported_frequencies)
+            raise SecIssuerFundamentalRefreshError(
+                f"{self._configuration.ticker} SEC fundamentals support only: {supported}"
+            )
 
         fetch = self._run_stage(
             SecIssuerFundamentalRefreshStage.SEC_FETCH,

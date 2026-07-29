@@ -68,6 +68,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--refresh-mode", choices=("auto", "full"), default="auto")
     parser.add_argument("--allow-partial", action="store_true")
+    parser.add_argument(
+        "--schedule-asset",
+        action="append",
+        default=[],
+        help="repeat to restrict automatic jobs to explicit catalog asset IDs",
+    )
+    parser.add_argument("--no-schedule-intraday", action="store_true")
+    parser.add_argument("--no-schedule-smv", action="store_true")
+    parser.add_argument("--no-schedule-macro", action="store_true")
     return parser
 
 
@@ -143,6 +152,18 @@ def main() -> int:
             workspace_root=paths.root,
             port=arguments.port,
             schedule=schedule,
+            scheduled_asset_ids=tuple(
+                sorted(
+                    {
+                        value.strip()
+                        for value in arguments.schedule_asset
+                        if isinstance(value, str) and value.strip()
+                    }
+                )
+            ),
+            schedule_intraday=not arguments.no_schedule_intraday,
+            schedule_smv_registry=not arguments.no_schedule_smv,
+            schedule_macro=not arguments.no_schedule_macro,
         )
         target = arguments.output
         if target is None:

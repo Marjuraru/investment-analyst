@@ -232,7 +232,16 @@ def _validate_observation(
         raise MalformedFundamentalResearchObservationError(
             "SEC research observation must belong to the configured issuer"
         )
-    definition = get_sec_fact_definition(observation.field_name)
+    record_key = _record_key(observation)
+    taxonomy = _required_string(record_key, "taxonomy")
+    if taxonomy != configuration.accounting_standard.value:
+        raise MalformedFundamentalResearchObservationError(
+            "SEC research taxonomy does not match its configured issuer"
+        )
+    definition = get_sec_fact_definition(
+        observation.field_name,
+        taxonomy=taxonomy,
+    )
     if observation.unit != definition.unit:
         raise MalformedFundamentalResearchObservationError(
             "SEC research observation unit does not match its field definition"
@@ -245,8 +254,7 @@ def _validate_observation(
         raise MalformedFundamentalResearchObservationError(
             "SEC research observation lacks period_end"
         )
-    record_key = _record_key(observation)
-    if _required_string(record_key, "taxonomy") != definition.taxonomy:
+    if taxonomy != definition.taxonomy:
         raise MalformedFundamentalResearchObservationError(
             "SEC research taxonomy does not match its field definition"
         )

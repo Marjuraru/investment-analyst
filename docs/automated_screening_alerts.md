@@ -312,14 +312,18 @@ maliciosas contenidas en documentos.
 
 ### Etapa A — Fundamento
 
-Después del scheduler multi-activo:
+Base local completada el 29 de julio de 2026 después del scheduler multi-activo:
 
 - modelos y almacenamiento versionado;
 - motor trivaluado;
-- reglas operativas;
+- reglas operativas de job fallido, interrumpido, omitido o con cobertura incompleta;
 - modo silencioso;
-- bandeja local;
+- bandeja local con transiciones auditadas `new → seen/dismissed/resolved/silenced`;
 - replay point-in-time.
+
+El scheduler expone además `current`, `stale`, `incomplete` o `never_run` por trabajo usando la hora
+del último chequeo exitoso y un umbral explícito. La siguiente ampliación añadirá alertas periódicas
+por frescura y presupuestos observados por proveedor sin alterar resultados ya persistidos.
 
 ### Etapa B — Screening analítico
 

@@ -205,6 +205,49 @@ def test_recency_and_confidence_rules() -> None:
         known_at, known_at - timedelta(days=800), DataFrequency.ANNUAL
     ) == Decimal("0.50")
     assert confidence_for(Decimal("0.75"), Decimal("0.80")) == Decimal("0.6000")
+    stale_available_at = datetime(2024, 1, 1, 12, tzinfo=UTC)
+    assert recency_factor(
+        datetime(2026, 1, 1, 1, tzinfo=UTC),
+        stale_available_at,
+        DataFrequency.ANNUAL,
+    ) == recency_factor(
+        datetime(2026, 1, 1, 23, tzinfo=UTC),
+        stale_available_at,
+        DataFrequency.ANNUAL,
+    )
+
+
+def test_diagnostic_identity_changes_only_when_freshness_semantics_change() -> None:
+    values = {
+        "fundamental.net_margin": "0.20",
+        "fundamental.liabilities_to_assets": "0.50",
+        "fundamental.liabilities_to_equity": "1.00",
+        "fundamental.revenue_yoy_growth": "0.10",
+        "fundamental.net_income_yoy_change_rate": "0.20",
+    }
+    first = _selection(
+        values,
+        known_at=datetime(2027, 1, 1, 1, tzinfo=UTC),
+    )
+    same_day = first.model_copy(
+        update={
+            "request": SecFundamentalDiagnosticRequest(
+                known_at=datetime(2027, 1, 1, 23, tzinfo=UTC),
+                frequency=DataFrequency.ANNUAL,
+            )
+        }
+    )
+    next_day = first.model_copy(
+        update={
+            "request": SecFundamentalDiagnosticRequest(
+                known_at=datetime(2027, 1, 2, 1, tzinfo=UTC),
+                frequency=DataFrequency.ANNUAL,
+            )
+        }
+    )
+
+    assert fundamental_diagnostic_id(first) == fundamental_diagnostic_id(same_day)
+    assert fundamental_diagnostic_id(first) != fundamental_diagnostic_id(next_day)
 
 
 def test_engine_builds_sufficient_diagnostic_with_exact_traceability() -> None:

@@ -14,6 +14,7 @@ class AssetClass(StrEnum):
 class SourceType(StrEnum):
     """Broad type of information supplied by a source."""
 
+    REGISTRY = "registry"
     MARKET = "market"
     FUNDAMENTALS = "fundamentals"
     MACRO = "macro"

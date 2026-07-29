@@ -87,6 +87,12 @@ def _sec_issuer_application(home: Path) -> InvestmentAnalystApplication:
                         ),
                         ProviderBinding(
                             provider="sec",
+                            namespace="taxonomy",
+                            identifier="us-gaap",
+                            capabilities=capabilities,
+                        ),
+                        ProviderBinding(
+                            provider="sec",
                             namespace="ticker",
                             identifier="AMD",
                             capabilities=capabilities,
@@ -376,7 +382,7 @@ def test_sec_issuer_facade_rejects_missing_catalog_binding_before_storage(
     with pytest.raises(ProviderAssetNotConfiguredError):
         _application(tmp_path).query_sec_fundamental_analysis(
             request,
-            asset_id="equity:us:b",
+            asset_id="etf:us:gbtc",
             location=StorageLocationRequest(legacy_root=missing),
         )
 

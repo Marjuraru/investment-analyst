@@ -11,10 +11,13 @@ from investment_analyst.core.models import DataFrequency, DataQuality
 from investment_analyst.providers.fundamentals.sec_fact_models import (
     ASSET_ID,
     SEC_FACT_DEFINITIONS,
+    SEC_IFRS_FACT_DEFINITIONS,
+    SEC_IFRS_NORMALIZED_FACT_DEFINITIONS,
     SEC_NORMALIZED_FACT_DEFINITIONS,
     SEC_RESEARCH_FACT_DEFINITIONS,
     SecFilingMetadata,
     SecFundamentalFact,
+    get_sec_fact_definition,
 )
 
 ACCEPTED_AT = datetime(2026, 1, 30, 21, tzinfo=UTC)
@@ -106,6 +109,40 @@ def test_research_fact_catalog_is_additive_and_has_unique_fields_and_tags() -> N
     assert SEC_NORMALIZED_FACT_DEFINITIONS[: len(SEC_FACT_DEFINITIONS)] == SEC_FACT_DEFINITIONS
     assert len(fields) == len(set(fields))
     assert len(tags) == len(set(tags))
+
+
+def test_ifrs_profile_maps_only_explicit_comparable_concepts() -> None:
+    assert [
+        (item.field_name, item.taxonomy, item.tag, item.unit) for item in SEC_IFRS_FACT_DEFINITIONS
+    ] == [
+        ("fundamental.revenue", "ifrs-full", "Revenue", "USD"),
+        ("fundamental.net_income", "ifrs-full", "ProfitLoss", "USD"),
+        ("fundamental.assets", "ifrs-full", "Assets", "USD"),
+        ("fundamental.liabilities", "ifrs-full", "Liabilities", "USD"),
+        (
+            "fundamental.stockholders_equity",
+            "ifrs-full",
+            "EquityAttributableToOwnersOfParent",
+            "USD",
+        ),
+    ]
+    assert (
+        get_sec_fact_definition(
+            "fundamental.operating_cash_flow",
+            taxonomy="ifrs-full",
+        ).tag
+        == "CashFlowsFromUsedInOperatingActivities"
+    )
+    assert len({item.field_name for item in SEC_IFRS_NORMALIZED_FACT_DEFINITIONS}) == len(
+        SEC_IFRS_NORMALIZED_FACT_DEFINITIONS
+    )
+
+    fact = _fact(
+        taxonomy="ifrs-full",
+        tag="Revenue",
+        form="20-F",
+    )
+    assert fact.period_type.value == "duration"
 
 
 @pytest.mark.parametrize("value", [True, 1.25])

@@ -1,6 +1,7 @@
 """Strict typed provider configurations resolved before client construction."""
 
 import re
+from enum import StrEnum
 
 from pydantic import ConfigDict, StrictInt, field_validator, model_validator
 
@@ -13,6 +14,13 @@ class ProviderConfigurationError(ValueError):
 
 
 _SEC_TICKER_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9.-]{0,31}$")
+
+
+class SecAccountingStandard(StrEnum):
+    """Supported issuer taxonomy and filing profile declared by the catalog."""
+
+    US_GAAP = "us-gaap"
+    IFRS = "ifrs-full"
 
 
 def sec_source_ids(ticker: str) -> tuple[str, str]:
@@ -77,6 +85,7 @@ class SecAssetConfiguration(ContractModel):
     asset_class: AssetClass
     quote_currency: NonEmptyStr
     exchange: NonEmptyStr
+    accounting_standard: SecAccountingStandard = SecAccountingStandard.US_GAAP
 
     @field_validator("cik")
     @classmethod
@@ -98,4 +107,20 @@ class SecAssetConfiguration(ContractModel):
             raise ValueError("SEC companyfacts source_id does not match the configured ticker")
         if self.submissions_source_id == self.companyfacts_source_id:
             raise ValueError("SEC source identifiers must be distinct")
+        if self.quote_currency != "USD":
+            raise ValueError("current SEC fact profiles require USD issuer reporting")
         return self
+
+    @property
+    def supported_forms(self) -> frozenset[str]:
+        """Return filing forms eligible under the declared accounting profile."""
+        if self.accounting_standard is SecAccountingStandard.IFRS:
+            return frozenset({"20-F", "20-F/A", "40-F", "40-F/A"})
+        return frozenset({"10-K", "10-K/A", "10-Q", "10-Q/A"})
+
+    @property
+    def supported_frequencies(self) -> tuple[str, ...]:
+        """Return deterministic analytical frequencies exposed by this profile."""
+        if self.accounting_standard is SecAccountingStandard.IFRS:
+            return ("annual",)
+        return ("annual", "quarterly")

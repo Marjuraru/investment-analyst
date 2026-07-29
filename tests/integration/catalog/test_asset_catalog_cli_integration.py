@@ -55,7 +55,7 @@ def test_list_assets_filters_and_is_cwd_independent(tmp_path) -> None:
         "etf:us:gbtc",
         "etf:us:ibit",
     }.issubset(all_asset_ids)
-    assert json.loads(equities.stdout)["count"] == 14
+    assert json.loads(equities.stdout)["count"] == 20
     assert json.loads(market.stdout)["count"] == 18
 
 

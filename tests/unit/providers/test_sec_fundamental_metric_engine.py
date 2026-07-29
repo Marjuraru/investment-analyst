@@ -7,7 +7,10 @@ from uuid import uuid4
 import pytest
 
 from investment_analyst.core.models import AssetClass, DataFrequency
-from investment_analyst.providers.asset_config import SecAssetConfiguration
+from investment_analyst.providers.asset_config import (
+    SecAccountingStandard,
+    SecAssetConfiguration,
+)
 from investment_analyst.providers.fundamentals.sec_metric_engine import (
     MalformedSecFundamentalPeriodError,
     SecFundamentalMetricEngine,
@@ -452,3 +455,71 @@ def test_engine_computes_the_same_formulas_for_an_isolated_sec_issuer() -> None:
     assert {
         fact.source_id for period in computation.source_result.periods for fact in period.facts
     } == {amd.companyfacts_source_id}
+
+
+def test_ifrs_annual_comparison_uses_period_end_when_reported_fy_is_stale() -> None:
+    bvn = SecAssetConfiguration(
+        asset_id="equity:us:bvn",
+        cik="0001013131",
+        ticker="BVN",
+        submissions_source_id="sec-edgar:bvn:submissions",
+        companyfacts_source_id="sec-edgar:bvn:companyfacts",
+        name="Compañía de Minas Buenaventura S.A.A.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NYSE",
+        accounting_standard=SecAccountingStandard.IFRS,
+    )
+    periods = (
+        _period(
+            datetime(2023, 12, 31, tzinfo=UTC),
+            {"fundamental.revenue": "100", "fundamental.net_income": "10"},
+            fiscal_year="2023",
+            form="20-F",
+        ),
+        _period(
+            datetime(2024, 12, 31, tzinfo=UTC),
+            {"fundamental.revenue": "125", "fundamental.net_income": "15"},
+            fiscal_year="2023",
+            form="20-F",
+        ),
+    )
+    periods = tuple(
+        period.model_copy(
+            update={
+                "facts": tuple(
+                    fact.model_copy(
+                        update={
+                            "source_id": bvn.companyfacts_source_id,
+                            "taxonomy": "ifrs-full",
+                        }
+                    )
+                    for fact in period.facts
+                )
+            }
+        )
+        for period in periods
+    )
+    request = SecFundamentalMetricRequest(
+        asset_id=bvn.asset_id,
+        known_at=datetime(2026, 12, 31, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+    )
+
+    computation = SecFundamentalMetricEngine(bvn).compute(
+        request,
+        _result(
+            periods,
+            known_at=request.known_at,
+            asset_id=bvn.asset_id,
+        ),
+        computed_at=datetime(2027, 1, 1, tzinfo=UTC),
+    )
+    current = {
+        candidate.metric_name: candidate
+        for candidate in computation.candidates
+        if candidate.period_end.year == 2024
+    }
+
+    assert current["fundamental.revenue_yoy_growth"].value == Decimal("0.25")
+    assert current["fundamental.net_income_yoy_change_rate"].value == Decimal("0.5")

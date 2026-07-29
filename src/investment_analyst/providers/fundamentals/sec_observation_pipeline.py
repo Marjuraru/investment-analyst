@@ -417,7 +417,10 @@ def _validate_candidate(
     if observation.source.source_id != configuration.companyfacts_source_id:
         raise SecObservationTraceabilityError("SEC observation source is incorrect")
     try:
-        expected_unit = get_sec_fact_definition(observation.field_name).unit
+        expected_unit = get_sec_fact_definition(
+            observation.field_name,
+            taxonomy=configuration.accounting_standard.value,
+        ).unit
     except ValueError as error:
         raise SecObservationTraceabilityError("SEC observation field is unsupported") from error
     if observation.unit != expected_unit:

@@ -1,7 +1,7 @@
 # Arquitectura
 
 ## Separación por capas
-- `providers`: obtención de datos crudos por dominio (market, fundamentals,
+- `providers`: obtención de datos crudos por dominio (registry, market, fundamentals,
   crypto, macro).
 - `core`: modelos, configuración e interfaces compartidas.
 - `analytics`: cálculos deterministas por dominio, incluido el futuro módulo
@@ -73,6 +73,14 @@ núcleo. Nada de esa infraestructura se incluye en el MVP.
 Los datasets centenarios destinados a investigación y modelado seguirán la
 [estrategia de datos históricos](historical_research_data.md): workspace separado, licencias
 registradas, vintages point-in-time y evaluación temporal sin contaminar el pipeline operativo.
+El primer [conector FRED/ALFRED](fred_alfred_point_in_time.md) persiste cada snapshot macro como
+RawRecord sin `asset_id` y lo consulta por `available_at`; no reutiliza el contrato de barras ni
+crea métricas o diagnósticos de activos.
+
+El [registro SMV/BVL](smv_bvl_registry.md) aplica la misma separación a identidad: las respuestas
+registrales completas son RawRecords con `asset_id=None`, mientras el catálogo versionado conserva
+las identidades de cotización. La consulta las relaciona sin convertir campos registrales en
+precios, fundamentales o señales.
 
 ## Prohibición actual de ejecución de órdenes
 El sistema no ejecuta operaciones ni se integra con brokers. Solo produce

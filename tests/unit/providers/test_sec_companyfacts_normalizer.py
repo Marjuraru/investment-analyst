@@ -9,9 +9,13 @@ from uuid import uuid4
 import pytest
 
 from investment_analyst.core.models import AssetClass, DataFrequency, RawRecord, SourceReference
-from investment_analyst.providers.asset_config import SecAssetConfiguration
+from investment_analyst.providers.asset_config import (
+    SecAccountingStandard,
+    SecAssetConfiguration,
+)
 from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
     GENERIC_TRANSFORMATION_VERSION,
+    IFRS_TRANSFORMATION_VERSION,
     ConflictingSecFactError,
     MalformedSecCompanyFactsError,
     SecCompanyFactsNormalizer,
@@ -292,6 +296,124 @@ def test_normalizer_isolates_a_second_sec_issuer_and_versions_its_observations()
             submissions,
             normalized_at=NORMALIZED_AT,
         )
+
+
+@pytest.mark.parametrize("annual_form", ["20-F", "40-F"])
+def test_normalizer_selects_annual_ifrs_profile_for_foreign_issuer(
+    annual_form: str,
+) -> None:
+    configuration = SecAssetConfiguration(
+        asset_id="equity:us:bvn",
+        cik="0001013131",
+        ticker="BVN",
+        submissions_source_id="sec-edgar:bvn:submissions",
+        companyfacts_source_id="sec-edgar:bvn:companyfacts",
+        name="Compañía de Minas Buenaventura S.A.A.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NYSE",
+        accounting_standard=SecAccountingStandard.IFRS,
+    )
+    accession = "0001104659-26-053101"
+    entity_name = "BUENAVENTURA MINING CO INC"
+    submissions_document = {
+        "cik": configuration.cik,
+        "name": entity_name,
+        "tickers": [configuration.ticker],
+        "exchanges": ["NYSE"],
+        "filings": {
+            "recent": {
+                "accessionNumber": [accession, "0001104659-26-020915"],
+                "filingDate": ["2026-04-30", "2026-02-26"],
+                "reportDate": ["2025-12-31", "2025-12-31"],
+                "acceptanceDateTime": [
+                    "2026-04-30T20:00:00Z",
+                    "2026-02-26T20:00:00Z",
+                ],
+                "form": [annual_form, "6-K"],
+                "primaryDocument": ["foreign-annual.htm", "foreign-6k.htm"],
+            },
+            "files": [],
+        },
+    }
+
+    def duration(value: str) -> dict[str, object]:
+        return {
+            "start": "2025-01-01",
+            "end": "2025-12-31",
+            "val": value,
+            "accn": accession,
+            "fy": 2025,
+            "fp": "FY",
+            "form": annual_form,
+            "filed": "2026-04-30",
+        }
+
+    def instant(value: str) -> dict[str, object]:
+        return {
+            "end": "2025-12-31",
+            "val": value,
+            "accn": accession,
+            "fy": 2025,
+            "fp": "FY",
+            "form": annual_form,
+            "filed": "2026-04-30",
+        }
+
+    concepts = {
+        "Revenue": duration("1329400000"),
+        "ProfitLoss": duration("402500000"),
+        "Assets": instant("6020000000"),
+        "Liabilities": instant("2210000000"),
+        "EquityAttributableToOwnersOfParent": instant("3675000000"),
+    }
+    company_document = {
+        "cik": configuration.cik,
+        "entityName": entity_name,
+        "facts": {
+            "ifrs-full": {tag: {"units": {"USD": [fact]}} for tag, fact in concepts.items()},
+            "us-gaap": {},
+        },
+    }
+    submissions = _record(
+        source_id=configuration.submissions_source_id,
+        schema_version=SUBMISSIONS_SCHEMA_VERSION,
+        document_type="submissions",
+        document=submissions_document,
+        asset_id=configuration.asset_id,
+        cik=configuration.cik,
+        entity_name=entity_name,
+    )
+    companyfacts = _record(
+        source_id=configuration.companyfacts_source_id,
+        schema_version=COMPANYFACTS_SCHEMA_VERSION,
+        document_type="company_facts",
+        document=company_document,
+        asset_id=configuration.asset_id,
+        cik=configuration.cik,
+        entity_name=entity_name,
+    )
+    normalizer = SecCompanyFactsNormalizer(configuration)
+
+    extraction = normalizer.extract(
+        companyfacts,
+        submissions,
+        normalized_at=NORMALIZED_AT,
+    )
+    observation = sec_fact_to_observation(
+        extraction.facts[0],
+        companyfacts,
+        submissions,
+        normalized_at=NORMALIZED_AT,
+        configuration=configuration,
+    )
+
+    assert extraction.facts_selected == 5
+    assert extraction.annual_count == 5
+    assert extraction.quarterly_count == 0
+    assert {fact.taxonomy for fact in extraction.facts} == {"ifrs-full"}
+    assert {fact.form for fact in extraction.facts} == {annual_form}
+    assert observation.transformation_version == IFRS_TRANSFORMATION_VERSION
 
 
 def test_extracts_additional_research_catalog_without_expanding_core_query() -> None:

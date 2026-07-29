@@ -18,6 +18,14 @@ The facade exposes the following operation groups:
 - read-only listed-market, Apple and bounded BTC-USD chart queries;
 - `refresh_sec_fundamentals(...)` resolves one catalog-backed corporate issuer, then uses one writer
   connection for SEC snapshots, observations, metrics, and its independent fundamental diagnostic;
+- `refresh_fred_vintage(...)` importa una instantánea macro oficial con vintage explícito y
+  `query_fred_point_in_time(...)` la reconstruye localmente en un corte de información, sin crear
+  activos ni mezclarla con análisis de mercado o fundamentales;
+- `refresh_fred_catalog_series(...)` enumera el borde de vintages de una serie configurada, importa
+  un lote acotado y deja progreso y cobertura explícitos para reanudación;
+- `refresh_bvl_registry(...)` actualiza por lote las razones sociales SMV configuradas y
+  `query_bvl_registry(...)` relaciona el catálogo BVL con evidencia registral local en un corte
+  explícito, sin atribuir precios ni fundamentales;
 - `refresh_btc_market(...)` opens one existing workspace with a single writer, plans missing
   Coinbase daily-candle edges, imports append-only evidence, and persists independent market
   statistics and a diagnostic without invoking SEC or Alpaca.
@@ -46,6 +54,18 @@ The generic SEC refresh requires `SecIssuerFundamentalRefreshRequest`, an existi
 and an explicit `SecEdgarIdentity`. It never accepts or constructs Alpaca credentials. SEC is queried
 on every run because filings and Company Facts revisions can appear independently from local market
 coverage. A failure identifies its stage and does not roll back successful earlier stages.
+
+La importación macro recibe un `FredApiKey` redactado y rangos de fecha explícitos. La consulta
+recibe un `FredPointInTimeQuery` estricto y abre el almacenamiento en modo de solo lectura. Los
+scripts FRED/ALFRED son adaptadores de estas operaciones y no construyen almacenamiento, clientes ni
+pipelines por su cuenta.
+
+El refresh registral recibe `BvlRegistryRefreshRequest`: sin IDs procesa las seis cotizaciones BVL
+en orden estable; con IDs procesa únicamente el subconjunto explícito. Usa una sola conexión writer
+y conserva el progreso de emisores anteriores si uno posterior falla. La consulta recibe
+`BvlRegistryUniverseRequest`, abre read-only y nunca accede a la red. El transporte de formularios
+se inyecta por separado del transporte GET para que las pruebas y futuros conectores no amplíen por
+accidente la capacidad de clientes existentes.
 
 ```python
 from datetime import UTC, datetime
@@ -80,6 +100,13 @@ All existing invariants remain in the underlying typed services: deterministic i
 append-only history, point-in-time eligibility through `available_at`, independent market and
 fundamental diagnostics, explicit IEX limitations, and preservation of successful earlier stages
 when a later bootstrap stage fails.
+
+El dominio macro conserva su propia fuente y `asset_id=None`. La fachada no lo convierte en una
+observación de activo ni lo incorpora a un diagnóstico consolidado.
+
+El dominio registral usa fuentes `registry`, conserva `asset_id=None` en las respuestas que abarcan
+un emisor y no crea observaciones. `BVN` y `SCCO` BVL mantienen identidades distintas de sus
+cotizaciones estadounidenses.
 
 The facade does not catch and flatten domain errors. Typed workspace, storage, provider, bootstrap,
 and query errors reach the CLI, runner, or local interface adapter so that each boundary can map

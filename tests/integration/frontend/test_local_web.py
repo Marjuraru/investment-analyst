@@ -12,6 +12,7 @@ from typing import cast
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from uuid import UUID
 
 import pytest
 
@@ -58,6 +59,17 @@ from investment_analyst.application.listed_market_refresh_models import (
     ListedMarketRefreshSummary,
 )
 from investment_analyst.application.market_universe import MarketAssetUniverse
+from investment_analyst.application.multi_asset_scheduler import (
+    ScheduledJobAttempt,
+    ScheduledJobAttemptStatus,
+    ScheduledJobDefinition,
+    ScheduledJobDomain,
+    ScheduledJobFailure,
+)
+from investment_analyst.application.operational_alerts import (
+    OperationalAlertMonitor,
+    OperationalAlertStateStore,
+)
 from investment_analyst.application.operational_models import (
     AaplDailyRunState,
     AaplOperationalHealth,
@@ -704,7 +716,13 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'const DEFAULT_TIME_ZONE = "America/Lima"' in javascript
     assert 'const NEW_YORK_TIME_ZONE = "America/New_York"' in javascript
     assert "function newYorkRegularSessionState" in javascript
-    assert 'document.addEventListener("visibilitychange", startMarketClocks)' in javascript
+    assert "const OVERVIEW_REFRESH_MS = 30_000" in javascript
+    assert "const OVERVIEW_MAX_BACKOFF_MS = 5 * 60_000" in javascript
+    assert "if (overviewRequestActive) return" in javascript
+    assert "if (document.hidden) return" in javascript
+    assert "() => refreshOverview({ manual: false })" in javascript
+    assert 'document.addEventListener("visibilitychange", () => {' in javascript
+    assert "refreshOverview({ manual: false })" in javascript
     assert "window.setTimeout(startMarketClocks, delay)" in javascript
     assert ".market-clock-strip" in stylesheet
     assert "window.requestAnimationFrame" in javascript
@@ -1018,7 +1036,7 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert overview["operational"]["status"] == "ready"
     assert overview["scheduler"] == {"enabled": False}
     assert assets_status == 200
-    assert assets["schema_version"] == "market-asset-universe-v2"
+    assert assets["schema_version"] == "market-asset-universe-v3"
     assert assets["catalog_version"] == 1
     assert len(assets["assets"]) == 18
     assets_by_id = {item["asset_id"]: item for item in assets["assets"]}
@@ -1039,7 +1057,9 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     ):
         assert assets_by_id[asset_id]["has_fundamentals"] is True
         assert assets_by_id[asset_id]["refresh_kind"] == "market_only"
-    assert assets_by_id["equity:us:b"]["has_fundamentals"] is False
+    for asset_id in ("equity:us:b", "equity:us:bvn", "equity:us:tsm"):
+        assert assets_by_id[asset_id]["has_fundamentals"] is True
+        assert assets_by_id[asset_id]["fundamental_frequencies"] == ["annual"]
     assert assets_by_id["etf:us:ibit"]["analysis"]["fundamental_mode"] == "investment_fund"
     assert assets_by_id["crypto:btc-usd"]["analysis"]["market_mode"] == "crypto_spot"
     assert run_status == 200 and run["status"] == "succeeded"
@@ -1164,6 +1184,91 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert len(application.analysis_requests) == 1
     assert application.analysis_asset_ids == ["equity:us:aapl"]
     assert application.analysis_locations[0].workspace == workspace.resolve()
+
+
+def test_local_api_exposes_empty_persistent_alert_inbox(tmp_path: Path) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    alerts = OperationalAlertStateStore(tmp_path / "state" / "alerts.json")
+
+    with _server(AaplLocalWebApplication(controller, None, alerts)) as (_, root):
+        overview_status, overview, _ = _json_request(Request(f"{root}/api/overview"))
+        inbox_status, inbox, _ = _json_request(Request(f"{root}/api/alerts?limit=10"))
+        invalid_status, invalid, _ = _json_request(Request(f"{root}/api/alerts?limit=0"))
+
+    assert overview_status == 200
+    assert overview["alerts"]["enabled"] is True
+    assert overview["alerts"]["silent_mode"] is True
+    assert inbox_status == 200
+    assert inbox["total"] == 0
+    assert inbox["events"] == []
+    assert invalid_status == 400
+    assert invalid["error"]["code"] == "invalid_request"
+
+
+def test_local_api_audits_alert_inbox_transitions(tmp_path: Path) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    alerts = OperationalAlertStateStore(tmp_path / "state" / "alerts.json")
+    definition = ScheduledJobDefinition(
+        job_id="test:failed",
+        provider="test-provider",
+        domain=ScheduledJobDomain.CATALOG,
+        data_frequency="daily",
+    )
+    completed_at = datetime(2026, 7, 29, 12, 2, tzinfo=UTC)
+    OperationalAlertMonitor(
+        alerts,
+        clock=lambda: completed_at,
+    )(
+        ScheduledJobAttempt(
+            attempt_id=UUID("00000000-0000-4000-8000-000000000999"),
+            definition=definition,
+            local_date=date(2026, 7, 29),
+            scheduled_for=definition.scheduled_for(date(2026, 7, 29)),
+            attempt_number=1,
+            status=ScheduledJobAttemptStatus.FAILED,
+            started_at=datetime(2026, 7, 29, 12, 1, tzinfo=UTC),
+            completed_at=completed_at,
+            failure=ScheduledJobFailure(
+                category="provider_unavailable",
+                message="safe failure",
+                retryable=True,
+            ),
+        )
+    )
+    alert_id = str(alerts.inbox().events[0].alert_id)
+
+    with _server(AaplLocalWebApplication(controller, None, alerts)) as (_, root):
+        transition_status, transition, _ = _json_request(
+            Request(
+                f"{root}/api/alerts/transition",
+                data=json.dumps({"alert_id": alert_id, "status": "seen"}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        inbox_status, inbox, _ = _json_request(Request(f"{root}/api/alerts?limit=10"))
+
+    assert transition_status == 200
+    assert transition["changed"] is True
+    assert transition["event"]["status"] == "seen"
+    assert inbox_status == 200
+    assert inbox["events"][0]["status"] == "seen"
+    assert alerts.status().new_count == 0
+    assert len(alerts.load().transitions) == 1
 
 
 def test_local_api_serves_and_refreshes_enabled_amd_fundamentals_independently(

@@ -39,14 +39,20 @@ emisores corporativos declarados en el catálogo:
   con ingestión append-only e idempotente, reconstrucción point-in-time y agregaciones locales
   deterministas de 1/5/15/30/45 minutos y 1/2/4/5 horas; la interfaz permite consultarlas en una
   ventana acotada de 24 horas sin sustituir la ruta diaria;
-- sondeo acotado de las rutas oficiales SMV/BVL y lector tipado de solo lectura del boletín diario
-  BVL para `CVERDEC1`, `BVN`, `SCCO`, `VOLCABC1`, `MINSURI1` y `POMALCC1`; valida el documento
-  completo, conserva moneda y decimales originales y emite metadatos auditables sin persistencia ni
-  activación prematura de identidades peruanas;
-- obtención oficial de fundamentales mediante SEC EDGAR; Apple conserva el flujo completo histórico
-  y diez emisores genéricos —AMD, Intel, Strategy, Micron, Palantir, CDE, HYMC, MUX, NEM y SCCO—
-  reutilizan refresh, consultas, cachés y presentación web por `asset_id`, validados contra sus
-  filings reales sin mezclar mercado ni emisores;
+- catálogo separado de seis cotizaciones BVL —`CVERDEC1`, `BVN`, `SCCO`, `VOLCABC1`, `MINSURI1`
+  y `POMALCC1`— y conector HTTPS del registro SMV: persiste respuestas oficiales ODbL append-only,
+  reconstruye el universo point-in-time y distingue el código abreviado reportado por SMV del ISIN
+  completo corroborado; el boletín diario BVL continúa como inspección tipada sin persistencia
+  mientras sus condiciones de automatización permanecen en revisión;
+- conector macro FRED/ALFRED point-in-time: conserva respuestas oficiales append-only sin
+  `asset_id`, protege la API key, enumera vintages de forma paginada y automatiza lotes reanudables
+  para seis series mensuales o trimestrales de crecimiento, inflación, empleo, tasas, crédito y
+  liquidez; las series diarias de curva, dólar y petróleo quedan catalogadas pero diferidas hasta
+  disponer de almacenamiento columnar;
+- obtención oficial de fundamentales mediante SEC EDGAR; Apple conserva el flujo completo histórico,
+  diez emisores US-GAAP —AMD, Intel, Strategy, Micron, Palantir, CDE, HYMC, MUX, NEM y SCCO— y tres
+  emisores IFRS anuales —Barrick, BVN ADR y TSM— reutilizan refresh, consultas, cachés y presentación
+  web por `asset_id`, validados contra filings reales sin mezclar mercado, taxonomías ni emisores;
 - base de investigación fundamental con 31 hechos SEC adicionales y 40 métricas descriptivas
   versionadas, calculadas point-in-time con `Decimal`, evidencia exacta por input y estadísticas
   históricas separadas para cambios, media, rango y CAGR válido; cada métrica aparece una sola vez,
@@ -60,7 +66,16 @@ emisores corporativos declarados en el catálogo:
 - fachada de aplicación tipada para que CLI, automatización e interfaz reutilicen las mismas
   operaciones sin duplicar composición;
 - ejecución operativa única con lock por workspace, estado atómico versionado, errores acotados y
-  health check de solo lectura, preparada para un programador externo;
+  health check de solo lectura;
+- scheduler multi-activo derivado del catálogo: mantiene trabajos separados por activo, proveedor,
+  dominio, frecuencia y zona horaria para mercado diario Alpaca, fundamentales SEC, Coinbase diario
+  e intradía, registro SMV y macro FRED/ALFRED cuando existe `FRED_API_KEY`; conserva cada intento,
+  muestra frescura y cobertura, reintenta con backoff acotado, recupera interrupciones y no revierte
+  el progreso exitoso de otros trabajos;
+- primer monitor silencioso de alertas operativas: evalúa cada intento mediante reglas trivaluadas,
+  persiste resultados e identidades deterministas, detecta cobertura incompleta, deduplica eventos
+  y ofrece una bandeja local con transiciones auditadas de vista, descartada o resuelta, sin IA,
+  notificaciones externas, gráficos ni consultas adicionales a proveedores;
 - interfaz web local compacta para ejecutar el flujo, consultar el reporte, revisar la evidencia y
   seleccionar desde un catálogo central Apple, Bitcoin y una lista inicial de acciones y ETF
   estadounidenses disponible mediante Alpaca IEX gratuito. Incluye AMD, Barrick (`B`), BVN, CDE,
@@ -79,18 +94,20 @@ emisores corporativos declarados en el catálogo:
   separado; incorpora evolución trimestral o anual de cinco hechos SEC, una clasificación
   empresarial visible que declara cuando la evidencia aún no es suficiente, ficha fundamental y
   una matriz compacta de 40 métricas derivadas con fórmulas e inputs auditables;
-  incluye relojes locales de Lima y Wall Street con la ventana regular NYSE explícita,
+  incluye relojes locales de Lima y Wall Street con la ventana regular NYSE explícita y estado
+  operativo local actualizado automáticamente cada 30 segundos con pausa y backoff,
   exportaciones exactas CSV/JSON generadas en el navegador, tema oscuro o claro, respuestas
-  comprimidas, cachés de lectura acotadas, scheduler diario persistente y unidad de usuario
+  comprimidas, cachés de lectura acotadas, scheduler de watchlist persistente y unidad de usuario
   `systemd` generada de forma segura;
 - entorno reproducible mediante un lock versionado, pruebas unitarias e integraciones locales,
   cobertura de líneas y ramas, auditoría de dependencias y validación continua con GitHub Actions.
 
-El MVP actual no incluye alertas, autenticación o exposición remota, inicio automático desde
-Windows Task Scheduler, ejecución de órdenes ni recomendaciones de inversión. La programación
-continua actualiza Apple; BTC-USD y los demás activos de mercado se actualizan manualmente desde la
-misma interfaz. Activos fuera del catálogo, indicadores o fuentes nuevas requieren fases de diseño
-y validación independientes.
+El MVP actual incluye únicamente alertas operativas locales en modo silencioso. Todavía no incluye
+reglas analíticas de oportunidad, notificaciones externas, autenticación o exposición remota,
+inicio automático desde Windows Task Scheduler, ejecución de órdenes ni recomendaciones de
+inversión. La programación continua actualiza la watchlist visible mediante los conectores ya
+configurados; puede limitarse a activos explícitos. Activos fuera del catálogo, indicadores o
+fuentes nuevas requieren fases de diseño y validación independientes.
 
 La ampliación de [investigación fundamental](docs/fundamental_research_foundation.md), la
 [estrategia de datos históricos](docs/historical_research_data.md), la
@@ -119,6 +136,10 @@ información de la que realmente contienen.
   observaciones, métricas y diagnóstico de una empresa configurada sin acoplarla a su mercado.
 - [Estrategia BVL/SMV](docs/bvl_market_strategy.md): plan gratuito por fases para identidad,
   cotización diferida, fundamentales y futura sustitución de proveedores.
+- [Registro SMV y universo BVL](docs/smv_bvl_registry.md): actualizar y consultar las seis
+  identidades peruanas con evidencia append-only y point-in-time.
+- [Conector FRED/ALFRED point-in-time](docs/fred_alfred_point_in_time.md): importar vintages
+  explícitos y consultar revisiones históricas sin mezclar macro con activos.
 - [Hoja de ruta del producto](docs/product_roadmap.md): orden de integración, mercados,
   fundamentales, macro, noticias, Cazatiburones, interfaz, IA y operación 24/7.
 - [Screening y alertas](docs/automated_screening_alerts.md): evaluación determinista y de bajo

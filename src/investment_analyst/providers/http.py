@@ -6,7 +6,7 @@ from time import sleep as default_sleep
 from types import MappingProxyType
 from typing import Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
@@ -34,14 +34,16 @@ class HttpRequestError(RuntimeError):
         url: str,
         message: str,
         *,
+        method: str = "GET",
         status_code: int | None = None,
         cause: BaseException | None = None,
     ) -> None:
         self.url = url
+        self.method = method
         self.status_code = status_code
         self.cause = cause
         status = f" (HTTP {status_code})" if status_code is not None else ""
-        super().__init__(f"GET {url} failed{status}: {message}")
+        super().__init__(f"{method} {url} failed{status}: {message}")
 
 
 class HttpTransport(Protocol):
@@ -59,8 +61,24 @@ class HttpTransport(Protocol):
         ...
 
 
+class HttpFormTransport(HttpTransport, Protocol):
+    """HTTPS transport that also supports bounded form submissions."""
+
+    def post_form(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        fields: Mapping[str, str],
+        timeout_seconds: float,
+        max_response_bytes: int | None = None,
+    ) -> HttpResponse:
+        """Perform one logical application/x-www-form-urlencoded POST request."""
+        ...
+
+
 class UrlLibHttpTransport:
-    """HTTPS GET transport with bounded deterministic retries."""
+    """HTTPS GET/form-POST transport with bounded deterministic retries."""
 
     def __init__(self, *, sleep: Callable[[float], None] = default_sleep) -> None:
         self._sleep = sleep
@@ -74,18 +92,71 @@ class UrlLibHttpTransport:
         max_response_bytes: int | None = None,
     ) -> HttpResponse:
         """Fetch bytes over HTTPS, retrying only transient failures."""
+        return self._request(
+            "GET",
+            url,
+            headers=headers,
+            body=None,
+            timeout_seconds=timeout_seconds,
+            max_response_bytes=max_response_bytes,
+        )
+
+    def post_form(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        fields: Mapping[str, str],
+        timeout_seconds: float,
+        max_response_bytes: int | None = None,
+    ) -> HttpResponse:
+        """Submit one HTTPS form without logging or reflecting its field values."""
+        request_headers = dict(headers)
+        request_headers.setdefault(
+            "Content-Type",
+            "application/x-www-form-urlencoded; charset=utf-8",
+        )
+        body = urlencode(tuple(fields.items())).encode("utf-8")
+        return self._request(
+            "POST",
+            url,
+            headers=request_headers,
+            body=body,
+            timeout_seconds=timeout_seconds,
+            max_response_bytes=max_response_bytes,
+        )
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes | None,
+        timeout_seconds: float,
+        max_response_bytes: int | None,
+    ) -> HttpResponse:
+        """Execute one already-encoded request under the shared safety policy."""
         if urlsplit(url).scheme.lower() != "https":
-            raise HttpRequestError(url, "only HTTPS URLs are allowed")
+            raise HttpRequestError(url, "only HTTPS URLs are allowed", method=method)
         if timeout_seconds <= 0:
-            raise HttpRequestError(url, "timeout_seconds must be greater than zero")
+            raise HttpRequestError(
+                url,
+                "timeout_seconds must be greater than zero",
+                method=method,
+            )
         if max_response_bytes is not None and (
             isinstance(max_response_bytes, bool)
             or not isinstance(max_response_bytes, int)
             or max_response_bytes <= 0
         ):
-            raise HttpRequestError(url, "max_response_bytes must be a positive integer")
+            raise HttpRequestError(
+                url,
+                "max_response_bytes must be a positive integer",
+                method=method,
+            )
 
-        request = Request(url, headers=dict(headers), method="GET")
+        request = Request(url, data=body, headers=dict(headers), method=method)
         for attempt in range(_MAX_ATTEMPTS):
             try:
                 with urlopen(request, timeout=timeout_seconds) as response:
@@ -111,6 +182,7 @@ class UrlLibHttpTransport:
                     raise HttpRequestError(
                         url,
                         "the server returned an unsuccessful response",
+                        method=method,
                         status_code=error.code,
                         cause=error,
                     ) from error
@@ -120,11 +192,12 @@ class UrlLibHttpTransport:
                     raise HttpRequestError(
                         url,
                         "a temporary network error exhausted the retry limit",
+                        method=method,
                         cause=error,
                     ) from error
                 self._sleep(self._retry_delay(attempt, None))
 
-        raise HttpRequestError(url, "the retry loop ended unexpectedly")
+        raise HttpRequestError(url, "the retry loop ended unexpectedly", method=method)
 
     @staticmethod
     def _retry_delay(attempt: int, retry_after: str | None) -> float:

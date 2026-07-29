@@ -16,15 +16,18 @@ from investment_analyst.core.models import (
     RawRecord,
     SourceReference,
 )
-from investment_analyst.providers.asset_config import SecAssetConfiguration
+from investment_analyst.providers.asset_config import (
+    SecAccountingStandard,
+    SecAssetConfiguration,
+)
 from investment_analyst.providers.fundamentals.sec_fact_models import (
     ASSET_ID,
     COMPANYFACTS_SCHEMA_VERSION,
-    SEC_NORMALIZED_FACT_DEFINITIONS,
     TRANSFORMATION_VERSION,
     SecFactDefinition,
     SecFactPeriodType,
     SecFundamentalFact,
+    sec_fact_definitions,
 )
 from investment_analyst.providers.fundamentals.sec_filing_index import SecFilingIndex
 from investment_analyst.providers.fundamentals.sec_raw_records import (
@@ -33,6 +36,7 @@ from investment_analyst.providers.fundamentals.sec_raw_records import (
 
 _OBSERVATION_NAMESPACE = UUID("80bb1c78-73b5-5390-b3dd-6da82dcf8a2e")
 GENERIC_TRANSFORMATION_VERSION = "sec-companyfacts-normalizer-v2"
+IFRS_TRANSFORMATION_VERSION = "sec-companyfacts-normalizer-ifrs-v1"
 
 
 class SecCompanyFactsNormalizationError(ValueError):
@@ -101,7 +105,7 @@ class SecFactExtractionResult:
 
 
 class SecCompanyFactsNormalizer:
-    """Extract selected corporate us-gaap facts for one configured issuer."""
+    """Extract selected corporate facts under one catalog-declared taxonomy."""
 
     def __init__(self, configuration: SecAssetConfiguration | None = None) -> None:
         self._configuration = configuration or aapl_sec_configuration()
@@ -131,27 +135,29 @@ class SecCompanyFactsNormalizer:
             submissions_record,
             self._configuration,
         )
-        us_gaap = _require_mapping(
-            _require_mapping(document.get("facts"), "document.facts").get("us-gaap"),
-            "document.facts.us-gaap",
+        taxonomy = self._configuration.accounting_standard.value
+        taxonomy_facts = _require_mapping(
+            _require_mapping(document.get("facts"), "document.facts").get(taxonomy),
+            f"document.facts.{taxonomy}",
         )
+        definitions = sec_fact_definitions(taxonomy)
 
         examined = 0
         skipped: Counter[str] = Counter()
         by_context: dict[tuple[object, ...], SecFundamentalFact] = {}
 
-        for definition in SEC_NORMALIZED_FACT_DEFINITIONS:
-            concept = us_gaap.get(definition.tag)
+        for definition in definitions:
+            concept = taxonomy_facts.get(definition.tag)
             if concept is None:
                 skipped[f"missing_concept:{definition.field_name}"] += 1
                 continue
             concept_mapping = _require_mapping(
                 concept,
-                f"document.facts.us-gaap.{definition.tag}",
+                f"document.facts.{taxonomy}.{definition.tag}",
             )
             units = _require_mapping(
                 concept_mapping.get("units"),
-                f"document.facts.us-gaap.{definition.tag}.units",
+                f"document.facts.{taxonomy}.{definition.tag}.units",
             )
             unit_facts = units.get(definition.unit)
             if unit_facts is None:
@@ -200,7 +206,7 @@ class SecCompanyFactsNormalizer:
                 ),
             )
         )
-        field_counts = {definition.field_name: 0 for definition in SEC_NORMALIZED_FACT_DEFINITIONS}
+        field_counts = {definition.field_name: 0 for definition in definitions}
         for fact in facts:
             field_counts[fact.field_name] += 1
         annual_count = sum(fact.frequency is DataFrequency.ANNUAL for fact in facts)
@@ -365,7 +371,11 @@ def _parse_candidate(
     if metadata.acceptance_at > normalized_at:
         return None, "future_acceptance"
 
-    frequency = _frequency(form, fiscal_period)
+    frequency = _frequency(
+        form,
+        fiscal_period,
+        accounting_standard=configuration.accounting_standard,
+    )
     if frequency is None:
         return None, "unsupported_fiscal_period"
 
@@ -452,6 +462,8 @@ def sec_transformation_version(configuration: SecAssetConfiguration) -> str:
     """Preserve Apple observation IDs while versioning the generic algorithm."""
     if configuration.asset_id == ASSET_ID:
         return TRANSFORMATION_VERSION
+    if configuration.accounting_standard is SecAccountingStandard.IFRS:
+        return IFRS_TRANSFORMATION_VERSION
     return GENERIC_TRANSFORMATION_VERSION
 
 
@@ -471,7 +483,20 @@ def _fact_context(fact: SecFundamentalFact) -> tuple[object, ...]:
     )
 
 
-def _frequency(form: str, fiscal_period: str) -> DataFrequency | None:
+def _frequency(
+    form: str,
+    fiscal_period: str,
+    *,
+    accounting_standard: SecAccountingStandard,
+) -> DataFrequency | None:
+    if (
+        accounting_standard is SecAccountingStandard.IFRS
+        and form in {"20-F", "20-F/A", "40-F", "40-F/A"}
+        and fiscal_period == "FY"
+    ):
+        return DataFrequency.ANNUAL
+    if accounting_standard is not SecAccountingStandard.US_GAAP:
+        return None
     if form in {"10-K", "10-K/A"} and fiscal_period == "FY":
         return DataFrequency.ANNUAL
     if form in {"10-Q", "10-Q/A"} and fiscal_period in {"Q1", "Q2", "Q3"}:

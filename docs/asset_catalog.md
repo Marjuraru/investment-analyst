@@ -8,8 +8,10 @@ canónicos ya utilizados por el repositorio permanecen sin cambios.
 El documento empaquetado `default_assets.v1.json` es estático, versionado y determinista. Contiene
 Bitcoin, Apple y la lista inicial de acciones y ETF estadounidenses comprobada con el nivel gratuito
 de Alpaca IEX: AMD, Barrick (`B`), BVN, CDE, HYMC, INTC, MSTR, MU, MUX, NEM, PLTR, SCCO, TSM,
-GBTC, GLD e IBIT. No contiene credenciales, observaciones de mercado, parámetros de algoritmos,
-recomendaciones ni valores que cambien con el tiempo.
+GBTC, GLD e IBIT. También contiene seis identidades de cotización BVL verificadas:
+`CVERDEC1`, `BVN`, `SCCO`, `VOLCABC1`, `MINSURI1` y `POMALCC1`. No contiene credenciales,
+observaciones de mercado, parámetros de algoritmos, recomendaciones ni valores que cambien con el
+tiempo.
 
 ## Modelo
 
@@ -30,6 +32,17 @@ Los CIK de SEC son texto para conservar los diez dígitos y sus ceros iniciales.
 de Coinbase y símbolos de proveedores también se conservan exactamente, sin conversiones
 destructivas.
 
+Las cotizaciones BVL usan vinculaciones `bvl/mnemonic`, `bvl/isin`, `smv/legal_name` y, cuando la
+consulta de valores lo expone, `smv/security_code`. Este último tiene ocho caracteres y no se
+presenta como ISIN. Los ISIN completos superan checksum ISO 6166 y se corroboran con documentos BVL.
+`smv/legal_name` declara `is_unique: false`: una razón social identifica al emisor y puede
+corresponder a varias clases o cotizaciones. Los identificadores de cotización conservan unicidad;
+una resolución inversa no única falla explícitamente en vez de elegir un activo.
+`equity:pe:bvl:bvn` y `equity:pe:bvl:scco` son distintos de `equity:us:bvn` y
+`equity:us:scco`; la resolución exacta por proveedor y namespace no es ambigua. Los aliases
+humanos de las cotizaciones peruanas incluyen el mercado para no cambiar el significado histórico
+de `BVN` o `SCCO` sin contexto.
+
 La configuración SEC deriva IDs de fuente distintos por ticker
 (`sec-edgar:<ticker>:submissions` y `sec-edgar:<ticker>:companyfacts`). Apple conserva sin cambios
 `sec-edgar:aapl:submissions` y `sec-edgar:aapl:companyfacts`; un futuro emisor no puede reutilizar
@@ -47,7 +60,7 @@ respectivamente las versiones genéricas v2, v3, v3 y v2.
 
 Esto no aplica fundamentales corporativos a cada símbolo por defecto. Una acción queda habilitada
 automáticamente cuando declara juntas las capacidades SEC de Submissions y Company Facts y sus
-vinculaciones exactas de ticker y CIK superan la resolución tipada. La fachada read-only puede
+vinculaciones exactas de ticker, CIK y taxonomía contable superan la resolución tipada. La fachada read-only puede
 consultar ese emisor por su `asset_id` y el refresh genérico puede ingerirlo con una sola conexión
 writer, sin añadir otra lista de activos en el código. AMD declara ticker `AMD` y CIK `0000002488`,
 verificados contra
@@ -55,14 +68,16 @@ verificados contra
 Intel declara ticker `INTC` y CIK `0000050863`, contrastados con el índice oficial de compañías de
 SEC. MSTR, MU y PLTR declaran de la misma forma sus CIK oficiales `0001050446`, `0000723125` y
 `0001321655`. CDE, HYMC, MUX, NEM y SCCO declaran `0000215466`, `0001718405`, `0000314203`,
-`0001164727` y `0001001838`. Tras validar filings reales e idempotencia, los diez emisores genéricos
+`0001164727` y `0001001838`. Tras validar filings reales e idempotencia, los diez emisores US-GAAP
 declaran `has_fundamentals=true` y conservan `refresh_kind=market_only`: mercado y SEC se ejecutan
 como writers independientes. Apple es el único activo con `complete_analysis`.
 
-Barrick (`B`) conserva análisis de mercado, pero no fundamentales corporativos en esta etapa: su
-historial reciente usa principalmente 40-F e IFRS y no debe pasar por el normalizador US-GAAP de
-10-K/10-Q. BVN y TSM requieren igualmente evaluar un adaptador IFRS. BVL/SMV necesita otro adaptador
-de documentos, moneda y disponibilidad; no se envía al conector SEC.
+El perfil IFRS anual habilita Barrick (`B`, CIK `0000756894`), BVN ADR (CIK `0001013131`) y TSM
+(CIK `0001046179`) mediante conceptos `ifrs-full` comparables y formularios 20-F/40-F. No interpreta
+6-K como trimestre ni pasa IFRS por el normalizador US-GAAP. Cada descriptor publica
+`fundamental_frequencies=["annual"]`, y el backend rechaza una frecuencia trimestral antes de leer
+o escribir. Las identidades BVL continúan separadas: sus fundamentales SMV necesitan otro adaptador
+de documentos, moneda y disponibilidad y no se envían al conector SEC.
 
 ## Consultas
 
@@ -97,10 +112,9 @@ python scripts/resolve_asset.py \
 
 ## Universo visible
 
-La fachada genera `market-asset-universe-v2` directamente desde el catálogo y las configuraciones
-tipadas de proveedores. Conserva los campos de v1, cambia intencionalmente el valor de actualización
-completa de `aapl_complete` a `complete_analysis` y añade un perfil
-`asset-analysis-capabilities-v1`; los clientes que validaban literalmente v1 deben adoptar el nuevo
+La fachada genera `market-asset-universe-v3` directamente desde el catálogo y las configuraciones
+tipadas de proveedores. Conserva los campos de v2 y añade `fundamental_frequencies`, derivado del
+perfil contable configurado; los clientes que validaban literalmente v2 deben adoptar el nuevo
 contrato. No cambia el formato del workspace.
 
 La interfaz consulta `/api/market-assets` al iniciar y construye su selector; no conserva otra lista

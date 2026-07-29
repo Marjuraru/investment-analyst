@@ -1,6 +1,6 @@
 """Published Decimal-only rules for SEC issuer fundamental diagnostics."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Context, Decimal, localcontext
 
 from investment_analyst.core.models import (
@@ -10,8 +10,8 @@ from investment_analyst.core.models import (
     EvidenceDirection,
 )
 
-ALGORITHM_VERSION = "sec-aapl-fundamental-diagnostic-v1.1-decimal34"
-GENERIC_ALGORITHM_VERSION = "sec-fundamental-diagnostic-v2-decimal34"
+ALGORITHM_VERSION = "sec-aapl-fundamental-diagnostic-v1.2-decimal34"
+GENERIC_ALGORITHM_VERSION = "sec-fundamental-diagnostic-v3-decimal34"
 SCORE_TOLERANCE = Decimal("0.0001")
 POSITIVE_THRESHOLD = Decimal("65")
 NEUTRAL_THRESHOLD = Decimal("40")
@@ -205,14 +205,13 @@ def recency_factor(
         raise SecFundamentalDiagnosticRuleError(
             "latest_available_at must include timezone information"
         )
-    delta = known_at - latest_available_at
-    if delta.days < 0:
+    if latest_available_at > known_at:
         raise SecFundamentalDiagnosticRuleError("metric availability cannot be after known_at")
     with localcontext(Context(prec=34)):
-        age_days = (
-            Decimal(delta.days)
-            + Decimal(delta.seconds) / Decimal("86400")
-            + Decimal(delta.microseconds) / Decimal("86400000000")
+        # Fundamental filings age on completed UTC calendar days. This avoids
+        # operational clock seconds changing an otherwise equivalent diagnosis.
+        age_days = Decimal(
+            (known_at.astimezone(UTC).date() - latest_available_at.astimezone(UTC).date()).days
         )
         if frequency is DataFrequency.QUARTERLY:
             fresh_limit = Decimal("150")

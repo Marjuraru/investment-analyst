@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serve the loopback analysis UI and its optional Apple daily scheduler."""
+"""Serve the loopback analysis UI and its optional watchlist scheduler."""
 
 import argparse
 import os
@@ -14,27 +14,38 @@ from uuid import uuid4
 from investment_analyst.application.aapl_bootstrap_models import AaplRefreshMode
 from investment_analyst.application.aapl_daily_runner import AaplDailyRunner
 from investment_analyst.application.aapl_scheduler import (
-    AaplDailyScheduleConfig,
-    AaplDailyScheduler,
-    AaplDailyScheduleStateStore,
     AaplLocalServiceAlreadyRunningError,
     AaplLocalServiceLock,
 )
 from investment_analyst.application.facade import InvestmentAnalystApplication
+from investment_analyst.application.multi_asset_scheduler import (
+    MultiAssetScheduler,
+    MultiAssetScheduleStateStore,
+)
+from investment_analyst.application.operational_alerts import (
+    OperationalAlertMonitor,
+    OperationalAlertStateStore,
+)
 from investment_analyst.application.operational_state import AaplOperationalStateError
 from investment_analyst.application.runtime import ApplicationRuntime, ApplicationRuntimeError
 from investment_analyst.core.models import DataFrequency
+from investment_analyst.frontend.local_schedule_jobs import (
+    LocalWatchlistScheduleConfig,
+    build_local_watchlist_jobs,
+)
 from investment_analyst.frontend.local_web import (
     AaplLocalController,
     AaplLocalHttpServer,
     AaplLocalWebApplication,
 )
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
+from investment_analyst.providers.macro.fred_alfred import FredApiKey
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
 from investment_analyst.storage import StorageError
 from investment_analyst.workspace.service import WorkspaceError
 
-_SCHEDULE_STATE_FILE = "aapl_daily_schedule_state.json"
+_SCHEDULE_STATE_FILE = "multi_asset_schedule_state_v1.json"
+_ALERT_STATE_FILE = "operational_alert_state_v1.json"
 _SERVICE_LOCK_FILE = "aapl_local_service.lock"
 
 
@@ -101,42 +112,67 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--refresh-mode", choices=("auto", "full"), default="auto")
     parser.add_argument("--allow-partial", action="store_true")
+    parser.add_argument(
+        "--schedule-asset",
+        action="append",
+        default=[],
+        help="repeat to restrict automatic jobs to explicit catalog asset IDs",
+    )
+    parser.add_argument("--no-schedule-intraday", action="store_true")
+    parser.add_argument("--no-schedule-smv", action="store_true")
+    parser.add_argument("--no-schedule-macro", action="store_true")
     return parser
 
 
-def _credentials() -> tuple[AlpacaCredentials, SecEdgarIdentity] | None:
+def _credentials() -> tuple[AlpacaCredentials, SecEdgarIdentity, FredApiKey | None] | None:
     api_key = os.environ.get("ALPACA_API_KEY", "")
     secret_key = os.environ.get("ALPACA_API_SECRET", "")
     sec_user_agent = os.environ.get("SEC_USER_AGENT", "")
     if not api_key.strip() or not secret_key.strip() or not sec_user_agent.strip():
         return None
+    fred_value = os.environ.get("FRED_API_KEY", "").strip()
     return (
         AlpacaCredentials(api_key=api_key, secret_key=secret_key),
         SecEdgarIdentity(sec_user_agent),
+        FredApiKey(fred_value) if fred_value else None,
     )
 
 
 def _serve(
-    arguments: argparse.Namespace, credentials: tuple[AlpacaCredentials, SecEdgarIdentity]
+    arguments: argparse.Namespace,
+    credentials: tuple[AlpacaCredentials, SecEdgarIdentity, FredApiKey | None],
 ) -> int:
     runtime = ApplicationRuntime.create_default()
     paths = runtime.workspace_service.resolve(arguments.workspace)
     runtime.workspace_service.inspect(paths.root)
     application = InvestmentAnalystApplication(runtime)
     runner = AaplDailyRunner(application, runtime.workspace_service)
-    alpaca_credentials, sec_identity = credentials
+    alpaca_credentials, sec_identity, fred_api_key = credentials
     controller = AaplLocalController(
         runner,
         application,
         workspace=paths.root,
         alpaca_credentials=alpaca_credentials,
         sec_identity=sec_identity,
+        fred_api_key=fred_api_key,
     )
 
-    scheduler: AaplDailyScheduler | None = None
+    scheduler: MultiAssetScheduler | None = None
+    alert_store = OperationalAlertStateStore(paths.state_root / _ALERT_STATE_FILE)
     if not arguments.no_scheduler:
-        scheduler = AaplDailyScheduler(
-            AaplDailyScheduleConfig(
+        selected_asset_ids = tuple(
+            sorted(
+                {
+                    value.strip()
+                    for value in arguments.schedule_asset
+                    if isinstance(value, str) and value.strip()
+                }
+            )
+        )
+        jobs = build_local_watchlist_jobs(
+            controller,
+            controller.market_assets(),
+            LocalWatchlistScheduleConfig(
                 timezone=arguments.timezone,
                 run_at=arguments.schedule_at,
                 market_start=arguments.market_start,
@@ -147,15 +183,24 @@ def _serve(
                     if arguments.refresh_mode == "full"
                     else AaplRefreshMode.AUTO
                 ),
-                require_complete=not arguments.allow_partial,
+                selected_asset_ids=selected_asset_ids,
+                include_intraday=not arguments.no_schedule_intraday,
+                include_smv_registry=not arguments.no_schedule_smv,
+                include_macro=fred_api_key is not None and not arguments.no_schedule_macro,
             ),
-            AaplDailyScheduleStateStore(paths.state_root / _SCHEDULE_STATE_FILE),
-            controller.run_request,
+        )
+        schedule_store = MultiAssetScheduleStateStore(paths.state_root / _SCHEDULE_STATE_FILE)
+        alert_monitor = OperationalAlertMonitor(alert_store)
+        alert_monitor.reconcile(schedule_store.load().attempts)
+        scheduler = MultiAssetScheduler(
+            jobs,
+            schedule_store,
+            observer=alert_monitor,
         )
 
     server = AaplLocalHttpServer(
         ("127.0.0.1", arguments.port),
-        AaplLocalWebApplication(controller, scheduler),
+        AaplLocalWebApplication(controller, scheduler, alert_store),
     )
     stop_event = threading.Event()
     scheduler_thread: threading.Thread | None = None
@@ -164,7 +209,7 @@ def _serve(
             target=scheduler.run_forever,
             args=(stop_event,),
             kwargs={"error_handler": lambda message: print(message, file=sys.stderr)},
-            name="aapl-daily-scheduler",
+            name="multi-asset-scheduler",
             daemon=True,
         )
 

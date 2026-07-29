@@ -4,6 +4,8 @@ const LOCALE = "es-PE";
 const DEFAULT_TIME_ZONE = "America/Lima";
 const NEW_YORK_TIME_ZONE = "America/New_York";
 const MARKET_CLOCK_REFRESH_MS = 60_000;
+const OVERVIEW_REFRESH_MS = 30_000;
+const OVERVIEW_MAX_BACKOFF_MS = 5 * 60_000;
 const NYSE_CORE_OPEN_MINUTES = 9 * 60 + 30;
 const NYSE_CORE_CLOSE_MINUTES = 16 * 60;
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
@@ -483,6 +485,7 @@ function marketAssetFromDescriptor(descriptor) {
     marketMode: descriptor.analysis.market_mode,
     fundamentalMode: descriptor.analysis.fundamental_mode,
     hasFundamentals: descriptor.has_fundamentals,
+    fundamentalFrequencies: descriptor.fundamental_frequencies,
     refreshKind: descriptor.refresh_kind,
     refreshLabel: `Actualizar ${descriptor.symbol}`,
     refreshSource: descriptor.refresh_kind === "complete_analysis"
@@ -496,7 +499,7 @@ function marketAssetFromDescriptor(descriptor) {
 async function loadMarketAssets() {
   const payload = await api("/api/market-assets");
   if (
-    payload.schema_version !== "market-asset-universe-v2"
+    payload.schema_version !== "market-asset-universe-v3"
     || !Array.isArray(payload.assets)
     || payload.assets.length === 0
   ) {
@@ -585,6 +588,32 @@ function applySelectedMarketAsset() {
   }
   for (const element of document.querySelectorAll("[data-complete-analysis-only]")) {
     element.classList.toggle("hidden", presentation.refreshKind !== "complete_analysis");
+  }
+  const supportedFrequencies = new Set(presentation.fundamentalFrequencies);
+  if (
+    presentation.hasFundamentals
+    && !supportedFrequencies.has(selectedFundamentalFrequency)
+  ) {
+    selectFundamentalFrequency(presentation.fundamentalFrequencies[0]);
+  }
+  for (const button of document.querySelectorAll(".frequency-button")) {
+    button.classList.toggle(
+      "hidden",
+      presentation.hasFundamentals
+        && !supportedFrequencies.has(button.dataset.frequency),
+    );
+  }
+  for (const selectId of ["report-frequency", "run-frequency"]) {
+    for (const option of byId(selectId).options) {
+      option.disabled = presentation.hasFundamentals
+        && !supportedFrequencies.has(option.value);
+    }
+    if (
+      presentation.hasFundamentals
+      && !supportedFrequencies.has(byId(selectId).value)
+    ) {
+      byId(selectId).value = presentation.fundamentalFrequencies[0];
+    }
   }
   byId("operacion-titulo").textContent = presentation.refreshLabel;
   byId("run-source-label").textContent = presentation.refreshSource;
@@ -2984,6 +3013,27 @@ async function queryFundamentalResearch() {
 }
 
 function localizedIssue(issue) {
+  if (issue.endsWith(": latest scheduled job failed")) {
+    return `${issue.slice(0, -": latest scheduled job failed".length)}: falló la actualización más reciente`;
+  }
+  if (issue.endsWith(": daily retry budget exhausted")) {
+    return `${issue.slice(0, -": daily retry budget exhausted".length)}: se agotaron los reintentos diarios`;
+  }
+  if (issue.endsWith(": prior scheduled job failed")) {
+    return `${issue.slice(0, -": prior scheduled job failed".length)}: falló la actualización anterior`;
+  }
+  if (issue.endsWith(": interrupted scheduled job")) {
+    return `${issue.slice(0, -": interrupted scheduled job".length)}: actualización interrumpida`;
+  }
+  if (issue.endsWith(": provider check is stale")) {
+    return `${issue.slice(0, -": provider check is stale".length)}: evidencia desactualizada`;
+  }
+  if (issue.endsWith(": latest coverage is incomplete")) {
+    return `${issue.slice(0, -": latest coverage is incomplete".length)}: cobertura incompleta`;
+  }
+  if (issue === "operational alert monitor could not persist its result") {
+    return "El monitor de alertas no pudo guardar su evaluación.";
+  }
   return ISSUE_TRANSLATIONS.get(issue) || issue;
 }
 
@@ -3013,6 +3063,7 @@ function applyOverview(payload) {
   const workspace = operational.workspace;
   const latest = operational.latest_run;
   const scheduler = payload.scheduler;
+  const alerts = payload.alerts || { enabled: false };
 
   badge(
     byId("health-badge"),
@@ -3020,7 +3071,7 @@ function applyOverview(payload) {
     statusTone(operational.status),
   );
   byId("workspace-status").textContent = translated(workspace.status, STATUS_LABELS, workspace.status);
-  byId("workspace-counts").textContent = `${formatInteger(workspace.counts.observations)} observaciones · ${formatInteger(workspace.counts.metric_results)} métricas`;
+  byId("workspace-counts").textContent = `${formatInteger(workspace.counts.observations)} obs. · ${formatInteger(workspace.counts.metric_results)} métricas`;
 
   byId("run-status").textContent = latest
     ? translated(latest.status, STATUS_LABELS, latest.status)
@@ -3032,18 +3083,58 @@ function applyOverview(payload) {
     ? "Verificada"
     : "Sin verificación reciente";
   byId("known-at-status").textContent = latest?.effective_known_at
-    ? `Corte Apple: ${formatInstant(latest.effective_known_at)}`
+    ? `Corte: ${formatInstant(latest.effective_known_at)}`
     : "—";
 
   if (scheduler.enabled) {
-    const config = scheduler.config;
-    byId("schedule-status").textContent = scheduler.due
-      ? "Pendiente"
-      : `Diaria · ${config.run_at}`;
-    byId("schedule-next").textContent = `Próxima: ${formatInstant(scheduler.next_run_at, config.timezone)}`;
+    if (Array.isArray(scheduler.jobs)) {
+      const total = scheduler.jobs.length;
+      if (scheduler.failed_count > 0) {
+        byId("schedule-status").textContent = `${formatInteger(scheduler.failed_count)} con fallo`;
+      } else if (scheduler.incomplete_count > 0) {
+        byId("schedule-status").textContent = `${formatInteger(scheduler.incomplete_count)} incompletos`;
+      } else if (scheduler.stale_count > 0) {
+        byId("schedule-status").textContent = `${formatInteger(scheduler.stale_count)} desactualizados`;
+      } else if (scheduler.due_count > 0) {
+        byId("schedule-status").textContent = `${formatInteger(scheduler.due_count)} pendientes`;
+      } else if (scheduler.running_count > 0) {
+        byId("schedule-status").textContent = `${formatInteger(scheduler.running_count)} en curso`;
+      } else {
+        byId("schedule-status").textContent = `${formatInteger(total)} trabajos automáticos`;
+      }
+      const nextJob = scheduler.jobs
+        .slice()
+        .sort((left, right) => left.next_run_at.localeCompare(right.next_run_at))[0];
+      byId("schedule-next").textContent = formatInstant(
+        scheduler.next_run_at,
+        nextJob?.definition?.timezone || DEFAULT_TIME_ZONE,
+      );
+    } else {
+      const config = scheduler.config;
+      byId("schedule-status").textContent = scheduler.due
+        ? "Pendiente"
+        : `Automática · ${config.run_at}`;
+      byId("schedule-next").textContent = formatInstant(scheduler.next_run_at, config.timezone);
+    }
   } else {
     byId("schedule-status").textContent = "Desactivada";
     byId("schedule-next").textContent = "Solo actualización manual";
+  }
+
+  if (alerts.enabled) {
+    byId("alert-status").textContent = alerts.new_count > 0
+      ? `${formatInteger(alerts.new_count)} nuevas`
+      : "Sin alertas";
+    byId("alert-latest").textContent = alerts.latest_alert_at
+      ? formatInstant(alerts.latest_alert_at)
+      : "Modo silencioso";
+    byId("alert-inbox-summary").textContent = alerts.alert_count > 0
+      ? `${formatInteger(alerts.alert_count)} registradas · modo silencioso`
+      : "Sin incidencias · modo silencioso";
+  } else {
+    byId("alert-status").textContent = "Desactivadas";
+    byId("alert-latest").textContent = "Monitor no configurado";
+    byId("alert-inbox-summary").textContent = "Monitor no configurado";
   }
 
   if (latest?.effective_known_at) byId("report-known-at").value = latest.effective_known_at;
@@ -3052,6 +3143,80 @@ function applyOverview(payload) {
   }
   operationalIssues = [...(operational.issues || []), ...(scheduler.issues || [])].map(localizedIssue);
   setMessage(operationalIssues.join(" · "), operationalIssues.length > 0);
+}
+
+function renderAlertInbox(payload) {
+  const inbox = byId("alert-inbox");
+  inbox.replaceChildren();
+  if (!Array.isArray(payload.events) || payload.events.length === 0) {
+    inbox.append(createElement("p", "", "No hay alertas operativas registradas."));
+    return;
+  }
+  for (const event of payload.events) {
+    const item = createElement("article", "alert-inbox-item");
+    const statusLabels = {
+      new: "Nueva",
+      seen: "Vista",
+      dismissed: "Descartada",
+      resolved: "Resuelta",
+      silenced: "Silenciada",
+    };
+    const status = createElement(
+      "span",
+      `alert-inbox-status ${event.status}`,
+      statusLabels[event.status] || event.status,
+    );
+    item.append(
+      createElement("strong", "", event.title),
+      status,
+      createElement("p", "", event.message),
+      createElement("time", "", formatInstant(event.last_activated_at)),
+    );
+    const actions = createElement("div", "alert-inbox-actions");
+    const availableActions = event.status === "new"
+      ? [["seen", "Marcar vista"], ["dismissed", "Descartar"], ["resolved", "Resolver"]]
+      : event.status === "seen"
+        ? [["dismissed", "Descartar"], ["resolved", "Resolver"]]
+        : ["dismissed", "silenced"].includes(event.status)
+          ? [["resolved", "Resolver"]]
+          : [];
+    for (const [target, label] of availableActions) {
+      const button = createElement("button", "alert-action-button", label);
+      button.type = "button";
+      button.addEventListener("click", () => transitionAlert(event.alert_id, target, button));
+      actions.append(button);
+    }
+    if (availableActions.length > 0) item.append(actions);
+    inbox.append(item);
+  }
+}
+
+async function transitionAlert(alertId, status, button) {
+  button.disabled = true;
+  try {
+    await api("/api/alerts/transition", {
+      method: "POST",
+      body: JSON.stringify({ alert_id: alertId, status }),
+    });
+    await Promise.all([loadAlertInbox(), refreshOverview()]);
+  } catch (error) {
+    setMessage(`No se pudo actualizar la alerta: ${error.message}`, true);
+    button.disabled = false;
+  }
+}
+
+async function loadAlertInbox() {
+  const inbox = byId("alert-inbox");
+  inbox.setAttribute("aria-busy", "true");
+  try {
+    renderAlertInbox(await api("/api/alerts?limit=50"));
+  } catch (error) {
+    inbox.replaceChildren(
+      createElement("p", "", `No se pudo consultar la bandeja: ${error.message}`),
+    );
+  } finally {
+    inbox.setAttribute("aria-busy", "false");
+  }
 }
 
 function newYorkRegularSessionState(now) {
@@ -3089,6 +3254,9 @@ function renderMarketClocks(now = new Date()) {
 }
 
 let marketClockTimer = null;
+let overviewTimer = null;
+let overviewRequestActive = false;
+let overviewFailureCount = 0;
 
 function startMarketClocks() {
   if (marketClockTimer !== null) {
@@ -3103,16 +3271,38 @@ function startMarketClocks() {
   }
 }
 
-async function refreshOverview() {
+function scheduleOverviewRefresh() {
+  if (overviewTimer !== null) {
+    window.clearTimeout(overviewTimer);
+    overviewTimer = null;
+  }
+  if (document.hidden) return;
+  const delay = Math.min(
+    OVERVIEW_REFRESH_MS * (2 ** overviewFailureCount),
+    OVERVIEW_MAX_BACKOFF_MS,
+  );
+  overviewTimer = window.setTimeout(
+    () => refreshOverview({ manual: false }),
+    delay,
+  );
+}
+
+async function refreshOverview({ manual = false } = {}) {
+  if (overviewRequestActive) return;
+  overviewRequestActive = true;
   const button = byId("refresh-overview");
-  setButtonBusy(button, true, "Actualizando…", "Actualizar estado");
+  if (manual) setButtonBusy(button, true, "Verificando…", "Verificar");
   try {
     applyOverview(await api("/api/overview"));
+    overviewFailureCount = 0;
   } catch (error) {
-    setMessage(error.message, true);
+    overviewFailureCount += 1;
+    if (manual) setMessage(error.message, true);
     badge(byId("health-badge"), "Sin conexión", "bad");
   } finally {
-    setButtonBusy(button, false, "Actualizando…", "Actualizar estado");
+    overviewRequestActive = false;
+    if (manual) setButtonBusy(button, false, "Verificando…", "Verificar");
+    scheduleOverviewRefresh();
   }
 }
 
@@ -3395,8 +3585,19 @@ byId("report-form").addEventListener("submit", async (event) => {
   ]);
 });
 
-byId("refresh-overview").addEventListener("click", refreshOverview);
-document.addEventListener("visibilitychange", startMarketClocks);
+byId("refresh-overview").addEventListener(
+  "click",
+  () => refreshOverview({ manual: true }),
+);
+document.addEventListener("visibilitychange", () => {
+  startMarketClocks();
+  if (document.hidden) {
+    if (overviewTimer !== null) window.clearTimeout(overviewTimer);
+    overviewTimer = null;
+  } else {
+    refreshOverview({ manual: false });
+  }
+});
 byId("export-market-csv").addEventListener("click", exportMarketCsv);
 byId("export-fundamental-csv").addEventListener("click", exportFundamentalCsv);
 byId("export-fundamental-research-csv").addEventListener(
@@ -3544,6 +3745,10 @@ for (const link of document.querySelectorAll(".nav-link")) {
     }
   });
 }
+
+byId("alert-inbox-panel").addEventListener("toggle", (event) => {
+  if (event.currentTarget.open) void loadAlertInbox();
+});
 
 const yesterday = new Date();
 yesterday.setUTCDate(yesterday.getUTCDate() - 1);
