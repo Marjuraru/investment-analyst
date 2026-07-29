@@ -1,56 +1,92 @@
-# Versioned asset catalog
+# Catálogo versionado de activos
 
-The asset catalog separates a stable canonical asset ID from identifiers assigned by external
-providers. A ticker is convenient for display, but it is not a safe global identity: the same
-text can be reused across markets, providers, or asset classes. The canonical IDs already used
-by this repository remain unchanged.
+El catálogo separa el ID canónico estable de cada activo de los identificadores asignados por
+proveedores externos. Un ticker es útil para mostrar, pero no constituye una identidad global
+segura: el mismo texto puede reutilizarse entre mercados, proveedores o clases de activo. Los IDs
+canónicos ya utilizados por el repositorio permanecen sin cambios.
 
-The packaged `default_assets.v1.json` document is static, versioned, deterministic, and contains
-only the assets currently supported by working pipelines: Apple and the Coinbase BTC-USD asset.
-It contains no credentials, URLs, market observations, algorithm parameters, recommendations, or
-time-varying values.
+El documento empaquetado `default_assets.v1.json` es estático, versionado y determinista. Contiene
+Bitcoin, Apple y la lista inicial de acciones y ETF estadounidenses comprobada con el nivel gratuito
+de Alpaca IEX: AMD, Barrick (`B`), BVN, CDE, HYMC, INTC, MSTR, MU, MUX, NEM, PLTR, SCCO, TSM,
+GBTC, GLD e IBIT. No contiene credenciales, observaciones de mercado, parámetros de algoritmos,
+recomendaciones ni valores que cambien con el tiempo.
 
-## Model
+## Modelo
 
-A `CatalogAsset` extends the core `Asset` contract with explicit aliases and provider bindings.
-Aliases are case-insensitive lookup names and do not replace the canonical ID. Each binding has:
+`CatalogAsset` amplía el contrato `Asset` del núcleo con alias y vinculaciones de proveedor
+explícitas. Los alias no distinguen mayúsculas y minúsculas, y no sustituyen el ID canónico. Cada
+vinculación contiene:
 
-- `provider`: a lower-case provider slug such as `alpaca`, `sec`, or `coinbase`;
-- `namespace`: the provider's identifier kind, such as `symbol`, `cik`, or `product_id`;
-- `identifier`: the exact external value;
-- `capabilities`: sorted namespaced operations currently supported through that binding.
+- `provider`: identificador en minúsculas como `alpaca`, `sec` o `coinbase`;
+- `namespace`: tipo de identificador del proveedor, como `symbol`, `cik` o `product_id`;
+- `identifier`: valor externo exacto;
+- `capabilities`: operaciones disponibles, ordenadas y con namespace.
 
-A binding identity is `(provider, namespace, identifier)`. The catalog rejects duplicate
-canonical IDs and duplicate external identities. Reverse lookup therefore cannot silently choose
-between two assets. Alias ambiguity is also reported explicitly.
+La identidad de una vinculación es `(provider, namespace, identifier)`. El catálogo rechaza IDs
+canónicos e identidades externas duplicadas; una búsqueda inversa no puede elegir silenciosamente
+entre dos activos. La ambigüedad entre alias también se informa de forma explícita.
 
-SEC CIK values are strings. This preserves Apple's ten-digit CIK, including leading zeroes.
-Coinbase product IDs and provider symbols are likewise preserved exactly instead of being
-converted or normalized destructively.
+Los CIK de SEC son texto para conservar los diez dígitos y sus ceros iniciales. Los IDs de producto
+de Coinbase y símbolos de proveedores también se conservan exactamente, sin conversiones
+destructivas.
 
-## Queries
+La configuración SEC deriva IDs de fuente distintos por ticker
+(`sec-edgar:<ticker>:submissions` y `sec-edgar:<ticker>:companyfacts`). Apple conserva sin cambios
+`sec-edgar:aapl:submissions` y `sec-edgar:aapl:companyfacts`; un futuro emisor no puede reutilizar
+accidentalmente esos IDs. El transporte, snapshots raw, normalización de los cinco hechos
+corporativos base, consulta point-in-time, cinco métricas y diagnóstico descriptivo reciben una
+`SecAssetConfiguration` y aíslan activo, CIK, fuentes e identidades. Las versiones históricas de
+Apple se conservan; los nuevos emisores usan versiones genéricas separadas cuando la versión forma
+parte de la identidad.
 
-List the complete packaged catalog:
+La tendencia, la investigación ampliada de 40 métricas, su historial y las secciones analíticas
+reciben el emisor configurado y conservan aislados activo, fuente, inputs y cachés. AAPL mantiene sus
+contratos `aapl-fundamental-trend-v1`, `aapl-fundamental-research-v2`,
+`aapl-fundamental-research-history-v2` y `aapl-fundamental-analysis-v1`; otro emisor usa
+respectivamente las versiones genéricas v2, v3, v3 y v2.
+
+Esto no aplica fundamentales corporativos a cada símbolo por defecto. Una acción queda habilitada
+automáticamente cuando declara juntas las capacidades SEC de Submissions y Company Facts y sus
+vinculaciones exactas de ticker y CIK superan la resolución tipada. La fachada read-only puede
+consultar ese emisor por su `asset_id` y el refresh genérico puede ingerirlo con una sola conexión
+writer, sin añadir otra lista de activos en el código. AMD declara ticker `AMD` y CIK `0000002488`,
+verificados contra
+[SEC EDGAR](https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/0000002488-26-000018-index.htm).
+Intel declara ticker `INTC` y CIK `0000050863`, contrastados con el índice oficial de compañías de
+SEC. MSTR, MU y PLTR declaran de la misma forma sus CIK oficiales `0001050446`, `0000723125` y
+`0001321655`. CDE, HYMC, MUX, NEM y SCCO declaran `0000215466`, `0001718405`, `0000314203`,
+`0001164727` y `0001001838`. Tras validar filings reales e idempotencia, los diez emisores genéricos
+declaran `has_fundamentals=true` y conservan `refresh_kind=market_only`: mercado y SEC se ejecutan
+como writers independientes. Apple es el único activo con `complete_analysis`.
+
+Barrick (`B`) conserva análisis de mercado, pero no fundamentales corporativos en esta etapa: su
+historial reciente usa principalmente 40-F e IFRS y no debe pasar por el normalizador US-GAAP de
+10-K/10-Q. BVN y TSM requieren igualmente evaluar un adaptador IFRS. BVL/SMV necesita otro adaptador
+de documentos, moneda y disponibilidad; no se envía al conector SEC.
+
+## Consultas
+
+Listar el catálogo empaquetado completo:
 
 ```bash
 python scripts/list_assets.py
 ```
 
-Filter by asset class or capability:
+Filtrar por clase de activo o capacidad:
 
 ```bash
 python scripts/list_assets.py --asset-type equity
 python scripts/list_assets.py --capability market.daily_bars
 ```
 
-Resolve an alias or canonical ID:
+Resolver un alias o ID canónico:
 
 ```bash
 python scripts/resolve_asset.py --alias aapl
 python scripts/resolve_asset.py --asset-id crypto:btc-usd
 ```
 
-Return a specific provider binding:
+Consultar una vinculación específica:
 
 ```bash
 python scripts/resolve_asset.py \
@@ -59,15 +95,58 @@ python scripts/resolve_asset.py \
   --namespace cik
 ```
 
-## Extending the catalog
+## Universo visible
 
-To add an already implemented asset, edit the next versioned JSON resource and provide its core
-`Asset` fields, unique aliases, and sorted provider bindings. Every capability must be a
-lower-case namespaced name. Asset IDs and external binding identities must remain globally
-unique. New provider identifiers must match the constants and behavior of the implementation,
-and compatibility tests should import those constants so catalog drift is detected.
+La fachada genera `market-asset-universe-v2` directamente desde el catálogo y las configuraciones
+tipadas de proveedores. Conserva los campos de v1, cambia intencionalmente el valor de actualización
+completa de `aapl_complete` a `complete_analysis` y añade un perfil
+`asset-analysis-capabilities-v1`; los clientes que validaban literalmente v1 deben adoptar el nuevo
+contrato. No cambia el formato del workspace.
 
-The service loads the packaged resource with `importlib.resources`, reads it once per instance,
-and builds immutable in-memory indexes once. It does not access the network, DuckDB, a workspace,
-or environment variables. Pipelines do not consume the catalog yet; migration will be gradual so
-existing persisted IDs and working integrations remain unchanged.
+La interfaz consulta `/api/market-assets` al iniciar y construye su selector; no conserva otra lista
+de símbolos. Añadir un activo Alpaca con `market.daily_bars` permite reutilizar consulta,
+actualización, gráfico, estadísticas y diagnóstico de mercado sin añadir una ruta HTTP por símbolo.
+
+Apple conserva su actualización conjunta SEC + Alpaca. Los demás activos Alpaca usan un flujo
+exclusivamente de mercado y, cuando declaran SEC, un refresh fundamental independiente por CLI o
+interfaz. Sus descriptores exponen fundamentales sin convertir mercado y fundamentales en un
+diagnóstico combinado. Bitcoin conserva sus fuentes diaria e intradía independientes.
+
+## Familias de análisis
+
+El perfil se deriva de `asset_class`, exchange y capacidades declaradas; no supone que todos los
+activos pertenezcan a Estados Unidos:
+
+- una acción pertenece a `listed_company`, usa mercado `listed_security` y fundamentales
+  `corporate`;
+- un ETF pertenece a `listed_fund`, comparte el contrato de mercado cotizado pero usa fundamentales
+  `investment_fund`, no ratios empresariales aplicados por conveniencia;
+- una criptomoneda pertenece a `cryptoasset`, usa mercado `crypto_spot` y futuros fundamentales
+  `crypto_network`.
+
+Una futura acción de BVL seguirá siendo `listed_company` aunque cotice en Perú y use PEN. Sus
+identificadores BVL/SMV y capacidades de datos se declararán en vinculaciones propias. Esto permite
+reutilizar el motor analítico corporativo cuando exista normalización compatible, sin hacer pasar
+documentos peruanos por el conector SEC.
+
+`market_data_configured` y `fundamental_data_configured` solo describen fuentes declaradas. No
+afirman que un pipeline todavía inexistente esté activo. `has_fundamentals` se conserva como señal
+de que la aplicación actual puede servir el análisis fundamental completo.
+
+## Ampliación del catálogo
+
+Para añadir un activo ya implementado, se edita el siguiente recurso JSON versionado con sus campos
+`Asset`, alias únicos y vinculaciones de proveedor ordenadas. Cada capacidad usa un nombre
+namespaced en minúsculas. Los IDs canónicos y las identidades externas deben ser globalmente
+únicos. Los identificadores nuevos deben coincidir con las constantes y el comportamiento de la
+implementación; las pruebas de compatibilidad deben importar esas constantes para detectar deriva
+del catálogo.
+
+Las configuraciones de activos listados exigen nombre, clase, moneda y bolsa explícitos. No existen
+valores predeterminados de Apple/NASDAQ/USD que puedan contaminar una incorporación de BVL u otro
+mercado.
+
+El servicio carga el recurso empaquetado con `importlib.resources`, lo lee una vez por instancia y
+construye índices inmutables en memoria. No accede a la red, DuckDB, un workspace ni variables de
+entorno. Los pipelines resuelven el contexto mediante `ApplicationRuntime`; los clientes de
+proveedor reciben únicamente identificadores ya validados.

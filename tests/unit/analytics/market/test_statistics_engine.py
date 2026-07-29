@@ -12,6 +12,7 @@ from investment_analyst.analytics.market.bar_models import (
     MarketBarCoverage,
     MarketBarSeries,
 )
+from investment_analyst.analytics.market.bar_schemas import COINBASE_INTRADAY_SOURCE_ID
 from investment_analyst.analytics.market.statistics_definitions import (
     RELATIVE_VOLUME_KEY,
     SIMPLE_RETURN_KEY,
@@ -103,6 +104,15 @@ def test_empty_and_single_bar_series_are_valid() -> None:
     one_result = MarketStatisticsEngine().compute(one, _request(one))
     assert len(_items(one_result, SMA_KEY)) == 1
     assert not _items(one_result, SIMPLE_RETURN_KEY)
+
+
+def test_intraday_source_is_rejected_even_when_series_is_empty() -> None:
+    daily = _series(())
+    query = daily.query.model_copy(update={"source_id": COINBASE_INTRADAY_SOURCE_ID})
+    minute = daily.model_copy(update={"query": query})
+
+    with pytest.raises(MarketStatisticsTraceabilityError, match="DAY_1 source"):
+        MarketStatisticsEngine().compute(minute, _request(minute))
 
 
 def test_returns_sma_volatility_and_relative_volume_are_exact() -> None:

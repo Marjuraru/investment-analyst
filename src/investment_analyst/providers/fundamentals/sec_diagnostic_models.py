@@ -1,4 +1,4 @@
-"""Strict models for auditable Apple SEC fundamental diagnostics."""
+"""Strict models for auditable SEC issuer fundamental diagnostics."""
 
 from datetime import date
 from decimal import Decimal
@@ -29,7 +29,7 @@ DiagnosticDecimal = Annotated[Decimal, BeforeValidator(_reject_decimal_float)]
 
 
 class SecFundamentalDiagnosticRequest(ContractModel):
-    """Point-in-time request for one Apple fundamental diagnostic."""
+    """Point-in-time request for one SEC issuer's fundamental diagnostic."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
@@ -40,9 +40,7 @@ class SecFundamentalDiagnosticRequest(ContractModel):
 
     @model_validator(mode="after")
     def validate_scope(self) -> "SecFundamentalDiagnosticRequest":
-        """Validate the fixed Apple scope and requested reporting period."""
-        if self.asset_id != ASSET_ID:
-            raise ValueError("asset_id must identify Apple")
+        """Validate the supported frequency and requested reporting period."""
         if self.frequency not in _ALLOWED_FREQUENCIES:
             raise ValueError("frequency must be annual or quarterly")
         if self.as_of_period_end is not None and self.as_of_period_end > self.known_at.date():

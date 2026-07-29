@@ -14,7 +14,8 @@
       "provider_bindings": [
         {
           "capabilities": [
-            "market.daily_bars"
+            "market.daily_bars",
+            "market.minute_bars"
           ],
           "identifier": "BTC-USD",
           "namespace": "product_id",
@@ -72,6 +73,619 @@
       },
       "quote_currency": "USD",
       "symbol": "AAPL"
+    },
+    {
+      "aliases": [
+        "AMD",
+        "Advanced Micro Devices"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:amd",
+      "exchange": "NASDAQ",
+      "is_active": true,
+      "name": "Advanced Micro Devices, Inc.",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "AMD",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0000002488",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "AMD",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "AMD",
+        "sec_cik": "0000002488"
+      },
+      "quote_currency": "USD",
+      "symbol": "AMD"
+    },
+    {
+      "aliases": [
+        "B",
+        "Barrick",
+        "Barrick Mining"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:b",
+      "exchange": "NYSE",
+      "is_active": true,
+      "name": "Barrick Mining Corporation",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "B",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "B"
+      },
+      "quote_currency": "USD",
+      "symbol": "B"
+    },
+    {
+      "aliases": [
+        "BVN",
+        "Buenaventura",
+        "Compa\u00f1\u00eda de Minas Buenaventura"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:bvn",
+      "exchange": "NYSE",
+      "is_active": true,
+      "name": "Compa\u00f1\u00eda de Minas Buenaventura S.A.A.",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "BVN",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "BVN"
+      },
+      "quote_currency": "USD",
+      "symbol": "BVN"
+    },
+    {
+      "aliases": [
+        "CDE",
+        "Coeur Mining"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:cde",
+      "exchange": "NYSE",
+      "is_active": true,
+      "name": "Coeur Mining, Inc.",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "CDE",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0000215466",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "CDE",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "CDE",
+        "sec_cik": "0000215466"
+      },
+      "quote_currency": "USD",
+      "symbol": "CDE"
+    },
+    {
+      "aliases": [
+        "HYMC",
+        "Hycroft Mining"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:hymc",
+      "exchange": "NASDAQ",
+      "is_active": true,
+      "name": "Hycroft Mining Holding Corporation",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "HYMC",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0001718405",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "HYMC",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "HYMC",
+        "sec_cik": "0001718405"
+      },
+      "quote_currency": "USD",
+      "symbol": "HYMC"
+    },
+    {
+      "aliases": [
+        "INTC",
+        "Intel"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:intc",
+      "exchange": "NASDAQ",
+      "is_active": true,
+      "name": "Intel Corporation",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "INTC",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0000050863",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "INTC",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "INTC",
+        "sec_cik": "0000050863"
+      },
+      "quote_currency": "USD",
+      "symbol": "INTC"
+    },
+    {
+      "aliases": [
+        "MSTR",
+        "MicroStrategy",
+        "Strategy"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:mstr",
+      "exchange": "NASDAQ",
+      "is_active": true,
+      "name": "Strategy Inc.",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "MSTR",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0001050446",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "MSTR",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "MSTR",
+        "sec_cik": "0001050446"
+      },
+      "quote_currency": "USD",
+      "symbol": "MSTR"
+    },
+    {
+      "aliases": [
+        "MU",
+        "Micron",
+        "Micron Technology"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:mu",
+      "exchange": "NASDAQ",
+      "is_active": true,
+      "name": "Micron Technology, Inc.",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "MU",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0000723125",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "MU",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "MU",
+        "sec_cik": "0000723125"
+      },
+      "quote_currency": "USD",
+      "symbol": "MU"
+    },
+    {
+      "aliases": [
+        "MUX",
+        "McEwen Mining",
+        "McEwen"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:mux",
+      "exchange": "NYSE",
+      "is_active": true,
+      "name": "McEwen Inc.",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "MUX",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0000314203",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "MUX",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "MUX",
+        "sec_cik": "0000314203"
+      },
+      "quote_currency": "USD",
+      "symbol": "MUX"
+    },
+    {
+      "aliases": [
+        "NEM",
+        "Newmont"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:nem",
+      "exchange": "NYSE",
+      "is_active": true,
+      "name": "Newmont Corporation",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "NEM",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0001164727",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "NEM",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "NEM",
+        "sec_cik": "0001164727"
+      },
+      "quote_currency": "USD",
+      "symbol": "NEM"
+    },
+    {
+      "aliases": [
+        "PLTR",
+        "Palantir"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:pltr",
+      "exchange": "NASDAQ",
+      "is_active": true,
+      "name": "Palantir Technologies Inc.",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "PLTR",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0001321655",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "PLTR",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "PLTR",
+        "sec_cik": "0001321655"
+      },
+      "quote_currency": "USD",
+      "symbol": "PLTR"
+    },
+    {
+      "aliases": [
+        "SCCO",
+        "Southern Copper"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:scco",
+      "exchange": "NYSE",
+      "is_active": true,
+      "name": "Southern Copper Corporation",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "SCCO",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0001001838",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "SCCO",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "SCCO",
+        "sec_cik": "0001001838"
+      },
+      "quote_currency": "USD",
+      "symbol": "SCCO"
+    },
+    {
+      "aliases": [
+        "TSM",
+        "TSMC",
+        "Taiwan Semiconductor"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:tsm",
+      "exchange": "NYSE",
+      "is_active": true,
+      "name": "Taiwan Semiconductor Manufacturing Company Limited",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "TSM",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "TSM"
+      },
+      "quote_currency": "USD",
+      "symbol": "TSM"
+    },
+    {
+      "aliases": [
+        "GBTC",
+        "Grayscale Bitcoin Trust"
+      ],
+      "asset_class": "etf",
+      "asset_id": "etf:us:gbtc",
+      "exchange": "NYSE ARCA",
+      "is_active": true,
+      "name": "Grayscale Bitcoin Trust ETF",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "GBTC",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "GBTC"
+      },
+      "quote_currency": "USD",
+      "symbol": "GBTC"
+    },
+    {
+      "aliases": [
+        "GLD",
+        "SPDR Gold Shares",
+        "Gold ETF"
+      ],
+      "asset_class": "etf",
+      "asset_id": "etf:us:gld",
+      "exchange": "NYSE ARCA",
+      "is_active": true,
+      "name": "SPDR Gold Shares",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "GLD",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "GLD"
+      },
+      "quote_currency": "USD",
+      "symbol": "GLD"
+    },
+    {
+      "aliases": [
+        "IBIT",
+        "iShares Bitcoin Trust"
+      ],
+      "asset_class": "etf",
+      "asset_id": "etf:us:ibit",
+      "exchange": "NASDAQ",
+      "is_active": true,
+      "name": "iShares Bitcoin Trust ETF",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "IBIT",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "IBIT"
+      },
+      "quote_currency": "USD",
+      "symbol": "IBIT"
     }
   ],
   "catalog_version": 1

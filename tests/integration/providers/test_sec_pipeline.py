@@ -1,4 +1,4 @@
-"""Offline integration tests for the Apple SEC raw-document pipeline."""
+"""Offline integration tests for the configurable SEC raw-document pipeline."""
 
 import json
 from collections.abc import Mapping
@@ -6,12 +6,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from investment_analyst.core.models import Asset, AssetClass
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_edgar import (
     SecEdgarClient,
     SecEdgarIdentity,
 )
 from investment_analyst.providers.fundamentals.sec_pipeline import (
     SecAaplFundamentalsPipeline,
+    SecIssuerFundamentalsPipeline,
 )
 from investment_analyst.providers.fundamentals.sec_raw_records import (
     ASSET_ID,
@@ -137,6 +139,82 @@ def test_company_facts_revision_creates_one_new_version_and_keeps_previous(tmp_p
             second.companyfacts_record_id,
         }
         assert storage.raw_records.get(first.companyfacts_record_id)
+        assert storage.observations.list() == []
+        assert storage.metric_results.list() == []
+        assert storage.diagnostics.list() == []
+
+
+def test_two_issuers_are_idempotent_and_isolated_in_one_workspace(tmp_path: Path) -> None:
+    amd_configuration = SecAssetConfiguration(
+        asset_id="equity:us:amd",
+        cik="0000002488",
+        ticker="AMD",
+        submissions_source_id="sec-edgar:amd:submissions",
+        companyfacts_source_id="sec-edgar:amd:companyfacts",
+        name="Advanced Micro Devices, Inc.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NASDAQ",
+    )
+    amd_submissions = json.loads(SUBMISSIONS)
+    amd_submissions.update(
+        {
+            "cik": "2488",
+            "name": amd_configuration.name,
+            "tickers": ["AMD"],
+        }
+    )
+    amd_company_facts = json.loads(COMPANY_FACTS)
+    amd_company_facts.update(
+        {
+            "cik": amd_configuration.cik,
+            "entityName": amd_configuration.name,
+        }
+    )
+
+    def amd_pipeline(storage: LocalStorage, retrieved_at: datetime):
+        transport = FixtureTransport(
+            json.dumps(amd_submissions).encode(),
+            json.dumps(amd_company_facts).encode(),
+        )
+        client = SecEdgarClient(
+            transport,
+            SecEdgarIdentity("Investment Analyst integration@example.com"),
+            cik=amd_configuration.cik,
+            ticker=amd_configuration.ticker,
+            sleep=lambda _: None,
+            clock=lambda: retrieved_at,
+        )
+        return SecIssuerFundamentalsPipeline(
+            storage,
+            client,
+            configuration=amd_configuration,
+        )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        apple, _ = _pipeline(storage, retrieved_at=FIRST_TIME)
+        apple_summary = apple.run()
+        amd_first = amd_pipeline(storage, FIRST_TIME).run()
+        amd_second = amd_pipeline(storage, SECOND_TIME).run()
+
+        assert amd_first.asset_id == amd_configuration.asset_id
+        assert amd_first.cik == amd_configuration.cik
+        assert amd_first.raw_records_created == 2
+        assert amd_second.raw_records_created == 0
+        assert amd_second.raw_records_reused == 2
+        assert len(storage.assets.list_all()) == 2
+        assert len(storage.sources.list_all()) == 4
+        assert len(storage.raw_records.list()) == 4
+        assert storage.assets.get(amd_configuration.asset_id).provider_symbols == {
+            "sec_cik": amd_configuration.cik
+        }
+        assert storage.raw_records.get(apple_summary.submissions_record_id).asset_id == ASSET_ID
+        assert {
+            record.asset_id
+            for record in storage.raw_records.list(
+                source_id=amd_configuration.companyfacts_source_id
+            )
+        } == {amd_configuration.asset_id}
         assert storage.observations.list() == []
         assert storage.metric_results.list() == []
         assert storage.diagnostics.list() == []

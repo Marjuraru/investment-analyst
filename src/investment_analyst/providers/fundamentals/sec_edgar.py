@@ -1,8 +1,9 @@
-"""Read-only SEC EDGAR client for Apple issuer foundation documents."""
+"""Read-only SEC EDGAR client for configurable issuer foundation documents."""
 
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -22,6 +23,15 @@ COMPANY_FACTS_PATH = f"/api/xbrl/companyfacts/CIK{APPLE_CIK}.json"
 _MAX_RESPONSE_BYTES = 50 * 1024 * 1024
 _REQUEST_DELAY_SECONDS = 0.5
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_TICKER_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9.-]{0,31}$")
+_ENTITY_LEGAL_TOKEN_ALIASES = {
+    "co": "company",
+    "corp": "corporation",
+    "inc": "incorporated",
+    "ltd": "limited",
+}
+_ENTITY_LEGAL_TOKENS = frozenset(_ENTITY_LEGAL_TOKEN_ALIASES.values())
+_ENTITY_JURISDICTION_MARKERS = frozenset({"de"})
 
 
 type SecJsonValue = dict[str, SecJsonValue] | list[SecJsonValue] | str | None
@@ -36,6 +46,30 @@ class SecDocumentType(StrEnum):
 
     SUBMISSIONS = "submissions"
     COMPANY_FACTS = "company_facts"
+
+
+def _entity_name_key(value: str) -> tuple[str, ...]:
+    """Compare SEC labels while normalizing typography and standard legal suffixes."""
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    tokens: list[str] = []
+    current: list[str] = []
+    for character in normalized:
+        if character.isalnum():
+            current.append(character)
+        elif current:
+            token = "".join(current)
+            tokens.append(_ENTITY_LEGAL_TOKEN_ALIASES.get(token, token))
+            current = []
+    if current:
+        token = "".join(current)
+        tokens.append(_ENTITY_LEGAL_TOKEN_ALIASES.get(token, token))
+    if (
+        len(tokens) >= 3
+        and tokens[-1] in _ENTITY_JURISDICTION_MARKERS
+        and tokens[-2] in _ENTITY_LEGAL_TOKENS
+    ):
+        tokens.pop()
+    return tuple(tokens)
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -74,13 +108,11 @@ class SecEdgarDocument:
 
     def __post_init__(self) -> None:
         cik = normalize_cik(self.cik)
-        if cik != APPLE_CIK:
-            raise SecEdgarError("SEC document CIK does not identify Apple")
         entity_name = self.entity_name.strip()
-        if entity_name.casefold() != APPLE_ENTITY_NAME.casefold():
-            raise SecEdgarError("SEC document entity does not identify Apple Inc.")
+        if not entity_name:
+            raise SecEdgarError("SEC document entity_name must not be empty")
         retrieved_at = _utc_datetime(self.retrieved_at, field_name="retrieved_at")
-        _validate_document_url(self.request_url, self.document_type)
+        _validate_document_url(self.request_url, self.document_type, cik=cik)
         if not isinstance(self.body, dict):
             raise SecEdgarError("SEC document body must be a JSON object")
         body = deepcopy(self.body)
@@ -89,7 +121,7 @@ class SecEdgarDocument:
             body_cik, body_entity_name = _validate_submissions(body)
         else:
             body_cik, body_entity_name = _validate_company_facts(body)
-        if body_cik != cik or body_entity_name.casefold() != entity_name.casefold():
+        if body_cik != cik or _entity_name_key(body_entity_name) != _entity_name_key(entity_name):
             raise SecEdgarError("SEC document metadata does not match its JSON body")
         if not _SHA256_PATTERN.fullmatch(self.body_sha256):
             raise SecEdgarError("SEC document body_sha256 must be a lowercase SHA-256 digest")
@@ -102,8 +134,8 @@ class SecEdgarDocument:
 
 
 @dataclass(frozen=True, slots=True)
-class SecAaplFetchResult:
-    """Exactly the Apple submissions and company-facts documents from one fetch."""
+class SecIssuerFetchResult:
+    """Exactly one issuer's submissions and company-facts documents from one fetch."""
 
     cik: str
     ticker: str
@@ -113,11 +145,11 @@ class SecAaplFetchResult:
 
     def __post_init__(self) -> None:
         cik = normalize_cik(self.cik)
+        ticker = _validate_ticker(self.ticker)
+        entity_name = self.entity_name.strip()
+        if not entity_name:
+            raise SecEdgarError("SEC fetch result entity_name must not be empty")
         retrieved_at = _utc_datetime(self.retrieved_at, field_name="retrieved_at")
-        if cik != APPLE_CIK or self.ticker != APPLE_TICKER:
-            raise SecEdgarError("SEC fetch result must represent Apple AAPL")
-        if self.entity_name.strip().casefold() != APPLE_ENTITY_NAME.casefold():
-            raise SecEdgarError("SEC fetch result entity must be Apple Inc.")
         document_types = [document.document_type for document in self.documents]
         if document_types.count(SecDocumentType.SUBMISSIONS) != 1:
             raise SecEdgarError("SEC fetch result requires exactly one submissions document")
@@ -126,20 +158,32 @@ class SecAaplFetchResult:
         if len(self.documents) != 2:
             raise SecEdgarError("SEC fetch result must contain exactly two documents")
         for document in self.documents:
-            if (
-                document.cik != cik
-                or document.entity_name.casefold() != self.entity_name.casefold()
-            ):
-                raise SecEdgarError("SEC fetch result documents identify inconsistent issuers")
+            if document.cik != cik:
+                raise SecEdgarError("SEC fetch result documents have an inconsistent CIK")
+            if _entity_name_key(document.entity_name) != _entity_name_key(entity_name):
+                raise SecEdgarError("SEC fetch result documents have inconsistent entity names")
             if document.retrieved_at != retrieved_at:
                 raise SecEdgarError("SEC fetch result documents must share one retrieval timestamp")
+        submissions = next(
+            document
+            for document in self.documents
+            if document.document_type is SecDocumentType.SUBMISSIONS
+        )
+        if ticker not in _submission_tickers(submissions.body):
+            raise SecEdgarError(
+                f"SEC submissions response does not include configured ticker {ticker}"
+            )
         object.__setattr__(self, "cik", cik)
-        object.__setattr__(self, "entity_name", self.entity_name.strip())
+        object.__setattr__(self, "ticker", ticker)
+        object.__setattr__(self, "entity_name", entity_name)
         object.__setattr__(self, "retrieved_at", retrieved_at)
 
 
+SecAaplFetchResult = SecIssuerFetchResult
+
+
 class SecEdgarClient:
-    """Fetch the two fixed Apple issuer documents from official SEC EDGAR data."""
+    """Fetch two issuer documents from official SEC EDGAR data."""
 
     def __init__(
         self,
@@ -164,9 +208,7 @@ class SecEdgarClient:
         if timeout_seconds <= 0:
             raise SecEdgarError("timeout_seconds must be greater than zero")
         normalized_cik = normalize_cik(cik)
-        normalized_ticker = ticker.strip()
-        if normalized_cik != APPLE_CIK or normalized_ticker != APPLE_TICKER:
-            raise SecEdgarError("SEC issuer identifiers do not identify Apple AAPL")
+        normalized_ticker = _validate_ticker(ticker)
         self._cik = normalized_cik
         self._ticker = normalized_ticker
         self._transport = transport
@@ -176,8 +218,8 @@ class SecEdgarClient:
         self._sleep = sleep
         self._clock = clock
 
-    def fetch_aapl_issuer_documents(self) -> SecAaplFetchResult:
-        """Fetch, parse, validate, and checksum the two fixed Apple documents."""
+    def fetch_issuer_documents(self) -> SecIssuerFetchResult:
+        """Fetch, parse, validate, and checksum both configured issuer documents."""
         submissions_path = f"/submissions/CIK{self._cik}.json"
         company_facts_path = f"/api/xbrl/companyfacts/CIK{self._cik}.json"
         submissions_url = f"{self._base_url}{submissions_path}"
@@ -201,6 +243,7 @@ class SecEdgarClient:
             submissions_response.url,
             submissions_response.body,
             retrieved_at,
+            expected_cik=self._cik,
         )
         company_facts = _parse_document(
             SecDocumentType.COMPANY_FACTS,
@@ -209,14 +252,21 @@ class SecEdgarClient:
             company_facts_response.url,
             company_facts_response.body,
             retrieved_at,
+            expected_cik=self._cik,
         )
-        return SecAaplFetchResult(
+        return SecIssuerFetchResult(
             cik=self._cik,
             ticker=self._ticker,
-            entity_name=APPLE_ENTITY_NAME,
+            entity_name=submissions.entity_name,
             retrieved_at=retrieved_at,
             documents=(submissions, company_facts),
         )
+
+    def fetch_aapl_issuer_documents(self) -> SecAaplFetchResult:
+        """Compatibility wrapper for the historical fixed-AAPL call."""
+        if self._cik != APPLE_CIK or self._ticker != APPLE_TICKER:
+            raise SecEdgarError("Apple fetch requires the configured Apple AAPL issuer")
+        return self.fetch_issuer_documents()
 
     def _headers(self) -> Mapping[str, str]:
         return {
@@ -240,6 +290,14 @@ def normalize_cik(value: object) -> str:
     return text.zfill(10)
 
 
+def _validate_ticker(value: str) -> str:
+    if value != value.strip() or not _TICKER_PATTERN.fullmatch(value):
+        raise SecEdgarError(
+            "SEC ticker must use upper-case letters, digits, dot, or dash without whitespace"
+        )
+    return value
+
+
 def _parse_document(
     document_type: SecDocumentType,
     request_url: str,
@@ -247,6 +305,8 @@ def _parse_document(
     response_url: str,
     body_bytes: bytes,
     retrieved_at: datetime,
+    *,
+    expected_cik: str,
 ) -> SecEdgarDocument:
     if status_code != 200:
         raise SecEdgarError(f"SEC returned HTTP {status_code} for {document_type.value}")
@@ -270,6 +330,8 @@ def _parse_document(
         cik, entity_name = _validate_submissions(decoded)
     else:
         cik, entity_name = _validate_company_facts(decoded)
+    if cik != expected_cik:
+        raise SecEdgarError("SEC response CIK does not match the configured issuer")
     return SecEdgarDocument(
         document_type=document_type,
         cik=cik,
@@ -291,15 +353,16 @@ def _validate_submissions(body: dict[str, SecJsonValue]) -> tuple[str, str]:
     tickers = body["tickers"]
     exchanges = body["exchanges"]
     filings = body["filings"]
-    if not isinstance(tickers, list) or not all(isinstance(value, str) for value in tickers):
+    if (
+        not isinstance(tickers, list)
+        or not tickers
+        or not all(isinstance(value, str) and value for value in tickers)
+    ):
         raise SecEdgarError("SEC submissions tickers must be a list of strings")
-    if APPLE_TICKER not in tickers:
-        raise SecEdgarError("SEC submissions response does not include ticker AAPL")
     if not isinstance(exchanges, list) or not all(isinstance(value, str) for value in exchanges):
         raise SecEdgarError("SEC submissions exchanges must be a list of strings")
     if not isinstance(filings, dict):
         raise SecEdgarError("SEC submissions filings must be an object")
-    _validate_apple_identity(cik, entity_name)
     return cik, entity_name
 
 
@@ -311,15 +374,14 @@ def _validate_company_facts(body: dict[str, SecJsonValue]) -> tuple[str, str]:
     entity_name = _required_string(body["entityName"], field_name="company facts entityName")
     if not isinstance(body["facts"], dict):
         raise SecEdgarError("SEC company facts facts field must be an object")
-    _validate_apple_identity(cik, entity_name)
     return cik, entity_name
 
 
-def _validate_apple_identity(cik: str, entity_name: str) -> None:
-    if cik != APPLE_CIK:
-        raise SecEdgarError("SEC response CIK does not identify Apple")
-    if entity_name.casefold() != APPLE_ENTITY_NAME.casefold():
-        raise SecEdgarError("SEC response entity does not identify Apple Inc.")
+def _submission_tickers(body: dict[str, SecJsonValue]) -> tuple[str, ...]:
+    tickers = body.get("tickers")
+    if not isinstance(tickers, list) or not all(isinstance(value, str) for value in tickers):
+        raise SecEdgarError("SEC submissions tickers must be a list of strings")
+    return tuple(tickers)
 
 
 def _required_string(value: SecJsonValue, *, field_name: str) -> str:
@@ -344,15 +406,22 @@ def _validate_json_value(value: object) -> None:
     raise SecEdgarError("SEC JSON must contain only objects, arrays, strings, and null")
 
 
-def _validate_document_url(url: str, document_type: SecDocumentType) -> None:
+def _validate_document_url(
+    url: str,
+    document_type: SecDocumentType,
+    *,
+    cik: str,
+) -> None:
     expected_path = (
-        SUBMISSIONS_PATH if document_type is SecDocumentType.SUBMISSIONS else COMPANY_FACTS_PATH
+        f"/submissions/CIK{cik}.json"
+        if document_type is SecDocumentType.SUBMISSIONS
+        else f"/api/xbrl/companyfacts/CIK{cik}.json"
     )
     parsed = urlsplit(url)
     if parsed.scheme.lower() != "https" or parsed.hostname != "data.sec.gov":
         raise SecEdgarError("SEC document URL must use the official HTTPS domain")
     if parsed.path != expected_path or parsed.query or parsed.fragment:
-        raise SecEdgarError("SEC document URL does not match the expected Apple endpoint")
+        raise SecEdgarError("SEC document URL does not match the expected issuer endpoint")
 
 
 def _reject_json_constant(value: str) -> str:

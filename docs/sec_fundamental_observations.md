@@ -1,8 +1,9 @@
-# Apple SEC fundamental observations
+# SEC issuer fundamental observations
 
-This step converts selected facts from locally stored SEC EDGAR snapshots into typed,
+This step converts selected facts for one configured SEC issuer from locally stored EDGAR snapshots into typed,
 point-in-time `NormalizedObservation` records. It performs no HTTP requests and does not modify the
-raw snapshots created by the SEC foundation pipeline.
+raw snapshots created by the SEC foundation pipeline. Asset, CIK, source IDs and transformation
+version must match one immutable issuer configuration; data from two issuers cannot be joined.
 
 ## Raw snapshots and normalized observations
 
@@ -31,7 +32,8 @@ facts. Annual facts must come from an FY 10-K or 10-K/A and span approximately o
 facts must come from Q1, Q2, or Q3 10-Q filings and span approximately one discrete quarter.
 Six-month and nine-month year-to-date values, comparative periods, Q4 as an independent quarter, and
 alternative tags or units are excluded. The system does not derive quarters by subtracting cumulative
-values.
+values. Una fila sin año o período fiscal no invalida el snapshot completo: se contabiliza
+explícitamente como `missing_fiscal_year` o `missing_fiscal_period` y no genera una observación.
 
 ## Amendments, revisions, and idempotence
 
@@ -42,8 +44,8 @@ observation. Earlier raw snapshots and earlier observation versions remain avail
 
 ## Run locally
 
-First store compatible Apple Submissions and Company Facts snapshots with the Step 11 pipeline. Then
-run:
+The current CLI remains the Apple composition. First store compatible Apple Submissions and Company
+Facts snapshots, then run:
 
 ```bash
 python scripts/normalize_sec_aapl_fundamentals.py --root /path/to/storage-root

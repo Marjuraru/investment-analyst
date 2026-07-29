@@ -1,6 +1,7 @@
 """Strict contracts for one unified fundamental-analysis workspace."""
 
 from typing import Literal
+from uuid import UUID
 
 from pydantic import ConfigDict, Field, model_validator
 
@@ -11,6 +12,7 @@ from investment_analyst.analytics.fundamentals.research_models import (
     FUNDAMENTAL_RESEARCH_METRIC_COUNT,
     FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS,
     AaplFundamentalResearchRequest,
+    FinancialDecimal,
     get_fundamental_research_metric_definition,
 )
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
@@ -37,6 +39,12 @@ CompanyCategoryKey = Literal[
     "turnaround",
     "asset_play",
 ]
+CompanyCategoryAssessmentStatus = Literal[
+    "matched",
+    "not_matched",
+    "insufficient_evidence",
+]
+COMPANY_CLASSIFICATION_ALGORITHM_VERSION = "peter-lynch-company-category-v1-decimal34"
 
 
 class FundamentalAnalysisMetricReference(ContractModel):
@@ -370,14 +378,92 @@ COMPANY_CLASSIFICATION_MISSING_REQUIREMENTS = (
 )
 
 
+class CompanyClassificationEvidence(ContractModel):
+    """Exact annual metric history retained as classification evidence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    metric_key: NonEmptyStr
+    point_count: int = Field(ge=4, le=5)
+    first_period_end: UTCDateTime
+    latest_period_end: UTCDateTime
+    first_value: FinancialDecimal
+    latest_value: FinancialDecimal
+    compound_annual_growth_rate: FinancialDecimal | None = None
+    input_observation_ids: tuple[UUID, ...]
+    metric_algorithm_versions: tuple[NonEmptyStr, ...]
+    history_algorithm_version: Literal["fundamental-research-history-v2-decimal34"]
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> "CompanyClassificationEvidence":
+        """Require ordered, finite, unique, fully attributable evidence."""
+        values = (self.first_value, self.latest_value, self.compound_annual_growth_rate)
+        if any(value is not None and not value.is_finite() for value in values):
+            raise ValueError("classification evidence values must be finite")
+        if self.first_period_end >= self.latest_period_end:
+            raise ValueError("classification evidence requires an ordered annual horizon")
+        if not self.input_observation_ids:
+            raise ValueError("classification evidence requires input observations")
+        if len(self.input_observation_ids) != len(set(self.input_observation_ids)):
+            raise ValueError("classification evidence observation IDs must be unique")
+        if not self.metric_algorithm_versions:
+            raise ValueError("classification evidence requires metric algorithms")
+        return self
+
+
+class CompanyCategoryAssessment(ContractModel):
+    """Transparent outcome of evaluating one category rule."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    category_key: CompanyCategoryKey
+    status: CompanyCategoryAssessmentStatus
+    criterion_es: NonEmptyStr
+    explanation_es: NonEmptyStr
+    evidence_metric_keys: tuple[NonEmptyStr, ...] = ()
+    missing_requirements: tuple[NonEmptyStr, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_assessment(self) -> "CompanyCategoryAssessment":
+        """Keep matched, rejected, and unavailable criteria unambiguous."""
+        if len(self.evidence_metric_keys) != len(set(self.evidence_metric_keys)):
+            raise ValueError("category evidence metric keys must be unique")
+        if self.status == "matched" and self.missing_requirements:
+            raise ValueError("matched categories cannot retain missing requirements")
+        if self.status == "insufficient_evidence" and not self.missing_requirements:
+            raise ValueError("insufficient category assessments require missing evidence")
+        if self.status == "not_matched" and self.missing_requirements:
+            raise ValueError("rejected categories cannot retain missing requirements")
+        return self
+
+
+def _unavailable_category_assessments() -> tuple[CompanyCategoryAssessment, ...]:
+    return tuple(
+        CompanyCategoryAssessment(
+            category_key=definition.category_key,
+            status="insufficient_evidence",
+            criterion_es="Aplicar la regla versionada con evidencia anual suficiente.",
+            explanation_es="La evidencia necesaria todavía no está disponible.",
+            missing_requirements=(COMPANY_CLASSIFICATION_MISSING_REQUIREMENTS[0],),
+        )
+        for definition in COMPANY_CATEGORY_DEFINITIONS
+    )
+
+
 class CompanyClassificationView(ContractModel):
-    """Visible classification state that refuses an unsupported automatic label."""
+    """Visible output of one conservative and auditable company-category rule."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     status: Literal["classified", "insufficient_evidence"] = "insufficient_evidence"
     selected_category: CompanyCategoryKey | None = None
     categories: tuple[CompanyCategoryDefinition, ...] = COMPANY_CATEGORY_DEFINITIONS
+    algorithm_version: Literal["peter-lynch-company-category-v1-decimal34"] = (
+        COMPANY_CLASSIFICATION_ALGORITHM_VERSION
+    )
+    evaluated_known_at: UTCDateTime | None = None
+    evidence: tuple[CompanyClassificationEvidence, ...] = ()
+    assessments: tuple[CompanyCategoryAssessment, ...] = _unavailable_category_assessments()
     missing_requirements: tuple[NonEmptyStr, ...] = COMPANY_CLASSIFICATION_MISSING_REQUIREMENTS
     explanation_es: NonEmptyStr = (
         "La categoría se mostrará aquí cuando exista una regla versionada y evidencia suficiente."
@@ -388,12 +474,28 @@ class CompanyClassificationView(ContractModel):
         """Preserve the complete visible category framework and honest state."""
         if self.categories != COMPANY_CATEGORY_DEFINITIONS:
             raise ValueError("company categories must preserve the versioned catalog")
-        if self.missing_requirements != COMPANY_CLASSIFICATION_MISSING_REQUIREMENTS:
-            raise ValueError("classification requirements must preserve the versioned contract")
+        if len(self.missing_requirements) != len(set(self.missing_requirements)):
+            raise ValueError("classification requirements must be unique")
+        assessment_keys = tuple(item.category_key for item in self.assessments)
+        category_keys = tuple(item.category_key for item in self.categories)
+        if assessment_keys != category_keys:
+            raise ValueError("classification assessments must preserve category order")
+        evidence_keys = tuple(item.metric_key for item in self.evidence)
+        if evidence_keys != tuple(sorted(evidence_keys)) or len(evidence_keys) != len(
+            set(evidence_keys)
+        ):
+            raise ValueError("classification evidence must be ordered and unique")
+        if self.evidence and self.evaluated_known_at is None:
+            raise ValueError("classification evidence requires an evaluated cut")
+        matched = tuple(item.category_key for item in self.assessments if item.status == "matched")
         if self.status == "classified" and self.selected_category is None:
             raise ValueError("classified company profiles require a selected category")
         if self.status == "insufficient_evidence" and self.selected_category is not None:
             raise ValueError("insufficient evidence cannot select a company category")
+        if self.status == "classified" and matched != (self.selected_category,):
+            raise ValueError("classified company profiles require exactly one matched category")
+        if self.status == "insufficient_evidence" and matched:
+            raise ValueError("insufficient evidence cannot contain a matched category")
         return self
 
 
@@ -463,19 +565,25 @@ FUNDAMENTAL_ANALYSIS_LIMITATIONS = (
     "Las secciones organizan evidencia SEC existente sin añadir cifras ni umbrales implícitos.",
     "Cada métrica aparece en una sola sección para evitar duplicados.",
     "La cobertura indica disponibilidad de evidencia y no es una puntuación de inversión.",
-    "La clasificación empresarial no se asigna sin una regla versionada y evidencia suficiente.",
+    (
+        "La clasificación empresarial usa una regla cuantitativa versionada; cíclica, "
+        "recuperación y activo oculto exigen evidencia adicional y no se infieren."
+    ),
     "El análisis no emite recomendación, ranking, valor intrínseco ni señal de compra o venta.",
 )
 
+AAPL_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION = "aapl-fundamental-analysis-v1"
+GENERIC_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION = "sec-fundamental-analysis-v2"
+
 
 class AaplFundamentalAnalysisResult(ContractModel):
-    """Versioned unified analysis over exact fundamental research history."""
+    """Versioned unified analysis over one SEC issuer's exact research history."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["aapl-fundamental-analysis-v1"] = "aapl-fundamental-analysis-v1"
-    asset_id: Literal["equity:us:aapl"] = ASSET_ID
-    source_id: Literal["sec-edgar:aapl:companyfacts"] = COMPANYFACTS_SOURCE_ID
+    schema_version: NonEmptyStr = AAPL_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION
+    asset_id: NonEmptyStr = ASSET_ID
+    source_id: NonEmptyStr = COMPANYFACTS_SOURCE_ID
     request: AaplFundamentalResearchRequest
     history: AaplFundamentalResearchHistoryResult
     classification: CompanyClassificationView = CompanyClassificationView()
@@ -487,6 +595,15 @@ class AaplFundamentalAnalysisResult(ContractModel):
     @model_validator(mode="after")
     def validate_result(self) -> "AaplFundamentalAnalysisResult":
         """Preserve exact history and one non-overlapping complete metric catalog."""
+        expected_schema = (
+            AAPL_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION
+            if self.asset_id == ASSET_ID
+            else GENERIC_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION
+        )
+        if self.schema_version != expected_schema:
+            raise ValueError("analysis schema version does not match its asset scope")
+        if self.asset_id != self.history.asset_id or self.source_id != self.history.source_id:
+            raise ValueError("analysis identity must match the embedded history")
         if self.request != self.history.request:
             raise ValueError("fundamental analysis request must match embedded history")
         if self.limitations != FUNDAMENTAL_ANALYSIS_LIMITATIONS:
@@ -540,18 +657,27 @@ class AaplFundamentalAnalysisResult(ContractModel):
         }
 
 
+FundamentalAnalysisResult = AaplFundamentalAnalysisResult
+
+
 __all__ = [
     "AaplFundamentalAnalysisResult",
+    "AAPL_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION",
     "COMPANY_CATEGORY_DEFINITIONS",
     "COMPANY_CLASSIFICATION_MISSING_REQUIREMENTS",
     "FUNDAMENTAL_ANALYSIS_LIMITATIONS",
     "FUNDAMENTAL_ANALYSIS_SECTION_DEFINITIONS",
     "CompanyCategoryDefinition",
+    "CompanyCategoryAssessment",
     "CompanyCategoryKey",
+    "CompanyClassificationEvidence",
     "CompanyClassificationView",
+    "COMPANY_CLASSIFICATION_ALGORITHM_VERSION",
     "FundamentalAnalysisCoverage",
+    "FundamentalAnalysisResult",
     "FundamentalAnalysisMetricReference",
     "FundamentalAnalysisSectionDefinition",
     "FundamentalAnalysisSectionKey",
     "FundamentalAnalysisSectionView",
+    "GENERIC_FUNDAMENTAL_ANALYSIS_SCHEMA_VERSION",
 ]

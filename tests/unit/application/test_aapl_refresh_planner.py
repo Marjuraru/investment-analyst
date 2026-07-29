@@ -13,7 +13,8 @@ from investment_analyst.application.aapl_bootstrap_models import (
     AaplRefreshMode,
 )
 from investment_analyst.application.aapl_refresh_planner import AaplMarketRefreshPlanner
-from investment_analyst.core.models import DataFrequency
+from investment_analyst.core.models import AssetClass, DataFrequency
+from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
 from investment_analyst.providers.market.alpaca_normalizer import ASSET_ID, SOURCE_ID
 from investment_analyst.providers.market.alpaca_pipeline import (
     AlpacaMarketFetchReceipt,
@@ -24,13 +25,19 @@ from investment_analyst.providers.market.alpaca_pipeline import (
 class ObservationRepositoryDouble:
     """Return explicitly supplied observations without writes."""
 
-    def __init__(self, observations: list[SimpleNamespace]) -> None:
+    def __init__(
+        self,
+        observations: list[SimpleNamespace],
+        *,
+        expected_asset_id: str = ASSET_ID,
+    ) -> None:
         self.observations = observations
+        self.expected_asset_id = expected_asset_id
         self.calls = 0
 
     def list(self, *, asset_id: str):
         self.calls += 1
-        assert asset_id == ASSET_ID
+        assert asset_id == self.expected_asset_id
         return list(self.observations)
 
 
@@ -53,8 +60,13 @@ class StorageDouble:
         self,
         observations: list[SimpleNamespace],
         records: list[object] | None = None,
+        *,
+        expected_asset_id: str = ASSET_ID,
     ) -> None:
-        self.observations = ObservationRepositoryDouble(observations)
+        self.observations = ObservationRepositoryDouble(
+            observations,
+            expected_asset_id=expected_asset_id,
+        )
         self.raw_records = RawRecordRepositoryDouble(records or [])
 
     def require_open(self) -> None:
@@ -129,6 +141,45 @@ def test_empty_workspace_plans_initial_full_requested_interval() -> None:
     assert plan.market_fetch_required is True
     assert plan.persisted_earliest is None
     assert plan.traceability_verified is True
+
+
+def test_planner_scopes_coverage_to_one_catalog_backed_alpaca_asset() -> None:
+    asset_id = "equity:us:bvn"
+    source_id = "alpaca-market-data:iex:bvn:daily-bars:adjustment-all"
+    configuration = AlpacaAssetConfiguration(
+        asset_id=asset_id,
+        symbol="BVN",
+        feed="iex",
+        adjustment="all",
+        source_id=source_id,
+        name="Compañía de Minas Buenaventura S.A.A.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NYSE",
+    )
+    storage = StorageDouble(
+        [
+            _observation(
+                datetime(2026, 1, 2, 5, tzinfo=UTC),
+                asset_id=asset_id,
+                source_id=source_id,
+            ),
+            _observation(datetime(2026, 1, 2, 5, tzinfo=UTC)),
+        ],
+        expected_asset_id=asset_id,
+    )
+
+    plan = AaplMarketRefreshPlanner(
+        storage,
+        configuration=configuration,
+    ).plan(
+        requested_start=date(2026, 1, 2),
+        requested_end=date(2026, 1, 2),
+        refresh_mode=AaplRefreshMode.AUTO,
+    )
+
+    assert plan.mode is AaplMarketRefreshMode.ALREADY_CURRENT
+    assert plan.fetch_intervals == ()
 
 
 def test_covered_range_is_current_without_interpreting_weekend_as_gap() -> None:

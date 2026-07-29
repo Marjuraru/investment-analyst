@@ -23,6 +23,7 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartSma,
     BtcMarketChart,
     BtcMarketChartRequest,
+    ListedMarketChart,
 )
 from investment_analyst.analytics.market.history_service import MarketHistoryError
 from investment_analyst.analytics.market.statistics_definitions import (
@@ -125,7 +126,7 @@ class BtcMarketChartQueryError(RuntimeError):
     """Raised when stored Coinbase evidence cannot produce a valid chart contract."""
 
 
-_ChartResult = TypeVar("_ChartResult", AaplMarketChart, BtcMarketChart)
+_ChartResult = TypeVar("_ChartResult", AaplMarketChart, BtcMarketChart, ListedMarketChart)
 
 
 class _HistoryOperations(Protocol):
@@ -595,3 +596,24 @@ class BtcMarketChartService(AaplMarketChartService):
             raise BtcMarketChartQueryError(
                 "stored Coinbase market history could not be charted"
             ) from error
+
+
+class ListedMarketChartService(AaplMarketChartService):
+    """Compose a bounded chart for one explicit catalog-backed Alpaca scope."""
+
+    def query(
+        self,
+        request: AaplMarketChartRequest,
+        *,
+        asset_id: str,
+        source_id: str,
+    ) -> ListedMarketChart:
+        """Return one listed-asset chart without writes or provider calls."""
+        return self._query_scoped(
+            request,
+            asset_id=asset_id,
+            source_id=source_id,
+            volume_unit="shares",
+            source_limitation=_AAPL_SOURCE_LIMITATION,
+            result_model=ListedMarketChart,
+        )

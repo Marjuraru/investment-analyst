@@ -751,9 +751,47 @@ FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS = (
 
 FUNDAMENTAL_RESEARCH_METRIC_COUNT = len(FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS)
 
+GENERIC_FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS = tuple(
+    definition.model_copy(
+        update={
+            "limitations": (
+                "Solo se calcula cuando el gasto por intereses es positivo; algunos emisores "
+                "pueden no publicar este concepto por separado en todos los períodos.",
+            )
+        }
+    )
+    if definition.metric_key == "fundamental.research.interest_coverage"
+    else definition
+    for definition in FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS
+)
+
 _DEFINITION_BY_KEY = {
     definition.metric_key: definition for definition in FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS
 }
+_GENERIC_DEFINITION_BY_KEY = {
+    definition.metric_key: definition
+    for definition in GENERIC_FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS
+}
+
+AAPL_FUNDAMENTAL_RESEARCH_SCHEMA_VERSION = "aapl-fundamental-research-v2"
+GENERIC_FUNDAMENTAL_RESEARCH_SCHEMA_VERSION = "sec-fundamental-research-v3"
+
+
+def fundamental_research_metric_definitions(
+    asset_id: str,
+) -> tuple[FundamentalResearchMetricDefinition, ...]:
+    """Return the exact published catalog for Apple or a generic SEC issuer."""
+    if asset_id == ASSET_ID:
+        return FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS
+    return GENERIC_FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS
+
+
+def fundamental_research_schema_version(asset_id: str) -> str:
+    """Preserve Apple's v2 response while versioning generic SEC output."""
+    if asset_id == ASSET_ID:
+        return AAPL_FUNDAMENTAL_RESEARCH_SCHEMA_VERSION
+    return GENERIC_FUNDAMENTAL_RESEARCH_SCHEMA_VERSION
+
 
 FUNDAMENTAL_RESEARCH_LIMITATIONS = (
     "Los hechos provienen de SEC EDGAR Company Facts y se seleccionan point-in-time.",
@@ -767,7 +805,7 @@ FUNDAMENTAL_RESEARCH_LIMITATIONS = (
 
 
 class AaplFundamentalResearchRequest(ContractModel):
-    """Bounded point-in-time request for Apple research metrics."""
+    """Bounded point-in-time request for one configured issuer's research metrics."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -842,12 +880,13 @@ class FundamentalResearchMetricValue(ContractModel):
         definition = _DEFINITION_BY_KEY.get(self.metric_key)
         if definition is None:
             raise ValueError("metric_key is not a fundamental research metric")
+        generic_definition = _GENERIC_DEFINITION_BY_KEY[self.metric_key]
         if (
             self.display_name_es != definition.display_name_es
             or self.unit != definition.unit
             or self.formula != definition.formula
             or self.algorithm_version != definition.algorithm_version
-            or self.limitations != definition.limitations
+            or self.limitations not in {definition.limitations, generic_definition.limitations}
         ):
             raise ValueError("research metric does not match its published definition")
         if self.frequency not in _ALLOWED_FREQUENCIES:
@@ -963,13 +1002,13 @@ class AaplFundamentalResearchCoverage(ContractModel):
 
 
 class AaplFundamentalResearchResult(ContractModel):
-    """Versioned point-in-time analytical result for Apple fundamentals."""
+    """Versioned point-in-time analytical result for one SEC issuer."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["aapl-fundamental-research-v2"] = "aapl-fundamental-research-v2"
-    asset_id: Literal["equity:us:aapl"] = ASSET_ID
-    source_id: Literal["sec-edgar:aapl:companyfacts"] = COMPANYFACTS_SOURCE_ID
+    schema_version: NonEmptyStr = AAPL_FUNDAMENTAL_RESEARCH_SCHEMA_VERSION
+    asset_id: NonEmptyStr = ASSET_ID
+    source_id: NonEmptyStr = COMPANYFACTS_SOURCE_ID
     request: AaplFundamentalResearchRequest
     definitions: tuple[FundamentalResearchMetricDefinition, ...] = (
         FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS
@@ -982,12 +1021,22 @@ class AaplFundamentalResearchResult(ContractModel):
     @model_validator(mode="after")
     def validate_result(self) -> "AaplFundamentalResearchResult":
         """Validate ordering, point-in-time safety, and versioned contracts."""
-        if self.definitions != FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS:
+        expected_schema = fundamental_research_schema_version(self.asset_id)
+        expected_definitions = fundamental_research_metric_definitions(self.asset_id)
+        if self.schema_version != expected_schema:
+            raise ValueError("research schema version does not match its asset scope")
+        if self.asset_id == ASSET_ID:
+            if self.source_id != COMPANYFACTS_SOURCE_ID:
+                raise ValueError("Apple research must preserve its historical source")
+        elif self.source_id == COMPANYFACTS_SOURCE_ID:
+            raise ValueError("generic SEC research must not reuse Apple's source")
+        if self.definitions != expected_definitions:
             raise ValueError("research definitions must preserve the versioned contract")
         if self.limitations != FUNDAMENTAL_RESEARCH_LIMITATIONS:
             raise ValueError("research limitations must preserve the versioned contract")
         if len(self.periods) != self.coverage.output_periods:
             raise ValueError("research period count must match coverage")
+        published = {definition.metric_key: definition for definition in expected_definitions}
         ends = tuple(item.period_end for item in self.periods)
         if ends != tuple(sorted(ends)) or len(ends) != len(set(ends)):
             raise ValueError("research periods must be ordered and unique")
@@ -998,6 +1047,15 @@ class AaplFundamentalResearchResult(ContractModel):
             if period.frequency is not self.request.frequency:
                 raise ValueError("research period frequency does not match request")
             for metric in period.metrics:
+                definition = published[metric.metric_key]
+                if (
+                    metric.display_name_es != definition.display_name_es
+                    or metric.formula != definition.formula
+                    or metric.unit != definition.unit
+                    or metric.algorithm_version != definition.algorithm_version
+                    or metric.limitations != definition.limitations
+                ):
+                    raise ValueError("research metric does not match the result's issuer contract")
                 if metric.available_at > self.request.known_at:
                     raise ValueError("research metric uses evidence unavailable at known_at")
         if ends:
@@ -1032,18 +1090,33 @@ def get_fundamental_research_metric_definition(
         raise ValueError(f"unsupported fundamental research metric: {metric_key}") from error
 
 
+FundamentalResearchCoverage = AaplFundamentalResearchCoverage
+FundamentalResearchPeriod = AaplFundamentalResearchPeriod
+FundamentalResearchRequest = AaplFundamentalResearchRequest
+FundamentalResearchResult = AaplFundamentalResearchResult
+
+
 __all__ = [
     "AaplFundamentalResearchCoverage",
     "AaplFundamentalResearchPeriod",
     "AaplFundamentalResearchRequest",
     "AaplFundamentalResearchResult",
+    "AAPL_FUNDAMENTAL_RESEARCH_SCHEMA_VERSION",
     "FUNDAMENTAL_RESEARCH_LIMITATIONS",
     "FUNDAMENTAL_RESEARCH_METRIC_COUNT",
     "FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS",
+    "GENERIC_FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS",
+    "GENERIC_FUNDAMENTAL_RESEARCH_SCHEMA_VERSION",
     "FinancialDecimal",
     "FundamentalResearchMetricDefinition",
     "FundamentalResearchMetricField",
     "FundamentalResearchMetricInput",
     "FundamentalResearchMetricValue",
+    "FundamentalResearchCoverage",
+    "FundamentalResearchPeriod",
+    "FundamentalResearchRequest",
+    "FundamentalResearchResult",
+    "fundamental_research_metric_definitions",
+    "fundamental_research_schema_version",
     "get_fundamental_research_metric_definition",
 ]

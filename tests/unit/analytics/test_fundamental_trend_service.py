@@ -14,7 +14,8 @@ from investment_analyst.analytics.fundamental_trend_service import (
     AaplFundamentalTrendQueryError,
     AaplFundamentalTrendService,
 )
-from investment_analyst.core.models import DataFrequency
+from investment_analyst.core.models import AssetClass, DataFrequency
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_fact_models import COMPANYFACTS_SOURCE_ID
 from investment_analyst.providers.fundamentals.sec_point_in_time_service import (
     SecFundamentalQueryError,
@@ -140,6 +141,43 @@ def test_trend_preserves_exact_sec_facts_and_point_in_time_scope() -> None:
             known_at=_KNOWN_AT,
             frequency=DataFrequency.QUARTERLY,
             limit=8,
+        )
+    ]
+
+
+def test_trend_uses_configured_sec_issuer_identity_without_changing_apple_schema() -> None:
+    configuration = SecAssetConfiguration(
+        asset_id="equity:us:amd",
+        cik="0000002488",
+        ticker="AMD",
+        submissions_source_id="sec-edgar:amd:submissions",
+        companyfacts_source_id="sec-edgar:amd:companyfacts",
+        name="Advanced Micro Devices, Inc.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NASDAQ",
+    )
+    fundamentals = _FakeFundamentals(_result(populated=False))
+    request = AaplFundamentalTrendRequest(
+        known_at=_KNOWN_AT,
+        frequency=DataFrequency.ANNUAL,
+        period_limit=5,
+    )
+
+    trend = AaplFundamentalTrendService(
+        fundamentals,
+        configuration,
+    ).query(request)
+
+    assert trend.schema_version == "sec-fundamental-trend-v2"
+    assert trend.asset_id == "equity:us:amd"
+    assert trend.source_id == "sec-edgar:amd:companyfacts"
+    assert fundamentals.requests == [
+        SecFundamentalQuery(
+            asset_id="equity:us:amd",
+            known_at=_KNOWN_AT,
+            frequency=DataFrequency.ANNUAL,
+            limit=5,
         )
     ]
 

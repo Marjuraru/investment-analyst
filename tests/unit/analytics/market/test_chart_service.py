@@ -22,10 +22,12 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartResolution,
     AaplMarketChartSma,
     BtcMarketChartRequest,
+    ListedMarketChart,
 )
 from investment_analyst.analytics.market.chart_service import (
     AaplMarketChartService,
     BtcMarketChartService,
+    ListedMarketChartService,
 )
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
 from investment_analyst.analytics.market.statistics_models import (
@@ -276,6 +278,31 @@ def test_btc_chart_uses_coinbase_scope_without_changing_apple_contract() -> None
     assert "one crypto venue" in chart.limitations[0]
     assert all(item.asset_id == "crypto:btc-usd" for item in chart.latest_statistics)
     assert all(item.source_id == COINBASE_SOURCE_ID for item in chart.latest_statistics)
+
+
+def test_listed_chart_uses_explicit_catalog_scope_without_new_service_class_per_asset() -> None:
+    history = _FakeHistory(270)
+    known_at = datetime(2026, 1, 1, tzinfo=UTC)
+    source_id = "alpaca-market-data:iex:bvn:daily-bars:adjustment-all"
+
+    chart = ListedMarketChartService(history, MarketStatisticsEngine()).query(
+        AaplMarketChartRequest(
+            known_at=known_at,
+            period=AaplMarketChartPeriod.ONE_YEAR,
+        ),
+        asset_id="equity:us:bvn",
+        source_id=source_id,
+    )
+
+    assert isinstance(chart, ListedMarketChart)
+    assert chart.schema_version == "listed-market-chart-v1"
+    assert chart.asset_id == "equity:us:bvn"
+    assert chart.source_id == source_id
+    assert chart.volume_unit == "shares"
+    assert len(chart.points) == 260
+    assert history.queries[0].asset_id == "equity:us:bvn"
+    assert history.queries[0].source_id == source_id
+    assert "not consolidated SIP coverage" in chart.limitations[0]
 
 
 def test_chart_preserves_warmup_and_empty_history_semantics() -> None:

@@ -1,4 +1,4 @@
-"""Deterministic engine for point-in-time Apple fundamental diagnostics."""
+"""Deterministic engine for point-in-time SEC issuer diagnostics."""
 
 import json
 from dataclasses import dataclass
@@ -14,6 +14,7 @@ from investment_analyst.core.models import (
     DiagnosticResult,
     DiagnosticVerdict,
 )
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_diagnostic_models import (
     SecFundamentalDiagnosticComputation,
     SecFundamentalDiagnosticMetric,
@@ -23,6 +24,7 @@ from investment_analyst.providers.fundamentals.sec_diagnostic_models import (
 from investment_analyst.providers.fundamentals.sec_diagnostic_rules import (
     ALGORITHM_VERSION,
     BASE_WEIGHTS,
+    GENERIC_ALGORITHM_VERSION,
     MINIMUM_COVERAGE,
     REQUIRED_SCORE_METRICS,
     SCORE_TOLERANCE,
@@ -37,12 +39,16 @@ from investment_analyst.providers.fundamentals.sec_diagnostic_rules import (
     score_metric,
     verdict_for,
 )
+from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID
+from investment_analyst.providers.fundamentals.sec_raw_records import (
+    aapl_sec_configuration,
+)
 
 _DIAGNOSTIC_NAMESPACE = UUID("97aee6de-3d19-5ee5-a383-1bdb8e894b77")
 
 
 class SecFundamentalDiagnosticEngineError(RuntimeError):
-    """Base error for Apple fundamental diagnostic computation."""
+    """Base error for SEC issuer fundamental diagnostic computation."""
 
 
 class SecFundamentalDiagnosticComputationError(SecFundamentalDiagnosticEngineError):
@@ -98,6 +104,15 @@ def fundamental_diagnostic_id(
         sort_keys=True,
     )
     return uuid5(_DIAGNOSTIC_NAMESPACE, canonical)
+
+
+def sec_fundamental_diagnostic_version(
+    configuration: SecAssetConfiguration,
+) -> str:
+    """Preserve Apple diagnostic identities and version generic issuer output."""
+    if configuration.asset_id == ASSET_ID:
+        return ALGORITHM_VERSION
+    return GENERIC_ALGORITHM_VERSION
 
 
 def _missing_requirements(
@@ -227,10 +242,12 @@ def _normal_summary(
     request: SecFundamentalDiagnosticRequest,
     selection: SecFundamentalDiagnosticSelection,
     derived: _DerivedDiagnostic,
+    *,
+    issuer_label: str,
 ) -> str:
     assert selection.target_period_end is not None
     return (
-        "Apple fundamental condition for "
+        f"{issuer_label} fundamental condition for "
         f"{request.frequency.value} period {selection.target_period_end.date().isoformat()} "
         f"is {derived.verdict.value} under explicit heuristic rules. This is descriptive, "
         "not a recommendation, and confidence summarizes coverage and recency rather than "
@@ -242,6 +259,8 @@ def _insufficient_summary(
     request: SecFundamentalDiagnosticRequest,
     selection: SecFundamentalDiagnosticSelection,
     missing: tuple[str, ...],
+    *,
+    issuer_label: str,
 ) -> str:
     period = (
         selection.target_period_end.date().isoformat()
@@ -249,7 +268,8 @@ def _insufficient_summary(
         else "no eligible period"
     )
     return (
-        f"Apple {request.frequency.value} fundamental diagnostic for {period} has insufficient "
+        f"{issuer_label} {request.frequency.value} fundamental diagnostic for {period} has "
+        "insufficient "
         f"data: {', '.join(missing)}. No directional interpretation is produced, and this is "
         "not a recommendation."
     )
@@ -257,6 +277,23 @@ def _insufficient_summary(
 
 class SecFundamentalDiagnosticEngine:
     """Apply published heuristic rules to selected persisted fundamental metrics."""
+
+    def __init__(self, configuration: SecAssetConfiguration | None = None) -> None:
+        self._configuration = configuration or aapl_sec_configuration()
+        self._algorithm_version = sec_fundamental_diagnostic_version(self._configuration)
+        self._issuer_label = (
+            "Apple" if self._configuration.asset_id == ASSET_ID else self._configuration.name
+        )
+
+    @property
+    def configuration(self) -> SecAssetConfiguration:
+        """Return the immutable SEC issuer configuration used by this engine."""
+        return self._configuration
+
+    @property
+    def algorithm_version(self) -> str:
+        """Return the exact diagnostic algorithm identity used by this engine."""
+        return self._algorithm_version
 
     def compute(
         self,
@@ -267,6 +304,10 @@ class SecFundamentalDiagnosticEngine:
     ) -> SecFundamentalDiagnosticComputation:
         """Build one sufficient or insufficient point-in-time diagnostic."""
         computed_at = _utc(computed_at, "computed_at")
+        if request.asset_id != self._configuration.asset_id:
+            raise SecFundamentalDiagnosticComputationError(
+                "request asset_id does not match the configured SEC issuer"
+            )
         derived = _derive(request, selection)
         if derived.metrics:
             available_at = max(item.available_at for item in derived.metrics)
@@ -277,7 +318,10 @@ class SecFundamentalDiagnosticEngine:
                 "computed_at must not precede diagnostic availability"
             )
         as_of = selection.target_period_end or request.known_at
-        diagnostic_id = fundamental_diagnostic_id(selection)
+        diagnostic_id = fundamental_diagnostic_id(
+            selection,
+            algorithm_version=self._algorithm_version,
+        )
 
         if not derived.sufficient:
             diagnostic = DiagnosticResult(
@@ -292,11 +336,12 @@ class SecFundamentalDiagnosticEngine:
                 computed_at=computed_at,
                 components=[],
                 evidence=[],
-                algorithm_version=ALGORITHM_VERSION,
+                algorithm_version=self._algorithm_version,
                 summary=_insufficient_summary(
                     request,
                     selection,
                     derived.missing_requirements,
+                    issuer_label=self._issuer_label,
                 ),
                 quality=DataQuality.PARTIAL,
             )
@@ -345,8 +390,13 @@ class SecFundamentalDiagnosticEngine:
                 computed_at=computed_at,
                 components=components,
                 evidence=evidence,
-                algorithm_version=ALGORITHM_VERSION,
-                summary=_normal_summary(request, selection, derived),
+                algorithm_version=self._algorithm_version,
+                summary=_normal_summary(
+                    request,
+                    selection,
+                    derived,
+                    issuer_label=self._issuer_label,
+                ),
                 quality=derived.quality,
             )
 
@@ -363,15 +413,25 @@ class SecFundamentalDiagnosticEngine:
 
 def verify_fundamental_diagnostic_computation(
     computation: SecFundamentalDiagnosticComputation,
+    configuration: SecAssetConfiguration | None = None,
 ) -> None:
     """Recalculate published rules once and verify a generated diagnostic before persistence."""
+    resolved = configuration or aapl_sec_configuration()
+    algorithm_version = sec_fundamental_diagnostic_version(resolved)
+    if computation.request.asset_id != resolved.asset_id:
+        raise SecFundamentalDiagnosticTraceabilityError(
+            "diagnostic request does not match the configured SEC issuer"
+        )
     derived = _derive(computation.request, computation.selection)
     diagnostic = computation.diagnostic
-    if diagnostic.diagnostic_id != fundamental_diagnostic_id(computation.selection):
+    if diagnostic.diagnostic_id != fundamental_diagnostic_id(
+        computation.selection,
+        algorithm_version=algorithm_version,
+    ):
         raise SecFundamentalDiagnosticTraceabilityError(
             "diagnostic ID does not match selected metric inputs"
         )
-    if diagnostic.algorithm_version != ALGORITHM_VERSION:
+    if diagnostic.algorithm_version != algorithm_version:
         raise SecFundamentalDiagnosticTraceabilityError("diagnostic algorithm version is invalid")
     if computation.coverage != derived.coverage:
         raise SecFundamentalDiagnosticTraceabilityError("diagnostic coverage is inconsistent")

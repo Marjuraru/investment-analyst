@@ -26,6 +26,11 @@ SEC normalizadas. Selecciona revisiones por `available_at` y `known_at`, calcula
 dígitos y devuelve los UUID de todos los inputs. En esta etapa no persiste resultados ni altera las
 cinco variables del contrato fundamental original.
 
+La ingestión corporativa SEC se compone por `asset_id` en un refresh independiente de mercado:
+snapshots, normalización, cinco métricas persistidas y diagnóstico fundamental. Cada etapa recibe la
+misma configuración inmutable de emisor y usa una sola conexión writer. Los fallos tardíos conservan
+el progreso append-only anterior; no existe un rollback global que elimine evidencia válida.
+
 La vista fundamental unificada organiza el resultado histórico exacto por tipo de análisis:
 crecimiento y datos por acción, rentabilidad, retornos y eficiencia, calidad del beneficio, liquidez
 y balance, deuda y solvencia, caja y reinversión y asignación de capital.
@@ -51,6 +56,14 @@ inventan a partir de una barra ni se atribuyen al feed IEX.
 Los diagnósticos de mercado y fundamental se calculan de forma independiente y
 pueden consultarse por separado. La consulta consolidada los presenta juntos sin
 mezclar su significado, sus fuentes ni producir una puntuación agregada.
+
+## Screening y alertas futuras
+
+El futuro motor de [screening y alertas](automated_screening_alerts.md) consumirá resultados
+persistidos o consultas point-in-time después de un refresh exitoso. Evaluará condiciones
+versionadas de forma trivaluada y conservará evidencia exacta; no recalculará datos mediante el
+frontend ni producirá una puntuación conjunta. Los eventos analíticos y los intentos de notificación
+tendrán identidades separadas para poder reintentar un canal sin duplicar el candidato.
 
 ## Escalabilidad futura
 La modularidad y el desacoplamiento permiten incorporar más adelante Docker,

@@ -9,7 +9,6 @@ from typing import Protocol
 from uuid import UUID
 
 from investment_analyst.analytics.fundamentals.research_models import (
-    FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS,
     AaplFundamentalResearchCoverage,
     AaplFundamentalResearchPeriod,
     AaplFundamentalResearchRequest,
@@ -17,24 +16,25 @@ from investment_analyst.analytics.fundamentals.research_models import (
     FundamentalResearchMetricDefinition,
     FundamentalResearchMetricInput,
     FundamentalResearchMetricValue,
+    fundamental_research_metric_definitions,
+    fundamental_research_schema_version,
 )
 from investment_analyst.core.models import (
     DataFrequency,
     DataQuality,
     NormalizedObservation,
 )
+from investment_analyst.providers.asset_config import SecAssetConfiguration
+from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
+    sec_transformation_version,
+)
 from investment_analyst.providers.fundamentals.sec_fact_models import (
-    ASSET_ID,
-    COMPANYFACTS_SOURCE_ID,
-    TRANSFORMATION_VERSION,
     get_sec_fact_definition,
 )
-
-_RESEARCH_FIELDS = frozenset(
-    field.field_name
-    for definition in FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS
-    for field in definition.input_fields
+from investment_analyst.providers.fundamentals.sec_raw_records import (
+    aapl_sec_configuration,
 )
+
 _REQUIRED_RECORD_KEY_FIELDS = frozenset(
     {
         "accession_number",
@@ -78,12 +78,29 @@ class FundamentalResearchComputationError(FundamentalResearchError):
     """Raised when a published metric cannot be calculated safely."""
 
 
-class AaplFundamentalResearchService:
+class SecIssuerFundamentalResearchService:
     """Select SEC evidence and compute descriptive metrics without writes."""
 
-    def __init__(self, storage: _ResearchStorage) -> None:
+    def __init__(
+        self,
+        storage: _ResearchStorage,
+        configuration: SecAssetConfiguration | None = None,
+    ) -> None:
         storage.require_open()
         self._storage = storage
+        self._configuration = configuration or aapl_sec_configuration()
+        self._transformation_version = sec_transformation_version(self._configuration)
+        self._definitions = fundamental_research_metric_definitions(self._configuration.asset_id)
+        self._research_fields = frozenset(
+            field.field_name
+            for definition in self._definitions
+            for field in definition.input_fields
+        )
+
+    @property
+    def configuration(self) -> SecAssetConfiguration:
+        """Return the immutable SEC issuer configuration used by this service."""
+        return self._configuration
 
     def query(
         self,
@@ -91,9 +108,17 @@ class AaplFundamentalResearchService:
     ) -> AaplFundamentalResearchResult:
         """Return one bounded, deterministic, point-in-time research result."""
         self._storage.require_open()
-        observations = self._storage.observations.list(asset_id=ASSET_ID)
+        observations = self._storage.observations.list(asset_id=self._configuration.asset_id)
         eligible = [
-            observation for observation in observations if _is_eligible(observation, request)
+            observation
+            for observation in observations
+            if _is_eligible(
+                observation,
+                request,
+                configuration=self._configuration,
+                transformation_version=self._transformation_version,
+                research_fields=self._research_fields,
+            )
         ]
         selected, superseded = _resolve_revisions(eligible)
 
@@ -109,9 +134,7 @@ class AaplFundamentalResearchService:
         if request.limit is not None:
             period_ends = period_ends[-request.limit :]
 
-        metric_counts = Counter(
-            {definition.metric_key: 0 for definition in FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS}
-        )
+        metric_counts = Counter({definition.metric_key: 0 for definition in self._definitions})
         skipped: Counter[str] = Counter()
         periods: list[AaplFundamentalResearchPeriod] = []
         selected_count = 0
@@ -125,7 +148,7 @@ class AaplFundamentalResearchService:
                     superseded[(field_name, period_end)] for field_name in facts
                 )
                 metrics: list[FundamentalResearchMetricValue] = []
-                for definition in FUNDAMENTAL_RESEARCH_METRIC_DEFINITIONS:
+                for definition in self._definitions:
                     metric, reason = _calculate_metric(
                         definition,
                         facts,
@@ -146,7 +169,11 @@ class AaplFundamentalResearchService:
                     )
 
         return AaplFundamentalResearchResult(
+            schema_version=fundamental_research_schema_version(self._configuration.asset_id),
+            asset_id=self._configuration.asset_id,
+            source_id=self._configuration.companyfacts_source_id,
             request=request,
+            definitions=self._definitions,
             periods=tuple(periods),
             coverage=AaplFundamentalResearchCoverage(
                 observations_examined=len(observations),
@@ -167,12 +194,16 @@ class AaplFundamentalResearchService:
 def _is_eligible(
     observation: NormalizedObservation,
     request: AaplFundamentalResearchRequest,
+    *,
+    configuration: SecAssetConfiguration,
+    transformation_version: str,
+    research_fields: frozenset[str],
 ) -> bool:
-    if observation.field_name not in _RESEARCH_FIELDS:
+    if observation.field_name not in research_fields:
         return False
-    if observation.source.source_id != COMPANYFACTS_SOURCE_ID:
+    if observation.source.source_id != configuration.companyfacts_source_id:
         return False
-    if observation.transformation_version != TRANSFORMATION_VERSION:
+    if observation.transformation_version != transformation_version:
         return False
     if observation.quality is not DataQuality.VALID:
         return False
@@ -189,14 +220,17 @@ def _is_eligible(
         return False
     if request.end_period_end is not None and period_end > request.end_period_end:
         return False
-    _validate_observation(observation)
+    _validate_observation(observation, configuration)
     return True
 
 
-def _validate_observation(observation: NormalizedObservation) -> None:
-    if observation.asset_id != ASSET_ID:
+def _validate_observation(
+    observation: NormalizedObservation,
+    configuration: SecAssetConfiguration,
+) -> None:
+    if observation.asset_id != configuration.asset_id:
         raise MalformedFundamentalResearchObservationError(
-            "SEC research observation must belong to Apple"
+            "SEC research observation must belong to the configured issuer"
         )
     definition = get_sec_fact_definition(observation.field_name)
     if observation.unit != definition.unit:
@@ -541,4 +575,8 @@ __all__ = [
     "FundamentalResearchComputationError",
     "FundamentalResearchError",
     "MalformedFundamentalResearchObservationError",
+    "SecIssuerFundamentalResearchService",
 ]
+
+
+AaplFundamentalResearchService = SecIssuerFundamentalResearchService

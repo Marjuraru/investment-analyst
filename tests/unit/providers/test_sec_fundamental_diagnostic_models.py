@@ -1,4 +1,4 @@
-"""Tests for strict Apple fundamental diagnostic models."""
+"""Tests for strict SEC issuer fundamental diagnostic models."""
 
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -68,11 +68,6 @@ def test_request_normalizes_offset_and_accepts_exact_period() -> None:
             "frequency": DataFrequency.DAY_1,
         },
         {
-            "asset_id": "equity:us:msft",
-            "known_at": datetime(2026, 1, 1, tzinfo=UTC),
-            "frequency": DataFrequency.ANNUAL,
-        },
-        {
             "known_at": datetime(2026, 1, 1, tzinfo=UTC),
             "frequency": DataFrequency.ANNUAL,
             "as_of_period_end": date(2026, 1, 2),
@@ -82,6 +77,16 @@ def test_request_normalizes_offset_and_accepts_exact_period() -> None:
 def test_request_rejects_invalid_values(values: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         SecFundamentalDiagnosticRequest.model_validate(values)
+
+
+def test_request_accepts_an_explicit_sec_issuer_asset() -> None:
+    request = SecFundamentalDiagnosticRequest(
+        asset_id="equity:us:amd",
+        known_at=datetime(2026, 1, 1, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+    )
+
+    assert request.asset_id == "equity:us:amd"
 
 
 def test_request_rejects_extra_fields() -> None:

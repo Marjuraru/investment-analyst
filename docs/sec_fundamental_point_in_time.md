@@ -1,8 +1,9 @@
 # SEC fundamental point-in-time queries
 
-This read-only service turns previously normalized Apple SEC observations into an auditable view of
-what was publicly available at a requested instant. It does not read raw SEC snapshots, reconstruct
-Company Facts, contact the internet, persist new data, or calculate ratios and diagnostics.
+This read-only service turns previously normalized observations for one configured SEC issuer into
+an auditable view of what was publicly available at a requested instant. It does not read raw SEC
+snapshots, reconstruct Company Facts, contact the internet, persist new data, or calculate ratios
+and diagnostics.
 
 ## Point-in-time semantics
 
@@ -26,14 +27,14 @@ are never carried from another period, so a partial period remains partial and r
 fields explicitly. Results can be restricted to an inclusive period range and a limit retains the
 most recent periods before restoring chronological output order.
 
-The scope remains limited to Apple, the SEC Company Facts source, USD, exact XBRL tags selected in the
-normalizer, and observations marked `VALID`. The current Step 12 audit key does not retain filing
-form, fiscal year, or fiscal period; those output fields remain null unless a compatible future key
-contains them. They are never inferred from dates.
+Each service instance is limited to its configured asset, SEC Company Facts source, transformation
+version, USD, exact XBRL tags selected in the normalizer, and observations marked `VALID`. A request
+for another asset fails instead of falling back to Apple. Filing form, fiscal year and fiscal period
+come only from the canonical audit key and are never inferred from dates.
 
 ## Performance and auditability
 
-The observation repository is read once for Apple. Revision grouping and sorting are at most
+The observation repository is read once for the requested issuer. Revision grouping and sorting are at most
 approximately O(N log N). The service never calls `raw_records.get`, `raw_records.list`, metrics,
 diagnostics, provider clients, or the SEC normalizer. Each selected fact retains its observation ID,
 raw-record ID, source, accession number, XBRL tag, period, availability time, and canonical record

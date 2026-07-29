@@ -52,6 +52,7 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
     BtcMarketChart,
     BtcMarketChartRequest,
+    ListedMarketChart,
 )
 from investment_analyst.analytics.market.chart_service import (
     AaplMarketChartQueryError,
@@ -64,6 +65,20 @@ from investment_analyst.application.aapl_daily_runner import (
     AaplDailyRunner,
 )
 from investment_analyst.application.aapl_scheduler import AaplDailyScheduler
+from investment_analyst.application.analysis_capabilities import (
+    FundamentalAnalysisMode,
+    MarketAnalysisMode,
+)
+from investment_analyst.application.btc_intraday import (
+    BtcIntradayChartQueryError,
+    BtcIntradayRefreshError,
+)
+from investment_analyst.application.btc_intraday_models import (
+    BtcIntradayChart,
+    BtcIntradayChartRequest,
+    BtcIntradayRefreshRequest,
+    BtcIntradayRefreshSummary,
+)
 from investment_analyst.application.btc_refresh import (
     BtcMarketKnownAtTooEarlyError,
     BtcMarketRefreshError,
@@ -73,6 +88,18 @@ from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshSummary,
 )
 from investment_analyst.application.facade import InvestmentAnalystApplication
+from investment_analyst.application.listed_market_refresh import (
+    ListedMarketKnownAtTooEarlyError,
+    ListedMarketRefreshError,
+)
+from investment_analyst.application.listed_market_refresh_models import (
+    ListedMarketRefreshRequest,
+    ListedMarketRefreshSummary,
+)
+from investment_analyst.application.market_universe import (
+    MarketAssetDescriptor,
+    MarketAssetUniverse,
+)
 from investment_analyst.application.operational_models import (
     AaplDailyRunRequestSnapshot,
     AaplDailyRunState,
@@ -83,8 +110,17 @@ from investment_analyst.application.operational_state import (
     AaplOperationalStateError,
 )
 from investment_analyst.application.runtime import ApplicationRuntimeError, StorageLocationRequest
+from investment_analyst.application.sec_fundamental_refresh import (
+    SecIssuerFundamentalKnownAtTooEarlyError,
+    SecIssuerFundamentalRefreshError,
+)
+from investment_analyst.application.sec_fundamental_refresh_models import (
+    SecIssuerFundamentalRefreshRequest,
+    SecIssuerFundamentalRefreshSummary,
+)
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
+from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID as APPLE_ASSET_ID
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
 from investment_analyst.storage import StorageError
 from investment_analyst.workspace.service import WorkspaceError
@@ -127,6 +163,10 @@ class _RunnerOperations(Protocol):
 
 
 class _ApplicationOperations(Protocol):
+    def list_market_assets(self) -> MarketAssetUniverse:
+        """Return the catalog-backed assets supported by the local market UI."""
+        ...
+
     def query_aapl_diagnostics(
         self,
         request: ConsolidatedDiagnosticRequest,
@@ -154,6 +194,34 @@ class _ApplicationOperations(Protocol):
         """Query one bounded persisted Coinbase chart."""
         ...
 
+    def query_listed_market_chart(
+        self,
+        request: AaplMarketChartRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> ListedMarketChart:
+        """Query one bounded catalog-backed Alpaca chart."""
+        ...
+
+    def query_btc_intraday_chart(
+        self,
+        request: BtcIntradayChartRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BtcIntradayChart:
+        """Query one bounded persisted Coinbase intraday chart."""
+        ...
+
+    def refresh_btc_intraday(
+        self,
+        request: BtcIntradayRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BtcIntradayRefreshSummary:
+        """Import one bounded Coinbase one-minute window."""
+        ...
+
     def refresh_btc_market(
         self,
         request: BtcMarketRefreshRequest,
@@ -161,6 +229,16 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> BtcMarketRefreshSummary:
         """Update Coinbase BTC-USD and persist independent market analytics."""
+        ...
+
+    def refresh_listed_market(
+        self,
+        request: ListedMarketRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        alpaca_credentials: AlpacaCredentials,
+    ) -> ListedMarketRefreshSummary:
+        """Update one Alpaca listed asset and persist independent analytics."""
         ...
 
     def query_aapl_fundamental_trend(
@@ -172,6 +250,16 @@ class _ApplicationOperations(Protocol):
         """Query one bounded persisted SEC fundamental trend."""
         ...
 
+    def query_sec_fundamental_trend(
+        self,
+        request: AaplFundamentalTrendRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalTrend:
+        """Query one bounded catalog-backed SEC fundamental trend."""
+        ...
+
     def query_aapl_fundamental_research(
         self,
         request: AaplFundamentalResearchRequest,
@@ -179,6 +267,16 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> AaplFundamentalResearchResult:
         """Calculate bounded point-in-time fundamental research metrics."""
+        ...
+
+    def query_sec_fundamental_research(
+        self,
+        request: AaplFundamentalResearchRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalResearchResult:
+        """Calculate bounded point-in-time research for one SEC issuer."""
         ...
 
     def query_aapl_fundamental_research_history(
@@ -190,6 +288,16 @@ class _ApplicationOperations(Protocol):
         """Calculate bounded historical fundamental research statistics."""
         ...
 
+    def query_sec_fundamental_research_history(
+        self,
+        request: AaplFundamentalResearchRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalResearchHistoryResult:
+        """Calculate bounded historical research for one SEC issuer."""
+        ...
+
     def query_aapl_fundamental_analysis(
         self,
         request: AaplFundamentalResearchRequest,
@@ -199,8 +307,32 @@ class _ApplicationOperations(Protocol):
         """Organize exact research evidence into analytical sections."""
         ...
 
+    def query_sec_fundamental_analysis(
+        self,
+        request: AaplFundamentalResearchRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalAnalysisResult:
+        """Organize one SEC issuer's evidence into analytical sections."""
+        ...
+
+    def refresh_sec_fundamentals(
+        self,
+        request: SecIssuerFundamentalRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        sec_identity: SecEdgarIdentity,
+    ) -> SecIssuerFundamentalRefreshSummary:
+        """Refresh one catalog-backed SEC issuer independently from market."""
+        ...
+
 
 class _WebOperations(Protocol):
+    def market_assets(self) -> dict[str, object]:
+        """Return the catalog-backed market watchlist."""
+        ...
+
     def overview(self) -> dict[str, object]:
         """Return operational and scheduler state."""
         ...
@@ -211,6 +343,10 @@ class _WebOperations(Protocol):
 
     def market_chart(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Return one bounded point-in-time market chart."""
+        ...
+
+    def market_intraday(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return one bounded point-in-time intraday chart."""
         ...
 
     def fundamental_trend(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
@@ -246,6 +382,14 @@ class _WebOperations(Protocol):
         """Execute one manual market-only refresh."""
         ...
 
+    def market_intraday_refresh(self, payload: dict[str, object]) -> dict[str, object]:
+        """Execute one manual intraday market refresh."""
+        ...
+
+    def fundamental_refresh(self, payload: dict[str, object]) -> dict[str, object]:
+        """Execute one manual SEC issuer refresh."""
+        ...
+
 
 class AaplLocalController:
     """Serialize in-process reads and writes over existing application boundaries."""
@@ -267,16 +411,23 @@ class AaplLocalController:
         self._operation_lock = threading.RLock()
         self._market_chart_cache: dict[AaplMarketChartRequest, AaplMarketChart] = {}
         self._btc_market_chart_cache: dict[BtcMarketChartRequest, BtcMarketChart] = {}
-        self._fundamental_trend_cache: dict[AaplFundamentalTrendRequest, AaplFundamentalTrend] = {}
+        self._listed_market_chart_cache: dict[
+            tuple[str, AaplMarketChartRequest], ListedMarketChart
+        ] = {}
+        self._btc_intraday_chart_cache: dict[BtcIntradayChartRequest, BtcIntradayChart] = {}
+        self._fundamental_trend_cache: dict[
+            tuple[str, AaplFundamentalTrendRequest], AaplFundamentalTrend
+        ] = {}
         self._fundamental_research_cache: dict[
-            AaplFundamentalResearchRequest, AaplFundamentalResearchResult
+            tuple[str, AaplFundamentalResearchRequest], AaplFundamentalResearchResult
         ] = {}
         self._fundamental_research_history_cache: dict[
-            AaplFundamentalResearchRequest, AaplFundamentalResearchHistoryResult
+            tuple[str, AaplFundamentalResearchRequest], AaplFundamentalResearchHistoryResult
         ] = {}
         self._fundamental_analysis_cache: dict[
-            AaplFundamentalResearchRequest, AaplFundamentalAnalysisResult
+            tuple[str, AaplFundamentalResearchRequest], AaplFundamentalAnalysisResult
         ] = {}
+        self._market_assets = self._application.list_market_assets()
 
     @classmethod
     def create_default(
@@ -304,6 +455,10 @@ class AaplLocalController:
         with self._operation_lock:
             return self._runner.inspect(workspace=self._workspace)
 
+    def market_assets(self) -> MarketAssetUniverse:
+        """Return the immutable market universe resolved at process startup."""
+        return self._market_assets
+
     def run_payload(self, payload: dict[str, object]) -> AaplDailyRunState:
         """Validate the stable request snapshot and execute it once."""
         snapshot = AaplDailyRunRequestSnapshot.model_validate(payload)
@@ -322,6 +477,8 @@ class AaplLocalController:
             finally:
                 self._market_chart_cache.clear()
                 self._btc_market_chart_cache.clear()
+                self._listed_market_chart_cache.clear()
+                self._btc_intraday_chart_cache.clear()
                 self._fundamental_trend_cache.clear()
                 self._fundamental_research_cache.clear()
                 self._fundamental_research_history_cache.clear()
@@ -368,6 +525,45 @@ class AaplLocalController:
             self._btc_market_chart_cache[request] = chart
             return chart
 
+    def listed_market_chart_request(
+        self,
+        asset_id: str,
+        request: AaplMarketChartRequest,
+    ) -> ListedMarketChart:
+        """Query one cached catalog-backed Alpaca chart without writes."""
+        cache_key = (asset_id, request)
+        with self._operation_lock:
+            cached = self._listed_market_chart_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            chart = self._application.query_listed_market_chart(
+                request,
+                asset_id=asset_id,
+                location=StorageLocationRequest(workspace=self._workspace),
+            )
+            if len(self._listed_market_chart_cache) >= _MAX_READ_CACHE_ENTRIES:
+                self._listed_market_chart_cache.pop(next(iter(self._listed_market_chart_cache)))
+            self._listed_market_chart_cache[cache_key] = chart
+            return chart
+
+    def btc_intraday_chart_request(
+        self,
+        request: BtcIntradayChartRequest,
+    ) -> BtcIntradayChart:
+        """Query cached, persisted Coinbase one-minute evidence without writes."""
+        with self._operation_lock:
+            cached = self._btc_intraday_chart_cache.get(request)
+            if cached is not None:
+                return cached
+            chart = self._application.query_btc_intraday_chart(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            )
+            if len(self._btc_intraday_chart_cache) >= _MAX_READ_CACHE_ENTRIES:
+                self._btc_intraday_chart_cache.pop(next(iter(self._btc_intraday_chart_cache)))
+            self._btc_intraday_chart_cache[request] = chart
+            return chart
+
     def btc_market_refresh_request(
         self,
         request: BtcMarketRefreshRequest,
@@ -382,78 +578,141 @@ class AaplLocalController:
             finally:
                 self._btc_market_chart_cache.clear()
 
+    def listed_market_refresh_request(
+        self,
+        request: ListedMarketRefreshRequest,
+    ) -> ListedMarketRefreshSummary:
+        """Execute one Alpaca market-only refresh through the writer mutex."""
+        with self._operation_lock:
+            try:
+                return self._application.refresh_listed_market(
+                    request,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                    alpaca_credentials=self._alpaca_credentials,
+                )
+            finally:
+                self._listed_market_chart_cache.clear()
+
+    def btc_intraday_refresh_request(
+        self,
+        request: BtcIntradayRefreshRequest,
+    ) -> BtcIntradayRefreshSummary:
+        """Execute one bounded Coinbase minute refresh through the writer mutex."""
+        with self._operation_lock:
+            try:
+                return self._application.refresh_btc_intraday(
+                    request,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                )
+            finally:
+                self._btc_intraday_chart_cache.clear()
+
+    def sec_fundamental_refresh_request(
+        self,
+        request: SecIssuerFundamentalRefreshRequest,
+    ) -> SecIssuerFundamentalRefreshSummary:
+        """Execute one SEC-only issuer refresh through the shared writer mutex."""
+        with self._operation_lock:
+            try:
+                return self._application.refresh_sec_fundamentals(
+                    request,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                    sec_identity=self._sec_identity,
+                )
+            finally:
+                self._fundamental_trend_cache.clear()
+                self._fundamental_research_cache.clear()
+                self._fundamental_research_history_cache.clear()
+                self._fundamental_analysis_cache.clear()
+
     def fundamental_trend_request(
         self,
         request: AaplFundamentalTrendRequest,
+        *,
+        asset_id: str = APPLE_ASSET_ID,
     ) -> AaplFundamentalTrend:
         """Query persisted SEC facts without providers, recomputation, or writes."""
+        cache_key = (asset_id, request)
         with self._operation_lock:
-            cached = self._fundamental_trend_cache.get(request)
+            cached = self._fundamental_trend_cache.get(cache_key)
             if cached is not None:
                 return cached
-            trend = self._application.query_aapl_fundamental_trend(
+            trend = self._application.query_sec_fundamental_trend(
                 request,
+                asset_id=asset_id,
                 location=StorageLocationRequest(workspace=self._workspace),
             )
             if len(self._fundamental_trend_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._fundamental_trend_cache.pop(next(iter(self._fundamental_trend_cache)))
-            self._fundamental_trend_cache[request] = trend
+            self._fundamental_trend_cache[cache_key] = trend
             return trend
 
     def fundamental_research_request(
         self,
         request: AaplFundamentalResearchRequest,
+        *,
+        asset_id: str = APPLE_ASSET_ID,
     ) -> AaplFundamentalResearchResult:
         """Calculate cached SEC research metrics without providers or writes."""
+        cache_key = (asset_id, request)
         with self._operation_lock:
-            cached = self._fundamental_research_cache.get(request)
+            cached = self._fundamental_research_cache.get(cache_key)
             if cached is not None:
                 return cached
-            research = self._application.query_aapl_fundamental_research(
+            research = self._application.query_sec_fundamental_research(
                 request,
+                asset_id=asset_id,
                 location=StorageLocationRequest(workspace=self._workspace),
             )
             if len(self._fundamental_research_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._fundamental_research_cache.pop(next(iter(self._fundamental_research_cache)))
-            self._fundamental_research_cache[request] = research
+            self._fundamental_research_cache[cache_key] = research
             return research
 
     def fundamental_research_history_request(
         self,
         request: AaplFundamentalResearchRequest,
+        *,
+        asset_id: str = APPLE_ASSET_ID,
     ) -> AaplFundamentalResearchHistoryResult:
         """Calculate cached historical research statistics without writes."""
+        cache_key = (asset_id, request)
         with self._operation_lock:
-            cached = self._fundamental_research_history_cache.get(request)
+            cached = self._fundamental_research_history_cache.get(cache_key)
             if cached is not None:
                 return cached
-            history = self._application.query_aapl_fundamental_research_history(
+            history = self._application.query_sec_fundamental_research_history(
                 request,
+                asset_id=asset_id,
                 location=StorageLocationRequest(workspace=self._workspace),
             )
             if len(self._fundamental_research_history_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._fundamental_research_history_cache.pop(
                     next(iter(self._fundamental_research_history_cache))
                 )
-            self._fundamental_research_history_cache[request] = history
+            self._fundamental_research_history_cache[cache_key] = history
             return history
 
     def fundamental_analysis_request(
         self,
         request: AaplFundamentalResearchRequest,
+        *,
+        asset_id: str = APPLE_ASSET_ID,
     ) -> AaplFundamentalAnalysisResult:
         """Return cached analytical sections without providers or writes."""
+        cache_key = (asset_id, request)
         with self._operation_lock:
-            cached = self._fundamental_analysis_cache.get(request)
+            cached = self._fundamental_analysis_cache.get(cache_key)
             if cached is not None:
                 return cached
-            analysis = self._application.query_aapl_fundamental_analysis(
+            analysis = self._application.query_sec_fundamental_analysis(
                 request,
+                asset_id=asset_id,
                 location=StorageLocationRequest(workspace=self._workspace),
             )
             if len(self._fundamental_analysis_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._fundamental_analysis_cache.pop(next(iter(self._fundamental_analysis_cache)))
-            self._fundamental_analysis_cache[request] = analysis
+            self._fundamental_analysis_cache[cache_key] = analysis
             return analysis
 
 
@@ -477,6 +736,10 @@ class AaplLocalWebApplication:
             "operational": self._controller.health().to_json_dict(),
             "scheduler": scheduler,
         }
+
+    def market_assets(self) -> dict[str, object]:
+        """Return one immutable catalog-driven watchlist."""
+        return self._controller.market_assets().to_json_dict()
 
     def report(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate query parameters and return the versioned report contract."""
@@ -541,19 +804,54 @@ class AaplLocalWebApplication:
                 name="third_sma_window",
                 default=50,
             )
-        if asset_id == "equity:us:aapl":
+        descriptor = self._market_asset(asset_id)
+        if descriptor.refresh_kind == "complete_analysis":
             request = AaplMarketChartRequest.model_validate(request_parameters)
             return self._controller.market_chart_request(request).to_json_dict()
-        if asset_id == "crypto:btc-usd":
+        if (
+            descriptor.analysis.market_mode is MarketAnalysisMode.CRYPTO_SPOT
+            and descriptor.provider == "coinbase"
+        ):
             request = BtcMarketChartRequest.model_validate(request_parameters)
             return self._controller.btc_market_chart_request(request).to_json_dict()
+        if (
+            descriptor.analysis.market_mode is MarketAnalysisMode.LISTED_SECURITY
+            and descriptor.provider == "alpaca"
+        ):
+            request = AaplMarketChartRequest.model_validate(request_parameters)
+            return self._controller.listed_market_chart_request(
+                asset_id,
+                request,
+            ).to_json_dict()
         raise ValueError("market chart asset_id is not supported")
+
+    def market_intraday(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Validate and return the fixed 24-hour BTC-USD intraday chart."""
+        allowed = {"asset_id", "known_at", "interval"}
+        if set(parameters) - allowed:
+            raise ValueError("intraday market query contains unsupported parameters")
+        asset_id = _one_parameter(parameters, "asset_id", required=False) or "crypto:btc-usd"
+        descriptor = self._market_asset(asset_id)
+        if (
+            descriptor.analysis.market_mode is not MarketAnalysisMode.CRYPTO_SPOT
+            or not descriptor.supports_intraday
+            or descriptor.provider != "coinbase"
+        ):
+            raise ValueError("intraday market asset_id is not supported")
+        known_at = _one_parameter(parameters, "known_at", required=True)
+        interval = _one_parameter(parameters, "interval", required=True)
+        request = BtcIntradayChartRequest(
+            known_at=_aware_datetime(known_at),
+            interval=interval,
+        )
+        return self._controller.btc_intraday_chart_request(request).to_json_dict()
 
     def fundamental_trend(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate query parameters and return the versioned SEC trend contract."""
-        allowed = {"known_at", "frequency"}
+        allowed = {"asset_id", "known_at", "frequency"}
         if set(parameters) - allowed:
             raise ValueError("fundamental trend query contains unsupported parameters")
+        descriptor = self._fundamental_asset(parameters)
         known_at = _one_parameter(parameters, "known_at", required=True)
         frequency = _frequency(_one_parameter(parameters, "frequency", required=True))
         period_limit = 5 if frequency is DataFrequency.ANNUAL else 8
@@ -562,40 +860,111 @@ class AaplLocalWebApplication:
             frequency=frequency,
             period_limit=period_limit,
         )
-        return self._controller.fundamental_trend_request(request).to_json_dict()
+        return self._controller.fundamental_trend_request(
+            request,
+            asset_id=descriptor.asset_id,
+        ).to_json_dict()
 
     def fundamental_research(
         self,
         parameters: Mapping[str, tuple[str, ...]],
     ) -> dict[str, object]:
         """Validate query parameters and return exact derived SEC metrics."""
+        descriptor = self._fundamental_asset(parameters)
         request = _fundamental_research_request(parameters)
-        return self._controller.fundamental_research_request(request).to_json_dict()
+        return self._controller.fundamental_research_request(
+            request,
+            asset_id=descriptor.asset_id,
+        ).to_json_dict()
 
     def fundamental_research_history(
         self,
         parameters: Mapping[str, tuple[str, ...]],
     ) -> dict[str, object]:
         """Validate query parameters and return historical SEC statistics."""
+        descriptor = self._fundamental_asset(parameters)
         request = _fundamental_research_request(parameters)
-        return self._controller.fundamental_research_history_request(request).to_json_dict()
+        return self._controller.fundamental_research_history_request(
+            request,
+            asset_id=descriptor.asset_id,
+        ).to_json_dict()
 
     def fundamental_analysis(
         self,
         parameters: Mapping[str, tuple[str, ...]],
     ) -> dict[str, object]:
         """Validate query parameters and return unified analytical sections."""
+        descriptor = self._fundamental_asset(parameters)
         request = _fundamental_research_request(parameters)
-        return self._controller.fundamental_analysis_request(request).to_json_dict()
+        return self._controller.fundamental_analysis_request(
+            request,
+            asset_id=descriptor.asset_id,
+        ).to_json_dict()
 
     def run(self, payload: dict[str, object]) -> dict[str, object]:
         """Execute one explicit request and return bounded operational state."""
         return self._controller.run_payload(payload).to_json_dict()
 
     def market_refresh(self, payload: dict[str, object]) -> dict[str, object]:
-        """Validate and execute one explicit Coinbase-only refresh."""
-        request = BtcMarketRefreshRequest.model_validate(payload)
-        return self._controller.btc_market_refresh_request(request).to_json_dict()
+        """Validate and execute one explicit market-only refresh."""
+        asset_id = payload.get("asset_id")
+        descriptor = self._market_asset(asset_id)
+        if (
+            descriptor.analysis.market_mode is MarketAnalysisMode.CRYPTO_SPOT
+            and descriptor.provider == "coinbase"
+        ):
+            request = BtcMarketRefreshRequest.model_validate(payload)
+            return self._controller.btc_market_refresh_request(request).to_json_dict()
+        if (
+            descriptor.analysis.market_mode is MarketAnalysisMode.LISTED_SECURITY
+            and descriptor.provider == "alpaca"
+            and descriptor.refresh_kind == "market_only"
+        ):
+            request = ListedMarketRefreshRequest.model_validate(payload)
+            return self._controller.listed_market_refresh_request(request).to_json_dict()
+        raise ValueError("market refresh asset_id is not supported")
+
+    def market_intraday_refresh(self, payload: dict[str, object]) -> dict[str, object]:
+        """Validate and execute one explicit bounded Coinbase minute refresh."""
+        request = BtcIntradayRefreshRequest.model_validate(payload)
+        return self._controller.btc_intraday_refresh_request(request).to_json_dict()
+
+    def fundamental_refresh(self, payload: dict[str, object]) -> dict[str, object]:
+        """Validate and execute one explicit SEC-only issuer refresh."""
+        descriptor = self._fundamental_descriptor(payload.get("asset_id"))
+        request = SecIssuerFundamentalRefreshRequest.model_validate(payload)
+        if request.asset_id != descriptor.asset_id:
+            raise ValueError("fundamental refresh asset_id is inconsistent")
+        return self._controller.sec_fundamental_refresh_request(request).to_json_dict()
+
+    def _market_asset(self, asset_id: object) -> MarketAssetDescriptor:
+        """Resolve one visible asset without maintaining a second allowlist."""
+        if not isinstance(asset_id, str):
+            raise ValueError("market asset_id must be a string")
+        candidates = tuple(
+            item for item in self._controller.market_assets().assets if item.asset_id == asset_id
+        )
+        if len(candidates) != 1:
+            raise ValueError("market asset_id is not supported")
+        return candidates[0]
+
+    def _fundamental_asset(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> MarketAssetDescriptor:
+        """Reject fundamental queries without a configured corporate issuer."""
+        asset_id = _one_parameter(parameters, "asset_id", required=False) or APPLE_ASSET_ID
+        return self._fundamental_descriptor(asset_id)
+
+    def _fundamental_descriptor(self, asset_id: object) -> MarketAssetDescriptor:
+        """Resolve one visible corporate issuer with an enabled SEC presentation."""
+        descriptor = self._market_asset(asset_id)
+        if (
+            not descriptor.has_fundamentals
+            or descriptor.analysis.fundamental_mode is not FundamentalAnalysisMode.CORPORATE
+        ):
+            raise ValueError("fundamental analysis is not available for asset_id")
+        return descriptor
 
 
 class AaplLocalHttpServer(ThreadingHTTPServer):
@@ -660,6 +1029,9 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/overview":
                 self._send_json(HTTPStatus.OK, server.application.overview())
                 return
+            if parsed.path == "/api/market-assets":
+                self._send_json(HTTPStatus.OK, server.application.market_assets())
+                return
             if parsed.path == "/api/report":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=8)
                 parameters = {key: tuple(values) for key, values in raw.items()}
@@ -669,6 +1041,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=9)
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(HTTPStatus.OK, server.application.market_chart(parameters))
+                return
+            if parsed.path == "/api/market-intraday":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.market_intraday(parameters),
+                )
                 return
             if parsed.path == "/api/fundamental-trend":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
@@ -707,14 +1087,23 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
         try:
             self._require_loopback_host()
             parsed = urlsplit(self.path)
-            if parsed.query or parsed.path not in {"/api/run", "/api/market-refresh"}:
+            if parsed.query or parsed.path not in {
+                "/api/run",
+                "/api/market-refresh",
+                "/api/market-intraday-refresh",
+                "/api/fundamental-refresh",
+            }:
                 raise _HttpError(HTTPStatus.NOT_FOUND, "not_found", "route not found")
             payload = self._read_json_object()
             server = cast(AaplLocalHttpServer, self.server)
             if parsed.path == "/api/run":
                 response = server.application.run(payload)
-            else:
+            elif parsed.path == "/api/market-refresh":
                 response = server.application.market_refresh(payload)
+            elif parsed.path == "/api/fundamental-refresh":
+                response = server.application.fundamental_refresh(payload)
+            else:
+                response = server.application.market_intraday_refresh(payload)
             self._send_json(HTTPStatus.OK, response)
         except Exception as error:  # noqa: BLE001
             self._send_mapped_error(error)
@@ -786,16 +1175,35 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 else HTTPStatus.SERVICE_UNAVAILABLE
             )
             self._send_error(status, error.failure.category, error.failure.message)
-        elif isinstance(error, BtcMarketKnownAtTooEarlyError):
+        elif isinstance(
+            error,
+            (
+                BtcMarketKnownAtTooEarlyError,
+                ListedMarketKnownAtTooEarlyError,
+                SecIssuerFundamentalKnownAtTooEarlyError,
+            ),
+        ):
             self._send_error(
                 HTTPStatus.UNPROCESSABLE_ENTITY,
                 "known_at_too_early",
                 str(error)[:500],
             )
-        elif isinstance(error, BtcMarketRefreshError):
+        elif isinstance(error, (ListedMarketRefreshError, BtcMarketRefreshError)):
             self._send_error(
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 "market_refresh_failed",
+                str(error)[:500],
+            )
+        elif isinstance(error, SecIssuerFundamentalRefreshError):
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "fundamental_refresh_failed",
+                str(error)[:500],
+            )
+        elif isinstance(error, BtcIntradayRefreshError):
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "market_intraday_refresh_failed",
                 str(error)[:500],
             )
         elif isinstance(
@@ -804,6 +1212,7 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 AaplDailyReportError,
                 AaplFundamentalTrendQueryError,
                 AaplMarketChartQueryError,
+                BtcIntradayChartQueryError,
                 BtcMarketChartQueryError,
                 ConsolidatedDiagnosticQueryError,
                 FundamentalResearchError,
@@ -927,7 +1336,7 @@ def _frequency(value: str | None) -> DataFrequency:
 def _fundamental_research_request(
     parameters: Mapping[str, tuple[str, ...]],
 ) -> AaplFundamentalResearchRequest:
-    allowed = {"known_at", "frequency"}
+    allowed = {"asset_id", "known_at", "frequency"}
     if set(parameters) - allowed:
         raise ValueError("fundamental research query contains unsupported parameters")
     known_at = _one_parameter(parameters, "known_at", required=True)

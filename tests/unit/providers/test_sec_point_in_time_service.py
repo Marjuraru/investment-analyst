@@ -8,10 +8,15 @@ from uuid import UUID, uuid4
 import pytest
 
 from investment_analyst.core.models import (
+    AssetClass,
     DataFrequency,
     DataQuality,
     NormalizedObservation,
     SourceReference,
+)
+from investment_analyst.providers.asset_config import SecAssetConfiguration
+from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
+    GENERIC_TRANSFORMATION_VERSION,
 )
 from investment_analyst.providers.fundamentals.sec_fact_models import (
     ASSET_ID,
@@ -22,6 +27,8 @@ from investment_analyst.providers.fundamentals.sec_point_in_time_service import 
     AmbiguousSecFundamentalRevisionError,
     MalformedSecFundamentalObservationError,
     SecAaplFundamentalPointInTimeService,
+    SecFundamentalQueryError,
+    SecIssuerFundamentalPointInTimeService,
 )
 from investment_analyst.providers.fundamentals.sec_query_models import SecFundamentalQuery
 
@@ -75,6 +82,7 @@ def _observation(
     quality: DataQuality = DataQuality.VALID,
     raw_record_id: UUID | None = None,
     record_key_updates: dict[str, object] | None = None,
+    asset_id: str = ASSET_ID,
 ) -> NormalizedObservation:
     raw_id = raw_record_id or uuid4()
     instant = field_name in {
@@ -116,7 +124,7 @@ def _observation(
     return NormalizedObservation(
         observation_id=uuid4(),
         raw_record_id=raw_id,
-        asset_id=ASSET_ID,
+        asset_id=asset_id,
         field_name=field_name,
         value=Decimal(value),
         unit="USD",
@@ -143,8 +151,10 @@ def _query(
     start: date | None = None,
     end: date | None = None,
     limit: int | None = None,
+    asset_id: str = ASSET_ID,
 ) -> SecFundamentalQuery:
     return SecFundamentalQuery(
+        asset_id=asset_id,
         known_at=known_at,
         frequency=frequency,
         start_period_end=start,
@@ -292,3 +302,47 @@ def test_service_reads_observations_once_and_never_accesses_raw_records() -> Non
 
     assert result.traceability_verified
     assert storage.observations.calls == 1
+
+
+def test_configured_issuer_is_isolated_by_asset_source_and_transformation() -> None:
+    amd = SecAssetConfiguration(
+        asset_id="equity:us:amd",
+        cik="0000002488",
+        ticker="AMD",
+        submissions_source_id="sec-edgar:amd:submissions",
+        companyfacts_source_id="sec-edgar:amd:companyfacts",
+        name="Advanced Micro Devices, Inc.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NASDAQ",
+    )
+    apple = _observation()
+    amd_valid = _observation(
+        asset_id=amd.asset_id,
+        source_id=amd.companyfacts_source_id,
+        transformation_version=GENERIC_TRANSFORMATION_VERSION,
+        accession="0000002488-25-000001",
+        value="200",
+    )
+    amd_wrong_source = _observation(
+        asset_id=amd.asset_id,
+        source_id=COMPANYFACTS_SOURCE_ID,
+        transformation_version=GENERIC_TRANSFORMATION_VERSION,
+        accession="0000002488-25-000002",
+        value="300",
+    )
+    storage = _Storage([apple, amd_valid, amd_wrong_source])
+    service = SecIssuerFundamentalPointInTimeService(  # type: ignore[arg-type]
+        storage,
+        amd,
+    )
+
+    result = service.query(_query(datetime(2026, 1, 1, tzinfo=UTC), asset_id=amd.asset_id))
+
+    assert result.observations_examined == 2
+    assert result.observations_eligible == 1
+    assert result.periods[0].facts[0].value == Decimal("200")
+    assert result.periods[0].facts[0].source_id == amd.companyfacts_source_id
+
+    with pytest.raises(SecFundamentalQueryError, match="does not match"):
+        service.query(_query(datetime(2026, 1, 1, tzinfo=UTC)))

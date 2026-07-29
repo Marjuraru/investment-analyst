@@ -1,4 +1,4 @@
-"""Deterministic Decimal engine for Apple SEC fundamental metrics."""
+"""Deterministic Decimal engine for SEC issuer fundamental metrics."""
 
 from collections import Counter
 from dataclasses import dataclass
@@ -6,10 +6,7 @@ from datetime import UTC, datetime
 from decimal import Context, Decimal, localcontext
 
 from investment_analyst.core.models import DataFrequency, DataQuality
-from investment_analyst.providers.fundamentals.sec_fact_models import (
-    ASSET_ID,
-    COMPANYFACTS_SOURCE_ID,
-)
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_metric_models import (
     SecFundamentalMetricCandidate,
     SecFundamentalMetricComputation,
@@ -21,6 +18,9 @@ from investment_analyst.providers.fundamentals.sec_query_models import (
     SecFundamentalPeriodView,
     SecFundamentalPointInTimeResult,
     SecSelectedFundamentalFact,
+)
+from investment_analyst.providers.fundamentals.sec_raw_records import (
+    aapl_sec_configuration,
 )
 
 _SKIP_KEYS = (
@@ -61,6 +61,7 @@ class _FiscalMetadata:
 
 @dataclass(frozen=True)
 class _PeriodContext:
+    asset_id: str
     period: SecFundamentalPeriodView
     facts: dict[str, SecSelectedFundamentalFact]
     fiscal_metadata: _FiscalMetadata | None
@@ -69,6 +70,14 @@ class _PeriodContext:
 
 class SecFundamentalMetricEngine:
     """Compute five explicit point-in-time metrics from selected SEC period views."""
+
+    def __init__(self, configuration: SecAssetConfiguration | None = None) -> None:
+        self._configuration = configuration or aapl_sec_configuration()
+
+    @property
+    def configuration(self) -> SecAssetConfiguration:
+        """Return the immutable SEC issuer configuration used by this engine."""
+        return self._configuration
 
     def compute(
         self,
@@ -106,8 +115,8 @@ class SecFundamentalMetricEngine:
             traceability_verified=True,
         )
 
-    @staticmethod
     def _validate_source(
+        self,
         request: SecFundamentalMetricRequest,
         result: SecFundamentalPointInTimeResult,
     ) -> list[_PeriodContext]:
@@ -115,7 +124,10 @@ class SecFundamentalMetricEngine:
             raise SecFundamentalMetricComputationError(
                 "point-in-time source result lacks verified traceability"
             )
-        if result.query.asset_id != request.asset_id or request.asset_id != ASSET_ID:
+        if (
+            result.query.asset_id != request.asset_id
+            or request.asset_id != self._configuration.asset_id
+        ):
             raise SecFundamentalMetricComputationError("point-in-time result uses another asset")
         if result.query.known_at != request.known_at:
             raise SecFundamentalMetricComputationError("point-in-time known_at does not match")
@@ -135,7 +147,13 @@ class SecFundamentalMetricEngine:
 
         contexts: list[_PeriodContext] = []
         for period in result.periods:
-            contexts.append(_validate_period(period, request))
+            contexts.append(
+                _validate_period(
+                    period,
+                    request,
+                    source_id=self._configuration.companyfacts_source_id,
+                )
+            )
         period_ends = tuple(context.period.period_end for context in contexts)
         if period_ends != tuple(sorted(period_ends)):
             raise SecFundamentalMetricComputationError("source periods are not chronological")
@@ -145,6 +163,8 @@ class SecFundamentalMetricEngine:
 def _validate_period(
     period: SecFundamentalPeriodView,
     request: SecFundamentalMetricRequest,
+    *,
+    source_id: str,
 ) -> _PeriodContext:
     if period.frequency is not request.frequency:
         raise MalformedSecFundamentalPeriodError("period mixes fundamental frequencies")
@@ -160,7 +180,7 @@ def _validate_period(
             raise MalformedSecFundamentalPeriodError("period repeats a fundamental field")
         if fact.frequency is not request.frequency or fact.period_end != period.period_end:
             raise MalformedSecFundamentalPeriodError("fact does not belong to its period")
-        if fact.source_id != COMPANYFACTS_SOURCE_ID:
+        if fact.source_id != source_id:
             raise MalformedSecFundamentalPeriodError("fact uses another source")
         if fact.unit != "USD":
             raise MalformedSecFundamentalPeriodError("fact must be denominated in USD")
@@ -194,7 +214,13 @@ def _validate_period(
     else:
         metadata_status = "valid"
         fiscal_metadata = next(iter(metadata_values))
-    return _PeriodContext(period, facts, fiscal_metadata, metadata_status)
+    return _PeriodContext(
+        request.asset_id,
+        period,
+        facts,
+        fiscal_metadata,
+        metadata_status,
+    )
 
 
 def _fiscal_metadata(
@@ -410,7 +436,7 @@ def _candidate(
     ordered = tuple(sorted(inputs, key=lambda item: item[0]))
     metadata = context.fiscal_metadata
     return SecFundamentalMetricCandidate(
-        asset_id=ASSET_ID,
+        asset_id=context.asset_id,
         metric_name=metric_name,
         value=value,
         unit="ratio",

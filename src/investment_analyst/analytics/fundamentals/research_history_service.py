@@ -5,6 +5,8 @@ from decimal import Context, Decimal, localcontext
 from typing import Protocol
 
 from investment_analyst.analytics.fundamentals.research_history_models import (
+    AAPL_FUNDAMENTAL_RESEARCH_HISTORY_SCHEMA_VERSION,
+    GENERIC_FUNDAMENTAL_RESEARCH_HISTORY_SCHEMA_VERSION,
     HISTORY_ALGORITHM_VERSION,
     AaplFundamentalResearchHistoryCoverage,
     AaplFundamentalResearchHistoryResult,
@@ -19,6 +21,7 @@ from investment_analyst.analytics.fundamentals.research_models import (
     get_fundamental_research_metric_definition,
 )
 from investment_analyst.core.models import DataFrequency
+from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID
 
 _DAYS_PER_YEAR = Decimal("365.2425")
 _LEVEL_UNITS = frozenset({"USD", "shares", "USD/shares"})
@@ -37,7 +40,7 @@ class FundamentalResearchHistoryError(RuntimeError):
     """Raised when verified research metrics cannot produce historical output."""
 
 
-class AaplFundamentalResearchHistoryService:
+class SecIssuerFundamentalResearchHistoryService:
     """Calculate descriptive changes and dispersion without writes or scores."""
 
     def __init__(self, research: _ResearchOperations) -> None:
@@ -66,6 +69,13 @@ class AaplFundamentalResearchHistoryService:
             ) from error
 
         return AaplFundamentalResearchHistoryResult(
+            schema_version=(
+                AAPL_FUNDAMENTAL_RESEARCH_HISTORY_SCHEMA_VERSION
+                if research.asset_id == ASSET_ID
+                else GENERIC_FUNDAMENTAL_RESEARCH_HISTORY_SCHEMA_VERSION
+            ),
+            asset_id=research.asset_id,
+            source_id=research.source_id,
             request=request,
             research=research,
             series=series,
@@ -157,4 +167,8 @@ def _history(
 __all__ = [
     "AaplFundamentalResearchHistoryService",
     "FundamentalResearchHistoryError",
+    "SecIssuerFundamentalResearchHistoryService",
 ]
+
+
+AaplFundamentalResearchHistoryService = SecIssuerFundamentalResearchHistoryService

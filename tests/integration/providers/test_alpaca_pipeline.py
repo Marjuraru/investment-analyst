@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from investment_analyst.core.models import AssetClass
+from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
 from investment_analyst.providers.http import HttpResponse
 from investment_analyst.providers.market.alpaca_normalizer import ASSET_ID, SOURCE_ID
 from investment_analyst.providers.market.alpaca_pipeline import (
@@ -141,6 +143,59 @@ def test_complete_round_trip_idempotence_and_data_separation(tmp_path: Path) -> 
             assert observation.observed_at is not None
             assert observation.observed_at.utcoffset() == timedelta(0)
             assert observation.available_at <= observation.normalized_at
+
+
+def test_catalog_asset_configuration_preserves_independent_bvn_identity(tmp_path: Path) -> None:
+    fixture = json.loads(_fixture())
+    fixture["symbol"] = "BVN"
+    configuration = AlpacaAssetConfiguration(
+        asset_id="equity:us:bvn",
+        symbol="BVN",
+        feed="iex",
+        adjustment="all",
+        source_id="alpaca-market-data:iex:bvn:daily-bars:adjustment-all",
+        name="Compañía de Minas Buenaventura S.A.A.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NYSE",
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        transport = FixtureTransport([json.dumps(fixture).encode()])
+        pipeline = AlpacaHistoricalPipeline(
+            storage,
+            AlpacaStockClient(
+                transport,
+                AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+                clock=lambda: FETCHED_AT,
+            ),
+            configuration=configuration,
+            clock=lambda: NORMALIZED_AT,
+        )
+
+        first = pipeline.run(START, END)
+        second_transport = FixtureTransport([json.dumps(fixture).encode()])
+        second = AlpacaHistoricalPipeline(
+            storage,
+            AlpacaStockClient(
+                second_transport,
+                AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+                clock=lambda: FETCHED_AT,
+            ),
+            configuration=configuration,
+            clock=lambda: NORMALIZED_AT,
+        ).run(START, END)
+
+        assert first.asset_id == configuration.asset_id
+        assert first.source_id == configuration.source_id
+        assert storage.assets.get(configuration.asset_id).symbol == "BVN"
+        assert all(
+            item.source.source_id == configuration.source_id
+            for item in storage.observations.list(asset_id=configuration.asset_id)
+        )
+        assert second.raw_records_created == 0
+        assert second.raw_records_reused == first.bars_received
+        assert second.observations_created == 0
+        assert second.observations_reused == first.observations_created
 
 
 def test_pagination_and_revised_bar_create_new_version(tmp_path: Path) -> None:

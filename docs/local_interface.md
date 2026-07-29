@@ -1,19 +1,23 @@
 # Interfaz local y operación continua
 
-La interfaz local convierte los flujos existentes de Apple y BTC-USD en una herramienta básica
-utilizable desde el navegador. El proceso de Apple puede ejecutar una programación diaria. No añade fórmulas,
-scores combinados, recomendaciones, Trading API ni un LLM activo.
+La interfaz local convierte los flujos existentes de mercado, Apple y BTC-USD en una herramienta
+básica utilizable desde el navegador. El proceso completo de Apple puede ejecutar una programación
+diaria. No añade fórmulas, scores combinados, recomendaciones, Trading API ni un LLM activo.
 
 ## Capacidades
 
 La página permite:
 
 - revisar el workspace, la última ejecución, la trazabilidad y la programación;
+- ver simultáneamente la hora de Lima y Wall Street, junto con el estado de la ventana regular
+  09:30–16:00 ET de NYSE;
 - cargar automáticamente el último reporte elegible al abrir la página;
-- explorar el histórico point-in-time de AAPL con OHLC, VWAP, operaciones, tres SMA configurables y
-  volumen;
-- alternar a BTC-USD y explorar todo el histórico diario persistido de Coinbase Exchange con OHLC,
-  volumen en BTC, retornos, volatilidad, volumen relativo y las mismas herramientas de gráfico;
+- seleccionar desde el catálogo central AAPL, BTC-USD y una lista inicial de acciones y ETF
+  estadounidenses sin mantener símbolos duplicados en la interfaz;
+- explorar el histórico point-in-time de cada activo con OHLC, VWAP cuando la fuente lo entrega,
+  operaciones, tres SMA configurables y volumen;
+- usar en BTC-USD el histórico diario persistido de Coinbase Exchange o una ventana intradía local
+  de 24 horas con OHLC y volumen en BTC;
 - consultar en la misma vista el retorno diario, volatilidad diaria de 20 días con datos, volumen
   relativo de 20 días, distancias a las SMA, extremos, retorno, CAGR y máximo drawdown del rango
   consultado;
@@ -21,10 +25,11 @@ La página permite:
   y preferencia local persistente; también permite mostrar u ocultar cada SMA y el volumen;
 - alternar el eje de precios entre escala lineal y logarítmica sin volver a consultar el workspace;
 - alternar entre línea de cierre y velas OHLC sin repetir la consulta, conservando medias y volumen;
-- consultar siempre todo el histórico local y cambiar únicamente el intervalo de cada punto o vela:
-  automático, 1 día, 1 semana o 1 mes;
+- consultar un año por defecto, ampliar a cinco años al elegir semana y solicitar el histórico
+  completo solo al elegir mes; BTC añade intervalos de 1/5/15/30/45 minutos y 1/2/4/5 horas sobre
+  las últimas 24 horas;
 - ampliar el gráfico alrededor del cursor con la rueda del mouse o con `+` y `-`, y restablecer la
-  vista con `0` o el control visible, sin consultar nuevamente el servicio;
+  vista con `0`, sin consultar nuevamente el servicio;
 - desplazar horizontalmente la vista ampliada mediante arrastre con el botón izquierdo;
 - comparar ocho trimestres o cinco años de ingresos y resultado neto, junto con la ficha de balance
   del último período y los ratios fundamentales seleccionados;
@@ -41,8 +46,11 @@ La página permite:
 - alternar entre un tema oscuro de baja luminancia, predeterminado, y el tema claro;
 - ampliar o reducir localmente el tramo visible sin descartar datos de la consulta completa;
 - ejecutar manualmente el bootstrap completo de SEC EDGAR y Alpaca Market Data IEX;
-- ejecutar una actualización Coinbase exclusivamente de mercado, incremental por los bordes del
-  histórico o completa, sin credenciales y sin crear fundamentales ficticios;
+- ejecutar una actualización exclusivamente de mercado, incremental por los bordes del histórico
+  o completa, para BTC-USD o cualquier activo Alpaca visible; si una empresa también declara SEC,
+  ambos writers se ejecutan en orden y conservan evidencia independiente;
+- importar explícitamente las últimas 24 horas de BTC-USD de un minuto cuando se selecciona una
+  resolución intradía;
 - consultar el reporte diario point-in-time en modo trimestral o anual;
 - seleccionar opcionalmente fechas `as-of` independientes para mercado y fundamentales;
 - ver diagnósticos, métricas, frescura, limitaciones y el contrato JSON versionado;
@@ -50,6 +58,20 @@ La página permite:
 
 Mercado y fundamentales se muestran en tarjetas separadas. La interfaz no calcula ni muestra un
 veredicto, confianza, calidad, recomendación o ranking combinado.
+
+## Relojes de mercado
+
+Los relojes se calculan enteramente en el navegador con las zonas IANA `America/Lima` y
+`America/New_York`. No realizan consultas de red y una única actualización, alineada al cambio de
+minuto, se pausa cuando la pestaña deja de estar visible. Esto permite reflejar automáticamente los
+cambios de horario de verano de Nueva York sin fijar una diferencia horaria estática.
+
+La franja compacta del encabezado muestra ambas horas y describe exclusivamente la sesión regular
+NYSE publicada de 09:30 a 16:00 ET. Distingue si Nueva York está antes, dentro o después de esa
+ventana sin ocupar otra tarjeta del área analítica. No afirma que el mercado esté operando: fines de
+semana se identifican, pero los feriados y cierres anticipados todavía no se evalúan. Esta
+limitación permanece disponible para tecnologías de asistencia. Un calendario oficial versionado
+será un contrato separado antes de convertir el estado horario en un estado operativo de mercado.
 
 ## Criterios de presentación
 
@@ -78,16 +100,16 @@ redondeo únicamente para presentación:
 - cobertura, rotación y deuda frente a patrimonio o FCF: múltiplos con hasta dos decimales;
 - EPS, ingresos y flujo de caja por acción: USD por acción con hasta dos decimales;
 - acciones promedio y en circulación: miles de millones con hasta dos decimales;
-- volumen del gráfico: acciones enteras para AAPL y hasta dos decimales de BTC; ambos usan notación
-  compacta con un decimal en el resumen;
+- volumen del gráfico: acciones o participaciones enteras para activos Alpaca y hasta dos decimales
+  de BTC; ambos usan notación compacta con un decimal en el resumen;
 - operaciones: enteros con separador de miles;
 - conteos: enteros con separador de miles.
 
 Los ceros decimales innecesarios se omiten, salvo en importes monetarios. El contrato JSON desplegable
 conserva el `Decimal` completo, las unidades, fórmulas, parámetros, identidades y timestamps para
-auditoría. El endpoint local `/api/market-chart` entrega `aapl-market-chart-v5` para Apple y
-`btc-market-chart-v1` para Bitcoin mediante `asset_id=crypto:btc-usd`: acepta
-`interval=auto|1d|1w|1mo`, además de
+auditoría. El endpoint local `/api/market-chart` entrega `aapl-market-chart-v5` para Apple,
+`listed-market-chart-v1` para los demás activos Alpaca y `btc-market-chart-v1` para Bitcoin:
+acepta `asset_id`, `interval=auto|1d|1w|1mo`, además de
 `short_sma_window`, `long_sma_window` y `third_sma_window`. La interfaz exige ventanas crecientes
 entre 2 y 400; el tercer parámetro conserva un valor predeterminado compatible para solicitudes
 anteriores,
@@ -99,6 +121,11 @@ acción explícita que solicita `period=max` y permite cargar todo el histórico
 El contrato HTTP conserva los demás rangos compatibles. Esta progresión evita incluir miles de
 sesiones diarias de BTC-USD en la respuesta inicial, sin recortar la evidencia persistida ni impedir
 el acceso al historial completo.
+El endpoint separado `/api/market-intraday` entrega `btc-intraday-chart-v1` únicamente para
+`crypto:btc-usd`. Acepta los nueve intervalos fijos, consulta una ventana de 24 horas y excluye el
+minuto todavía en curso. No acepta rangos arbitrarios desde el navegador ni reutiliza el contrato
+diario. La actualización `POST /api/market-intraday-refresh` se ejecuta solo por una acción explícita,
+importa como máximo 1.440 minutos y expone conteos creados/reutilizados para auditar idempotencia.
 Para no truncar una vela por el límite del rango, un intervalo semanal o mensual puede incluir un
 bloque completo que supere ligeramente el objetivo de días. La vela del calendario vigente sí puede
 estar en curso: contiene únicamente la evidencia disponible en `known_at` y se identifica como tal.
@@ -118,7 +145,10 @@ mantienen separadas. La tabla OHLC se construye solo al abrirla para no cargar m
 El endpoint `/api/fundamental-research` entrega el contrato exacto
 `aapl-fundamental-research-v2`, incluidas fórmulas, versiones, limitaciones e identidades de inputs.
 La matriz compacta presenta el último período; su exportación conserva todos los períodos acotados
-devueltos por la consulta.
+devueltos por la consulta. Los endpoints fundamentales aceptan `asset_id`; la interfaz lo envía
+siempre y el servidor rechaza activos sin un pipeline fundamental completo antes de invocar los
+servicios SEC configurados. La omisión conserva AAPL como valor compatible para clientes locales
+anteriores.
 
 El endpoint `/api/fundamental-research-history` envuelve ese contrato sin modificarlo y añade media,
 mínimo, máximo, rango, cambio frente al período disponible anterior, cambio del horizonte y CAGR.
@@ -211,27 +241,80 @@ visible; restablecer el zoom vuelve a incluir el rango consultado completo. El J
 ## Personalización analítica
 
 Las tres medias móviles ya permiten personalizar ventana, color y visibilidad; el gráfico también
-permite elegir escala lineal o logarítmica, línea o velas e intervalo diario, semanal o mensual. Esta personalización
+permite elegir escala lineal o logarítmica, línea o velas —con velas como vista predeterminada— e
+intervalo diario, semanal o mensual, además de intervalos fijos intradía para BTC. Esta personalización
 usa límites tipados, muestra los parámetros efectivos, conserva fórmula, valores exactos y evidencia
 y no modifica resultados persistidos ni algoritmos canónicos. Quedan para expansiones posteriores
 los parámetros de otras estadísticas y las plantillas reutilizables de indicadores.
 
-## Intervalos intradía previstos
+## Base intradía
 
-El workspace canónico actual conserva barras diarias de Alpaca Market Data IEX. Por ello, los
-intervalos de 1, 5, 15, 30 y 45 minutos y de 1, 2, 4 y 5 horas no se muestran todavía: una barra
-diaria no contiene evidencia suficiente para reconstruirlos. La expansión intradía deberá ingerir
-barras base de un minuto con una identidad de fuente nueva, zona horaria de NASDAQ, límites de sesión
-y disponibilidad point-in-time explícitos. A partir de esa base podrán agregarse de forma exacta los
-intervalos mayores sobre todo el historial disponible, conservando OHLCV, cobertura y UUID de entrada
-sin alterar la historia diaria.
+La historia diaria de los activos Alpaca y BTC-USD permanece separada por identidad y fuente. Existe
+una fuente paralela de velas BTC-USD de un minuto de Coinbase Exchange, mercado 24/7, con identidad
+y disponibilidad point-in-time propias. Sobre esa evidencia se agregan localmente intervalos fijos
+UTC de 1, 5, 15, 30 y 45 minutos y de 1, 2, 4 y 5 horas, conservando OHLCV, calidad, completitud y
+UUID de entrada.
+
+La interfaz presenta la fuente intradía solo cuando el activo seleccionado es BTC. Cambiar el
+intervalo consulta exclusivamente el workspace; la acción de actualización ejecuta primero el flujo
+diario y después importa 24 horas de minutos completos. Un fallo de la segunda etapa no elimina el
+progreso diario. No se reconstruyen minutos a partir de barras diarias ni se aplican las SMA,
+estadísticas o diagnósticos diarios a esta fuente.
+
+## Universo de mercado
+
+El endpoint `/api/market-assets` entrega `market-asset-universe-v2`, generado directamente desde el
+catálogo central y las configuraciones tipadas de proveedores. El navegador construye el selector
+con esa respuesta; no mantiene otra lista de símbolos. Cada descriptor declara identidad canónica,
+símbolo del proveedor, fuente, esquema de gráfico, fecha inicial soportada, unidad de volumen,
+capacidad intradía, tipo de actualización y un perfil analítico por familia. La interfaz decide si
+un intervalo es intradía a partir de la capacidad del descriptor, no comparando el ID con Bitcoin.
+
+El perfil separa empresas cotizadas, fondos cotizados y criptoactivos. También distingue análisis
+corporativo, análisis de fondos y análisis de red/token; por ello una criptomoneda nunca muestra por
+accidente fundamentales SEC. El mismo contrato admite futuras acciones de BVL como empresas
+cotizadas sin asignarles un proveedor estadounidense.
+
+Apple conserva la actualización completa SEC + Alpaca. Los demás activos Alpaca visibles utilizan
+el contrato genérico `listed-market-refresh-v1`, exclusivamente de mercado, y comparten gráfico,
+estadísticas y diagnóstico sin una ruta HTTP por símbolo. Su cobertura gratuita es Alpaca IEX:
+una sola bolsa y no el mercado consolidado SIP. El catálogo inicial contiene AMD, Barrick (`B`),
+BVN, CDE, HYMC, INTC, MSTR, MU, MUX, NEM, PLTR, SCCO, TSM, GBTC, GLD e IBIT, además de AAPL y
+BTC-USD.
+
+AMD, Intel, Strategy, Micron, Palantir, CDE, HYMC, MUX, NEM y SCCO ya declaran una fuente corporativa
+SEC. El backend web dispone de lectura y actualización SEC genéricas por `asset_id`:
+`/api/fundamental-refresh` ejecuta el writer independiente y tendencia, investigación, historia y
+análisis usan cachés aisladas por emisor. Para otro emisor la tendencia publica
+`sec-fundamental-trend-v2`; Apple conserva `aapl-fundamental-trend-v1`. La disponibilidad visual se
+deriva de las capacidades y vinculaciones SEC completas del catálogo, no de una lista adicional de
+símbolos en la interfaz o el backend.
+
+El smoke real de AMD del 28 de julio de 2026 procesó dos documentos oficiales, 883 observaciones y
+23 métricas persistidas del diagnóstico base. La repetición reutilizó exactamente los dos raw, las
+883 observaciones, las 23 métricas y el diagnóstico, sin crear duplicados. La investigación ampliada
+obtuvo 25 de 40 métricas en el período más reciente y 26 series históricas.
+
+El smoke real anual de Intel del mismo día procesó dos documentos oficiales, 687 observaciones y 19
+métricas base. MSTR, MU y PLTR produjeron respectivamente 477, 873 y 559 observaciones y 27, 39 y 28
+métricas base. Las repeticiones reutilizaron toda la evidencia sin crear duplicados. Estos emisores
+publican `has_fundamentals=true` y `refresh_kind=market_only`: la interfaz muestra su análisis
+corporativo y, al actualizar, ejecuta primero su mercado Alpaca y después SEC como dos operaciones
+independientes. No utiliza el bootstrap ni la consulta diagnóstica consolidada de Apple. Los
+conceptos ausentes permanecen visibles como faltantes; no se rellenan con cero ni con datos de otro
+emisor.
+
+CDE, HYMC, MUX, NEM y SCCO produjeron en sus smokes reales 873, 633, 845, 569 y 1224 observaciones.
+La cobertura diagnóstica incompleta se muestra como tal y no impide consultar la evidencia
+disponible. Barrick continúa solo con mercado porque sus formularios 40-F/IFRS requieren un
+normalizador distinto.
 
 ## Integración actual de cripto
 
-El selector de activo admite `crypto:btc-usd`. Esta vista usa únicamente velas diarias públicas de
-Coinbase Exchange: representa un solo mercado, no un precio agregado de todo el ecosistema. La
-interfaz oculta fundamentos SEC y clasificaciones empresariales al seleccionar Bitcoin; no reutiliza
-identidades de AAPL ni interpreta sesiones bursátiles en un mercado 24/7.
+El descriptor `crypto:btc-usd` usa únicamente velas diarias públicas de Coinbase Exchange:
+representa un solo mercado, no un precio agregado de todo el ecosistema. La interfaz oculta
+fundamentos SEC y clasificaciones empresariales al seleccionar Bitcoin; no reutiliza identidades de
+AAPL ni interpreta sesiones bursátiles en un mercado 24/7.
 
 La sección Operación cambia al flujo BTC-USD y ofrece actualización incremental automática o rango
 completo. El rango público es inclusivo y solo admite días UTC terminados. El plan automático detecta

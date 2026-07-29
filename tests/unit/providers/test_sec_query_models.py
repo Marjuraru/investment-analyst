@@ -52,6 +52,16 @@ def test_query_normalizes_offset_and_validates_range() -> None:
     assert query.frequency is DataFrequency.ANNUAL
 
 
+def test_query_accepts_an_explicit_sec_issuer_asset() -> None:
+    query = SecFundamentalQuery(
+        asset_id="equity:us:amd",
+        known_at=datetime(2026, 1, 1, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+    )
+
+    assert query.asset_id == "equity:us:amd"
+
+
 @pytest.mark.parametrize(
     "values",
     [

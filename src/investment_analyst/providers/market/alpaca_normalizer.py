@@ -15,6 +15,7 @@ from investment_analyst.core.models import (
     SourceReference,
     SourceType,
 )
+from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
 from investment_analyst.providers.market.alpaca_stock import (
     ADJUSTMENT,
     FEED,
@@ -30,26 +31,55 @@ RAW_SCHEMA_VERSION = "alpaca-stock-bars-v1"
 TRANSFORMATION_VERSION = "alpaca-iex-bar-normalizer-v1"
 
 
-def create_alpaca_asset() -> Asset:
-    """Return the stable AAPL asset definition used by the importer."""
-    return Asset(
+def alpaca_source_id(symbol: str) -> str:
+    """Return the stable source identity for one normalized Alpaca symbol."""
+    normalized = symbol.strip().lower()
+    allowed = "abcdefghijklmnopqrstuvwxyz0123456789.-"
+    if not normalized or any(character not in allowed for character in normalized):
+        raise ValueError("Alpaca symbol cannot produce a stable source identity")
+    return f"alpaca-market-data:iex:{normalized}:daily-bars:adjustment-all"
+
+
+def _default_configuration() -> AlpacaAssetConfiguration:
+    return AlpacaAssetConfiguration(
         asset_id=ASSET_ID,
         symbol=SYMBOL,
+        feed=FEED,
+        adjustment=ADJUSTMENT,
+        source_id=SOURCE_ID,
         name="Apple Inc.",
         asset_class=AssetClass.EQUITY,
         quote_currency="USD",
         exchange="NASDAQ",
-        provider_symbols={"alpaca_iex": SYMBOL},
+    )
+
+
+def create_alpaca_asset(
+    configuration: AlpacaAssetConfiguration | None = None,
+) -> Asset:
+    """Return the stable catalog-backed asset definition used by the importer."""
+    resolved = configuration or _default_configuration()
+    return Asset(
+        asset_id=resolved.asset_id,
+        symbol=resolved.symbol,
+        name=resolved.name,
+        asset_class=resolved.asset_class,
+        quote_currency=resolved.quote_currency,
+        exchange=resolved.exchange,
+        provider_symbols={"alpaca_iex": resolved.symbol},
         is_active=True,
     )
 
 
-def create_alpaca_source() -> SourceDefinition:
-    """Return the official Alpaca IEX daily-bar source definition."""
+def create_alpaca_source(
+    configuration: AlpacaAssetConfiguration | None = None,
+) -> SourceDefinition:
+    """Return one official partial-coverage Alpaca IEX daily-bar source."""
+    resolved = configuration or _default_configuration()
     return SourceDefinition(
-        source_id=SOURCE_ID,
+        source_id=resolved.source_id,
         provider_name="Alpaca Market Data",
-        dataset_name="AAPL IEX Daily Bars, Adjustment All",
+        dataset_name=f"{resolved.symbol} IEX Daily Bars, Adjustment All",
         source_type=SourceType.MARKET,
         base_url="https://data.alpaca.markets",
         is_official=True,
@@ -77,12 +107,16 @@ def bar_to_raw_record(
     *,
     retrieved_at: datetime,
     request_url: str,
+    configuration: AlpacaAssetConfiguration | None = None,
 ) -> RawRecord:
     """Create a version-aware raw record from one Alpaca IEX bar."""
+    resolved = configuration or _default_configuration()
+    if bar.symbol != resolved.symbol:
+        raise ValueError("Alpaca bar symbol does not match the resolved asset")
     checksum = raw_bar_checksum(bar)
     record_name = "|".join(
         (
-            SOURCE_ID,
+            resolved.source_id,
             bar.symbol,
             bar.timestamp.isoformat(),
             FEED,
@@ -92,7 +126,7 @@ def bar_to_raw_record(
     )
     record_id = uuid5(NAMESPACE_URL, record_name)
     source = SourceReference(
-        source_id=SOURCE_ID,
+        source_id=resolved.source_id,
         record_key=f"{bar.symbol}:{bar.timestamp.isoformat()}:{FEED}:{ADJUSTMENT}",
         retrieved_at=retrieved_at,
         raw_uri=request_url,
@@ -100,7 +134,7 @@ def bar_to_raw_record(
     )
     return RawRecord(
         record_id=record_id,
-        asset_id=ASSET_ID,
+        asset_id=resolved.asset_id,
         source=source,
         event_time=bar.timestamp,
         available_at=retrieved_at,
@@ -126,8 +160,15 @@ def bar_to_observations(
     raw_record: RawRecord,
     *,
     normalized_at: datetime,
+    configuration: AlpacaAssetConfiguration | None = None,
 ) -> tuple[NormalizedObservation, ...]:
     """Create exactly seven IEX bar observations without inventing reporting periods."""
+    resolved = configuration or _default_configuration()
+    if (
+        raw_record.asset_id != resolved.asset_id
+        or raw_record.source.source_id != resolved.source_id
+    ):
+        raise ValueError("Alpaca raw record does not match the resolved asset")
     fields = (
         ("open", bar.open, "USD"),
         ("high", bar.high, "USD"),
@@ -141,7 +182,7 @@ def bar_to_observations(
         NormalizedObservation(
             observation_id=observation_id(raw_record.record_id, field_name),
             raw_record_id=raw_record.record_id,
-            asset_id=ASSET_ID,
+            asset_id=resolved.asset_id,
             field_name=field_name,
             value=value,
             unit=unit,

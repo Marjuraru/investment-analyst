@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from investment_analyst.core.models import Asset, AssetClass, SourceType
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_edgar import (
     SecDocumentType,
     SecEdgarClient,
@@ -16,6 +17,7 @@ from investment_analyst.providers.fundamentals.sec_raw_records import (
     COMPANY_FACTS_SOURCE_ID,
     SUBMISSIONS_SOURCE_ID,
     create_sec_aapl_asset,
+    create_sec_asset,
     get_sec_source_definitions,
     sec_document_to_raw_record,
 )
@@ -86,6 +88,67 @@ def test_asset_preserves_alpaca_symbol_and_adds_sec_cik() -> None:
         "alpaca_iex": "AAPL",
         "sec_cik": "0000320193",
     }
+
+
+def test_second_issuer_uses_distinct_asset_sources_and_record_ids() -> None:
+    configuration = SecAssetConfiguration(
+        asset_id="equity:us:amd",
+        cik="0000002488",
+        ticker="AMD",
+        submissions_source_id="sec-edgar:amd:submissions",
+        companyfacts_source_id="sec-edgar:amd:companyfacts",
+        name="Advanced Micro Devices, Inc.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NASDAQ",
+    )
+    submissions = json.loads(SUBMISSIONS)
+    submissions.update(
+        {
+            "cik": "2488",
+            "name": configuration.name,
+            "tickers": ["AMD"],
+        }
+    )
+    company_facts = json.loads(COMPANY_FACTS)
+    company_facts.update(
+        {
+            "cik": configuration.cik,
+            "entityName": configuration.name,
+        }
+    )
+    client = SecEdgarClient(
+        FixtureTransport(
+            [
+                json.dumps(submissions).encode(),
+                json.dumps(company_facts).encode(),
+            ]
+        ),
+        SecEdgarIdentity("Investment Analyst tests@example.com"),
+        cik=configuration.cik,
+        ticker=configuration.ticker,
+        sleep=lambda _: None,
+        clock=lambda: FIRST_TIME,
+    )
+    records = tuple(
+        sec_document_to_raw_record(document, configuration)
+        for document in client.fetch_issuer_documents().documents
+    )
+    sources = get_sec_source_definitions(configuration)
+
+    assert create_sec_asset(configuration).asset_id == "equity:us:amd"
+    assert {record.asset_id for record in records} == {"equity:us:amd"}
+    assert {record.source.source_id for record in records} == {
+        "sec-edgar:amd:submissions",
+        "sec-edgar:amd:companyfacts",
+    }
+    assert {source.source_id for source in sources} == {
+        "sec-edgar:amd:submissions",
+        "sec-edgar:amd:companyfacts",
+    }
+    assert all("Advanced Micro Devices" in source.dataset_name for source in sources)
+    apple_ids = {sec_document_to_raw_record(document).record_id for document in _documents()}
+    assert apple_ids.isdisjoint({record.record_id for record in records})
 
 
 def test_uuid_is_stable_ignores_retrieval_time_and_changes_with_content() -> None:

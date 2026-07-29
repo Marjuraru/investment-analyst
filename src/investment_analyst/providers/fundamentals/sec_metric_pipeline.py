@@ -1,14 +1,11 @@
-"""Persistence pipeline for deterministic Apple SEC fundamental metrics."""
+"""Persistence pipeline for deterministic SEC issuer fundamental metrics."""
 
 import json
 from datetime import UTC, datetime
 from uuid import UUID, uuid5
 
 from investment_analyst.core.models import DataQuality, MetricResult
-from investment_analyst.providers.fundamentals.sec_fact_models import (
-    ASSET_ID,
-    COMPANYFACTS_SOURCE_ID,
-)
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_metric_engine import (
     SecFundamentalMetricEngine,
 )
@@ -19,9 +16,12 @@ from investment_analyst.providers.fundamentals.sec_metric_models import (
     SecFundamentalMetricRequest,
 )
 from investment_analyst.providers.fundamentals.sec_point_in_time_service import (
-    SecAaplFundamentalPointInTimeService,
+    SecIssuerFundamentalPointInTimeService,
 )
 from investment_analyst.providers.fundamentals.sec_query_models import SecFundamentalQuery
+from investment_analyst.providers.fundamentals.sec_raw_records import (
+    aapl_sec_configuration,
+)
 from investment_analyst.storage import LocalStorage
 
 _RESULT_NAMESPACE = UUID("fe4bb5e6-0983-4ff5-a82e-c20f0789b6c4")
@@ -67,21 +67,23 @@ def sec_fundamental_metric_result_id(candidate: SecFundamentalMetricCandidate) -
     return uuid5(_RESULT_NAMESPACE, canonical)
 
 
-class SecAaplFundamentalMetricPipeline:
+class SecIssuerFundamentalMetricPipeline:
     """Query selected SEC facts once and persist deterministic metrics idempotently."""
 
     def __init__(
         self,
         storage: LocalStorage,
-        point_in_time_service: SecAaplFundamentalPointInTimeService,
+        point_in_time_service: SecIssuerFundamentalPointInTimeService,
         engine: SecFundamentalMetricEngine,
         *,
+        configuration: SecAssetConfiguration | None = None,
         clock=_utc_now,
     ) -> None:
         storage.require_open()
         self._storage = storage
         self._point_in_time_service = point_in_time_service
         self._engine = engine
+        self._configuration = configuration or aapl_sec_configuration()
         self._clock = clock
 
     def run(
@@ -90,6 +92,10 @@ class SecAaplFundamentalMetricPipeline:
     ) -> SecFundamentalMetricImportSummary:
         """Execute one logically prevalidated and idempotent metric persistence run."""
         self._storage.require_open()
+        if request.asset_id != self._configuration.asset_id:
+            raise SecFundamentalMetricPipelineError(
+                "request asset_id does not match the configured SEC issuer"
+            )
         counts_before = self._protected_counts()
         internal_query = SecFundamentalQuery(
             asset_id=request.asset_id,
@@ -112,7 +118,7 @@ class SecAaplFundamentalMetricPipeline:
         )
         self._validate_proposed_results(proposed, computation)
 
-        existing_results = self._storage.metric_results.list(asset_id=ASSET_ID)
+        existing_results = self._storage.metric_results.list(asset_id=request.asset_id)
         existing_by_id = {result.result_id: result for result in existing_results}
         if len(existing_by_id) != len(existing_results):
             raise SecFundamentalMetricPipelineError("stored metric result IDs are not unique")
@@ -143,7 +149,7 @@ class SecAaplFundamentalMetricPipeline:
             period for period in source_result.periods if period.period_end in target_set
         ]
         return SecFundamentalMetricImportSummary(
-            asset_id=ASSET_ID,
+            asset_id=request.asset_id,
             known_at=request.known_at,
             frequency=request.frequency,
             computed_at=computed_at,
@@ -164,8 +170,8 @@ class SecAaplFundamentalMetricPipeline:
             traceability_verified=True,
         )
 
-    @staticmethod
     def _to_metric_result(
+        self,
         candidate: SecFundamentalMetricCandidate,
         computed_at: datetime,
     ) -> MetricResult:
@@ -174,7 +180,7 @@ class SecAaplFundamentalMetricPipeline:
             for item in candidate.input_roles
         ]
         parameters = {
-            "source_id": COMPANYFACTS_SOURCE_ID,
+            "source_id": self._configuration.companyfacts_source_id,
             "frequency": candidate.frequency.value,
             "period_end": candidate.period_end.isoformat(),
             "comparison": candidate.comparison.value,
@@ -198,8 +204,8 @@ class SecAaplFundamentalMetricPipeline:
             quality=candidate.quality,
         )
 
-    @staticmethod
     def _validate_proposed_results(
+        self,
         results: tuple[MetricResult, ...],
         computation: SecFundamentalMetricComputation,
     ) -> None:
@@ -229,7 +235,9 @@ class SecAaplFundamentalMetricPipeline:
                         "metric references an observation outside the point-in-time result"
                     )
                 input_facts.append(fact)
-            if any(fact.source_id != COMPANYFACTS_SOURCE_ID for fact in input_facts):
+            if any(
+                fact.source_id != self._configuration.companyfacts_source_id for fact in input_facts
+            ):
                 raise SecFundamentalMetricTraceabilityError("metric mixes fundamental sources")
             if any(fact.available_at > computation.request.known_at for fact in input_facts):
                 raise SecFundamentalMetricTraceabilityError(
@@ -308,3 +316,6 @@ def _utc_datetime(value: datetime, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise SecFundamentalMetricPipelineError(f"{field_name} must include timezone information")
     return value.astimezone(UTC)
+
+
+SecAaplFundamentalMetricPipeline = SecIssuerFundamentalMetricPipeline

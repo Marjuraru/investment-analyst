@@ -1,12 +1,13 @@
-# Apple SEC fundamental diagnostic
+# SEC issuer fundamental diagnostic
 
-This step creates a descriptive fundamental diagnostic for Apple from the five persisted SEC
-fundamental metrics produced in Step 14. It is independent from the market diagnostic and does not
-read raw SEC documents, normalized observations, prices, or external services.
+This step creates a descriptive fundamental diagnostic for one configured SEC issuer from the five
+persisted fundamental metrics. It is independent from the market diagnostic and does not read raw
+SEC documents, normalized observations, prices, or external services. The current CLI and complete
+application composition remain Apple-specific.
 
 ## Point-in-time selection
 
-The selector reads the metric repository once, keeps only Apple annual or quarterly fundamental
+The selector reads the metric repository once, keeps only the configured issuer's annual or quarterly fundamental
 metrics with `available_at <= known_at`, validates their formulas, algorithm versions, input roles,
 and deterministic identities, then resolves revisions by metric name, frequency, and reporting
 period. The most recent eligible revision is selected. Equal-time contradictory revisions are
@@ -55,9 +56,13 @@ not add a separate insufficient value.
 ## Auditability and persistence
 
 The diagnostic stores components and evidence linked to selected `MetricResult` IDs. Its UUID5 uses
-Apple, fundamental mode, frequency, target period, algorithm version, and selected metric IDs. It
+the canonical asset, fundamental mode, frequency, target period, algorithm version, and selected metric IDs. It
 does not use `known_at`, `computed_at`, current time, or storage order. Identical inputs therefore
 reuse the same diagnostic; a revised metric or algorithm version creates a new diagnostic.
+
+Apple retains `sec-aapl-fundamental-diagnostic-v1.1-decimal34` and its existing identities. A newly
+configured issuer uses `sec-fundamental-diagnostic-v2-decimal34`, preventing generic results from
+masquerading as historical Apple output.
 
 The pipeline validates the rules, score, inputs, timestamps, traceability, identity, and existing
 conflicts before the first write. Weighted sums use a Decimal tolerance of 0.0001. The process does

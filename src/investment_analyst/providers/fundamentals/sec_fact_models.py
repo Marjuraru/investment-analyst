@@ -1,4 +1,4 @@
-"""Strict models for selected Apple SEC fundamental facts."""
+"""Strict models for selected SEC corporate fundamental facts."""
 
 from datetime import date
 from decimal import Decimal
@@ -333,7 +333,7 @@ class SecFilingMetadata(ContractModel):
 
 
 class SecFundamentalFact(ContractModel):
-    """Selected point-in-time Apple fact before observation persistence."""
+    """Selected point-in-time issuer fact before observation persistence."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -375,12 +375,10 @@ class SecFundamentalFact(ContractModel):
 
     @model_validator(mode="after")
     def validate_fact(self) -> "SecFundamentalFact":
-        """Validate the selected concept, period shape, and fixed scope."""
+        """Validate the selected concept and accounting period shape."""
         definition = _DEFINITION_BY_FIELD.get(self.field_name)
         if definition is None:
             raise ValueError("field_name is not one of the selected SEC concepts")
-        if self.asset_id != ASSET_ID:
-            raise ValueError("asset_id must identify Apple")
         if self.taxonomy != definition.taxonomy or self.tag != definition.tag:
             raise ValueError("taxonomy and tag must match the selected field definition")
         if self.unit != definition.unit:

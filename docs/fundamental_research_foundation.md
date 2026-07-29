@@ -1,7 +1,9 @@
 # Base de investigación fundamental
 
-Esta base amplía los datos normalizados de Apple sin cambiar la consulta point-in-time pública de
-cinco hechos, sus identidades deterministas ni las fórmulas y diagnósticos existentes.
+Esta base amplía los datos normalizados de un emisor SEC configurado sin cambiar la consulta
+point-in-time pública de cinco hechos, sus identidades deterministas ni las fórmulas y diagnósticos
+existentes. Apple permanece como composición pública actual y conserva exactamente sus contratos e
+identidades históricas.
 
 ## Catálogos separados
 
@@ -70,6 +72,12 @@ observación SEC usada. Un input ausente se registra en la cobertura; un denomin
 produce infinito ni una interpretación implícita. Revisiones con igual disponibilidad y semántica
 contradictoria detienen la consulta.
 
+El servicio recibe una `SecAssetConfiguration`, consulta exclusivamente las observaciones de ese
+activo y exige su fuente Company Facts y versión de normalización. AAPL conserva
+`aapl-fundamental-research-v2`; otro emisor obtiene `sec-fundamental-research-v3` y una limitación
+neutral sobre conceptos que el emisor puede no desglosar. El modelo verifica que las definiciones y
+cada métrica coincidan con el contrato del emisor, evitando mezclar resultados o evidencia.
+
 Sobre ese resultado se construye una vista histórica independiente que conserva todos los puntos y
 calcula media, rango, variación frente al período disponible anterior, variación del horizonte y
 CAGR. El CAGR se limita a series anuales de nivel —USD, USD por acción o acciones— con extremos
@@ -111,14 +119,24 @@ investigación para ampliar datos y reglas, pero no crean paneles duplicados ni 
 interfaz.
 
 La clasificación empresarial muestra desde el inicio las categorías crecimiento lento, empresa
-estable, crecimiento rápido, cíclica, recuperación y activo oculto. Aunque ya existen series por
-acción, todavía faltan reglas de crecimiento comparable, sensibilidad cíclica, evidencia de
-reestructuración y valoración de activos; por ello, el contrato devuelve explícitamente
-`insufficient_evidence` y no inventa una categoría.
+estable, crecimiento rápido, cíclica, recuperación y activo oculto. La regla cuantitativa v1 puede
+clasificar las tres primeras cuando existen al menos cuatro ejercicios y tres años comparables con
+CAGR positivo de EPS diluido e ingresos por acción. Publica los rangos, períodos, valores,
+versiones e identidades de observación usados. Si los dos indicadores no coinciden en una única
+categoría o la historia no alcanza, devuelve `insufficient_evidence` en lugar de aproximar.
 
-El endpoint local `/api/fundamental-analysis` devuelve `aapl-fundamental-analysis-v1` e incorpora sin
-alteraciones el historial `aapl-fundamental-research-history-v2`, por lo que cada métrica conserva
-fórmula, versión, valor `Decimal` e identidades de observación.
+Las categorías cíclica, recuperación y activo oculto permanecen sin asignación automática: exigen
+respectivamente series macro o sectoriales versionadas, evidencia de reestructuración y continuidad,
+o una tasación identificable de activos. No se deducen solo de Company Facts.
+
+La cadena read-only es configurable por emisor. AAPL conserva
+`aapl-fundamental-research-history-v2` y `aapl-fundamental-analysis-v1`; otro emisor usa
+`sec-fundamental-research-history-v3` y `sec-fundamental-analysis-v2`. En ambos casos, el historial y
+el análisis incorporan sin alteraciones el resultado anterior, por lo que cada métrica conserva
+fórmula, versión, valor `Decimal` e identidades de observación. El endpoint local
+`/api/fundamental-analysis` todavía compone explícitamente AAPL; la fachada read-only ya expone
+consultas genéricas por `asset_id`, pero otro emisor no será visible hasta declarar su vínculo SEC,
+ingerir sus documentos y validar su cobertura XBRL.
 
 ## Desarrollo analítico posterior
 
@@ -128,8 +146,9 @@ frecuencias y vintages separados. Tampoco se mezclarán con el dominio
 [`Cazatiburones`](cazatiburones.md), que exige filings de propiedad o evidencia on-chain propia.
 
 No se generará una puntuación conjunta de "gurús", recomendación o valor intrínseco falsamente
-preciso. La siguiente ampliación fundamental requiere crecimiento comparable, retornos sobre saldos
-promedio, valoración, clasificación empresarial y sus ajustes sectoriales explícitos.
+preciso. La siguiente ampliación fundamental requiere retornos sobre saldos promedio, valoración,
+ajustes sectoriales explícitos y la evidencia externa necesaria para las tres categorías aún no
+resueltas.
 
 El mantenimiento económico de capex no es un hecho SEC directamente observable. Por ello, el FCF
 contable y cualquier aproximación a owner earnings deberán permanecer claramente diferenciados.

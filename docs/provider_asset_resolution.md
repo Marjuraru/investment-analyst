@@ -52,4 +52,10 @@ There is no data migration. Existing RawRecords, observations, metrics, and diag
 
 To add an asset, update the versioned catalog with its canonical core asset definition, aliases, exact provider bindings, and supported capabilities. All external identities must remain globally unique.
 
-To integrate a provider, add its bindings and capabilities, resolve one `ProviderAssetContext` at the composition boundary, build a typed provider configuration, and pass only resolved identifiers to the low-level client. Financial algorithms may remain asset-specific until a separate migration explicitly generalizes them.
+To integrate a provider, add its bindings and capabilities, resolve one `ProviderAssetContext` at the
+composition boundary, build a typed provider configuration, and pass only resolved identifiers to
+the low-level client. The core five-field SEC chain is issuer-configurable through persisted
+diagnostics. The read-only extended research, history, and analytical sections are also
+issuer-configurable and exposed through catalog-backed facade methods. Bootstrap and presentation
+composition remain Apple-specific. Non-SEC exchanges require their own evidence adapters rather
+than synthetic SEC configuration.

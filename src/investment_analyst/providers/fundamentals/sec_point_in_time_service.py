@@ -1,4 +1,4 @@
-"""Read-only point-in-time selection of normalized Apple SEC observations."""
+"""Read-only point-in-time selection of normalized SEC issuer observations."""
 
 import json
 from collections import defaultdict
@@ -7,10 +7,9 @@ from datetime import UTC, date, datetime
 from uuid import UUID
 
 from investment_analyst.core.models import DataFrequency, DataQuality, NormalizedObservation
-from investment_analyst.providers.fundamentals.sec_fact_models import (
-    ASSET_ID,
-    COMPANYFACTS_SOURCE_ID,
-    TRANSFORMATION_VERSION,
+from investment_analyst.providers.asset_config import SecAssetConfiguration
+from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
+    sec_transformation_version,
 )
 from investment_analyst.providers.fundamentals.sec_query_models import (
     SecFundamentalPeriodView,
@@ -18,6 +17,9 @@ from investment_analyst.providers.fundamentals.sec_query_models import (
     SecFundamentalQuery,
     SecSelectedFundamentalFact,
     allowed_sec_fundamental_fields,
+)
+from investment_analyst.providers.fundamentals.sec_raw_records import (
+    aapl_sec_configuration,
 )
 from investment_analyst.storage import LocalStorage
 
@@ -94,16 +96,31 @@ class _ParsedRecordKey:
         self.fiscal_period = fiscal_period
 
 
-class SecAaplFundamentalPointInTimeService:
-    """Build point-in-time period views without reading SEC RawRecords."""
+class SecIssuerFundamentalPointInTimeService:
+    """Build point-in-time period views for one configured SEC issuer."""
 
-    def __init__(self, storage: LocalStorage) -> None:
+    def __init__(
+        self,
+        storage: LocalStorage,
+        configuration: SecAssetConfiguration | None = None,
+    ) -> None:
         self._storage = storage
+        self._configuration = configuration or aapl_sec_configuration()
+        self._transformation_version = sec_transformation_version(self._configuration)
+
+    @property
+    def configuration(self) -> SecAssetConfiguration:
+        """Return the immutable SEC issuer configuration used by this service."""
+        return self._configuration
 
     def query(self, request: SecFundamentalQuery) -> SecFundamentalPointInTimeResult:
         """Select the latest publicly available revision for each field and period."""
         self._storage.require_open()
-        observations = self._storage.observations.list(asset_id=ASSET_ID)
+        if request.asset_id != self._configuration.asset_id:
+            raise SecFundamentalQueryError(
+                "query asset_id does not match the configured SEC issuer"
+            )
+        observations = self._storage.observations.list(asset_id=request.asset_id)
         candidates = self._eligible_candidates(observations, request)
         selected, superseded = self._resolve_revisions(candidates, request)
         periods = self._build_periods(selected, request)
@@ -134,7 +151,12 @@ class SecAaplFundamentalPointInTimeService:
     ) -> list[SecSelectedFundamentalFact]:
         candidates: list[SecSelectedFundamentalFact] = []
         for observation in observations:
-            if not _appears_in_scope(observation, request):
+            if not _appears_in_scope(
+                observation,
+                request,
+                source_id=self._configuration.companyfacts_source_id,
+                transformation_version=self._transformation_version,
+            ):
                 continue
             if observation.unit != "USD":
                 raise MalformedSecFundamentalObservationError(
@@ -215,7 +237,7 @@ class SecAaplFundamentalPointInTimeService:
                     raise SecFundamentalTraceabilityError(
                         "selected fact is not part of the eligible observation set"
                     )
-                if fact.source_id != COMPANYFACTS_SOURCE_ID:
+                if fact.source_id != self._configuration.companyfacts_source_id:
                     raise SecFundamentalTraceabilityError("selected fact has the wrong source")
                 if fact.available_at > result.query.known_at:
                     raise SecFundamentalTraceabilityError("selected fact is not point-in-time safe")
@@ -228,18 +250,24 @@ class SecAaplFundamentalPointInTimeService:
 def _appears_in_scope(
     observation: NormalizedObservation,
     request: SecFundamentalQuery,
+    *,
+    source_id: str,
+    transformation_version: str,
 ) -> bool:
     if observation.field_name not in _ALLOWED_FIELDS:
         return False
-    if observation.source.source_id != COMPANYFACTS_SOURCE_ID:
+    if observation.source.source_id != source_id:
         return False
-    if observation.transformation_version != TRANSFORMATION_VERSION:
+    if observation.transformation_version != transformation_version:
         return False
     if observation.quality is not DataQuality.VALID:
         return False
     if observation.frequency is not request.frequency:
         return False
     return observation.available_at <= request.known_at
+
+
+SecAaplFundamentalPointInTimeService = SecIssuerFundamentalPointInTimeService
 
 
 def _period_in_range(period_end: date, request: SecFundamentalQuery) -> bool:

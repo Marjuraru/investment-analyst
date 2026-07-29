@@ -1,5 +1,6 @@
 """Tests for exact Apple SEC Company Facts selection and observation conversion."""
 
+import json
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -7,8 +8,10 @@ from uuid import uuid4
 
 import pytest
 
-from investment_analyst.core.models import DataFrequency, RawRecord, SourceReference
+from investment_analyst.core.models import AssetClass, DataFrequency, RawRecord, SourceReference
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
+    GENERIC_TRANSFORMATION_VERSION,
     ConflictingSecFactError,
     MalformedSecCompanyFactsError,
     SecCompanyFactsNormalizer,
@@ -152,10 +155,13 @@ def _record(
     record_id=None,
     retrieved_at: datetime = RETRIEVED_AT,
     checksum: str = "a" * 64,
+    asset_id: str = ASSET_ID,
+    cik: str = "0000320193",
+    entity_name: str = "Apple Inc.",
 ) -> RawRecord:
     return RawRecord(
         record_id=record_id or uuid4(),
-        asset_id=ASSET_ID,
+        asset_id=asset_id,
         source=SourceReference(
             source_id=source_id,
             retrieved_at=retrieved_at,
@@ -167,8 +173,8 @@ def _record(
         received_at=retrieved_at,
         payload={
             "document_type": document_type,
-            "cik": "0000320193",
-            "entity_name": "Apple Inc.",
+            "cik": cik,
+            "entity_name": entity_name,
             "document": document,
         },
         schema_version=schema_version,
@@ -217,6 +223,75 @@ def test_extracts_all_five_annual_and_quarterly_fields() -> None:
     }
     assert all(result.field_counts[item.field_name] == 0 for item in SEC_RESEARCH_FACT_DEFINITIONS)
     assert {fact.value for fact in result.facts} >= {Decimal("1000.25"), Decimal("260.50")}
+
+
+def test_normalizer_isolates_a_second_sec_issuer_and_versions_its_observations() -> None:
+    configuration = SecAssetConfiguration(
+        asset_id="equity:us:amd",
+        cik="0000002488",
+        ticker="AMD",
+        submissions_source_id="sec-edgar:amd:submissions",
+        companyfacts_source_id="sec-edgar:amd:companyfacts",
+        name="Advanced Micro Devices, Inc.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NASDAQ",
+    )
+
+    def amd_document(document: dict[str, object]) -> dict[str, object]:
+        serialized = json.dumps(document).replace("0000320193", configuration.cik)
+        result = json.loads(serialized)
+        if "name" in result:
+            result["name"] = configuration.name
+            result["tickers"] = [configuration.ticker]
+        if "entityName" in result:
+            result["entityName"] = configuration.name
+        return result
+
+    submissions = _record(
+        source_id=configuration.submissions_source_id,
+        schema_version=SUBMISSIONS_SCHEMA_VERSION,
+        document_type="submissions",
+        document=amd_document(_submissions_document()),
+        asset_id=configuration.asset_id,
+        cik=configuration.cik,
+        entity_name=configuration.name,
+    )
+    companyfacts = _record(
+        source_id=configuration.companyfacts_source_id,
+        schema_version=COMPANYFACTS_SCHEMA_VERSION,
+        document_type="company_facts",
+        document=amd_document(_company_document()),
+        asset_id=configuration.asset_id,
+        cik=configuration.cik,
+        entity_name=configuration.name,
+    )
+    normalizer = SecCompanyFactsNormalizer(configuration)
+
+    extraction = normalizer.extract(
+        companyfacts,
+        submissions,
+        normalized_at=NORMALIZED_AT,
+    )
+    observation = sec_fact_to_observation(
+        extraction.facts[0],
+        companyfacts,
+        submissions,
+        normalized_at=NORMALIZED_AT,
+        configuration=configuration,
+    )
+
+    assert extraction.facts_selected == 10
+    assert {fact.asset_id for fact in extraction.facts} == {configuration.asset_id}
+    assert observation.asset_id == configuration.asset_id
+    assert observation.source.source_id == configuration.companyfacts_source_id
+    assert observation.transformation_version == GENERIC_TRANSFORMATION_VERSION
+    with pytest.raises(MalformedSecCompanyFactsError, match="configured asset"):
+        SecCompanyFactsNormalizer().extract(
+            companyfacts,
+            submissions,
+            normalized_at=NORMALIZED_AT,
+        )
 
 
 def test_extracts_additional_research_catalog_without_expanding_core_query() -> None:
@@ -301,6 +376,26 @@ def test_metadata_mismatches_and_missing_accession_are_skipped() -> None:
     assert result.skipped_counts["form_mismatch"] == 1
     assert result.skipped_counts["filed_date_mismatch"] == 1
     assert result.skipped_counts["report_date_mismatch"] == 1
+
+
+def test_missing_fiscal_period_is_counted_and_skipped() -> None:
+    document = _company_document()
+    assets = document["facts"]["us-gaap"]["Assets"]["units"]["USD"]
+    assets.extend(
+        [
+            {**_instant_fact(annual=True, value="1"), "fp": None},
+            {**_instant_fact(annual=True, value="2"), "fp": " "},
+        ]
+    )
+
+    result = SecCompanyFactsNormalizer().extract(
+        _company(document=document),
+        _submissions(),
+        normalized_at=NORMALIZED_AT,
+    )
+
+    assert result.skipped_counts["missing_fiscal_period"] == 2
+    assert result.facts_selected == 10
 
 
 def test_missing_tag_and_invalid_value_handling() -> None:

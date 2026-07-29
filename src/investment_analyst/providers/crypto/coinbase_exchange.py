@@ -1,4 +1,4 @@
-"""Coinbase Exchange client for public daily BTC-USD candles."""
+"""Coinbase Exchange client for public BTC-USD candles."""
 
 import json
 import re
@@ -12,7 +12,9 @@ from urllib.parse import quote, urlencode
 from investment_analyst.providers.http import HttpTransport
 
 OFFICIAL_BASE_URL = "https://api.exchange.coinbase.com"
+MINUTE_GRANULARITY_SECONDS = 60
 DAILY_GRANULARITY_SECONDS = 86_400
+SUPPORTED_GRANULARITY_SECONDS = frozenset({60, 300, 900, 3_600, 21_600, 86_400})
 _MAX_INTERVALS_PER_REQUEST = 300
 _MAX_RESPONSE_BYTES = 2_000_000
 _MAX_ROWS_PER_RESPONSE = 1_000
@@ -77,6 +79,7 @@ class CoinbaseFetchResult:
     requested_start: datetime
     requested_end: datetime
     retrieved_at: datetime
+    granularity_seconds: int
     request_urls: tuple[str, ...]
     candles: tuple[CoinbaseCandle, ...]
 
@@ -110,13 +113,38 @@ class CoinbaseExchangeClient:
         start: datetime,
         end: datetime,
     ) -> CoinbaseFetchResult:
-        """Fetch, validate, filter, order, and deduplicate daily candles."""
+        """Fetch daily candles through the generic bounded candle operation."""
+        return self.fetch_candles(
+            product_id,
+            start,
+            end,
+            granularity_seconds=DAILY_GRANULARITY_SECONDS,
+        )
+
+    def fetch_candles(
+        self,
+        product_id: str,
+        start: datetime,
+        end: datetime,
+        *,
+        granularity_seconds: int,
+    ) -> CoinbaseFetchResult:
+        """Fetch, validate, filter, order, and deduplicate one supported granularity."""
         if not _PRODUCT_ID_PATTERN.fullmatch(product_id):
             raise CoinbaseExchangeError("product_id must use the BASE-QUOTE format")
+        if (
+            isinstance(granularity_seconds, bool)
+            or granularity_seconds not in SUPPORTED_GRANULARITY_SECONDS
+        ):
+            raise CoinbaseExchangeError("unsupported Coinbase candle granularity")
         requested_start = _utc_datetime(start, field_name="start")
         requested_end = _utc_datetime(end, field_name="end")
         if requested_start >= requested_end:
             raise CoinbaseExchangeError("start must be earlier than end")
+        if not _is_aligned(requested_start, granularity_seconds) or not _is_aligned(
+            requested_end, granularity_seconds
+        ):
+            raise CoinbaseExchangeError("candle range must align to the requested granularity")
         now = _utc_datetime(self._clock(), field_name="clock result")
         if requested_end > now:
             raise CoinbaseExchangeError("future candle ranges are not allowed")
@@ -126,10 +154,15 @@ class CoinbaseExchangeClient:
         cursor = requested_start
         while cursor < requested_end:
             chunk_end = min(
-                cursor + timedelta(days=_MAX_INTERVALS_PER_REQUEST),
+                cursor + timedelta(seconds=granularity_seconds * _MAX_INTERVALS_PER_REQUEST),
                 requested_end,
             )
-            request_url = self._build_request_url(product_id, cursor, chunk_end)
+            request_url = self._build_request_url(
+                product_id,
+                cursor,
+                chunk_end,
+                granularity_seconds,
+            )
             if request_urls:
                 self._sleep(_REQUEST_DELAY_SECONDS)
             response = self._transport.get(
@@ -164,6 +197,7 @@ class CoinbaseExchangeClient:
             requested_start=requested_start,
             requested_end=requested_end,
             retrieved_at=retrieved_at,
+            granularity_seconds=granularity_seconds,
             request_urls=tuple(request_urls),
             candles=candles,
         )
@@ -173,12 +207,13 @@ class CoinbaseExchangeClient:
         product_id: str,
         start: datetime,
         end: datetime,
+        granularity_seconds: int,
     ) -> str:
         query = urlencode(
             {
                 "start": start.isoformat(),
                 "end": end.isoformat(),
-                "granularity": str(DAILY_GRANULARITY_SECONDS),
+                "granularity": str(granularity_seconds),
             }
         )
         return f"{self._base_url}/products/{quote(product_id, safe='')}/candles?{query}"
@@ -188,6 +223,12 @@ def _utc_datetime(value: datetime, *, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise CoinbaseExchangeError(f"{field_name} must include timezone information")
     return value.astimezone(UTC)
+
+
+def _is_aligned(value: datetime, granularity_seconds: int) -> bool:
+    if value.microsecond != 0:
+        return False
+    return int(value.timestamp()) % granularity_seconds == 0
 
 
 def _reject_json_constant(value: str) -> str:

@@ -1,4 +1,4 @@
-"""Tests for the deterministic Apple SEC fundamental metric engine."""
+"""Tests for the deterministic SEC issuer fundamental metric engine."""
 
 from datetime import UTC, date, datetime
 from decimal import Context, Decimal, getcontext, localcontext
@@ -6,7 +6,8 @@ from uuid import uuid4
 
 import pytest
 
-from investment_analyst.core.models import DataFrequency
+from investment_analyst.core.models import AssetClass, DataFrequency
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_metric_engine import (
     MalformedSecFundamentalPeriodError,
     SecFundamentalMetricEngine,
@@ -114,8 +115,13 @@ def _result(
     *,
     frequency: DataFrequency = DataFrequency.ANNUAL,
     known_at: datetime = datetime(2026, 12, 31, tzinfo=UTC),
+    asset_id: str = "equity:us:aapl",
 ) -> SecFundamentalPointInTimeResult:
-    query = SecFundamentalQuery(known_at=known_at, frequency=frequency)
+    query = SecFundamentalQuery(
+        asset_id=asset_id,
+        known_at=known_at,
+        frequency=frequency,
+    )
     return SecFundamentalPointInTimeResult(
         query=query,
         periods=periods,
@@ -400,3 +406,49 @@ def test_future_or_wrong_source_fact_is_rejected() -> None:
 
     with pytest.raises(MalformedSecFundamentalPeriodError, match="another source"):
         _compute((period,))
+
+
+def test_engine_computes_the_same_formulas_for_an_isolated_sec_issuer() -> None:
+    amd = SecAssetConfiguration(
+        asset_id="equity:us:amd",
+        cik="0000002488",
+        ticker="AMD",
+        submissions_source_id="sec-edgar:amd:submissions",
+        companyfacts_source_id="sec-edgar:amd:companyfacts",
+        name="Advanced Micro Devices, Inc.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NASDAQ",
+    )
+    periods = tuple(
+        period.model_copy(
+            update={
+                "facts": tuple(
+                    fact.model_copy(update={"source_id": amd.companyfacts_source_id})
+                    for fact in period.facts
+                )
+            }
+        )
+        for period in _annual_history()
+    )
+    request = SecFundamentalMetricRequest(
+        asset_id=amd.asset_id,
+        known_at=datetime(2026, 12, 31, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+    )
+
+    computation = SecFundamentalMetricEngine(amd).compute(
+        request,
+        _result(
+            periods,
+            known_at=request.known_at,
+            asset_id=amd.asset_id,
+        ),
+        computed_at=datetime(2027, 1, 1, tzinfo=UTC),
+    )
+
+    assert len(computation.candidates) == 8
+    assert {candidate.asset_id for candidate in computation.candidates} == {amd.asset_id}
+    assert {
+        fact.source_id for period in computation.source_result.periods for fact in period.facts
+    } == {amd.companyfacts_source_id}

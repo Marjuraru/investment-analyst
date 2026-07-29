@@ -15,7 +15,7 @@ from investment_analyst.analytics.market.bar_schemas import (
     MarketBarSchema,
     get_market_bar_schema,
 )
-from investment_analyst.core.models import DataFrequency, NormalizedObservation, RawRecord
+from investment_analyst.core.models import NormalizedObservation, RawRecord
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import RecordNotFoundError, StorageError
 
@@ -56,12 +56,12 @@ class HistoricalMarketDataService:
         schema = self._schema(query.source_id)
         observations = self._storage.observations.list(
             asset_id=query.asset_id,
-            frequency=DataFrequency.DAY_1,
+            frequency=schema.frequency,
             observed_from=query.start,
             observed_before=query.end,
             available_to=query.known_at,
         )
-        scoped = self._scope_observations(observations, query)
+        scoped = self._scope_observations(observations, schema, query)
         allowed_fields = set(schema.required_fields) | set(schema.optional_fields)
         unexpected = sorted(
             observation.field_name
@@ -115,13 +115,14 @@ class HistoricalMarketDataService:
     @staticmethod
     def _scope_observations(
         observations: list[NormalizedObservation],
+        schema: MarketBarSchema,
         query: HistoricalBarQuery,
     ) -> list[NormalizedObservation]:
         return [
             observation
             for observation in observations
             if observation.source.source_id == query.source_id
-            and observation.frequency is DataFrequency.DAY_1
+            and observation.frequency is schema.frequency
             and observation.observed_at is not None
             and query.start <= observation.observed_at < query.end
             and observation.available_at <= query.known_at
@@ -160,7 +161,7 @@ class HistoricalMarketDataService:
             asset_id=query.asset_id,
             source_id=query.source_id,
             raw_record_id=raw_record_id,
-            frequency=DataFrequency.DAY_1,
+            frequency=schema.frequency,
             timestamp=first.observed_at,
             available_at=first.available_at,
             open=values["open"],
@@ -196,8 +197,8 @@ class HistoricalMarketDataService:
                 raise TraceabilityError(f"raw record {raw_record_id} mixes asset identifiers")
             if observation.source.source_id != query.source_id:
                 raise TraceabilityError(f"raw record {raw_record_id} mixes source identifiers")
-            if observation.frequency is not DataFrequency.DAY_1:
-                raise TraceabilityError(f"raw record {raw_record_id} contains non-daily data")
+            if observation.frequency is not schema.frequency:
+                raise TraceabilityError(f"raw record {raw_record_id} contains the wrong frequency")
             if observation.unit != schema.units[field_name]:
                 raise ConflictingObservationError(
                     f"field {field_name!r} for raw record {raw_record_id} has unit "

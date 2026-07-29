@@ -58,4 +58,6 @@ def test_catalog_capabilities_match_current_working_integrations() -> None:
     assert service.supports(APPLE_ASSET_ID, "fundamentals.company_facts")
     assert service.supports(APPLE_ASSET_ID, "fundamentals.submissions")
     assert service.supports(COINBASE_ASSET_ID, "market.daily_bars")
+    assert service.supports(COINBASE_ASSET_ID, "market.minute_bars")
+    assert not service.supports(APPLE_ASSET_ID, "market.minute_bars")
     assert not service.supports(COINBASE_ASSET_ID, "fundamentals.company_facts")
