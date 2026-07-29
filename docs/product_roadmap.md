@@ -408,7 +408,16 @@ local, sin elevar artificialmente el mínimo global antes de cubrir el código h
 
 ## Orden inmediato recomendado
 
-1. resolver el contrato de persistencia del mercado BVL e integrar cierres diarios;
-2. diseñar el workspace macro columnar y el backfill reanudable para series diarias;
-3. validar durante varios ciclos el screening silencioso y ampliar reglas con backtesting
-   point-in-time antes de activar notificaciones.
+La ruta crítica vigente se mantiene en
+[`basic_functional_release_plan.md`](basic_functional_release_plan.md). Su orden es:
+
+1. estabilizar, validar y fusionar el PR de orquestación y screening;
+2. eliminar fallos operativos recurrentes y validar backup, restauración y soak silencioso;
+3. desacoplar lecturas de refresh largos, compactar la API operativa y medir presupuestos;
+4. completar watchlist, valoración, indicadores, reglas y notificaciones reanudables;
+5. incorporar corpus oficial e IA cualitativa opcional con citas y presupuesto;
+6. cerrar la versión mediante CI, smokes, 72 horas de operación y recuperación probada.
+
+Mercado BVL, macro diario columnar, Cazatiburones e investigación predictiva conservan sus fases de
+esta hoja de ruta, pero no desplazan la estabilización de la versión básica ni se implementan sin
+resolver previamente sus fuentes, licencias y contratos.

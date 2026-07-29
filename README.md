@@ -156,6 +156,8 @@ información de la que realmente contienen.
   explícitos y consultar revisiones históricas sin mezclar macro con activos.
 - [Hoja de ruta del producto](docs/product_roadmap.md): orden de integración, mercados,
   fundamentales, macro, noticias, Cazatiburones, interfaz, IA y operación 24/7.
+- [Plan de cierre básico](docs/basic_functional_release_plan.md): auditoría arquitectónica,
+  prioridades, presupuestos y ruta crítica hasta notificaciones e IA cualitativa opcional.
 - [Screening y alertas](docs/automated_screening_alerts.md): evaluación determinista y de bajo
   consumo de candidatos para revisión, notificaciones y enriquecimiento cualitativo opcional.
 - [Integración continua](docs/continuous_integration.md): validar automáticamente cada pull request.
