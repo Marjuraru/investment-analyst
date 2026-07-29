@@ -319,6 +319,9 @@ Base local completada el 29 de julio de 2026 después del scheduler multi-activo
 - reglas operativas de job fallido, interrumpido, omitido o con cobertura incompleta;
 - modo silencioso;
 - bandeja local con transiciones auditadas `new → seen/dismissed/resolved/silenced`;
+- recuperación automática auditada: un éxito posterior, completo y del mismo trabajo cambia las
+  incidencias anteriores a `resolved` con actor `system_recovery`, sin borrar intentos, eventos ni
+  transiciones;
 - replay point-in-time.
 
 El scheduler expone además `current`, `stale`, `incomplete` o `never_run` por trabajo usando la hora

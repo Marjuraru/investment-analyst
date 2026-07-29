@@ -1,5 +1,7 @@
 """Build provider-specific configurations from one resolved catalog context."""
 
+from datetime import date
+
 from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
 from investment_analyst.providers.asset_config import (
     AlpacaAssetConfiguration,
@@ -37,6 +39,17 @@ def resolve_alpaca_configuration(
         required_namespaces=("symbol",),
         required_capabilities=("market.daily_bars",),
     )
+    history_starts = tuple(
+        binding.identifier for binding in context.bindings if binding.namespace == "history_start"
+    )
+    if len(history_starts) > 1:
+        raise ValueError("Alpaca history_start binding is ambiguous")
+    history_start: date | None = None
+    if history_starts:
+        try:
+            history_start = date.fromisoformat(history_starts[0])
+        except ValueError as error:
+            raise ValueError("Alpaca history_start binding must use YYYY-MM-DD") from error
     return AlpacaAssetConfiguration(
         asset_id=context.asset.asset_id,
         symbol=context.require_identifier("symbol"),
@@ -47,6 +60,7 @@ def resolve_alpaca_configuration(
         asset_class=context.asset.asset_class,
         quote_currency=context.asset.quote_currency,
         exchange=context.asset.exchange or "UNKNOWN",
+        history_start=history_start,
     )
 
 

@@ -109,6 +109,7 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     assert barrick.asset_id == "equity:us:b"
     assert barrick.provider_identifier == "B"
     assert barrick.source_id == "alpaca-market-data:iex:b:daily-bars:adjustment-all"
+    assert barrick.default_market_start == date(2025, 5, 10)
     assert barrick.analysis.family is AssetAnalysisFamily.LISTED_COMPANY
     assert barrick.has_fundamentals
 

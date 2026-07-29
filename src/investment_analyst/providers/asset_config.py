@@ -1,6 +1,7 @@
 """Strict typed provider configurations resolved before client construction."""
 
 import re
+from datetime import date, datetime
 from enum import StrEnum
 
 from pydantic import ConfigDict, StrictInt, field_validator, model_validator
@@ -50,6 +51,24 @@ class AlpacaAssetConfiguration(ContractModel):
     asset_class: AssetClass
     quote_currency: NonEmptyStr
     exchange: NonEmptyStr
+    history_start: date | None = None
+
+    @field_validator("history_start", mode="before")
+    @classmethod
+    def validate_history_start(cls, value: object) -> object:
+        """Accept one explicit provider-safe ISO date without datetime coercion."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            raise ValueError("Alpaca history_start must be a date")
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value)
+            except ValueError as error:
+                raise ValueError("Alpaca history_start must use YYYY-MM-DD") from error
+        if not isinstance(value, date):
+            raise ValueError("Alpaca history_start must be a date")
+        return value
 
 
 class CoinbaseAssetConfiguration(ContractModel):

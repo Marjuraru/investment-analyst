@@ -416,7 +416,10 @@ La tarjeta de programación resume trabajos fallidos, con cobertura incompleta o
 Cada job conserva el último intento y el último chequeo exitoso por separado, de modo que un fallo
 nuevo no borra la referencia de frescura anterior. En la bandeja se puede marcar una alerta como
 vista, descartada o resuelta. Cada cambio crea una transición append-only con hora, estado anterior
-y estado nuevo; repetir el mismo estado es idempotente.
+y estado nuevo; repetir el mismo estado es idempotente. Un intento automático posterior que termine
+correctamente y con cobertura completa resuelve también, con actor `system_recovery`, las alertas
+anteriores del mismo job. Esta recuperación no elimina la evidencia histórica ni permite que un
+éxito parcial o de otro job cierre una incidencia.
 
 La primera entrega no evalúa oportunidades financieras ni envía Telegram, correo o notificaciones
 del sistema. La bandeja local recomienda revisar la evidencia operativa; no recomienda comprar o

@@ -137,6 +137,7 @@ def _descriptor(
         binding
         for binding in asset.provider_bindings
         if _DAILY_MARKET_CAPABILITY in binding.capabilities
+        and binding.namespace in {"product_id", "symbol"}
     )
     if len(market_bindings) != 1:
         raise ValueError("each visible market asset requires exactly one default daily source")
@@ -180,7 +181,10 @@ def _descriptor(
                 else "listed-market-chart-v1"
             ),
             volume_unit="shares",
-            default_market_start=_ALPACA_HISTORY_START,
+            default_market_start=max(
+                _ALPACA_HISTORY_START,
+                configuration.history_start or _ALPACA_HISTORY_START,
+            ),
             analysis=analysis,
             has_fundamentals=fundamental_pipeline_available,
             fundamental_frequencies=fundamental_frequencies,

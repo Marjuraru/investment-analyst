@@ -464,6 +464,14 @@
           "capabilities": [
             "market.daily_bars"
           ],
+          "identifier": "2025-05-10",
+          "namespace": "history_start",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
           "identifier": "B",
           "namespace": "symbol",
           "provider": "alpaca"

@@ -90,6 +90,78 @@ def test_success_is_screened_trivalued_without_creating_alert(tmp_path: Path) ->
     assert store.status().new_count == 0
 
 
+def test_complete_success_resolves_prior_job_alerts_with_audited_system_transition(
+    tmp_path: Path,
+) -> None:
+    store = OperationalAlertStateStore(tmp_path / "alerts.json")
+    monitor = OperationalAlertMonitor(
+        store,
+        clock=lambda: datetime(2026, 7, 29, 12, 7, tzinfo=UTC),
+    )
+    failure = _attempt(ScheduledJobAttemptStatus.FAILED)
+    success = _attempt(
+        ScheduledJobAttemptStatus.SUCCEEDED,
+        attempt_id=UUID("00000000-0000-4000-8000-000000000105"),
+    ).model_copy(
+        update={
+            "attempt_number": 2,
+            "started_at": datetime(2026, 7, 29, 12, 5, tzinfo=UTC),
+            "completed_at": datetime(2026, 7, 29, 12, 6, tzinfo=UTC),
+        }
+    )
+
+    monitor(failure)
+    assert (
+        store.resolve_recovered_job(
+            "sec:equity:us:amd:fundamentals-quarterly",
+            recovered_at=datetime(2026, 7, 29, 12, 6, tzinfo=UTC),
+            recorded_at=datetime(2026, 7, 29, 12, 7, tzinfo=UTC),
+        )
+        == 0
+    )
+    monitor(success)
+    monitor.reconcile((failure, success))
+
+    state = store.load()
+    assert len(state.screenings) == 8
+    assert len(state.events) == 1
+    assert state.events[0].status is OperationalAlertEventStatus.RESOLVED
+    assert len(state.transitions) == 1
+    assert state.transitions[0].actor == "system_recovery"
+    assert state.transitions[0].from_status is OperationalAlertEventStatus.NEW
+    assert state.transitions[0].to_status is OperationalAlertEventStatus.RESOLVED
+    assert store.status().new_count == 0
+
+
+def test_incomplete_success_does_not_resolve_prior_job_failure(tmp_path: Path) -> None:
+    store = OperationalAlertStateStore(tmp_path / "alerts.json")
+    monitor = OperationalAlertMonitor(
+        store,
+        clock=lambda: datetime(2026, 7, 29, 12, 7, tzinfo=UTC),
+    )
+    failure = _attempt(ScheduledJobAttemptStatus.FAILED)
+    incomplete = _attempt(
+        ScheduledJobAttemptStatus.SUCCEEDED,
+        attempt_id=UUID("00000000-0000-4000-8000-000000000106"),
+        coverage_complete=False,
+    ).model_copy(
+        update={
+            "attempt_number": 2,
+            "started_at": datetime(2026, 7, 29, 12, 5, tzinfo=UTC),
+            "completed_at": datetime(2026, 7, 29, 12, 6, tzinfo=UTC),
+        }
+    )
+
+    monitor(failure)
+    monitor(incomplete)
+
+    state = store.load()
+    assert len(state.events) == 2
+    assert all(item.status is OperationalAlertEventStatus.NEW for item in state.events)
+    assert state.transitions == ()
+    assert store.status().new_count == 2
+
+
 def test_failure_creates_one_idempotent_silent_inbox_event(tmp_path: Path) -> None:
     store = OperationalAlertStateStore(tmp_path / "alerts.json")
     engine = OperationalAlertEngine()

@@ -166,7 +166,7 @@ class OperationalAlertTransition(ContractModel):
     from_status: OperationalAlertEventStatus
     to_status: OperationalAlertEventStatus
     recorded_at: UTCDateTime
-    actor: Literal["local_user"] = "local_user"
+    actor: Literal["local_user", "system_recovery"] = "local_user"
 
     @model_validator(mode="after")
     def validate_transition(self) -> "OperationalAlertTransition":
@@ -372,6 +372,7 @@ class OperationalAlertStateStore:
         to_status: OperationalAlertEventStatus,
         *,
         recorded_at: datetime,
+        actor: Literal["local_user", "system_recovery"] = "local_user",
     ) -> tuple[OperationalAlertEvent, bool]:
         """Apply one idempotent allowed transition and append its audit evidence."""
         if recorded_at.tzinfo is None or recorded_at.utcoffset() is None:
@@ -420,6 +421,7 @@ class OperationalAlertStateStore:
                 from_status=current.status,
                 to_status=to_status,
                 recorded_at=recorded_at,
+                actor=actor,
             )
             updated = current.model_copy(update={"status": to_status})
             events[alert_id] = updated
@@ -445,6 +447,81 @@ class OperationalAlertStateStore:
                 )
             )
             return updated, True
+
+    def resolve_recovered_job(
+        self,
+        job_id: str,
+        *,
+        recovered_at: datetime,
+        recorded_at: datetime,
+    ) -> int:
+        """Resolve prior alerts after complete success for the same scheduled job."""
+        if not job_id.strip():
+            raise ValueError("job_id must not be empty")
+        for name, value in (("recovered_at", recovered_at), ("recorded_at", recorded_at)):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"{name} must be timezone-aware")
+        recovered_at = recovered_at.astimezone(UTC)
+        recorded_at = recorded_at.astimezone(UTC)
+        if recorded_at < recovered_at:
+            raise ValueError("recorded_at must not predate recovered_at")
+        with self._lock:
+            state = self.load()
+            recoverable = tuple(
+                item
+                for item in state.events
+                if item.job_id == job_id
+                and item.first_activated_at < recovered_at
+                and item.status is not OperationalAlertEventStatus.RESOLVED
+            )
+            if not recoverable:
+                return 0
+            if state.transitions and recorded_at < state.transitions[-1].recorded_at:
+                raise AaplOperationalStateError(
+                    "operational recovery time predates the latest alert transition"
+                )
+            events = {item.alert_id: item for item in state.events}
+            transitions = list(state.transitions)
+            for current in recoverable:
+                transitions.append(
+                    OperationalAlertTransition(
+                        transition_id=_alert_transition_id(
+                            current.alert_id,
+                            current.status,
+                            OperationalAlertEventStatus.RESOLVED,
+                            recorded_at,
+                        ),
+                        alert_id=current.alert_id,
+                        from_status=current.status,
+                        to_status=OperationalAlertEventStatus.RESOLVED,
+                        recorded_at=recorded_at,
+                        actor="system_recovery",
+                    )
+                )
+                events[current.alert_id] = current.model_copy(
+                    update={"status": OperationalAlertEventStatus.RESOLVED}
+                )
+            self._write(
+                OperationalAlertState(
+                    screenings=state.screenings,
+                    events=tuple(
+                        sorted(
+                            events.values(),
+                            key=lambda item: (
+                                item.first_activated_at,
+                                str(item.alert_id),
+                            ),
+                        )
+                    ),
+                    transitions=tuple(
+                        sorted(
+                            transitions,
+                            key=lambda item: (item.recorded_at, str(item.transition_id)),
+                        )
+                    ),
+                )
+            )
+            return len(recoverable)
 
     def status(self) -> OperationalAlertInboxStatus:
         """Return monitor counts without any provider or analytical query."""
@@ -641,6 +718,17 @@ class OperationalAlertMonitor:
             raise ValueError("alert monitor clock must return a datetime")
         results = self._engine.evaluate(attempt, computed_at=computed_at)
         self._store.record(results, self._engine.events_for(results))
+        if (
+            attempt.status is ScheduledJobAttemptStatus.SUCCEEDED
+            and attempt.execution is not None
+            and attempt.execution.coverage_complete
+            and attempt.completed_at is not None
+        ):
+            self._store.resolve_recovered_job(
+                attempt.definition.job_id,
+                recovered_at=attempt.completed_at,
+                recorded_at=computed_at,
+            )
 
     def reconcile(self, attempts: tuple[ScheduledJobAttempt, ...]) -> None:
         """Backfill missing monitor results from durable completed scheduler attempts."""

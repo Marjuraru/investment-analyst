@@ -326,6 +326,46 @@ def test_quarterly_yoy_joins_same_fiscal_quarter_not_previous_date() -> None:
     assert growth.value == Decimal("0.2")
 
 
+def test_conflicting_fiscal_quarter_labels_skip_only_affected_yoy_metrics() -> None:
+    q1_2017 = _period(
+        datetime(2017, 3, 31, tzinfo=UTC),
+        {"fundamental.revenue": "100", "fundamental.net_income": "10"},
+        frequency=DataFrequency.QUARTERLY,
+        fiscal_year="2017",
+        fiscal_period="Q1",
+        form="10-Q",
+    )
+    q1_2018_with_stale_fy = _period(
+        datetime(2018, 3, 31, tzinfo=UTC),
+        {"fundamental.revenue": "110", "fundamental.net_income": "11"},
+        frequency=DataFrequency.QUARTERLY,
+        fiscal_year="2017",
+        fiscal_period="Q1",
+        form="10-Q",
+    )
+    q1_2019 = _period(
+        datetime(2019, 3, 31, tzinfo=UTC),
+        {"fundamental.revenue": "120", "fundamental.net_income": "12"},
+        frequency=DataFrequency.QUARTERLY,
+        fiscal_year="2019",
+        fiscal_period="Q1",
+        form="10-Q",
+    )
+
+    computation = _compute(
+        (q1_2017, q1_2018_with_stale_fy, q1_2019),
+        frequency=DataFrequency.QUARTERLY,
+    )
+
+    assert [item.metric_name for item in computation.candidates] == [
+        "fundamental.net_margin",
+        "fundamental.net_margin",
+        "fundamental.net_margin",
+    ]
+    assert computation.skipped_counts["inconsistent_fiscal_metadata"] == 4
+    assert computation.skipped_counts["missing_previous_period"] == 2
+
+
 def test_comparator_outside_requested_range_remains_available() -> None:
     computation = _compute(
         _annual_history(),

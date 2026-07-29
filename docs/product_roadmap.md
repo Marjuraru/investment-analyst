@@ -290,7 +290,8 @@ explicará condiciones y evidencia; no afirmará que debe comprarse o venderse.
 La implementación se divide en:
 
 1. alertas operativas y modo silencioso después del scheduler multi-activo —base local completada
-   el 29 de julio de 2026 con motor trivaluado, replay, deduplicación y bandeja de solo lectura—;
+   el 29 de julio de 2026 con motor trivaluado, replay, deduplicación, transiciones auditadas y
+   cierre automático tras una recuperación completa del mismo trabajo—;
 2. reglas de mercado y fundamentales con métricas existentes;
 3. reglas de valoración, técnicas y plantillas configurables;
 4. eventos, filings, noticias y Cazatiburones;

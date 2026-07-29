@@ -92,8 +92,8 @@ class SecFundamentalMetricEngine:
         """Compute all valid metrics for the requested target periods."""
         computed_at = _utc_datetime(computed_at, "computed_at")
         contexts = self._validate_source(request, point_in_time_result)
+        contexts, fiscal_index = _build_fiscal_index(contexts)
         target_contexts = _target_contexts(contexts, request)
-        fiscal_index = _build_fiscal_index(contexts)
         candidates: list[SecFundamentalMetricCandidate] = []
         skipped = Counter({key: 0 for key in _SKIP_KEYS})
 
@@ -295,20 +295,50 @@ def _target_contexts(
 
 def _build_fiscal_index(
     contexts: list[_PeriodContext],
-) -> dict[tuple[DataFrequency, int, str], _PeriodContext]:
-    index: dict[tuple[DataFrequency, int, str], _PeriodContext] = {}
+) -> tuple[
+    list[_PeriodContext],
+    dict[tuple[DataFrequency, int, str], _PeriodContext],
+]:
+    """Exclude conflicting fiscal labels without discarding same-period metrics."""
+    grouped: dict[tuple[DataFrequency, int, str], list[_PeriodContext]] = {}
     for context in contexts:
         metadata = context.fiscal_metadata
         if metadata is None:
             continue
         key = (context.period.frequency, metadata.fiscal_year, metadata.fiscal_period)
-        existing = index.get(key)
-        if existing is not None and existing.period.period_end != context.period.period_end:
-            raise AmbiguousSecFundamentalComparisonError(
-                "multiple periods share the same fiscal year and fiscal period"
+        grouped.setdefault(key, []).append(context)
+    ambiguous = {
+        key
+        for key, values in grouped.items()
+        if len({context.period.period_end for context in values}) > 1
+    }
+
+    normalized: list[_PeriodContext] = []
+    for context in contexts:
+        metadata = context.fiscal_metadata
+        key = (
+            (context.period.frequency, metadata.fiscal_year, metadata.fiscal_period)
+            if metadata is not None
+            else None
+        )
+        if key in ambiguous:
+            context = _PeriodContext(
+                asset_id=context.asset_id,
+                period=context.period,
+                facts=context.facts,
+                fiscal_metadata=None,
+                metadata_status="inconsistent",
             )
+        normalized.append(context)
+
+    index: dict[tuple[DataFrequency, int, str], _PeriodContext] = {}
+    for context in normalized:
+        metadata = context.fiscal_metadata
+        if metadata is None:
+            continue
+        key = (context.period.frequency, metadata.fiscal_year, metadata.fiscal_period)
         index[key] = context
-    return index
+    return normalized, index
 
 
 def _same_period_candidates(

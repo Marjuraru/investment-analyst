@@ -83,6 +83,11 @@ observaciones recién validados.
 observaciones por campo y frecuencia, omisiones, métricas creadas o reutilizadas, cobertura,
 requisitos faltantes y diagnóstico. No incluye documentos SEC, credenciales ni un `User-Agent`.
 
+Si Company Facts asigna el mismo año y período fiscal a dos cierres distintos, el motor no escoge
+uno por orden de almacenamiento. Marca ambos contextos fiscales como inconsistentes, conserva los
+ratios que dependen solo del mismo cierre y omite únicamente los comparativos interanuales
+afectados. La omisión queda contabilizada como `inconsistent_fiscal_metadata`.
+
 El motor ampliado puede consultar después la tendencia de cinco hechos, las 40 métricas, su
 historial y las ocho secciones analíticas usando el mismo `asset_id`. El smoke real de AMD del
 28 de julio de 2026 confirmó idempotencia exacta y 25 métricas disponibles en el período más

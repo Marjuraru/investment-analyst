@@ -5,6 +5,13 @@ proveedores externos. Un ticker es útil para mostrar, pero no constituye una id
 segura: el mismo texto puede reutilizarse entre mercados, proveedores o clases de activo. Los IDs
 canónicos ya utilizados por el repositorio permanecen sin cambios.
 
+Un binding Alpaca puede añadir el namespace opcional `history_start` para declarar el primer día
+que pertenece inequívocamente al activo y es ingerible bajo el contrato del feed. Barrick cambió
+de `GOLD` a `B` al comenzar la negociación del 9 de mayo de 2025; el feed IEX representa ese día
+de transición con cero volumen, cero operaciones y VWAP cero. Su borde se fija en `2025-05-10`:
+excluye el símbolo `B` del emisor anterior y el placeholder, sin inventar un VWAP ni debilitar la
+validación común. El source ID y el formato del workspace no cambian.
+
 El documento empaquetado `default_assets.v1.json` es estático, versionado y determinista. Contiene
 Bitcoin, Apple y la lista inicial de acciones y ETF estadounidenses comprobada con el nivel gratuito
 de Alpaca IEX: AMD, Barrick (`B`), BVN, CDE, HYMC, INTC, MSTR, MU, MUX, NEM, PLTR, SCCO, TSM,

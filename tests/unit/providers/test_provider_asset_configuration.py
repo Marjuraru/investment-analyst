@@ -1,5 +1,7 @@
 """Unit coverage for typed configurations built from the central catalog."""
 
+from datetime import date
+
 import pytest
 from pydantic import ValidationError
 
@@ -101,9 +103,11 @@ def test_factories_preserve_current_provider_and_persisted_identities() -> None:
 def test_alpaca_configuration_scales_from_catalog_without_changing_apple_identity() -> None:
     resolver = _resolver()
 
+    barrick = resolve_alpaca_configuration(resolver, asset_id="equity:us:b")
     bvn = resolve_alpaca_configuration(resolver, asset_id="equity:us:bvn")
     gld = resolve_alpaca_configuration(resolver, asset_id="etf:us:gld")
 
+    assert barrick.history_start == date(2025, 5, 10)
     assert (bvn.symbol, bvn.source_id, bvn.exchange) == (
         "BVN",
         "alpaca-market-data:iex:bvn:daily-bars:adjustment-all",
@@ -114,6 +118,8 @@ def test_alpaca_configuration_scales_from_catalog_without_changing_apple_identit
         "alpaca-market-data:iex:gld:daily-bars:adjustment-all",
         "etf",
     )
+    assert bvn.history_start is None
+    assert gld.history_start is None
 
 
 def test_alpaca_configuration_requires_explicit_asset_metadata() -> None:
@@ -124,6 +130,22 @@ def test_alpaca_configuration_requires_explicit_asset_metadata() -> None:
             feed=FEED,
             adjustment=ADJUSTMENT,
             source_id=ALPACA_SOURCE_ID,
+        )
+
+
+def test_alpaca_configuration_validates_optional_history_start() -> None:
+    with pytest.raises(ValidationError, match="must use YYYY-MM-DD"):
+        AlpacaAssetConfiguration(
+            asset_id=APPLE_ASSET_ID,
+            symbol=APPLE_TICKER,
+            feed=FEED,
+            adjustment=ADJUSTMENT,
+            source_id=ALPACA_SOURCE_ID,
+            name="Apple Inc.",
+            asset_class=AssetClass.EQUITY,
+            quote_currency="USD",
+            exchange="NASDAQ",
+            history_start="2025-99-99",
         )
 
 
