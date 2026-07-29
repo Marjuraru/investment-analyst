@@ -57,6 +57,27 @@ Los diagnósticos de mercado y fundamental se calculan de forma independiente y
 pueden consultarse por separado. La consulta consolidada los presenta juntos sin
 mezclar su significado, sus fuentes ni producir una puntuación agregada.
 
+## Descentralización del activo fundador
+
+AAPL fue el primer flujo vertical completo y por eso persisten nombres `Aapl*`, valores
+predeterminados y contratos históricos en aplicación, operación e interfaz. Es deuda de
+compatibilidad, no una decisión de dominio: Apple debe comportarse como otra empresa del catálogo.
+
+La migración seguirá estas reglas:
+
+1. no crear nuevos casos de uso, rutas, estados ni modelos específicos de AAPL;
+2. introducir contratos genéricos por activo y dominio antes de añadir más capacidades;
+3. mantener temporalmente los contratos y esquemas históricos como adaptadores del flujo genérico;
+4. no renombrar archivos de estado, IDs o esquemas persistidos sin una migración versionada;
+5. probar las mismas rutas con varios emisores US-GAAP, IFRS y proveedores de mercado;
+6. permitir especialización por familia —empresa, ETF o cripto—, no por símbolo;
+7. retirar una bifurcación Apple solo cuando replay, idempotencia, point-in-time y clientes
+   compatibles estén cubiertos.
+
+El criterio de salida es que seleccionar AAPL, AMD, CDE, BVN ADR o TSM reutilice la misma
+orquestación empresarial según las capacidades declaradas. Las diferencias legítimas serán fuente,
+taxonomía, frecuencia, moneda y cobertura, nunca el nombre del activo.
+
 ## Screening y alertas
 
 El motor de [screening y alertas](automated_screening_alerts.md) consume resultados persistidos

@@ -30,6 +30,11 @@ El proyecto ya dispone de un flujo básico funcional local. Apple conserva el bo
 experiencia web completa; la actualización fundamental SEC también puede ejecutarse por CLI para
 emisores corporativos declarados en el catálogo:
 
+AAPL es el activo fundador y conserva contratos históricos por compatibilidad; no es el centro
+conceptual ni el modelo especial de la herramienta. La dirección vigente es que acciones y ETF
+usen casos de uso genéricos derivados del catálogo, mientras cripto conserva su familia analítica
+propia. No se añadirán nuevas rutas o modelos específicos de Apple.
+
 - workspace persistente con DuckDB, RawRecords, observaciones normalizadas, métricas, diagnósticos y
   exportación Parquet;
 - catálogo central de activos y resolución independiente de proveedores;

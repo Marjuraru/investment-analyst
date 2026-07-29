@@ -9,6 +9,8 @@ funcional debe permitir que un analista:
 - consulte mercado y fundamentales por activo con evidencia point-in-time;
 - reciba candidatos deterministas para revisión sin una puntuación agregada ni recomendación;
 - reciba una notificación deduplicada cuando exista evidencia nueva;
+- consulte actividad declarada de insiders, propietarios relevantes e instituciones en una sección
+  Cazatiburones independiente;
 - solicite un resumen cualitativo opcional con citas sobre documentos persistidos;
 - siga usando todas las funciones cuantitativas cuando la IA esté desactivada;
 - cierre, reinicie, respalde y restaure el servicio sin perder trazabilidad.
@@ -91,8 +93,9 @@ funcionan, pero no sustituyen presupuestos p50/p95 repetibles.
 - scheduler, alertas y screening cargan, validan y reescriben documentos JSON completos. Los tamaños
   actuales son pequeños, pero los límites configurados de 100.000 o 250.000 registros harían
   costoso cada cambio en una operación 24/7.
-- persisten nombres y adaptadores heredados de Apple junto a rutas genéricas. La compatibilidad es
-  válida, pero `AAPL` aún conserva un flujo privilegiado y puede fomentar nuevas excepciones.
+- persisten nombres, valores predeterminados y adaptadores heredados de Apple junto a rutas
+  genéricas. `AAPL` no es solo un ejemplo en el código actual: conserva bootstrap, runner, estados,
+  controlador y contratos privilegiados que deben migrar sin romper compatibilidad;
 - los 40 trabajos se ejecutan secuencialmente y con horarios próximos. Falta un presupuesto
   central por proveedor, medición de latencia y distribución del trabajo.
 
@@ -105,6 +108,7 @@ funcionan, pero no sustituyen presupuestos p50/p95 repetibles.
 - no existe outbox ni canal de notificación;
 - no existe todavía un corpus local de filings, comunicados y noticias;
 - sin corpus no es posible implementar una IA auditable con citas;
+- Cazatiburones está diseñado, pero aún no ingiere Forms 3/4/5, Schedules 13D/13G o 13F;
 - BVL tiene identidad registral, pero mercado y fundamentales siguen bloqueados por fuente,
   autorización o adaptador.
 
@@ -112,7 +116,7 @@ funcionan, pero no sustituyen presupuestos p50/p95 repetibles.
 
 - historia desde 1950 y laboratorio predictivo;
 - fundamentales on-chain de cripto;
-- Cazatiburones;
+- extensiones Cazatiburones para BVL y cripto;
 - mercado y fundamentales BVL automatizados sin contrato de uso resuelto;
 - exposición remota, aplicación móvil o servidor SBC;
 - base vectorial, microservicios, Kubernetes o migración a PostgreSQL.
@@ -133,7 +137,7 @@ estado operativo          DuckDB + Parquet append-only
                                     |
                 +-------------------+-------------------+
                 |                   |                   |
-             mercado          fundamentales        macro/eventos
+             mercado          fundamentales     macro/eventos/Cazatiburones
                 |                   |                   |
                 +------ resultados independientes -----+
                                     |
@@ -154,8 +158,14 @@ paquete de evidencia inmutable después de una acción del usuario o un candidat
 
 ### 1. Aplicación y HTTP
 
-- crear casos de uso genéricos por dominio y conservar los contratos `Aapl*` únicamente como
-  adaptadores de compatibilidad;
+- crear casos de uso genéricos por activo y dominio y conservar los contratos `Aapl*` únicamente
+  como adaptadores de compatibilidad;
+- prohibir nuevas bifurcaciones por símbolo y especializar solo por capacidad, proveedor,
+  taxonomía o familia de activo;
+- reemplazar gradualmente bootstrap, runner, estado, controlador y defaults de AAPL por
+  equivalentes genéricos con migración versionada;
+- exigir pruebas de contrato cruzadas para AAPL, otro emisor US-GAAP, uno IFRS, un ETF y BTC antes
+  de retirar cada adaptador histórico;
 - dividir `local_web.py` en controlador, DTO HTTP, routers de lectura, comandos, errores y servidor;
 - convertir los refresh manuales largos en comandos con identidad y estado; el POST devuelve el
   trabajo aceptado y la interfaz conserva la última lectura mientras el writer opera;
@@ -223,6 +233,21 @@ acciones y período. No modifica ni combina los diagnósticos de mercado y funda
 - añadir comparación y plantillas configurables sin saturar el gráfico principal;
 - hacer visible si un activo tiene mercado, fundamentales, valoración, macro y documentos, sin
   mostrar paneles vacíos.
+
+### 6. Cazatiburones
+
+El primer alcance forma parte de la ruta básica porque reutiliza el corpus SEC requerido por la IA:
+
+1. corpus versionado de filings con accession number, emisor, declarante, formulario y timestamps;
+2. Forms 3/4/5 para propiedad y transacciones de insiders;
+3. Schedules 13D/13G para propiedad beneficiaria y sus enmiendas;
+4. Form 13F para posiciones trimestrales institucionales, después de resolver CUSIP y clases;
+5. métricas, eventos y reglas propias sin mezclar mercado o fundamentales;
+6. línea temporal y evidencia visible antes del resumen mediante IA.
+
+La implementación detallada se mantiene en [`cazatiburones.md`](cazatiburones.md). Las extensiones
+SMV y on-chain permanecen fuera de esta primera entrega porque necesitan fuentes e identidades
+distintas.
 
 ## Implementación básica de IA
 
@@ -297,17 +322,20 @@ cuando aporta valor.
 
 Salida: cero fallos críticos sin explicar y rama principal reproducible.
 
-### Bloque 1 — eficiencia y operación recuperable
+### Bloque 1 — generalización, eficiencia y operación recuperable
 
-1. crear overview compacto y detalle bajo demanda;
-2. separar adaptadores web y caché por dominio;
-3. convertir refresh manual en trabajo no bloqueante;
-4. instrumentar latencia, volumen y presupuesto por proveedor;
-5. implementar y probar backup/restauración;
-6. diseñar y migrar estados operativos solo después del smoke temporal.
+1. congelar nuevas APIs específicas de AAPL y definir los contratos genéricos compatibles;
+2. migrar bootstrap, runner, estado y controlador por etapas, sin cambiar identidades persistidas;
+3. crear overview compacto y detalle bajo demanda;
+4. separar adaptadores web y caché por dominio;
+5. convertir refresh manual en trabajo no bloqueante;
+6. instrumentar latencia, volumen y presupuesto por proveedor;
+7. implementar y probar backup/restauración;
+8. diseñar y migrar estados operativos solo después del smoke temporal.
 
-Salida: la interfaz sigue respondiendo durante un refresh, el reinicio recupera trabajos y la
-historia operativa no depende de reescrituras crecientes.
+Salida: AAPL usa el mismo núcleo que los demás emisores, la interfaz sigue respondiendo durante un
+refresh, el reinicio recupera trabajos y la historia operativa no depende de reescrituras
+crecientes.
 
 ### Bloque 2 — análisis y alertas básicas completas
 
@@ -320,19 +348,29 @@ historia operativa no depende de reescrituras crecientes.
 
 Salida: el sistema encuentra, explica y notifica candidatos sin IA ni intervención continua.
 
-### Bloque 3 — corpus e IA cualitativa opcional
+### Bloque 3 — corpus y Cazatiburones básico
 
 1. importar y versionar filings SEC;
 2. búsqueda y línea temporal local;
-3. construir paquetes de evidencia deterministas;
-4. implementar el puerto de IA y un adaptador económico;
-5. validar citas, presupuesto, caché, prompt injection y ausencia de secretos;
-6. añadir una acción de “resumir evidencia” y un panel separado en la interfaz.
+3. normalizar Forms 3/4/5 y Schedules 13D/13G;
+4. incorporar 13F con correspondencias verificadas de CUSIP y clase;
+5. calcular cambios descriptivos y eventos propios;
+6. añadir panel, evidencia y reglas Cazatiburones independientes.
+
+Salida: el analista puede revisar actividad declarada de participantes y recibir candidatos
+trazables sin convertirlos en señal de compra o venta.
+
+### Bloque 4 — IA cualitativa opcional
+
+1. construir paquetes de evidencia deterministas desde documentos, eventos y métricas;
+2. implementar el puerto de IA y un adaptador económico;
+3. validar citas, presupuesto, caché, prompt injection y ausencia de secretos;
+4. añadir una acción de “resumir evidencia” y un panel separado en la interfaz.
 
 Salida: un candidato o documento puede enriquecerse con un resumen citado, pero toda la herramienta
 sigue funcionando con IA apagada.
 
-### Bloque 4 — aceptación de la versión
+### Bloque 5 — aceptación de la versión
 
 1. CI, cobertura, auditoría y smokes reales por familia de activo;
 2. prueba de 72 horas en modo silencioso;
@@ -371,6 +409,9 @@ La versión básica estará lista únicamente cuando:
 - no existan fallos recurrentes sin clasificación o acción;
 - cada resultado y candidato pueda reconstruirse desde su evidencia;
 - mercado, fundamentales y valoración permanezcan separados;
+- AAPL no conserve una ruta analítica privilegiada fuera de adaptadores compatibles documentados;
+- Cazatiburones reconstruya filings, participantes, instrumentos y disponibilidad sin inferencias
+  ocultas;
 - notificaciones sean deduplicadas, reanudables y opcionales;
 - la IA entregue salida estructurada y citada dentro de presupuesto, o pueda apagarse sin degradar
   el producto cuantitativo;
@@ -386,4 +427,5 @@ La versión básica estará lista únicamente cuando:
 - No se ejecuta un LLM continuamente.
 - No se incorpora predicción de precios a la versión operativa.
 - La historia desde 1950 se mantendrá en un workspace de investigación separado.
-- Cazatiburones, on-chain y despliegue SBC comienzan después de la aceptación básica.
+- Cazatiburones para BVL, análisis on-chain y despliegue SBC comienzan después de la aceptación
+  básica; la primera vertical SEC de Cazatiburones sí forma parte de la ruta.
