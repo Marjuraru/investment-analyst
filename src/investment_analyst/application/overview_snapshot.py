@@ -31,6 +31,10 @@ class OperationalOverviewSnapshot(ContractModel):
     failed_operation_count: int = Field(default=0, ge=0)
     latest_operation_id: UUID | None = None
     latest_operation_status: ManualOperationStatus | None = None
+    watchlist_asset_count: int = Field(default=0, ge=0)
+    favorite_asset_count: int = Field(default=0, ge=0)
+    scheduled_asset_count: int = Field(default=0, ge=0)
+    unavailable_preference_count: int = Field(default=0, ge=0)
 
     @classmethod
     def now(cls, **values: object) -> "OperationalOverviewSnapshot":

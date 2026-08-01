@@ -78,6 +78,9 @@ propia. No se añadirán nuevas rutas o modelos específicos de Apple.
   muestra frescura y cobertura, reintenta con backoff acotado solo fallos transitorios clasificados
   por tipo o estado HTTP, recupera interrupciones y no revierte el progreso exitoso de otros
   trabajos;
+- preferencias versionadas por workspace para watchlist, favoritos y actualización programada:
+  parten de la configuración CLI sin escribir al arrancar, usan control optimista, sobreviven al
+  reinicio y reconcilian los mismos jobs en ejecución sin llamadas adicionales a proveedores;
 - primer monitor silencioso de alertas operativas: evalúa cada intento mediante reglas trivaluadas,
   persiste resultados e identidades deterministas, detecta cobertura incompleta, deduplica eventos
   y ofrece una bandeja local con transiciones auditadas de vista, descartada o resuelta, sin IA,
@@ -152,6 +155,8 @@ información de la que realmente contienen.
   mantener el servicio local mediante `systemd --user`.
 - [Runtime por capacidades](docs/capability_driven_runtime.md): consultar dispatch tipado, overview
   no bloqueante, cola manual durable, telemetría y backup/restore verificados.
+- [Preferencias de activos](docs/asset_preferences.md): persistir watchlist, favoritos y selección
+  automática con precedencia CLI documentada y reconciliación sin reinicio.
 - [Base intradía de Coinbase](docs/coinbase_intraday.md): importar ventanas acotadas de un minuto y
   consultar agregaciones trazables por CLI o interfaz sin mezclar la historia diaria.
 - [Refresh fundamental SEC por emisor](docs/sec_issuer_refresh.md): actualizar snapshots,

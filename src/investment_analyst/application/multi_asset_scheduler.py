@@ -616,6 +616,7 @@ class MultiAssetScheduler:
         if len(job_ids) != len(set(job_ids)):
             raise ValueError("registered scheduled job IDs must be unique")
         self._jobs = tuple(sorted(jobs, key=lambda item: item.definition.job_id))
+        self._registry_lock = threading.RLock()
         self._store = store
         self._observer = observer
         self._clock = clock
@@ -627,7 +628,23 @@ class MultiAssetScheduler:
 
     def status(self) -> MultiAssetSchedulerStatus:
         """Inspect every job without fetching providers or writing state."""
-        return self._status_at(self._now(), self._store.load())
+        jobs = self._jobs_snapshot()
+        return self._status_at(self._now(), self._store.load(), jobs)
+
+    def registered_job_definitions(self) -> tuple[ScheduledJobDefinition, ...]:
+        """Return one immutable registry snapshot without provider or state work."""
+        return tuple(item.definition for item in self._jobs_snapshot())
+
+    def reconcile_jobs(self, jobs: tuple[RegisteredScheduledJob, ...]) -> None:
+        """Atomically publish a provider-free replacement registry."""
+        if not jobs:
+            raise ValueError("multi-asset scheduler requires at least one job")
+        job_ids = tuple(item.definition.job_id for item in jobs)
+        if len(job_ids) != len(set(job_ids)):
+            raise ValueError("registered scheduled job IDs must be unique")
+        replacement = tuple(sorted(jobs, key=lambda item: item.definition.job_id))
+        with self._registry_lock:
+            self._jobs = replacement
 
     def tick(self) -> tuple[ScheduledJobAttempt, ...]:
         """Recover interrupted work and execute all currently due jobs once."""
@@ -637,10 +654,11 @@ class MultiAssetScheduler:
         try:
             self._retry_notifications()
             now = self._now()
+            jobs = self._jobs_snapshot()
             state = self._recover_interrupted(now, self._store.load(), completed)
-            status = self._status_at(now, state)
+            status = self._status_at(now, state, jobs)
             due_ids = tuple(item.definition.job_id for item in status.jobs if item.due)
-            registry = {item.definition.job_id: item for item in self._jobs}
+            registry = {item.definition.job_id: item for item in jobs}
             for job_id in due_ids:
                 job = registry[job_id]
                 current = self._now()
@@ -777,13 +795,11 @@ class MultiAssetScheduler:
         state: MultiAssetScheduleState,
         completed: list[ScheduledJobAttempt],
     ) -> MultiAssetScheduleState:
-        registry = {item.definition.job_id: item.definition for item in self._jobs}
         latest_by_job = self._latest_by_job(state)
         for job_id, attempt in sorted(latest_by_job.items()):
             if (
                 attempt.status is not ScheduledJobAttemptStatus.RUNNING
                 or job_id == self._active_job_id
-                or job_id not in registry
             ):
                 continue
             recovered = ScheduledJobAttempt(
@@ -808,31 +824,36 @@ class MultiAssetScheduler:
         self,
         now: datetime,
         state: MultiAssetScheduleState,
+        jobs: tuple[RegisteredScheduledJob, ...],
     ) -> MultiAssetSchedulerStatus:
-        jobs = tuple(self._job_status(item.definition, now, state) for item in self._jobs)
-        issues = tuple(issue for item in jobs for issue in item.issues)
+        statuses = tuple(self._job_status(item.definition, now, state) for item in jobs)
+        issues = tuple(issue for item in statuses for issue in item.issues)
         if self._observer_issue is not None:
             issues = (*issues, self._observer_issue)
         return MultiAssetSchedulerStatus(
-            jobs=jobs,
-            due_count=sum(item.due for item in jobs),
+            jobs=statuses,
+            due_count=sum(item.due for item in statuses),
             running_count=sum(
                 item.latest_attempt is not None
                 and item.latest_attempt.status is ScheduledJobAttemptStatus.RUNNING
-                for item in jobs
+                for item in statuses
             ),
             failed_count=sum(
                 item.latest_attempt is not None
                 and item.latest_attempt.status is ScheduledJobAttemptStatus.FAILED
-                for item in jobs
+                for item in statuses
             ),
-            stale_count=sum(item.freshness is ScheduledJobFreshness.STALE for item in jobs),
+            stale_count=sum(item.freshness is ScheduledJobFreshness.STALE for item in statuses),
             incomplete_count=sum(
-                item.freshness is ScheduledJobFreshness.INCOMPLETE for item in jobs
+                item.freshness is ScheduledJobFreshness.INCOMPLETE for item in statuses
             ),
-            next_run_at=min(item.next_run_at for item in jobs),
+            next_run_at=min(item.next_run_at for item in statuses),
             issues=issues,
         )
+
+    def _jobs_snapshot(self) -> tuple[RegisteredScheduledJob, ...]:
+        with self._registry_lock:
+            return self._jobs
 
     def _job_status(
         self,

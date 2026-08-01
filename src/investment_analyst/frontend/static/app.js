@@ -119,6 +119,7 @@ const MARKET_CHART_PERIOD_LABELS = Object.freeze({
   "24h": "Últimas 24 horas",
 });
 let marketAssets = Object.freeze({});
+let assetPreferencesSnapshot = null;
 
 const MARKET_RESOLUTION_PRESENTATION = Object.freeze({
   daily: Object.freeze({ singular: "día", plural: "días", adjective: "diarios" }),
@@ -416,6 +417,8 @@ const ERROR_MESSAGES = Object.freeze({
   query_failed: "No fue posible construir el análisis para el corte solicitado.",
   run_active: "Ya existe una actualización en curso para este espacio de datos.",
   rule_conflict: "La regla cambió desde que se abrió. Vuelve a cargarla antes de guardar.",
+  asset_preferences_conflict:
+    "La selección cambió desde que se abrió. Se recargó el estado vigente; revisa antes de guardar.",
   backtest_unavailable:
     "No hay evidencia point-in-time compatible para este replay en el activo seleccionado.",
   known_at_too_early:
@@ -532,6 +535,133 @@ async function loadMarketAssets() {
     }),
   );
   selector.value = selectedMarketAsset;
+}
+
+function preferenceToggle(asset, kind, label) {
+  const wrapper = createElement("label", "preference-toggle");
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.dataset.assetId = asset.asset_id;
+  input.dataset.preferenceKind = kind;
+  input.checked = Boolean(asset[kind]);
+  input.disabled = !asset.available || (kind !== "watchlist" && !asset.watchlist);
+  const accessible = createElement(
+    "span",
+    "visually-hidden",
+    `${label}: ${asset.symbol}`,
+  );
+  wrapper.append(input, accessible);
+  return wrapper;
+}
+
+function prioritizeAssetSelector(payload) {
+  const selector = byId("market-asset-select");
+  const ordered = payload.assets.filter((asset) => asset.available && marketAssets[asset.asset_id]);
+  selector.replaceChildren(
+    ...ordered.map((asset) => {
+      const option = document.createElement("option");
+      option.value = asset.asset_id;
+      option.textContent = `${asset.favorite ? "★ " : ""}${asset.symbol} — ${asset.name}`;
+      return option;
+    }),
+  );
+  selector.value = selectedMarketAsset;
+}
+
+function renderAssetPreferences(payload) {
+  if (
+    payload.schema_version !== "asset-preferences-view-v1"
+    || !Array.isArray(payload.assets)
+  ) {
+    throw new Error("Las preferencias locales no tienen un contrato compatible.");
+  }
+  assetPreferencesSnapshot = payload;
+  const list = byId("asset-preferences-list");
+  list.replaceChildren();
+  for (const asset of payload.assets) {
+    const row = createElement(
+      "div",
+      `preference-row${asset.available ? "" : " unavailable"}`,
+    );
+    row.dataset.assetId = asset.asset_id;
+    const identity = createElement("div", "preference-asset");
+    identity.append(
+      createElement("strong", "", `${asset.favorite ? "★ " : ""}${asset.symbol} — ${asset.name}`),
+      createElement(
+        "small",
+        "",
+        asset.available
+          ? `${asset.provider} · ${asset.frequencies.join(", ")} · ${asset.source_ids.length} fuentes`
+          : "No disponible en el catálogo actual · fuera de ejecución",
+      ),
+    );
+    const watchlist = preferenceToggle(asset, "watchlist", "Watchlist");
+    const favorite = preferenceToggle(asset, "favorite", "Favorito");
+    const scheduled = preferenceToggle(asset, "scheduled_refresh", "Actualización programada");
+    row.append(identity, watchlist, favorite, scheduled);
+    const watchlistInput = watchlist.querySelector("input");
+    watchlistInput.addEventListener("change", () => {
+      const enabled = watchlistInput.checked && asset.available;
+      for (const dependent of [favorite, scheduled]) {
+        const input = dependent.querySelector("input");
+        input.disabled = !enabled;
+        if (!enabled) input.checked = false;
+      }
+    });
+    list.append(row);
+  }
+  byId("asset-preferences-summary").textContent =
+    `${formatInteger(payload.watchlist_count)} en watchlist · `
+    + `${formatInteger(payload.favorite_count)} favoritos · `
+    + `${formatInteger(payload.scheduled_asset_count)} programados`;
+  byId("asset-preferences-status").textContent = payload.source === "persisted"
+    ? `Revisión ${payload.revision_id.slice(0, 8)} · ${formatInstant(payload.created_at)}`
+    : "Valores efectivos de la configuración CLI; aún no se escribió una revisión.";
+  prioritizeAssetSelector(payload);
+}
+
+async function loadAssetPreferences() {
+  renderAssetPreferences(await api("/api/v1/asset-preferences"));
+}
+
+function preferenceEntriesFromForm() {
+  return [...document.querySelectorAll("#asset-preferences-list .preference-row")]
+    .map((row) => {
+      const input = (kind) => row.querySelector(`[data-preference-kind="${kind}"]`).checked;
+      return {
+        asset_id: row.dataset.assetId,
+        watchlist: input("watchlist"),
+        favorite: input("favorite"),
+        scheduled_refresh: input("scheduled_refresh"),
+      };
+    })
+    .sort((left, right) => left.asset_id.localeCompare(right.asset_id));
+}
+
+async function saveAssetPreferences() {
+  if (assetPreferencesSnapshot === null) return;
+  const button = byId("save-asset-preferences");
+  setButtonBusy(button, true, "Guardando…", "Guardar preferencias");
+  try {
+    const payload = await api("/api/v1/asset-preferences", {
+      method: "PUT",
+      body: JSON.stringify({
+        schema_version: "asset-preferences-update-v1",
+        expected_revision_id: assetPreferencesSnapshot.revision_id,
+        expected_fingerprint: assetPreferencesSnapshot.fingerprint,
+        entries: preferenceEntriesFromForm(),
+      }),
+    });
+    renderAssetPreferences(payload);
+    byId("asset-preferences-status").textContent =
+      `Preferencias guardadas · ${formatInteger(payload.scheduled_job_count)} trabajos activos`;
+    await refreshOverview({ manual: false });
+  } catch (error) {
+    if (error.code === "asset_preferences_conflict") await loadAssetPreferences();
+    byId("asset-preferences-status").textContent = error.message;
+  } finally {
+    setButtonBusy(button, false, "Guardando…", "Guardar preferencias");
+  }
 }
 
 function isIntradayInterval(value = chartSettings.interval) {
@@ -3051,7 +3181,10 @@ async function api(path, options = {}) {
   if (!response.ok) {
     const error = payload.error || {};
     const message = ERROR_MESSAGES[error.code] || error.message || `Error HTTP ${response.status}`;
-    throw new Error(message);
+    const failure = new Error(message);
+    failure.code = error.code;
+    failure.status = response.status;
+    throw failure;
   }
   return payload;
 }
@@ -4039,6 +4172,10 @@ byId("refresh-overview").addEventListener(
   "click",
   () => refreshOverview({ manual: true }),
 );
+byId("asset-preferences-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await saveAssetPreferences();
+});
 document.addEventListener("visibilitychange", () => {
   startMarketClocks();
   if (document.hidden) {
@@ -4216,6 +4353,7 @@ byId("report-known-at").value = new Date().toISOString();
 async function initialize() {
   initializeTheme();
   await loadMarketAssets();
+  await loadAssetPreferences();
   initializeChartSettings();
   applySelectedMarketAsset();
   startMarketClocks();

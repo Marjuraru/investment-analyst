@@ -20,6 +20,11 @@ Each initialized workspace contains:
 processed, DuckDB, and Parquet-export layout is not migrated or renamed. `exports/` and `state/` are
 reserved workspace-level directories for future application services.
 
+`state/asset_preferences_state_v1.json`, cuando existe, conserva la watchlist, favoritos y refresh
+programado como revisiones auditables. Su ausencia es válida: el servicio usa una semilla CLI en
+memoria y no escribe automáticamente el workspace. Este estado no modifica DuckDB, Parquet ni el
+manifest v1.
+
 ## Resolution precedence
 
 Workspace resolution is deterministic and does not use `/tmp` by default:
@@ -96,3 +101,6 @@ activar un destino nuevo o vacío. Nunca sobrescribe un workspace con contenido 
 workspace fuente. Consulta [`capability_driven_runtime.md`](capability_driven_runtime.md).
 La creación y la verificación rechazan enlaces simbólicos en cualquier nivel; el inventario solo
 acepta archivos regulares contenidos físicamente en el árbol validado.
+El inventario incluye el documento de preferencias cuando existe; restore conserva exactamente sus
+revisiones y fingerprint. Un workspace que nunca creó preferencias sigue siendo respaldable y
+restaurable.

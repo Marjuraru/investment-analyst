@@ -24,6 +24,14 @@ from investment_analyst.application.aapl_scheduler import (
     AaplLocalServiceAlreadyRunningError,
     AaplLocalServiceLock,
 )
+from investment_analyst.application.asset_preferences import (
+    AssetPreferencesError,
+    AssetPreferencesService,
+    AssetPreferencesStore,
+    cli_seed_asset_preferences,
+    effective_asset_preferences,
+    scheduled_available_asset_ids,
+)
 from investment_analyst.application.facade import InvestmentAnalystApplication
 from investment_analyst.application.manual_operations import (
     ManualOperationQueue,
@@ -32,6 +40,7 @@ from investment_analyst.application.manual_operations import (
 from investment_analyst.application.multi_asset_scheduler import (
     MultiAssetScheduler,
     MultiAssetScheduleStateStore,
+    RegisteredScheduledJob,
 )
 from investment_analyst.application.operational_alerts import (
     OperationalAlertMonitor,
@@ -61,6 +70,7 @@ _ALERT_STATE_FILE = "operational_alert_state_v1.json"
 _ANALYTICAL_STATE_FILE = "analytical_screening_state_v1.json"
 _ANALYTICAL_RULE_REGISTRY_FILE = "analytical_rule_registry_state_v1.json"
 _MANUAL_OPERATION_STATE_FILE = "manual_operation_state_v1.json"
+_ASSET_PREFERENCES_STATE_FILE = "asset_preferences_state_v1.json"
 _SERVICE_LOCK_FILE = "aapl_local_service.lock"
 
 
@@ -184,36 +194,61 @@ def _serve(
         paths.root,
         analytical_rule_store,
     )
-    if not arguments.no_scheduler:
-        selected_asset_ids = tuple(
-            sorted(
-                {
-                    value.strip()
-                    for value in arguments.schedule_asset
-                    if isinstance(value, str) and value.strip()
-                }
-            )
+    selected_asset_ids = tuple(
+        sorted(
+            {
+                value.strip()
+                for value in arguments.schedule_asset
+                if isinstance(value, str) and value.strip()
+            }
         )
-        jobs = build_local_watchlist_jobs(
+    )
+    schedule_config = LocalWatchlistScheduleConfig(
+        timezone=arguments.timezone,
+        run_at=arguments.schedule_at,
+        market_start=arguments.market_start,
+        market_end_lag_days=arguments.market_end_lag_days,
+        fundamental_frequency=arguments.fundamental_frequency,
+        refresh_mode=(
+            AaplRefreshMode.FULL if arguments.refresh_mode == "full" else AaplRefreshMode.AUTO
+        ),
+        selected_asset_ids=selected_asset_ids,
+        include_intraday=not arguments.no_schedule_intraday,
+        include_smv_registry=not arguments.no_schedule_smv,
+        include_macro=fred_api_key is not None and not arguments.no_schedule_macro,
+    )
+    preference_store = AssetPreferencesStore(paths.state_root / _ASSET_PREFERENCES_STATE_FILE)
+    preference_seed = cli_seed_asset_preferences(
+        controller.market_assets(),
+        selected_asset_ids,
+    )
+    initial_preferences = effective_asset_preferences(
+        preference_store.load(),
+        preference_seed,
+    )
+
+    def jobs_for_preferences(
+        asset_ids: tuple[str, ...],
+    ) -> tuple[RegisteredScheduledJob, ...]:
+        return build_local_watchlist_jobs(
             controller,
             controller.market_assets(),
-            LocalWatchlistScheduleConfig(
-                timezone=arguments.timezone,
-                run_at=arguments.schedule_at,
-                market_start=arguments.market_start,
-                market_end_lag_days=arguments.market_end_lag_days,
-                fundamental_frequency=arguments.fundamental_frequency,
-                refresh_mode=(
-                    AaplRefreshMode.FULL
-                    if arguments.refresh_mode == "full"
-                    else AaplRefreshMode.AUTO
-                ),
-                selected_asset_ids=selected_asset_ids,
-                include_intraday=not arguments.no_schedule_intraday,
-                include_smv_registry=not arguments.no_schedule_smv,
-                include_macro=fred_api_key is not None and not arguments.no_schedule_macro,
+            schedule_config.model_copy(
+                update={
+                    "selected_asset_ids": asset_ids,
+                    "selection_is_explicit": True,
+                }
             ),
         )
+
+    if not arguments.no_scheduler:
+        scheduled_asset_ids = scheduled_available_asset_ids(
+            initial_preferences,
+            controller.market_assets(),
+        )
+        if not scheduled_asset_ids:
+            raise ValueError("scheduler-enabled preferences require at least one scheduled asset")
+        jobs = jobs_for_preferences(scheduled_asset_ids)
         schedule_store = MultiAssetScheduleStateStore(paths.state_root / _SCHEDULE_STATE_FILE)
         schedule_attempts = schedule_store.load().attempts
         alert_monitor = OperationalAlertMonitor(alert_store)
@@ -236,6 +271,14 @@ def _serve(
             ),
         )
 
+    preference_service = AssetPreferencesService(
+        preference_store,
+        controller.market_assets(),
+        preference_seed,
+        scheduler=scheduler,
+        job_factory=jobs_for_preferences if scheduler is not None else None,
+    )
+
     web_application = AaplLocalWebApplication(
         controller,
         scheduler,
@@ -243,6 +286,7 @@ def _serve(
         analytical_store,
         analytical_rule_store,
         analytical_backtest,
+        asset_preferences=preference_service,
     )
     manual_operations = ManualOperationQueue(
         ManualOperationStateStore(paths.state_root / _MANUAL_OPERATION_STATE_FILE),
@@ -326,6 +370,7 @@ def main() -> int:
         return 4
     except (
         AaplOperationalStateError,
+        AssetPreferencesError,
         ApplicationRuntimeError,
         OSError,
         StorageError,

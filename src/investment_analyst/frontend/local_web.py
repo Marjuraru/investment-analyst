@@ -84,6 +84,12 @@ from investment_analyst.application.analysis_capabilities import (
     FundamentalAnalysisMode,
     MarketAnalysisMode,
 )
+from investment_analyst.application.asset_preferences import (
+    AssetPreferencesConflictError,
+    AssetPreferencesError,
+    AssetPreferencesService,
+    AssetPreferencesUpdate,
+)
 from investment_analyst.application.btc_intraday import (
     BtcIntradayChartQueryError,
     BtcIntradayRefreshError,
@@ -483,6 +489,14 @@ class _WebOperations(Protocol):
 
     def compact_overview(self) -> dict[str, object]:
         """Return the bounded nonblocking operational snapshot."""
+        ...
+
+    def asset_preferences(self) -> dict[str, object]:
+        """Return effective watchlist preferences without provider work."""
+        ...
+
+    def update_asset_preferences(self, payload: dict[str, object]) -> dict[str, object]:
+        """Persist and reconcile one optimistic preference update."""
         ...
 
     def enqueue_operation(self, payload: dict[str, object]) -> dict[str, object]:
@@ -977,6 +991,7 @@ class AaplLocalWebApplication:
         analytical_rule_store: AnalyticalRuleRegistryStore | None = None,
         analytical_backtest: AnalyticalBacktestService | None = None,
         manual_operations: ManualOperationQueue | None = None,
+        asset_preferences: AssetPreferencesService | None = None,
     ) -> None:
         self._controller = controller
         self._scheduler = scheduler
@@ -985,6 +1000,7 @@ class AaplLocalWebApplication:
         self._analytical_rule_store = analytical_rule_store
         self._analytical_backtest = analytical_backtest
         self._manual_operations = manual_operations
+        self._asset_preferences = asset_preferences
 
     def set_manual_operations(self, operations: ManualOperationQueue) -> None:
         """Attach the durable queue after its dispatcher can reference this adapter."""
@@ -1003,11 +1019,15 @@ class AaplLocalWebApplication:
         candidates: dict[str, object] = {"enabled": False}
         if self._analytical_store is not None:
             candidates = self._analytical_store.status().to_json_dict()
+        preferences: dict[str, object] = {"enabled": False}
+        if self._asset_preferences is not None:
+            preferences = self._asset_preferences.view().to_json_dict()
         return {
             "operational": self._controller.health().to_json_dict(),
             "scheduler": scheduler,
             "alerts": alerts,
             "candidates": candidates,
+            "asset_preferences": preferences,
         }
 
     def compact_overview(self) -> dict[str, object]:
@@ -1026,6 +1046,7 @@ class AaplLocalWebApplication:
             scheduled_running_count = _safe_nonnegative_int(status.get("running_count"))
             scheduled_failed_count = _safe_nonnegative_int(status.get("failed_count"))
         queue_snapshot = self._manual_operations.snapshot() if self._manual_operations else None
+        preferences = self._asset_preferences.view() if self._asset_preferences else None
         return OperationalOverviewSnapshot.now(
             operational_status=str(health["status"]),
             workspace_status=str(workspace["status"]),
@@ -1041,7 +1062,24 @@ class AaplLocalWebApplication:
             failed_operation_count=queue_snapshot.failed_count if queue_snapshot else 0,
             latest_operation_id=queue_snapshot.latest_operation_id if queue_snapshot else None,
             latest_operation_status=queue_snapshot.latest_status if queue_snapshot else None,
+            watchlist_asset_count=preferences.watchlist_count if preferences else 0,
+            favorite_asset_count=preferences.favorite_count if preferences else 0,
+            scheduled_asset_count=preferences.scheduled_asset_count if preferences else 0,
+            unavailable_preference_count=preferences.unavailable_count if preferences else 0,
         ).to_json_dict()
+
+    def asset_preferences(self) -> dict[str, object]:
+        """Return effective preferences without creating missing state."""
+        if self._asset_preferences is None:
+            raise ValueError("asset preferences are not configured")
+        return self._asset_preferences.view().to_json_dict()
+
+    def update_asset_preferences(self, payload: dict[str, object]) -> dict[str, object]:
+        """Validate, persist, and reconcile preferences without provider work."""
+        if self._asset_preferences is None:
+            raise ValueError("asset preferences are not configured")
+        request = AssetPreferencesUpdate.model_validate(payload)
+        return self._asset_preferences.update(request).to_json_dict()
 
     def enqueue_operation(self, payload: dict[str, object]) -> dict[str, object]:
         """Validate and durably enqueue one existing operation without provider work."""
@@ -1484,6 +1522,9 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         self._dispatch_post()
 
+    def do_PUT(self) -> None:  # noqa: N802
+        self._dispatch_put()
+
     def do_OPTIONS(self) -> None:  # noqa: N802
         self._send_error(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed", "method not allowed")
 
@@ -1511,6 +1552,11 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 if parsed.query:
                     raise ValueError("compact overview does not accept parameters")
                 self._send_json(HTTPStatus.OK, server.application.compact_overview())
+                return
+            if parsed.path == "/api/v1/asset-preferences":
+                if parsed.query:
+                    raise ValueError("asset preferences do not accept parameters")
+                self._send_json(HTTPStatus.OK, server.application.asset_preferences())
                 return
             operation_prefix = "/api/v1/manual-operations/"
             if parsed.path.startswith(operation_prefix):
@@ -1659,6 +1705,21 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
         except Exception as error:  # noqa: BLE001
             self._send_mapped_error(error)
 
+    def _dispatch_put(self) -> None:
+        try:
+            self._require_loopback_host()
+            parsed = urlsplit(self.path)
+            if parsed.query or parsed.path != "/api/v1/asset-preferences":
+                raise _HttpError(HTTPStatus.NOT_FOUND, "not_found", "route not found")
+            payload = self._read_json_object()
+            server = cast(AaplLocalHttpServer, self.server)
+            self._send_json(
+                HTTPStatus.OK,
+                server.application.update_asset_preferences(payload),
+            )
+        except Exception as error:  # noqa: BLE001
+            self._send_mapped_error(error)
+
     def _read_json_object(self) -> dict[str, object]:
         content_type = self.headers.get("Content-Type", "").partition(";")[0].strip().casefold()
         if content_type != "application/json":
@@ -1725,6 +1786,12 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 "rule_conflict",
                 str(error)[:500],
             )
+        elif isinstance(error, AssetPreferencesConflictError):
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "asset_preferences_conflict",
+                str(error)[:500],
+            )
         elif isinstance(error, AaplDailyRunExecutionError):
             status = (
                 HTTPStatus.UNPROCESSABLE_ENTITY
@@ -1789,6 +1856,7 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
             error,
             (
                 AaplOperationalStateError,
+                AssetPreferencesError,
                 ApplicationRuntimeError,
                 StorageError,
                 WorkspaceError,
