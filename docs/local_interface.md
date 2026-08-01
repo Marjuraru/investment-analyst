@@ -372,6 +372,15 @@ transitorios. Tras reiniciar, transforma un intento interrumpido en un fallo tra
 reintentarlo. Las operaciones del controlador continúan compartiendo un único mutex writer; no se
 ejecutan dos escrituras simultáneas.
 
+### Riesgo operativo separado: contención del mutex writer
+
+El mutex compartido protege la escritura única y evita ejecuciones concurrentes sobre el workspace,
+pero una cola de trabajos vencidos puede mantenerlo ocupado durante varios proveedores consecutivos.
+Mientras exista esa contención, `GET /api/overview` también espera el mutex y puede agotar el tiempo
+del cliente aunque el servicio siga activo; al terminar la cola, responde de nuevo sin reparar ni
+limpiar el workspace. Separar la lectura de salud de la exclusión de escritura queda fuera del alcance
+actual y debe conservarse como riesgo operativo independiente del flujo BTC diario.
+
 La decisión de reintento usa excepciones tipadas, su cadena causal y el estado HTTP estructurado; no
 interpreta texto libre. Timeout, conexión interrumpida, `408`, `429` y los estados transitorios
 `500`, `502`, `503` y `504` conservan backoff y presupuesto. Configuración o credenciales inválidas,

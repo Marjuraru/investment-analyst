@@ -1,7 +1,7 @@
 """Offline integration tests for the complete incremental BTC market refresh."""
 
-from collections.abc import Mapping
-from datetime import UTC, date, datetime
+from collections.abc import Callable, Mapping
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -15,6 +15,7 @@ from investment_analyst.analytics.market.history_service import HistoricalMarket
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
 from investment_analyst.analytics.market.statistics_pipeline import MarketStatisticsPipeline
 from investment_analyst.application.btc_refresh import (
+    BtcMarketExecutionClock,
     BtcMarketKnownAtTooEarlyError,
     BtcMarketRefreshPipeline,
 )
@@ -59,8 +60,12 @@ class FixtureTransport:
 def _pipeline(
     storage: LocalStorage,
     transport: FixtureTransport,
+    *,
+    execution_clock: Callable[[], datetime] | None = None,
 ) -> BtcMarketRefreshPipeline:
     history = HistoricalMarketDataService(storage)
+    fetch_clock = execution_clock or (lambda: FETCHED_AT)
+    analytics_clock = execution_clock or (lambda: RUN_AT)
     return BtcMarketRefreshPipeline(
         refresh_planner=BtcMarketRefreshPlanner(storage),
         market_pipeline=CoinbaseHistoricalPipeline(
@@ -68,23 +73,23 @@ def _pipeline(
             CoinbaseExchangeClient(
                 transport,
                 sleep=lambda _: None,
-                clock=lambda: FETCHED_AT,
+                clock=fetch_clock,
             ),
-            clock=lambda: FETCHED_AT,
+            clock=fetch_clock,
         ),
         statistics_pipeline=MarketStatisticsPipeline(
             storage,
             history,
             MarketStatisticsEngine(),
-            clock=lambda: RUN_AT,
+            clock=analytics_clock,
         ),
         diagnostic_pipeline=MarketDiagnosticPipeline(
             storage,
             MarketDiagnosticMetricSelector(storage),
             MarketDiagnosticEngine(),
-            clock=lambda: RUN_AT,
+            clock=analytics_clock,
         ),
-        clock=lambda: RUN_AT,
+        clock=analytics_clock,
     )
 
 
@@ -143,3 +148,31 @@ def test_explicit_cut_before_new_fetch_preserves_ingested_progress(tmp_path: Pat
         assert len(storage.observations.list(asset_id=ASSET_ID)) == 15
         assert storage.metric_results.list() == []
         assert storage.diagnostics.list() == []
+
+
+def test_refresh_preserves_point_in_time_when_wall_clock_regresses(tmp_path: Path) -> None:
+    high_watermark = RUN_AT + timedelta(microseconds=2)
+    regressed = RUN_AT - timedelta(hours=1)
+    wall_times = iter((RUN_AT, RUN_AT, high_watermark, regressed, regressed, regressed))
+    execution_clock = BtcMarketExecutionClock(lambda: next(wall_times, regressed))
+    transport = FixtureTransport()
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        result = _pipeline(
+            storage,
+            transport,
+            execution_clock=execution_clock,
+        ).run(_request())
+
+        assert result.effective_known_at == high_watermark
+        assert result.traceability_verified is True
+        assert result.metric_results_created > 0
+        assert result.diagnostics_created == 1
+        assert all(
+            observation.available_at <= result.effective_known_at
+            for observation in storage.observations.list(asset_id=ASSET_ID)
+        )
+        assert all(
+            metric.available_at <= metric.computed_at
+            for metric in storage.metric_results.list(asset_id=ASSET_ID)
+        )

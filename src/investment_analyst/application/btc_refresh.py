@@ -36,6 +36,24 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+class BtcMarketExecutionClock:
+    """Keep one BTC daily execution clock in UTC without allowing regressions."""
+
+    def __init__(self, source: Callable[[], datetime] = _utc_now) -> None:
+        self._source = source
+        self._latest: datetime | None = None
+
+    def __call__(self) -> datetime:
+        """Return the latest wall-clock value observed during this execution."""
+        value = self._source()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise BtcMarketRefreshError("clock must return a timezone-aware datetime")
+        normalized = value.astimezone(UTC)
+        if self._latest is None or normalized > self._latest:
+            self._latest = normalized
+        return self._latest
+
+
 class BtcMarketRefreshPipeline:
     """Plan, ingest, calculate, and diagnose BTC-USD without fundamental data."""
 

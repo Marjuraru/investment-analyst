@@ -80,7 +80,10 @@ from investment_analyst.application.btc_intraday_models import (
     BtcIntradayRefreshRequest,
     BtcIntradayRefreshSummary,
 )
-from investment_analyst.application.btc_refresh import BtcMarketRefreshPipeline
+from investment_analyst.application.btc_refresh import (
+    BtcMarketExecutionClock,
+    BtcMarketRefreshPipeline,
+)
 from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshRequest,
     BtcMarketRefreshSummary,
@@ -462,24 +465,32 @@ class InvestmentAnalystApplication:
             location,
             access_mode=WorkspaceAccessMode.READ_WRITE,
         ) as storage:
+            execution_clock = BtcMarketExecutionClock()
             history = HistoricalMarketDataService(storage)
             return BtcMarketRefreshPipeline(
                 refresh_planner=BtcMarketRefreshPlanner(storage),
                 market_pipeline=CoinbaseHistoricalPipeline(
                     storage,
-                    CoinbaseExchangeClient(self._transport_factory()),
+                    CoinbaseExchangeClient(
+                        self._transport_factory(),
+                        clock=execution_clock,
+                    ),
                     configuration=configuration,
+                    clock=execution_clock,
                 ),
                 statistics_pipeline=MarketStatisticsPipeline(
                     storage,
                     history,
                     MarketStatisticsEngine(),
+                    clock=execution_clock,
                 ),
                 diagnostic_pipeline=MarketDiagnosticPipeline(
                     storage,
                     MarketDiagnosticMetricSelector(storage),
                     MarketDiagnosticEngine(),
+                    clock=execution_clock,
                 ),
+                clock=execution_clock,
             ).run(request)
 
     def refresh_listed_market(
