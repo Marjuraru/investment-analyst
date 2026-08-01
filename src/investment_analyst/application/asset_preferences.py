@@ -182,6 +182,7 @@ class AssetPreferenceProjection(ContractModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    schema_version: Literal["asset-preference-projection-v1"] = "asset-preference-projection-v1"
     asset_id: str = Field(min_length=1, max_length=200)
     symbol: NonEmptyStr
     name: NonEmptyStr

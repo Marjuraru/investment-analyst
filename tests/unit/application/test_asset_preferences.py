@@ -342,6 +342,7 @@ def test_service_reconciles_registry_without_running_providers_and_allows_empty_
         job_factory=jobs,
     )
     initial = service.view()
+    assert all(item.schema_version == "asset-preference-projection-v1" for item in initial.assets)
     updated = service.update(
         _update(
             _entries("crypto:btc-usd"),

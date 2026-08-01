@@ -44,9 +44,9 @@ PUT /api/v1/asset-preferences
 ```
 
 GET devuelve `asset-preferences-view-v1`: origen `cli_seed` o `persisted`, revisión, fingerprint,
-conteos y una proyección compacta por activo. Proveedor, fuentes, frecuencias y capacidades se
-derivan del catálogo actual; no se guardan como preferencias mutables. Los favoritos se ordenan
-primero sin ocultar activos no favoritos o no disponibles.
+conteos y proyecciones `asset-preference-projection-v1` compactas por activo. Proveedor, fuentes,
+frecuencias y capacidades se derivan del catálogo actual; no se guardan como preferencias mutables.
+Los favoritos se ordenan primero sin ocultar activos no favoritos o no disponibles.
 
 PUT acepta únicamente `asset-preferences-update-v1`, con `expected_revision_id`,
 `expected_fingerprint` y entradas completas. Extras, schema desconocido, booleanos ambiguos,

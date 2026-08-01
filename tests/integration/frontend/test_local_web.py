@@ -1346,6 +1346,7 @@ def test_asset_preferences_get_put_conflict_and_invalid_payload_are_provider_fre
     assert updated_status == 200
     assert updated["source"] == "persisted"
     assert updated["revision_id"] == "00000000-0000-4000-8000-000000000301"
+    assert updated["assets"][0]["schema_version"] == "asset-preference-projection-v1"
     assert updated["assets"][0]["asset_id"] == "crypto:btc-usd"
     assert stale_status == 409
     assert stale["error"]["code"] == "asset_preferences_conflict"
