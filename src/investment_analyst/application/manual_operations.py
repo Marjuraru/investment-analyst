@@ -15,7 +15,14 @@ from uuid import UUID, uuid4
 
 from pydantic import ConfigDict, Field, JsonValue, field_validator, model_validator
 
+from investment_analyst.application.btc_intraday_models import BtcIntradayRefreshRequest
+from investment_analyst.application.btc_refresh_models import BtcMarketRefreshRequest
+from investment_analyst.application.listed_market_refresh_models import ListedMarketRefreshRequest
+from investment_analyst.application.operational_models import AaplDailyRunRequestSnapshot
 from investment_analyst.application.operational_state import AaplOperationalStateError
+from investment_analyst.application.sec_fundamental_refresh_models import (
+    SecIssuerFundamentalRefreshRequest,
+)
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 
 _MAX_OPERATIONS_RETAINED = 10_000
@@ -66,6 +73,22 @@ class ManualOperationRequest(ContractModel):
                 raise ValueError("manual operation payload must not contain credentials")
         return value
 
+    @model_validator(mode="after")
+    def validate_payload_for_operation(self) -> ManualOperationRequest:
+        """Reject payloads that do not match the selected public operation contract."""
+        if self.operation_kind is ManualOperationKind.COMPLETE_REFRESH:
+            AaplDailyRunRequestSnapshot.model_validate(self.payload)
+        elif self.operation_kind is ManualOperationKind.MARKET_DAILY:
+            if self.payload.get("asset_id") == "crypto:btc-usd":
+                BtcMarketRefreshRequest.model_validate(self.payload)
+            else:
+                ListedMarketRefreshRequest.model_validate(self.payload)
+        elif self.operation_kind is ManualOperationKind.MARKET_INTRADAY:
+            BtcIntradayRefreshRequest.model_validate(self.payload)
+        else:
+            SecIssuerFundamentalRefreshRequest.model_validate(self.payload)
+        return self
+
     @property
     def fingerprint(self) -> str:
         """Return a deterministic identity for active-operation deduplication."""
@@ -84,16 +107,18 @@ class ManualOperationResult(ContractModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal["manual-operation-result-v1"] = "manual-operation-result-v1"
-    result_schema_version: NonEmptyStr
+    result_schema_version: NonEmptyStr | None = None
     effective_known_at: UTCDateTime | None = None
-    created_count: int = Field(default=0, ge=0)
-    reused_count: int = Field(default=0, ge=0)
-    coverage_complete: bool = True
-    traceability_verified: bool = True
+    created_count: int | None = Field(default=None, ge=0)
+    reused_count: int | None = Field(default=None, ge=0)
+    coverage_complete: bool | None = None
+    traceability_verified: bool | None = None
 
     @field_validator("created_count", "reused_count", mode="before")
     @classmethod
     def reject_boolean_counts(cls, value: object) -> object:
+        if value is None:
+            return value
         if isinstance(value, bool):
             raise ValueError("manual operation counts must be integers")
         return value
@@ -101,8 +126,8 @@ class ManualOperationResult(ContractModel):
     @field_validator("coverage_complete", "traceability_verified", mode="before")
     @classmethod
     def require_boolean_evidence(cls, value: object) -> object:
-        if not isinstance(value, bool):
-            raise ValueError("manual operation evidence flags must be bool")
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("manual operation evidence flags must be bool or null")
         return value
 
 
@@ -296,6 +321,8 @@ class ManualOperationQueue:
         self._clock = clock
         self._operation_id_factory = operation_id_factory
         self._run_lock = threading.Lock()
+        self._time_lock = threading.Lock()
+        self._last_timestamp = _latest_timestamp(self._store.load())
         self._condition = threading.Condition()
         self._stop = False
         self._worker: threading.Thread | None = None
@@ -450,7 +477,26 @@ class ManualOperationQueue:
         value = self._clock()
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("manual operation clock must return a timezone-aware datetime")
-        return value.astimezone(UTC)
+        normalized = value.astimezone(UTC)
+        with self._time_lock:
+            if self._last_timestamp is not None and normalized < self._last_timestamp:
+                normalized = self._last_timestamp
+            self._last_timestamp = normalized
+        return normalized
+
+
+def _latest_timestamp(state: ManualOperationStateDocument) -> datetime | None:
+    timestamps = tuple(
+        timestamp
+        for operation in state.operations
+        for timestamp in (
+            operation.submitted_at,
+            operation.started_at,
+            operation.completed_at,
+        )
+        if timestamp is not None
+    )
+    return max(timestamps, default=None)
 
 
 def _iter_keys(value: JsonValue) -> tuple[str, ...]:

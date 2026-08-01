@@ -94,3 +94,5 @@ tamaños, SHA-256, UUID del workspace y conteos de raw records, observaciones, m
 El restore verifica todo el contenido y vuelve a inspeccionar DuckDB en modo read-only antes de
 activar un destino nuevo o vacío. Nunca sobrescribe un workspace con contenido ni modifica el
 workspace fuente. Consulta [`capability_driven_runtime.md`](capability_driven_runtime.md).
+La creación y la verificación rechazan enlaces simbólicos en cualquier nivel; el inventario solo
+acepta archivos regulares contenidos físicamente en el árbol validado.

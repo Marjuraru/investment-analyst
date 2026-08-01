@@ -1,6 +1,7 @@
 """Regression tests for durable queued manual operations."""
 
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -19,13 +20,14 @@ from investment_analyst.application.manual_operations import (
 )
 
 
-def _request() -> ManualOperationRequest:
+def _request(*, market_end: str = "2026-07-02") -> ManualOperationRequest:
     return ManualOperationRequest(
         operation_kind=ManualOperationKind.MARKET_DAILY,
         payload={
             "asset_id": "crypto:btc-usd",
-            "start": "2026-07-01",
-            "end": "2026-07-02",
+            "market_start": "2026-07-01",
+            "market_end": market_end,
+            "refresh_mode": "auto",
             "requested_known_at": "2026-07-03T00:00:00Z",
         },
     )
@@ -125,6 +127,93 @@ def test_queue_uses_one_writer_mutex_while_snapshot_remains_available(tmp_path: 
     assert snapshot.running_count == 1
     assert status is not None and status.status is ManualOperationStatus.RUNNING
     assert not worker.is_alive()
+
+
+@pytest.mark.parametrize(
+    ("operation_kind", "payload"),
+    [
+        (
+            ManualOperationKind.COMPLETE_REFRESH,
+            {
+                "asset_id": "equity:us:aapl",
+                "market_start": "2026-07-01",
+                "market_end": "2026-07-02",
+                "unexpected": True,
+            },
+        ),
+        (
+            ManualOperationKind.MARKET_DAILY,
+            {"asset_id": "crypto:btc-usd", "hours": 24},
+        ),
+        (
+            ManualOperationKind.MARKET_INTRADAY,
+            {
+                "asset_id": "crypto:btc-usd",
+                "hours": 12,
+                "requested_end": "2026-07-03T00:00:00Z",
+            },
+        ),
+        (
+            ManualOperationKind.FUNDAMENTALS,
+            {"asset_id": "equity:us:amd", "frequency": "monthly"},
+        ),
+    ],
+)
+def test_payload_is_strictly_validated_for_operation_before_persistence(
+    tmp_path: Path,
+    operation_kind: ManualOperationKind,
+    payload: dict[str, object],
+) -> None:
+    state_path = tmp_path / "manual-operations.json"
+    ManualOperationQueue(ManualOperationStateStore(state_path), lambda request: _result())
+
+    with pytest.raises(ValidationError):
+        ManualOperationRequest(operation_kind=operation_kind, payload=payload)
+
+    assert not state_path.exists()
+
+
+def test_worker_survives_decreasing_clock_and_completes_later_work(tmp_path: Path) -> None:
+    origin = datetime(2026, 7, 3, hour=1, tzinfo=UTC)
+    moments = iter(origin - timedelta(seconds=index) for index in range(6))
+    calls: list[ManualOperationRequest] = []
+    queue = ManualOperationQueue(
+        ManualOperationStateStore(tmp_path / "state.json"),
+        lambda request: calls.append(request) or _result(),
+        clock=lambda: next(moments),
+        operation_id_factory=iter(
+            (
+                UUID("00000000-0000-0000-0000-000000000010"),
+                UUID("00000000-0000-0000-0000-000000000011"),
+            )
+        ).__next__,
+    )
+    first = queue.enqueue(_request())
+    second = queue.enqueue(_request(market_end="2026-07-03"))
+
+    queue.start()
+    try:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if all(
+                (state := queue.get(operation_id)) is not None
+                and state.status is ManualOperationStatus.SUCCEEDED
+                for operation_id in (first.operation_id, second.operation_id)
+            ):
+                break
+            time.sleep(0.01)
+    finally:
+        queue.stop()
+
+    completed = tuple(queue.get(item.operation_id) for item in (first, second))
+    assert all(
+        item is not None and item.status is ManualOperationStatus.SUCCEEDED for item in completed
+    )
+    assert len(calls) == 2
+    for item in completed:
+        assert item is not None
+        assert item.started_at is not None and item.started_at >= item.submitted_at
+        assert item.completed_at is not None and item.completed_at >= item.started_at
 
 
 @pytest.mark.parametrize("key", ["api_key", "secret_key", "Authorization", "access_token"])

@@ -116,6 +116,8 @@ class CatalogAsset(Asset):
     @model_validator(mode="after")
     def validate_crypto_profile(self) -> "CatalogAsset":
         """Keep crypto taxonomy explicit and absent from non-crypto assets."""
+        if self.asset_class is AssetClass.CRYPTO and self.crypto_profile is None:
+            raise ValueError("crypto assets require an explicit crypto_profile")
         if self.asset_class is not AssetClass.CRYPTO and self.crypto_profile is not None:
             raise ValueError("crypto_profile is only valid for crypto assets")
         return self

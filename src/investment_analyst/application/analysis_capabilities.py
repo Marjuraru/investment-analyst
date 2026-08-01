@@ -151,11 +151,12 @@ def analysis_capabilities_for(asset: CatalogAsset) -> AssetAnalysisCapabilities:
         sorted(item for item in declared if item.startswith(_FUNDAMENTAL_PREFIX))
     )
     family, market_mode, fundamental_mode = _EXPECTED_MODES[asset.asset_class]
-    crypto_profile = (
-        _CRYPTO_PROFILE_MAP.get(asset.crypto_profile, CryptoAnalyticalProfile.UNSUPPORTED)
-        if asset.asset_class is AssetClass.CRYPTO
-        else None
-    )
+    if asset.asset_class is AssetClass.CRYPTO:
+        if asset.crypto_profile is None:
+            raise ValueError("crypto assets require an explicit catalog profile")
+        crypto_profile = _CRYPTO_PROFILE_MAP[asset.crypto_profile]
+    else:
+        crypto_profile = None
     return AssetAnalysisCapabilities(
         asset_id=asset.asset_id,
         asset_class=asset.asset_class,

@@ -121,15 +121,21 @@ class WorkspaceBackupService:
 
     def create(self, source: Path, destination: Path) -> WorkspaceBackupManifest:
         """Publish one complete backup directory only after every hash verifies."""
-        source_root = source.expanduser().resolve()
-        destination_root = destination.expanduser().resolve(strict=False)
+        source_path = source.expanduser()
+        destination_path = destination.expanduser()
+        if source_path.is_symlink() or destination_path.is_symlink():
+            raise WorkspaceBackupError("workspace backup paths must not be symbolic links")
+        source_root = source_path.resolve()
+        destination_root = destination_path.resolve(strict=False)
         if destination_root.exists():
             raise WorkspaceBackupError("backup destination already exists")
         temporary = destination_root.with_name(f".{destination_root.name}.{uuid4().hex}.tmp")
         if source_root == destination_root or source_root in destination_root.parents:
             raise WorkspaceBackupError("backup destination must be outside the source workspace")
         try:
+            _reject_symlinks(source_root)
             with _workspace_process_guard(source_root), self._writer_lock:
+                _reject_symlinks(source_root)
                 inspection = self._workspace_service.inspect(source_root)
                 if inspection.status != "ready":
                     raise WorkspaceBackupError("source workspace must be ready for backup")
@@ -159,12 +165,17 @@ class WorkspaceBackupService:
 
     def restore(self, backup: Path, destination: Path) -> WorkspaceInspection:
         """Verify then activate a backup only into a new or empty destination."""
-        backup_root = backup.expanduser().resolve()
-        destination_root = destination.expanduser().resolve(strict=False)
+        backup_path = backup.expanduser()
+        destination_path = destination.expanduser()
+        if backup_path.is_symlink() or destination_path.is_symlink():
+            raise WorkspaceBackupError("workspace restore paths must not be symbolic links")
+        backup_root = backup_path.resolve()
+        destination_root = destination_path.resolve(strict=False)
         if destination_root.exists() and any(destination_root.iterdir()):
             raise WorkspaceBackupError("restore destination must be new or empty")
         if backup_root == destination_root or backup_root in destination_root.parents:
             raise WorkspaceBackupError("restore destination must be outside the backup")
+        _reject_symlinks(backup_root)
         manifest = _load_manifest(backup_root / BACKUP_MANIFEST_NAME)
         _verify_backup_directory(backup_root, manifest)
         temporary = destination_root.with_name(f".{destination_root.name}.{uuid4().hex}.tmp")
@@ -200,6 +211,7 @@ class WorkspaceBackupService:
 
 
 def _inventory(root: Path) -> tuple[WorkspaceBackupFile, ...]:
+    _reject_symlinks(root)
     files: list[WorkspaceBackupFile] = []
     for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
         relative = path.relative_to(root).as_posix()
@@ -249,6 +261,8 @@ def _copy_inventory(
     for item in files:
         source_file = source / item.path
         target_file = destination / item.path
+        if source_file.is_symlink() or not source_file.is_file():
+            raise WorkspaceBackupError("backup inventory must contain only regular files")
         target_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source_file, target_file)
         if target_file.stat().st_size != item.size_bytes or _sha256(target_file) != item.sha256:
@@ -268,6 +282,7 @@ def _create_required_layout(root: Path) -> None:
 
 
 def _verify_backup_directory(root: Path, manifest: WorkspaceBackupManifest) -> None:
+    _reject_symlinks(root)
     expected = {item.path: item for item in manifest.files}
     actual = {
         path.relative_to(root).as_posix(): path
@@ -283,6 +298,8 @@ def _verify_backup_directory(root: Path, manifest: WorkspaceBackupManifest) -> N
 
 
 def _load_manifest(path: Path) -> WorkspaceBackupManifest:
+    if path.is_symlink() or not path.is_file():
+        raise WorkspaceBackupError("backup manifest must be a regular file")
     try:
         return WorkspaceBackupManifest.model_validate_json(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as error:
@@ -304,10 +321,19 @@ def _write_manifest(path: Path, manifest: WorkspaceBackupManifest) -> None:
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "rb", closefd=True) as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _reject_symlinks(root: Path) -> None:
+    try:
+        if root.is_symlink() or any(path.is_symlink() for path in root.rglob("*")):
+            raise WorkspaceBackupError("workspace backups must not contain symbolic links")
+    except OSError as error:
+        raise WorkspaceBackupError("workspace backup tree could not be inspected") from error
 
 
 @contextmanager

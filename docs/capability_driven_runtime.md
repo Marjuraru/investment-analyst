@@ -12,10 +12,11 @@ cripto spot diario, cripto spot intradía o fundamentales corporativos. El plan 
 `market-asset-universe-v3` y falla antes de abrir storage o contactar un proveedor si la capacidad no
 existe. `GET /api/v1/capabilities` expone este inventario inmutable.
 
-El catálogo añade `crypto_profile`. La taxonomía analítica resultante distingue `bitcoin`,
-`ethereum`, `altcoin` y `unsupported`; stablecoins y activos wrapped se clasifican explícitamente
-como no soportados. Solo Bitcoin tiene pipelines productivos. Ethereum y altcoins se caracterizan
-mediante contratos sintéticos, sin fórmulas on-chain ni reutilización de diagnósticos de Bitcoin.
+Todo criptoactivo del catálogo debe declarar `crypto_profile`; no existe fallback para un perfil
+ausente. La taxonomía analítica distingue `bitcoin`, `ethereum`, `altcoin` y `unsupported`;
+stablecoins y activos wrapped se clasifican explícitamente como no soportados. Solo Bitcoin tiene
+pipelines productivos. Ethereum y altcoins se caracterizan mediante contratos sintéticos, sin
+fórmulas on-chain ni reutilización de diagnósticos de Bitcoin.
 
 La configuración Coinbase declara producto, `asset_id`, source ID, granularity, unidad base y unidad
 de cotización. `coinbase_source_id(product_id, granularity_seconds)` conserva exactamente las
@@ -49,12 +50,16 @@ GET  /api/v1/manual-operations/<operation_id>
 ```
 
 `manual-operation-request-v1` admite `complete_refresh`, `market_daily`, `market_intraday` y
-`fundamentals`, con el payload estricto de la fachada existente. La cola persiste
+`fundamentals`. El payload se valida contra el contrato estricto de la operación seleccionada antes
+de calcular su fingerprint o persistirlo. La cola persiste
 `state/manual_operation_state_v1.json`, deduplica solicitudes equivalentes solo mientras estén
 `queued` o `running`, usa un único worker y el mismo writer de la fachada. Tras reiniciar, una
 operación que quedó `running` vuelve a `queued` con `recovery_count` incrementado y conserva su
-identidad. Los resultados son compactos; los errores usan mensajes fijos, y las claves que parecen
-credenciales se rechazan antes de persistir.
+identidad. El reloj auditado se mantiene no decreciente aunque el reloj de pared retroceda, por lo
+que el worker no se detiene. Los resultados conservan el schema y los conteos de la operación; la
+cobertura y trazabilidad solo se publican cuando la respuesta permite derivarlas, y `null` significa
+no evaluable. Los errores usan mensajes fijos, y las claves que parecen credenciales se rechazan
+antes de persistir.
 
 ## Telemetría
 
@@ -68,7 +73,8 @@ históricos sin este campo siguen cargando.
 `WorkspaceBackupService` crea un directorio temporal bajo coordinación del writer, inventaría todos
 los archivos regulares relevantes, verifica tamaño y SHA-256, registra los cuatro conteos de storage
 y solo entonces publica el destino. Locks y temporales no se incluyen. Una copia incompleta nunca
-aparece en la ruta final.
+aparece en la ruta final. Tanto la creación como la verificación rechazan cualquier enlace simbólico,
+incluido un enlace interno que apunte fuera del workspace o backup.
 
 El CLI toma el mismo lock de proceso que el servicio local; si el servicio está activo, rechaza el
 backup. Debe detenerse de forma ordenada antes de copiar para que ningún writer externo pueda abrirse

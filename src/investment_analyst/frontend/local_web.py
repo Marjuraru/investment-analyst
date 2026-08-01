@@ -189,18 +189,15 @@ def _safe_nonnegative_int(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def _manual_operation_result(response: dict[str, object]) -> ManualOperationResult:
-    """Reduce one existing public response to bounded durable evidence."""
-    created = sum(
-        _safe_nonnegative_int(value)
-        for key, value in response.items()
-        if key == "created_count" or key.endswith("_created")
-    )
-    reused = sum(
-        _safe_nonnegative_int(value)
-        for key, value in response.items()
-        if key == "reused_count" or key.endswith("_reused")
-    )
+def _manual_operation_result(
+    operation_kind: ManualOperationKind,
+    response: dict[str, object],
+) -> ManualOperationResult:
+    """Reduce one typed public response without inventing unavailable evidence."""
+    count_source = response.get("counts")
+    counts = count_source if isinstance(count_source, dict) else response
+    created = _operation_count(counts, suffix="_created", aggregate_key="created_count")
+    reused = _operation_count(counts, suffix="_reused", aggregate_key="reused_count")
     known_at: datetime | None = None
     for key in ("effective_known_at", "known_at", "checked_at", "retrieved_at"):
         value = response.get(key)
@@ -213,16 +210,60 @@ def _manual_operation_result(response: dict[str, object]) -> ManualOperationResu
         if candidate.tzinfo is not None and candidate.utcoffset() is not None:
             known_at = candidate.astimezone(UTC)
             break
-    coverage = response.get("coverage_complete", response.get("update_coverage_complete", True))
-    traceability = response.get("traceability_verified", True)
+    schema_version = response.get("schema_version")
     return ManualOperationResult(
-        result_schema_version=str(response.get("schema_version") or "legacy-operation-response"),
+        result_schema_version=(
+            schema_version if isinstance(schema_version, str) and schema_version else None
+        ),
         effective_known_at=known_at,
         created_count=created,
         reused_count=reused,
-        coverage_complete=coverage if isinstance(coverage, bool) else True,
-        traceability_verified=traceability if isinstance(traceability, bool) else True,
+        coverage_complete=_operation_coverage(operation_kind, response),
+        traceability_verified=_optional_bool(response.get("traceability_verified")),
     )
+
+
+def _operation_count(
+    values: Mapping[object, object],
+    *,
+    suffix: str,
+    aggregate_key: str,
+) -> int | None:
+    candidates = tuple(
+        value
+        for key, value in values.items()
+        if isinstance(key, str) and (key == aggregate_key or key.endswith(suffix))
+    )
+    if not candidates or any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in candidates
+    ):
+        return None
+    return sum(cast(int, value) for value in candidates)
+
+
+def _optional_bool(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _operation_coverage(
+    operation_kind: ManualOperationKind,
+    response: Mapping[str, object],
+) -> bool | None:
+    for key in ("coverage_complete", "update_coverage_complete"):
+        evidence = _optional_bool(response.get(key))
+        if evidence is not None:
+            return evidence
+    if operation_kind is ManualOperationKind.COMPLETE_REFRESH:
+        status = response.get("overall_status")
+        return status == "complete" if isinstance(status, str) else None
+    if operation_kind in {
+        ManualOperationKind.MARKET_DAILY,
+        ManualOperationKind.MARKET_INTRADAY,
+    }:
+        missing = response.get("missing_intervals")
+        if isinstance(missing, (list, tuple)):
+            return not missing
+    return None
 
 
 class _RunnerOperations(Protocol):
@@ -1026,7 +1067,7 @@ class AaplLocalWebApplication:
             response = self.market_intraday_refresh(cast(dict[str, object], request.payload))
         else:
             response = self.fundamental_refresh(cast(dict[str, object], request.payload))
-        return _manual_operation_result(response)
+        return _manual_operation_result(request.operation_kind, response)
 
     def alerts(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Return local persisted alerts without providers or analytical writes."""

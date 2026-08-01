@@ -149,6 +149,7 @@ def test_funds_and_crypto_do_not_inherit_corporate_analysis(
         asset_class=asset_class,
         exchange="COINBASE" if asset_class is AssetClass.CRYPTO else "NYSE ARCA",
         quote_currency="USD",
+        crypto_profile=(CatalogCryptoProfile.ALTCOIN if asset_class is AssetClass.CRYPTO else None),
         bindings=(
             _binding(
                 provider=provider,

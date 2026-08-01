@@ -99,3 +99,33 @@ def test_backup_and_restore_reject_existing_or_nonempty_destinations(tmp_path: P
     with pytest.raises(WorkspaceBackupError, match="new or empty"):
         service.restore(backup, destination)
     assert preserved.read_text(encoding="utf-8") == "keep"
+
+
+def test_backup_rejects_internal_symlink_without_copying_external_file(tmp_path: Path) -> None:
+    _, service, source = _service(tmp_path)
+    external = tmp_path / "external-secret.txt"
+    external.write_text("must stay outside the backup", encoding="utf-8")
+    (source / "state/external-link.txt").symlink_to(external)
+    destination = tmp_path / "backup"
+
+    with pytest.raises(WorkspaceBackupError, match="symbolic links"):
+        service.create(source, destination)
+
+    assert not destination.exists()
+
+
+def test_restore_verification_rejects_symlinked_inventory_file(tmp_path: Path) -> None:
+    _, service, source = _service(tmp_path)
+    backup = tmp_path / "backup"
+    manifest = service.create(source, backup)
+    target = backup / manifest.files[0].path
+    external = tmp_path / "external-replacement.bin"
+    external.write_bytes(target.read_bytes())
+    target.unlink()
+    target.symlink_to(external)
+    destination = tmp_path / "restored"
+
+    with pytest.raises(WorkspaceBackupError, match="symbolic links"):
+        service.restore(backup, destination)
+
+    assert not destination.exists()

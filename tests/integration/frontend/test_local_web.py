@@ -70,6 +70,7 @@ from investment_analyst.application.listed_market_refresh_models import (
     ListedMarketRefreshSummary,
 )
 from investment_analyst.application.manual_operations import (
+    ManualOperationKind,
     ManualOperationQueue,
     ManualOperationStateStore,
 )
@@ -99,6 +100,7 @@ from investment_analyst.frontend.local_web import (
     AaplLocalController,
     AaplLocalHttpServer,
     AaplLocalWebApplication,
+    _manual_operation_result,
 )
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
@@ -1900,3 +1902,85 @@ def test_versioned_manual_operation_api_enqueues_deduplicates_and_reports_status
     assert status_code == 200
     assert status["status"] == "succeeded"
     assert status["result"]["traceability_verified"] is True
+
+
+def test_manual_result_preserves_aapl_schema_counts_and_only_explicit_evidence() -> None:
+    result = _manual_operation_result(
+        ManualOperationKind.COMPLETE_REFRESH,
+        {
+            "schema_version": "aapl-daily-run-state-v1",
+            "effective_known_at": "2026-07-03T00:00:00Z",
+            "overall_status": "partial",
+            "counts": {
+                "raw_records_created": 2,
+                "raw_records_reused": 3,
+                "observations_created": 5,
+                "observations_reused": 7,
+                "metric_results_created": 11,
+                "metric_results_reused": 13,
+                "diagnostics_created": 17,
+                "diagnostics_reused": 19,
+            },
+            "traceability_verified": False,
+        },
+    )
+    unevaluable = _manual_operation_result(
+        ManualOperationKind.FUNDAMENTALS,
+        {
+            "schema_version": "sec-issuer-fundamental-refresh-v1",
+            "metric_results_created": 1,
+        },
+    )
+
+    assert result.result_schema_version == "aapl-daily-run-state-v1"
+    assert result.created_count == 35
+    assert result.reused_count == 42
+    assert result.coverage_complete is False
+    assert result.traceability_verified is False
+    assert unevaluable.created_count == 1
+    assert unevaluable.reused_count is None
+    assert unevaluable.coverage_complete is None
+    assert unevaluable.traceability_verified is None
+
+
+def test_manual_operation_api_rejects_kind_payload_before_writing_state(tmp_path: Path) -> None:
+    controller = AaplLocalController(
+        _FakeRunner(),
+        _FakeApplication(),
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    state_path = tmp_path / "manual-operations.json"
+    web.set_manual_operations(
+        ManualOperationQueue(
+            ManualOperationStateStore(state_path),
+            web.execute_manual_operation,
+        )
+    )
+    body = json.dumps(
+        {
+            "schema_version": "manual-operation-request-v1",
+            "operation_kind": "market_intraday",
+            "payload": {
+                "asset_id": "crypto:btc-usd",
+                "hours": 12,
+                "requested_end": "2026-07-03T00:00:00Z",
+            },
+        }
+    ).encode()
+
+    with _server(web) as (_, root):
+        status, response, _ = _json_request(
+            Request(
+                f"{root}/api/v1/manual-operations",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 400
+    assert response["error"]["code"] == "invalid_request"
+    assert not state_path.exists()
