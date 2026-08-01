@@ -8,19 +8,16 @@ from investment_analyst.providers.asset_config import (
     CoinbaseAssetConfiguration,
     SecAccountingStandard,
     SecAssetConfiguration,
+    coinbase_source_id,
     sec_source_ids,
 )
 from investment_analyst.providers.crypto.coinbase_exchange import (
     DAILY_GRANULARITY_SECONDS,
     MINUTE_GRANULARITY_SECONDS,
 )
-from investment_analyst.providers.crypto.coinbase_intraday_normalizer import (
-    SOURCE_ID as COINBASE_INTRADAY_SOURCE_ID,
-)
 from investment_analyst.providers.crypto.coinbase_normalizer import (
     ASSET_ID as COINBASE_ASSET_ID,
 )
-from investment_analyst.providers.crypto.coinbase_normalizer import SOURCE_ID as COINBASE_SOURCE_ID
 from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID as APPLE_ASSET_ID
 from investment_analyst.providers.market.alpaca_normalizer import alpaca_source_id
 from investment_analyst.providers.market.alpaca_stock import ADJUSTMENT, FEED
@@ -76,11 +73,15 @@ def resolve_coinbase_configuration(
         required_namespaces=("product_id",),
         required_capabilities=("market.daily_bars",),
     )
+    product_id = context.require_identifier("product_id")
+    base_unit, quote_unit = product_id.split("-", maxsplit=1)
     return CoinbaseAssetConfiguration(
         asset_id=context.asset.asset_id,
-        product_id=context.require_identifier("product_id"),
-        source_id=COINBASE_SOURCE_ID,
+        product_id=product_id,
+        source_id=coinbase_source_id(product_id, DAILY_GRANULARITY_SECONDS),
         granularity_seconds=DAILY_GRANULARITY_SECONDS,
+        base_unit=base_unit,
+        quote_unit=quote_unit,
     )
 
 
@@ -96,11 +97,15 @@ def resolve_coinbase_intraday_configuration(
         required_namespaces=("product_id",),
         required_capabilities=("market.minute_bars",),
     )
+    product_id = context.require_identifier("product_id")
+    base_unit, quote_unit = product_id.split("-", maxsplit=1)
     return CoinbaseAssetConfiguration(
         asset_id=context.asset.asset_id,
-        product_id=context.require_identifier("product_id"),
-        source_id=COINBASE_INTRADAY_SOURCE_ID,
+        product_id=product_id,
+        source_id=coinbase_source_id(product_id, MINUTE_GRANULARITY_SECONDS),
         granularity_seconds=MINUTE_GRANULARITY_SECONDS,
+        base_unit=base_unit,
+        quote_unit=quote_unit,
     )
 
 

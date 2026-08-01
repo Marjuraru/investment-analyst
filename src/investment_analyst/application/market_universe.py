@@ -7,6 +7,7 @@ from pydantic import ConfigDict, Field, model_validator
 
 from investment_analyst.application.analysis_capabilities import (
     AssetAnalysisCapabilities,
+    CryptoAnalyticalProfile,
     analysis_capabilities_for,
 )
 from investment_analyst.catalog.provider_configuration import (
@@ -19,7 +20,6 @@ from investment_analyst.catalog.provider_context import ProviderAssetContextReso
 from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.core.models import AssetClass, DataFrequency
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
-from investment_analyst.providers.crypto.coinbase_normalizer import ASSET_ID as BITCOIN_ASSET_ID
 from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID as APPLE_ASSET_ID
 
 _ALPACA_HISTORY_START = date(2016, 1, 1)
@@ -50,6 +50,7 @@ class MarketAssetDescriptor(ContractModel):
     analysis: AssetAnalysisCapabilities
     has_fundamentals: bool
     fundamental_frequencies: tuple[DataFrequency, ...]
+    fundamental_source_ids: tuple[NonEmptyStr, ...] = ()
     supports_intraday: bool
     intraday_source_id: NonEmptyStr | None = None
     intraday_schema_version: NonEmptyStr | None = None
@@ -80,6 +81,11 @@ class MarketAssetDescriptor(ContractModel):
             raise ValueError("fundamental frequencies must be supported, unique, and ordered")
         if self.has_fundamentals != bool(self.fundamental_frequencies):
             raise ValueError("fundamental frequencies must match fundamental availability")
+        expected_sources = tuple(sorted(set(self.fundamental_source_ids)))
+        if self.fundamental_source_ids != expected_sources:
+            raise ValueError("fundamental source IDs must be unique and sorted")
+        if self.has_fundamentals != bool(self.fundamental_source_ids):
+            raise ValueError("fundamental source IDs must match fundamental availability")
         if self.refresh_kind == "complete_analysis" and not self.has_fundamentals:
             raise ValueError("complete refresh requires fundamental capability")
         return self
@@ -188,13 +194,28 @@ def _descriptor(
             analysis=analysis,
             has_fundamentals=fundamental_pipeline_available,
             fundamental_frequencies=fundamental_frequencies,
+            fundamental_source_ids=(
+                tuple(
+                    sorted(
+                        (
+                            sec_configuration.submissions_source_id,
+                            sec_configuration.companyfacts_source_id,
+                        )
+                    )
+                )
+                if sec_configuration is not None
+                else ()
+            ),
             supports_intraday=False,
             refresh_kind=("complete_analysis" if complete_refresh_available else "market_only"),
         )
 
-    if binding.provider == "coinbase" and asset.asset_id == BITCOIN_ASSET_ID:
-        daily = resolve_coinbase_configuration(resolver)
-        intraday = resolve_coinbase_intraday_configuration(resolver)
+    if (
+        binding.provider == "coinbase"
+        and analysis.crypto_profile is CryptoAnalyticalProfile.BITCOIN
+    ):
+        daily = resolve_coinbase_configuration(resolver, asset_id=asset_id)
+        intraday = resolve_coinbase_intraday_configuration(resolver, asset_id=asset_id)
         return MarketAssetDescriptor(
             asset_id=asset.asset_id,
             symbol=daily.product_id,
@@ -206,11 +227,12 @@ def _descriptor(
             provider_identifier=daily.product_id,
             source_id=daily.source_id,
             chart_schema_version="btc-market-chart-v1",
-            volume_unit="BTC",
+            volume_unit=daily.base_unit,
             default_market_start=_COINBASE_HISTORY_START,
             analysis=analysis,
             has_fundamentals=False,
             fundamental_frequencies=(),
+            fundamental_source_ids=(),
             supports_intraday=_MINUTE_MARKET_CAPABILITY in binding.capabilities,
             intraday_source_id=intraday.source_id,
             intraday_schema_version="btc-intraday-chart-v1",

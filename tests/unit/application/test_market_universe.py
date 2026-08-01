@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from investment_analyst.application.analysis_capabilities import (
     AssetAnalysisCapabilities,
     AssetAnalysisFamily,
+    CryptoAnalyticalProfile,
     FundamentalAnalysisMode,
     MarketAnalysisMode,
 )
@@ -136,6 +137,7 @@ def test_market_descriptor_rejects_incomplete_intraday_contract() -> None:
                 family=AssetAnalysisFamily.CRYPTOASSET,
                 market_mode=MarketAnalysisMode.CRYPTO_SPOT,
                 fundamental_mode=FundamentalAnalysisMode.CRYPTO_NETWORK,
+                crypto_profile=CryptoAnalyticalProfile.ALTCOIN,
                 declared_market_capabilities=("market.minute_bars",),
                 declared_fundamental_capabilities=(),
                 market_data_configured=True,

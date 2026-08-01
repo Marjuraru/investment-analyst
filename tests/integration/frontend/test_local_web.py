@@ -4,6 +4,7 @@ import gzip
 import http.client
 import json
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
@@ -67,6 +68,10 @@ from investment_analyst.application.facade import InvestmentAnalystApplication
 from investment_analyst.application.listed_market_refresh_models import (
     ListedMarketRefreshRequest,
     ListedMarketRefreshSummary,
+)
+from investment_analyst.application.manual_operations import (
+    ManualOperationQueue,
+    ManualOperationStateStore,
 )
 from investment_analyst.application.market_universe import MarketAssetUniverse
 from investment_analyst.application.multi_asset_scheduler import (
@@ -1788,3 +1793,110 @@ def test_local_server_rejects_non_loopback_binding() -> None:
             ("0.0.0.0", 0),
             cast(AaplLocalWebApplication, _ExplodingApplication()),
         )
+
+
+def test_compact_overview_does_not_wait_for_blocked_provider_writer(tmp_path: Path) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _BlockedApplication(_FakeApplication):
+        def refresh_btc_market(
+            self,
+            request: BtcMarketRefreshRequest,
+            *,
+            location: StorageLocationRequest,
+        ) -> BtcMarketRefreshSummary:
+            entered.set()
+            assert release.wait(timeout=2)
+            return super().refresh_btc_market(request, location=location)
+
+    controller = AaplLocalController(
+        _FakeRunner(),
+        _BlockedApplication(),
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    request = BtcMarketRefreshRequest(
+        market_start=date(2026, 7, 1),
+        market_end=date(2026, 7, 2),
+        requested_known_at=datetime(2026, 7, 3, tzinfo=UTC),
+    )
+    worker = threading.Thread(target=controller.btc_market_refresh_request, args=(request,))
+    worker.start()
+    assert entered.wait(timeout=2)
+
+    started = time.perf_counter()
+    payload = AaplLocalWebApplication(controller, None).compact_overview()
+    elapsed = time.perf_counter() - started
+    release.set()
+    worker.join(timeout=2)
+
+    assert payload["schema_version"] == "operational-overview-snapshot-v1"
+    assert elapsed < 0.1
+    assert len(json.dumps(payload).encode("utf-8")) < 20 * 1024
+    assert not worker.is_alive()
+
+
+def test_versioned_manual_operation_api_enqueues_deduplicates_and_reports_status(
+    tmp_path: Path,
+) -> None:
+    controller = AaplLocalController(
+        _FakeRunner(),
+        _FakeApplication(),
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    queue = ManualOperationQueue(
+        ManualOperationStateStore(tmp_path / "manual-operations.json"),
+        web.execute_manual_operation,
+    )
+    web.set_manual_operations(queue)
+    body = json.dumps(
+        {
+            "schema_version": "manual-operation-request-v1",
+            "operation_kind": "market_daily",
+            "payload": {
+                "asset_id": "crypto:btc-usd",
+                "market_start": "2026-07-01",
+                "market_end": "2026-07-02",
+                "refresh_mode": "auto",
+                "requested_known_at": "2026-07-03T00:00:00Z",
+            },
+        }
+    ).encode()
+
+    with _server(web) as (_, root):
+        first_status, first, _ = _json_request(
+            Request(
+                f"{root}/api/v1/manual-operations",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        second_status, second, _ = _json_request(
+            Request(
+                f"{root}/api/v1/manual-operations",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        overview_status, overview, _ = _json_request(Request(f"{root}/api/v1/overview"))
+        completed = queue.run_next()
+        status_code, status, _ = _json_request(
+            Request(f"{root}/api/v1/manual-operations/{first['operation_id']}")
+        )
+
+    assert first_status == second_status == 202
+    assert first["operation_id"] == second["operation_id"]
+    assert first["status"] == "queued"
+    assert overview_status == 200
+    assert overview["queued_operation_count"] == 1
+    assert completed is not None and completed.status.value == "succeeded"
+    assert status_code == 200
+    assert status["status"] == "succeeded"
+    assert status["result"]["traceability_verified"] is True

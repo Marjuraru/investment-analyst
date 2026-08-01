@@ -33,6 +33,10 @@ The SEC CIK remains a ten-character string so leading zeroes are preserved. It i
 
 Provider-specific configuration models contain only the identifiers and fixed dataset settings required by the current flows. They are immutable and reject extra fields. The current source IDs, Alpaca IEX feed, adjustment mode, and Coinbase daily granularity remain unchanged.
 
+Coinbase declara también unidad base, unidad de cotización y granularity. Su source ID se deriva de
+`product_id + granularity`; para BTC-USD el resultado es byte por byte el ID histórico. Esto permite
+validar productos sintéticos sin crear pipelines productivos ni introducir bifurcaciones por símbolo.
+
 Existing constants remain available for compatibility with older tests and callers. New composition code resolves external identifiers through the catalog and uses those constants only for stable dataset identities that must remain compatible with persisted records.
 
 ## Persisted identity compatibility

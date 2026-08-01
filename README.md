@@ -150,6 +150,8 @@ información de la que realmente contienen.
   su estado y preparar la programación local.
 - [Interfaz y operación continua](docs/local_interface.md): usar la herramienta en el navegador y
   mantener el servicio local mediante `systemd --user`.
+- [Runtime por capacidades](docs/capability_driven_runtime.md): consultar dispatch tipado, overview
+  no bloqueante, cola manual durable, telemetría y backup/restore verificados.
 - [Base intradía de Coinbase](docs/coinbase_intraday.md): importar ventanas acotadas de un minuto y
   consultar agregaciones trazables por CLI o interfaz sin mezclar la historia diaria.
 - [Refresh fundamental SEC por emisor](docs/sec_issuer_refresh.md): actualizar snapshots,

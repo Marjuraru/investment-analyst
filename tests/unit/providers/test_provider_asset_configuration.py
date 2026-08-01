@@ -28,6 +28,7 @@ from investment_analyst.providers.asset_config import (
     ProviderConfigurationError,
     SecAccountingStandard,
     SecAssetConfiguration,
+    coinbase_source_id,
     sec_source_ids,
 )
 from investment_analyst.providers.crypto.coinbase_exchange import (
@@ -79,12 +80,16 @@ def test_factories_preserve_current_provider_and_persisted_identities() -> None:
         product_id=PRODUCT_ID,
         source_id=SOURCE_ID,
         granularity_seconds=DAILY_GRANULARITY_SECONDS,
+        base_unit="BTC",
+        quote_unit="USD",
     )
     assert coinbase_intraday == CoinbaseAssetConfiguration(
         asset_id=COINBASE_ASSET_ID,
         product_id=PRODUCT_ID,
         source_id=COINBASE_INTRADAY_SOURCE_ID,
         granularity_seconds=MINUTE_GRANULARITY_SECONDS,
+        base_unit="BTC",
+        quote_unit="USD",
     )
     assert sec == SecAssetConfiguration(
         asset_id=APPLE_ASSET_ID,
@@ -172,6 +177,8 @@ def test_configurations_are_strict_frozen_and_preserve_identifier_text() -> None
             product_id=PRODUCT_ID,
             source_id=SOURCE_ID,
             granularity_seconds=True,
+            base_unit="BTC",
+            quote_unit="USD",
         )
 
 
@@ -188,6 +195,17 @@ def test_sec_source_ids_are_issuer_specific_and_preserve_apple_identity() -> Non
         sec_source_ids("AMD/USD")
     with pytest.raises(ProviderConfigurationError):
         sec_source_ids("amd")
+
+
+def test_coinbase_source_identity_scales_by_product_and_granularity() -> None:
+    assert coinbase_source_id("BTC-USD", DAILY_GRANULARITY_SECONDS) == SOURCE_ID
+    assert coinbase_source_id("BTC-USD", MINUTE_GRANULARITY_SECONDS) == COINBASE_INTRADAY_SOURCE_ID
+    assert (
+        coinbase_source_id("ETH-USD", DAILY_GRANULARITY_SECONDS)
+        == "coinbase-exchange:eth-usd:daily-candles"
+    )
+    with pytest.raises(ProviderConfigurationError):
+        coinbase_source_id("eth/usd", DAILY_GRANULARITY_SECONDS)
 
 
 def test_sec_configuration_resolves_a_future_us_issuer_without_apple_ids() -> None:

@@ -48,6 +48,11 @@ not load the catalog themselves.
 The runtime is an ordinary injected object, not a singleton. It has no mutable global state, reads
 no `.env` file, and stores no credentials.
 
+`CapabilityDrivenRuntimePlan` complementa esta composición con un inventario inmutable por activo,
+proveedor, dominio y frecuencia. Conserva source IDs y fachadas públicas; no reemplaza storage ni
+activa proveedores nuevos. Véase
+[`capability_driven_runtime.md`](capability_driven_runtime.md).
+
 ## Examples
 
 Use the default workspace:
