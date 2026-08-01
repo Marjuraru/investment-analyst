@@ -38,13 +38,14 @@ from investment_analyst.core.models import (
     SourceReference,
 )
 from investment_analyst.core.models.diagnostic import DECIMAL_TOLERANCE
+from investment_analyst.providers.fundamentals.sec_diagnostic_rules import (
+    ALGORITHM_VERSION as FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION,
+)
 from investment_analyst.providers.fundamentals.sec_metric_models import (
     SEC_FUNDAMENTAL_METRIC_DEFINITIONS,
 )
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import RecordNotFoundError
-
-FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION = "sec-aapl-fundamental-diagnostic-v1.1-decimal34"
 
 _MARKET_METRIC_KEYS = frozenset({SIMPLE_RETURN_KEY, SMA_KEY, VOLATILITY_KEY, RELATIVE_VOLUME_KEY})
 _FUNDAMENTAL_DEFINITION_BY_KEY = {

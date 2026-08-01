@@ -59,6 +59,22 @@ def test_service_unit_can_disable_scheduler_and_writes_atomically(tmp_path: Path
     assert list(target.parent.glob(".*.tmp")) == []
 
 
+def test_service_unit_can_restrict_watchlist_and_disable_intraday(tmp_path: Path) -> None:
+    values = _config(tmp_path).model_dump()
+    values["scheduled_asset_ids"] = (
+        "crypto:btc-usd",
+        "equity:us:amd",
+    )
+    values["schedule_intraday"] = False
+
+    document = render_local_service_unit(AaplLocalServiceUnitConfig(**values))
+
+    assert document.count('"--schedule-asset"') == 2
+    assert '"crypto:btc-usd"' in document
+    assert '"equity:us:amd"' in document
+    assert '"--no-schedule-intraday"' in document
+
+
 def test_service_unit_rejects_relative_paths_and_boolean_port(tmp_path: Path) -> None:
     values = _config(tmp_path).model_dump()
     values["repository_root"] = Path("relative")

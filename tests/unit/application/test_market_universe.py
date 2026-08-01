@@ -16,13 +16,13 @@ from investment_analyst.application.market_universe import (
     MarketAssetDescriptor,
     MarketAssetUniverse,
 )
-from investment_analyst.core.models import AssetClass
+from investment_analyst.core.models import AssetClass, DataFrequency
 
 
 def test_default_universe_exposes_supported_assets_and_source_contracts() -> None:
     universe = InvestmentAnalystApplication.create_default().list_market_assets()
 
-    assert universe.schema_version == "market-asset-universe-v2"
+    assert universe.schema_version == "market-asset-universe-v3"
     assert universe.catalog_version == 1
     assert len(universe.assets) == 18
     assert tuple(item.asset_id for item in universe.assets) == tuple(
@@ -53,6 +53,10 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     assert apple.provider == "alpaca"
     assert apple.refresh_kind == "complete_analysis"
     assert apple.has_fundamentals
+    assert apple.fundamental_frequencies == (
+        DataFrequency.ANNUAL,
+        DataFrequency.QUARTERLY,
+    )
     assert apple.analysis.family is AssetAnalysisFamily.LISTED_COMPANY
     assert apple.analysis.market_mode is MarketAnalysisMode.LISTED_SECURITY
     assert apple.analysis.fundamental_mode is FundamentalAnalysisMode.CORPORATE
@@ -68,6 +72,10 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     )
     assert amd.has_fundamentals
     assert amd.refresh_kind == "market_only"
+    for symbol in ("B", "BVN", "TSM"):
+        foreign_issuer = by_symbol[symbol]
+        assert foreign_issuer.has_fundamentals
+        assert foreign_issuer.fundamental_frequencies == (DataFrequency.ANNUAL,)
     intel = by_symbol["INTC"]
     assert intel.analysis.fundamental_data_configured
     assert intel.has_fundamentals
@@ -82,7 +90,6 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
         assert issuer.analysis.fundamental_data_configured
         assert issuer.has_fundamentals
         assert issuer.refresh_kind == "market_only"
-    assert not by_symbol["B"].has_fundamentals
     for asset in universe.assets:
         if asset.analysis.fundamental_mode is FundamentalAnalysisMode.CORPORATE:
             assert asset.has_fundamentals is asset.analysis.fundamental_data_configured
@@ -102,8 +109,9 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     assert barrick.asset_id == "equity:us:b"
     assert barrick.provider_identifier == "B"
     assert barrick.source_id == "alpaca-market-data:iex:b:daily-bars:adjustment-all"
+    assert barrick.default_market_start == date(2025, 5, 10)
     assert barrick.analysis.family is AssetAnalysisFamily.LISTED_COMPANY
-    assert not barrick.has_fundamentals
+    assert barrick.has_fundamentals
 
 
 def test_market_descriptor_rejects_incomplete_intraday_contract() -> None:
@@ -134,6 +142,7 @@ def test_market_descriptor_rejects_incomplete_intraday_contract() -> None:
                 fundamental_data_configured=False,
             ),
             has_fundamentals=False,
+            fundamental_frequencies=(),
             supports_intraday=True,
             refresh_kind="market_only",
         )

@@ -14,6 +14,7 @@ _PROJECT_ROOT = Path(__file__).parents[3]
 _READ_ONLY_SCRIPTS = (
     "query_aapl_fundamental_research.py",
     "query_aapl_diagnostics.py",
+    "query_bvl_registry.py",
     "query_market_history.py",
     "query_sec_aapl_fundamentals.py",
 )
@@ -27,8 +28,17 @@ _READ_WRITE_SCRIPTS = (
     "fetch_sec_aapl_fundamentals.py",
     "normalize_sec_aapl_fundamentals.py",
     "refresh_sec_fundamentals.py",
+    "refresh_bvl_registry.py",
     "run_aapl_complete_snapshot.py",
 )
+_FACADE_READ_ONLY_SCRIPTS = {
+    "query_aapl_diagnostics.py": ".query_aapl_diagnostics(",
+    "query_bvl_registry.py": ".query_bvl_registry(",
+}
+_FACADE_READ_WRITE_SCRIPTS = {
+    "refresh_bvl_registry.py": ".refresh_bvl_registry(",
+    "refresh_sec_fundamentals.py": ".refresh_sec_fundamentals(",
+}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -73,16 +83,16 @@ def test_migrated_scripts_use_only_central_storage_composition() -> None:
 def test_scripts_and_facade_keep_explicit_storage_access_modes() -> None:
     for script_name in _READ_ONLY_SCRIPTS:
         text = (_PROJECT_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
-        if script_name == "query_aapl_diagnostics.py":
-            assert ".query_aapl_diagnostics(" in text
+        if script_name in _FACADE_READ_ONLY_SCRIPTS:
+            assert _FACADE_READ_ONLY_SCRIPTS[script_name] in text
             assert "WorkspaceAccessMode" not in text
         else:
             assert "WorkspaceAccessMode.READ_ONLY" in text
             assert "WorkspaceAccessMode.READ_WRITE" not in text
     for script_name in _READ_WRITE_SCRIPTS:
         text = (_PROJECT_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
-        if script_name == "refresh_sec_fundamentals.py":
-            assert ".refresh_sec_fundamentals(" in text
+        if script_name in _FACADE_READ_WRITE_SCRIPTS:
+            assert _FACADE_READ_WRITE_SCRIPTS[script_name] in text
             assert "WorkspaceAccessMode" not in text
         else:
             assert "WorkspaceAccessMode.READ_WRITE" in text
@@ -90,7 +100,9 @@ def test_scripts_and_facade_keep_explicit_storage_access_modes() -> None:
     facade = (_PROJECT_ROOT / "src" / "investment_analyst" / "application" / "facade.py").read_text(
         encoding="utf-8"
     )
-    assert facade.count("access_mode=WorkspaceAccessMode.READ_ONLY") == 9
+    assert facade.count("access_mode=WorkspaceAccessMode.READ_ONLY") == 11
+    assert "def query_fred_point_in_time(" in facade
+    assert "def query_bvl_registry(" in facade
     assert "def query_aapl_diagnostics(" in facade
     assert "def query_aapl_market_chart(" in facade
     assert "def query_btc_market_chart(" in facade
@@ -108,7 +120,10 @@ def test_scripts_and_facade_keep_explicit_storage_access_modes() -> None:
     assert "def query_sec_fundamental_research(" in facade
     assert "def query_sec_fundamental_research_history(" in facade
     assert "def query_sec_fundamental_analysis(" in facade
-    assert facade.count("access_mode=WorkspaceAccessMode.READ_WRITE") == 5
+    assert "def refresh_fred_vintage(" in facade
+    assert "def refresh_fred_catalog_series(" in facade
+    assert "def refresh_bvl_registry(" in facade
+    assert facade.count("access_mode=WorkspaceAccessMode.READ_WRITE") == 8
 
 
 def test_operational_cli_delegates_without_direct_storage_or_dotenv() -> None:

@@ -7,7 +7,7 @@ from uuid import uuid4
 from pydantic import ConfigDict, Field, field_validator
 
 from investment_analyst.application.aapl_scheduler import AaplDailyScheduleConfig
-from investment_analyst.core.models.base import ContractModel
+from investment_analyst.core.models.base import ContractModel, NonEmptyStr
 
 LOCAL_SERVICE_UNIT_NAME = "investment-analyst.service"
 
@@ -22,6 +22,10 @@ class AaplLocalServiceUnitConfig(ContractModel):
     workspace_root: Path
     port: int = Field(default=8765, ge=1, le=65_535)
     schedule: AaplDailyScheduleConfig | None
+    scheduled_asset_ids: tuple[NonEmptyStr, ...] = ()
+    schedule_intraday: bool = True
+    schedule_smv_registry: bool = True
+    schedule_macro: bool = True
 
     @field_validator(
         "repository_root",
@@ -59,6 +63,30 @@ class AaplLocalServiceUnitConfig(ContractModel):
             raise ValueError("port must be an integer")
         return value
 
+    @field_validator("scheduled_asset_ids")
+    @classmethod
+    def require_deterministic_asset_ids(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Keep the optional scheduler selection unique and ordered."""
+        if value != tuple(sorted(set(value))):
+            raise ValueError("scheduled_asset_ids must be unique and sorted")
+        return value
+
+    @field_validator(
+        "schedule_intraday",
+        "schedule_smv_registry",
+        "schedule_macro",
+        mode="before",
+    )
+    @classmethod
+    def require_intraday_boolean(cls, value: object) -> object:
+        """Reject truthy strings or integers."""
+        if not isinstance(value, bool):
+            raise ValueError("service schedule flags must be bool")
+        return value
+
 
 def render_local_service_unit(config: AaplLocalServiceUnitConfig) -> str:
     """Render a fixed user service without shell interpolation or embedded secrets."""
@@ -93,11 +121,19 @@ def render_local_service_unit(config: AaplLocalServiceUnitConfig) -> str:
         )
         if not config.schedule.require_complete:
             arguments.append("--allow-partial")
+        for asset_id in config.scheduled_asset_ids:
+            arguments.extend(("--schedule-asset", asset_id))
+        if not config.schedule_intraday:
+            arguments.append("--no-schedule-intraday")
+        if not config.schedule_smv_registry:
+            arguments.append("--no-schedule-smv")
+        if not config.schedule_macro:
+            arguments.append("--no-schedule-macro")
     command = " ".join(_quote_systemd(item) for item in arguments)
     return "\n".join(
         (
             "[Unit]",
-            "Description=Investment Analyst local Apple interface and scheduler",
+            "Description=Investment Analyst local interface and watchlist scheduler",
             "Wants=network-online.target",
             "After=network-online.target",
             "",

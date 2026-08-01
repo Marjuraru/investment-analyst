@@ -129,6 +129,14 @@ Then follow these rules:
 - Do not generate or apply a large patch from stale context. Prefer direct, narrow edits against the files currently on disk.
 - If a patch is explicitly required, run `git apply --check` first, apply it once, and never retry with `--3way` or `--reject` without new user direction.
 
+### Issue implementation publication default
+
+When the user asks to implement an issue by number, that request also authorizes the complete
+publication workflow for that issue: run every required validation, stage only the intended scope,
+commit, push, and open or update the pull request against the branch indicated by the issue or user.
+Never merge it. The final response for that workflow contains only the pull request, exact test
+results, and pending risks.
+
 ## Development environment
 
 - Primary environment: Windows, WSL2, Ubuntu 24.04, Python 3.12, VS Code, Git, Ruff, and Pytest.

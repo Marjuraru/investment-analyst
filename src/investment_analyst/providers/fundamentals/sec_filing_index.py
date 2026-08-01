@@ -14,7 +14,6 @@ from investment_analyst.providers.fundamentals.sec_raw_records import (
     aapl_sec_configuration,
 )
 
-_ALLOWED_FORMS = frozenset({"10-K", "10-K/A", "10-Q", "10-Q/A"})
 _COLUMNS = (
     "accessionNumber",
     "filingDate",
@@ -50,9 +49,10 @@ class SecFilingIndex:
         configuration: SecAssetConfiguration | None = None,
     ) -> "SecFilingIndex":
         """Validate a submissions RawRecord and index supported accessions."""
+        resolved_configuration = configuration or aapl_sec_configuration()
         recent = _validate_record_and_get_recent(
             record,
-            configuration or aapl_sec_configuration(),
+            resolved_configuration,
         )
         columns = {name: _require_list(recent, name) for name in _COLUMNS}
         lengths = {len(values) for values in columns.values()}
@@ -64,7 +64,11 @@ class SecFilingIndex:
         by_accession: dict[str, SecFilingMetadata] = {}
         row_count = next(iter(lengths), 0)
         for index in range(row_count):
-            metadata = _parse_row(columns, index)
+            metadata = _parse_row(
+                columns,
+                index,
+                allowed_forms=resolved_configuration.supported_forms,
+            )
             if metadata is None:
                 continue
             existing = by_accession.get(metadata.accession_number)
@@ -139,9 +143,11 @@ def _validate_record_and_get_recent(
 def _parse_row(
     columns: Mapping[str, list[object]],
     index: int,
+    *,
+    allowed_forms: frozenset[str],
 ) -> SecFilingMetadata | None:
     form = _require_string(columns["form"][index], "form")
-    if form not in _ALLOWED_FORMS:
+    if form not in allowed_forms:
         return None
 
     accession = _require_string(

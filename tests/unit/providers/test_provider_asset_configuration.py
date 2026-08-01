@@ -1,5 +1,7 @@
 """Unit coverage for typed configurations built from the central catalog."""
 
+from datetime import date
+
 import pytest
 from pydantic import ValidationError
 
@@ -24,6 +26,7 @@ from investment_analyst.providers.asset_config import (
     AlpacaAssetConfiguration,
     CoinbaseAssetConfiguration,
     ProviderConfigurationError,
+    SecAccountingStandard,
     SecAssetConfiguration,
     sec_source_ids,
 )
@@ -100,9 +103,11 @@ def test_factories_preserve_current_provider_and_persisted_identities() -> None:
 def test_alpaca_configuration_scales_from_catalog_without_changing_apple_identity() -> None:
     resolver = _resolver()
 
+    barrick = resolve_alpaca_configuration(resolver, asset_id="equity:us:b")
     bvn = resolve_alpaca_configuration(resolver, asset_id="equity:us:bvn")
     gld = resolve_alpaca_configuration(resolver, asset_id="etf:us:gld")
 
+    assert barrick.history_start == date(2025, 5, 10)
     assert (bvn.symbol, bvn.source_id, bvn.exchange) == (
         "BVN",
         "alpaca-market-data:iex:bvn:daily-bars:adjustment-all",
@@ -113,6 +118,8 @@ def test_alpaca_configuration_scales_from_catalog_without_changing_apple_identit
         "alpaca-market-data:iex:gld:daily-bars:adjustment-all",
         "etf",
     )
+    assert bvn.history_start is None
+    assert gld.history_start is None
 
 
 def test_alpaca_configuration_requires_explicit_asset_metadata() -> None:
@@ -123,6 +130,22 @@ def test_alpaca_configuration_requires_explicit_asset_metadata() -> None:
             feed=FEED,
             adjustment=ADJUSTMENT,
             source_id=ALPACA_SOURCE_ID,
+        )
+
+
+def test_alpaca_configuration_validates_optional_history_start() -> None:
+    with pytest.raises(ValidationError, match="must use YYYY-MM-DD"):
+        AlpacaAssetConfiguration(
+            asset_id=APPLE_ASSET_ID,
+            symbol=APPLE_TICKER,
+            feed=FEED,
+            adjustment=ADJUSTMENT,
+            source_id=ALPACA_SOURCE_ID,
+            name="Apple Inc.",
+            asset_class=AssetClass.EQUITY,
+            quote_currency="USD",
+            exchange="NASDAQ",
+            history_start="2025-99-99",
         )
 
 
@@ -194,6 +217,12 @@ def test_sec_configuration_resolves_a_future_us_issuer_without_apple_ids() -> No
                         ),
                         ProviderBinding(
                             provider="sec",
+                            namespace="taxonomy",
+                            identifier="us-gaap",
+                            capabilities=capabilities,
+                        ),
+                        ProviderBinding(
+                            provider="sec",
                             namespace="ticker",
                             identifier="AMD",
                             capabilities=capabilities,
@@ -232,6 +261,39 @@ def test_default_catalog_resolves_official_amd_sec_identity() -> None:
         quote_currency="USD",
         exchange="NASDAQ",
     )
+
+
+def test_default_catalog_resolves_bvn_as_annual_ifrs_foreign_issuer() -> None:
+    configuration = resolve_sec_configuration(
+        _resolver(),
+        asset_id="equity:us:bvn",
+    )
+
+    assert configuration.cik == "0001013131"
+    assert configuration.ticker == "BVN"
+    assert configuration.accounting_standard is SecAccountingStandard.IFRS
+    assert configuration.supported_forms == frozenset({"20-F", "20-F/A", "40-F", "40-F/A"})
+    assert configuration.supported_frequencies == ("annual",)
+
+
+@pytest.mark.parametrize(
+    ("asset_id", "cik", "ticker"),
+    [
+        ("equity:us:b", "0000756894", "B"),
+        ("equity:us:tsm", "0001046179", "TSM"),
+    ],
+)
+def test_default_catalog_resolves_additional_ifrs_foreign_issuers(
+    asset_id: str,
+    cik: str,
+    ticker: str,
+) -> None:
+    configuration = resolve_sec_configuration(_resolver(), asset_id=asset_id)
+
+    assert configuration.cik == cik
+    assert configuration.ticker == ticker
+    assert configuration.accounting_standard is SecAccountingStandard.IFRS
+    assert configuration.supported_frequencies == ("annual",)
 
 
 def test_sec_configuration_rejects_noncorporate_or_cross_issuer_identity() -> None:

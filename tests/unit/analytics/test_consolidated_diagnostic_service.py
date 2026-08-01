@@ -400,7 +400,10 @@ def test_complete_partial_unavailable_and_versions(tmp_path) -> None:
         )
         assert view.status is ConsolidatedDiagnosticStatus.COMPLETE
         assert view.fundamental.diagnostic is not None
-        assert view.fundamental.diagnostic.algorithm_version.endswith("v1.1-decimal34")
+        assert (
+            view.fundamental.diagnostic.algorithm_version
+            == FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION
+        )
         assert view.ignored_algorithm_versions == 1
         assert view.fundamental.revisions_superseded == 0
         assert view.market.computed_after_known_at

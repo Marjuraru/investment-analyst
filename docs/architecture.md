@@ -1,7 +1,7 @@
 # Arquitectura
 
 ## Separación por capas
-- `providers`: obtención de datos crudos por dominio (market, fundamentals,
+- `providers`: obtención de datos crudos por dominio (registry, market, fundamentals,
   crypto, macro).
 - `core`: modelos, configuración e interfaces compartidas.
 - `analytics`: cálculos deterministas por dominio, incluido el futuro módulo
@@ -57,13 +57,35 @@ Los diagnósticos de mercado y fundamental se calculan de forma independiente y
 pueden consultarse por separado. La consulta consolidada los presenta juntos sin
 mezclar su significado, sus fuentes ni producir una puntuación agregada.
 
-## Screening y alertas futuras
+## Descentralización del activo fundador
 
-El futuro motor de [screening y alertas](automated_screening_alerts.md) consumirá resultados
-persistidos o consultas point-in-time después de un refresh exitoso. Evaluará condiciones
-versionadas de forma trivaluada y conservará evidencia exacta; no recalculará datos mediante el
-frontend ni producirá una puntuación conjunta. Los eventos analíticos y los intentos de notificación
-tendrán identidades separadas para poder reintentar un canal sin duplicar el candidato.
+AAPL fue el primer flujo vertical completo y por eso persisten nombres `Aapl*`, valores
+predeterminados y contratos históricos en aplicación, operación e interfaz. Es deuda de
+compatibilidad, no una decisión de dominio: Apple debe comportarse como otra empresa del catálogo.
+
+La migración seguirá estas reglas:
+
+1. no crear nuevos casos de uso, rutas, estados ni modelos específicos de AAPL;
+2. introducir contratos genéricos por activo y dominio antes de añadir más capacidades;
+3. mantener temporalmente los contratos y esquemas históricos como adaptadores del flujo genérico;
+4. no renombrar archivos de estado, IDs o esquemas persistidos sin una migración versionada;
+5. probar las mismas rutas con varios emisores US-GAAP, IFRS y proveedores de mercado;
+6. permitir especialización por familia —empresa, ETF o cripto—, no por símbolo;
+7. retirar una bifurcación Apple solo cuando replay, idempotencia, point-in-time y clientes
+   compatibles estén cubiertos.
+
+El criterio de salida es que seleccionar AAPL, AMD, CDE, BVN ADR o TSM reutilice la misma
+orquestación empresarial según las capacidades declaradas. Las diferencias legítimas serán fuente,
+taxonomía, frecuencia, moneda y cobertura, nunca el nombre del activo.
+
+## Screening y alertas
+
+El motor de [screening y alertas](automated_screening_alerts.md) consume resultados persistidos
+después de un refresh exitoso y con evidencia nueva. Evalúa condiciones versionadas de forma
+trivaluada, conserva evidencia exacta y ofrece un replay point-in-time de solo lectura; no recalcula
+datos mediante el frontend ni produce una puntuación conjunta. Los eventos analíticos y los futuros
+intentos de notificación tienen identidades separadas para poder reintentar un canal sin duplicar el
+candidato.
 
 ## Escalabilidad futura
 La modularidad y el desacoplamiento permiten incorporar más adelante Docker,
@@ -73,6 +95,14 @@ núcleo. Nada de esa infraestructura se incluye en el MVP.
 Los datasets centenarios destinados a investigación y modelado seguirán la
 [estrategia de datos históricos](historical_research_data.md): workspace separado, licencias
 registradas, vintages point-in-time y evaluación temporal sin contaminar el pipeline operativo.
+El primer [conector FRED/ALFRED](fred_alfred_point_in_time.md) persiste cada snapshot macro como
+RawRecord sin `asset_id` y lo consulta por `available_at`; no reutiliza el contrato de barras ni
+crea métricas o diagnósticos de activos.
+
+El [registro SMV/BVL](smv_bvl_registry.md) aplica la misma separación a identidad: las respuestas
+registrales completas son RawRecords con `asset_id=None`, mientras el catálogo versionado conserva
+las identidades de cotización. La consulta las relaciona sin convertir campos registrales en
+precios, fundamentales o señales.
 
 ## Prohibición actual de ejecución de órdenes
 El sistema no ejecuta operaciones ni se integra con brokers. Solo produce

@@ -27,6 +27,10 @@ _SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9.-]{0,15}$")
 class AlpacaStockError(ValueError):
     """Invalid Alpaca request parameters, credentials, or response data."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        self.status_code = status_code
+        super().__init__(message)
+
 
 @dataclass(frozen=True, slots=True, repr=False)
 class AlpacaCredentials:
@@ -192,7 +196,10 @@ class AlpacaStockClient:
             )
             request_urls.append(request_url)
             if response.status_code != 200:
-                raise AlpacaStockError(f"Alpaca Market Data returned HTTP {response.status_code}")
+                raise AlpacaStockError(
+                    f"Alpaca Market Data returned HTTP {response.status_code}",
+                    status_code=response.status_code,
+                )
             page_bars, next_page_token = _parse_page(symbol, response.body)
             for bar in page_bars:
                 if not requested_start <= bar.timestamp < requested_end:

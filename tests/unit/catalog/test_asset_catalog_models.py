@@ -117,3 +117,28 @@ def test_document_rejects_external_binding_shared_by_different_assets() -> None:
     )
     with pytest.raises(ValidationError, match="globally unique"):
         AssetCatalogDocument(catalog_version=1, assets=(crypto, _asset()))
+
+
+def test_document_allows_explicit_non_unique_external_relationship() -> None:
+    shared = _binding(
+        provider="smv",
+        namespace="legal_name",
+        identifier="EMISOR S.A.A.",
+        capabilities=("registry.issuer",),
+        is_unique=False,
+    )
+    first = _asset(provider_bindings=(shared,))
+    second = _asset(
+        asset_id="equity:pe:bvl:second",
+        symbol="SECOND",
+        name="Second listing",
+        aliases=("SECOND",),
+        provider_bindings=(shared,),
+    )
+
+    document = AssetCatalogDocument(
+        catalog_version=1,
+        assets=tuple(sorted((first, second), key=lambda item: item.asset_id)),
+    )
+
+    assert document.assets[0].provider_bindings[0].is_unique is False

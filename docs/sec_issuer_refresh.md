@@ -1,8 +1,8 @@
 # Refresh fundamental SEC por emisor
 
-Este flujo actualiza una empresa estadounidense configurada en el catálogo sin depender de Alpaca,
-de su cobertura de mercado ni del bootstrap completo de Apple. Usa únicamente SEC EDGAR, no exige
-una API key y mantiene el diagnóstico fundamental separado del diagnóstico de mercado.
+Este flujo actualiza una empresa cotizada y configurada en SEC sin depender de Alpaca, de su
+cobertura de mercado ni del bootstrap completo de Apple. Usa únicamente SEC EDGAR, no exige una API
+key y mantiene el diagnóstico fundamental separado del diagnóstico de mercado.
 
 ## Etapas
 
@@ -33,11 +33,17 @@ Apple conserva sus IDs y versiones históricas. Los emisores genéricos habilita
 - McEwen: activo `equity:us:mux`, ticker `MUX` y CIK `0000314203`;
 - Newmont: activo `equity:us:nem`, ticker `NEM` y CIK `0001164727`;
 - Southern Copper: activo `equity:us:scco`, ticker `SCCO` y CIK `0001001838`.
+- Barrick: activo `equity:us:b`, ticker `B`, CIK `0000756894`, IFRS anual y 40-F;
+- Buenaventura ADR: activo `equity:us:bvn`, ticker `BVN`, CIK `0001013131`, IFRS anual y 20-F;
+- TSM: activo `equity:us:tsm`, ticker `TSM`, CIK `0001046179`, IFRS anual y 20-F.
 
 Las identidades fueron contrastadas con el índice oficial de compañías de SEC. La de AMD también se
 contrastó con su
 [Form 10-K oficial de SEC](https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/0000002488-26-000018-index.htm).
 Su incorporación no autoriza aplicar el conector SEC a ETF, criptomonedas ni empresas BVL/SMV.
+El catálogo declara además la taxonomía: US-GAAP admite anual y trimestral mediante 10-K/10-Q; el
+perfil IFRS admite solo anual mediante 20-F/40-F. Una frecuencia incompatible falla antes de
+consultar SEC o abrir una operación de escritura.
 
 ## Ejecución
 
@@ -77,6 +83,11 @@ observaciones recién validados.
 observaciones por campo y frecuencia, omisiones, métricas creadas o reutilizadas, cobertura,
 requisitos faltantes y diagnóstico. No incluye documentos SEC, credenciales ni un `User-Agent`.
 
+Si Company Facts asigna el mismo año y período fiscal a dos cierres distintos, el motor no escoge
+uno por orden de almacenamiento. Marca ambos contextos fiscales como inconsistentes, conserva los
+ratios que dependen solo del mismo cierre y omite únicamente los comparativos interanuales
+afectados. La omisión queda contabilizada como `inconsistent_fiscal_metadata`.
+
 El motor ampliado puede consultar después la tendencia de cinco hechos, las 40 métricas, su
 historial y las ocho secciones analíticas usando el mismo `asset_id`. El smoke real de AMD del
 28 de julio de 2026 confirmó idempotencia exacta y 25 métricas disponibles en el período más
@@ -87,6 +98,8 @@ métricas y el diagnóstico. MSTR, MU y PLTR produjeron respectivamente 477, 873
 CDE, HYMC, MUX, NEM y SCCO produjeron respectivamente 873, 633, 845, 569 y 1224 observaciones y 20,
 27, 31, 33 y 9 métricas base. Su cobertura varía y permanece explícita; las repeticiones no crearon
 registros. Todos conservaron trazabilidad completa, por lo que sus descriptores web están
-habilitados. Barrick queda excluido porque su evidencia reciente es 40-F/IFRS, fuera del contrato
-US-GAAP 10-K/10-Q. La interfaz usa un endpoint writer independiente y cachés de lectura por emisor.
+habilitados. Los smokes IFRS reales del 29 de julio de 2026 produjeron 166 observaciones y 43
+métricas base para Barrick, 215 y 38 para BVN, y 149 y 38 para TSM; sus repeticiones reutilizaron
+exactamente los dos raw, todas las observaciones, todas las métricas y el diagnóstico. La interfaz
+usa un endpoint writer independiente, frecuencia anual y cachés de lectura por emisor.
 El flujo no calcula valoración, no combina scores, no recomienda operaciones y no ejecuta órdenes.

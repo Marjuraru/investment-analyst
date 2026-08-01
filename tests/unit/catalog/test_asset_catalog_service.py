@@ -25,6 +25,12 @@ from investment_analyst.core.models import AssetClass
 
 _DEFAULT_ASSET_IDS = [
     "crypto:btc-usd",
+    "equity:pe:bvl:bvn",
+    "equity:pe:bvl:cverdec1",
+    "equity:pe:bvl:minsuri1",
+    "equity:pe:bvl:pomalcc1",
+    "equity:pe:bvl:scco",
+    "equity:pe:bvl:volcabc1",
     "equity:us:aapl",
     "equity:us:amd",
     "equity:us:b",
@@ -77,10 +83,10 @@ def test_default_catalog_loads_and_lists_deterministically() -> None:
     service = AssetCatalogService.load_default()
     assert service.catalog_version == 1
     assert [asset.asset_id for asset in service.list_assets()] == _DEFAULT_ASSET_IDS
-    assert service.list_assets(asset_type=AssetClass.EQUITY)[0].symbol == "AAPL"
-    assert [
-        asset.asset_id for asset in service.list_assets(capability="market.daily_bars")
-    ] == _DEFAULT_ASSET_IDS
+    assert service.list_assets(asset_type=AssetClass.EQUITY)[0].symbol == "BVN"
+    assert [asset.asset_id for asset in service.list_assets(capability="market.daily_bars")] == [
+        asset_id for asset_id in _DEFAULT_ASSET_IDS if not asset_id.startswith("equity:pe:bvl:")
+    ]
     assert [asset.asset_id for asset in service.list_assets(capability="market.minute_bars")] == [
         "crypto:btc-usd"
     ]
@@ -157,6 +163,48 @@ def test_coinbase_asset_and_product_binding_are_available() -> None:
     assert service.supports(bitcoin.asset_id, "market.minute_bars")
 
 
+def test_bvl_listings_have_separate_exchange_identity_and_corroborated_isin() -> None:
+    service = AssetCatalogService.load_default()
+    cerro = service.resolve_external(
+        provider="bvl",
+        namespace="mnemonic",
+        identifier="CVERDEC1",
+    )
+    bvl_bvn = service.resolve_external(
+        provider="bvl",
+        namespace="mnemonic",
+        identifier="BVN",
+    )
+    us_bvn = service.resolve_external(
+        provider="alpaca",
+        namespace="symbol",
+        identifier="BVN",
+    )
+
+    assert cerro.asset_id == "equity:pe:bvl:cverdec1"
+    assert cerro.exchange == "BVL"
+    assert (
+        service.get_binding(
+            cerro.asset_id,
+            provider="bvl",
+            namespace="isin",
+        ).identifier
+        == "PEP646501002"
+    )
+    assert (
+        service.get_binding(
+            cerro.asset_id,
+            provider="smv",
+            namespace="security_code",
+        ).identifier
+        == "64650100"
+    )
+    assert bvl_bvn.asset_id == "equity:pe:bvl:bvn"
+    assert us_bvn.asset_id == "equity:us:bvn"
+    assert bvl_bvn != us_bvn
+    assert len(service.list_assets(capability="registry.exchange_listing")) == 6
+
+
 def test_typed_not_found_errors() -> None:
     service = AssetCatalogService.load_default()
     with pytest.raises(AssetNotFoundError):
@@ -195,6 +243,38 @@ def test_ambiguous_alias_and_binding_fail_without_tie_breaking() -> None:
     service = AssetCatalogService(AssetCatalogDocument(catalog_version=1, assets=(multiple,)))
     with pytest.raises(AmbiguousProviderBindingError):
         service.get_binding("equity:us:multiple", provider="alpaca", namespace="symbol")
+
+    shared_issuer = ProviderBinding(
+        provider="smv",
+        namespace="legal_name",
+        identifier="EMISOR S.A.A.",
+        is_unique=False,
+        capabilities=("registry.issuer",),
+    )
+    first_listing = _catalog_asset(
+        asset_id="equity:pe:bvl:first",
+        symbol="FIRST",
+        alias="FIRST",
+        bindings=(shared_issuer,),
+    )
+    second_listing = _catalog_asset(
+        asset_id="equity:pe:bvl:second",
+        symbol="SECOND",
+        alias="SECOND",
+        bindings=(shared_issuer,),
+    )
+    service = AssetCatalogService(
+        AssetCatalogDocument(
+            catalog_version=1,
+            assets=(first_listing, second_listing),
+        )
+    )
+    with pytest.raises(AmbiguousProviderBindingError):
+        service.resolve_external(
+            provider="smv",
+            namespace="legal_name",
+            identifier="EMISOR S.A.A.",
+        )
 
 
 def test_path_loading_rejects_malformed_and_unknown_versions(tmp_path) -> None:

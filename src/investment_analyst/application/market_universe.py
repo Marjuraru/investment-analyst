@@ -17,7 +17,7 @@ from investment_analyst.catalog.provider_configuration import (
 )
 from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
 from investment_analyst.catalog.service import AssetCatalogService
-from investment_analyst.core.models import AssetClass
+from investment_analyst.core.models import AssetClass, DataFrequency
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
 from investment_analyst.providers.crypto.coinbase_normalizer import ASSET_ID as BITCOIN_ASSET_ID
 from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID as APPLE_ASSET_ID
@@ -49,6 +49,7 @@ class MarketAssetDescriptor(ContractModel):
     default_market_start: date
     analysis: AssetAnalysisCapabilities
     has_fundamentals: bool
+    fundamental_frequencies: tuple[DataFrequency, ...]
     supports_intraday: bool
     intraday_source_id: NonEmptyStr | None = None
     intraday_schema_version: NonEmptyStr | None = None
@@ -70,6 +71,15 @@ class MarketAssetDescriptor(ContractModel):
             raise ValueError("visible market assets require configured market data")
         if self.has_fundamentals and not self.analysis.fundamental_data_configured:
             raise ValueError("fundamental analysis requires declared fundamental data")
+        expected_frequencies = (
+            tuple(sorted(set(self.fundamental_frequencies), key=lambda item: item.value))
+            if self.has_fundamentals
+            else ()
+        )
+        if self.fundamental_frequencies != expected_frequencies:
+            raise ValueError("fundamental frequencies must be supported, unique, and ordered")
+        if self.has_fundamentals != bool(self.fundamental_frequencies):
+            raise ValueError("fundamental frequencies must match fundamental availability")
         if self.refresh_kind == "complete_analysis" and not self.has_fundamentals:
             raise ValueError("complete refresh requires fundamental capability")
         return self
@@ -80,7 +90,7 @@ class MarketAssetUniverse(ContractModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["market-asset-universe-v2"] = "market-asset-universe-v2"
+    schema_version: Literal["market-asset-universe-v3"] = "market-asset-universe-v3"
     catalog_version: int = Field(ge=1)
     assets: tuple[MarketAssetDescriptor, ...]
 
@@ -127,6 +137,7 @@ def _descriptor(
         binding
         for binding in asset.provider_bindings
         if _DAILY_MARKET_CAPABILITY in binding.capabilities
+        and binding.namespace in {"product_id", "symbol"}
     )
     if len(market_bindings) != 1:
         raise ValueError("each visible market asset requires exactly one default daily source")
@@ -137,8 +148,16 @@ def _descriptor(
     fundamental_pipeline_available = (
         asset.asset_class is AssetClass.EQUITY and _FUNDAMENTAL_CAPABILITIES.issubset(capabilities)
     )
-    if fundamental_pipeline_available:
+    sec_configuration = (
         resolve_sec_configuration(resolver, asset_id=asset_id)
+        if fundamental_pipeline_available
+        else None
+    )
+    fundamental_frequencies = (
+        tuple(DataFrequency(item) for item in sec_configuration.supported_frequencies)
+        if sec_configuration is not None
+        else ()
+    )
     complete_refresh_available = (
         asset.asset_id in _COMPLETE_ANALYSIS_ASSET_IDS and fundamental_pipeline_available
     )
@@ -162,9 +181,13 @@ def _descriptor(
                 else "listed-market-chart-v1"
             ),
             volume_unit="shares",
-            default_market_start=_ALPACA_HISTORY_START,
+            default_market_start=max(
+                _ALPACA_HISTORY_START,
+                configuration.history_start or _ALPACA_HISTORY_START,
+            ),
             analysis=analysis,
             has_fundamentals=fundamental_pipeline_available,
+            fundamental_frequencies=fundamental_frequencies,
             supports_intraday=False,
             refresh_kind=("complete_analysis" if complete_refresh_available else "market_only"),
         )
@@ -187,6 +210,7 @@ def _descriptor(
             default_market_start=_COINBASE_HISTORY_START,
             analysis=analysis,
             has_fundamentals=False,
+            fundamental_frequencies=(),
             supports_intraday=_MINUTE_MARKET_CAPABILITY in binding.capabilities,
             intraday_source_id=intraday.source_id,
             intraday_schema_version="btc-intraday-chart-v1",

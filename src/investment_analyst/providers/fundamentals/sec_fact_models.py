@@ -9,6 +9,7 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from investment_analyst.core.models import DataFrequency, DataQuality
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
+from investment_analyst.providers.asset_config import SecAccountingStandard
 
 ASSET_ID = "equity:us:aapl"
 CIK = "0000320193"
@@ -17,7 +18,7 @@ COMPANYFACTS_SOURCE_ID = "sec-edgar:aapl:companyfacts"
 SUBMISSIONS_SCHEMA_VERSION = "sec-edgar-submissions-snapshot-v1"
 COMPANYFACTS_SCHEMA_VERSION = "sec-edgar-companyfacts-snapshot-v1"
 TRANSFORMATION_VERSION = "sec-aapl-companyfacts-normalizer-v1"
-_ALLOWED_FORMS = frozenset({"10-K", "10-K/A", "10-Q", "10-Q/A"})
+_ALLOWED_FORMS = frozenset({"10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "40-F/A"})
 
 
 class SecFactPeriodType(StrEnum):
@@ -304,7 +305,217 @@ SEC_RESEARCH_FACT_DEFINITIONS = (
 )
 
 SEC_NORMALIZED_FACT_DEFINITIONS = SEC_FACT_DEFINITIONS + SEC_RESEARCH_FACT_DEFINITIONS
-_DEFINITION_BY_FIELD = {item.field_name: item for item in SEC_NORMALIZED_FACT_DEFINITIONS}
+
+# IFRS definitions intentionally include only concepts with direct economic and unit
+# compatibility with the provider-independent field. Missing US-GAAP research fields
+# remain absent rather than being inferred from broader or issuer-specific concepts.
+SEC_IFRS_FACT_DEFINITIONS = (
+    SecFactDefinition(
+        field_name="fundamental.revenue",
+        taxonomy="ifrs-full",
+        tag="Revenue",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.net_income",
+        taxonomy="ifrs-full",
+        tag="ProfitLoss",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.assets",
+        taxonomy="ifrs-full",
+        tag="Assets",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.liabilities",
+        taxonomy="ifrs-full",
+        tag="Liabilities",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.stockholders_equity",
+        taxonomy="ifrs-full",
+        tag="EquityAttributableToOwnersOfParent",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+)
+
+SEC_IFRS_RESEARCH_FACT_DEFINITIONS = (
+    SecFactDefinition(
+        field_name="fundamental.diluted_earnings_per_share",
+        taxonomy="ifrs-full",
+        tag="DilutedEarningsLossPerShare",
+        unit="USD/shares",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.weighted_average_diluted_shares",
+        taxonomy="ifrs-full",
+        tag="WeightedAverageShares",
+        unit="shares",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.shares_outstanding",
+        taxonomy="ifrs-full",
+        tag="NumberOfSharesOutstanding",
+        unit="shares",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.gross_profit",
+        taxonomy="ifrs-full",
+        tag="GrossProfit",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.operating_income",
+        taxonomy="ifrs-full",
+        tag="ProfitLossFromOperatingActivities",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.operating_cash_flow",
+        taxonomy="ifrs-full",
+        tag="CashFlowsFromUsedInOperatingActivities",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.capital_expenditures",
+        taxonomy="ifrs-full",
+        tag="PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.dividends_paid",
+        taxonomy="ifrs-full",
+        tag="DividendsPaidToEquityHoldersOfParentClassifiedAsFinancingActivities",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.share_repurchases",
+        taxonomy="ifrs-full",
+        tag="PaymentsToAcquireOrRedeemEntitysShares",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.selling_general_and_administrative",
+        taxonomy="ifrs-full",
+        tag="AdministrativeExpense",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.cash_and_cash_equivalents",
+        taxonomy="ifrs-full",
+        tag="CashAndCashEquivalents",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.current_assets",
+        taxonomy="ifrs-full",
+        tag="CurrentAssets",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.current_liabilities",
+        taxonomy="ifrs-full",
+        tag="CurrentLiabilities",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.inventory",
+        taxonomy="ifrs-full",
+        tag="Inventories",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.accounts_receivable",
+        taxonomy="ifrs-full",
+        tag="TradeAndOtherCurrentReceivables",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.accounts_payable",
+        taxonomy="ifrs-full",
+        tag="TradeAndOtherCurrentPayables",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.interest_expense",
+        taxonomy="ifrs-full",
+        tag="FinanceCosts",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.income_before_tax",
+        taxonomy="ifrs-full",
+        tag="ProfitLossBeforeTax",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.income_tax_expense",
+        taxonomy="ifrs-full",
+        tag="IncomeTaxExpenseContinuingOperations",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.property_plant_and_equipment_net",
+        taxonomy="ifrs-full",
+        tag="PropertyPlantAndEquipmentIncludingRightofuseAssets",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.operating_lease_liability_current",
+        taxonomy="ifrs-full",
+        tag="CurrentLeaseLiabilities",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.operating_lease_liability_noncurrent",
+        taxonomy="ifrs-full",
+        tag="NoncurrentLeaseLiabilities",
+        unit="USD",
+        period_type=SecFactPeriodType.INSTANT,
+    ),
+)
+
+SEC_IFRS_NORMALIZED_FACT_DEFINITIONS = (
+    SEC_IFRS_FACT_DEFINITIONS + SEC_IFRS_RESEARCH_FACT_DEFINITIONS
+)
+_DEFINITIONS_BY_TAXONOMY = {
+    SecAccountingStandard.US_GAAP.value: SEC_NORMALIZED_FACT_DEFINITIONS,
+    SecAccountingStandard.IFRS.value: SEC_IFRS_NORMALIZED_FACT_DEFINITIONS,
+}
+_DEFINITION_BY_TAXONOMY_FIELD = {
+    (item.taxonomy, item.field_name): item
+    for definitions in _DEFINITIONS_BY_TAXONOMY.values()
+    for item in definitions
+}
 
 
 class SecFilingMetadata(ContractModel):
@@ -324,7 +535,7 @@ class SecFilingMetadata(ContractModel):
     def validate_filing(self) -> "SecFilingMetadata":
         """Validate supported forms, chronology, and amendment semantics."""
         if self.form not in _ALLOWED_FORMS:
-            raise ValueError("form must be a supported 10-K or 10-Q filing")
+            raise ValueError("form must be a supported SEC annual or quarterly filing")
         if self.report_date > self.filing_date:
             raise ValueError("report_date must not be later than filing_date")
         if self.is_amendment != self.form.endswith("/A"):
@@ -376,9 +587,9 @@ class SecFundamentalFact(ContractModel):
     @model_validator(mode="after")
     def validate_fact(self) -> "SecFundamentalFact":
         """Validate the selected concept and accounting period shape."""
-        definition = _DEFINITION_BY_FIELD.get(self.field_name)
+        definition = _DEFINITION_BY_TAXONOMY_FIELD.get((self.taxonomy, self.field_name))
         if definition is None:
-            raise ValueError("field_name is not one of the selected SEC concepts")
+            raise ValueError("field_name and taxonomy are not a selected SEC concept")
         if self.taxonomy != definition.taxonomy or self.tag != definition.tag:
             raise ValueError("taxonomy and tag must match the selected field definition")
         if self.unit != definition.unit:
@@ -386,7 +597,7 @@ class SecFundamentalFact(ContractModel):
         if not self.value.is_finite():
             raise ValueError("value must be a finite Decimal")
         if self.form not in _ALLOWED_FORMS:
-            raise ValueError("form must be a supported 10-K or 10-Q filing")
+            raise ValueError("form must be a supported SEC annual or quarterly filing")
         if self.frequency not in {DataFrequency.QUARTERLY, DataFrequency.ANNUAL}:
             raise ValueError("frequency must be quarterly or annual")
         if self.quality is not DataQuality.VALID:
@@ -403,7 +614,7 @@ class SecFundamentalFact(ContractModel):
     @property
     def period_type(self) -> SecFactPeriodType:
         """Return the fixed period type for this selected concept."""
-        return _DEFINITION_BY_FIELD[self.field_name].period_type
+        return _DEFINITION_BY_TAXONOMY_FIELD[(self.taxonomy, self.field_name)].period_type
 
     def to_json_dict(self) -> dict[str, object]:
         """Return an explicit JSON-compatible representation."""
@@ -430,9 +641,21 @@ class SecFundamentalFact(ContractModel):
         }
 
 
-def get_sec_fact_definition(field_name: str) -> SecFactDefinition:
-    """Return one explicit definition or raise for an unsupported field."""
+def sec_fact_definitions(taxonomy: str) -> tuple[SecFactDefinition, ...]:
+    """Return the exact deterministic fact profile for one declared taxonomy."""
     try:
-        return _DEFINITION_BY_FIELD[field_name]
+        return _DEFINITIONS_BY_TAXONOMY[taxonomy]
     except KeyError as error:
-        raise ValueError(f"unsupported SEC fact field: {field_name}") from error
+        raise ValueError(f"unsupported SEC accounting taxonomy: {taxonomy}") from error
+
+
+def get_sec_fact_definition(
+    field_name: str,
+    *,
+    taxonomy: str = SecAccountingStandard.US_GAAP.value,
+) -> SecFactDefinition:
+    """Return one taxonomy-specific definition or raise for an unsupported field."""
+    try:
+        return _DEFINITION_BY_TAXONOMY_FIELD[(taxonomy, field_name)]
+    except KeyError as error:
+        raise ValueError(f"unsupported SEC fact field for {taxonomy}: {field_name}") from error

@@ -345,5 +345,5 @@ def test_two_sec_issuers_persist_isolated_diagnostics(tmp_path) -> None:
         assert amd_second.diagnostics_reused == 1
         assert len(apple_diagnostics) == len(amd_diagnostics) == 1
         assert apple.diagnostic_id != amd_first.diagnostic_id
-        assert amd_diagnostics[0].algorithm_version == ("sec-fundamental-diagnostic-v2-decimal34")
+        assert amd_diagnostics[0].algorithm_version == ("sec-fundamental-diagnostic-v3-decimal34")
         assert amd_diagnostics[0].summary.startswith("Advanced Micro Devices, Inc.")

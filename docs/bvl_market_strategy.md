@@ -115,8 +115,8 @@ antes de promoverlo.
 
 ### Checkpoint operativo del 28 de julio de 2026
 
-Este checkpoint inicia BVL sin adelantar identidades ni persistencia que todavía dependan del
-catálogo SMV y de una revisión contractual:
+Este checkpoint histórico inició BVL sin adelantar identidades ni persistencia que entonces
+dependían del catálogo SMV y de una revisión contractual:
 
 1. Implementar un lector tipado del boletín diario oficial de renta variable que descargue el
    documento completo con un límite explícito, valide URL, tipo de contenido y estructura, y
@@ -141,11 +141,10 @@ La lista inicial solicitada se resolverá contra identificadores oficiales. El b
 BVL no se confundirán con sus cotizaciones estadounidenses ya existentes: mercado, moneda, clase e
 identidad permanecerán separados.
 
-El criterio de salida de este checkpoint es un reporte repetible, estricto, limitado y sin efectos
-laterales que pueda leer esos nemónicos desde el boletín vigente y falle de forma visible ante
-ambigüedad o cambio estructural. La incorporación al catálogo central y la persistencia point-in-time
-quedan para el siguiente checkpoint, después de resolver ISIN, clase y términos aplicables mediante
-SMV. Esta separación evita producir una serie histórica con identidades prematuras.
+El criterio de salida de este checkpoint fue un reporte repetible, estricto, limitado y sin efectos
+laterales que pudiera leer esos nemónicos desde el boletín vigente y fallar de forma visible ante
+ambigüedad o cambio estructural. El checkpoint posterior ya incorporó catálogo y persistencia
+point-in-time del registro SMV; no convirtió por ello el boletín BVL en una fuente persistente.
 
 #### Ejecución del lector
 
@@ -169,8 +168,8 @@ documento, número de filas detectadas, cotizaciones seleccionadas y nemónicos 
 el HTML y declara `persistence_performed=false`.
 
 Este comando es una inspección técnica puntual, no una autorización de redistribución ni una
-dependencia de producción. Hasta resolver identidad y condiciones aplicables, no se programa, no
-recorre históricos y no escribe en el workspace permanente.
+dependencia de producción. Hasta resolver las condiciones aplicables al boletín, no se programa,
+no recorre históricos y no escribe en el workspace permanente.
 
 ### Fase 0 — validación contractual gratuita
 
@@ -207,13 +206,19 @@ automatizada del boletín completo.
 
 ### Fase 1 — catálogo peruano
 
-1. Crear adaptadores SMV para empresas y valores.
-2. Resolver identidad por ISIN y aliases BVL en el catálogo central.
-3. Persistir evidencia cruda y observaciones registrales de forma idempotente.
-4. Añadir una consulta local del universo sin precios ni scores.
+Completada el 29 de julio de 2026:
 
-Criterio de salida: repetición equivalente con cero identidades nuevas, revisión distinta
-append-only y trazabilidad completa hasta la respuesta SMV.
+1. Los adaptadores consultan empresas y valores por razón social mediante el formulario HTTPS
+   oficial, sin usar el endpoint SOAP HTTP declarado en el WSDL.
+2. El catálogo resuelve seis listings por `asset_id`, nemónico, ISIN completo y emisor.
+3. El código de ocho caracteres devuelto bajo `CodigoISIN` se conserva como código abreviado; no se
+   completa por heurística.
+4. Las respuestas completas se persisten de forma append-only e idempotente y se consultan por
+   `known_at`.
+5. El refresh por lote conserva el progreso anterior ante fallos y la consulta local no crea
+   precios, métricas ni scores.
+
+Consulta [Registro SMV y universo BVL](smv_bvl_registry.md) para contratos, estados y comandos.
 
 ### Fase 2 — mercado diario diferido
 

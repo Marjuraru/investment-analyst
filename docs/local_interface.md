@@ -1,14 +1,18 @@
 # Interfaz local y operación continua
 
-La interfaz local convierte los flujos existentes de mercado, Apple y BTC-USD en una herramienta
-básica utilizable desde el navegador. El proceso completo de Apple puede ejecutar una programación
-diaria. No añade fórmulas, scores combinados, recomendaciones, Trading API ni un LLM activo.
+La interfaz local convierte los flujos existentes de mercado, fundamentales y BTC-USD en una
+herramienta básica utilizable desde el navegador. Un scheduler derivado del catálogo puede
+actualizar la watchlist por trabajos independientes. No añade scores combinados, recomendaciones,
+Trading API ni un LLM activo.
 
 ## Capacidades
 
 La página permite:
 
 - revisar el workspace, la última ejecución, la trazabilidad y la programación;
+- revisar una bandeja persistente de incidencias operativas evaluadas en modo silencioso;
+- mantener ese estado actualizado automáticamente cada 30 segundos, sin ejecutar proveedores ni
+  recargar gráficos;
 - ver simultáneamente la hora de Lima y Wall Street, junto con el estado de la ventana regular
   09:30–16:00 ET de NYSE;
 - cargar automáticamente el último reporte elegible al abrir la página;
@@ -54,10 +58,23 @@ La página permite:
 - consultar el reporte diario point-in-time en modo trimestral o anual;
 - seleccionar opcionalmente fechas `as-of` independientes para mercado y fundamentales;
 - ver diagnósticos, métricas, frescura, limitaciones y el contrato JSON versionado;
-- mantener una ejecución diaria mientras el servicio está activo.
+- editar reglas de screening mediante revisiones locales auditadas y restaurar sus valores
+  iniciales sin borrar historia;
+- ejecutar un replay point-in-time de frecuencia y ruido sobre el activo seleccionado;
+- mantener actualizaciones diarias de la watchlist mientras el servicio está activo.
 
 Mercado y fundamentales se muestran en tarjetas separadas. La interfaz no calcula ni muestra un
 veredicto, confianza, calidad, recomendación o ranking combinado.
+
+## Estado operativo automático
+
+Las cinco celdas compactas de datos, ejecución, programación, trazabilidad y alertas se consultan
+mediante `GET /api/overview` al abrir la página y cada 30 segundos. Solo leen estado local: no
+ejecutan SEC, Alpaca ni Coinbase, no escriben en el workspace y no recargan series pesadas. Nunca
+hay más de una solicitud en curso; los fallos aplican backoff exponencial hasta cinco minutos y la
+consulta se pausa con la pestaña oculta. `Verificar` queda como recuperación manual, no como
+requisito de uso. La bandeja carga hasta 50 eventos únicamente al abrirla mediante
+`GET /api/alerts`.
 
 ## Relojes de mercado
 
@@ -263,7 +280,7 @@ estadísticas o diagnósticos diarios a esta fuente.
 
 ## Universo de mercado
 
-El endpoint `/api/market-assets` entrega `market-asset-universe-v2`, generado directamente desde el
+El endpoint `/api/market-assets` entrega `market-asset-universe-v3`, generado directamente desde el
 catálogo central y las configuraciones tipadas de proveedores. El navegador construye el selector
 con esa respuesta; no mantiene otra lista de símbolos. Cada descriptor declara identidad canónica,
 símbolo del proveedor, fuente, esquema de gráfico, fecha inicial soportada, unidad de volumen,
@@ -282,8 +299,9 @@ una sola bolsa y no el mercado consolidado SIP. El catálogo inicial contiene AM
 BVN, CDE, HYMC, INTC, MSTR, MU, MUX, NEM, PLTR, SCCO, TSM, GBTC, GLD e IBIT, además de AAPL y
 BTC-USD.
 
-AMD, Intel, Strategy, Micron, Palantir, CDE, HYMC, MUX, NEM y SCCO ya declaran una fuente corporativa
-SEC. El backend web dispone de lectura y actualización SEC genéricas por `asset_id`:
+AMD, Intel, Strategy, Micron, Palantir, CDE, HYMC, MUX, NEM y SCCO declaran una fuente corporativa
+SEC US-GAAP. Barrick, BVN ADR y TSM declaran un perfil IFRS anual. El backend web dispone de lectura
+y actualización SEC genéricas por `asset_id`:
 `/api/fundamental-refresh` ejecuta el writer independiente y tendencia, investigación, historia y
 análisis usan cachés aisladas por emisor. Para otro emisor la tendencia publica
 `sec-fundamental-trend-v2`; Apple conserva `aapl-fundamental-trend-v1`. La disponibilidad visual se
@@ -306,8 +324,10 @@ emisor.
 
 CDE, HYMC, MUX, NEM y SCCO produjeron en sus smokes reales 873, 633, 845, 569 y 1224 observaciones.
 La cobertura diagnóstica incompleta se muestra como tal y no impide consultar la evidencia
-disponible. Barrick continúa solo con mercado porque sus formularios 40-F/IFRS requieren un
-normalizador distinto.
+disponible. Los smokes IFRS reales del 29 de julio de 2026 produjeron 166 observaciones y 43 métricas
+base para Barrick, 215 y 38 para BVN, y 149 y 38 para TSM. Cada repetición reutilizó dos snapshots,
+todas las observaciones, métricas y el diagnóstico. La interfaz ofrece solo frecuencia anual y el
+servidor rechaza trimestral antes de invocar una lectura o un proveedor.
 
 ## Integración actual de cripto
 
@@ -320,8 +340,9 @@ La sección Operación cambia al flujo BTC-USD y ofrece actualización increment
 completo. El rango público es inclusivo y solo admite días UTC terminados. El plan automático detecta
 únicamente prefijos y sufijos fuera de las velas persistidas; no inventa huecos internos. Después de
 importar conserva `RawRecord`, observaciones, métricas y diagnóstico de mercado independientes y
-devuelve `btc-market-refresh-v1` con conteos, corte efectivo y trazabilidad. La programación diaria
-persistente sigue siendo de Apple en esta versión; Coinbase se actualiza manualmente desde la página.
+devuelve `btc-market-refresh-v1` con conteos, corte efectivo y trazabilidad. El scheduler crea para
+Bitcoin trabajos separados de mercado diario e intradía; ninguno inventa fundamentales
+corporativos ni reutiliza identidades de acciones.
 
 Todo el OHLCV solicitado se conserva para la gráfica y los cálculos de consulta. La actualización
 operativa persiste estadísticas únicamente sobre los 90 días calendario finales del rango: cubre
@@ -329,11 +350,12 @@ holgadamente las ventanas técnicas actuales de 20 días y evita recalcular once
 diario. El contrato declara `analytics_start`, `analytics_end` y `analytics_lookback_days`; esta
 optimización no recorta los datos históricos guardados ni la vista de máximo histórico.
 
-## Programación diaria
+## Programación de la watchlist
 
-La configuración predeterminada evalúa una ejecución a las `07:00` de `America/Lima`, con inicio
-de mercado `2025-01-01`, frecuencia fundamental trimestral y fin de mercado igual al día calendario
-anterior:
+La configuración predeterminada deriva trabajos para todos los activos visibles del catálogo. El
+mercado diario Alpaca y Coinbase se evalúa a las `07:00` de `America/Lima`, los fundamentales SEC
+a las `07:15` y Coinbase intradía a las `07:30`. El inicio de mercado predeterminado es
+`2025-01-01`; el fin diario es el día calendario anterior:
 
 ```text
 fecha local de ejecución - 1 día calendario
@@ -342,10 +364,50 @@ fecha local de ejecución - 1 día calendario
 Este cálculo es explícitamente calendario; no pretende identificar sesiones, feriados o cierres de
 bolsa. El planificador de mercado existente sigue detectando únicamente bordes faltantes.
 
-Si el proceso inicia después de la hora configurada y aún no existe un intento para esa fecha local,
-ejecuta una recuperación inmediata. Persiste el intento antes de llamar al runner y no lo repite en
-la misma fecha, incluso si falla o el proceso se reinicia. Un intento interrumpido se muestra como
-incidencia y puede recuperarse manualmente desde la interfaz. Al día siguiente vuelve a intentar.
+Cada job declara activo, proveedor, dominio, frecuencia y zona horaria. Si el proceso inicia después
+de su hora y todavía no terminó el job de esa fecha local, lo evalúa inmediatamente. Persiste el
+estado `running` antes de invocar el conector, conserva los trabajos anteriores aunque uno posterior
+falle y admite hasta tres intentos diarios con backoff de 15 minutos únicamente para fallos
+transitorios. Tras reiniciar, transforma un intento interrumpido en un fallo trazable antes de
+reintentarlo. Las operaciones del controlador continúan compartiendo un único mutex writer; no se
+ejecutan dos escrituras simultáneas.
+
+### Riesgo operativo separado: contención del mutex writer
+
+El mutex compartido protege la escritura única y evita ejecuciones concurrentes sobre el workspace,
+pero una cola de trabajos vencidos puede mantenerlo ocupado durante varios proveedores consecutivos.
+Mientras exista esa contención, `GET /api/overview` también espera el mutex y puede agotar el tiempo
+del cliente aunque el servicio siga activo; al terminar la cola, responde de nuevo sin reparar ni
+limpiar el workspace. Separar la lectura de salud de la exclusión de escritura queda fuera del alcance
+actual y debe conservarse como riesgo operativo independiente del flujo BTC diario.
+
+La decisión de reintento usa excepciones tipadas, su cadena causal y el estado HTTP estructurado; no
+interpreta texto libre. Timeout, conexión interrumpida, `408`, `429` y los estados transitorios
+`500`, `502`, `503` y `504` conservan backoff y presupuesto. Configuración o credenciales inválidas,
+`401`/`403`, activo o capacidad no soportada, payload incompatible, validación point-in-time,
+almacenamiento o estado incompatible, otros estados HTTP e imprevistos terminan sin otro intento de
+proveedor ese día. El error persistido usa una categoría estable y un mensaje fijo de hasta 500
+caracteres, sin URL, headers, traceback ni texto arbitrario que pudiera contener secretos.
+
+Una cobertura FRED incompleta se conserva como ejecución exitosa con `coverage_complete=false`, no
+como éxito completo ni como fallo reintentable. Si falla el observador de alertas, el scheduler
+reintenta solo esa notificación local y no vuelve a ejecutar el proveedor.
+
+Por defecto se programa toda la watchlist soportada. Para restringirla, repite `--schedule-asset`;
+por ejemplo:
+
+```bash
+.venv/bin/python scripts/serve_investment_analyst.py \
+  --schedule-asset equity:us:amd \
+  --schedule-asset crypto:btc-usd
+```
+
+Usa `--no-schedule-intraday` si deseas conservar Bitcoin diario sin su ventana automática de un
+minuto. El registro SMV se programa por defecto y puede desactivarse con `--no-schedule-smv`.
+Si el `.env` contiene una `FRED_API_KEY` válida, también se registran seis trabajos macro
+mensuales/trimestrales; `--no-schedule-macro` los desactiva sin afectar el resto. El instalador
+`scripts/install_local_service.py` acepta las mismas opciones y las conserva como argumentos
+explícitos en la unidad revisable.
 
 Personaliza el horario y el rango al iniciar:
 
@@ -364,9 +426,44 @@ Desactiva únicamente el scheduler, conservando la UI y la ejecución manual:
 .venv/bin/python scripts/serve_investment_analyst.py --no-scheduler
 ```
 
-El lock `state/aapl_local_service.lock` impide dos servicios para el mismo workspace. El lock
-operativo independiente continúa impidiendo dos writers. El estado más reciente del scheduler se
-guarda atómicamente en `state/aapl_daily_schedule_state.json`; no reemplaza el historial analítico.
+El lock `state/aapl_local_service.lock` impide dos servicios para el mismo workspace. El estado de
+todos los intentos se guarda atómicamente en `state/multi_asset_schedule_state_v1.json`; no
+reemplaza ni recorta el historial analítico.
+
+## Alertas operativas silenciosas
+
+Después de cada intento completado, el monitor evalúa cuatro reglas versionadas: actualización
+fallida, interrumpida, omitida o con cobertura incompleta. Cada condición produce `met`, `not_met`
+o `not_evaluable`; una ausencia nunca se convierte en cero. La identidad depende de regla, versión
+e intento, por lo que repetir el replay no duplica resultados ni eventos.
+
+La tarjeta de programación resume trabajos fallidos, con cobertura incompleta o desactualizados.
+Cada job conserva el último intento y el último chequeo exitoso por separado, de modo que un fallo
+nuevo no borra la referencia de frescura anterior. En la bandeja se puede marcar una alerta como
+vista, descartada o resuelta. Cada cambio crea una transición append-only con hora, estado anterior
+y estado nuevo; repetir el mismo estado es idempotente. Un intento automático posterior que termine
+correctamente y con cobertura completa resuelve también, con actor `system_recovery`, las alertas
+anteriores del mismo job. Esta recuperación no elimina la evidencia histórica ni permite que un
+éxito parcial o de otro job cierre una incidencia.
+
+La primera entrega no evalúa oportunidades financieras ni envía Telegram, correo o notificaciones
+del sistema. La bandeja local recomienda revisar la evidencia operativa; no recomienda comprar o
+vender. El monitor trabaja con el intento ya persistido: no carga gráficos, no abre el frontend, no
+consulta proveedores y funciona con el navegador cerrado.
+
+## Reglas y replay analítico
+
+El panel **Reglas de screening** carga bajo demanda el registro local. Permite cambiar el estado,
+los umbrales de entrada y salida, las confirmaciones y la espera entre candidatos. El servidor
+valida el contrato completo, rechaza floats para valores financieros, usa el fingerprint mostrado
+como lock optimista y crea una revisión append-only solo si el contenido cambió. Restaurar los
+valores iniciales crea otra revisión; no elimina el historial.
+
+El botón **Replay** usa el activo seleccionado y hasta 200 cortes point-in-time persistidos. Es una
+consulta de solo lectura: muestra cortes, coincidencias, candidatos simulados y condiciones no
+evaluables. No consulta proveedores, no modifica resultados operativos y no estima retornos ni
+precisión predictiva. Una regla modificada se utiliza automáticamente en el siguiente intento con
+evidencia nueva; los intentos ya recibidos permanecen intactos.
 
 ## Servicio persistente con systemd
 
@@ -410,9 +507,16 @@ de usuario vuelva a ejecutarse. Esta versión no crea una tarea en Windows Task 
 Todos permanecen dentro del workspace seleccionado:
 
 - `state/aapl_daily_run.lock`: exclusión de una ejecución analítica;
-- `state/aapl_daily_run_state.json`: última ejecución manual o programada;
+- `state/aapl_daily_run_state.json`: última ejecución completa Apple iniciada manualmente;
 - `state/aapl_local_service.lock`: exclusión del proceso UI/scheduler;
-- `state/aapl_daily_schedule_state.json`: último intento de la programación.
+- `state/multi_asset_schedule_state_v1.json`: historial de intentos por job y su evidencia compacta;
+- `state/operational_alert_state_v1.json`: resultados trivaluados y eventos deduplicados de la
+  bandeja local;
+- `state/analytical_screening_state_v1.json`: resultados, recibos, candidatos y transiciones
+  analíticas append-only;
+- `state/analytical_rule_registry_state_v1.json`: revisiones locales completas de reglas con
+  fingerprints encadenados.
 
-Los archivos de estado son resúmenes operativos acotados. El historial, las identidades
-deterministas y la evidencia append-only continúan en el almacenamiento normal del workspace.
+Los archivos de estado son contratos operativos versionados y privados. La evidencia financiera
+append-only continúa en el almacenamiento normal del workspace; las alertas no la sustituyen ni
+modifican.

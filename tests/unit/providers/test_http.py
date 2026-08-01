@@ -2,11 +2,17 @@
 
 from email.message import Message
 from urllib.error import HTTPError
+from urllib.parse import parse_qs
+from urllib.request import Request
 
 import pytest
 
 import investment_analyst.providers.http as http_module
-from investment_analyst.providers.http import HttpRequestError, UrlLibHttpTransport
+from investment_analyst.providers.http import (
+    HttpRequestError,
+    HttpRequestFailureKind,
+    UrlLibHttpTransport,
+)
 
 
 class FakeResponse:
@@ -41,12 +47,14 @@ def _http_error(status: int, retry_after: str | None = None) -> HTTPError:
 
 
 def test_rejects_non_https_url() -> None:
-    with pytest.raises(HttpRequestError, match="only HTTPS"):
+    with pytest.raises(HttpRequestError, match="only HTTPS") as error:
         UrlLibHttpTransport().get(
             "http://example.test/data",
             headers={},
             timeout_seconds=1.0,
         )
+
+    assert error.value.failure_kind is HttpRequestFailureKind.CONFIGURATION
 
 
 def test_returns_successful_response(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,6 +73,52 @@ def test_returns_successful_response(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.body == b'{"ok":true}'
     assert response.headers["Content-Type"] == "application/json"
     assert response.body_truncated is False
+
+
+def test_posts_encoded_form_over_https_without_putting_fields_in_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: Request | None = None
+
+    def fake_urlopen(request: Request, timeout: float) -> FakeResponse:
+        nonlocal observed
+        observed = request
+        assert timeout == 2.0
+        return FakeResponse(body=b"<html>ok</html>")
+
+    monkeypatch.setattr(http_module, "urlopen", fake_urlopen)
+    response = UrlLibHttpTransport().post_form(
+        "https://example.test/query",
+        headers={"Accept": "text/html"},
+        fields={"issuer": "MINSUR S.A.", "token": "a+b/c="},
+        timeout_seconds=2.0,
+        max_response_bytes=100,
+    )
+
+    assert response.body == b"<html>ok</html>"
+    assert observed is not None
+    assert observed.get_method() == "POST"
+    assert observed.full_url == "https://example.test/query"
+    assert observed.data is not None
+    assert parse_qs(observed.data.decode("utf-8")) == {
+        "issuer": ["MINSUR S.A."],
+        "token": ["a+b/c="],
+    }
+    assert observed.get_header("Content-type") == (
+        "application/x-www-form-urlencoded; charset=utf-8"
+    )
+
+
+def test_form_post_rejects_non_https_without_exposing_fields() -> None:
+    with pytest.raises(HttpRequestError, match="POST http://example.test/query") as error:
+        UrlLibHttpTransport().post_form(
+            "http://example.test/query",
+            headers={},
+            fields={"secret": "must-not-appear"},
+            timeout_seconds=1.0,
+        )
+
+    assert "must-not-appear" not in str(error.value)
 
 
 def test_can_bound_response_body_without_reading_the_remainder(
@@ -96,7 +150,7 @@ def test_rejects_invalid_response_limit(limit: int | float) -> None:
         )
 
 
-@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("status", [408, 429, 503])
 def test_retries_transient_http_status(
     monkeypatch: pytest.MonkeyPatch,
     status: int,
@@ -139,6 +193,7 @@ def test_does_not_retry_permanent_http_error(monkeypatch: pytest.MonkeyPatch) ->
 
     assert attempts == 1
     assert error.value.status_code == 400
+    assert error.value.failure_kind is HttpRequestFailureKind.HTTP_STATUS
 
 
 def test_timeout_becomes_request_error_after_three_attempts(
@@ -152,7 +207,7 @@ def test_timeout_becomes_request_error_after_three_attempts(
         raise TimeoutError("timed out")
 
     monkeypatch.setattr(http_module, "urlopen", fake_urlopen)
-    with pytest.raises(HttpRequestError, match="retry limit"):
+    with pytest.raises(HttpRequestError, match="retry limit") as error:
         UrlLibHttpTransport(sleep=lambda _: None).get(
             "https://example.test/data",
             headers={},
@@ -160,6 +215,7 @@ def test_timeout_becomes_request_error_after_three_attempts(
         )
 
     assert attempts == 3
+    assert error.value.failure_kind is HttpRequestFailureKind.TRANSPORT
 
 
 def test_invalid_retry_after_uses_bounded_backoff(

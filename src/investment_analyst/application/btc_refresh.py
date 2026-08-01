@@ -36,6 +36,27 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+class BtcMarketExecutionClock:
+    """Keep one BTC daily execution clock in UTC without allowing regressions."""
+
+    def __init__(self, source: Callable[[], datetime] = _utc_now) -> None:
+        self._source = source
+        self._latest: datetime | None = None
+
+    def __call__(self) -> datetime:
+        """Return the latest wall-clock value observed during this execution."""
+        return self.observe(self._source())
+
+    def observe(self, value: datetime) -> datetime:
+        """Record one UTC instant as a chronological floor for this execution."""
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise BtcMarketRefreshError("clock must return a timezone-aware datetime")
+        normalized = value.astimezone(UTC)
+        if self._latest is None or normalized > self._latest:
+            self._latest = normalized
+        return self._latest
+
+
 class BtcMarketRefreshPipeline:
     """Plan, ingest, calculate, and diagnose BTC-USD without fundamental data."""
 
@@ -86,6 +107,12 @@ class BtcMarketRefreshPipeline:
             imports.append(summary)
 
         effective_known_at = self._resolve_known_at(request, plan, imports)
+        if (
+            isinstance(self._clock, BtcMarketExecutionClock)
+            and plan.persisted_latest_available_at is not None
+            and plan.persisted_latest_available_at <= effective_known_at
+        ):
+            self._clock.observe(plan.persisted_latest_available_at)
         analytics_start = max(start, end - timedelta(days=_OPERATIONAL_ANALYTICS_DAYS))
         query = HistoricalBarQuery(
             asset_id=ASSET_ID,

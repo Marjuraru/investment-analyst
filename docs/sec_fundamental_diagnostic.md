@@ -45,9 +45,10 @@ A final score of at least 65 is positive, a score from 40 up to 65 is neutral, a
 is negative. Each selected metric creates one component and one evidence item. Evidence contribution
 is `(component_score - 50) / 50`.
 
-Confidence is `coverage × recency_factor`. Quarterly recency is 1.00 through 150 days and declines
-linearly to 0.50 at 365 days. Annual recency is 1.00 through 400 days and declines linearly to 0.50 at
-800 days. Confidence summarizes contextual coverage and freshness; it is not a probability.
+Confidence is `coverage × recency_factor`. Quarterly recency is 1.00 through 150 completed UTC
+calendar days and declines linearly to 0.50 at 365 days. Annual recency is 1.00 through 400 completed
+UTC calendar days and declines linearly to 0.50 at 800 days. Confidence summarizes contextual
+coverage and freshness; it is not a probability.
 
 Quality is `VALID` only with full coverage and recency of at least 0.75. Otherwise a sufficient
 result is `PARTIAL`. Insufficient diagnostics also use `PARTIAL`, because the core quality enum does
@@ -56,13 +57,17 @@ not add a separate insufficient value.
 ## Auditability and persistence
 
 The diagnostic stores components and evidence linked to selected `MetricResult` IDs. Its UUID5 uses
-the canonical asset, fundamental mode, frequency, target period, algorithm version, and selected metric IDs. It
-does not use `known_at`, `computed_at`, current time, or storage order. Identical inputs therefore
-reuse the same diagnostic; a revised metric or algorithm version creates a new diagnostic.
+the canonical asset, fundamental mode, frequency, target period, algorithm version, selected metric
+IDs, and the resulting freshness factor. It does not use `computed_at` or storage order. Identical
+inputs evaluated on the same completed UTC day therefore reuse the same diagnostic; a changed
+freshness day, revised metric, or algorithm version creates an append-only revision. A diagnostic
+without selected metrics includes the requested cut because its `as_of` and availability derive
+from that cut.
 
-Apple retains `sec-aapl-fundamental-diagnostic-v1.1-decimal34` and its existing identities. A newly
-configured issuer uses `sec-fundamental-diagnostic-v2-decimal34`, preventing generic results from
-masquerading as historical Apple output.
+Apple uses `sec-aapl-fundamental-diagnostic-v1.2-decimal34`; a catalog-configured issuer uses
+`sec-fundamental-diagnostic-v3-decimal34`. Older versions remain append-only but are ignored by
+current-version queries. This version change prevents a changing recency confidence from conflicting
+with a deterministic identity.
 
 The pipeline validates the rules, score, inputs, timestamps, traceability, identity, and existing
 conflicts before the first write. Weighted sums use a Decimal tolerance of 0.0001. The process does

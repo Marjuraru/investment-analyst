@@ -2,7 +2,7 @@
 
 import re
 
-from pydantic import ConfigDict, StrictInt, field_validator, model_validator
+from pydantic import ConfigDict, StrictBool, StrictInt, field_validator, model_validator
 
 from investment_analyst.core.models import Asset, AssetClass
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
@@ -19,6 +19,7 @@ class ProviderBinding(ContractModel):
     provider: NonEmptyStr
     namespace: NonEmptyStr
     identifier: NonEmptyStr
+    is_unique: StrictBool = True
     capabilities: tuple[NonEmptyStr, ...]
 
     @field_validator("provider", "namespace", mode="before")
@@ -121,13 +122,17 @@ class AssetCatalogDocument(ContractModel):
             raise ValueError("asset IDs must be unique")
         if asset_ids != tuple(sorted(asset_ids)):
             raise ValueError("assets must be sorted by asset_id")
-        binding_owners: dict[tuple[str, str, str], str] = {}
+        binding_owners: dict[tuple[str, str, str], tuple[str, bool]] = {}
         for asset in self.assets:
             for binding in asset.provider_bindings:
-                owner = binding_owners.get(binding.identity)
-                if owner is not None and owner != asset.asset_id:
-                    raise ValueError("external provider bindings must be globally unique")
-                binding_owners[binding.identity] = asset.asset_id
+                existing = binding_owners.get(binding.identity)
+                if (
+                    existing is not None
+                    and existing[0] != asset.asset_id
+                    and (existing[1] or binding.is_unique)
+                ):
+                    raise ValueError("unique external provider bindings must be globally unique")
+                binding_owners[binding.identity] = (asset.asset_id, binding.is_unique)
         return self
 
     def list_by_type(self, asset_type: AssetClass) -> tuple[CatalogAsset, ...]:

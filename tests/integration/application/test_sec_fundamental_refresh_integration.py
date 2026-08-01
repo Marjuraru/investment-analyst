@@ -17,7 +17,10 @@ from investment_analyst.application.sec_fundamental_refresh_models import (
     SecIssuerFundamentalRefreshStage,
 )
 from investment_analyst.core.models import AssetClass, DataFrequency
-from investment_analyst.providers.asset_config import SecAssetConfiguration
+from investment_analyst.providers.asset_config import (
+    SecAccountingStandard,
+    SecAssetConfiguration,
+)
 from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
     SecCompanyFactsNormalizer,
 )
@@ -198,6 +201,7 @@ def _pipeline(
     storage: LocalStorage,
     *,
     fail_diagnostic: bool = False,
+    configuration: SecAssetConfiguration = _CONFIGURATION,
 ) -> tuple[SecIssuerFundamentalRefreshPipeline, _FixtureTransport]:
     submissions, companyfacts = _documents()
     transport = _FixtureTransport(submissions, companyfacts)
@@ -227,7 +231,7 @@ def _pipeline(
     return (
         SecIssuerFundamentalRefreshPipeline(
             storage,
-            configuration=_CONFIGURATION,
+            configuration=configuration,
             fetch_pipeline=SecIssuerFundamentalsPipeline(
                 storage,
                 client,
@@ -344,3 +348,28 @@ def test_historical_cut_too_early_preserves_ingested_evidence_only(
         assert len(storage.observations.list(asset_id=_CONFIGURATION.asset_id)) == 10
         assert storage.metric_results.list(asset_id=_CONFIGURATION.asset_id) == []
         assert storage.diagnostics.list(asset_id=_CONFIGURATION.asset_id) == []
+
+
+def test_unsupported_ifrs_quarterly_refresh_fails_before_provider_or_storage(
+    tmp_path: Path,
+) -> None:
+    ifrs_configuration = _CONFIGURATION.model_copy(
+        update={"accounting_standard": SecAccountingStandard.IFRS}
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline, transport = _pipeline(storage, configuration=ifrs_configuration)
+        request = SecIssuerFundamentalRefreshRequest(
+            asset_id=ifrs_configuration.asset_id,
+            frequency=DataFrequency.QUARTERLY,
+            requested_known_at=_KNOWN_AT,
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="AMD SEC fundamentals support only: annual",
+        ):
+            pipeline.run(request)
+
+        assert transport.calls == []
+        assert storage.raw_records.list() == []
+        assert storage.observations.list(asset_id=ifrs_configuration.asset_id) == []

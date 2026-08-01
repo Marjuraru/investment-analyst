@@ -85,7 +85,20 @@ def fundamental_diagnostic_id(
     *,
     algorithm_version: str = ALGORITHM_VERSION,
 ) -> UUID:
-    """Return a UUID5 identity based only on period, version, and selected metric inputs."""
+    """Return a UUID5 identity for all inputs that can change diagnostic content."""
+    if selection.selected_metrics:
+        latest_available = max(item.available_at for item in selection.selected_metrics)
+        freshness_identity = str(
+            recency_factor(
+                selection.request.known_at,
+                latest_available,
+                selection.request.frequency,
+            )
+        )
+        empty_known_at = None
+    else:
+        freshness_identity = None
+        empty_known_at = selection.request.known_at.isoformat()
     document = {
         "asset_id": selection.request.asset_id,
         "mode": DiagnosticMode.FUNDAMENTAL.value,
@@ -95,6 +108,8 @@ def fundamental_diagnostic_id(
         ),
         "algorithm_version": algorithm_version,
         "selected_metric_result_ids": [str(item.result_id) for item in selection.selected_metrics],
+        "freshness_factor": freshness_identity,
+        "empty_known_at": empty_known_at,
     }
     canonical = json.dumps(
         document,

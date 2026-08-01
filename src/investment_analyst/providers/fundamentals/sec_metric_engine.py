@@ -6,7 +6,10 @@ from datetime import UTC, datetime
 from decimal import Context, Decimal, localcontext
 
 from investment_analyst.core.models import DataFrequency, DataQuality
-from investment_analyst.providers.asset_config import SecAssetConfiguration
+from investment_analyst.providers.asset_config import (
+    SecAccountingStandard,
+    SecAssetConfiguration,
+)
 from investment_analyst.providers.fundamentals.sec_metric_models import (
     SecFundamentalMetricCandidate,
     SecFundamentalMetricComputation,
@@ -89,8 +92,8 @@ class SecFundamentalMetricEngine:
         """Compute all valid metrics for the requested target periods."""
         computed_at = _utc_datetime(computed_at, "computed_at")
         contexts = self._validate_source(request, point_in_time_result)
+        contexts, fiscal_index = _build_fiscal_index(contexts)
         target_contexts = _target_contexts(contexts, request)
-        fiscal_index = _build_fiscal_index(contexts)
         candidates: list[SecFundamentalMetricCandidate] = []
         skipped = Counter({key: 0 for key in _SKIP_KEYS})
 
@@ -152,6 +155,7 @@ class SecFundamentalMetricEngine:
                     period,
                     request,
                     source_id=self._configuration.companyfacts_source_id,
+                    accounting_standard=self._configuration.accounting_standard,
                 )
             )
         period_ends = tuple(context.period.period_end for context in contexts)
@@ -165,6 +169,7 @@ def _validate_period(
     request: SecFundamentalMetricRequest,
     *,
     source_id: str,
+    accounting_standard: SecAccountingStandard,
 ) -> _PeriodContext:
     if period.frequency is not request.frequency:
         raise MalformedSecFundamentalPeriodError("period mixes fundamental frequencies")
@@ -196,7 +201,10 @@ def _validate_period(
                 raise MalformedSecFundamentalPeriodError(
                     "fact timestamps must be normalized to UTC"
                 )
-        metadata, status = _fiscal_metadata(fact)
+        metadata, status = _fiscal_metadata(
+            fact,
+            accounting_standard=accounting_standard,
+        )
         if status == "missing":
             metadata_missing = True
         elif status == "inconsistent":
@@ -225,6 +233,8 @@ def _validate_period(
 
 def _fiscal_metadata(
     fact: SecSelectedFundamentalFact,
+    *,
+    accounting_standard: SecAccountingStandard,
 ) -> tuple[_FiscalMetadata | None, str]:
     values = (fact.form, fact.fiscal_year, fact.fiscal_period)
     if all(value is None for value in values):
@@ -241,9 +251,18 @@ def _fiscal_metadata(
     if not 1900 <= fiscal_year <= 10000:
         return None, "inconsistent"
     if fact.frequency is DataFrequency.ANNUAL:
-        if fact.form not in {"10-K", "10-K/A"} or fact.fiscal_period != "FY":
+        if (
+            fact.form not in {"10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"}
+            or fact.fiscal_period != "FY"
+        ):
             return None, "inconsistent"
+        if accounting_standard is SecAccountingStandard.IFRS:
+            if fact.form not in {"20-F", "20-F/A", "40-F", "40-F/A"}:
+                return None, "inconsistent"
+            fiscal_year = fact.period_end.year
     elif fact.frequency is DataFrequency.QUARTERLY:
+        if accounting_standard is SecAccountingStandard.IFRS:
+            return None, "inconsistent"
         if fact.form not in {"10-Q", "10-Q/A"}:
             return None, "inconsistent"
         if fact.fiscal_period not in {"Q1", "Q2", "Q3"}:
@@ -276,20 +295,50 @@ def _target_contexts(
 
 def _build_fiscal_index(
     contexts: list[_PeriodContext],
-) -> dict[tuple[DataFrequency, int, str], _PeriodContext]:
-    index: dict[tuple[DataFrequency, int, str], _PeriodContext] = {}
+) -> tuple[
+    list[_PeriodContext],
+    dict[tuple[DataFrequency, int, str], _PeriodContext],
+]:
+    """Exclude conflicting fiscal labels without discarding same-period metrics."""
+    grouped: dict[tuple[DataFrequency, int, str], list[_PeriodContext]] = {}
     for context in contexts:
         metadata = context.fiscal_metadata
         if metadata is None:
             continue
         key = (context.period.frequency, metadata.fiscal_year, metadata.fiscal_period)
-        existing = index.get(key)
-        if existing is not None and existing.period.period_end != context.period.period_end:
-            raise AmbiguousSecFundamentalComparisonError(
-                "multiple periods share the same fiscal year and fiscal period"
+        grouped.setdefault(key, []).append(context)
+    ambiguous = {
+        key
+        for key, values in grouped.items()
+        if len({context.period.period_end for context in values}) > 1
+    }
+
+    normalized: list[_PeriodContext] = []
+    for context in contexts:
+        metadata = context.fiscal_metadata
+        key = (
+            (context.period.frequency, metadata.fiscal_year, metadata.fiscal_period)
+            if metadata is not None
+            else None
+        )
+        if key in ambiguous:
+            context = _PeriodContext(
+                asset_id=context.asset_id,
+                period=context.period,
+                facts=context.facts,
+                fiscal_metadata=None,
+                metadata_status="inconsistent",
             )
+        normalized.append(context)
+
+    index: dict[tuple[DataFrequency, int, str], _PeriodContext] = {}
+    for context in normalized:
+        metadata = context.fiscal_metadata
+        if metadata is None:
+            continue
+        key = (context.period.frequency, metadata.fiscal_year, metadata.fiscal_period)
         index[key] = context
-    return index
+    return normalized, index
 
 
 def _same_period_candidates(

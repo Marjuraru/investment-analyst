@@ -27,41 +27,45 @@ dependencias del núcleo determinista.
 
 ## Estado de referencia
 
-Checkpoint auditado: 28 de julio de 2026, commit `9b3881e`.
+Checkpoint base auditado: 29 de julio de 2026, `main` en `e53f1c8`.
 
 ### Funcional
 
 - persistencia local DuckDB/Parquet, identidades deterministas y evidencia append-only;
 - mercado diario para el universo gratuito Alpaca IEX y BTC-USD/Coinbase;
 - base intradía BTC-USD de un minuto y nueve agregaciones locales;
-- fundamentales SEC completos para AAPL y diez emisores genéricos US-GAAP;
+- fundamentales SEC completos para AAPL, diez emisores genéricos US-GAAP y tres emisores IFRS
+  anuales (Barrick, BVN ADR y TSM);
 - 40 métricas fundamentales, historia, comparación y clasificación explicable cuando la evidencia
   alcanza;
 - gráficos diarios, semanales, mensuales e intradía, velas, escala logarítmica, zoom, arrastre y
   tres SMA configurables;
 - interfaz local, exportaciones, cachés, compresión, scheduler Apple y servicio `systemd --user`;
+- importación FRED/ALFRED por vintage explícito, evidencia macro append-only y reconstrucción local
+  point-in-time con disponibilidad diaria conservadora;
+- catálogo de seis cotizaciones BVL, cliente HTTPS SMV, evidencia registral append-only,
+  reconstrucción point-in-time y refresh por lote reanudable;
 - dependencias reproducibles, Ruff, Pytest, cobertura, auditoría y CI.
 
 ### Parcial
 
-- BVL: sondeo oficial y lector tipado del boletín diario, todavía sin identidad SMV, persistencia,
-  histórico o interfaz;
+- BVL mercado: lector tipado del boletín diario, todavía sin autorización resuelta para
+  persistencia automática, histórico o interfaz;
 - operación multi-activo: refresh manual generalizado, pero programación persistente centrada en
   Apple;
-- fundamentales extranjeros: TSM, Barrick y BVN requieren IFRS; BVL requiere SMV;
-- FRED/ALFRED: fundamento point-in-time desarrollado en una rama paralela, todavía sin integrar en
-  la línea actual.
+- fundamentales BVL: requieren el futuro adaptador SMV y no reutilizan el perfil SEC del ADR;
+- screening automático y bandejas locales implementados; catálogo ampliado y notificaciones
+  externas pendientes.
 
 ### Diseñado, no implementado
 
-- catálogo y fundamentales SMV;
+- fundamentales SMV;
 - scheduler multi-proveedor;
 - indicadores técnicos adicionales, comparación y plantillas;
 - fundamentales de red para cripto;
 - catálogo macro y workspace de historia larga;
 - corpus y búsqueda de noticias;
 - dominio Cazatiburones;
-- screening automático, bandeja de alertas y notificaciones;
 - IA cualitativa opcional y laboratorio predictivo;
 - autenticación o exposición remota segura.
 
@@ -71,38 +75,36 @@ El catálogo actual cubre mercado estadounidense para AAPL, AMD, Barrick (`B`), 
 INTC, MSTR, MU, MUX, NEM, PLTR, SCCO, TSM, GBTC, GLD e IBIT, además de BTC-USD. La cobertura
 fundamental no es igual para todos.
 
-La expansión BVL debe resolver mediante evidencia oficial `CVERDEC1`, `BVN`, `SCCO`, `VOLCABC1`,
-`MINSURI1` y `POMALCC1`. “FCA” permanece sin mapear. `ABX` debe tratarse como alias histórico de
-Barrick cuando se confirme su vigencia, no como instrumento duplicado. “TBC” debe aclararse antes de
-añadirlo; no se asumirá que significa BTC.
+El catálogo BVL ya separa `CVERDEC1`, `BVN`, `SCCO`, `VOLCABC1`, `MINSURI1` y `POMALCC1` de los
+instrumentos estadounidenses. “FCA” permanece sin mapear. `ABX` debe tratarse como alias histórico
+de Barrick cuando se confirme su vigencia, no como instrumento duplicado. “TBC” debe aclararse
+antes de añadirlo; no se asumirá que significa BTC.
 
-## Dependencia de integración antes de ampliar
+## Consolidación de la base
 
-Los PR #10, #11 y #12 forman una pila de ramas. El trabajo multiemisor y BVL actual está respaldado
-en GitHub, pero todavía no forma parte de `main`. Antes de añadir otro dominio:
+Los PR #10, #11 y #12 se consolidaron mediante el PR #13. La línea principal ya contiene BTC
+intradía, mercado y fundamentales multi-activo, el lector BVL y la planificación de alertas. La base
+FRED/ALFRED fue trasladada de forma aislada sobre ese `main`, sin fusionar la pila histórica ni
+reintroducir commits laterales.
 
-1. integrar el fundamento intradía/multi-activo en orden;
-2. reconstruir ramas limpias sobre el `main` actualizado, evitando force-pushes innecesarios;
-3. publicar el trabajo multiemisor y BVL mediante un PR propio;
-4. trasladar FRED/ALFRED sobre la base consolidada;
-5. ejecutar CI y smoke local después de cada squash.
-
-El criterio de salida es que `main` contenga toda la funcionalidad aceptada y que ningún commit
-único dependa únicamente de una rama lateral.
+El criterio permanente es que cada ampliación nazca del `main` vigente, pase CI y smoke local y no
+dependa únicamente de una rama paralela.
 
 ## Fase 1 — Identidad y catálogo BVL/SMV
 
-1. Implementar adaptadores tipados para empresas y valores inscritos de SMV.
-2. Validar ISIN, emisor, clase, moneda, mercado, nemónico y vigencias.
-3. Conservar el ISIN como candidato principal a identidad estable y el nemónico como alias
-   versionado.
-4. Mantener separadas las cotizaciones BVL de BVN y SCCO de sus instrumentos estadounidenses.
-5. Resolver la lista inicial y dejar cualquier identidad ambigua como no disponible.
-6. Persistir respuestas oficiales y observaciones registrales de forma append-only.
-7. Exponer una consulta local del universo peruano sin atribuirle todavía precios o fundamentales.
+Completada localmente el 29 de julio de 2026:
 
-Criterio de salida: repetición equivalente sin identidades nuevas, revisión distinta append-only,
-ausencia de colisiones y trazabilidad completa a SMV.
+1. Adaptadores tipados para empresas y valores inscritos mediante formularios HTTPS SMV.
+2. ISIN completo validado por checksum y código SMV abreviado conservado por separado.
+3. Seis cotizaciones BVL con nemónico, moneda, emisor e identidad de mercado independientes.
+4. `BVN` y `SCCO` de Lima separados de sus instrumentos estadounidenses.
+5. Respuestas completas append-only, deduplicación semántica y revisiones point-in-time.
+6. Consulta local del universo con estados explícitos de cobertura y evidencia raw.
+7. Refresh por lote, una conexión writer y conservación de progreso ante fallos tardíos.
+
+La limitación residual es explícita: el valor BVL `BVN` no aparece en la consulta de valores del
+emisor SMV, por lo que se verifica el emisor pero el listing exacto conserva evidencia BVL
+independiente.
 
 ## Fase 2 — Mercado diario BVL
 
@@ -122,8 +124,9 @@ manual de documentos oficiales o captura diaria hacia adelante. El endpoint inte
 
 ## Fase 3 — Orquestación multi-activo
 
-El scheduler debe dejar de representar una ejecución Apple y pasar a ejecutar trabajos explícitos
-por activo, proveedor, dominio, frecuencia y zona horaria.
+Base completada localmente el 29 de julio de 2026. El scheduler dejó de representar una ejecución
+Apple y ahora ejecuta trabajos explícitos por activo, proveedor, dominio, frecuencia y zona
+horaria.
 
 Trabajos previstos:
 
@@ -147,7 +150,12 @@ Capacidades requeridas:
 - persistencia del progreso exitoso previo a un fallo;
 - panel operativo y health check generalizados.
 
-Esta fase es prerequisito para alertas automáticas y funcionamiento 24/7.
+La entrega actual cubre Alpaca diario, SEC, Coinbase diario e intradía, registro SMV y seis series
+FRED/ALFRED de baja frecuencia cuando existe la API key. Incluye selección explícita o watchlist
+completa, estado, frescura y cobertura por job, un único writer, reintentos acotados, backoff,
+recuperación tras reinicios y preservación de progreso previo. BVL diario continúa bloqueado por su
+contrato de uso; noticias y filings se añadirán cuando sus conectores estén listos. Queda medir
+presupuestos reales por proveedor y diseñar almacenamiento columnar para fuentes de alto volumen.
 
 ## Fase 4 — Fundamentales corporativos completos
 
@@ -168,8 +176,11 @@ Ampliar progresivamente:
 
 ### IFRS
 
-Crear un adaptador separado para TSM, Barrick, BVN ADR y otros emisores extranjeros. Los conceptos
-`ifrs-full` no pasarán por el normalizador US-GAAP.
+La base anual está implementada para TSM, Barrick y BVN ADR: declara `ifrs-full`, admite 20-F/40-F,
+selecciona únicamente conceptos comparables en USD publicados por SEC y mantiene identidades
+separadas del perfil US-GAAP. Las siguientes ampliaciones son soporte explícito de moneda funcional
+distinta de USD, mayor cobertura de conceptos IFRS y más emisores solo después de smoke real e
+idempotencia.
 
 ### SMV
 
@@ -225,10 +236,11 @@ Una etiqueta heurística de wallet no se interpreta como identidad institucional
 
 ## Fase 7 — Macro y larga historia
 
-1. Integrar el fundamento FRED/ALFRED existente.
+1. Integrar el fundamento FRED/ALFRED existente. Completado para el scheduler local.
 2. Crear catálogo versionado de inflación, crecimiento, tipos, curva, empleo, crédito, liquidez,
-   dólar y commodities.
-3. Enumerar vintages, actualizar en lotes y reanudar.
+   dólar y commodities. Completado; las series diarias quedan explícitamente diferidas.
+3. Enumerar vintages, actualizar en lotes y reanudar. Completado para bordes nuevos de seis series
+   de baja frecuencia; falta backfill histórico y almacenamiento columnar.
 4. Añadir variables peruanas oficiales mediante BCRP/INEI cuando corresponda.
 5. Construir un panel descriptivo de regímenes inspirado en relaciones macro de crecimiento,
    inflación, liquidez y tipos.
@@ -278,8 +290,15 @@ explicará condiciones y evidencia; no afirmará que debe comprarse o venderse.
 
 La implementación se divide en:
 
-1. alertas operativas y modo silencioso después del scheduler multi-activo;
-2. reglas de mercado y fundamentales con métricas existentes;
+1. alertas operativas y modo silencioso después del scheduler multi-activo —base local completada
+   el 29 de julio de 2026 con motor trivaluado, replay, deduplicación, transiciones auditadas y
+   cierre automático tras una recuperación completa del mismo trabajo—;
+2. reglas de mercado y fundamentales con métricas existentes —primer monitor local completado con
+   motor puro, contratos point-in-time, dos plantillas silenciosas, persistencia, deduplicación,
+   confirmaciones, histéresis, cooldown, bandeja separada y conexión al scheduler solo ante
+   evidencia nueva; también incluye editor versionado, restauración auditable, locking optimista y
+   replay histórico acotado de frecuencia y ruido; queda ampliar el catálogo y observarlo durante
+   varios ciclos silenciosos—;
 3. reglas de valoración, técnicas y plantillas configurables;
 4. eventos, filings, noticias y Cazatiburones;
 5. resumen opcional mediante IA solo después de una activación determinista.
@@ -389,10 +408,18 @@ local, sin elevar artificialmente el mínimo global antes de cubrir el código h
 
 ## Orden inmediato recomendado
 
-1. consolidar la pila de PR actual;
-2. integrar la rama multiemisor y BVL;
-3. reubicar FRED/ALFRED sobre esa base;
-4. implementar identidad y catálogo SMV;
-5. persistir e integrar mercado BVL;
-6. generalizar el scheduler;
-7. activar la primera base de alertas operativas y screening silencioso.
+La ruta crítica vigente se mantiene en
+[`basic_functional_release_plan.md`](basic_functional_release_plan.md). Su orden es:
+
+1. estabilizar, validar y fusionar el PR de orquestación y screening;
+2. eliminar el centralismo heredado de AAPL mediante contratos genéricos y adaptadores compatibles;
+3. eliminar fallos operativos recurrentes y validar backup, restauración y soak silencioso;
+4. desacoplar lecturas de refresh largos, compactar la API operativa y medir presupuestos;
+5. completar watchlist, valoración, indicadores, reglas y notificaciones reanudables;
+6. incorporar corpus oficial y la primera vertical SEC de Cazatiburones;
+7. añadir IA cualitativa opcional con citas y presupuesto sobre ese corpus;
+8. cerrar la versión mediante CI, smokes, 72 horas de operación y recuperación probada.
+
+Mercado BVL, macro diario columnar, extensiones Cazatiburones para BVL/cripto e investigación
+predictiva conservan sus fases de esta hoja de ruta, pero no desplazan la estabilización de la
+versión básica ni se implementan sin resolver previamente sus fuentes, licencias y contratos.

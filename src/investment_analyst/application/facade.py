@@ -1,7 +1,7 @@
 """Stable application facade for local investment-analysis workflows."""
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -80,7 +80,10 @@ from investment_analyst.application.btc_intraday_models import (
     BtcIntradayRefreshRequest,
     BtcIntradayRefreshSummary,
 )
-from investment_analyst.application.btc_refresh import BtcMarketRefreshPipeline
+from investment_analyst.application.btc_refresh import (
+    BtcMarketExecutionClock,
+    BtcMarketRefreshPipeline,
+)
 from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshRequest,
     BtcMarketRefreshSummary,
@@ -94,6 +97,14 @@ from investment_analyst.application.listed_market_refresh_models import (
 from investment_analyst.application.market_universe import (
     MarketAssetUniverse,
     build_market_asset_universe,
+)
+from investment_analyst.application.peru_registry import (
+    BvlRegistryRefreshRequest,
+    BvlRegistryRefreshService,
+    BvlRegistryRefreshSummary,
+    BvlRegistryUniverse,
+    BvlRegistryUniverseRequest,
+    BvlRegistryUniverseService,
 )
 from investment_analyst.application.runtime import ApplicationRuntime, StorageLocationRequest
 from investment_analyst.application.sec_fundamental_refresh import (
@@ -149,13 +160,34 @@ from investment_analyst.providers.fundamentals.sec_point_in_time_service import 
     SecAaplFundamentalPointInTimeService,
     SecIssuerFundamentalPointInTimeService,
 )
-from investment_analyst.providers.http import HttpTransport, UrlLibHttpTransport
+from investment_analyst.providers.http import (
+    HttpFormTransport,
+    HttpTransport,
+    UrlLibHttpTransport,
+)
+from investment_analyst.providers.macro.fred_alfred import FredAlfredClient, FredApiKey
+from investment_analyst.providers.macro.fred_catalog_refresh import (
+    FredCatalogRefreshRequest,
+    FredCatalogRefreshService,
+    FredCatalogRefreshSummary,
+)
+from investment_analyst.providers.macro.fred_pipeline import (
+    FredVintageImportSummary,
+    FredVintagePipeline,
+)
+from investment_analyst.providers.macro.fred_point_in_time import (
+    FredPointInTimeQuery,
+    FredPointInTimeResult,
+    FredPointInTimeService,
+)
 from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistoricalPipeline
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials, AlpacaStockClient
+from investment_analyst.providers.peru.smv_open_data import SmvOpenDataClient
 from investment_analyst.storage import LocalStorage
 from investment_analyst.workspace.models import WorkspaceAccessMode, WorkspaceInitialization
 
 HttpTransportFactory = Callable[[], HttpTransport]
+HttpFormTransportFactory = Callable[[], HttpFormTransport]
 
 
 class AaplApplicationBootstrapResult(ContractModel):
@@ -182,9 +214,11 @@ class InvestmentAnalystApplication:
         runtime: ApplicationRuntime,
         *,
         transport_factory: HttpTransportFactory = UrlLibHttpTransport,
+        form_transport_factory: HttpFormTransportFactory = UrlLibHttpTransport,
     ) -> None:
         self._runtime = runtime
         self._transport_factory = transport_factory
+        self._form_transport_factory = form_transport_factory
 
     @classmethod
     def create_default(cls) -> "InvestmentAnalystApplication":
@@ -197,6 +231,96 @@ class InvestmentAnalystApplication:
             self._runtime.catalog,
             self._runtime.provider_resolver,
         )
+
+    def refresh_fred_vintage(
+        self,
+        series_id: str,
+        *,
+        vintage_date: date,
+        observation_start: date,
+        observation_end: date,
+        location: StorageLocationRequest,
+        api_key: FredApiKey,
+    ) -> FredVintageImportSummary:
+        """Import one explicit official macro vintage without creating asset analytics."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_WRITE,
+        ) as storage:
+            return FredVintagePipeline(
+                storage,
+                FredAlfredClient(self._transport_factory(), api_key),
+            ).run(
+                series_id,
+                vintage_date=vintage_date,
+                observation_start=observation_start,
+                observation_end=observation_end,
+            )
+
+    def refresh_fred_catalog_series(
+        self,
+        request: FredCatalogRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        api_key: FredApiKey,
+    ) -> FredCatalogRefreshSummary:
+        """Discover and import a bounded resumable batch for one configured series."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_WRITE,
+        ) as storage:
+            return FredCatalogRefreshService(
+                storage,
+                FredAlfredClient(self._transport_factory(), api_key),
+            ).run(request)
+
+    def query_fred_point_in_time(
+        self,
+        request: FredPointInTimeQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> FredPointInTimeResult:
+        """Reconstruct one macro series locally at an explicit information cut."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return FredPointInTimeService(storage).query(request)
+
+    def refresh_bvl_registry(
+        self,
+        request: BvlRegistryRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BvlRegistryRefreshSummary:
+        """Refresh configured SMV identities through one resumable writer batch."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_WRITE,
+        ) as storage:
+            return BvlRegistryRefreshService(
+                storage,
+                self._runtime.catalog,
+                self._runtime.provider_resolver,
+                SmvOpenDataClient(self._form_transport_factory()),
+            ).run(request)
+
+    def query_bvl_registry(
+        self,
+        request: BvlRegistryUniverseRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BvlRegistryUniverse:
+        """Query configured BVL identities and local SMV evidence at one cut."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return BvlRegistryUniverseService(
+                storage,
+                self._runtime.catalog,
+                self._runtime.provider_resolver,
+            ).query(request)
 
     def bootstrap_aapl_workspace(
         self,
@@ -341,24 +465,32 @@ class InvestmentAnalystApplication:
             location,
             access_mode=WorkspaceAccessMode.READ_WRITE,
         ) as storage:
+            execution_clock = BtcMarketExecutionClock()
             history = HistoricalMarketDataService(storage)
             return BtcMarketRefreshPipeline(
                 refresh_planner=BtcMarketRefreshPlanner(storage),
                 market_pipeline=CoinbaseHistoricalPipeline(
                     storage,
-                    CoinbaseExchangeClient(self._transport_factory()),
+                    CoinbaseExchangeClient(
+                        self._transport_factory(),
+                        clock=execution_clock,
+                    ),
                     configuration=configuration,
+                    clock=execution_clock,
                 ),
                 statistics_pipeline=MarketStatisticsPipeline(
                     storage,
                     history,
                     MarketStatisticsEngine(),
+                    clock=execution_clock,
                 ),
                 diagnostic_pipeline=MarketDiagnosticPipeline(
                     storage,
                     MarketDiagnosticMetricSelector(storage),
                     MarketDiagnosticEngine(),
+                    clock=execution_clock,
                 ),
+                clock=execution_clock,
             ).run(request)
 
     def refresh_listed_market(

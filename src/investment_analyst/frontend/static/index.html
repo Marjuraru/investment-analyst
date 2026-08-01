@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark light">
     <meta name="theme-color" content="#0b111c">
-    <title>Apple (AAPL) · Investment Analyst</title>
+    <title>Investment Analyst · Análisis local</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234db1cf'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-family='Arial,sans-serif' font-size='24' font-weight='700' fill='%230b111c'%3EIA%3C/text%3E%3C/svg%3E">
     <link rel="stylesheet" href="/assets/styles.css">
     <script src="/assets/app.js" defer></script>
@@ -75,8 +75,13 @@
             <button id="theme-toggle" class="button secondary compact theme-toggle" type="button" aria-pressed="true">
               Tema claro
             </button>
-            <button id="refresh-overview" class="button secondary compact" type="button">
-              Actualizar estado
+            <button
+              id="refresh-overview"
+              class="button secondary compact"
+              type="button"
+              title="El estado se actualiza automáticamente cada 30 segundos"
+            >
+              Verificar
             </button>
           </div>
           <div
@@ -110,18 +115,13 @@
 
         <main id="contenido" tabindex="-1">
           <section id="resumen" aria-labelledby="resumen-titulo">
-            <div class="section-intro">
-              <div>
-                <p class="eyebrow">VISTA GENERAL</p>
-                <h2 id="resumen-titulo">Estado del análisis</h2>
-              </div>
-            </div>
+            <h2 id="resumen-titulo" class="visually-hidden">Estado operativo</h2>
 
             <div class="overview-grid" aria-label="Estado operativo">
               <article class="status-card">
                 <div class="status-label">
                   <span class="status-dot" aria-hidden="true"></span>
-                  Espacio de datos
+                  Datos
                 </div>
                 <strong id="workspace-status">—</strong>
                 <small id="workspace-counts">—</small>
@@ -129,7 +129,7 @@
               <article class="status-card">
                 <div class="status-label">
                   <span class="status-dot" aria-hidden="true"></span>
-                  Última actualización Apple
+                  Ejecución completa
                 </div>
                 <strong id="run-status">—</strong>
                 <small id="run-time">—</small>
@@ -137,7 +137,7 @@
               <article class="status-card">
                 <div class="status-label">
                   <span class="status-dot" aria-hidden="true"></span>
-                  Próxima actualización Apple
+                  Programación
                 </div>
                 <strong id="schedule-status">—</strong>
                 <small id="schedule-next">—</small>
@@ -149,6 +149,22 @@
                 </div>
                 <strong id="traceability-status">—</strong>
                 <small id="known-at-status">—</small>
+              </article>
+              <article class="status-card">
+                <div class="status-label">
+                  <span class="status-dot" aria-hidden="true"></span>
+                  Candidatos
+                </div>
+                <strong id="candidate-status">—</strong>
+                <small id="candidate-latest">Modo silencioso</small>
+              </article>
+              <article class="status-card">
+                <div class="status-label">
+                  <span class="status-dot" aria-hidden="true"></span>
+                  Alertas
+                </div>
+                <strong id="alert-status">—</strong>
+                <small id="alert-latest">Modo silencioso</small>
               </article>
             </div>
 
@@ -555,7 +571,7 @@
             <div class="section-intro analysis-intro">
               <div>
                 <p class="eyebrow">ANÁLISIS</p>
-                <h2 id="analisis-titulo">Diagnóstico de Apple</h2>
+                <h2 id="analisis-titulo">Diagnóstico consolidado</h2>
               </div>
             </div>
 
@@ -651,9 +667,48 @@
             <div class="section-intro">
               <div>
                 <p class="eyebrow">OPERACIÓN</p>
-                <h2 id="operacion-titulo">Actualizar Apple</h2>
+                <h2 id="operacion-titulo">Actualizar activo</h2>
               </div>
             </div>
+
+            <details id="screening-rules-panel" class="operation-panel screening-rules-panel">
+              <summary>
+                <span>
+                  <strong>Reglas de screening</strong>
+                  <small id="screening-rules-summary">Umbrales, confirmaciones y replay histórico</small>
+                </span>
+                <span class="summary-action">Abrir</span>
+              </summary>
+              <div id="screening-rules" class="screening-rules" aria-live="polite">
+                <p>Cargando reglas configuradas…</p>
+              </div>
+            </details>
+
+            <details id="candidate-inbox-panel" class="operation-panel candidate-inbox-panel">
+              <summary>
+                <span>
+                  <strong>Candidatos analíticos</strong>
+                  <small id="candidate-inbox-summary">Screening determinista en modo silencioso</small>
+                </span>
+                <span class="summary-action">Abrir</span>
+              </summary>
+              <div id="candidate-inbox" class="alert-inbox candidate-inbox" aria-live="polite">
+                <p>No hay candidatos analíticos registrados.</p>
+              </div>
+            </details>
+
+            <details id="alert-inbox-panel" class="operation-panel alert-inbox-panel">
+              <summary>
+                <span>
+                  <strong>Bandeja operativa</strong>
+                  <small id="alert-inbox-summary">Evaluación determinista en modo silencioso</small>
+                </span>
+                <span class="summary-action">Abrir</span>
+              </summary>
+              <div id="alert-inbox" class="alert-inbox" aria-live="polite">
+                <p id="alert-inbox-empty">No hay alertas operativas registradas.</p>
+              </div>
+            </details>
 
             <details class="operation-panel">
               <summary>

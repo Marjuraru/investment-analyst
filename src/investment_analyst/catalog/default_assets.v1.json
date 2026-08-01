@@ -30,6 +30,315 @@
     },
     {
       "aliases": [
+        "Buenaventura BVL",
+        "BVN BVL"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:pe:bvl:bvn",
+      "exchange": "BVL",
+      "is_active": true,
+      "name": "Compa\u00f1\u00eda de Minas Buenaventura S.A.A. (BVL)",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "registry.exchange_listing"
+          ],
+          "identifier": "US2044481040",
+          "namespace": "isin",
+          "provider": "bvl"
+        },
+        {
+          "capabilities": [
+            "registry.exchange_listing"
+          ],
+          "identifier": "BVN",
+          "namespace": "mnemonic",
+          "provider": "bvl"
+        },
+        {
+          "capabilities": [
+            "registry.issuer"
+          ],
+          "identifier": "COMPA\u00d1IA DE MINAS BUENAVENTURA S.A.A.",
+          "is_unique": false,
+          "namespace": "legal_name",
+          "provider": "smv"
+        }
+      ],
+      "provider_symbols": {
+        "bvl_isin": "US2044481040",
+        "bvl_mnemonic": "BVN"
+      },
+      "quote_currency": "USD",
+      "symbol": "BVN"
+    },
+    {
+      "aliases": [
+        "Cerro Verde BVL",
+        "CVERDEC1"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:pe:bvl:cverdec1",
+      "exchange": "BVL",
+      "is_active": true,
+      "name": "Sociedad Minera Cerro Verde S.A.A.",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "registry.exchange_listing"
+          ],
+          "identifier": "PEP646501002",
+          "namespace": "isin",
+          "provider": "bvl"
+        },
+        {
+          "capabilities": [
+            "registry.exchange_listing"
+          ],
+          "identifier": "CVERDEC1",
+          "namespace": "mnemonic",
+          "provider": "bvl"
+        },
+        {
+          "capabilities": [
+            "registry.issuer"
+          ],
+          "identifier": "SOCIEDAD MINERA CERRO VERDE S.A.A.",
+          "is_unique": false,
+          "namespace": "legal_name",
+          "provider": "smv"
+        },
+        {
+          "capabilities": [
+            "registry.security"
+          ],
+          "identifier": "64650100",
+          "namespace": "security_code",
+          "provider": "smv"
+        }
+      ],
+      "provider_symbols": {
+        "bvl_isin": "PEP646501002",
+        "bvl_mnemonic": "CVERDEC1",
+        "smv_security_code": "64650100"
+      },
+      "quote_currency": "USD",
+      "symbol": "CVERDEC1"
+    },
+    {
+      "aliases": [
+        "MINSURI1",
+        "Minsur BVL"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:pe:bvl:minsuri1",
+      "exchange": "BVL",
+      "is_active": true,
+      "name": "Minsur S.A. - Acciones de Inversi\u00f3n",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "registry.exchange_listing"
+          ],
+          "identifier": "PEP622005002",
+          "namespace": "isin",
+          "provider": "bvl"
+        },
+        {
+          "capabilities": [
+            "registry.exchange_listing"
+          ],
+          "identifier": "MINSURI1",
+          "namespace": "mnemonic",
+          "provider": "bvl"
+        },
+        {
+          "capabilities": [
+            "registry.issuer"
+          ],
+          "identifier": "MINSUR S.A.",
+          "is_unique": false,
+          "namespace": "legal_name",
+          "provider": "smv"
+        },
+        {
+          "capabilities": [
+            "registry.security"
+          ],
+          "identifier": "62200500",
+          "namespace": "security_code",
+          "provider": "smv"
+        }
+      ],
+      "provider_symbols": {
+        "bvl_isin": "PEP622005002",
+        "bvl_mnemonic": "MINSURI1",
+        "smv_security_code": "62200500"
+      },
+      "quote_currency": "PEN",
+      "symbol": "MINSURI1"
+    },
+    {
+      "aliases": [
+        "Pomalca BVL",
+        "POMALCC1"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:pe:bvl:pomalcc1",
+      "exchange": "BVL",
+      "is_active": true,
+      "name": "Empresa Agroindustrial Pomalca S.A.A.",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "registry.exchange_listing"
+          ],
+          "identifier": "PEP779301006",
+          "namespace": "isin",
+          "provider": "bvl"
+        },
+        {
+          "capabilities": [
+            "registry.exchange_listing"
+          ],
+          "identifier": "POMALCC1",
+          "namespace": "mnemonic",
+          "provider": "bvl"
+        },
+        {
+          "capabilities": [
+            "registry.issuer"
+          ],
+          "identifier": "EMPRESA AGROINDUSTRIAL POMALCA S.A.A.",
+          "is_unique": false,
+          "namespace": "legal_name",
+          "provider": "smv"
+        },
+        {
+          "capabilities": [
+            "registry.security"
+          ],
+          "identifier": "77930100",
+          "namespace": "security_code",
+          "provider": "smv"
+        }
+      ],
+      "provider_symbols": {
+        "bvl_isin": "PEP779301006",
+        "bvl_mnemonic": "POMALCC1",
+        "smv_security_code": "77930100"
+      },
+      "quote_currency": "PEN",
+      "symbol": "POMALCC1"
+    },
+    {
+      "aliases": [
+        "SCCO BVL",
+        "Southern Copper BVL"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:pe:bvl:scco",
+      "exchange": "BVL",
+      "is_active": true,
+      "name": "Southern Copper Corporation (BVL)",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "registry.exchange_listing"
+          ],
+          "identifier": "US84265V1052",
+          "namespace": "isin",
+          "provider": "bvl"
+        },
+        {
+          "capabilities": [
+            "registry.exchange_listing"
+          ],
+          "identifier": "SCCO",
+          "namespace": "mnemonic",
+          "provider": "bvl"
+        },
+        {
+          "capabilities": [
+            "registry.issuer"
+          ],
+          "identifier": "SOUTHERN COPPER CORPORATION",
+          "is_unique": false,
+          "namespace": "legal_name",
+          "provider": "smv"
+        },
+        {
+          "capabilities": [
+            "registry.security"
+          ],
+          "identifier": "4265V105",
+          "namespace": "security_code",
+          "provider": "smv"
+        }
+      ],
+      "provider_symbols": {
+        "bvl_isin": "US84265V1052",
+        "bvl_mnemonic": "SCCO",
+        "smv_security_code": "4265V105"
+      },
+      "quote_currency": "USD",
+      "symbol": "SCCO"
+    },
+    {
+      "aliases": [
+        "Volcan B BVL",
+        "VOLCABC1"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:pe:bvl:volcabc1",
+      "exchange": "BVL",
+      "is_active": true,
+      "name": "Volcan Compa\u00f1\u00eda Minera S.A.A. - Clase B",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "registry.exchange_listing"
+          ],
+          "identifier": "PEP648014202",
+          "namespace": "isin",
+          "provider": "bvl"
+        },
+        {
+          "capabilities": [
+            "registry.exchange_listing"
+          ],
+          "identifier": "VOLCABC1",
+          "namespace": "mnemonic",
+          "provider": "bvl"
+        },
+        {
+          "capabilities": [
+            "registry.issuer"
+          ],
+          "identifier": "VOLCAN COMPA\u00d1IA MINERA S.A.A.",
+          "is_unique": false,
+          "namespace": "legal_name",
+          "provider": "smv"
+        },
+        {
+          "capabilities": [
+            "registry.security"
+          ],
+          "identifier": "64801420",
+          "namespace": "security_code",
+          "provider": "smv"
+        }
+      ],
+      "provider_symbols": {
+        "bvl_isin": "PEP648014202",
+        "bvl_mnemonic": "VOLCABC1",
+        "smv_security_code": "64801420"
+      },
+      "quote_currency": "PEN",
+      "symbol": "VOLCABC1"
+    },
+    {
+      "aliases": [
         "AAPL",
         "Apple",
         "Apple Inc."
@@ -55,6 +364,16 @@
           ],
           "identifier": "0000320193",
           "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
           "provider": "sec"
         },
         {
@@ -107,6 +426,16 @@
             "fundamentals.company_facts",
             "fundamentals.submissions"
           ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
           "identifier": "AMD",
           "namespace": "ticker",
           "provider": "sec"
@@ -135,13 +464,50 @@
           "capabilities": [
             "market.daily_bars"
           ],
+          "identifier": "2025-05-10",
+          "namespace": "history_start",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
           "identifier": "B",
           "namespace": "symbol",
           "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0000756894",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "ifrs-full",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "B",
+          "namespace": "ticker",
+          "provider": "sec"
         }
       ],
       "provider_symbols": {
-        "alpaca_iex": "B"
+        "alpaca_iex": "B",
+        "sec_cik": "0000756894"
       },
       "quote_currency": "USD",
       "symbol": "B"
@@ -165,10 +531,39 @@
           "identifier": "BVN",
           "namespace": "symbol",
           "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0001013131",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "ifrs-full",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "BVN",
+          "namespace": "ticker",
+          "provider": "sec"
         }
       ],
       "provider_symbols": {
-        "alpaca_iex": "BVN"
+        "alpaca_iex": "BVN",
+        "sec_cik": "0001013131"
       },
       "quote_currency": "USD",
       "symbol": "BVN"
@@ -199,6 +594,16 @@
           ],
           "identifier": "0000215466",
           "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
           "provider": "sec"
         },
         {
@@ -251,6 +656,16 @@
             "fundamentals.company_facts",
             "fundamentals.submissions"
           ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
           "identifier": "HYMC",
           "namespace": "ticker",
           "provider": "sec"
@@ -289,6 +704,16 @@
           ],
           "identifier": "0000050863",
           "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
           "provider": "sec"
         },
         {
@@ -342,6 +767,16 @@
             "fundamentals.company_facts",
             "fundamentals.submissions"
           ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
           "identifier": "MSTR",
           "namespace": "ticker",
           "provider": "sec"
@@ -381,6 +816,16 @@
           ],
           "identifier": "0000723125",
           "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
           "provider": "sec"
         },
         {
@@ -434,6 +879,16 @@
             "fundamentals.company_facts",
             "fundamentals.submissions"
           ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
           "identifier": "MUX",
           "namespace": "ticker",
           "provider": "sec"
@@ -472,6 +927,16 @@
           ],
           "identifier": "0001164727",
           "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
           "provider": "sec"
         },
         {
@@ -524,6 +989,16 @@
             "fundamentals.company_facts",
             "fundamentals.submissions"
           ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
           "identifier": "PLTR",
           "namespace": "ticker",
           "provider": "sec"
@@ -569,6 +1044,16 @@
             "fundamentals.company_facts",
             "fundamentals.submissions"
           ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
           "identifier": "SCCO",
           "namespace": "ticker",
           "provider": "sec"
@@ -600,10 +1085,39 @@
           "identifier": "TSM",
           "namespace": "symbol",
           "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0001046179",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "ifrs-full",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "TSM",
+          "namespace": "ticker",
+          "provider": "sec"
         }
       ],
       "provider_symbols": {
-        "alpaca_iex": "TSM"
+        "alpaca_iex": "TSM",
+        "sec_cik": "0001046179"
       },
       "quote_currency": "USD",
       "symbol": "TSM"

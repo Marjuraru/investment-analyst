@@ -11,9 +11,24 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Protocol, cast
 from urllib.parse import parse_qs, urlsplit
+from uuid import UUID
 
 from pydantic import ValidationError
 
+from investment_analyst.alerts.analytical_backtest import (
+    AnalyticalBacktestError,
+    AnalyticalBacktestRequest,
+    AnalyticalBacktestService,
+)
+from investment_analyst.alerts.analytical_rule_registry import (
+    AnalyticalRuleConfigurationUpdate,
+    AnalyticalRuleRegistryConflictError,
+    AnalyticalRuleRegistryStore,
+)
+from investment_analyst.alerts.analytical_state import (
+    AnalyticalCandidateStatus,
+    AnalyticalScreeningStateStore,
+)
 from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagnosticReport
 from investment_analyst.analytics.aapl_daily_report_service import AaplDailyReportError
 from investment_analyst.analytics.consolidated_diagnostic_models import (
@@ -100,6 +115,11 @@ from investment_analyst.application.market_universe import (
     MarketAssetDescriptor,
     MarketAssetUniverse,
 )
+from investment_analyst.application.multi_asset_scheduler import MultiAssetScheduler
+from investment_analyst.application.operational_alerts import (
+    OperationalAlertEventStatus,
+    OperationalAlertStateStore,
+)
 from investment_analyst.application.operational_models import (
     AaplDailyRunRequestSnapshot,
     AaplDailyRunState,
@@ -108,6 +128,10 @@ from investment_analyst.application.operational_models import (
 from investment_analyst.application.operational_state import (
     AaplDailyRunAlreadyRunningError,
     AaplOperationalStateError,
+)
+from investment_analyst.application.peru_registry import (
+    BvlRegistryRefreshRequest,
+    BvlRegistryRefreshSummary,
 )
 from investment_analyst.application.runtime import ApplicationRuntimeError, StorageLocationRequest
 from investment_analyst.application.sec_fundamental_refresh import (
@@ -121,6 +145,11 @@ from investment_analyst.application.sec_fundamental_refresh_models import (
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
 from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID as APPLE_ASSET_ID
+from investment_analyst.providers.macro.fred_alfred import FredApiKey
+from investment_analyst.providers.macro.fred_catalog_refresh import (
+    FredCatalogRefreshRequest,
+    FredCatalogRefreshSummary,
+)
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
 from investment_analyst.storage import StorageError
 from investment_analyst.workspace.service import WorkspaceError
@@ -327,6 +356,25 @@ class _ApplicationOperations(Protocol):
         """Refresh one catalog-backed SEC issuer independently from market."""
         ...
 
+    def refresh_fred_catalog_series(
+        self,
+        request: FredCatalogRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        api_key: FredApiKey,
+    ) -> FredCatalogRefreshSummary:
+        """Refresh one configured FRED series through bounded vintage discovery."""
+        ...
+
+    def refresh_bvl_registry(
+        self,
+        request: BvlRegistryRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BvlRegistryRefreshSummary:
+        """Refresh the configured official SMV registry."""
+        ...
+
 
 class _WebOperations(Protocol):
     def market_assets(self) -> dict[str, object]:
@@ -335,6 +383,37 @@ class _WebOperations(Protocol):
 
     def overview(self) -> dict[str, object]:
         """Return operational and scheduler state."""
+        ...
+
+    def alerts(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return the bounded persistent local alert inbox."""
+        ...
+
+    def alert_transition(self, payload: dict[str, object]) -> dict[str, object]:
+        """Apply one audited local alert-inbox transition."""
+        ...
+
+    def candidates(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return the bounded persistent analytical candidate inbox."""
+        ...
+
+    def candidate_transition(self, payload: dict[str, object]) -> dict[str, object]:
+        """Apply one audited analytical-candidate transition."""
+        ...
+
+    def screening_rules(self) -> dict[str, object]:
+        """Return the current versioned analytical rule configuration."""
+        ...
+
+    def screening_rule_update(self, payload: dict[str, object]) -> dict[str, object]:
+        """Apply one optimistically locked analytical rule update."""
+        ...
+
+    def screening_backtest(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Replay one configured rule over persisted point-in-time evidence."""
         ...
 
     def report(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
@@ -402,12 +481,14 @@ class AaplLocalController:
         workspace: Path | None,
         alpaca_credentials: AlpacaCredentials,
         sec_identity: SecEdgarIdentity,
+        fred_api_key: FredApiKey | None = None,
     ) -> None:
         self._runner = runner
         self._application = application
         self._workspace = workspace
         self._alpaca_credentials = alpaca_credentials
         self._sec_identity = sec_identity
+        self._fred_api_key = fred_api_key
         self._operation_lock = threading.RLock()
         self._market_chart_cache: dict[AaplMarketChartRequest, AaplMarketChart] = {}
         self._btc_market_chart_cache: dict[BtcMarketChartRequest, BtcMarketChart] = {}
@@ -436,6 +517,7 @@ class AaplLocalController:
         workspace: Path | None,
         alpaca_credentials: AlpacaCredentials,
         sec_identity: SecEdgarIdentity,
+        fred_api_key: FredApiKey | None = None,
     ) -> "AaplLocalController":
         """Compose one shared runtime for the facade and operational runner."""
         from investment_analyst.application.runtime import ApplicationRuntime
@@ -448,6 +530,7 @@ class AaplLocalController:
             workspace=workspace,
             alpaca_credentials=alpaca_credentials,
             sec_identity=sec_identity,
+            fred_api_key=fred_api_key,
         )
 
     def health(self) -> AaplOperationalHealth:
@@ -625,6 +708,31 @@ class AaplLocalController:
                 self._fundamental_research_history_cache.clear()
                 self._fundamental_analysis_cache.clear()
 
+    def fred_catalog_refresh_request(
+        self,
+        request: FredCatalogRefreshRequest,
+    ) -> FredCatalogRefreshSummary:
+        """Refresh one FRED series through the shared writer mutex."""
+        if self._fred_api_key is None:
+            raise ValueError("FRED_API_KEY is required for automatic macro refresh")
+        with self._operation_lock:
+            return self._application.refresh_fred_catalog_series(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+                api_key=self._fred_api_key,
+            )
+
+    def bvl_registry_refresh_request(
+        self,
+        request: BvlRegistryRefreshRequest,
+    ) -> BvlRegistryRefreshSummary:
+        """Refresh official SMV registry evidence through the shared writer mutex."""
+        with self._operation_lock:
+            return self._application.refresh_bvl_registry(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            )
+
     def fundamental_trend_request(
         self,
         request: AaplFundamentalTrendRequest,
@@ -722,20 +830,161 @@ class AaplLocalWebApplication:
     def __init__(
         self,
         controller: AaplLocalController,
-        scheduler: AaplDailyScheduler | None,
+        scheduler: AaplDailyScheduler | MultiAssetScheduler | None,
+        alert_store: OperationalAlertStateStore | None = None,
+        analytical_store: AnalyticalScreeningStateStore | None = None,
+        analytical_rule_store: AnalyticalRuleRegistryStore | None = None,
+        analytical_backtest: AnalyticalBacktestService | None = None,
     ) -> None:
         self._controller = controller
         self._scheduler = scheduler
+        self._alert_store = alert_store
+        self._analytical_store = analytical_store
+        self._analytical_rule_store = analytical_rule_store
+        self._analytical_backtest = analytical_backtest
 
     def overview(self) -> dict[str, object]:
         """Return state only; never initialize, fetch, calculate, or persist."""
         scheduler: dict[str, object] = {"enabled": False}
         if self._scheduler is not None:
             scheduler = self._scheduler.status().to_json_dict()
+        alerts: dict[str, object] = {"enabled": False}
+        if self._alert_store is not None:
+            alerts = self._alert_store.status().to_json_dict()
+        candidates: dict[str, object] = {"enabled": False}
+        if self._analytical_store is not None:
+            candidates = self._analytical_store.status().to_json_dict()
         return {
             "operational": self._controller.health().to_json_dict(),
             "scheduler": scheduler,
+            "alerts": alerts,
+            "candidates": candidates,
         }
+
+    def alerts(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return local persisted alerts without providers or analytical writes."""
+        if self._alert_store is None:
+            return {
+                "schema_version": "operational-alert-inbox-v1",
+                "silent_mode": True,
+                "total": 0,
+                "events": [],
+            }
+        allowed = {"limit"}
+        if set(parameters) - allowed:
+            raise ValueError("alert inbox query contains unsupported parameters")
+        limit_value = _one_parameter(parameters, "limit", required=False)
+        limit = _integer_parameter(limit_value, name="limit", default=50)
+        return self._alert_store.inbox(limit=limit).to_json_dict()
+
+    def alert_transition(self, payload: dict[str, object]) -> dict[str, object]:
+        """Validate and persist one explicit local-inbox state change."""
+        if self._alert_store is None:
+            raise ValueError("operational alert monitor is not configured")
+        if set(payload) != {"alert_id", "status"}:
+            raise ValueError("alert transition requires only alert_id and status")
+        alert_id_value = payload["alert_id"]
+        status_value = payload["status"]
+        if not isinstance(alert_id_value, str) or not isinstance(status_value, str):
+            raise ValueError("alert_id and status must be strings")
+        try:
+            alert_id = UUID(alert_id_value)
+            status = OperationalAlertEventStatus(status_value)
+        except ValueError as error:
+            raise ValueError("alert transition contains an invalid identifier or status") from error
+        event, changed = self._alert_store.transition(
+            alert_id,
+            status,
+            recorded_at=datetime.now(UTC),
+        )
+        return {
+            "schema_version": "operational-alert-transition-response-v1",
+            "changed": changed,
+            "event": event.to_json_dict(),
+        }
+
+    def candidates(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return persisted analytical candidates without recalculation or providers."""
+        if self._analytical_store is None:
+            return {
+                "schema_version": "analytical-candidate-inbox-v1",
+                "silent_mode": True,
+                "total": 0,
+                "items": [],
+            }
+        if set(parameters) - {"limit"}:
+            raise ValueError("candidate inbox query contains unsupported parameters")
+        limit_value = _one_parameter(parameters, "limit", required=False)
+        limit = _integer_parameter(limit_value, name="limit", default=50)
+        return self._analytical_store.inbox(limit=limit).to_json_dict()
+
+    def candidate_transition(self, payload: dict[str, object]) -> dict[str, object]:
+        """Validate and persist one explicit analytical-candidate transition."""
+        if self._analytical_store is None:
+            raise ValueError("analytical screening monitor is not configured")
+        if set(payload) != {"candidate_id", "status"}:
+            raise ValueError("candidate transition requires only candidate_id and status")
+        candidate_id_value = payload["candidate_id"]
+        status_value = payload["status"]
+        if not isinstance(candidate_id_value, str) or not isinstance(status_value, str):
+            raise ValueError("candidate_id and status must be strings")
+        try:
+            candidate_id = UUID(candidate_id_value)
+            status = AnalyticalCandidateStatus(status_value)
+        except ValueError as error:
+            raise ValueError(
+                "candidate transition contains an invalid identifier or status"
+            ) from error
+        event, changed = self._analytical_store.transition(
+            candidate_id,
+            status,
+            recorded_at=datetime.now(UTC),
+        )
+        return {
+            "schema_version": "analytical-candidate-transition-response-v1",
+            "changed": changed,
+            "event": event.to_json_dict(),
+        }
+
+    def screening_rules(self) -> dict[str, object]:
+        """Return defaults and append-only local rule revisions without providers."""
+        if self._analytical_rule_store is None:
+            return {
+                "schema_version": "analytical-rule-registry-snapshot-v1",
+                "configurations": [],
+                "total_revisions": 0,
+            }
+        return self._analytical_rule_store.snapshot().to_json_dict()
+
+    def screening_rule_update(self, payload: dict[str, object]) -> dict[str, object]:
+        """Validate and persist one complete, optimistically locked rule revision."""
+        if self._analytical_rule_store is None:
+            raise ValueError("analytical rule registry is not configured")
+        request = AnalyticalRuleConfigurationUpdate.model_validate(payload)
+        return self._analytical_rule_store.update(
+            request,
+            recorded_at=datetime.now(UTC),
+        ).to_json_dict()
+
+    def screening_backtest(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Run a bounded read-only point-in-time replay for one rule and asset."""
+        if self._analytical_backtest is None:
+            raise ValueError("analytical backtest is not configured")
+        if set(parameters) - {"rule_id", "asset_id", "max_cuts"}:
+            raise ValueError("screening backtest query contains unsupported parameters")
+        request = AnalyticalBacktestRequest(
+            rule_id=_one_parameter(parameters, "rule_id", required=True),
+            asset_id=_one_parameter(parameters, "asset_id", required=True),
+            max_cuts=_integer_parameter(
+                _one_parameter(parameters, "max_cuts", required=False),
+                name="max_cuts",
+                default=200,
+            ),
+        )
+        return self._analytical_backtest.run(request).to_json_dict()
 
     def market_assets(self) -> dict[str, object]:
         """Return one immutable catalog-driven watchlist."""
@@ -854,6 +1103,7 @@ class AaplLocalWebApplication:
         descriptor = self._fundamental_asset(parameters)
         known_at = _one_parameter(parameters, "known_at", required=True)
         frequency = _frequency(_one_parameter(parameters, "frequency", required=True))
+        self._require_fundamental_frequency(descriptor, frequency)
         period_limit = 5 if frequency is DataFrequency.ANNUAL else 8
         request = AaplFundamentalTrendRequest(
             known_at=_aware_datetime(known_at),
@@ -872,6 +1122,7 @@ class AaplLocalWebApplication:
         """Validate query parameters and return exact derived SEC metrics."""
         descriptor = self._fundamental_asset(parameters)
         request = _fundamental_research_request(parameters)
+        self._require_fundamental_frequency(descriptor, request.frequency)
         return self._controller.fundamental_research_request(
             request,
             asset_id=descriptor.asset_id,
@@ -884,6 +1135,7 @@ class AaplLocalWebApplication:
         """Validate query parameters and return historical SEC statistics."""
         descriptor = self._fundamental_asset(parameters)
         request = _fundamental_research_request(parameters)
+        self._require_fundamental_frequency(descriptor, request.frequency)
         return self._controller.fundamental_research_history_request(
             request,
             asset_id=descriptor.asset_id,
@@ -896,6 +1148,7 @@ class AaplLocalWebApplication:
         """Validate query parameters and return unified analytical sections."""
         descriptor = self._fundamental_asset(parameters)
         request = _fundamental_research_request(parameters)
+        self._require_fundamental_frequency(descriptor, request.frequency)
         return self._controller.fundamental_analysis_request(
             request,
             asset_id=descriptor.asset_id,
@@ -935,6 +1188,7 @@ class AaplLocalWebApplication:
         request = SecIssuerFundamentalRefreshRequest.model_validate(payload)
         if request.asset_id != descriptor.asset_id:
             raise ValueError("fundamental refresh asset_id is inconsistent")
+        self._require_fundamental_frequency(descriptor, request.frequency)
         return self._controller.sec_fundamental_refresh_request(request).to_json_dict()
 
     def _market_asset(self, asset_id: object) -> MarketAssetDescriptor:
@@ -965,6 +1219,18 @@ class AaplLocalWebApplication:
         ):
             raise ValueError("fundamental analysis is not available for asset_id")
         return descriptor
+
+    @staticmethod
+    def _require_fundamental_frequency(
+        descriptor: MarketAssetDescriptor,
+        frequency: DataFrequency,
+    ) -> None:
+        """Reject unsupported issuer frequencies before reads, providers, or writes."""
+        if frequency not in descriptor.fundamental_frequencies:
+            supported = ", ".join(item.value for item in descriptor.fundamental_frequencies)
+            raise ValueError(
+                f"fundamental frequency is not available for asset_id; supported: {supported}"
+            )
 
 
 class AaplLocalHttpServer(ThreadingHTTPServer):
@@ -1029,6 +1295,35 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/overview":
                 self._send_json(HTTPStatus.OK, server.application.overview())
                 return
+            if parsed.path == "/api/alerts":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=2)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(HTTPStatus.OK, server.application.alerts(parameters))
+                return
+            if parsed.path == "/api/candidates":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=2)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.candidates(parameters),
+                )
+                return
+            if parsed.path == "/api/screening-rules":
+                if parsed.query:
+                    raise ValueError("screening rules query does not accept parameters")
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.screening_rules(),
+                )
+                return
+            if parsed.path == "/api/screening-backtest":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=3)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.screening_backtest(parameters),
+                )
+                return
             if parsed.path == "/api/market-assets":
                 self._send_json(HTTPStatus.OK, server.application.market_assets())
                 return
@@ -1092,12 +1387,21 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 "/api/market-refresh",
                 "/api/market-intraday-refresh",
                 "/api/fundamental-refresh",
+                "/api/alerts/transition",
+                "/api/candidates/transition",
+                "/api/screening-rules/update",
             }:
                 raise _HttpError(HTTPStatus.NOT_FOUND, "not_found", "route not found")
             payload = self._read_json_object()
             server = cast(AaplLocalHttpServer, self.server)
             if parsed.path == "/api/run":
                 response = server.application.run(payload)
+            elif parsed.path == "/api/alerts/transition":
+                response = server.application.alert_transition(payload)
+            elif parsed.path == "/api/candidates/transition":
+                response = server.application.candidate_transition(payload)
+            elif parsed.path == "/api/screening-rules/update":
+                response = server.application.screening_rule_update(payload)
             elif parsed.path == "/api/market-refresh":
                 response = server.application.market_refresh(payload)
             elif parsed.path == "/api/fundamental-refresh":
@@ -1168,6 +1472,12 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
             self._send_error(HTTPStatus.BAD_REQUEST, "invalid_request", "request validation failed")
         elif isinstance(error, AaplDailyRunAlreadyRunningError):
             self._send_error(HTTPStatus.CONFLICT, "run_active", str(error)[:500])
+        elif isinstance(error, AnalyticalRuleRegistryConflictError):
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "rule_conflict",
+                str(error)[:500],
+            )
         elif isinstance(error, AaplDailyRunExecutionError):
             status = (
                 HTTPStatus.UNPROCESSABLE_ENTITY
@@ -1220,6 +1530,12 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
             ),
         ):
             self._send_error(HTTPStatus.UNPROCESSABLE_ENTITY, "query_failed", str(error)[:500])
+        elif isinstance(error, AnalyticalBacktestError):
+            self._send_error(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "backtest_unavailable",
+                str(error)[:500],
+            )
         elif isinstance(error, ValueError):
             self._send_error(HTTPStatus.BAD_REQUEST, "invalid_request", str(error)[:500])
         elif isinstance(

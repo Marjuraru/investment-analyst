@@ -4,6 +4,8 @@ const LOCALE = "es-PE";
 const DEFAULT_TIME_ZONE = "America/Lima";
 const NEW_YORK_TIME_ZONE = "America/New_York";
 const MARKET_CLOCK_REFRESH_MS = 60_000;
+const OVERVIEW_REFRESH_MS = 30_000;
+const OVERVIEW_MAX_BACKOFF_MS = 5 * 60_000;
 const NYSE_CORE_OPEN_MINUTES = 9 * 60 + 30;
 const NYSE_CORE_CLOSE_MINUTES = 16 * 60;
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
@@ -413,6 +415,9 @@ const ERROR_MESSAGES = Object.freeze({
   invalid_json: "La solicitud no pudo interpretarse correctamente.",
   query_failed: "No fue posible construir el análisis para el corte solicitado.",
   run_active: "Ya existe una actualización en curso para este espacio de datos.",
+  rule_conflict: "La regla cambió desde que se abrió. Vuelve a cargarla antes de guardar.",
+  backtest_unavailable:
+    "No hay evidencia point-in-time compatible para este replay en el activo seleccionado.",
   known_at_too_early:
     "El corte elegido es anterior a la evidencia de mercado recién obtenida.",
   market_refresh_failed: "No fue posible actualizar el activo desde su proveedor. Inténtalo nuevamente.",
@@ -433,6 +438,7 @@ let selectedMarketAsset = "equity:us:aapl";
 const marketStartByAsset = new Map();
 const knownAtByAsset = new Map();
 let selectedFundamentalFrequency = "quarterly";
+let screeningRuleSnapshot = null;
 let fundamentalTrendPayload = null;
 let fundamentalResearchPayload = null;
 let fundamentalBusyCount = 0;
@@ -483,6 +489,7 @@ function marketAssetFromDescriptor(descriptor) {
     marketMode: descriptor.analysis.market_mode,
     fundamentalMode: descriptor.analysis.fundamental_mode,
     hasFundamentals: descriptor.has_fundamentals,
+    fundamentalFrequencies: descriptor.fundamental_frequencies,
     refreshKind: descriptor.refresh_kind,
     refreshLabel: `Actualizar ${descriptor.symbol}`,
     refreshSource: descriptor.refresh_kind === "complete_analysis"
@@ -496,7 +503,7 @@ function marketAssetFromDescriptor(descriptor) {
 async function loadMarketAssets() {
   const payload = await api("/api/market-assets");
   if (
-    payload.schema_version !== "market-asset-universe-v2"
+    payload.schema_version !== "market-asset-universe-v3"
     || !Array.isArray(payload.assets)
     || payload.assets.length === 0
   ) {
@@ -585,6 +592,32 @@ function applySelectedMarketAsset() {
   }
   for (const element of document.querySelectorAll("[data-complete-analysis-only]")) {
     element.classList.toggle("hidden", presentation.refreshKind !== "complete_analysis");
+  }
+  const supportedFrequencies = new Set(presentation.fundamentalFrequencies);
+  if (
+    presentation.hasFundamentals
+    && !supportedFrequencies.has(selectedFundamentalFrequency)
+  ) {
+    selectFundamentalFrequency(presentation.fundamentalFrequencies[0]);
+  }
+  for (const button of document.querySelectorAll(".frequency-button")) {
+    button.classList.toggle(
+      "hidden",
+      presentation.hasFundamentals
+        && !supportedFrequencies.has(button.dataset.frequency),
+    );
+  }
+  for (const selectId of ["report-frequency", "run-frequency"]) {
+    for (const option of byId(selectId).options) {
+      option.disabled = presentation.hasFundamentals
+        && !supportedFrequencies.has(option.value);
+    }
+    if (
+      presentation.hasFundamentals
+      && !supportedFrequencies.has(byId(selectId).value)
+    ) {
+      byId(selectId).value = presentation.fundamentalFrequencies[0];
+    }
   }
   byId("operacion-titulo").textContent = presentation.refreshLabel;
   byId("run-source-label").textContent = presentation.refreshSource;
@@ -2984,6 +3017,27 @@ async function queryFundamentalResearch() {
 }
 
 function localizedIssue(issue) {
+  if (issue.endsWith(": latest scheduled job failed")) {
+    return `${issue.slice(0, -": latest scheduled job failed".length)}: falló la actualización más reciente`;
+  }
+  if (issue.endsWith(": daily retry budget exhausted")) {
+    return `${issue.slice(0, -": daily retry budget exhausted".length)}: se agotaron los reintentos diarios`;
+  }
+  if (issue.endsWith(": prior scheduled job failed")) {
+    return `${issue.slice(0, -": prior scheduled job failed".length)}: falló la actualización anterior`;
+  }
+  if (issue.endsWith(": interrupted scheduled job")) {
+    return `${issue.slice(0, -": interrupted scheduled job".length)}: actualización interrumpida`;
+  }
+  if (issue.endsWith(": provider check is stale")) {
+    return `${issue.slice(0, -": provider check is stale".length)}: evidencia desactualizada`;
+  }
+  if (issue.endsWith(": latest coverage is incomplete")) {
+    return `${issue.slice(0, -": latest coverage is incomplete".length)}: cobertura incompleta`;
+  }
+  if (issue === "operational alert monitor could not persist its result") {
+    return "El monitor de alertas no pudo guardar su evaluación.";
+  }
   return ISSUE_TRANSLATIONS.get(issue) || issue;
 }
 
@@ -3013,6 +3067,8 @@ function applyOverview(payload) {
   const workspace = operational.workspace;
   const latest = operational.latest_run;
   const scheduler = payload.scheduler;
+  const alerts = payload.alerts || { enabled: false };
+  const candidates = payload.candidates || { enabled: false };
 
   badge(
     byId("health-badge"),
@@ -3020,7 +3076,7 @@ function applyOverview(payload) {
     statusTone(operational.status),
   );
   byId("workspace-status").textContent = translated(workspace.status, STATUS_LABELS, workspace.status);
-  byId("workspace-counts").textContent = `${formatInteger(workspace.counts.observations)} observaciones · ${formatInteger(workspace.counts.metric_results)} métricas`;
+  byId("workspace-counts").textContent = `${formatInteger(workspace.counts.observations)} obs. · ${formatInteger(workspace.counts.metric_results)} métricas`;
 
   byId("run-status").textContent = latest
     ? translated(latest.status, STATUS_LABELS, latest.status)
@@ -3032,18 +3088,74 @@ function applyOverview(payload) {
     ? "Verificada"
     : "Sin verificación reciente";
   byId("known-at-status").textContent = latest?.effective_known_at
-    ? `Corte Apple: ${formatInstant(latest.effective_known_at)}`
+    ? `Corte: ${formatInstant(latest.effective_known_at)}`
     : "—";
 
   if (scheduler.enabled) {
-    const config = scheduler.config;
-    byId("schedule-status").textContent = scheduler.due
-      ? "Pendiente"
-      : `Diaria · ${config.run_at}`;
-    byId("schedule-next").textContent = `Próxima: ${formatInstant(scheduler.next_run_at, config.timezone)}`;
+    if (Array.isArray(scheduler.jobs)) {
+      const total = scheduler.jobs.length;
+      if (scheduler.failed_count > 0) {
+        byId("schedule-status").textContent = `${formatInteger(scheduler.failed_count)} con fallo`;
+      } else if (scheduler.incomplete_count > 0) {
+        byId("schedule-status").textContent = `${formatInteger(scheduler.incomplete_count)} incompletos`;
+      } else if (scheduler.stale_count > 0) {
+        byId("schedule-status").textContent = `${formatInteger(scheduler.stale_count)} desactualizados`;
+      } else if (scheduler.due_count > 0) {
+        byId("schedule-status").textContent = `${formatInteger(scheduler.due_count)} pendientes`;
+      } else if (scheduler.running_count > 0) {
+        byId("schedule-status").textContent = `${formatInteger(scheduler.running_count)} en curso`;
+      } else {
+        byId("schedule-status").textContent = `${formatInteger(total)} trabajos automáticos`;
+      }
+      const nextJob = scheduler.jobs
+        .slice()
+        .sort((left, right) => left.next_run_at.localeCompare(right.next_run_at))[0];
+      byId("schedule-next").textContent = formatInstant(
+        scheduler.next_run_at,
+        nextJob?.definition?.timezone || DEFAULT_TIME_ZONE,
+      );
+    } else {
+      const config = scheduler.config;
+      byId("schedule-status").textContent = scheduler.due
+        ? "Pendiente"
+        : `Automática · ${config.run_at}`;
+      byId("schedule-next").textContent = formatInstant(scheduler.next_run_at, config.timezone);
+    }
   } else {
     byId("schedule-status").textContent = "Desactivada";
     byId("schedule-next").textContent = "Solo actualización manual";
+  }
+
+  if (alerts.enabled) {
+    byId("alert-status").textContent = alerts.new_count > 0
+      ? `${formatInteger(alerts.new_count)} nuevas`
+      : "Sin alertas";
+    byId("alert-latest").textContent = alerts.latest_alert_at
+      ? formatInstant(alerts.latest_alert_at)
+      : "Modo silencioso";
+    byId("alert-inbox-summary").textContent = alerts.alert_count > 0
+      ? `${formatInteger(alerts.alert_count)} registradas · modo silencioso`
+      : "Sin incidencias · modo silencioso";
+  } else {
+    byId("alert-status").textContent = "Desactivadas";
+    byId("alert-latest").textContent = "Monitor no configurado";
+    byId("alert-inbox-summary").textContent = "Monitor no configurado";
+  }
+
+  if (candidates.enabled) {
+    byId("candidate-status").textContent = candidates.new_count > 0
+      ? `${formatInteger(candidates.new_count)} nuevos`
+      : "Sin candidatos";
+    byId("candidate-latest").textContent = candidates.latest_candidate_at
+      ? formatInstant(candidates.latest_candidate_at)
+      : `${formatInteger(candidates.result_count)} evaluaciones`;
+    byId("candidate-inbox-summary").textContent = candidates.candidate_count > 0
+      ? `${formatInteger(candidates.candidate_count)} registrados · modo silencioso`
+      : `${formatInteger(candidates.result_count)} evaluaciones · sin candidatos`;
+  } else {
+    byId("candidate-status").textContent = "Desactivados";
+    byId("candidate-latest").textContent = "Monitor no configurado";
+    byId("candidate-inbox-summary").textContent = "Monitor no configurado";
   }
 
   if (latest?.effective_known_at) byId("report-known-at").value = latest.effective_known_at;
@@ -3052,6 +3164,509 @@ function applyOverview(payload) {
   }
   operationalIssues = [...(operational.issues || []), ...(scheduler.issues || [])].map(localizedIssue);
   setMessage(operationalIssues.join(" · "), operationalIssues.length > 0);
+}
+
+function renderAlertInbox(payload) {
+  const inbox = byId("alert-inbox");
+  inbox.replaceChildren();
+  if (!Array.isArray(payload.events) || payload.events.length === 0) {
+    inbox.append(createElement("p", "", "No hay alertas operativas registradas."));
+    return;
+  }
+  for (const event of payload.events) {
+    const item = createElement("article", "alert-inbox-item");
+    const statusLabels = {
+      new: "Nueva",
+      seen: "Vista",
+      dismissed: "Descartada",
+      resolved: "Resuelta",
+      silenced: "Silenciada",
+    };
+    const status = createElement(
+      "span",
+      `alert-inbox-status ${event.status}`,
+      statusLabels[event.status] || event.status,
+    );
+    item.append(
+      createElement("strong", "", event.title),
+      status,
+      createElement("p", "", event.message),
+      createElement("time", "", formatInstant(event.last_activated_at)),
+    );
+    const actions = createElement("div", "alert-inbox-actions");
+    const availableActions = event.status === "new"
+      ? [["seen", "Marcar vista"], ["dismissed", "Descartar"], ["resolved", "Resolver"]]
+      : event.status === "seen"
+        ? [["dismissed", "Descartar"], ["resolved", "Resolver"]]
+        : ["dismissed", "silenced"].includes(event.status)
+          ? [["resolved", "Resolver"]]
+          : [];
+    for (const [target, label] of availableActions) {
+      const button = createElement("button", "alert-action-button", label);
+      button.type = "button";
+      button.addEventListener("click", () => transitionAlert(event.alert_id, target, button));
+      actions.append(button);
+    }
+    if (availableActions.length > 0) item.append(actions);
+    inbox.append(item);
+  }
+}
+
+async function transitionAlert(alertId, status, button) {
+  button.disabled = true;
+  try {
+    await api("/api/alerts/transition", {
+      method: "POST",
+      body: JSON.stringify({ alert_id: alertId, status }),
+    });
+    await Promise.all([loadAlertInbox(), refreshOverview()]);
+  } catch (error) {
+    setMessage(`No se pudo actualizar la alerta: ${error.message}`, true);
+    button.disabled = false;
+  }
+}
+
+async function loadAlertInbox() {
+  const inbox = byId("alert-inbox");
+  inbox.setAttribute("aria-busy", "true");
+  try {
+    renderAlertInbox(await api("/api/alerts?limit=50"));
+  } catch (error) {
+    inbox.replaceChildren(
+      createElement("p", "", `No se pudo consultar la bandeja: ${error.message}`),
+    );
+  } finally {
+    inbox.setAttribute("aria-busy", "false");
+  }
+}
+
+const SCREENING_STATE_LABELS = Object.freeze({
+  draft: "Borrador · solo replay",
+  silent: "Monitoreo silencioso",
+  active: "Activa · bandeja local",
+  paused: "Pausada",
+});
+
+const SCREENING_OPERATOR_LABELS = Object.freeze({
+  gt: ">",
+  gte: "≥",
+  lt: "<",
+  lte: "≤",
+  eq: "=",
+});
+
+function screeningField(labelText, control) {
+  const label = createElement("label", "field screening-rule-field");
+  label.append(createElement("span", "", labelText), control);
+  return label;
+}
+
+function screeningRulePayload(configuration, form, sourceRule = null) {
+  const rule = sourceRule || configuration.rule;
+  if (sourceRule) {
+    return {
+      schema_version: "analytical-rule-configuration-update-v1",
+      rule_id: configuration.rule.rule_id,
+      expected_fingerprint: configuration.fingerprint,
+      state: sourceRule.state,
+      confirmations_required: sourceRule.confirmations_required,
+      cooldown_seconds: sourceRule.cooldown_seconds,
+      conditions: sourceRule.conditions.map((condition) => ({
+        condition_id: condition.condition_id,
+        threshold: condition.threshold,
+        exit_threshold: condition.exit_threshold,
+      })),
+    };
+  }
+  const state = form.querySelector("[data-screening-state]")?.value;
+  const confirmations = Number(
+    form.querySelector("[data-screening-confirmations]")?.value,
+  );
+  const cooldownHours = Number(
+    form.querySelector("[data-screening-cooldown-hours]")?.value,
+  );
+  if (
+    !Object.hasOwn(SCREENING_STATE_LABELS, state)
+    || !Number.isInteger(confirmations)
+    || confirmations < 1
+    || confirmations > 20
+    || !Number.isFinite(cooldownHours)
+    || cooldownHours < 0
+  ) {
+    throw new Error("Revisa el estado, las confirmaciones y la espera configurada.");
+  }
+  const controls = new Map(
+    Array.from(form.querySelectorAll("[data-screening-condition]")).map((control) => [
+      control.dataset.screeningCondition,
+      control,
+    ]),
+  );
+  const conditions = rule.conditions.map((condition) => {
+    const group = controls.get(condition.condition_id);
+    if (!group) throw new Error("La edición no coincide con el contrato de la regla.");
+    const threshold = group.querySelector("[data-screening-threshold]")?.value.trim();
+    const exitValue = group.querySelector("[data-screening-exit-threshold]")?.value.trim();
+    if (!threshold) throw new Error("Cada condición requiere un umbral.");
+    return {
+      condition_id: condition.condition_id,
+      threshold,
+      exit_threshold: exitValue || null,
+    };
+  });
+  return {
+    schema_version: "analytical-rule-configuration-update-v1",
+    rule_id: configuration.rule.rule_id,
+    expected_fingerprint: configuration.fingerprint,
+    state,
+    confirmations_required: confirmations,
+    cooldown_seconds: Math.round(cooldownHours * 3600),
+    conditions,
+  };
+}
+
+function renderScreeningBacktest(container, payload) {
+  container.replaceChildren();
+  const evaluated = payload.evaluations.length;
+  const range = `${formatCalendarDate(payload.first_known_at)}–${formatCalendarDate(payload.last_known_at)}`;
+  const grid = createElement("div", "screening-backtest-grid");
+  const metrics = [
+    ["Cortes", `${formatInteger(evaluated)} de ${formatInteger(payload.total_available_cuts)}`],
+    [
+      "Coincidencias",
+      `${formatInteger(payload.matched_count)} · ${formatUnsignedPercentage(payload.match_rate)}`,
+    ],
+    ["Candidatos simulados", formatInteger(payload.candidate_activation_count)],
+    ["No evaluables", formatInteger(payload.not_evaluable_count)],
+  ];
+  for (const [label, value] of metrics) {
+    const item = createElement("span", "screening-backtest-metric");
+    item.append(createElement("small", "", label), createElement("strong", "", value));
+    grid.append(item);
+  }
+  container.append(
+    grid,
+    createElement(
+      "small",
+      "screening-backtest-range",
+      `${range}${payload.truncated ? " · muestra limitada a los cortes más recientes" : ""}`,
+    ),
+    createElement(
+      "small",
+      "screening-backtest-limitation",
+      "Replay descriptivo: no mide rentabilidad posterior ni precisión predictiva.",
+    ),
+  );
+}
+
+async function runScreeningBacktest(configuration, container, button) {
+  setButtonBusy(button, true, "Calculando…", `Replay de ${marketAssets[selectedMarketAsset]?.symbol || "activo"}`);
+  container.replaceChildren(createElement("p", "", "Leyendo snapshots persistidos…"));
+  try {
+    const query = new URLSearchParams({
+      rule_id: configuration.rule.rule_id,
+      asset_id: selectedMarketAsset,
+      max_cuts: "200",
+    });
+    renderScreeningBacktest(
+      container,
+      await api(`/api/screening-backtest?${query.toString()}`),
+    );
+  } catch (error) {
+    container.replaceChildren(
+      createElement("p", "screening-rule-error", error.message),
+    );
+  } finally {
+    setButtonBusy(
+      button,
+      false,
+      "Calculando…",
+      `Replay de ${marketAssets[selectedMarketAsset]?.symbol || "activo"}`,
+    );
+  }
+}
+
+async function updateScreeningRule(configuration, form, button, sourceRule = null) {
+  const idleLabel = sourceRule ? "Restaurar valores iniciales" : "Guardar regla";
+  setButtonBusy(button, true, "Guardando…", idleLabel);
+  try {
+    const payload = screeningRulePayload(configuration, form, sourceRule);
+    const outcome = await api("/api/screening-rules/update", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    setMessage(
+      outcome.changed
+        ? "Regla versionada. Se aplicará a la próxima evidencia nueva."
+        : "La regla ya tenía esos valores.",
+      false,
+    );
+    await loadScreeningRules();
+  } catch (error) {
+    setMessage(`No se pudo guardar la regla: ${error.message}`, true);
+    button.disabled = false;
+  }
+}
+
+function renderScreeningRule(configuration) {
+  const { rule, default_rule: defaultRule } = configuration;
+  const card = createElement("article", "screening-rule-card");
+  const heading = createElement("div", "screening-rule-heading");
+  const title = createElement("div");
+  title.append(
+    createElement("strong", "", rule.name_es),
+    createElement(
+      "small",
+      "",
+      `${rule.domain === "market" ? "Mercado" : "Fundamentales"} · v${rule.rule_version}`,
+    ),
+  );
+  heading.append(
+    title,
+    createElement(
+      "span",
+      `screening-rule-badge${configuration.customized ? " customized" : ""}`,
+      configuration.customized ? "Personalizada" : "Inicial",
+    ),
+  );
+  const form = createElement("form", "screening-rule-form");
+  const state = document.createElement("select");
+  state.dataset.screeningState = "true";
+  for (const [value, label] of Object.entries(SCREENING_STATE_LABELS)) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    option.selected = rule.state === value;
+    state.append(option);
+  }
+  const confirmations = document.createElement("input");
+  confirmations.type = "number";
+  confirmations.min = "1";
+  confirmations.max = "20";
+  confirmations.step = "1";
+  confirmations.value = String(rule.confirmations_required);
+  confirmations.dataset.screeningConfirmations = "true";
+  const cooldown = document.createElement("input");
+  cooldown.type = "number";
+  cooldown.min = "0";
+  cooldown.max = "8760";
+  cooldown.step = "0.25";
+  cooldown.value = String(rule.cooldown_seconds / 3600);
+  cooldown.dataset.screeningCooldownHours = "true";
+  const controls = createElement("div", "screening-rule-controls");
+  controls.append(
+    screeningField("Estado", state),
+    screeningField("Confirmaciones", confirmations),
+    screeningField("Espera (horas)", cooldown),
+  );
+  const conditionGrid = createElement("div", "screening-condition-grid");
+  for (const condition of rule.conditions) {
+    const group = createElement("fieldset", "screening-condition");
+    group.dataset.screeningCondition = condition.condition_id;
+    const legend = createElement(
+      "legend",
+      "",
+      `${condition.label_es} ${SCREENING_OPERATOR_LABELS[condition.operator] || condition.operator}`,
+    );
+    const threshold = document.createElement("input");
+    threshold.type = "text";
+    threshold.inputMode = "decimal";
+    threshold.value = condition.threshold;
+    threshold.dataset.screeningThreshold = "true";
+    group.append(legend, screeningField("Umbral de entrada", threshold));
+    const exitThreshold = document.createElement("input");
+    exitThreshold.type = "text";
+    exitThreshold.inputMode = "decimal";
+    exitThreshold.value = condition.exit_threshold ?? "";
+    exitThreshold.dataset.screeningExitThreshold = "true";
+    group.append(screeningField("Umbral de salida", exitThreshold));
+    if (condition.unit === "ratio") {
+      group.append(
+        createElement(
+          "small",
+          "",
+          condition.metric_key === "market.history.relative_volume"
+            ? "Múltiplo; por ejemplo, 1.5×."
+            : "Ratio decimal; por ejemplo, 0.60 = 60%.",
+        ),
+      );
+    }
+    conditionGrid.append(group);
+  }
+  const actions = createElement("div", "screening-rule-actions");
+  const save = createElement("button", "button primary compact", "Guardar regla");
+  save.type = "submit";
+  const reset = createElement(
+    "button",
+    "button secondary compact",
+    "Restaurar valores iniciales",
+  );
+  reset.type = "button";
+  reset.disabled = !configuration.customized;
+  const backtest = createElement(
+    "button",
+    "button secondary compact",
+    `Replay de ${marketAssets[selectedMarketAsset]?.symbol || "activo"}`,
+  );
+  backtest.type = "button";
+  actions.append(save, reset, backtest);
+  const replay = createElement("div", "screening-backtest-result");
+  replay.append(createElement("p", "", "Replay aún no ejecutado para el activo seleccionado."));
+  form.append(controls, conditionGrid, actions, replay);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void updateScreeningRule(configuration, form, save);
+  });
+  reset.addEventListener("click", () => {
+    void updateScreeningRule(configuration, form, reset, defaultRule);
+  });
+  backtest.addEventListener("click", () => {
+    void runScreeningBacktest(configuration, replay, backtest);
+  });
+  card.append(heading, form);
+  return card;
+}
+
+function renderScreeningRules(payload) {
+  const container = byId("screening-rules");
+  container.replaceChildren();
+  if (!Array.isArray(payload.configurations) || payload.configurations.length === 0) {
+    container.append(createElement("p", "", "No hay reglas de screening configuradas."));
+    byId("screening-rules-summary").textContent = "Registro no configurado";
+    return;
+  }
+  byId("screening-rules-summary").textContent =
+    `${formatInteger(payload.configurations.length)} reglas · ${formatInteger(payload.total_revisions)} revisiones locales`;
+  for (const configuration of payload.configurations) {
+    container.append(renderScreeningRule(configuration));
+  }
+}
+
+async function loadScreeningRules() {
+  const container = byId("screening-rules");
+  container.setAttribute("aria-busy", "true");
+  try {
+    screeningRuleSnapshot = await api("/api/screening-rules");
+    renderScreeningRules(screeningRuleSnapshot);
+  } catch (error) {
+    container.replaceChildren(
+      createElement("p", "screening-rule-error", `No se pudieron cargar las reglas: ${error.message}`),
+    );
+  } finally {
+    container.setAttribute("aria-busy", "false");
+  }
+}
+
+function formatCandidateCondition(condition, definition) {
+  if (condition.state === "not_evaluable") return `${definition.label_es}: sin evidencia`;
+  const parsed = numericValue(condition.observed_value);
+  if (parsed === null) return `${definition.label_es}: —`;
+  const percentageKeys = new Set([
+    "fundamental.liabilities_to_assets",
+    "fundamental.net_margin",
+    "fundamental.revenue_yoy_growth",
+  ]);
+  const value = percentageKeys.has(condition.metric_key)
+    ? formatUnsignedPercentage(parsed)
+    : condition.unit === "ratio"
+      ? `${formatNumber(parsed, { maximumFractionDigits: 2 })}×`
+      : `${formatNumber(parsed, { maximumFractionDigits: 2 })} ${condition.unit}`;
+  return `${definition.label_es}: ${value}`;
+}
+
+function renderCandidateInbox(payload) {
+  const inbox = byId("candidate-inbox");
+  inbox.replaceChildren();
+  if (!Array.isArray(payload.items) || payload.items.length === 0) {
+    inbox.append(createElement("p", "", "No hay candidatos analíticos registrados."));
+    return;
+  }
+  const statusLabels = {
+    new: "Nuevo",
+    seen: "Visto",
+    dismissed: "Descartado",
+    resolved: "Resuelto",
+    silenced: "Silenciado",
+  };
+  for (const itemPayload of payload.items) {
+    const { event, result } = itemPayload;
+    const assetLabel = marketAssets[result.asset_id]?.symbol || result.asset_id;
+    const item = createElement("article", "alert-inbox-item candidate-inbox-item");
+    item.append(
+      createElement("strong", "", `${result.rule.name_es} · ${assetLabel}`),
+      createElement(
+        "span",
+        `alert-inbox-status ${event.status}`,
+        statusLabels[event.status] || event.status,
+      ),
+    );
+    const conditions = createElement("ul", "candidate-condition-list");
+    result.conditions.forEach((condition, index) => {
+      const definition = result.rule.conditions[index];
+      conditions.append(
+        createElement(
+          "li",
+          condition.state,
+          formatCandidateCondition(condition, definition),
+        ),
+      );
+    });
+    item.append(
+      conditions,
+      createElement(
+        "span",
+        "candidate-meta",
+        `${formatCalendarDate(event.as_of)} · ${formatInteger(event.confirmations)} confirmación${event.confirmations === 1 ? "" : "es"}`,
+      ),
+      createElement("time", "", formatInstant(event.activated_at)),
+    );
+    const actions = createElement("div", "alert-inbox-actions");
+    const availableActions = event.status === "new"
+      ? [["seen", "Marcar visto"], ["dismissed", "Descartar"], ["resolved", "Resolver"]]
+      : event.status === "seen"
+        ? [["dismissed", "Descartar"], ["resolved", "Resolver"]]
+        : ["dismissed", "silenced"].includes(event.status)
+          ? [["resolved", "Resolver"]]
+          : [];
+    for (const [target, label] of availableActions) {
+      const button = createElement("button", "alert-action-button", label);
+      button.type = "button";
+      button.addEventListener(
+        "click",
+        () => transitionCandidate(event.candidate_id, target, button),
+      );
+      actions.append(button);
+    }
+    if (availableActions.length > 0) item.append(actions);
+    inbox.append(item);
+  }
+}
+
+async function transitionCandidate(candidateId, status, button) {
+  button.disabled = true;
+  try {
+    await api("/api/candidates/transition", {
+      method: "POST",
+      body: JSON.stringify({ candidate_id: candidateId, status }),
+    });
+    await Promise.all([loadCandidateInbox(), refreshOverview()]);
+  } catch (error) {
+    setMessage(`No se pudo actualizar el candidato: ${error.message}`, true);
+    button.disabled = false;
+  }
+}
+
+async function loadCandidateInbox() {
+  const inbox = byId("candidate-inbox");
+  inbox.setAttribute("aria-busy", "true");
+  try {
+    renderCandidateInbox(await api("/api/candidates?limit=50"));
+  } catch (error) {
+    inbox.replaceChildren(
+      createElement("p", "", `No se pudo consultar la bandeja: ${error.message}`),
+    );
+  } finally {
+    inbox.setAttribute("aria-busy", "false");
+  }
 }
 
 function newYorkRegularSessionState(now) {
@@ -3089,6 +3704,9 @@ function renderMarketClocks(now = new Date()) {
 }
 
 let marketClockTimer = null;
+let overviewTimer = null;
+let overviewRequestActive = false;
+let overviewFailureCount = 0;
 
 function startMarketClocks() {
   if (marketClockTimer !== null) {
@@ -3103,16 +3721,38 @@ function startMarketClocks() {
   }
 }
 
-async function refreshOverview() {
+function scheduleOverviewRefresh() {
+  if (overviewTimer !== null) {
+    window.clearTimeout(overviewTimer);
+    overviewTimer = null;
+  }
+  if (document.hidden) return;
+  const delay = Math.min(
+    OVERVIEW_REFRESH_MS * (2 ** overviewFailureCount),
+    OVERVIEW_MAX_BACKOFF_MS,
+  );
+  overviewTimer = window.setTimeout(
+    () => refreshOverview({ manual: false }),
+    delay,
+  );
+}
+
+async function refreshOverview({ manual = false } = {}) {
+  if (overviewRequestActive) return;
+  overviewRequestActive = true;
   const button = byId("refresh-overview");
-  setButtonBusy(button, true, "Actualizando…", "Actualizar estado");
+  if (manual) setButtonBusy(button, true, "Verificando…", "Verificar");
   try {
     applyOverview(await api("/api/overview"));
+    overviewFailureCount = 0;
   } catch (error) {
-    setMessage(error.message, true);
+    overviewFailureCount += 1;
+    if (manual) setMessage(error.message, true);
     badge(byId("health-badge"), "Sin conexión", "bad");
   } finally {
-    setButtonBusy(button, false, "Actualizando…", "Actualizar estado");
+    overviewRequestActive = false;
+    if (manual) setButtonBusy(button, false, "Verificando…", "Verificar");
+    scheduleOverviewRefresh();
   }
 }
 
@@ -3395,8 +4035,19 @@ byId("report-form").addEventListener("submit", async (event) => {
   ]);
 });
 
-byId("refresh-overview").addEventListener("click", refreshOverview);
-document.addEventListener("visibilitychange", startMarketClocks);
+byId("refresh-overview").addEventListener(
+  "click",
+  () => refreshOverview({ manual: true }),
+);
+document.addEventListener("visibilitychange", () => {
+  startMarketClocks();
+  if (document.hidden) {
+    if (overviewTimer !== null) window.clearTimeout(overviewTimer);
+    overviewTimer = null;
+  } else {
+    refreshOverview({ manual: false });
+  }
+});
 byId("export-market-csv").addEventListener("click", exportMarketCsv);
 byId("export-fundamental-csv").addEventListener("click", exportFundamentalCsv);
 byId("export-fundamental-research-csv").addEventListener(
@@ -3544,6 +4195,18 @@ for (const link of document.querySelectorAll(".nav-link")) {
     }
   });
 }
+
+byId("alert-inbox-panel").addEventListener("toggle", (event) => {
+  if (event.currentTarget.open) void loadAlertInbox();
+});
+
+byId("candidate-inbox-panel").addEventListener("toggle", (event) => {
+  if (event.currentTarget.open) void loadCandidateInbox();
+});
+
+byId("screening-rules-panel").addEventListener("toggle", (event) => {
+  if (event.currentTarget.open) void loadScreeningRules();
+});
 
 const yesterday = new Date();
 yesterday.setUTCDate(yesterday.getUTCDate() - 1);
