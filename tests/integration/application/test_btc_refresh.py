@@ -176,3 +176,39 @@ def test_refresh_preserves_point_in_time_when_wall_clock_regresses(tmp_path: Pat
             metric.available_at <= metric.computed_at
             for metric in storage.metric_results.list(asset_id=ASSET_ID)
         )
+
+
+def test_already_current_uses_persisted_time_with_a_new_delayed_clock(tmp_path: Path) -> None:
+    storage_paths = StoragePaths.from_root(tmp_path)
+    first_transport = FixtureTransport()
+    first_clock = BtcMarketExecutionClock(lambda: RUN_AT)
+
+    with LocalStorage(storage_paths) as storage:
+        first = _pipeline(
+            storage,
+            first_transport,
+            execution_clock=first_clock,
+        ).run(_request())
+        first_metric_ids = {item.result_id for item in storage.metric_results.list()}
+        first_diagnostic_ids = {item.diagnostic_id for item in storage.diagnostics.list()}
+
+    delayed_clock = BtcMarketExecutionClock(lambda: RUN_AT - timedelta(hours=1))
+    second_transport = FixtureTransport()
+    with LocalStorage(storage_paths) as storage:
+        second = _pipeline(
+            storage,
+            second_transport,
+            execution_clock=delayed_clock,
+        ).run(_request())
+
+        assert second.refresh_plan.mode is BtcMarketRefreshMode.ALREADY_CURRENT
+        assert second.effective_known_at == first.effective_known_at == RUN_AT
+        assert second.intervals_executed == 0
+        assert second.metric_results_created == 0
+        assert second.metric_results_reused == first.metric_results_created
+        assert second.diagnostics_created == 0
+        assert second.diagnostics_reused == first.diagnostics_created
+        assert second.traceability_verified is True
+        assert second_transport.calls == []
+        assert {item.result_id for item in storage.metric_results.list()} == first_metric_ids
+        assert {item.diagnostic_id for item in storage.diagnostics.list()} == first_diagnostic_ids
