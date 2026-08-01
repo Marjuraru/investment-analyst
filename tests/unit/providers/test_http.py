@@ -8,7 +8,11 @@ from urllib.request import Request
 import pytest
 
 import investment_analyst.providers.http as http_module
-from investment_analyst.providers.http import HttpRequestError, UrlLibHttpTransport
+from investment_analyst.providers.http import (
+    HttpRequestError,
+    HttpRequestFailureKind,
+    UrlLibHttpTransport,
+)
 
 
 class FakeResponse:
@@ -43,12 +47,14 @@ def _http_error(status: int, retry_after: str | None = None) -> HTTPError:
 
 
 def test_rejects_non_https_url() -> None:
-    with pytest.raises(HttpRequestError, match="only HTTPS"):
+    with pytest.raises(HttpRequestError, match="only HTTPS") as error:
         UrlLibHttpTransport().get(
             "http://example.test/data",
             headers={},
             timeout_seconds=1.0,
         )
+
+    assert error.value.failure_kind is HttpRequestFailureKind.CONFIGURATION
 
 
 def test_returns_successful_response(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,7 +150,7 @@ def test_rejects_invalid_response_limit(limit: int | float) -> None:
         )
 
 
-@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("status", [408, 429, 503])
 def test_retries_transient_http_status(
     monkeypatch: pytest.MonkeyPatch,
     status: int,
@@ -187,6 +193,7 @@ def test_does_not_retry_permanent_http_error(monkeypatch: pytest.MonkeyPatch) ->
 
     assert attempts == 1
     assert error.value.status_code == 400
+    assert error.value.failure_kind is HttpRequestFailureKind.HTTP_STATUS
 
 
 def test_timeout_becomes_request_error_after_three_attempts(
@@ -200,7 +207,7 @@ def test_timeout_becomes_request_error_after_three_attempts(
         raise TimeoutError("timed out")
 
     monkeypatch.setattr(http_module, "urlopen", fake_urlopen)
-    with pytest.raises(HttpRequestError, match="retry limit"):
+    with pytest.raises(HttpRequestError, match="retry limit") as error:
         UrlLibHttpTransport(sleep=lambda _: None).get(
             "https://example.test/data",
             headers={},
@@ -208,6 +215,7 @@ def test_timeout_becomes_request_error_after_three_attempts(
         )
 
     assert attempts == 3
+    assert error.value.failure_kind is HttpRequestFailureKind.TRANSPORT
 
 
 def test_invalid_retry_after_uses_bounded_backoff(

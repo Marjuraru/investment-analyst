@@ -367,9 +367,22 @@ bolsa. El planificador de mercado existente sigue detectando únicamente bordes 
 Cada job declara activo, proveedor, dominio, frecuencia y zona horaria. Si el proceso inicia después
 de su hora y todavía no terminó el job de esa fecha local, lo evalúa inmediatamente. Persiste el
 estado `running` antes de invocar el conector, conserva los trabajos anteriores aunque uno posterior
-falle y admite hasta tres intentos diarios con backoff de 15 minutos. Tras reiniciar, transforma un
-intento interrumpido en un fallo trazable antes de reintentarlo. Las operaciones del controlador
-continúan compartiendo un único mutex writer; no se ejecutan dos escrituras simultáneas.
+falle y admite hasta tres intentos diarios con backoff de 15 minutos únicamente para fallos
+transitorios. Tras reiniciar, transforma un intento interrumpido en un fallo trazable antes de
+reintentarlo. Las operaciones del controlador continúan compartiendo un único mutex writer; no se
+ejecutan dos escrituras simultáneas.
+
+La decisión de reintento usa excepciones tipadas, su cadena causal y el estado HTTP estructurado; no
+interpreta texto libre. Timeout, conexión interrumpida, `408`, `429` y los estados transitorios
+`500`, `502`, `503` y `504` conservan backoff y presupuesto. Configuración o credenciales inválidas,
+`401`/`403`, activo o capacidad no soportada, payload incompatible, validación point-in-time,
+almacenamiento o estado incompatible, otros estados HTTP e imprevistos terminan sin otro intento de
+proveedor ese día. El error persistido usa una categoría estable y un mensaje fijo de hasta 500
+caracteres, sin URL, headers, traceback ni texto arbitrario que pudiera contener secretos.
+
+Una cobertura FRED incompleta se conserva como ejecución exitosa con `coverage_complete=false`, no
+como éxito completo ni como fallo reintentable. Si falla el observador de alertas, el scheduler
+reintenta solo esa notificación local y no vuelve a ejecutar el proveedor.
 
 Por defecto se programa toda la watchlist soportada. Para restringirla, repite `--schedule-asset`;
 por ejemplo:

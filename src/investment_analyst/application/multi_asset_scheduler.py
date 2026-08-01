@@ -48,6 +48,23 @@ class ScheduledJobFreshness(StrEnum):
     INCOMPLETE = "incomplete"
 
 
+class ScheduledJobFailureCategory(StrEnum):
+    """Stable operational categories that determine retry policy without message parsing."""
+
+    CONFIGURATION = "configuration_error"
+    AUTHENTICATION = "authentication_error"
+    UNSUPPORTED_CAPABILITY = "unsupported_capability"
+    PROVIDER_CONTRACT = "provider_contract_error"
+    VALIDATION = "validation_error"
+    STORAGE_STATE = "storage_state_error"
+    RATE_LIMIT = "rate_limit"
+    TRANSPORT = "transport_error"
+    TRANSIENT_HTTP = "transient_http_error"
+    HTTP = "http_error"
+    UNEXPECTED = "unexpected_error"
+    INTERRUPTED = "interrupted_job"
+
+
 class ScheduledJobDefinition(ContractModel):
     """Immutable schedule and scope for one provider-independent job."""
 
@@ -666,16 +683,26 @@ class MultiAssetScheduler:
                 completed_at=self._now(),
                 failure=error.failure,
             )
-        except (AaplOperationalStateError, ValueError) as error:
-            message = str(error).strip()[:500] or "scheduled job failed validation"
+        except AaplOperationalStateError:
             completed = ScheduledJobAttempt(
                 **running.model_dump(exclude={"status", "completed_at", "execution", "failure"}),
-                status=ScheduledJobAttemptStatus.FAILED,
+                status=ScheduledJobAttemptStatus.SKIPPED,
                 completed_at=self._now(),
                 failure=ScheduledJobFailure(
-                    category=type(error).__name__,
-                    message=message,
-                    retryable=True,
+                    category=ScheduledJobFailureCategory.STORAGE_STATE,
+                    message="scheduled operational state is incompatible or unavailable",
+                    retryable=False,
+                ),
+            )
+        except ValueError:
+            completed = ScheduledJobAttempt(
+                **running.model_dump(exclude={"status", "completed_at", "execution", "failure"}),
+                status=ScheduledJobAttemptStatus.SKIPPED,
+                completed_at=self._now(),
+                failure=ScheduledJobFailure(
+                    category=ScheduledJobFailureCategory.VALIDATION,
+                    message="scheduled job output failed validation",
+                    retryable=False,
                 ),
             )
         except Exception:  # noqa: BLE001
@@ -684,9 +711,9 @@ class MultiAssetScheduler:
                 status=ScheduledJobAttemptStatus.FAILED,
                 completed_at=self._now(),
                 failure=ScheduledJobFailure(
-                    category="unexpected_error",
+                    category=ScheduledJobFailureCategory.UNEXPECTED,
                     message="the scheduled job failed unexpectedly",
-                    retryable=True,
+                    retryable=False,
                 ),
             )
         else:
@@ -722,7 +749,7 @@ class MultiAssetScheduler:
                 status=ScheduledJobAttemptStatus.FAILED,
                 completed_at=now,
                 failure=ScheduledJobFailure(
-                    category="interrupted_job",
+                    category=ScheduledJobFailureCategory.INTERRUPTED,
                     message="the prior scheduled job was interrupted before completion",
                     retryable=True,
                 ),
@@ -790,11 +817,13 @@ class MultiAssetScheduler:
                 next_run = definition.scheduled_for(local_date + timedelta(days=1))
                 if definition.job_id != self._active_job_id:
                     issues.append(f"{definition.job_id}: interrupted scheduled job")
-            elif today_latest.status in {
-                ScheduledJobAttemptStatus.SUCCEEDED,
-                ScheduledJobAttemptStatus.SKIPPED,
-            }:
+            elif today_latest.status is ScheduledJobAttemptStatus.SUCCEEDED:
                 next_run = definition.scheduled_for(local_date + timedelta(days=1))
+            elif today_latest.status is ScheduledJobAttemptStatus.SKIPPED or (
+                today_latest.failure is not None and not today_latest.failure.retryable
+            ):
+                next_run = definition.scheduled_for(local_date + timedelta(days=1))
+                issues.append(f"{definition.job_id}: latest scheduled job failed")
             elif (
                 today_latest.failure is not None
                 and today_latest.failure.retryable
@@ -812,7 +841,8 @@ class MultiAssetScheduler:
         if (
             latest is not None
             and latest.local_date < local_date
-            and latest.status is ScheduledJobAttemptStatus.FAILED
+            and latest.status
+            in {ScheduledJobAttemptStatus.FAILED, ScheduledJobAttemptStatus.SKIPPED}
         ):
             issues.append(f"{definition.job_id}: prior scheduled job failed")
         freshness = self._freshness(definition, latest_success, now)
@@ -915,6 +945,7 @@ __all__ = [
     "ScheduledJobDomain",
     "ScheduledJobExecution",
     "ScheduledJobFailure",
+    "ScheduledJobFailureCategory",
     "ScheduledJobFreshness",
     "ScheduledJobInvocation",
     "ScheduledJobRunError",

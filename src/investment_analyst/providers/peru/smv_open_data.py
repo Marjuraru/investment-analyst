@@ -187,6 +187,10 @@ class SmvOpenDataFetch:
 class SmvOpenDataError(RuntimeError):
     """Safe failure raised when the official portal violates its bounded contract."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        self.status_code = status_code
+        super().__init__(message)
+
 
 class SmvOpenDataNotFoundError(SmvOpenDataError):
     """Raised when an exact legal-name query has no registered result."""
@@ -359,7 +363,10 @@ class SmvOpenDataClient:
     @staticmethod
     def _validated_html(response: HttpResponse, *, expected_url: str) -> str:
         if response.status_code != 200:
-            raise SmvOpenDataError(f"SMV portal returned HTTP {response.status_code}")
+            raise SmvOpenDataError(
+                f"SMV portal returned HTTP {response.status_code}",
+                status_code=response.status_code,
+            )
         if response.body_truncated:
             raise SmvOpenDataError(
                 f"SMV portal exceeds the {MAX_SMV_PORTAL_BYTES}-byte safety limit"

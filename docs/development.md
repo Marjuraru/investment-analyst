@@ -42,7 +42,7 @@ uv run --locked --extra dev pip-audit \
 ```
 
 La cobertura mide líneas y ramas, incluidos los procesos Python iniciados por las pruebas CLI. El
-umbral mínimo es 82.00%, frente a una línea base observada de 82.47% con 525 pruebas.
+umbral mínimo es 82.00%, frente a una línea base observada de 82.54% con 894 pruebas.
 
 ## Verificación completa
 

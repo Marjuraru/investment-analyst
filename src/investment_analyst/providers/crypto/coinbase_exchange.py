@@ -26,6 +26,10 @@ _INTEGER_PATTERN = re.compile(r"^-?\d+$")
 class CoinbaseExchangeError(ValueError):
     """Invalid Coinbase request parameters or response data."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        self.status_code = status_code
+        super().__init__(message)
+
 
 @dataclass(frozen=True, slots=True)
 class CoinbaseCandle:
@@ -176,7 +180,8 @@ class CoinbaseExchangeClient:
             request_urls.append(request_url)
             if response.status_code != 200:
                 raise CoinbaseExchangeError(
-                    f"Coinbase returned HTTP {response.status_code} for a candle request"
+                    f"Coinbase returned HTTP {response.status_code} for a candle request",
+                    status_code=response.status_code,
                 )
             for candle in _parse_candles(product_id, response.body):
                 if not requested_start <= candle.start < requested_end:

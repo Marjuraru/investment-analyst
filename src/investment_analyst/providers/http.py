@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from time import sleep as default_sleep
 from types import MappingProxyType
 from typing import Protocol
@@ -9,10 +10,19 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
-_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 _MAX_ATTEMPTS = 3
 _MAX_RETRY_AFTER_SECONDS = 5.0
 _DEFAULT_BACKOFF_SECONDS = (0.1, 0.2)
+
+
+class HttpRequestFailureKind(StrEnum):
+    """Structured reason why one bounded HTTP request failed."""
+
+    CONFIGURATION = "configuration"
+    HTTP_STATUS = "http_status"
+    TRANSPORT = "transport"
+    UNEXPECTED = "unexpected"
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,13 +47,30 @@ class HttpRequestError(RuntimeError):
         method: str = "GET",
         status_code: int | None = None,
         cause: BaseException | None = None,
+        failure_kind: HttpRequestFailureKind | None = None,
     ) -> None:
         self.url = url
         self.method = method
         self.status_code = status_code
         self.cause = cause
+        self.failure_kind = failure_kind or self._infer_failure_kind(
+            status_code=status_code,
+            cause=cause,
+        )
         status = f" (HTTP {status_code})" if status_code is not None else ""
         super().__init__(f"{method} {url} failed{status}: {message}")
+
+    @staticmethod
+    def _infer_failure_kind(
+        *,
+        status_code: int | None,
+        cause: BaseException | None,
+    ) -> HttpRequestFailureKind:
+        if status_code is not None:
+            return HttpRequestFailureKind.HTTP_STATUS
+        if isinstance(cause, (ConnectionError, TimeoutError, URLError)):
+            return HttpRequestFailureKind.TRANSPORT
+        return HttpRequestFailureKind.UNEXPECTED
 
 
 class HttpTransport(Protocol):
@@ -138,12 +165,18 @@ class UrlLibHttpTransport:
     ) -> HttpResponse:
         """Execute one already-encoded request under the shared safety policy."""
         if urlsplit(url).scheme.lower() != "https":
-            raise HttpRequestError(url, "only HTTPS URLs are allowed", method=method)
+            raise HttpRequestError(
+                url,
+                "only HTTPS URLs are allowed",
+                method=method,
+                failure_kind=HttpRequestFailureKind.CONFIGURATION,
+            )
         if timeout_seconds <= 0:
             raise HttpRequestError(
                 url,
                 "timeout_seconds must be greater than zero",
                 method=method,
+                failure_kind=HttpRequestFailureKind.CONFIGURATION,
             )
         if max_response_bytes is not None and (
             isinstance(max_response_bytes, bool)
@@ -154,6 +187,7 @@ class UrlLibHttpTransport:
                 url,
                 "max_response_bytes must be a positive integer",
                 method=method,
+                failure_kind=HttpRequestFailureKind.CONFIGURATION,
             )
 
         request = Request(url, data=body, headers=dict(headers), method=method)
@@ -178,7 +212,7 @@ class UrlLibHttpTransport:
                         body_truncated=body_truncated,
                     )
             except HTTPError as error:
-                if error.code not in _RETRYABLE_STATUS_CODES or attempt == _MAX_ATTEMPTS - 1:
+                if error.code not in RETRYABLE_HTTP_STATUS_CODES or attempt == _MAX_ATTEMPTS - 1:
                     raise HttpRequestError(
                         url,
                         "the server returned an unsuccessful response",
@@ -197,7 +231,12 @@ class UrlLibHttpTransport:
                     ) from error
                 self._sleep(self._retry_delay(attempt, None))
 
-        raise HttpRequestError(url, "the retry loop ended unexpectedly", method=method)
+        raise HttpRequestError(
+            url,
+            "the retry loop ended unexpectedly",
+            method=method,
+            failure_kind=HttpRequestFailureKind.UNEXPECTED,
+        )
 
     @staticmethod
     def _retry_delay(attempt: int, retry_after: str | None) -> float:

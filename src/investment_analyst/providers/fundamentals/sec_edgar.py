@@ -40,6 +40,10 @@ type SecJsonValue = dict[str, SecJsonValue] | list[SecJsonValue] | str | None
 class SecEdgarError(ValueError):
     """Invalid SEC request configuration or issuer document response."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        self.status_code = status_code
+        super().__init__(message)
+
 
 class SecDocumentType(StrEnum):
     """SEC issuer documents imported by this project step."""
@@ -309,7 +313,10 @@ def _parse_document(
     expected_cik: str,
 ) -> SecEdgarDocument:
     if status_code != 200:
-        raise SecEdgarError(f"SEC returned HTTP {status_code} for {document_type.value}")
+        raise SecEdgarError(
+            f"SEC returned HTTP {status_code} for {document_type.value}",
+            status_code=status_code,
+        )
     if response_url != request_url:
         raise SecEdgarError("SEC response redirected away from the requested official document")
     if len(body_bytes) > _MAX_RESPONSE_BYTES:

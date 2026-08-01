@@ -75,8 +75,9 @@ propia. No se añadirán nuevas rutas o modelos específicos de Apple.
 - scheduler multi-activo derivado del catálogo: mantiene trabajos separados por activo, proveedor,
   dominio, frecuencia y zona horaria para mercado diario Alpaca, fundamentales SEC, Coinbase diario
   e intradía, registro SMV y macro FRED/ALFRED cuando existe `FRED_API_KEY`; conserva cada intento,
-  muestra frescura y cobertura, reintenta con backoff acotado, recupera interrupciones y no revierte
-  el progreso exitoso de otros trabajos;
+  muestra frescura y cobertura, reintenta con backoff acotado solo fallos transitorios clasificados
+  por tipo o estado HTTP, recupera interrupciones y no revierte el progreso exitoso de otros
+  trabajos;
 - primer monitor silencioso de alertas operativas: evalúa cada intento mediante reglas trivaluadas,
   persiste resultados e identidades deterministas, detecta cobertura incompleta, deduplica eventos
   y ofrece una bandeja local con transiciones auditadas de vista, descartada o resuelta, sin IA,

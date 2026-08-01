@@ -13,7 +13,11 @@ from urllib.parse import urlencode
 from pydantic import ConfigDict, Field, JsonValue, TypeAdapter, field_validator, model_validator
 
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
-from investment_analyst.providers.http import HttpRequestError, HttpTransport
+from investment_analyst.providers.http import (
+    HttpRequestError,
+    HttpRequestFailureKind,
+    HttpTransport,
+)
 
 OFFICIAL_BASE_URL = "https://api.stlouisfed.org"
 OBSERVATIONS_PATH = "/fred/series/observations"
@@ -30,6 +34,17 @@ _JSON_VALUE_ADAPTER = TypeAdapter(JsonValue)
 
 class FredAlfredError(ValueError):
     """Invalid FRED/ALFRED input, response, or request result."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        failure_kind: HttpRequestFailureKind | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.failure_kind = failure_kind
+        super().__init__(message)
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -261,9 +276,17 @@ class FredAlfredClient:
             )
         except HttpRequestError as error:
             status = f" (HTTP {error.status_code})" if error.status_code is not None else ""
-            raise FredAlfredError(f"FRED/ALFRED request failed{status}") from None
+            raise FredAlfredError(
+                f"FRED/ALFRED request failed{status}",
+                status_code=error.status_code,
+                failure_kind=error.failure_kind,
+            ) from None
         if http_response.status_code != 200:
-            raise FredAlfredError(f"FRED/ALFRED returned HTTP {http_response.status_code}")
+            raise FredAlfredError(
+                f"FRED/ALFRED returned HTTP {http_response.status_code}",
+                status_code=http_response.status_code,
+                failure_kind=HttpRequestFailureKind.HTTP_STATUS,
+            )
         if http_response.body_truncated:
             raise FredAlfredError("FRED/ALFRED response exceeded the safe size limit")
         retrieved_at = _as_utc(self._clock(), field_name="clock result")
@@ -341,9 +364,17 @@ class FredAlfredClient:
                 )
             except HttpRequestError as error:
                 status = f" (HTTP {error.status_code})" if error.status_code is not None else ""
-                raise FredAlfredError(f"FRED/ALFRED request failed{status}") from None
+                raise FredAlfredError(
+                    f"FRED/ALFRED request failed{status}",
+                    status_code=error.status_code,
+                    failure_kind=error.failure_kind,
+                ) from None
             if http_response.status_code != 200:
-                raise FredAlfredError(f"FRED/ALFRED returned HTTP {http_response.status_code}")
+                raise FredAlfredError(
+                    f"FRED/ALFRED returned HTTP {http_response.status_code}",
+                    status_code=http_response.status_code,
+                    failure_kind=HttpRequestFailureKind.HTTP_STATUS,
+                )
             if http_response.body_truncated:
                 raise FredAlfredError("FRED/ALFRED response exceeded the safe size limit")
             response = FredVintageDatesResponse.model_validate(_decode_json(http_response.body))

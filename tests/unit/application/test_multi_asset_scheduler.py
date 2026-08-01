@@ -16,6 +16,7 @@ from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobDomain,
     ScheduledJobExecution,
     ScheduledJobFailure,
+    ScheduledJobFailureCategory,
     ScheduledJobFreshness,
     ScheduledJobInvocation,
     ScheduledJobRunError,
@@ -136,6 +137,105 @@ def test_scheduler_retries_only_failed_job_after_backoff(tmp_path: Path) -> None
     assert second[0].attempt_number == 2
     assert second[0].status is ScheduledJobAttemptStatus.SUCCEEDED
     assert scheduler.status().failed_count == 0
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_status", "expected_category"),
+    [
+        (
+            "permanent",
+            ScheduledJobAttemptStatus.SKIPPED,
+            ScheduledJobFailureCategory.AUTHENTICATION,
+        ),
+        (
+            "validation",
+            ScheduledJobAttemptStatus.SKIPPED,
+            ScheduledJobFailureCategory.VALIDATION,
+        ),
+        (
+            "unexpected",
+            ScheduledJobAttemptStatus.FAILED,
+            ScheduledJobFailureCategory.UNEXPECTED,
+        ),
+    ],
+)
+def test_scheduler_never_retries_permanent_validation_or_unexpected_failures(
+    tmp_path: Path,
+    mode: str,
+    expected_status: ScheduledJobAttemptStatus,
+    expected_category: ScheduledJobFailureCategory,
+) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    calls = 0
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        nonlocal calls
+        del invocation
+        calls += 1
+        if mode == "permanent":
+            raise ScheduledJobRunError(
+                ScheduledJobFailure(
+                    category=ScheduledJobFailureCategory.AUTHENTICATION,
+                    message="safe authentication failure",
+                    retryable=False,
+                )
+            )
+        if mode == "validation":
+            raise ValueError("simulated-secret")
+        raise RuntimeError("simulated-secret")
+
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(_definition(f"{mode}-job"), run),),
+        MultiAssetScheduleStateStore(tmp_path / f"{mode}.json"),
+        clock=lambda: now,
+    )
+
+    first = scheduler.tick()
+    now += timedelta(minutes=30)
+
+    assert first[0].status is expected_status
+    assert first[0].failure is not None
+    assert first[0].failure.category == expected_category
+    assert first[0].failure.retryable is False
+    assert "simulated-secret" not in first[0].failure.message
+    assert scheduler.tick() == ()
+    assert calls == 1
+    job_status = scheduler.status().jobs[0]
+    assert job_status.due is False
+    assert any("latest scheduled job failed" in issue for issue in job_status.issues)
+
+
+def test_scheduler_preserves_last_success_after_later_permanent_failure(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    should_fail = False
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        if should_fail:
+            raise ScheduledJobRunError(
+                ScheduledJobFailure(
+                    category=ScheduledJobFailureCategory.CONFIGURATION,
+                    message="safe configuration failure",
+                    retryable=False,
+                )
+            )
+        return _execution(invocation)
+
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(_definition("last-success"), run),),
+        MultiAssetScheduleStateStore(tmp_path / "last-success.json"),
+        clock=lambda: now,
+    )
+
+    first = scheduler.tick()[0]
+    should_fail = True
+    now += timedelta(days=1)
+    second = scheduler.tick()[0]
+    status = scheduler.status().jobs[0]
+
+    assert first.status is ScheduledJobAttemptStatus.SUCCEEDED
+    assert second.status is ScheduledJobAttemptStatus.SKIPPED
+    assert status.latest_attempt == second
+    assert status.latest_success == first
 
 
 def test_scheduler_recovers_interrupted_attempt_before_retry(tmp_path: Path) -> None:

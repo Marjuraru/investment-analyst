@@ -2,8 +2,9 @@
 
 from datetime import date, datetime, time, timedelta
 from typing import Protocol
+from urllib.error import URLError
 
-from pydantic import ConfigDict, field_validator, model_validator
+from pydantic import ConfigDict, ValidationError, field_validator, model_validator
 
 from investment_analyst.application.aapl_bootstrap_models import AaplRefreshMode
 from investment_analyst.application.btc_intraday import BtcIntradayRefreshError
@@ -11,13 +12,19 @@ from investment_analyst.application.btc_intraday_models import (
     BtcIntradayRefreshRequest,
     BtcIntradayRefreshSummary,
 )
-from investment_analyst.application.btc_refresh import BtcMarketRefreshError
+from investment_analyst.application.btc_refresh import (
+    BtcMarketKnownAtTooEarlyError,
+    BtcMarketRefreshError,
+)
 from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshRequest,
     BtcMarketRefreshSummary,
     BtcRefreshMode,
 )
-from investment_analyst.application.listed_market_refresh import ListedMarketRefreshError
+from investment_analyst.application.listed_market_refresh import (
+    ListedMarketKnownAtTooEarlyError,
+    ListedMarketRefreshError,
+)
 from investment_analyst.application.listed_market_refresh_models import (
     ListedMarketRefreshRequest,
     ListedMarketRefreshSummary,
@@ -32,14 +39,17 @@ from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobDomain,
     ScheduledJobExecution,
     ScheduledJobFailure,
+    ScheduledJobFailureCategory,
     ScheduledJobInvocation,
     ScheduledJobRunError,
 )
+from investment_analyst.application.operational_state import AaplOperationalStateError
 from investment_analyst.application.peru_registry import (
     BvlRegistryRefreshRequest,
     BvlRegistryRefreshSummary,
 )
 from investment_analyst.application.sec_fundamental_refresh import (
+    SecIssuerFundamentalKnownAtTooEarlyError,
     SecIssuerFundamentalRefreshError,
 )
 from investment_analyst.application.sec_fundamental_refresh_models import (
@@ -48,6 +58,14 @@ from investment_analyst.application.sec_fundamental_refresh_models import (
 )
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
+from investment_analyst.providers.asset_config import ProviderConfigurationError
+from investment_analyst.providers.crypto.coinbase_exchange import CoinbaseExchangeError
+from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarError
+from investment_analyst.providers.http import (
+    RETRYABLE_HTTP_STATUS_CODES,
+    HttpRequestError,
+    HttpRequestFailureKind,
+)
 from investment_analyst.providers.macro.fred_alfred import FredAlfredError
 from investment_analyst.providers.macro.fred_catalog import (
     FRED_SERIES_CATALOG,
@@ -57,8 +75,13 @@ from investment_analyst.providers.macro.fred_catalog_refresh import (
     FredCatalogRefreshRequest,
     FredCatalogRefreshSummary,
 )
-from investment_analyst.providers.peru.smv_open_data import SmvOpenDataError
+from investment_analyst.providers.market.alpaca_stock import AlpacaStockError
+from investment_analyst.providers.peru.smv_open_data import (
+    SmvOpenDataError,
+    SmvOpenDataNotFoundError,
+)
 from investment_analyst.storage import StorageError
+from investment_analyst.workspace.service import WorkspaceError
 
 
 class _LocalScheduledOperations(Protocol):
@@ -235,7 +258,7 @@ def _smv_registry_job(
         try:
             summary = controller.bvl_registry_refresh_request(BvlRegistryRefreshRequest())
         except (SmvOpenDataError, StorageError, ValueError, OSError) as error:
-            raise _retryable_provider_error(error) from error
+            raise _classified_provider_error(error) from error
         source_ids = tuple(
             sorted(
                 {
@@ -300,7 +323,7 @@ def _fred_catalog_job(
                 )
             )
         except (FredAlfredError, StorageError, ValueError, OSError) as error:
-            raise _retryable_provider_error(error) from error
+            raise _classified_provider_error(error) from error
         return ScheduledJobExecution(
             job_id=definition.job_id,
             effective_known_at=summary.checked_at,
@@ -366,7 +389,7 @@ def _market_job(
                 )
                 return _btc_market_execution(definition.job_id, summary)
         except (ListedMarketRefreshError, BtcMarketRefreshError) as error:
-            raise _retryable_provider_error(error) from error
+            raise _classified_provider_error(error) from error
         raise ScheduledJobRunError(
             ScheduledJobFailure(
                 category="unsupported_market_provider",
@@ -408,7 +431,7 @@ def _fundamental_job(
                 )
             )
         except SecIssuerFundamentalRefreshError as error:
-            raise _retryable_provider_error(error) from error
+            raise _classified_provider_error(error) from error
         created = (
             summary.raw_records_created
             + summary.observations_created
@@ -460,7 +483,7 @@ def _intraday_job(
                 )
             )
         except BtcIntradayRefreshError as error:
-            raise _retryable_provider_error(error) from error
+            raise _classified_provider_error(error) from error
         created = summary.raw_records_created + summary.observations_created
         reused = summary.raw_records_reused + summary.observations_reused
         return ScheduledJobExecution(
@@ -529,14 +552,207 @@ def _btc_market_execution(
     )
 
 
-def _retryable_provider_error(error: Exception) -> ScheduledJobRunError:
-    message = str(error).strip()[:500] or "scheduled provider refresh failed"
-    return ScheduledJobRunError(
-        ScheduledJobFailure(
-            category=type(error).__name__,
-            message=message,
+def _classified_provider_error(error: Exception) -> ScheduledJobRunError:
+    """Map typed provider causes to one safe scheduler policy without parsing messages."""
+    chain = _exception_chain(error)
+    request_error = next(
+        (item for item in chain if isinstance(item, HttpRequestError)),
+        None,
+    )
+    if request_error is not None:
+        failure = _http_failure(
+            status_code=request_error.status_code,
+            failure_kind=request_error.failure_kind,
+        )
+    else:
+        fred_error = next(
+            (
+                item
+                for item in chain
+                if isinstance(item, FredAlfredError) and item.failure_kind is not None
+            ),
+            None,
+        )
+        if fred_error is not None:
+            failure = _http_failure(
+                status_code=fred_error.status_code,
+                failure_kind=fred_error.failure_kind,
+            )
+        else:
+            status_code = _provider_status_code(chain)
+            failure = (
+                _http_failure(
+                    status_code=status_code,
+                    failure_kind=HttpRequestFailureKind.HTTP_STATUS,
+                )
+                if status_code is not None
+                else _non_http_failure(chain)
+            )
+    return ScheduledJobRunError(failure)
+
+
+def _http_failure(
+    *,
+    status_code: int | None,
+    failure_kind: HttpRequestFailureKind,
+) -> ScheduledJobFailure:
+    if failure_kind is HttpRequestFailureKind.CONFIGURATION:
+        return _safe_failure(
+            ScheduledJobFailureCategory.CONFIGURATION,
+            "scheduled provider request configuration is invalid",
+        )
+    if failure_kind is HttpRequestFailureKind.TRANSPORT:
+        return _safe_failure(
+            ScheduledJobFailureCategory.TRANSPORT,
+            "scheduled provider transport failed after bounded internal retries",
             retryable=True,
         )
+    if failure_kind is HttpRequestFailureKind.UNEXPECTED:
+        return _safe_failure(
+            ScheduledJobFailureCategory.UNEXPECTED,
+            "scheduled provider request failed unexpectedly",
+        )
+    if status_code in {401, 403}:
+        return _safe_failure(
+            ScheduledJobFailureCategory.AUTHENTICATION,
+            "scheduled provider authentication or authorization failed",
+        )
+    if status_code == 429:
+        return _safe_failure(
+            ScheduledJobFailureCategory.RATE_LIMIT,
+            "scheduled provider rate limit remained active after bounded internal retries",
+            retryable=True,
+        )
+    if status_code in RETRYABLE_HTTP_STATUS_CODES:
+        return _safe_failure(
+            ScheduledJobFailureCategory.TRANSIENT_HTTP,
+            "scheduled provider returned a transient HTTP failure after bounded internal retries",
+            retryable=True,
+        )
+    return _safe_failure(
+        ScheduledJobFailureCategory.HTTP,
+        "scheduled provider returned a permanent HTTP failure",
+    )
+
+
+def _non_http_failure(chain: tuple[BaseException, ...]) -> ScheduledJobFailure:
+    if any(isinstance(item, ProviderConfigurationError) for item in chain):
+        return _safe_failure(
+            ScheduledJobFailureCategory.CONFIGURATION,
+            "scheduled provider credentials or configuration are invalid",
+        )
+    if any(isinstance(item, SmvOpenDataNotFoundError) for item in chain):
+        return _safe_failure(
+            ScheduledJobFailureCategory.UNSUPPORTED_CAPABILITY,
+            "scheduled provider does not support the configured asset or capability",
+        )
+    if any(isinstance(item, (TimeoutError, ConnectionError, URLError)) for item in chain):
+        return _safe_failure(
+            ScheduledJobFailureCategory.TRANSPORT,
+            "scheduled provider transport failed after bounded internal retries",
+            retryable=True,
+        )
+    if any(
+        isinstance(item, (StorageError, WorkspaceError, AaplOperationalStateError, OSError))
+        for item in chain
+    ):
+        return _safe_failure(
+            ScheduledJobFailureCategory.STORAGE_STATE,
+            "scheduled workspace or persisted state is incompatible or unavailable",
+        )
+    if any(
+        isinstance(
+            item,
+            (
+                ListedMarketKnownAtTooEarlyError,
+                BtcMarketKnownAtTooEarlyError,
+                SecIssuerFundamentalKnownAtTooEarlyError,
+                ValidationError,
+            ),
+        )
+        for item in chain
+    ):
+        return _safe_failure(
+            ScheduledJobFailureCategory.VALIDATION,
+            "scheduled provider result failed point-in-time or model validation",
+        )
+    if any(
+        type(item) is SecIssuerFundamentalRefreshError and item.__cause__ is None for item in chain
+    ):
+        return _safe_failure(
+            ScheduledJobFailureCategory.UNSUPPORTED_CAPABILITY,
+            "scheduled provider does not support the configured asset or capability",
+        )
+    if any(
+        isinstance(
+            item,
+            (
+                AlpacaStockError,
+                CoinbaseExchangeError,
+                SecEdgarError,
+                FredAlfredError,
+                SmvOpenDataError,
+                ListedMarketRefreshError,
+                BtcMarketRefreshError,
+                BtcIntradayRefreshError,
+                ValueError,
+            ),
+        )
+        for item in chain
+    ):
+        return _safe_failure(
+            ScheduledJobFailureCategory.PROVIDER_CONTRACT,
+            "scheduled provider payload or refresh contract is invalid",
+        )
+    return _safe_failure(
+        ScheduledJobFailureCategory.UNEXPECTED,
+        "scheduled provider refresh failed unexpectedly",
+    )
+
+
+def _provider_status_code(chain: tuple[BaseException, ...]) -> int | None:
+    for item in chain:
+        if (
+            isinstance(
+                item,
+                (
+                    AlpacaStockError,
+                    CoinbaseExchangeError,
+                    SecEdgarError,
+                    FredAlfredError,
+                    SmvOpenDataError,
+                ),
+            )
+            and item.status_code is not None
+        ):
+            return item.status_code
+    return None
+
+
+def _exception_chain(error: BaseException) -> tuple[BaseException, ...]:
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        chain.append(current)
+        seen.add(id(current))
+        nested = current.__cause__
+        if nested is None and isinstance(current, HttpRequestError):
+            nested = current.cause
+        current = nested
+    return tuple(chain)
+
+
+def _safe_failure(
+    category: ScheduledJobFailureCategory,
+    message: str,
+    *,
+    retryable: bool = False,
+) -> ScheduledJobFailure:
+    return ScheduledJobFailure(
+        category=category,
+        message=message,
+        retryable=retryable,
     )
 
 

@@ -30,7 +30,7 @@ pip downloads used to bootstrap the pinned uv version; the lock remains the depe
 truth.
 
 Coverage uses branch measurement and subprocess instrumentation from `pyproject.toml`. The current
-525-test baseline is 82.47%, and the enforced floor is 82.00%. `pip-audit` examines the exact
+894-test baseline is 82.54%, and the enforced floor is 82.00%. `pip-audit` examines the exact
 installed locked environment and fails when its vulnerability service reports a known issue.
 
 ## Security and resource limits

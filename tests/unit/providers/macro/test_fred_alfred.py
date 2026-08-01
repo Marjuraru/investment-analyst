@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from investment_analyst.providers.http import HttpRequestError, HttpResponse
+from investment_analyst.providers.http import (
+    HttpRequestError,
+    HttpRequestFailureKind,
+    HttpResponse,
+)
 from investment_analyst.providers.macro.fred_alfred import (
     MAX_RESPONSE_BYTES,
     FredAlfredClient,
@@ -132,6 +136,8 @@ def test_transport_failure_does_not_reveal_api_key() -> None:
         )
 
     assert str(captured.value) == "FRED/ALFRED request failed (HTTP 503)"
+    assert captured.value.status_code == 503
+    assert captured.value.failure_kind is HttpRequestFailureKind.HTTP_STATUS
     assert API_KEY not in str(captured.value)
 
 
