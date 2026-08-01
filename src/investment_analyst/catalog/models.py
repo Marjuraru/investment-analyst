@@ -1,6 +1,7 @@
 """Strict, immutable models for the versioned asset catalog."""
 
 import re
+from enum import StrEnum
 
 from pydantic import ConfigDict, StrictBool, StrictInt, field_validator, model_validator
 
@@ -9,6 +10,16 @@ from investment_analyst.core.models.base import ContractModel, NonEmptyStr
 
 _SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _CAPABILITY_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)+$")
+
+
+class CatalogCryptoProfile(StrEnum):
+    """Economic crypto taxonomy declared independently from a provider symbol."""
+
+    BITCOIN = "bitcoin"
+    ETHEREUM = "ethereum"
+    ALTCOIN = "altcoin"
+    STABLECOIN = "stablecoin"
+    WRAPPED = "wrapped"
 
 
 class ProviderBinding(ContractModel):
@@ -73,6 +84,7 @@ class CatalogAsset(Asset):
 
     aliases: tuple[NonEmptyStr, ...]
     provider_bindings: tuple[ProviderBinding, ...]
+    crypto_profile: CatalogCryptoProfile | None = None
 
     @field_validator("aliases")
     @classmethod
@@ -100,6 +112,15 @@ class CatalogAsset(Asset):
         if identities != tuple(sorted(identities)):
             raise ValueError("provider_bindings must be sorted by identity")
         return values
+
+    @model_validator(mode="after")
+    def validate_crypto_profile(self) -> "CatalogAsset":
+        """Keep crypto taxonomy explicit and absent from non-crypto assets."""
+        if self.asset_class is AssetClass.CRYPTO and self.crypto_profile is None:
+            raise ValueError("crypto assets require an explicit crypto_profile")
+        if self.asset_class is not AssetClass.CRYPTO and self.crypto_profile is not None:
+            raise ValueError("crypto_profile is only valid for crypto assets")
+        return self
 
 
 class AssetCatalogDocument(ContractModel):

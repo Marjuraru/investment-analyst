@@ -97,6 +97,14 @@ def test_scheduler_runs_all_due_jobs_and_preserves_success_after_later_failure(
         ScheduledJobAttemptStatus.SUCCEEDED,
         ScheduledJobAttemptStatus.FAILED,
     )
+    assert completed[0].telemetry is not None
+    assert completed[0].telemetry.provider == "test-provider"
+    assert completed[0].telemetry.created_count == 1
+    assert completed[0].telemetry.coverage_complete is True
+    assert completed[1].telemetry is not None
+    assert completed[1].telemetry.failure_category == "provider_unavailable"
+    assert completed[1].telemetry.provider_call_count is None
+    assert completed[1].telemetry.response_bytes is None
     status = scheduler.status()
     assert status.due_count == 0
     assert status.failed_count == 1

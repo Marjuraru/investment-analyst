@@ -69,7 +69,9 @@ veredicto, confianza, calidad, recomendación o ranking combinado.
 ## Estado operativo automático
 
 Las cinco celdas compactas de datos, ejecución, programación, trazabilidad y alertas se consultan
-mediante `GET /api/overview` al abrir la página y cada 30 segundos. Solo leen estado local: no
+mediante el endpoint compatible `GET /api/overview` al abrir la página y cada 30 segundos. La API
+añade `GET /api/v1/overview` para consumidores que requieren un snapshot pequeño y no bloqueante.
+Solo leen estado local: no
 ejecutan SEC, Alpaca ni Coinbase, no escriben en el workspace y no recargan series pesadas. Nunca
 hay más de una solicitud en curso; los fallos aplican backoff exponencial hasta cinco minutos y la
 consulta se pausa con la pestaña oculta. `Verificar` queda como recuperación manual, no como
@@ -376,10 +378,9 @@ ejecutan dos escrituras simultáneas.
 
 El mutex compartido protege la escritura única y evita ejecuciones concurrentes sobre el workspace,
 pero una cola de trabajos vencidos puede mantenerlo ocupado durante varios proveedores consecutivos.
-Mientras exista esa contención, `GET /api/overview` también espera el mutex y puede agotar el tiempo
-del cliente aunque el servicio siga activo; al terminar la cola, responde de nuevo sin reparar ni
-limpiar el workspace. Separar la lectura de salud de la exclusión de escritura queda fuera del alcance
-actual y debe conservarse como riesgo operativo independiente del flujo BTC diario.
+El health usa ahora un snapshot inmutable y las cachés otro lock, por lo que el overview no espera el
+tiempo completo del proveedor. La contención sigue retrasando otras escrituras; permanece como riesgo
+operativo separado y no debe resolverse introduciendo otro writer.
 
 La decisión de reintento usa excepciones tipadas, su cadena causal y el estado HTTP estructurado; no
 interpreta texto libre. Timeout, conexión interrumpida, `408`, `429` y los estados transitorios
@@ -429,6 +430,11 @@ Desactiva únicamente el scheduler, conservando la UI y la ejecución manual:
 El lock `state/aapl_local_service.lock` impide dos servicios para el mismo workspace. El estado de
 todos los intentos se guarda atómicamente en `state/multi_asset_schedule_state_v1.json`; no
 reemplaza ni recorta el historial analítico.
+
+Las operaciones manuales nuevas pueden usar `POST /api/v1/manual-operations` y consultar su estado
+con `GET /api/v1/manual-operations/<operation_id>`. La respuesta de enqueue es `202`; el worker
+durable ejecuta después la fachada síncrona compatible. Solicitudes activas equivalentes se
+deduplican y un estado `running` encontrado al reiniciar se reencola con recovery auditado.
 
 ## Alertas operativas silenciosas
 
@@ -510,6 +516,7 @@ Todos permanecen dentro del workspace seleccionado:
 - `state/aapl_daily_run_state.json`: última ejecución completa Apple iniciada manualmente;
 - `state/aapl_local_service.lock`: exclusión del proceso UI/scheduler;
 - `state/multi_asset_schedule_state_v1.json`: historial de intentos por job y su evidencia compacta;
+- `state/manual_operation_state_v1.json`: cola manual durable, resultados compactos y recovery;
 - `state/operational_alert_state_v1.json`: resultados trivaluados y eventos deduplicados de la
   bandeja local;
 - `state/analytical_screening_state_v1.json`: resultados, recibos, candidatos y transiciones

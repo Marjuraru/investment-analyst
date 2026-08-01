@@ -15,6 +15,7 @@ class ProviderConfigurationError(ValueError):
 
 
 _SEC_TICKER_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9.-]{0,31}$")
+_COINBASE_PRODUCT_PATTERN = re.compile(r"^[A-Z0-9]+-[A-Z0-9]+$")
 
 
 class SecAccountingStandard(StrEnum):
@@ -35,6 +36,23 @@ def sec_source_ids(ticker: str) -> tuple[str, str]:
         f"sec-edgar:{slug}:submissions",
         f"sec-edgar:{slug}:companyfacts",
     )
+
+
+def coinbase_source_id(product_id: str, granularity_seconds: int) -> str:
+    """Derive a provider/product/granularity source identity without symbol branching."""
+    if product_id != product_id.strip() or not _COINBASE_PRODUCT_PATTERN.fullmatch(product_id):
+        raise ProviderConfigurationError("Coinbase product_id must use BASE-QUOTE")
+    if isinstance(granularity_seconds, bool) or granularity_seconds <= 0:
+        raise ProviderConfigurationError("Coinbase granularity must be a positive integer")
+    slug = product_id.casefold()
+    suffix = (
+        "daily-candles"
+        if granularity_seconds == 86_400
+        else f"minute-{granularity_seconds // 60}-candles"
+        if granularity_seconds % 60 == 0
+        else f"second-{granularity_seconds}-candles"
+    )
+    return f"coinbase-exchange:{slug}:{suffix}"
 
 
 class AlpacaAssetConfiguration(ContractModel):
@@ -72,7 +90,7 @@ class AlpacaAssetConfiguration(ContractModel):
 
 
 class CoinbaseAssetConfiguration(ContractModel):
-    """Fixed market-data identifiers required by the current Coinbase flow."""
+    """Catalog-backed Coinbase product, units, and granularity contract."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -80,6 +98,8 @@ class CoinbaseAssetConfiguration(ContractModel):
     product_id: NonEmptyStr
     source_id: NonEmptyStr
     granularity_seconds: StrictInt
+    base_unit: NonEmptyStr
+    quote_unit: NonEmptyStr
 
     @field_validator("granularity_seconds")
     @classmethod
@@ -88,6 +108,18 @@ class CoinbaseAssetConfiguration(ContractModel):
         if value <= 0:
             raise ValueError("granularity_seconds must be positive")
         return value
+
+    @model_validator(mode="after")
+    def validate_product_contract(self) -> "CoinbaseAssetConfiguration":
+        """Keep declared units and source identity aligned with the product."""
+        parts = self.product_id.split("-")
+        if len(parts) != 2 or any(not part for part in parts):
+            raise ValueError("Coinbase product_id must use BASE-QUOTE")
+        if (self.base_unit, self.quote_unit) != (parts[0], parts[1]):
+            raise ValueError("Coinbase units must match product_id")
+        if self.source_id != coinbase_source_id(self.product_id, self.granularity_seconds):
+            raise ValueError("Coinbase source_id must match product and granularity")
+        return self
 
 
 class SecAssetConfiguration(ContractModel):

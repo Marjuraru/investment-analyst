@@ -8,6 +8,7 @@
       ],
       "asset_class": "crypto",
       "asset_id": "crypto:btc-usd",
+      "crypto_profile": "bitcoin",
       "exchange": "COINBASE",
       "is_active": true,
       "name": "Bitcoin",

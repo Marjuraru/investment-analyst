@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import ConfigDict, field_validator, model_validator
 
-from investment_analyst.catalog.models import CatalogAsset
+from investment_analyst.catalog.models import CatalogAsset, CatalogCryptoProfile
 from investment_analyst.core.models import AssetClass
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
 
@@ -34,6 +34,24 @@ class FundamentalAnalysisMode(StrEnum):
     CORPORATE = "corporate"
     INVESTMENT_FUND = "investment_fund"
     CRYPTO_NETWORK = "crypto_network"
+
+
+class CryptoAnalyticalProfile(StrEnum):
+    """Supported analytical isolation profile for crypto assets."""
+
+    BITCOIN = "bitcoin"
+    ETHEREUM = "ethereum"
+    ALTCOIN = "altcoin"
+    UNSUPPORTED = "unsupported"
+
+
+_CRYPTO_PROFILE_MAP = {
+    CatalogCryptoProfile.BITCOIN: CryptoAnalyticalProfile.BITCOIN,
+    CatalogCryptoProfile.ETHEREUM: CryptoAnalyticalProfile.ETHEREUM,
+    CatalogCryptoProfile.ALTCOIN: CryptoAnalyticalProfile.ALTCOIN,
+    CatalogCryptoProfile.STABLECOIN: CryptoAnalyticalProfile.UNSUPPORTED,
+    CatalogCryptoProfile.WRAPPED: CryptoAnalyticalProfile.UNSUPPORTED,
+}
 
 
 _EXPECTED_MODES = {
@@ -67,6 +85,8 @@ class AssetAnalysisCapabilities(ContractModel):
     family: AssetAnalysisFamily
     market_mode: MarketAnalysisMode
     fundamental_mode: FundamentalAnalysisMode
+    crypto_profile: CryptoAnalyticalProfile | None = None
+    unsupported_reasons: tuple[NonEmptyStr, ...] = ()
     declared_market_capabilities: tuple[NonEmptyStr, ...]
     declared_fundamental_capabilities: tuple[NonEmptyStr, ...]
     market_data_configured: bool
@@ -104,6 +124,18 @@ class AssetAnalysisCapabilities(ContractModel):
             raise ValueError("market_data_configured must match declared capabilities")
         if self.fundamental_data_configured != bool(self.declared_fundamental_capabilities):
             raise ValueError("fundamental_data_configured must match declared capabilities")
+        if self.asset_class is AssetClass.CRYPTO:
+            if self.crypto_profile is None:
+                raise ValueError("crypto assets require an explicit analytical profile")
+            expected_reasons = (
+                ("stablecoin_or_wrapped_asset",)
+                if self.crypto_profile is CryptoAnalyticalProfile.UNSUPPORTED
+                else ()
+            )
+            if self.unsupported_reasons != expected_reasons:
+                raise ValueError("unsupported reasons must match the crypto profile")
+        elif self.crypto_profile is not None or self.unsupported_reasons:
+            raise ValueError("crypto analytical fields are only valid for crypto assets")
         return self
 
 
@@ -119,6 +151,12 @@ def analysis_capabilities_for(asset: CatalogAsset) -> AssetAnalysisCapabilities:
         sorted(item for item in declared if item.startswith(_FUNDAMENTAL_PREFIX))
     )
     family, market_mode, fundamental_mode = _EXPECTED_MODES[asset.asset_class]
+    if asset.asset_class is AssetClass.CRYPTO:
+        if asset.crypto_profile is None:
+            raise ValueError("crypto assets require an explicit catalog profile")
+        crypto_profile = _CRYPTO_PROFILE_MAP[asset.crypto_profile]
+    else:
+        crypto_profile = None
     return AssetAnalysisCapabilities(
         asset_id=asset.asset_id,
         asset_class=asset.asset_class,
@@ -126,6 +164,12 @@ def analysis_capabilities_for(asset: CatalogAsset) -> AssetAnalysisCapabilities:
         family=family,
         market_mode=market_mode,
         fundamental_mode=fundamental_mode,
+        crypto_profile=crypto_profile,
+        unsupported_reasons=(
+            ("stablecoin_or_wrapped_asset",)
+            if crypto_profile is CryptoAnalyticalProfile.UNSUPPORTED
+            else ()
+        ),
         declared_market_capabilities=market_capabilities,
         declared_fundamental_capabilities=fundamental_capabilities,
         market_data_configured=bool(market_capabilities),
@@ -148,6 +192,7 @@ def _validate_capability_tuple(
 __all__ = [
     "AssetAnalysisCapabilities",
     "AssetAnalysisFamily",
+    "CryptoAnalyticalProfile",
     "FundamentalAnalysisMode",
     "MarketAnalysisMode",
     "analysis_capabilities_for",

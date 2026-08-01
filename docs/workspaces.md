@@ -85,3 +85,14 @@ outside the source repository. `/tmp` remains suitable only when a test explicit
 
 There is no automatic workspace-format or storage migration yet. Incompatible versions require an
 explicit future migration design rather than silent rewriting.
+
+## Backup y restore verificados
+
+Los scripts `backup_workspace.py` y `restore_workspace.py` operan mediante
+`WorkspaceBackupService`. El backup se publica de forma atómica con manifest v1, inventario,
+tamaños, SHA-256, UUID del workspace y conteos de raw records, observaciones, métricas y diagnósticos.
+El restore verifica todo el contenido y vuelve a inspeccionar DuckDB en modo read-only antes de
+activar un destino nuevo o vacío. Nunca sobrescribe un workspace con contenido ni modifica el
+workspace fuente. Consulta [`capability_driven_runtime.md`](capability_driven_runtime.md).
+La creación y la verificación rechazan enlaces simbólicos en cualquier nivel; el inventario solo
+acepta archivos regulares contenidos físicamente en el árbol validado.

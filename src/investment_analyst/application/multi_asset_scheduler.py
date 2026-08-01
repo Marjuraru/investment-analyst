@@ -65,6 +65,34 @@ class ScheduledJobFailureCategory(StrEnum):
     INTERRUPTED = "interrupted_job"
 
 
+class ProviderJobTelemetry(ContractModel):
+    """Safe provider/job timing and evidence counters for one completed attempt."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["provider-job-telemetry-v1"] = "provider-job-telemetry-v1"
+    job_id: NonEmptyStr
+    provider: NonEmptyStr
+    domain: ScheduledJobDomain
+    started_at: UTCDateTime
+    completed_at: UTCDateTime
+    duration_ms: int = Field(ge=0)
+    provider_call_count: int | None = Field(default=None, ge=0)
+    response_bytes: int | None = Field(default=None, ge=0)
+    created_count: int = Field(default=0, ge=0)
+    reused_count: int = Field(default=0, ge=0)
+    coverage_complete: bool | None = None
+    failure_category: NonEmptyStr | None = None
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> "ProviderJobTelemetry":
+        if self.completed_at < self.started_at:
+            raise ValueError("telemetry completion must not predate start")
+        if (self.coverage_complete is None) == (self.failure_category is None):
+            raise ValueError("telemetry requires exactly one success or failure outcome")
+        return self
+
+
 class ScheduledJobDefinition(ContractModel):
     """Immutable schedule and scope for one provider-independent job."""
 
@@ -282,6 +310,7 @@ class ScheduledJobAttempt(ContractModel):
     completed_at: UTCDateTime | None = None
     execution: ScheduledJobExecution | None = None
     failure: ScheduledJobFailure | None = None
+    telemetry: ProviderJobTelemetry | None = None
 
     @field_validator("local_date", mode="before")
     @classmethod
@@ -310,6 +339,7 @@ class ScheduledJobAttempt(ContractModel):
                 self.completed_at is not None
                 or self.execution is not None
                 or self.failure is not None
+                or self.telemetry is not None
             ):
                 raise ValueError("running attempts cannot contain an outcome")
         elif self.status is ScheduledJobAttemptStatus.SUCCEEDED:
@@ -336,6 +366,7 @@ class ScheduledJobAttempt(ContractModel):
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "execution": self.execution.to_json_dict() if self.execution else None,
             "failure": self.failure.model_dump(mode="json") if self.failure else None,
+            "telemetry": self.telemetry.model_dump(mode="json") if self.telemetry else None,
         }
 
 
@@ -674,7 +705,9 @@ class MultiAssetScheduler:
                 raise ValueError("scheduled execution job_id does not match its definition")
         except ScheduledJobRunError as error:
             completed = ScheduledJobAttempt(
-                **running.model_dump(exclude={"status", "completed_at", "execution", "failure"}),
+                **running.model_dump(
+                    exclude={"status", "completed_at", "execution", "failure", "telemetry"}
+                ),
                 status=(
                     ScheduledJobAttemptStatus.FAILED
                     if error.failure.retryable
@@ -685,7 +718,9 @@ class MultiAssetScheduler:
             )
         except AaplOperationalStateError:
             completed = ScheduledJobAttempt(
-                **running.model_dump(exclude={"status", "completed_at", "execution", "failure"}),
+                **running.model_dump(
+                    exclude={"status", "completed_at", "execution", "failure", "telemetry"}
+                ),
                 status=ScheduledJobAttemptStatus.SKIPPED,
                 completed_at=self._now(),
                 failure=ScheduledJobFailure(
@@ -696,7 +731,9 @@ class MultiAssetScheduler:
             )
         except ValueError:
             completed = ScheduledJobAttempt(
-                **running.model_dump(exclude={"status", "completed_at", "execution", "failure"}),
+                **running.model_dump(
+                    exclude={"status", "completed_at", "execution", "failure", "telemetry"}
+                ),
                 status=ScheduledJobAttemptStatus.SKIPPED,
                 completed_at=self._now(),
                 failure=ScheduledJobFailure(
@@ -707,7 +744,9 @@ class MultiAssetScheduler:
             )
         except Exception:  # noqa: BLE001
             completed = ScheduledJobAttempt(
-                **running.model_dump(exclude={"status", "completed_at", "execution", "failure"}),
+                **running.model_dump(
+                    exclude={"status", "completed_at", "execution", "failure", "telemetry"}
+                ),
                 status=ScheduledJobAttemptStatus.FAILED,
                 completed_at=self._now(),
                 failure=ScheduledJobFailure(
@@ -718,13 +757,16 @@ class MultiAssetScheduler:
             )
         else:
             completed = ScheduledJobAttempt(
-                **running.model_dump(exclude={"status", "completed_at", "execution", "failure"}),
+                **running.model_dump(
+                    exclude={"status", "completed_at", "execution", "failure", "telemetry"}
+                ),
                 status=ScheduledJobAttemptStatus.SUCCEEDED,
                 completed_at=self._now(),
                 execution=execution,
             )
         finally:
             self._active_job_id = None
+        completed = completed.model_copy(update={"telemetry": _attempt_telemetry(completed)})
         self._store.write_attempt(completed)
         self._notify(completed)
         return completed
@@ -745,7 +787,9 @@ class MultiAssetScheduler:
             ):
                 continue
             recovered = ScheduledJobAttempt(
-                **attempt.model_dump(exclude={"status", "completed_at", "execution", "failure"}),
+                **attempt.model_dump(
+                    exclude={"status", "completed_at", "execution", "failure", "telemetry"}
+                ),
                 status=ScheduledJobAttemptStatus.FAILED,
                 completed_at=now,
                 failure=ScheduledJobFailure(
@@ -754,6 +798,7 @@ class MultiAssetScheduler:
                     retryable=True,
                 ),
             )
+            recovered = recovered.model_copy(update={"telemetry": _attempt_telemetry(recovered)})
             self._store.write_attempt(recovered)
             self._notify(recovered)
             completed.append(recovered)
@@ -933,11 +978,32 @@ class MultiAssetScheduler:
         return value.astimezone(UTC)
 
 
+def _attempt_telemetry(attempt: ScheduledJobAttempt) -> ProviderJobTelemetry:
+    """Build telemetry from the already-captured lifecycle without another clock read."""
+    if attempt.completed_at is None:
+        raise ValueError("completed attempt telemetry requires completed_at")
+    execution = attempt.execution
+    failure = attempt.failure
+    return ProviderJobTelemetry(
+        job_id=attempt.definition.job_id,
+        provider=attempt.definition.provider,
+        domain=attempt.definition.domain,
+        started_at=attempt.started_at,
+        completed_at=attempt.completed_at,
+        duration_ms=int((attempt.completed_at - attempt.started_at).total_seconds() * 1000),
+        created_count=execution.created_count if execution else 0,
+        reused_count=execution.reused_count if execution else 0,
+        coverage_complete=execution.coverage_complete if execution else None,
+        failure_category=failure.category if failure else None,
+    )
+
+
 __all__ = [
     "MultiAssetScheduleState",
     "MultiAssetScheduleStateStore",
     "MultiAssetScheduler",
     "MultiAssetSchedulerStatus",
+    "ProviderJobTelemetry",
     "RegisteredScheduledJob",
     "ScheduledJobAttempt",
     "ScheduledJobAttemptStatus",

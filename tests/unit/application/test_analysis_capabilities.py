@@ -6,11 +6,12 @@ from pydantic import ValidationError
 from investment_analyst.application.analysis_capabilities import (
     AssetAnalysisCapabilities,
     AssetAnalysisFamily,
+    CryptoAnalyticalProfile,
     FundamentalAnalysisMode,
     MarketAnalysisMode,
     analysis_capabilities_for,
 )
-from investment_analyst.catalog.models import CatalogAsset, ProviderBinding
+from investment_analyst.catalog.models import CatalogAsset, CatalogCryptoProfile, ProviderBinding
 from investment_analyst.core.models import AssetClass
 
 
@@ -37,6 +38,7 @@ def _asset(
     exchange: str,
     quote_currency: str,
     bindings: tuple[ProviderBinding, ...],
+    crypto_profile: CatalogCryptoProfile | None = None,
 ) -> CatalogAsset:
     return CatalogAsset(
         asset_id=asset_id,
@@ -47,6 +49,7 @@ def _asset(
         exchange=exchange,
         aliases=(symbol,),
         provider_bindings=bindings,
+        crypto_profile=crypto_profile,
     )
 
 
@@ -146,6 +149,7 @@ def test_funds_and_crypto_do_not_inherit_corporate_analysis(
         asset_class=asset_class,
         exchange="COINBASE" if asset_class is AssetClass.CRYPTO else "NYSE ARCA",
         quote_currency="USD",
+        crypto_profile=(CatalogCryptoProfile.ALTCOIN if asset_class is AssetClass.CRYPTO else None),
         bindings=(
             _binding(
                 provider=provider,
@@ -193,3 +197,51 @@ def test_profile_rejects_truthy_configuration_flags() -> None:
             market_data_configured=1,
             fundamental_data_configured=False,
         )
+
+
+@pytest.mark.parametrize(
+    ("catalog_profile", "analytical_profile", "unsupported"),
+    [
+        (CatalogCryptoProfile.BITCOIN, CryptoAnalyticalProfile.BITCOIN, ()),
+        (CatalogCryptoProfile.ETHEREUM, CryptoAnalyticalProfile.ETHEREUM, ()),
+        (CatalogCryptoProfile.ALTCOIN, CryptoAnalyticalProfile.ALTCOIN, ()),
+        (
+            CatalogCryptoProfile.STABLECOIN,
+            CryptoAnalyticalProfile.UNSUPPORTED,
+            ("stablecoin_or_wrapped_asset",),
+        ),
+        (
+            CatalogCryptoProfile.WRAPPED,
+            CryptoAnalyticalProfile.UNSUPPORTED,
+            ("stablecoin_or_wrapped_asset",),
+        ),
+    ],
+)
+def test_crypto_profiles_are_explicit_and_isolated(
+    catalog_profile: CatalogCryptoProfile,
+    analytical_profile: CryptoAnalyticalProfile,
+    unsupported: tuple[str, ...],
+) -> None:
+    asset = _asset(
+        asset_id=f"crypto:test-{catalog_profile.value}",
+        symbol="TEST",
+        asset_class=AssetClass.CRYPTO,
+        exchange="SYNTHETIC",
+        quote_currency="USD",
+        crypto_profile=catalog_profile,
+        bindings=(
+            _binding(
+                provider="coinbase",
+                namespace="product_id",
+                identifier="TEST-USD",
+                capabilities=("market.daily_bars",),
+            ),
+        ),
+    )
+
+    profile = analysis_capabilities_for(asset)
+
+    assert profile.crypto_profile is analytical_profile
+    assert profile.unsupported_reasons == unsupported
+    assert profile.fundamental_mode is FundamentalAnalysisMode.CRYPTO_NETWORK
+    assert not profile.fundamental_data_configured

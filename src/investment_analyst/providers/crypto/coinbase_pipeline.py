@@ -304,6 +304,8 @@ class CoinbaseHistoricalPipeline(_CoinbaseCandlePipeline):
             product_id=PRODUCT_ID,
             source_id=SOURCE_ID,
             granularity_seconds=DAILY_GRANULARITY_SECONDS,
+            base_unit="BTC",
+            quote_unit="USD",
         )
         super().__init__(
             storage,
@@ -336,6 +338,8 @@ class CoinbaseIntradayPipeline(_CoinbaseCandlePipeline):
             product_id=PRODUCT_ID,
             source_id=INTRADAY_SOURCE_ID,
             granularity_seconds=MINUTE_GRANULARITY_SECONDS,
+            base_unit="BTC",
+            quote_unit="USD",
         )
         super().__init__(
             storage,

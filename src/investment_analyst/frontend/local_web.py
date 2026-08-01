@@ -102,6 +102,10 @@ from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshRequest,
     BtcMarketRefreshSummary,
 )
+from investment_analyst.application.capability_runtime import (
+    CapabilityDrivenRuntimePlan,
+    build_capability_runtime_plan,
+)
 from investment_analyst.application.facade import InvestmentAnalystApplication
 from investment_analyst.application.listed_market_refresh import (
     ListedMarketKnownAtTooEarlyError,
@@ -110,6 +114,12 @@ from investment_analyst.application.listed_market_refresh import (
 from investment_analyst.application.listed_market_refresh_models import (
     ListedMarketRefreshRequest,
     ListedMarketRefreshSummary,
+)
+from investment_analyst.application.manual_operations import (
+    ManualOperationKind,
+    ManualOperationQueue,
+    ManualOperationRequest,
+    ManualOperationResult,
 )
 from investment_analyst.application.market_universe import (
     MarketAssetDescriptor,
@@ -129,6 +139,7 @@ from investment_analyst.application.operational_state import (
     AaplDailyRunAlreadyRunningError,
     AaplOperationalStateError,
 )
+from investment_analyst.application.overview_snapshot import OperationalOverviewSnapshot
 from investment_analyst.application.peru_registry import (
     BvlRegistryRefreshRequest,
     BvlRegistryRefreshSummary,
@@ -172,6 +183,87 @@ _CSP = (
 
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-standard JSON constant is not allowed: {value}")
+
+
+def _safe_nonnegative_int(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _manual_operation_result(
+    operation_kind: ManualOperationKind,
+    response: dict[str, object],
+) -> ManualOperationResult:
+    """Reduce one typed public response without inventing unavailable evidence."""
+    count_source = response.get("counts")
+    counts = count_source if isinstance(count_source, dict) else response
+    created = _operation_count(counts, suffix="_created", aggregate_key="created_count")
+    reused = _operation_count(counts, suffix="_reused", aggregate_key="reused_count")
+    known_at: datetime | None = None
+    for key in ("effective_known_at", "known_at", "checked_at", "retrieved_at"):
+        value = response.get(key)
+        if not isinstance(value, str):
+            continue
+        try:
+            candidate = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if candidate.tzinfo is not None and candidate.utcoffset() is not None:
+            known_at = candidate.astimezone(UTC)
+            break
+    schema_version = response.get("schema_version")
+    return ManualOperationResult(
+        result_schema_version=(
+            schema_version if isinstance(schema_version, str) and schema_version else None
+        ),
+        effective_known_at=known_at,
+        created_count=created,
+        reused_count=reused,
+        coverage_complete=_operation_coverage(operation_kind, response),
+        traceability_verified=_optional_bool(response.get("traceability_verified")),
+    )
+
+
+def _operation_count(
+    values: Mapping[object, object],
+    *,
+    suffix: str,
+    aggregate_key: str,
+) -> int | None:
+    candidates = tuple(
+        value
+        for key, value in values.items()
+        if isinstance(key, str) and (key == aggregate_key or key.endswith(suffix))
+    )
+    if not candidates or any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in candidates
+    ):
+        return None
+    return sum(cast(int, value) for value in candidates)
+
+
+def _optional_bool(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _operation_coverage(
+    operation_kind: ManualOperationKind,
+    response: Mapping[str, object],
+) -> bool | None:
+    for key in ("coverage_complete", "update_coverage_complete"):
+        evidence = _optional_bool(response.get(key))
+        if evidence is not None:
+            return evidence
+    if operation_kind is ManualOperationKind.COMPLETE_REFRESH:
+        status = response.get("overall_status")
+        return status == "complete" if isinstance(status, str) else None
+    if operation_kind in {
+        ManualOperationKind.MARKET_DAILY,
+        ManualOperationKind.MARKET_INTRADAY,
+    }:
+        missing = response.get("missing_intervals")
+        if isinstance(missing, (list, tuple)):
+            return not missing
+    return None
 
 
 class _RunnerOperations(Protocol):
@@ -381,8 +473,24 @@ class _WebOperations(Protocol):
         """Return the catalog-backed market watchlist."""
         ...
 
+    def runtime_capabilities(self) -> dict[str, object]:
+        """Return the catalog-derived provider/domain/frequency dispatch inventory."""
+        ...
+
     def overview(self) -> dict[str, object]:
         """Return operational and scheduler state."""
+        ...
+
+    def compact_overview(self) -> dict[str, object]:
+        """Return the bounded nonblocking operational snapshot."""
+        ...
+
+    def enqueue_operation(self, payload: dict[str, object]) -> dict[str, object]:
+        """Persist one typed request and return immediately."""
+        ...
+
+    def operation_status(self, operation_id: UUID) -> dict[str, object] | None:
+        """Return one durable queued-operation status."""
         ...
 
     def alerts(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
@@ -471,7 +579,7 @@ class _WebOperations(Protocol):
 
 
 class AaplLocalController:
-    """Serialize in-process reads and writes over existing application boundaries."""
+    """Coordinate one writer while serving reads from independent locks and snapshots."""
 
     def __init__(
         self,
@@ -489,7 +597,9 @@ class AaplLocalController:
         self._alpaca_credentials = alpaca_credentials
         self._sec_identity = sec_identity
         self._fred_api_key = fred_api_key
-        self._operation_lock = threading.RLock()
+        self._writer_lock = threading.RLock()
+        self._cache_lock = threading.RLock()
+        self._state_lock = threading.RLock()
         self._market_chart_cache: dict[AaplMarketChartRequest, AaplMarketChart] = {}
         self._btc_market_chart_cache: dict[BtcMarketChartRequest, BtcMarketChart] = {}
         self._listed_market_chart_cache: dict[
@@ -509,6 +619,8 @@ class AaplLocalController:
             tuple[str, AaplFundamentalResearchRequest], AaplFundamentalAnalysisResult
         ] = {}
         self._market_assets = self._application.list_market_assets()
+        self._runtime_capabilities = build_capability_runtime_plan(self._market_assets)
+        self._health_snapshot = self._runner.inspect(workspace=self._workspace)
 
     @classmethod
     def create_default(
@@ -534,13 +646,17 @@ class AaplLocalController:
         )
 
     def health(self) -> AaplOperationalHealth:
-        """Inspect workspace and latest run while no in-process write is active."""
-        with self._operation_lock:
-            return self._runner.inspect(workspace=self._workspace)
+        """Return a complete immutable snapshot without waiting for a provider."""
+        with self._state_lock:
+            return self._health_snapshot
 
     def market_assets(self) -> MarketAssetUniverse:
         """Return the immutable market universe resolved at process startup."""
         return self._market_assets
+
+    def runtime_capabilities(self) -> CapabilityDrivenRuntimePlan:
+        """Return immutable capability routes resolved at process startup."""
+        return self._runtime_capabilities
 
     def run_payload(self, payload: dict[str, object]) -> AaplDailyRunState:
         """Validate the stable request snapshot and execute it once."""
@@ -549,7 +665,7 @@ class AaplLocalController:
 
     def run_request(self, request: AaplWorkspaceBootstrapRequest) -> AaplDailyRunState:
         """Execute a typed manual or scheduled request through one shared mutex."""
-        with self._operation_lock:
+        with self._writer_lock:
             try:
                 return self._runner.run(
                     request,
@@ -558,55 +674,50 @@ class AaplLocalController:
                     sec_identity=self._sec_identity,
                 )
             finally:
-                self._market_chart_cache.clear()
-                self._btc_market_chart_cache.clear()
-                self._listed_market_chart_cache.clear()
-                self._btc_intraday_chart_cache.clear()
-                self._fundamental_trend_cache.clear()
-                self._fundamental_research_cache.clear()
-                self._fundamental_research_history_cache.clear()
-                self._fundamental_analysis_cache.clear()
+                self._clear_read_caches()
+                self._refresh_health_snapshot()
 
     def report_request(
         self,
         request: ConsolidatedDiagnosticRequest,
     ) -> AaplDailyDiagnosticReport:
         """Query persisted evidence without providers or writes."""
-        with self._operation_lock:
-            return self._application.query_aapl_diagnostics(
-                request,
-                location=StorageLocationRequest(workspace=self._workspace),
-            )
+        return self._application.query_aapl_diagnostics(
+            request,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
 
     def market_chart_request(self, request: AaplMarketChartRequest) -> AaplMarketChart:
         """Query persisted market bars and indicators without providers or writes."""
-        with self._operation_lock:
+        with self._cache_lock:
             cached = self._market_chart_cache.get(request)
             if cached is not None:
                 return cached
-            chart = self._application.query_aapl_market_chart(
-                request,
-                location=StorageLocationRequest(workspace=self._workspace),
-            )
+        chart = self._application.query_aapl_market_chart(
+            request,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+        with self._cache_lock:
             if len(self._market_chart_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._market_chart_cache.pop(next(iter(self._market_chart_cache)))
             self._market_chart_cache[request] = chart
-            return chart
+        return chart
 
     def btc_market_chart_request(self, request: BtcMarketChartRequest) -> BtcMarketChart:
         """Query persisted Coinbase bars and indicators without providers or writes."""
-        with self._operation_lock:
+        with self._cache_lock:
             cached = self._btc_market_chart_cache.get(request)
             if cached is not None:
                 return cached
-            chart = self._application.query_btc_market_chart(
-                request,
-                location=StorageLocationRequest(workspace=self._workspace),
-            )
+        chart = self._application.query_btc_market_chart(
+            request,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+        with self._cache_lock:
             if len(self._btc_market_chart_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._btc_market_chart_cache.pop(next(iter(self._btc_market_chart_cache)))
             self._btc_market_chart_cache[request] = chart
-            return chart
+        return chart
 
     def listed_market_chart_request(
         self,
@@ -615,58 +726,62 @@ class AaplLocalController:
     ) -> ListedMarketChart:
         """Query one cached catalog-backed Alpaca chart without writes."""
         cache_key = (asset_id, request)
-        with self._operation_lock:
+        with self._cache_lock:
             cached = self._listed_market_chart_cache.get(cache_key)
             if cached is not None:
                 return cached
-            chart = self._application.query_listed_market_chart(
-                request,
-                asset_id=asset_id,
-                location=StorageLocationRequest(workspace=self._workspace),
-            )
+        chart = self._application.query_listed_market_chart(
+            request,
+            asset_id=asset_id,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+        with self._cache_lock:
             if len(self._listed_market_chart_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._listed_market_chart_cache.pop(next(iter(self._listed_market_chart_cache)))
             self._listed_market_chart_cache[cache_key] = chart
-            return chart
+        return chart
 
     def btc_intraday_chart_request(
         self,
         request: BtcIntradayChartRequest,
     ) -> BtcIntradayChart:
         """Query cached, persisted Coinbase one-minute evidence without writes."""
-        with self._operation_lock:
+        with self._cache_lock:
             cached = self._btc_intraday_chart_cache.get(request)
             if cached is not None:
                 return cached
-            chart = self._application.query_btc_intraday_chart(
-                request,
-                location=StorageLocationRequest(workspace=self._workspace),
-            )
+        chart = self._application.query_btc_intraday_chart(
+            request,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+        with self._cache_lock:
             if len(self._btc_intraday_chart_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._btc_intraday_chart_cache.pop(next(iter(self._btc_intraday_chart_cache)))
             self._btc_intraday_chart_cache[request] = chart
-            return chart
+        return chart
 
     def btc_market_refresh_request(
         self,
         request: BtcMarketRefreshRequest,
     ) -> BtcMarketRefreshSummary:
         """Execute one Coinbase-only refresh through the shared writer mutex."""
-        with self._operation_lock:
+        with self._writer_lock:
             try:
                 return self._application.refresh_btc_market(
                     request,
                     location=StorageLocationRequest(workspace=self._workspace),
                 )
             finally:
-                self._btc_market_chart_cache.clear()
+                with self._cache_lock:
+                    self._btc_market_chart_cache.clear()
+                self._refresh_health_snapshot()
 
     def listed_market_refresh_request(
         self,
         request: ListedMarketRefreshRequest,
     ) -> ListedMarketRefreshSummary:
         """Execute one Alpaca market-only refresh through the writer mutex."""
-        with self._operation_lock:
+        with self._writer_lock:
             try:
                 return self._application.refresh_listed_market(
                     request,
@@ -674,28 +789,32 @@ class AaplLocalController:
                     alpaca_credentials=self._alpaca_credentials,
                 )
             finally:
-                self._listed_market_chart_cache.clear()
+                with self._cache_lock:
+                    self._listed_market_chart_cache.clear()
+                self._refresh_health_snapshot()
 
     def btc_intraday_refresh_request(
         self,
         request: BtcIntradayRefreshRequest,
     ) -> BtcIntradayRefreshSummary:
         """Execute one bounded Coinbase minute refresh through the writer mutex."""
-        with self._operation_lock:
+        with self._writer_lock:
             try:
                 return self._application.refresh_btc_intraday(
                     request,
                     location=StorageLocationRequest(workspace=self._workspace),
                 )
             finally:
-                self._btc_intraday_chart_cache.clear()
+                with self._cache_lock:
+                    self._btc_intraday_chart_cache.clear()
+                self._refresh_health_snapshot()
 
     def sec_fundamental_refresh_request(
         self,
         request: SecIssuerFundamentalRefreshRequest,
     ) -> SecIssuerFundamentalRefreshSummary:
         """Execute one SEC-only issuer refresh through the shared writer mutex."""
-        with self._operation_lock:
+        with self._writer_lock:
             try:
                 return self._application.refresh_sec_fundamentals(
                     request,
@@ -703,10 +822,12 @@ class AaplLocalController:
                     sec_identity=self._sec_identity,
                 )
             finally:
-                self._fundamental_trend_cache.clear()
-                self._fundamental_research_cache.clear()
-                self._fundamental_research_history_cache.clear()
-                self._fundamental_analysis_cache.clear()
+                with self._cache_lock:
+                    self._fundamental_trend_cache.clear()
+                    self._fundamental_research_cache.clear()
+                    self._fundamental_research_history_cache.clear()
+                    self._fundamental_analysis_cache.clear()
+                self._refresh_health_snapshot()
 
     def fred_catalog_refresh_request(
         self,
@@ -715,7 +836,7 @@ class AaplLocalController:
         """Refresh one FRED series through the shared writer mutex."""
         if self._fred_api_key is None:
             raise ValueError("FRED_API_KEY is required for automatic macro refresh")
-        with self._operation_lock:
+        with self._writer_lock:
             return self._application.refresh_fred_catalog_series(
                 request,
                 location=StorageLocationRequest(workspace=self._workspace),
@@ -727,7 +848,7 @@ class AaplLocalController:
         request: BvlRegistryRefreshRequest,
     ) -> BvlRegistryRefreshSummary:
         """Refresh official SMV registry evidence through the shared writer mutex."""
-        with self._operation_lock:
+        with self._writer_lock:
             return self._application.refresh_bvl_registry(
                 request,
                 location=StorageLocationRequest(workspace=self._workspace),
@@ -741,19 +862,20 @@ class AaplLocalController:
     ) -> AaplFundamentalTrend:
         """Query persisted SEC facts without providers, recomputation, or writes."""
         cache_key = (asset_id, request)
-        with self._operation_lock:
+        with self._cache_lock:
             cached = self._fundamental_trend_cache.get(cache_key)
             if cached is not None:
                 return cached
-            trend = self._application.query_sec_fundamental_trend(
-                request,
-                asset_id=asset_id,
-                location=StorageLocationRequest(workspace=self._workspace),
-            )
+        trend = self._application.query_sec_fundamental_trend(
+            request,
+            asset_id=asset_id,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+        with self._cache_lock:
             if len(self._fundamental_trend_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._fundamental_trend_cache.pop(next(iter(self._fundamental_trend_cache)))
             self._fundamental_trend_cache[cache_key] = trend
-            return trend
+        return trend
 
     def fundamental_research_request(
         self,
@@ -763,19 +885,20 @@ class AaplLocalController:
     ) -> AaplFundamentalResearchResult:
         """Calculate cached SEC research metrics without providers or writes."""
         cache_key = (asset_id, request)
-        with self._operation_lock:
+        with self._cache_lock:
             cached = self._fundamental_research_cache.get(cache_key)
             if cached is not None:
                 return cached
-            research = self._application.query_sec_fundamental_research(
-                request,
-                asset_id=asset_id,
-                location=StorageLocationRequest(workspace=self._workspace),
-            )
+        research = self._application.query_sec_fundamental_research(
+            request,
+            asset_id=asset_id,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+        with self._cache_lock:
             if len(self._fundamental_research_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._fundamental_research_cache.pop(next(iter(self._fundamental_research_cache)))
             self._fundamental_research_cache[cache_key] = research
-            return research
+        return research
 
     def fundamental_research_history_request(
         self,
@@ -785,21 +908,22 @@ class AaplLocalController:
     ) -> AaplFundamentalResearchHistoryResult:
         """Calculate cached historical research statistics without writes."""
         cache_key = (asset_id, request)
-        with self._operation_lock:
+        with self._cache_lock:
             cached = self._fundamental_research_history_cache.get(cache_key)
             if cached is not None:
                 return cached
-            history = self._application.query_sec_fundamental_research_history(
-                request,
-                asset_id=asset_id,
-                location=StorageLocationRequest(workspace=self._workspace),
-            )
+        history = self._application.query_sec_fundamental_research_history(
+            request,
+            asset_id=asset_id,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+        with self._cache_lock:
             if len(self._fundamental_research_history_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._fundamental_research_history_cache.pop(
                     next(iter(self._fundamental_research_history_cache))
                 )
             self._fundamental_research_history_cache[cache_key] = history
-            return history
+        return history
 
     def fundamental_analysis_request(
         self,
@@ -809,19 +933,36 @@ class AaplLocalController:
     ) -> AaplFundamentalAnalysisResult:
         """Return cached analytical sections without providers or writes."""
         cache_key = (asset_id, request)
-        with self._operation_lock:
+        with self._cache_lock:
             cached = self._fundamental_analysis_cache.get(cache_key)
             if cached is not None:
                 return cached
-            analysis = self._application.query_sec_fundamental_analysis(
-                request,
-                asset_id=asset_id,
-                location=StorageLocationRequest(workspace=self._workspace),
-            )
+        analysis = self._application.query_sec_fundamental_analysis(
+            request,
+            asset_id=asset_id,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+        with self._cache_lock:
             if len(self._fundamental_analysis_cache) >= _MAX_READ_CACHE_ENTRIES:
                 self._fundamental_analysis_cache.pop(next(iter(self._fundamental_analysis_cache)))
             self._fundamental_analysis_cache[cache_key] = analysis
-            return analysis
+        return analysis
+
+    def _clear_read_caches(self) -> None:
+        with self._cache_lock:
+            self._market_chart_cache.clear()
+            self._btc_market_chart_cache.clear()
+            self._listed_market_chart_cache.clear()
+            self._btc_intraday_chart_cache.clear()
+            self._fundamental_trend_cache.clear()
+            self._fundamental_research_cache.clear()
+            self._fundamental_research_history_cache.clear()
+            self._fundamental_analysis_cache.clear()
+
+    def _refresh_health_snapshot(self) -> None:
+        snapshot = self._runner.inspect(workspace=self._workspace)
+        with self._state_lock:
+            self._health_snapshot = snapshot
 
 
 class AaplLocalWebApplication:
@@ -835,6 +976,7 @@ class AaplLocalWebApplication:
         analytical_store: AnalyticalScreeningStateStore | None = None,
         analytical_rule_store: AnalyticalRuleRegistryStore | None = None,
         analytical_backtest: AnalyticalBacktestService | None = None,
+        manual_operations: ManualOperationQueue | None = None,
     ) -> None:
         self._controller = controller
         self._scheduler = scheduler
@@ -842,6 +984,13 @@ class AaplLocalWebApplication:
         self._analytical_store = analytical_store
         self._analytical_rule_store = analytical_rule_store
         self._analytical_backtest = analytical_backtest
+        self._manual_operations = manual_operations
+
+    def set_manual_operations(self, operations: ManualOperationQueue) -> None:
+        """Attach the durable queue after its dispatcher can reference this adapter."""
+        if self._manual_operations is not None:
+            raise ValueError("manual operation queue is already configured")
+        self._manual_operations = operations
 
     def overview(self) -> dict[str, object]:
         """Return state only; never initialize, fetch, calculate, or persist."""
@@ -860,6 +1009,65 @@ class AaplLocalWebApplication:
             "alerts": alerts,
             "candidates": candidates,
         }
+
+    def compact_overview(self) -> dict[str, object]:
+        """Return a bounded snapshot without retained histories or writer acquisition."""
+        health = self._controller.health().to_json_dict()
+        workspace = cast(dict[str, object], health["workspace"])
+        latest_run = cast(dict[str, object] | None, health.get("latest_run"))
+        scheduler_enabled = self._scheduler is not None
+        scheduled_job_count = 0
+        scheduled_running_count = 0
+        scheduled_failed_count = 0
+        if self._scheduler is not None:
+            status = self._scheduler.status().to_json_dict()
+            jobs = status.get("jobs", ())
+            scheduled_job_count = len(jobs) if isinstance(jobs, (list, tuple)) else 0
+            scheduled_running_count = _safe_nonnegative_int(status.get("running_count"))
+            scheduled_failed_count = _safe_nonnegative_int(status.get("failed_count"))
+        queue_snapshot = self._manual_operations.snapshot() if self._manual_operations else None
+        return OperationalOverviewSnapshot.now(
+            operational_status=str(health["status"]),
+            workspace_status=str(workspace["status"]),
+            workspace_id=workspace.get("workspace_id"),
+            latest_run_id=latest_run.get("run_id") if latest_run else None,
+            latest_run_status=str(latest_run["status"]) if latest_run else None,
+            scheduler_enabled=scheduler_enabled,
+            scheduled_job_count=scheduled_job_count,
+            scheduled_running_count=scheduled_running_count,
+            scheduled_failed_count=scheduled_failed_count,
+            queued_operation_count=queue_snapshot.queued_count if queue_snapshot else 0,
+            running_operation_count=queue_snapshot.running_count if queue_snapshot else 0,
+            failed_operation_count=queue_snapshot.failed_count if queue_snapshot else 0,
+            latest_operation_id=queue_snapshot.latest_operation_id if queue_snapshot else None,
+            latest_operation_status=queue_snapshot.latest_status if queue_snapshot else None,
+        ).to_json_dict()
+
+    def enqueue_operation(self, payload: dict[str, object]) -> dict[str, object]:
+        """Validate and durably enqueue one existing operation without provider work."""
+        if self._manual_operations is None:
+            raise ValueError("manual operation queue is not configured")
+        request = ManualOperationRequest.model_validate(payload)
+        return self._manual_operations.enqueue(request).to_json_dict()
+
+    def operation_status(self, operation_id: UUID) -> dict[str, object] | None:
+        """Return one durable operation status without waiting for its provider."""
+        if self._manual_operations is None:
+            raise ValueError("manual operation queue is not configured")
+        operation = self._manual_operations.get(operation_id)
+        return operation.to_json_dict() if operation else None
+
+    def execute_manual_operation(self, request: ManualOperationRequest) -> ManualOperationResult:
+        """Dispatch a queued request through the compatible typed synchronous facade."""
+        if request.operation_kind is ManualOperationKind.COMPLETE_REFRESH:
+            response = self.run(cast(dict[str, object], request.payload))
+        elif request.operation_kind is ManualOperationKind.MARKET_DAILY:
+            response = self.market_refresh(cast(dict[str, object], request.payload))
+        elif request.operation_kind is ManualOperationKind.MARKET_INTRADAY:
+            response = self.market_intraday_refresh(cast(dict[str, object], request.payload))
+        else:
+            response = self.fundamental_refresh(cast(dict[str, object], request.payload))
+        return _manual_operation_result(request.operation_kind, response)
 
     def alerts(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Return local persisted alerts without providers or analytical writes."""
@@ -989,6 +1197,10 @@ class AaplLocalWebApplication:
     def market_assets(self) -> dict[str, object]:
         """Return one immutable catalog-driven watchlist."""
         return self._controller.market_assets().to_json_dict()
+
+    def runtime_capabilities(self) -> dict[str, object]:
+        """Return the strict dispatch plan without storage or provider access."""
+        return self._controller.runtime_capabilities().to_json_dict()
 
     def report(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate query parameters and return the versioned report contract."""
@@ -1295,6 +1507,31 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/overview":
                 self._send_json(HTTPStatus.OK, server.application.overview())
                 return
+            if parsed.path == "/api/v1/overview":
+                if parsed.query:
+                    raise ValueError("compact overview does not accept parameters")
+                self._send_json(HTTPStatus.OK, server.application.compact_overview())
+                return
+            operation_prefix = "/api/v1/manual-operations/"
+            if parsed.path.startswith(operation_prefix):
+                if parsed.query:
+                    raise ValueError("manual operation status does not accept parameters")
+                raw_id = parsed.path.removeprefix(operation_prefix)
+                if not raw_id or "/" in raw_id:
+                    raise _HttpError(HTTPStatus.NOT_FOUND, "not_found", "route not found")
+                try:
+                    operation_id = UUID(raw_id)
+                except ValueError as error:
+                    raise ValueError("manual operation_id is invalid") from error
+                operation = server.application.operation_status(operation_id)
+                if operation is None:
+                    raise _HttpError(
+                        HTTPStatus.NOT_FOUND,
+                        "not_found",
+                        "manual operation was not found",
+                    )
+                self._send_json(HTTPStatus.OK, operation)
+                return
             if parsed.path == "/api/alerts":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=2)
                 parameters = {key: tuple(values) for key, values in raw.items()}
@@ -1326,6 +1563,11 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/market-assets":
                 self._send_json(HTTPStatus.OK, server.application.market_assets())
+                return
+            if parsed.path == "/api/v1/capabilities":
+                if parsed.query:
+                    raise ValueError("runtime capabilities do not accept parameters")
+                self._send_json(HTTPStatus.OK, server.application.runtime_capabilities())
                 return
             if parsed.path == "/api/report":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=8)
@@ -1390,10 +1632,15 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 "/api/alerts/transition",
                 "/api/candidates/transition",
                 "/api/screening-rules/update",
+                "/api/v1/manual-operations",
             }:
                 raise _HttpError(HTTPStatus.NOT_FOUND, "not_found", "route not found")
             payload = self._read_json_object()
             server = cast(AaplLocalHttpServer, self.server)
+            if parsed.path == "/api/v1/manual-operations":
+                response = server.application.enqueue_operation(payload)
+                self._send_json(HTTPStatus.ACCEPTED, response)
+                return
             if parsed.path == "/api/run":
                 response = server.application.run(payload)
             elif parsed.path == "/api/alerts/transition":

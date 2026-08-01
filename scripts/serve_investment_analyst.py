@@ -25,6 +25,10 @@ from investment_analyst.application.aapl_scheduler import (
     AaplLocalServiceLock,
 )
 from investment_analyst.application.facade import InvestmentAnalystApplication
+from investment_analyst.application.manual_operations import (
+    ManualOperationQueue,
+    ManualOperationStateStore,
+)
 from investment_analyst.application.multi_asset_scheduler import (
     MultiAssetScheduler,
     MultiAssetScheduleStateStore,
@@ -56,6 +60,7 @@ _SCHEDULE_STATE_FILE = "multi_asset_schedule_state_v1.json"
 _ALERT_STATE_FILE = "operational_alert_state_v1.json"
 _ANALYTICAL_STATE_FILE = "analytical_screening_state_v1.json"
 _ANALYTICAL_RULE_REGISTRY_FILE = "analytical_rule_registry_state_v1.json"
+_MANUAL_OPERATION_STATE_FILE = "manual_operation_state_v1.json"
 _SERVICE_LOCK_FILE = "aapl_local_service.lock"
 
 
@@ -231,17 +236,20 @@ def _serve(
             ),
         )
 
-    server = AaplLocalHttpServer(
-        ("127.0.0.1", arguments.port),
-        AaplLocalWebApplication(
-            controller,
-            scheduler,
-            alert_store,
-            analytical_store,
-            analytical_rule_store,
-            analytical_backtest,
-        ),
+    web_application = AaplLocalWebApplication(
+        controller,
+        scheduler,
+        alert_store,
+        analytical_store,
+        analytical_rule_store,
+        analytical_backtest,
     )
+    manual_operations = ManualOperationQueue(
+        ManualOperationStateStore(paths.state_root / _MANUAL_OPERATION_STATE_FILE),
+        web_application.execute_manual_operation,
+    )
+    web_application.set_manual_operations(manual_operations)
+    server = AaplLocalHttpServer(("127.0.0.1", arguments.port), web_application)
     stop_event = threading.Event()
     scheduler_thread: threading.Thread | None = None
     if scheduler is not None:
@@ -280,6 +288,7 @@ def _serve(
         signal.signal(signal.SIGINT, request_shutdown)
         if scheduler_thread is not None:
             scheduler_thread.start()
+        manual_operations.start()
         print(
             f"Investment Analyst available at http://127.0.0.1:{arguments.port}",
             flush=True,
@@ -291,6 +300,7 @@ def _serve(
             request_shutdown(signal.SIGINT, None)
         finally:
             stop_event.set()
+            manual_operations.stop()
             server.server_close()
             if scheduler_thread is not None:
                 scheduler_thread.join(timeout=5)

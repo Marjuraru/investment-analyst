@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from investment_analyst.catalog.models import (
     AssetCatalogDocument,
     CatalogAsset,
+    CatalogCryptoProfile,
     ProviderBinding,
 )
 from investment_analyst.core.models import AssetClass
@@ -112,11 +113,38 @@ def test_document_rejects_external_binding_shared_by_different_assets() -> None:
         symbol="TEST",
         name="Test",
         asset_class=AssetClass.CRYPTO,
+        crypto_profile=CatalogCryptoProfile.ALTCOIN,
         exchange=None,
         aliases=("TEST",),
     )
     with pytest.raises(ValidationError, match="globally unique"):
         AssetCatalogDocument(catalog_version=1, assets=(crypto, _asset()))
+
+
+def test_crypto_catalog_assets_require_an_explicit_isolated_profile() -> None:
+    with pytest.raises(ValidationError, match="require an explicit crypto_profile"):
+        _asset(
+            asset_id="crypto:unclassified",
+            symbol="UNKNOWN",
+            name="Unclassified crypto",
+            asset_class=AssetClass.CRYPTO,
+            exchange="SYNTHETIC",
+            aliases=("UNKNOWN",),
+        )
+
+    profiles = tuple(
+        _asset(
+            asset_id=f"crypto:{profile.value}",
+            symbol=profile.value.upper(),
+            name=profile.value,
+            asset_class=AssetClass.CRYPTO,
+            crypto_profile=profile,
+            exchange="SYNTHETIC",
+            aliases=(profile.value,),
+        ).crypto_profile
+        for profile in CatalogCryptoProfile
+    )
+    assert profiles == tuple(CatalogCryptoProfile)
 
 
 def test_document_allows_explicit_non_unique_external_relationship() -> None:

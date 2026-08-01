@@ -39,6 +39,12 @@ Los CIK de SEC son texto para conservar los diez dígitos y sus ceros iniciales.
 de Coinbase y símbolos de proveedores también se conservan exactamente, sin conversiones
 destructivas.
 
+Los criptoactivos deben declarar `crypto_profile`: `bitcoin`, `ethereum`, `altcoin`, `stablecoin` o
+`wrapped`; la ausencia invalida el catálogo. Bitcoin, Ethereum y altcoins permanecen como perfiles
+analíticos separados. Stablecoin y wrapped se traducen explícitamente a `unsupported` y no heredan
+análisis de Bitcoin. El catálogo productivo conserva únicamente Bitcoin. Los otros perfiles se
+prueban sintéticamente para fijar el límite sin anunciar ingestión productiva.
+
 Las cotizaciones BVL usan vinculaciones `bvl/mnemonic`, `bvl/isin`, `smv/legal_name` y, cuando la
 consulta de valores lo expone, `smv/security_code`. Este último tiene ocho caracteres y no se
 presenta como ISIN. Los ISIN completos superan checksum ISO 6166 y se corroboran con documentos BVL.
