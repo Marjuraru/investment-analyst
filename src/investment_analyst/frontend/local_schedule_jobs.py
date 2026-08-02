@@ -140,6 +140,7 @@ class LocalWatchlistScheduleConfig(ContractModel):
     fundamental_frequency: DataFrequency = DataFrequency.QUARTERLY
     refresh_mode: AaplRefreshMode = AaplRefreshMode.AUTO
     selected_asset_ids: tuple[NonEmptyStr, ...] = ()
+    selection_is_explicit: bool = False
     include_intraday: bool = True
     include_smv_registry: bool = False
     include_macro: bool = False
@@ -188,6 +189,7 @@ class LocalWatchlistScheduleConfig(ContractModel):
         "include_intraday",
         "include_smv_registry",
         "include_macro",
+        "selection_is_explicit",
         mode="before",
     )
     @classmethod
@@ -217,7 +219,11 @@ def build_local_watchlist_jobs(
 ) -> tuple[RegisteredScheduledJob, ...]:
     """Build provider/domain jobs without symbol-specific application routes."""
     known_ids = {item.asset_id for item in universe.assets}
-    requested = set(config.selected_asset_ids) if config.selected_asset_ids else known_ids
+    requested = (
+        set(config.selected_asset_ids)
+        if config.selection_is_explicit or config.selected_asset_ids
+        else known_ids
+    )
     unknown = requested - known_ids
     if unknown:
         raise ValueError(f"scheduled asset_id is not supported: {sorted(unknown)[0]}")

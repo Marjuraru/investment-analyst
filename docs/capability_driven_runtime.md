@@ -61,6 +61,14 @@ cobertura y trazabilidad solo se publican cuando la respuesta permite derivarlas
 no evaluable. Los errores usan mensajes fijos, y las claves que parecen credenciales se rechazan
 antes de persistir.
 
+## Registro reconciliable
+
+El registro de jobs ya no queda fijado durante todo el proceso. Las preferencias persistentes
+seleccionan activos y el scheduler publica atómicamente un nuevo tuple de jobs construido desde este
+plan y el catálogo, sin ejecutar proveedores. Cada tick conserva su snapshot; retirar un job no
+cancela el callback activo y reactivarlo reutiliza el mismo `job_id` y su historia. Los contratos y
+la precedencia están en [`asset_preferences.md`](asset_preferences.md).
+
 ## Telemetría
 
 Cada intento nuevo del scheduler añade `provider-job-telemetry-v1`: job, proveedor, dominio,

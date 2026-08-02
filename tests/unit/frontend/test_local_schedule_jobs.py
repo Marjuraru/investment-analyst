@@ -123,6 +123,17 @@ def test_selected_asset_must_exist_in_visible_catalog() -> None:
         )
 
 
+def test_explicit_empty_selection_does_not_fall_back_to_every_catalog_asset() -> None:
+    config = _config().model_copy(update={"selection_is_explicit": True})
+
+    with pytest.raises(ValueError, match="at least one job"):
+        build_local_watchlist_jobs(
+            _UnusedController(),
+            _universe(),
+            config,
+        )
+
+
 def test_optional_macro_and_smv_jobs_have_independent_provider_scopes() -> None:
     config = _config("equity:us:aapl").model_copy(
         update={"include_smv_registry": True, "include_macro": True}

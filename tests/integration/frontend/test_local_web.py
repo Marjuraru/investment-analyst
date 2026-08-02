@@ -54,6 +54,12 @@ from investment_analyst.analytics.market.chart_models import (
 )
 from investment_analyst.analytics.market.intraday_models import IntradayInterval
 from investment_analyst.application.aapl_bootstrap_models import AaplWorkspaceBootstrapRequest
+from investment_analyst.application.asset_preferences import (
+    AssetPreferenceEntry,
+    AssetPreferencesService,
+    AssetPreferencesStore,
+    cli_seed_asset_preferences,
+)
 from investment_analyst.application.btc_intraday_models import (
     BtcIntradayChart,
     BtcIntradayChartRequest,
@@ -76,11 +82,16 @@ from investment_analyst.application.manual_operations import (
 )
 from investment_analyst.application.market_universe import MarketAssetUniverse
 from investment_analyst.application.multi_asset_scheduler import (
+    MultiAssetScheduler,
+    MultiAssetScheduleStateStore,
+    RegisteredScheduledJob,
     ScheduledJobAttempt,
     ScheduledJobAttemptStatus,
     ScheduledJobDefinition,
     ScheduledJobDomain,
+    ScheduledJobExecution,
     ScheduledJobFailure,
+    ScheduledJobInvocation,
 )
 from investment_analyst.application.operational_alerts import (
     OperationalAlertMonitor,
@@ -695,6 +706,21 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "Métricas por área" in html
     assert 'id="candidate-inbox-panel"' in html
     assert 'id="candidate-status"' in html
+    assert 'id="asset-preferences-panel"' in html
+    assert 'id="asset-preferences-form"' in html
+    assert 'role="group" aria-label="Preferencias por activo"' in html
+    assert 'id="asset-preferences-status" role="status" aria-live="polite"' in html
+    assert 'api("/api/v1/asset-preferences")' in javascript
+    assert 'method: "PUT"' in javascript
+    assert "programados efectivos" in javascript
+    assert "Scheduler desactivado; la selección programada se conserva." in javascript
+    assert "scheduler desactivado; 0 trabajos efectivos" in javascript
+    assert "localStorage.setItem" in javascript
+    assert "asset-preferences" not in "".join(
+        line for line in javascript.splitlines() if "localStorage" in line
+    )
+    assert ".preferences-table" in stylesheet
+    assert "overflow-x: auto" in stylesheet
     assert 'api("/api/candidates?limit=50")' in javascript
     assert 'api("/api/candidates/transition"' in javascript
     assert 'id="screening-rules-panel"' in html
@@ -1230,6 +1256,239 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert len(application.analysis_requests) == 1
     assert application.analysis_asset_ids == ["equity:us:aapl"]
     assert application.analysis_locations[0].workspace == workspace.resolve()
+
+
+def test_asset_preferences_get_put_conflict_and_invalid_payload_are_provider_free(
+    tmp_path: Path,
+) -> None:
+    runner = _FakeRunner()
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        runner,
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    preference_path = tmp_path / "state/asset_preferences_state_v1.json"
+    store = AssetPreferencesStore(
+        preference_path,
+        clock=lambda: datetime(2026, 8, 2, tzinfo=UTC),
+        revision_id_factory=lambda: UUID("00000000-0000-4000-8000-000000000301"),
+    )
+    seed = cli_seed_asset_preferences(
+        controller.market_assets(),
+        ("equity:us:aapl",),
+    )
+    preferences = AssetPreferencesService(
+        store,
+        controller.market_assets(),
+        seed,
+        scheduler=None,
+        job_factory=None,
+    )
+    web = AaplLocalWebApplication(controller, None, asset_preferences=preferences)
+
+    with _server(web) as (_, root):
+        initial_status, initial, _ = _json_request(Request(f"{root}/api/v1/asset-preferences"))
+        assert not preference_path.exists()
+        entries = (
+            AssetPreferenceEntry(
+                asset_id="crypto:btc-usd",
+                watchlist=True,
+                favorite=True,
+                scheduled_refresh=True,
+            ),
+            AssetPreferenceEntry(
+                asset_id="equity:us:aapl",
+                watchlist=True,
+                favorite=False,
+                scheduled_refresh=False,
+            ),
+        )
+        body = json.dumps(
+            {
+                "schema_version": "asset-preferences-update-v1",
+                "expected_revision_id": initial["revision_id"],
+                "expected_fingerprint": initial["fingerprint"],
+                "entries": [item.model_dump(mode="json") for item in entries],
+            }
+        ).encode()
+        updated_status, updated, _ = _json_request(
+            Request(
+                f"{root}/api/v1/asset-preferences",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="PUT",
+            )
+        )
+        stale_status, stale, _ = _json_request(
+            Request(
+                f"{root}/api/v1/asset-preferences",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="PUT",
+            )
+        )
+        invalid_document = json.loads(body)
+        invalid_document["expected_revision_id"] = updated["revision_id"]
+        invalid_document["expected_fingerprint"] = updated["fingerprint"]
+        invalid_document["entries"][0]["favorite"] = 1
+        invalid_status, invalid, _ = _json_request(
+            Request(
+                f"{root}/api/v1/asset-preferences",
+                data=json.dumps(invalid_document).encode(),
+                headers={"Content-Type": "application/json"},
+                method="PUT",
+            )
+        )
+        overview_status, overview, _ = _json_request(Request(f"{root}/api/overview"))
+        compact_status, compact, _ = _json_request(Request(f"{root}/api/v1/overview"))
+
+    assert initial_status == 200
+    assert initial["schema_version"] == "asset-preferences-view-v1"
+    assert initial["source"] == "cli_seed"
+    initial_aapl = next(item for item in initial["assets"] if item["asset_id"] == "equity:us:aapl")
+    assert initial_aapl["scheduled_refresh"] is True
+    assert initial_aapl["effective_scheduled_refresh"] is False
+    assert initial["scheduled_asset_count"] == 0
+    assert initial["scheduled_job_count"] == 0
+    assert updated_status == 200
+    assert updated["source"] == "persisted"
+    assert updated["revision_id"] == "00000000-0000-4000-8000-000000000301"
+    assert updated["assets"][0]["schema_version"] == "asset-preference-projection-v1"
+    assert updated["assets"][0]["asset_id"] == "crypto:btc-usd"
+    assert updated["assets"][0]["scheduled_refresh"] is True
+    assert updated["assets"][0]["effective_scheduled_refresh"] is False
+    assert updated["scheduled_asset_count"] == 0
+    assert updated["scheduled_job_count"] == 0
+    assert stale_status == 409
+    assert stale["error"]["code"] == "asset_preferences_conflict"
+    assert invalid_status == 400
+    assert invalid["error"]["code"] == "invalid_request"
+    assert overview_status == 200
+    assert overview["scheduler"] == {"enabled": False}
+    assert overview["asset_preferences"]["scheduled_asset_count"] == 0
+    assert overview["asset_preferences"]["scheduled_job_count"] == 0
+    assert compact_status == 200
+    assert compact["scheduler_enabled"] is False
+    assert compact["scheduled_asset_count"] == 0
+    assert compact["scheduled_job_count"] == 0
+    state = store.load()
+    assert state is not None
+    assert len(state.revisions) == 1
+    assert application.btc_refresh_requests == []
+    assert application.listed_refresh_requests == []
+    assert application.fundamental_refresh_requests == []
+
+
+def test_preference_update_and_overview_do_not_wait_for_active_provider(
+    tmp_path: Path,
+) -> None:
+    runner = _FakeRunner()
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        runner,
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    provider_started = threading.Event()
+    provider_release = threading.Event()
+    provider_calls = 0
+
+    def provider(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        nonlocal provider_calls
+        provider_calls += 1
+        provider_started.set()
+        assert provider_release.wait(timeout=5)
+        return ScheduledJobExecution(
+            job_id=invocation.definition.job_id,
+            effective_known_at=invocation.started_at,
+            evidence_changed=False,
+            source_ids=("test-source",),
+            created_count=0,
+            reused_count=1,
+        )
+
+    def jobs(asset_ids: tuple[str, ...]) -> tuple[RegisteredScheduledJob, ...]:
+        return tuple(
+            RegisteredScheduledJob(
+                ScheduledJobDefinition(
+                    job_id=f"test:{asset_id}:market-daily",
+                    asset_id=asset_id,
+                    provider="test",
+                    domain=ScheduledJobDomain.MARKET_DAILY,
+                    data_frequency="day_1",
+                ),
+                provider,
+            )
+            for asset_id in asset_ids
+        )
+
+    scheduler = MultiAssetScheduler(
+        jobs(("equity:us:aapl",)),
+        MultiAssetScheduleStateStore(tmp_path / "state/schedule.json"),
+        clock=lambda: datetime(2026, 8, 2, hour=12, minute=5, tzinfo=UTC),
+    )
+    seed = cli_seed_asset_preferences(
+        controller.market_assets(),
+        ("equity:us:aapl",),
+    )
+    preferences = AssetPreferencesService(
+        AssetPreferencesStore(
+            tmp_path / "state/preferences.json",
+            clock=lambda: datetime(2026, 8, 2, hour=12, minute=6, tzinfo=UTC),
+        ),
+        controller.market_assets(),
+        seed,
+        scheduler=scheduler,
+        job_factory=jobs,
+    )
+    web = AaplLocalWebApplication(controller, scheduler, asset_preferences=preferences)
+    tick = threading.Thread(target=scheduler.tick)
+    tick.start()
+    assert provider_started.wait(timeout=5)
+    entry = AssetPreferenceEntry(
+        asset_id="crypto:btc-usd",
+        watchlist=True,
+        favorite=False,
+        scheduled_refresh=True,
+    )
+    body = json.dumps(
+        {
+            "schema_version": "asset-preferences-update-v1",
+            "expected_revision_id": None,
+            "expected_fingerprint": seed.fingerprint,
+            "entries": [entry.model_dump(mode="json")],
+        }
+    ).encode()
+
+    try:
+        with _server(web) as (_, root):
+            started = time.perf_counter()
+            update_status, updated, _ = _json_request(
+                Request(
+                    f"{root}/api/v1/asset-preferences",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="PUT",
+                )
+            )
+            overview_status, overview, _ = _json_request(Request(f"{root}/api/overview"))
+            elapsed = time.perf_counter() - started
+    finally:
+        provider_release.set()
+        tick.join(timeout=5)
+
+    assert update_status == 200
+    assert updated["scheduled_job_count"] == 1
+    assert overview_status == 200
+    assert overview["scheduler"]["jobs"][0]["definition"]["asset_id"] == "crypto:btc-usd"
+    assert elapsed < 2.5
+    assert provider_calls == 1
+    assert not tick.is_alive()
 
 
 def test_local_api_exposes_empty_persistent_alert_inbox(tmp_path: Path) -> None:

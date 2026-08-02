@@ -1,5 +1,6 @@
 """Tests for provider-independent multi-asset scheduling and recovery."""
 
+import threading
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -279,6 +280,46 @@ def test_scheduler_recovers_interrupted_attempt_before_retry(tmp_path: Path) -> 
     assert scheduler.status().next_run_at == now + timedelta(seconds=60)
 
 
+def test_scheduler_recovers_interrupted_removed_job_without_reactivating_it(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    removed = _definition("removed-market")
+    replacement = _definition("replacement-disabled").model_copy(update={"enabled": False})
+    store = MultiAssetScheduleStateStore(tmp_path / "removed.json")
+    running = ScheduledJobAttempt(
+        attempt_id=UUID("00000000-0000-4000-8000-000000000020"),
+        definition=removed,
+        local_date=date(2026, 7, 29),
+        scheduled_for=datetime(2026, 7, 29, 12, tzinfo=UTC),
+        attempt_number=1,
+        status=ScheduledJobAttemptStatus.RUNNING,
+        started_at=datetime(2026, 7, 29, 12, 1, tzinfo=UTC),
+    )
+    store.write_attempt(running)
+    provider_calls = 0
+
+    def replacement_run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        nonlocal provider_calls
+        provider_calls += 1
+        return _execution(invocation)
+
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(replacement, replacement_run),),
+        store,
+        clock=lambda: now,
+    )
+
+    completed = scheduler.tick()
+
+    assert len(completed) == 1
+    assert completed[0].attempt_id == running.attempt_id
+    assert completed[0].failure is not None
+    assert completed[0].failure.category == ScheduledJobFailureCategory.INTERRUPTED
+    assert provider_calls == 0
+    assert scheduler.registered_job_definitions() == (replacement,)
+
+
 def test_scheduler_rejects_duplicate_jobs_and_naive_clock(tmp_path: Path) -> None:
     definition = _definition("duplicate")
     job = RegisteredScheduledJob(definition, _execution)
@@ -365,3 +406,58 @@ def test_scheduler_exposes_current_stale_and_incomplete_coverage(tmp_path: Path)
     incomplete = incomplete_scheduler.status()
     assert incomplete.jobs[0].freshness is ScheduledJobFreshness.INCOMPLETE
     assert incomplete.incomplete_count == 1
+
+
+def test_registry_reconciliation_during_active_provider_preserves_identity_and_history(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    active = _definition("a-active-market")
+    queued = _definition("b-queued-market")
+    replacement = _definition("replacement-market")
+    provider_started = threading.Event()
+    provider_release = threading.Event()
+    provider_calls = 0
+    queued_calls = 0
+
+    def blocked(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        nonlocal provider_calls
+        provider_calls += 1
+        provider_started.set()
+        assert provider_release.wait(timeout=5)
+        return _execution(invocation)
+
+    def must_be_retired(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        nonlocal queued_calls
+        queued_calls += 1
+        return _execution(invocation)
+
+    store = MultiAssetScheduleStateStore(tmp_path / "reconciled.json")
+    active_job = RegisteredScheduledJob(active, blocked)
+    queued_job = RegisteredScheduledJob(queued, must_be_retired)
+    replacement_job = RegisteredScheduledJob(replacement, _execution)
+    scheduler = MultiAssetScheduler((active_job, queued_job), store, clock=lambda: now)
+    completed: list[tuple[ScheduledJobAttempt, ...]] = []
+    thread = threading.Thread(target=lambda: completed.append(scheduler.tick()))
+    thread.start()
+    assert provider_started.wait(timeout=5)
+
+    scheduler.reconcile_jobs((replacement_job,))
+    assert scheduler.registered_job_definitions() == (replacement,)
+    provider_release.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert provider_calls == 1
+    assert queued_calls == 0
+    assert len(completed[0]) == 1
+    assert completed[0][0].definition.job_id == active.job_id
+    assert completed[0][0].status is ScheduledJobAttemptStatus.SUCCEEDED
+    assert tuple(item.definition.job_id for item in store.load().attempts) == (active.job_id,)
+
+    scheduler.reconcile_jobs((active_job,))
+    reactivated = scheduler.status().jobs[0]
+    assert reactivated.definition.job_id == active.job_id
+    assert reactivated.latest_success == completed[0][0]
+    assert scheduler.tick() == ()
+    assert provider_calls == 1

@@ -485,6 +485,117 @@ section {
   white-space: nowrap;
 }
 
+.preferences-panel {
+  margin-top: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.preferences-panel > summary {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  padding: 0.65rem 0.8rem;
+  cursor: pointer;
+}
+
+.preferences-panel > summary span,
+.preferences-panel > summary small {
+  display: block;
+}
+
+.preferences-panel > summary strong {
+  color: var(--ink-strong);
+  font-size: 0.82rem;
+}
+
+.preferences-panel > summary small,
+.panel-copy,
+#asset-preferences-status {
+  margin-top: 0.12rem;
+  color: var(--muted);
+  font-size: 0.65rem;
+}
+
+#asset-preferences-form {
+  padding: 0 0.8rem 0.8rem;
+  border-top: 1px solid var(--line-soft);
+}
+
+.panel-copy {
+  margin-block: 0.65rem;
+}
+
+.preferences-table {
+  overflow-x: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+}
+
+.preferences-heading,
+.preference-row {
+  display: grid;
+  grid-template-columns: minmax(230px, 1fr) repeat(3, minmax(86px, 0.28fr));
+  min-width: 540px;
+  align-items: center;
+}
+
+.preferences-heading {
+  padding: 0.4rem 0.6rem;
+  color: var(--muted);
+  background: var(--surface-strong);
+  font-size: 0.58rem;
+  font-weight: 760;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.preferences-heading span:not(:first-child),
+.preference-toggle {
+  text-align: center;
+}
+
+.preference-row {
+  min-height: 50px;
+  padding: 0.42rem 0.6rem;
+  border-top: 1px solid var(--line-soft);
+}
+
+.preference-asset strong,
+.preference-asset small {
+  display: block;
+}
+
+.preference-asset strong {
+  color: var(--ink-strong);
+  font-size: 0.72rem;
+}
+
+.preference-asset small {
+  margin-top: 0.1rem;
+  color: var(--muted);
+  font-size: 0.6rem;
+}
+
+.preference-row.unavailable {
+  opacity: 0.72;
+}
+
+.preference-toggle input {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+}
+
+.preferences-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin-top: 0.65rem;
+}
+
 .status-card small {
   margin-top: 0.1rem;
   color: var(--muted);

@@ -403,6 +403,19 @@ por ejemplo:
   --schedule-asset crypto:btc-usd
 ```
 
+Estas opciones son una semilla compatible solo cuando no existe
+`state/asset_preferences_state_v1.json`; arrancar no crea ese archivo. La primera edición explícita
+desde la interfaz o `PUT /api/v1/asset-preferences` crea una revisión y, desde entonces, el estado
+persistido tiene precedencia sobre `--schedule-asset`. `GET /api/v1/asset-preferences` devuelve el
+fingerprint y la revisión esperados por PUT. Una edición concurrente responde `409` y no sobrescribe
+la selección más reciente. Consulta [`asset_preferences.md`](asset_preferences.md).
+
+Al guardar, el registro se reconstruye desde catálogo y capacidades y se publica atómicamente. No
+se llama a proveedores, no se abre otro writer y no se cancela el trabajo ya activo. Retirar y
+reactivar conserva `job_id`, intentos e historia. Si el tick ya había capturado otros jobs retirados
+pero aún no iniciados, los omite. Un activo nuevo del catálogo no entra solo en una watchlist ya
+persistida.
+
 Usa `--no-schedule-intraday` si deseas conservar Bitcoin diario sin su ventana automática de un
 minuto. El registro SMV se programa por defecto y puede desactivarse con `--no-schedule-smv`.
 Si el `.env` contiene una `FRED_API_KEY` válida, también se registran seis trabajos macro
@@ -426,6 +439,11 @@ Desactiva únicamente el scheduler, conservando la UI y la ejecución manual:
 ```bash
 .venv/bin/python scripts/serve_investment_analyst.py --no-scheduler
 ```
+
+La opción también conserva `scheduled_refresh=true` en las preferencias, pero publica
+`effective_scheduled_refresh=false`, cero activos programados efectivos y cero jobs en API,
+overview e interfaz. Con scheduler deshabilitado puede guardarse una selección vacía; al habilitarlo
+se exige al menos un activo disponible programado.
 
 El lock `state/aapl_local_service.lock` impide dos servicios para el mismo workspace. El estado de
 todos los intentos se guarda atómicamente en `state/multi_asset_schedule_state_v1.json`; no
@@ -517,6 +535,10 @@ Todos permanecen dentro del workspace seleccionado:
 - `state/aapl_local_service.lock`: exclusión del proceso UI/scheduler;
 - `state/multi_asset_schedule_state_v1.json`: historial de intentos por job y su evidencia compacta;
 - `state/manual_operation_state_v1.json`: cola manual durable, resultados compactos y recovery;
+- `state/asset_preferences_state_v1.json`: revisiones de watchlist, favoritos y refresh programado
+  con fingerprint y control optimista;
+- `state/asset_preferences_state_v1_archives/`: segmentos históricos inmutables y hash-bound
+  creados antes de los límites de 1 000 revisiones o 4 MiB;
 - `state/operational_alert_state_v1.json`: resultados trivaluados y eventos deduplicados de la
   bandeja local;
 - `state/analytical_screening_state_v1.json`: resultados, recibos, candidatos y transiciones

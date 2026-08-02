@@ -53,6 +53,12 @@ proveedor, dominio y frecuencia. Conserva source IDs y fachadas públicas; no re
 activa proveedores nuevos. Véase
 [`capability_driven_runtime.md`](capability_driven_runtime.md).
 
+Las preferencias del usuario no se incorporan al catálogo ni al runtime como configuración de
+proveedor. `AssetPreferencesService` proyecta sobre `MarketAssetUniverse`: el catálogo sigue siendo
+la autoridad para disponibilidad, fuentes y frecuencias, mientras el workspace guarda únicamente
+watchlist, favorito y refresh programado. Véase
+[`asset_preferences.md`](asset_preferences.md).
+
 ## Examples
 
 Use the default workspace:
