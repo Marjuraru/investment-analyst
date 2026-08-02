@@ -665,8 +665,13 @@ class MultiAssetScheduler:
                 refreshed = self._job_status(job.definition, current, self._store.load())
                 if not refreshed.due:
                     continue
-                attempt = self._run_job(job, current)
-                completed.append(attempt)
+                if not self._claim_registered_job(job_id):
+                    continue
+                try:
+                    attempt = self._run_job(job, current)
+                    completed.append(attempt)
+                finally:
+                    self._release_active_job(job_id)
             return tuple(completed)
         finally:
             self._tick_lock.release()
@@ -709,7 +714,6 @@ class MultiAssetScheduler:
             started_at=now,
         )
         self._store.write_attempt(running)
-        self._active_job_id = definition.job_id
         try:
             invocation = ScheduledJobInvocation(
                 definition=definition,
@@ -782,8 +786,6 @@ class MultiAssetScheduler:
                 completed_at=self._now(),
                 execution=execution,
             )
-        finally:
-            self._active_job_id = None
         completed = completed.model_copy(update={"telemetry": _attempt_telemetry(completed)})
         self._store.write_attempt(completed)
         self._notify(completed)
@@ -854,6 +856,19 @@ class MultiAssetScheduler:
     def _jobs_snapshot(self) -> tuple[RegisteredScheduledJob, ...]:
         with self._registry_lock:
             return self._jobs
+
+    def _claim_registered_job(self, job_id: str) -> bool:
+        """Make a still-registered due job active atomically with reconciliation."""
+        with self._registry_lock:
+            if all(item.definition.job_id != job_id for item in self._jobs):
+                return False
+            self._active_job_id = job_id
+            return True
+
+    def _release_active_job(self, job_id: str) -> None:
+        with self._registry_lock:
+            if self._active_job_id == job_id:
+                self._active_job_id = None
 
     def _job_status(
         self,

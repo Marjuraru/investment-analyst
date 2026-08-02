@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -27,6 +28,10 @@ from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCD
 _MAX_ASSETS = 100
 _MAX_REVISIONS = 1_000
 _MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
+_ARCHIVE_AT_REVISIONS = 900
+_ARCHIVE_AT_DOCUMENT_BYTES = 3 * 1024 * 1024
+_RETAINED_REVISIONS = 100
+_MAX_ARCHIVES = 10_000
 
 
 class AssetPreferencesError(RuntimeError):
@@ -96,12 +101,81 @@ class AssetPreferencesRevision(ContractModel):
         return self.model_dump(mode="json")
 
 
+class AssetPreferencesArchiveReference(ContractModel):
+    """Hash-bound link from active state to one immutable history segment."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["asset-preferences-archive-reference-v1"] = (
+        "asset-preferences-archive-reference-v1"
+    )
+    file_name: NonEmptyStr
+    sha256: NonEmptyStr
+    size_bytes: int = Field(gt=0, le=_MAX_DOCUMENT_BYTES)
+    previous_revision_id: UUID | None
+    first_revision_id: UUID
+    last_revision_id: UUID
+    revision_count: int = Field(gt=0, le=_MAX_REVISIONS)
+    first_created_at: UTCDateTime
+    last_created_at: UTCDateTime
+
+    @field_validator("file_name")
+    @classmethod
+    def require_safe_file_name(cls, value: str) -> str:
+        candidate = PurePosixPath(value)
+        if (
+            candidate.is_absolute()
+            or len(candidate.parts) != 1
+            or candidate.name != value
+            or not value.endswith(".json")
+        ):
+            raise ValueError("preference archive file name is invalid")
+        return value
+
+    @field_validator("sha256")
+    @classmethod
+    def require_sha256(cls, value: str) -> str:
+        _validate_fingerprint(value)
+        return value
+
+    @model_validator(mode="after")
+    def validate_reference(self) -> AssetPreferencesArchiveReference:
+        if self.first_created_at > self.last_created_at:
+            raise ValueError("preference archive timestamps are inconsistent")
+        return self
+
+
+class AssetPreferencesArchiveDocument(ContractModel):
+    """One immutable, independently bounded segment of preference history."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["asset-preferences-archive-v1"] = "asset-preferences-archive-v1"
+    previous_revision_id: UUID | None
+    revisions: tuple[AssetPreferencesRevision, ...] = Field(
+        min_length=1,
+        max_length=_MAX_REVISIONS,
+    )
+
+    @model_validator(mode="after")
+    def validate_history(self) -> AssetPreferencesArchiveDocument:
+        _validate_revision_chain(self.revisions, self.previous_revision_id)
+        return self
+
+    def to_json_dict(self) -> dict[str, object]:
+        return self.model_dump(mode="json")
+
+
 class AssetPreferencesDocument(ContractModel):
-    """Append-only preference history stored as one bounded workspace document."""
+    """Active preference history plus hash-bound immutable archive references."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal["asset-preferences-state-v1"] = "asset-preferences-state-v1"
+    archives: tuple[AssetPreferencesArchiveReference, ...] = Field(
+        default=(),
+        max_length=_MAX_ARCHIVES,
+    )
     revisions: tuple[AssetPreferencesRevision, ...] = Field(
         min_length=1,
         max_length=_MAX_REVISIONS,
@@ -109,15 +183,24 @@ class AssetPreferencesDocument(ContractModel):
 
     @model_validator(mode="after")
     def validate_history(self) -> AssetPreferencesDocument:
-        ids = tuple(item.revision_id for item in self.revisions)
-        if len(ids) != len(set(ids)):
-            raise ValueError("preference revision identities must be unique")
-        for index, revision in enumerate(self.revisions):
-            expected_parent = self.revisions[index - 1].revision_id if index else None
-            if revision.parent_revision_id != expected_parent:
-                raise ValueError("preference revision parent chain is inconsistent")
-            if index and revision.created_at < self.revisions[index - 1].created_at:
-                raise ValueError("preference revision timestamps must not decrease")
+        previous_revision_id: UUID | None = None
+        previous_created_at: datetime | None = None
+        archive_names: set[str] = set()
+        for archive in self.archives:
+            if archive.file_name in archive_names:
+                raise ValueError("preference archive file names must be unique")
+            archive_names.add(archive.file_name)
+            if archive.previous_revision_id != previous_revision_id:
+                raise ValueError("preference archive parent chain is inconsistent")
+            if previous_created_at is not None and archive.first_created_at < previous_created_at:
+                raise ValueError("preference archive timestamps must not decrease")
+            previous_revision_id = archive.last_revision_id
+            previous_created_at = archive.last_created_at
+        _validate_revision_chain(
+            self.revisions,
+            previous_revision_id,
+            previous_created_at=previous_created_at,
+        )
         return self
 
     @property
@@ -230,7 +313,7 @@ class AssetPreferencesView(ContractModel):
 
 
 class AssetPreferencesStore:
-    """Load and atomically append bounded preference revisions."""
+    """Load, archive, and atomically append bounded preference revisions."""
 
     def __init__(
         self,
@@ -240,11 +323,30 @@ class AssetPreferencesStore:
         revision_id_factory: Callable[[], UUID] = uuid4,
         max_revisions: int = _MAX_REVISIONS,
         max_document_bytes: int = _MAX_DOCUMENT_BYTES,
+        archive_at_revisions: int | None = None,
+        archive_at_document_bytes: int | None = None,
+        retained_revisions: int = _RETAINED_REVISIONS,
     ) -> None:
         if max_revisions < 1 or max_revisions > _MAX_REVISIONS:
             raise ValueError("preference max_revisions is invalid")
-        if max_document_bytes < 1:
+        if max_document_bytes < 1 or max_document_bytes > _MAX_DOCUMENT_BYTES:
             raise ValueError("preference max_document_bytes is invalid")
+        if (retained_revisions < 1 or retained_revisions >= max_revisions) and (
+            max_revisions != 1 or retained_revisions != _RETAINED_REVISIONS
+        ):
+            raise ValueError("preference retained_revisions is invalid")
+        revision_trigger = archive_at_revisions
+        if revision_trigger is None and max_revisions >= 3:
+            revision_trigger = min(_ARCHIVE_AT_REVISIONS, max_revisions - 1)
+        if revision_trigger is not None and (
+            revision_trigger < 2 or revision_trigger >= max_revisions
+        ):
+            raise ValueError("preference archive_at_revisions is invalid")
+        byte_trigger = archive_at_document_bytes
+        if byte_trigger is None and max_document_bytes >= 3:
+            byte_trigger = min(_ARCHIVE_AT_DOCUMENT_BYTES, max_document_bytes - 1)
+        if byte_trigger is not None and (byte_trigger < 1 or byte_trigger >= max_document_bytes):
+            raise ValueError("preference archive_at_document_bytes is invalid")
         expanded = path.expanduser()
         if not expanded.is_absolute():
             raise ValueError("asset preference state path must be absolute")
@@ -253,6 +355,10 @@ class AssetPreferencesStore:
         self._revision_id_factory = revision_id_factory
         self._max_revisions = max_revisions
         self._max_document_bytes = max_document_bytes
+        self._archive_at_revisions = revision_trigger
+        self._archive_at_document_bytes = byte_trigger
+        self._retained_revisions = min(retained_revisions, max_revisions - 1)
+        self._archive_root = expanded.parent / f"{expanded.stem}_archives"
         self._lock = threading.RLock()
 
     @property
@@ -263,6 +369,19 @@ class AssetPreferencesStore:
         """Read valid state without creating or repairing a missing/corrupt document."""
         with self._lock:
             return self._load_unlocked()
+
+    def load_history(self) -> tuple[AssetPreferencesRevision, ...]:
+        """Load the complete verified chain across archives and active state."""
+        with self._lock:
+            document = self._load_unlocked()
+            if document is None:
+                return ()
+            archived = tuple(
+                revision
+                for reference in document.archives
+                for revision in self._load_archive_unlocked(reference).revisions
+            )
+            return (*archived, *document.revisions)
 
     def apply(
         self,
@@ -284,7 +403,8 @@ class AssetPreferencesStore:
             if document is not None and fingerprint == current.fingerprint:
                 return current, False
             revisions = document.revisions if document is not None else ()
-            if len(revisions) >= self._max_revisions:
+            archives = document.archives if document is not None else ()
+            if len(revisions) >= self._max_revisions and self._archive_at_revisions is None:
                 raise AssetPreferencesStateError("asset preference history limit was reached")
             created_at = self._now()
             parent = revisions[-1] if revisions else None
@@ -297,50 +417,202 @@ class AssetPreferencesStore:
                 fingerprint=fingerprint,
                 entries=update.entries,
             )
-            updated = AssetPreferencesDocument(revisions=(*revisions, revision))
+            appended = (*revisions, revision)
+            pending_archive: tuple[Path, bytes] | None = None
+            provisional: AssetPreferencesDocument | None = None
+            if len(appended) <= _MAX_REVISIONS:
+                provisional = AssetPreferencesDocument(archives=archives, revisions=appended)
+            should_archive = (
+                self._archive_at_revisions is not None
+                and len(appended) >= self._archive_at_revisions
+            ) or (
+                provisional is not None
+                and self._archive_at_document_bytes is not None
+                and len(_encode_document(provisional)) >= self._archive_at_document_bytes
+            )
+            if should_archive:
+                updated, pending_archive = self._compact(archives, appended)
+            elif provisional is None or len(appended) > self._max_revisions:
+                raise AssetPreferencesStateError("asset preference history limit was reached")
+            else:
+                updated = provisional
             encoded = _encode_document(updated)
             if len(encoded) > self._max_document_bytes:
                 raise AssetPreferencesStateError("asset preference document size limit was reached")
-            self._write(encoded)
+            if pending_archive is not None:
+                self._write_archive(*pending_archive)
+            self._write_atomic(self._path, encoded, "asset preference state")
             return effective_asset_preferences(updated, seed), True
 
     def _load_unlocked(self) -> AssetPreferencesDocument | None:
-        if self._path.is_symlink():
-            raise AssetPreferencesStateError("asset preference state must be a regular file")
         if not self._path.exists():
+            if self._path.is_symlink():
+                raise AssetPreferencesStateError("asset preference state must be a regular file")
             return None
         try:
-            if not self._path.is_file():
-                raise OSError("not a regular file")
-            return AssetPreferencesDocument.model_validate_json(
-                self._path.read_text(encoding="utf-8")
+            document = AssetPreferencesDocument.model_validate_json(
+                self._read_bounded(self._path, "asset preference state")
             )
+            if len(document.revisions) > self._max_revisions:
+                raise ValueError("active preference history exceeds its configured limit")
+            self._validate_archives_unlocked(document)
+            return document
         except (OSError, UnicodeError, ValueError) as error:
             raise AssetPreferencesStateError(
                 "asset preference state is malformed or unreadable"
             ) from error
 
-    def _write(self, document: bytes) -> None:
-        temporary = self._path.with_name(f".{self._path.name}.{uuid4().hex}.tmp")
+    def _compact(
+        self,
+        archives: tuple[AssetPreferencesArchiveReference, ...],
+        revisions: tuple[AssetPreferencesRevision, ...],
+    ) -> tuple[AssetPreferencesDocument, tuple[Path, bytes]]:
+        retained = min(self._retained_revisions, len(revisions) - 1)
+        archived_revisions = revisions[:-retained]
+        active_revisions = revisions[-retained:]
+        previous_revision_id = (
+            archives[-1].last_revision_id if archives else archived_revisions[0].parent_revision_id
+        )
+        archive = AssetPreferencesArchiveDocument(
+            previous_revision_id=previous_revision_id,
+            revisions=archived_revisions,
+        )
+        encoded_archive = _encode_archive(archive)
+        if (
+            len(archived_revisions) > self._max_revisions
+            or len(encoded_archive) > self._max_document_bytes
+        ):
+            raise AssetPreferencesStateError("asset preference archive limit was reached")
+        first = archived_revisions[0]
+        last = archived_revisions[-1]
+        file_name = f"asset_preferences_{first.revision_id.hex}_{last.revision_id.hex}.json"
+        reference = AssetPreferencesArchiveReference(
+            file_name=file_name,
+            sha256=hashlib.sha256(encoded_archive).hexdigest(),
+            size_bytes=len(encoded_archive),
+            previous_revision_id=archive.previous_revision_id,
+            first_revision_id=first.revision_id,
+            last_revision_id=last.revision_id,
+            revision_count=len(archived_revisions),
+            first_created_at=first.created_at,
+            last_created_at=last.created_at,
+        )
+        updated = AssetPreferencesDocument(
+            archives=(*archives, reference),
+            revisions=active_revisions,
+        )
+        return updated, (self._archive_root / file_name, encoded_archive)
+
+    def _validate_archives_unlocked(self, document: AssetPreferencesDocument) -> None:
+        seen_ids: set[UUID] = set()
+        previous_revision_id: UUID | None = None
+        previous_created_at: datetime | None = None
+        for reference in document.archives:
+            archive = self._load_archive_unlocked(reference)
+            first = archive.revisions[0]
+            last = archive.revisions[-1]
+            if (
+                archive.previous_revision_id != reference.previous_revision_id
+                or first.revision_id != reference.first_revision_id
+                or last.revision_id != reference.last_revision_id
+                or len(archive.revisions) != reference.revision_count
+                or first.created_at != reference.first_created_at
+                or last.created_at != reference.last_created_at
+                or archive.previous_revision_id != previous_revision_id
+            ):
+                raise ValueError("preference archive reference does not match its content")
+            _validate_revision_chain(
+                archive.revisions,
+                previous_revision_id,
+                previous_created_at=previous_created_at,
+            )
+            for revision in archive.revisions:
+                if revision.revision_id in seen_ids:
+                    raise ValueError("preference revision identities must be globally unique")
+                seen_ids.add(revision.revision_id)
+            previous_revision_id = last.revision_id
+            previous_created_at = last.created_at
+        _validate_revision_chain(
+            document.revisions,
+            previous_revision_id,
+            previous_created_at=previous_created_at,
+        )
+        if any(revision.revision_id in seen_ids for revision in document.revisions):
+            raise ValueError("preference revision identities must be globally unique")
+
+    def _load_archive_unlocked(
+        self,
+        reference: AssetPreferencesArchiveReference,
+    ) -> AssetPreferencesArchiveDocument:
+        if self._archive_root.is_symlink():
+            raise ValueError("preference archive directory must not be a symbolic link")
+        path = self._archive_root / reference.file_name
+        encoded = self._read_bounded(path, "asset preference archive")
+        if len(encoded) != reference.size_bytes:
+            raise ValueError("preference archive size does not match its reference")
+        if hashlib.sha256(encoded).hexdigest() != reference.sha256:
+            raise ValueError("preference archive hash does not match its reference")
+        archive = AssetPreferencesArchiveDocument.model_validate_json(encoded)
+        if len(archive.revisions) > self._max_revisions:
+            raise ValueError("preference archive exceeds its configured revision limit")
+        return archive
+
+    def _read_bounded(self, path: Path, label: str) -> bytes:
+        if path.is_symlink():
+            raise OSError(f"{label} must be a regular file")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise OSError(f"{label} must be a regular file")
+            if metadata.st_size > self._max_document_bytes:
+                raise ValueError(f"{label} exceeds its configured size limit")
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                encoded = stream.read(self._max_document_bytes + 1)
+            if len(encoded) > self._max_document_bytes:
+                raise ValueError(f"{label} exceeds its configured size limit")
+            return encoded
+        finally:
+            os.close(descriptor)
+
+    def _write_archive(self, path: Path, document: bytes) -> None:
+        if self._archive_root.is_symlink():
+            raise AssetPreferencesStateError(
+                "asset preference archive directory must not be a symbolic link"
+            )
+        if path.exists() or path.is_symlink():
+            try:
+                existing = self._read_bounded(path, "asset preference archive")
+            except (OSError, ValueError) as error:
+                raise AssetPreferencesStateError(
+                    "asset preference archive is malformed or unreadable"
+                ) from error
+            if existing != document:
+                raise AssetPreferencesStateError("asset preference archive identity conflicts")
+            return
+        self._write_atomic(path, document, "asset preference archive")
+
+    def _write_atomic(self, path: Path, document: bytes, label: str) -> None:
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
         descriptor: int | None = None
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.parent.is_symlink():
+                raise OSError("parent directory is a symbolic link")
             descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(descriptor, "wb", closefd=True) as stream:
                 descriptor = None
                 stream.write(document)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, self._path)
-            directory = os.open(self._path.parent, os.O_RDONLY)
+            os.replace(temporary, path)
+            directory = os.open(path.parent, os.O_RDONLY)
             try:
                 os.fsync(directory)
             finally:
                 os.close(directory)
         except OSError as error:
-            raise AssetPreferencesStateError(
-                "asset preference state could not be written"
-            ) from error
+            raise AssetPreferencesStateError(f"{label} could not be written") from error
         finally:
             if descriptor is not None:
                 os.close(descriptor)
@@ -459,6 +731,7 @@ class AssetPreferencesService:
                         entries.get(asset_id),
                         descriptors.get(asset_id),
                         job_ids_by_asset.get(asset_id, ()),
+                        scheduler_enabled=self._scheduler is not None,
                     )
                     for asset_id in set(entries) | set(descriptors)
                 ),
@@ -567,7 +840,39 @@ def _validate_fingerprint(value: str) -> None:
         raise ValueError("asset preference fingerprint is invalid")
 
 
+def _validate_revision_chain(
+    revisions: tuple[AssetPreferencesRevision, ...],
+    previous_revision_id: UUID | None,
+    *,
+    previous_created_at: datetime | None = None,
+) -> None:
+    ids = tuple(item.revision_id for item in revisions)
+    if len(ids) != len(set(ids)):
+        raise ValueError("preference revision identities must be unique")
+    expected_parent = previous_revision_id
+    prior_created_at = previous_created_at
+    for revision in revisions:
+        if revision.parent_revision_id != expected_parent:
+            raise ValueError("preference revision parent chain is inconsistent")
+        if prior_created_at is not None and revision.created_at < prior_created_at:
+            raise ValueError("preference revision timestamps must not decrease")
+        expected_parent = revision.revision_id
+        prior_created_at = revision.created_at
+
+
 def _encode_document(document: AssetPreferencesDocument) -> bytes:
+    return (
+        json.dumps(
+            document.to_json_dict(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def _encode_archive(document: AssetPreferencesArchiveDocument) -> bytes:
     return (
         json.dumps(
             document.to_json_dict(),
@@ -584,6 +889,8 @@ def _projection(
     entry: AssetPreferenceEntry | None,
     descriptor: MarketAssetDescriptor | None,
     job_ids: tuple[str, ...],
+    *,
+    scheduler_enabled: bool,
 ) -> AssetPreferenceProjection:
     preference = entry or AssetPreferenceEntry(
         asset_id=asset_id,
@@ -645,7 +952,7 @@ def _projection(
         watchlist=preference.watchlist,
         favorite=preference.favorite,
         scheduled_refresh=preference.scheduled_refresh,
-        effective_scheduled_refresh=preference.scheduled_refresh,
+        effective_scheduled_refresh=preference.scheduled_refresh and scheduler_enabled,
         job_ids=tuple(sorted(job_ids)),
     )
 
@@ -653,6 +960,8 @@ def _projection(
 __all__ = [
     "AssetPreferenceEntry",
     "AssetPreferenceProjection",
+    "AssetPreferencesArchiveDocument",
+    "AssetPreferencesArchiveReference",
     "AssetPreferencesConflictError",
     "AssetPreferencesDocument",
     "AssetPreferencesError",

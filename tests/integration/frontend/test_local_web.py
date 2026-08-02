@@ -712,6 +712,9 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'id="asset-preferences-status" role="status" aria-live="polite"' in html
     assert 'api("/api/v1/asset-preferences")' in javascript
     assert 'method: "PUT"' in javascript
+    assert "programados efectivos" in javascript
+    assert "Scheduler desactivado; la selección programada se conserva." in javascript
+    assert "scheduler desactivado; 0 trabajos efectivos" in javascript
     assert "localStorage.setItem" in javascript
     assert "asset-preferences" not in "".join(
         line for line in javascript.splitlines() if "localStorage" in line
@@ -1339,19 +1342,38 @@ def test_asset_preferences_get_put_conflict_and_invalid_payload_are_provider_fre
                 method="PUT",
             )
         )
+        overview_status, overview, _ = _json_request(Request(f"{root}/api/overview"))
+        compact_status, compact, _ = _json_request(Request(f"{root}/api/v1/overview"))
 
     assert initial_status == 200
     assert initial["schema_version"] == "asset-preferences-view-v1"
     assert initial["source"] == "cli_seed"
+    initial_aapl = next(item for item in initial["assets"] if item["asset_id"] == "equity:us:aapl")
+    assert initial_aapl["scheduled_refresh"] is True
+    assert initial_aapl["effective_scheduled_refresh"] is False
+    assert initial["scheduled_asset_count"] == 0
+    assert initial["scheduled_job_count"] == 0
     assert updated_status == 200
     assert updated["source"] == "persisted"
     assert updated["revision_id"] == "00000000-0000-4000-8000-000000000301"
     assert updated["assets"][0]["schema_version"] == "asset-preference-projection-v1"
     assert updated["assets"][0]["asset_id"] == "crypto:btc-usd"
+    assert updated["assets"][0]["scheduled_refresh"] is True
+    assert updated["assets"][0]["effective_scheduled_refresh"] is False
+    assert updated["scheduled_asset_count"] == 0
+    assert updated["scheduled_job_count"] == 0
     assert stale_status == 409
     assert stale["error"]["code"] == "asset_preferences_conflict"
     assert invalid_status == 400
     assert invalid["error"]["code"] == "invalid_request"
+    assert overview_status == 200
+    assert overview["scheduler"] == {"enabled": False}
+    assert overview["asset_preferences"]["scheduled_asset_count"] == 0
+    assert overview["asset_preferences"]["scheduled_job_count"] == 0
+    assert compact_status == 200
+    assert compact["scheduler_enabled"] is False
+    assert compact["scheduled_asset_count"] == 0
+    assert compact["scheduled_job_count"] == 0
     state = store.load()
     assert state is not None
     assert len(state.revisions) == 1

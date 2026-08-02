@@ -141,7 +141,10 @@ def test_cli_seed_is_effective_without_writing_and_persisted_state_wins(tmp_path
     initial = service.view()
     assert initial.source == "cli_seed"
     assert initial.revision_id is None
-    assert initial.scheduled_asset_count == 1
+    assert initial.scheduled_asset_count == 0
+    initial_aapl = next(item for item in initial.assets if item.asset_id == "equity:us:aapl")
+    assert initial_aapl.scheduled_refresh is True
+    assert initial_aapl.effective_scheduled_refresh is False
     assert not store.path.exists()
 
     requested = _entries("crypto:btc-usd")
@@ -163,9 +166,12 @@ def test_cli_seed_is_effective_without_writing_and_persisted_state_wins(tmp_path
     assert first.source == "persisted"
     assert first.revision_id == UUID("00000000-0000-4000-8000-000000000101")
     assert restarted_with_conflicting_cli.fingerprint == first.fingerprint
-    assert restarted_with_conflicting_cli.scheduled_asset_count == 1
+    assert restarted_with_conflicting_cli.scheduled_asset_count == 0
+    assert restarted_with_conflicting_cli.scheduled_job_count == 0
     favorite = next(item for item in restarted_with_conflicting_cli.assets if item.favorite)
     assert favorite.asset_id == "crypto:btc-usd"
+    assert favorite.scheduled_refresh is True
+    assert favorite.effective_scheduled_refresh is False
 
 
 def test_identical_update_is_idempotent_and_distinct_revisions_keep_history(
@@ -289,6 +295,137 @@ def test_conflict_limit_corruption_and_atomic_failure_are_safe(
     assert list(tmp_path.glob(".atomic.json.*.tmp")) == []
 
 
+def test_history_is_archived_before_hard_limits_and_read_limits_are_enforced(
+    tmp_path: Path,
+) -> None:
+    universe = _universe()
+    seed = cli_seed_asset_preferences(universe, ())
+    clocks = iter(datetime(2026, 8, 2, hour=hour, tzinfo=UTC) for hour in range(1, 7))
+    ids = iter(UUID(int=value) for value in range(1, 7))
+    store = AssetPreferencesStore(
+        tmp_path / "state/asset_preferences_state_v1.json",
+        clock=clocks.__next__,
+        revision_id_factory=ids.__next__,
+        max_revisions=6,
+        archive_at_revisions=4,
+        retained_revisions=2,
+    )
+    current = seed
+    expected_ids: list[UUID] = []
+    for index in range(6):
+        entries = _entries("equity:us:aapl" if index % 2 == 0 else "equity:us:amd")
+        current, changed = store.apply(
+            _update(
+                entries,
+                revision_id=current.revision_id,
+                fingerprint=current.fingerprint,
+            ),
+            seed,
+        )
+        assert changed is True
+        assert current.revision_id is not None
+        expected_ids.append(current.revision_id)
+
+    document = store.load()
+    history = store.load_history()
+    assert document is not None
+    assert len(document.revisions) == 2
+    assert len(document.archives) == 2
+    assert sum(item.revision_count for item in document.archives) == 4
+    assert tuple(item.revision_id for item in history) == tuple(expected_ids)
+    assert all(
+        item.parent_revision_id == (history[index - 1].revision_id if index else None)
+        for index, item in enumerate(history)
+    )
+    assert all(
+        (store.path.parent / f"{store.path.stem}_archives" / reference.file_name).stat().st_size
+        == reference.size_bytes
+        for reference in document.archives
+    )
+    first_archive = (
+        store.path.parent / f"{store.path.stem}_archives" / document.archives[0].file_name
+    )
+    original_archive = first_archive.read_bytes()
+    tampered_archive = bytearray(original_archive)
+    tampered_archive[1] = ord("x")
+    first_archive.write_bytes(tampered_archive)
+    with pytest.raises(AssetPreferencesStateError) as hash_failure:
+        store.load()
+    assert "hash does not match" in str(hash_failure.value.__cause__)
+
+    first_archive.write_bytes(b"x" * ((4 * 1024 * 1024) + 1))
+    with pytest.raises(AssetPreferencesStateError, match="malformed or unreadable") as size_failure:
+        store.load()
+    assert "size limit" in str(size_failure.value.__cause__)
+
+    oversized = tmp_path / "oversized.json"
+    oversized.write_bytes(b"{" + (b" " * 256))
+    with pytest.raises(AssetPreferencesStateError, match="malformed or unreadable") as read_failure:
+        AssetPreferencesStore(
+            oversized,
+            max_document_bytes=128,
+            archive_at_document_bytes=64,
+        ).load()
+    assert "size limit" in str(read_failure.value.__cause__)
+
+
+def test_failed_active_state_publish_keeps_old_chain_and_reuses_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    universe = _universe()
+    seed = cli_seed_asset_preferences(universe, ())
+    ids = iter(UUID(int=value) for value in range(101, 106))
+    store = AssetPreferencesStore(
+        tmp_path / "state/preferences.json",
+        clock=lambda: datetime(2026, 8, 2, tzinfo=UTC),
+        revision_id_factory=ids.__next__,
+        max_revisions=6,
+        archive_at_revisions=4,
+        retained_revisions=2,
+    )
+    current = seed
+    for asset_id in ("equity:us:aapl", "equity:us:amd", "crypto:btc-usd"):
+        current, _ = store.apply(
+            _update(
+                _entries(asset_id),
+                revision_id=current.revision_id,
+                fingerprint=current.fingerprint,
+            ),
+            seed,
+        )
+    original_replace = __import__("os").replace
+
+    def fail_state_only(source: Path, destination: Path) -> None:
+        if destination == store.path:
+            raise OSError("simulated-secret")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(
+        "investment_analyst.application.asset_preferences.os.replace",
+        fail_state_only,
+    )
+    update = _update(
+        _entries("equity:us:aapl"),
+        revision_id=current.revision_id,
+        fingerprint=current.fingerprint,
+    )
+    with pytest.raises(AssetPreferencesStateError, match="could not be written") as failure:
+        store.apply(update, seed)
+    assert "simulated-secret" not in str(failure.value)
+    assert len(store.load_history()) == 3
+
+    monkeypatch.setattr(
+        "investment_analyst.application.asset_preferences.os.replace",
+        original_replace,
+    )
+    recovered, changed = store.apply(update, seed)
+    assert changed is True
+    assert recovered.revision_id is not None
+    assert len(store.load_history()) == 4
+    assert len(store.load().archives) == 1
+
+
 def test_service_reconciles_registry_without_running_providers_and_allows_empty_when_disabled(
     tmp_path: Path,
 ) -> None:
@@ -376,6 +513,13 @@ def test_service_reconciles_registry_without_running_providers_and_allows_empty_
         job_factory=None,
     )
     disabled_initial = disabled.view()
+    disabled_aapl = next(
+        item for item in disabled_initial.assets if item.asset_id == "equity:us:aapl"
+    )
+    assert disabled_aapl.scheduled_refresh is True
+    assert disabled_aapl.effective_scheduled_refresh is False
+    assert disabled_initial.scheduled_asset_count == 0
+    assert disabled_initial.scheduled_job_count == 0
     empty = disabled.update(
         _update(
             (),

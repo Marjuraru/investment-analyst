@@ -21,9 +21,11 @@ processed, DuckDB, and Parquet-export layout is not migrated or renamed. `export
 reserved workspace-level directories for future application services.
 
 `state/asset_preferences_state_v1.json`, cuando existe, conserva la watchlist, favoritos y refresh
-programado como revisiones auditables. Su ausencia es válida: el servicio usa una semilla CLI en
-memoria y no escribe automáticamente el workspace. Este estado no modifica DuckDB, Parquet ni el
-manifest v1.
+programado como revisiones auditables. Al aproximarse a 1 000 revisiones o 4 MiB, los segmentos
+históricos hash-bound viven en `state/asset_preferences_state_v1_archives/`; forman parte del mismo
+estado lógico y del inventario verificado de backup/restore. Su ausencia es válida: el servicio usa
+una semilla CLI en memoria y no escribe automáticamente el workspace. Este estado no modifica
+DuckDB, Parquet ni el manifest v1.
 
 ## Resolution precedence
 

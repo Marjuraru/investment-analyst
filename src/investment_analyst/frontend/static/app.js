@@ -613,10 +613,13 @@ function renderAssetPreferences(payload) {
   byId("asset-preferences-summary").textContent =
     `${formatInteger(payload.watchlist_count)} en watchlist · `
     + `${formatInteger(payload.favorite_count)} favoritos · `
-    + `${formatInteger(payload.scheduled_asset_count)} programados`;
-  byId("asset-preferences-status").textContent = payload.source === "persisted"
+    + `${formatInteger(payload.scheduled_asset_count)} programados efectivos`;
+  const revisionStatus = payload.source === "persisted"
     ? `Revisión ${payload.revision_id.slice(0, 8)} · ${formatInstant(payload.created_at)}`
     : "Valores efectivos de la configuración CLI; aún no se escribió una revisión.";
+  byId("asset-preferences-status").textContent = payload.scheduler_enabled
+    ? revisionStatus
+    : `${revisionStatus} Scheduler desactivado; la selección programada se conserva.`;
   prioritizeAssetSelector(payload);
 }
 
@@ -653,8 +656,9 @@ async function saveAssetPreferences() {
       }),
     });
     renderAssetPreferences(payload);
-    byId("asset-preferences-status").textContent =
-      `Preferencias guardadas · ${formatInteger(payload.scheduled_job_count)} trabajos activos`;
+    byId("asset-preferences-status").textContent = payload.scheduler_enabled
+      ? `Preferencias guardadas · ${formatInteger(payload.scheduled_job_count)} trabajos activos`
+      : "Preferencias guardadas · scheduler desactivado; 0 trabajos efectivos";
     await refreshOverview({ manual: false });
   } catch (error) {
     if (error.code === "asset_preferences_conflict") await loadAssetPreferences();

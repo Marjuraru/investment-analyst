@@ -166,6 +166,9 @@ def test_backup_restore_preserves_preference_revision_and_supports_absent_state(
     store = AssetPreferencesStore(
         preference_path,
         clock=lambda: datetime(2026, 8, 1, hour=2, tzinfo=UTC),
+        max_revisions=6,
+        archive_at_revisions=4,
+        retained_revisions=2,
     )
     persisted, changed = store.apply(
         AssetPreferencesUpdate(
@@ -175,16 +178,37 @@ def test_backup_restore_preserves_preference_revision_and_supports_absent_state(
         ),
         seed,
     )
+    revision_ids = [persisted.revision_id]
+    for favorite in (False, True, False):
+        revised_entry = entry.model_copy(update={"favorite": favorite})
+        persisted, appended = store.apply(
+            AssetPreferencesUpdate(
+                expected_revision_id=persisted.revision_id,
+                expected_fingerprint=persisted.fingerprint,
+                entries=(revised_entry,),
+            ),
+            seed,
+        )
+        assert appended is True
+        revision_ids.append(persisted.revision_id)
     manifest = service.create(source, tmp_path / "with-preferences")
     service.restore(tmp_path / "with-preferences", tmp_path / "restored-preferences")
     restored_store = AssetPreferencesStore(
-        tmp_path / "restored-preferences/state/asset_preferences_state_v1.json"
+        tmp_path / "restored-preferences/state/asset_preferences_state_v1.json",
+        max_revisions=6,
+        archive_at_revisions=4,
+        retained_revisions=2,
     )
 
     restored = restored_store.load()
     assert changed is True
     assert any(item.path == "state/asset_preferences_state_v1.json" for item in manifest.files)
+    assert any(
+        item.path.startswith("state/asset_preferences_state_v1_archives/")
+        for item in manifest.files
+    )
     assert restored is not None
     assert restored.current.revision_id == persisted.revision_id
     assert restored.current.fingerprint == persisted.fingerprint
+    assert tuple(item.revision_id for item in restored_store.load_history()) == tuple(revision_ids)
     assert preference_path.read_bytes() == restored_store.path.read_bytes()

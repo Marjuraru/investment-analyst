@@ -412,11 +412,13 @@ def test_registry_reconciliation_during_active_provider_preserves_identity_and_h
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
-    active = _definition("active-market")
+    active = _definition("a-active-market")
+    queued = _definition("b-queued-market")
     replacement = _definition("replacement-market")
     provider_started = threading.Event()
     provider_release = threading.Event()
     provider_calls = 0
+    queued_calls = 0
 
     def blocked(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
         nonlocal provider_calls
@@ -425,10 +427,16 @@ def test_registry_reconciliation_during_active_provider_preserves_identity_and_h
         assert provider_release.wait(timeout=5)
         return _execution(invocation)
 
+    def must_be_retired(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        nonlocal queued_calls
+        queued_calls += 1
+        return _execution(invocation)
+
     store = MultiAssetScheduleStateStore(tmp_path / "reconciled.json")
     active_job = RegisteredScheduledJob(active, blocked)
+    queued_job = RegisteredScheduledJob(queued, must_be_retired)
     replacement_job = RegisteredScheduledJob(replacement, _execution)
-    scheduler = MultiAssetScheduler((active_job,), store, clock=lambda: now)
+    scheduler = MultiAssetScheduler((active_job, queued_job), store, clock=lambda: now)
     completed: list[tuple[ScheduledJobAttempt, ...]] = []
     thread = threading.Thread(target=lambda: completed.append(scheduler.tick()))
     thread.start()
@@ -441,6 +449,8 @@ def test_registry_reconciliation_during_active_provider_preserves_identity_and_h
 
     assert not thread.is_alive()
     assert provider_calls == 1
+    assert queued_calls == 0
+    assert len(completed[0]) == 1
     assert completed[0][0].definition.job_id == active.job_id
     assert completed[0][0].status is ScheduledJobAttemptStatus.SUCCEEDED
     assert tuple(item.definition.job_id for item in store.load().attempts) == (active.job_id,)

@@ -14,11 +14,19 @@ SHA-256 determinista y entradas ordenadas por `asset_id`. Cada entrada declara p
 - `favorite`;
 - `scheduled_refresh`.
 
-Favoritos y activos programados siempre pertenecen a la watchlist. El documento admite como máximo
-100 activos, 1 000 revisiones y 4 MiB; al alcanzar un límite rechaza la escritura sin recortar el
-historial. Las escrituras usan un temporal privado, `fsync` y reemplazo atómico. Un archivo corrupto,
-incompatible, no regular o no escribible produce un error acotado y nunca se repara ni reescribe al
-arrancar.
+Favoritos y activos programados siempre pertenecen a la watchlist. Cada documento admite como
+máximo 100 activos, 1 000 revisiones y 4 MiB. Antes de llegar al límite —900 revisiones o 3 MiB en
+el estado activo— las revisiones antiguas pasan a segmentos inmutables bajo
+`state/asset_preferences_state_v1_archives/` y permanecen encadenadas a las 100 revisiones activas.
+Cada referencia fija nombre, tamaño, SHA-256, extremos, conteo y revisión padre. Tanto el estado
+activo como cada segmento se rechazan antes de leer si exceden 4 MiB; después se validan esquema,
+hash, cadena global, identidades y timestamps.
+
+El segmento se publica primero mediante temporal privado, `fsync` y reemplazo atómico; solo después
+se publica el estado que lo referencia. Una interrupción puede dejar un segmento huérfano inocuo,
+pero nunca un estado visible que apunte a un segmento ausente. El nombre determinista permite que
+un reintento reutilice únicamente bytes idénticos. Un archivo corrupto, incompatible, no regular o
+no escribible produce un error acotado y nunca se repara ni reescribe al arrancar.
 
 Si el archivo no existe, el servicio deriva en memoria el estado efectivo desde las opciones CLI:
 
@@ -29,7 +37,9 @@ Si el archivo no existe, el servicio deriva en memoria el estado efectivo desde 
 La primera actualización explícita crea la primera revisión, incluso si coincide con la semilla.
 Después, el estado persistido manda sobre `--schedule-asset`. Un update semánticamente idéntico es
 idempotente y no crea otra revisión. `--no-scheduler` desactiva la ejecución sin borrar ni modificar
-preferencias.
+preferencias: `scheduled_refresh` conserva la intención configurada,
+`effective_scheduled_refresh=false`, y los conteos de activos y jobs efectivos son cero en API,
+overview e interfaz.
 
 Un activo añadido posteriormente al catálogo aparece disponible pero no seleccionado en una
 watchlist persistida. Un ID guardado que deje de estar disponible permanece visible, conserva sus
@@ -76,7 +86,9 @@ Ejemplo abreviado para la primera actualización:
 
 La frontera preferencias→jobs vuelve a construir el registro solo con el universo, capacidades y
 configuración operativa ya validada. Construir o publicar ese registro no llama proveedores. El
-scheduler reemplaza el tuple ordenado bajo un lock corto y cada tick usa un snapshot inmutable.
+scheduler reemplaza el tuple ordenado bajo un lock corto y cada tick usa un snapshot inmutable. Antes
+de iniciar cada callback del snapshot vuelve a reclamar su `job_id` bajo el mismo lock: un job
+retirado que aún estaba en cola se omite y no crea intento.
 
 Una actualización no cancela el callback que ya está activo. Si su job fue retirado, el intento
 termina y se conserva, pero no se programa otra vez. Reactivar el activo reconstruye el mismo
@@ -92,7 +104,7 @@ El panel «Watchlist y automatización» usa controles nativos de formulario, et
 estado anunciado y una tabla desplazable en móvil. Distingue watchlist, favorito y programación;
 un cambio se confirma o informa conflicto. `localStorage` no guarda estas preferencias.
 
-El backup inventaría el documento como cualquier archivo regular de `state/`; restore conserva sus
-bytes, revisión y fingerprint. Un backup sin preferencias continúa siendo válido. Los contratos y
-errores no incluyen credenciales, payloads de proveedor, headers ni valores arbitrarios de
-excepciones.
+El backup inventaría el documento y todos sus segmentos como archivos regulares de `state/`; restore
+conserva sus bytes, cadena completa, revisión y fingerprint. Un backup sin preferencias continúa
+siendo válido. Los contratos y errores no incluyen credenciales, payloads de proveedor, headers ni
+valores arbitrarios de excepciones.
