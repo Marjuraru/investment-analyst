@@ -137,6 +137,15 @@ commit, push, and open or update the pull request against the branch indicated b
 Never merge it. The final response for that workflow contains only the pull request, exact test
 results, and pending risks.
 
+### Evidence reuse and validation ownership
+
+- Bind validation evidence to the exact HEAD, command, environment, and result.
+- Use focused tests during implementation and run the full local validation once per candidate HEAD.
+- Do not rerun a complete suite already green for the same HEAD and environment unless the HEAD or relevant environment changed, CI failed or was canceled, or review found an uncovered risk.
+- A reviewer or release authority should reuse green CI for the exact HEAD and run only narrowly justified focused checks.
+- If the same command fails twice for the same reason, stop blind retries and diagnose the cause.
+- Allow only one writer per branch or worktree. Parallel agents that may write require isolated Git worktrees.
+
 ## Development environment
 
 - Primary environment: Windows, WSL2, Ubuntu 24.04, Python 3.12, VS Code, Git, Ruff, and Pytest.

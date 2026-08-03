@@ -1,0 +1,4 @@
+interface:
+  display_name: "Investment Block Flow"
+  short_description: "Planifica, implementa y audita bloques"
+  default_prompt: "Usa $investment-block-flow para procesar el siguiente bloque de desarrollo."
