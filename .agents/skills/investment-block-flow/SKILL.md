@@ -1,11 +1,12 @@
 ---
 name: investment-block-flow
-description: Orquesta bloques de desarrollo de investment-analyst mediante GitHub Issues y pull requests. Usar cuando el usuario diga "continua al siguiente bloque", solicite implementar un Issue, revisar o auditar un PR, corregir comentarios, validar CI o fusionar un bloque terminado.
+description: Compatibilidad para orquestar Issues y PRs explícitos de investment-analyst, corregir hallazgos, revisar CI o fusionar cuando el usuario lo autorice. Para el workflow activo normal usar $plan, $build y /audit.
 ---
 
 # Investment Block Flow
 
-Leer primero `AGENTS.md` completo y tratar el repositorio, GitHub y el árbol de trabajo actual como fuentes autoritativas.
+Leer primero `AGENTS.md` y `docs/development_protocol.md` completos. Tratar el repositorio, GitHub y
+el árbol de trabajo actual como fuentes autoritativas.
 
 ## Seleccionar el modo
 
@@ -21,6 +22,7 @@ No convertir una revisión o auditoría en autorización para editar.
 ## Aplicar reglas comunes
 
 - Mantener un Issue y un PR por capacidad cohesiva, con un único escritor por rama.
+- Para el flujo sin números, delegar en `$plan`, `$build` y `/audit`; no inventar el último target.
 - Clasificar el riesgo como R0 mecánico, R1 normal, R2 alto o R3 crítico. Tratar point-in-time, fórmulas, identidades, almacenamiento, concurrencia, seguridad y semántica financiera como R3.
 - Preservar el workspace permanente, secretos, historial y cambios locales preexistentes.
 - Detener cualquier ampliación de alcance y devolverla al arquitecto como bloque separado.
@@ -42,7 +44,8 @@ No convertir una revisión o auditoría en autorización para editar.
 1. Leer el Issue y confirmar que la rama parte de `main` actualizado.
 2. Ser el único escritor del PR y realizar el cambio cohesivo mínimo.
 3. Usar pruebas focalizadas durante la iteración.
-4. Ejecutar la validación completa una sola vez por cada HEAD candidato final; repetir lo necesario después de cualquier cambio material.
+4. Ejecutar pruebas focalizadas y usar CI como gate determinista completo del HEAD publicado. Solo
+   correr `scripts/check.sh` bajo las excepciones documentadas.
 5. Ejecutar smoke real cuando el Issue afecte proveedores, persistencia, scheduler, interfaz o servicio.
 6. Publicar o actualizar el PR y el informe de entrega con HEAD, pruebas exactas y riesgos.
 7. Responder únicamente con PR, resultados exactos y riesgos pendientes.

@@ -50,4 +50,14 @@ umbral mínimo es 82.00%, frente a una línea base observada de 82.54% con 894 p
 bash scripts/check.sh
 ```
 
+La verificación completa local continúa disponible para preparación offline, diagnóstico, cambios
+de dependencias/toolchain/CI o cuando un Work Block la exija expresamente. En el flujo normal de un
+PR, el builder ejecuta Ruff y Pytest focalizados, revisa diff/status y publica el candidato; GitHub
+CI es la autoridad de la suite determinista completa para ese SHA. No se debe ejecutar Pytest
+completo y después `scripts/check.sh` como dos gates equivalentes.
+
+Los smokes con proveedores, persistencia, scheduler, interfaz o servicio son una evidencia separada
+de CI y deben seguir el Issue en un workspace temporal o seguro. Consulta
+[`development_protocol.md`](development_protocol.md).
+
 Consulta `docs/dependency_management.md` antes de añadir o actualizar dependencias.
