@@ -17,6 +17,10 @@ from investment_analyst.analytics.market.diagnostic_selection import (
 from investment_analyst.analytics.market.history_service import HistoricalMarketDataService
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
 from investment_analyst.analytics.market.statistics_pipeline import MarketStatisticsPipeline
+from investment_analyst.analytics.valuation import (
+    CorporateValuationRequest,
+    ValuationPersistenceSummary,
+)
 from investment_analyst.application.aapl_bootstrap_models import AaplMarketRefreshMode
 from investment_analyst.application.aapl_refresh_planner import AaplMarketRefreshPlanner
 from investment_analyst.application.listed_market_refresh import (
@@ -70,9 +74,37 @@ class _FixtureTransport:
         return HttpResponse(status_code=200, body=self._body, headers={}, url=url)
 
 
+class _ValuationService:
+    def __init__(self) -> None:
+        self.requests: list[CorporateValuationRequest] = []
+
+    def query(self, request: CorporateValuationRequest) -> CorporateValuationRequest:
+        self.requests.append(request)
+        return request
+
+
+class _ValuationPipeline:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def persist(self, snapshot: CorporateValuationRequest) -> ValuationPersistenceSummary:
+        self.calls += 1
+        return ValuationPersistenceSummary(
+            definitions_created=1 if self.calls == 1 else 0,
+            definitions_reused=0 if self.calls == 1 else 1,
+            metric_results_created=1 if self.calls == 1 else 0,
+            metric_results_reused=0 if self.calls == 1 else 1,
+            metrics_not_evaluable=10,
+            metrics_not_applicable=0,
+        )
+
+
 def _pipeline(
     storage: LocalStorage,
     transport: _FixtureTransport,
+    *,
+    valuation_service: _ValuationService | None = None,
+    valuation_pipeline: _ValuationPipeline | None = None,
 ) -> ListedMarketRefreshPipeline:
     history = HistoricalMarketDataService(storage)
     return ListedMarketRefreshPipeline(
@@ -103,6 +135,8 @@ def _pipeline(
             MarketDiagnosticEngine(),
             clock=lambda: _RUN_AT,
         ),
+        valuation_service=valuation_service,
+        valuation_pipeline=valuation_pipeline,
         clock=lambda: _RUN_AT,
     )
 
@@ -165,3 +199,28 @@ def test_listed_refresh_preserves_ingestion_when_explicit_cut_is_too_early(
         assert len(storage.observations.list(asset_id=_CONFIGURATION.asset_id)) == 21
         assert storage.metric_results.list() == []
         assert storage.diagnostics.list() == []
+
+
+def test_listed_refresh_reuses_local_valuation_without_an_extra_market_call(
+    tmp_path: Path,
+) -> None:
+    transport = _FixtureTransport()
+    valuation_service = _ValuationService()
+    valuation_pipeline = _ValuationPipeline()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline = _pipeline(
+            storage,
+            transport,
+            valuation_service=valuation_service,
+            valuation_pipeline=valuation_pipeline,
+        )
+
+        first = pipeline.run(_request())
+        second = pipeline.run(_request())
+
+    assert len(transport.calls) == 1
+    assert len(valuation_service.requests) == 2
+    assert all(item.asset_id == _CONFIGURATION.asset_id for item in valuation_service.requests)
+    assert first.valuation_metric_results_created == 1
+    assert first.valuation_metrics_not_evaluable == 10
+    assert second.valuation_metric_results_reused == 1

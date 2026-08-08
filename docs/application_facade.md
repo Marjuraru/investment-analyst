@@ -124,3 +124,11 @@ Its SEC trend, research, history, and analysis reads are keyed by `asset_id`, an
 fundamental refresh delegates to `refresh_sec_fundamentals(...)` with the same writer mutex. It adds
 no storage access or provider logic of its own. See
 [`local_interface.md`](local_interface.md) for the UI, scheduler, and persistent-service contract.
+
+## Corporate valuation
+
+La fachada expone `query_corporate_valuation(...)` para reconstrucción local read-only y
+`persist_corporate_valuation(...)` para materialización append-only. Ambas resuelven Alpaca/SEC y
+el contrato de unidad desde catálogo/runtime. Los refresh de mercado y SEC llaman la misma capa tras
+su analítica independiente; no hacen una segunda consulta de proveedor y reportan creados,
+reutilizados y no evaluables por separado.

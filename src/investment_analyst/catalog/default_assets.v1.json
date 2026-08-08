@@ -392,6 +392,10 @@
         "sec_cik": "0000320193"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "AAPL"
     },
     {
@@ -447,6 +451,10 @@
         "sec_cik": "0000002488"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "AMD"
     },
     {

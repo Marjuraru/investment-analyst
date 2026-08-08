@@ -444,6 +444,7 @@ let selectedFundamentalFrequency = "quarterly";
 let screeningRuleSnapshot = null;
 let fundamentalTrendPayload = null;
 let fundamentalResearchPayload = null;
+let valuationPayload = null;
 let fundamentalBusyCount = 0;
 let reportPayload = null;
 let chartSettings = { ...DEFAULT_CHART_SETTINGS };
@@ -492,6 +493,7 @@ function marketAssetFromDescriptor(descriptor) {
     marketMode: descriptor.analysis.market_mode,
     fundamentalMode: descriptor.analysis.fundamental_mode,
     hasFundamentals: descriptor.has_fundamentals,
+    hasCorporateValuation: descriptor.has_corporate_valuation,
     fundamentalFrequencies: descriptor.fundamental_frequencies,
     refreshKind: descriptor.refresh_kind,
     refreshLabel: `Actualizar ${descriptor.symbol}`,
@@ -717,6 +719,9 @@ function applySelectedMarketAsset() {
   document.title = `${presentation.name} (${presentation.symbol}) · Investment Analyst`;
   for (const element of document.querySelectorAll("[data-fundamental-only]")) {
     element.classList.toggle("hidden", !presentation.hasFundamentals);
+  }
+  for (const element of document.querySelectorAll("[data-valuation-only]")) {
+    element.classList.toggle("hidden", !presentation.hasCorporateValuation);
   }
   for (const element of document.querySelectorAll("[data-complete-run-only]")) {
     element.classList.toggle("hidden", presentation.refreshKind !== "complete_analysis");
@@ -3150,6 +3155,165 @@ async function queryFundamentalResearch() {
   }
 }
 
+const VALUATION_STATUS_LABELS = Object.freeze({
+  evaluated: "Calculada",
+  partial: "Parcial",
+  not_evaluable: "No evaluable",
+  not_applicable: "No aplica",
+});
+
+const VALUATION_REASON_LABELS = Object.freeze({
+  asset_not_applicable: "No aplica al tipo de activo",
+  market_not_configured: "Mercado no configurado",
+  fundamentals_not_configured: "Fundamentales no configurados",
+  share_basis_unavailable: "Base entre título y acción no disponible",
+  security_unit_mismatch: "Unidad del título incompatible",
+  corporate_action_basis_unavailable: "Base de acción corporativa no demostrable",
+  price_unavailable: "Precio no disponible en el corte",
+  price_ambiguous: "Revisión de precio ambigua",
+  fundamentals_unavailable: "Ejercicio anual no disponible en el corte",
+  fundamental_revision_ambiguous: "Revisión fundamental ambigua",
+  period_mismatch: "Períodos incompatibles",
+  source_mismatch: "Fuentes incompatibles",
+  frequency_mismatch: "Frecuencias incompatibles",
+  accounting_basis_mismatch: "Taxonomías contables incompatibles",
+  currency_mismatch: "Monedas incompatibles; no se aplica FX",
+  unit_mismatch: "Unidades financieras incompatibles",
+  missing_input: "Falta un input oficial requerido",
+  invalid_denominator: "Denominador nulo, negativo o inválido",
+  ebitda_unavailable: "D&A anual oficial compatible no disponible",
+});
+
+function valuationDisplayValue(metric, definition) {
+  if (metric.status !== "evaluated") {
+    return VALUATION_REASON_LABELS[metric.reason_code] || metric.reason_code || "No evaluable";
+  }
+  if (definition.unit === "USD") {
+    return formatNumber(metric.value, {
+      style: "currency",
+      currency: "USD",
+      currencyDisplay: "narrowSymbol",
+      notation: "compact",
+      maximumFractionDigits: 2,
+    });
+  }
+  if (definition.unit === "percentage") return formatUnsignedPercentage(metric.value);
+  return formatMultiple(metric.value);
+}
+
+function resetValuation() {
+  valuationPayload = null;
+  byId("valuation-metrics").replaceChildren();
+  byId("valuation-context").textContent =
+    "La consulta se carga bajo demanda desde evidencia local.";
+  byId("valuation-status").textContent =
+    "Selecciona una fecha o abre esta sección para consultar.";
+  byId("valuation-coverage").textContent = "Sin consultar";
+  byId("valuation-coverage").className = "quality-chip";
+  byId("valuation-price-context").textContent = "—";
+  byId("valuation-period-context").textContent = "—";
+  byId("valuation-filing-context").textContent = "—";
+  byId("valuation-unit-context").textContent = "—";
+  byId("valuation-evidence").textContent = "Sin evidencia cargada.";
+  setExportAvailable("export-valuation-json", false);
+}
+
+function renderValuation(payload) {
+  valuationPayload = payload;
+  const definitions = new Map(
+    (payload.definitions || []).map((definition) => [definition.metric_key, definition]),
+  );
+  const metrics = byId("valuation-metrics");
+  metrics.replaceChildren();
+  for (const metric of payload.metrics || []) {
+    const definition = definitions.get(metric.metric_key);
+    if (!definition) continue;
+    const card = createElement("article", `valuation-metric ${metric.status}`);
+    const header = createElement("div", "valuation-metric-heading");
+    header.append(
+      createElement("strong", "", definition.display_name_es),
+      createElement(
+        "span",
+        `quality-chip ${metric.status === "evaluated" ? "good" : "warn"}`,
+        VALUATION_STATUS_LABELS[metric.status] || metric.status,
+      ),
+    );
+    const value = createElement(
+      "p",
+      `valuation-metric-value ${metric.status}`,
+      valuationDisplayValue(metric, definition),
+    );
+    if (metric.value !== null && metric.value !== undefined) {
+      value.title = `Valor exacto: ${metric.value} ${definition.unit}`;
+    }
+    const formula = createElement("small", "valuation-formula", definition.formula);
+    const evidence = createElement(
+      "small",
+      "valuation-input-summary",
+      metric.status === "evaluated"
+        ? `${formatInteger(metric.input_observation_ids.length)} inputs · disponible ${formatInstant(metric.available_at)}`
+        : `${formatInteger(metric.input_observation_ids.length)} inputs elegibles`,
+    );
+    card.append(header, value, formula, evidence);
+    metrics.append(card);
+  }
+  const coverage = payload.coverage;
+  const coverageChip = byId("valuation-coverage");
+  coverageChip.textContent = `${formatInteger(coverage.evaluated)}/${formatInteger(coverage.total)} calculadas`;
+  coverageChip.className = `quality-chip ${payload.status === "evaluated" ? "good" : "warn"}`;
+  byId("valuation-context").textContent =
+    `${marketAssetPresentation().symbol} · corte ${formatInstant(payload.known_at)} · ${VALUATION_STATUS_LABELS[payload.status] || payload.status}`;
+  byId("valuation-status").textContent =
+    `${formatInteger(coverage.evaluated)} calculadas · ${formatInteger(coverage.not_evaluable)} no evaluables · lectura local sin proveedores.`;
+  byId("valuation-price-context").textContent = payload.valuation_as_of
+    ? `${formatCalendarDate(payload.valuation_as_of)} · ${formatInteger(payload.price_age_days)} días de antigüedad · ${payload.price_source_id}`
+    : "No disponible en el corte";
+  byId("valuation-period-context").textContent = payload.annual_period_end
+    ? `${formatCalendarDate(payload.annual_period_start)}–${formatCalendarDate(payload.annual_period_end)} · ${payload.fiscal_period || "FY"}`
+    : "No disponible en el corte";
+  byId("valuation-filing-context").textContent = payload.filing_accepted_at
+    ? `${payload.filing_form || "Filing"} ${payload.filing_accession_number || ""} · ${formatInstant(payload.filing_accepted_at)}`
+    : "No disponible en el corte";
+  byId("valuation-unit-context").textContent = payload.security_basis
+    ? `${payload.price_currency}/${payload.report_currency} · ${payload.security_basis.basis} · factor exacto ${payload.security_basis.market_units_per_reported_share}`
+    : "Base de título no disponible";
+  byId("valuation-evidence").textContent = JSON.stringify(payload, null, 2);
+  setExportAvailable("export-valuation-json", true);
+}
+
+async function queryValuation() {
+  if (!marketAssetPresentation().hasCorporateValuation) return;
+  const card = byId("valuation-card");
+  const button = byId("query-valuation");
+  card.setAttribute("aria-busy", "true");
+  setButtonBusy(button, true, "Consultando…", "Cargar valoración");
+  byId("valuation-status").textContent = "Reconstruyendo la valoración desde evidencia local…";
+  const parameters = new URLSearchParams({
+    asset_id: selectedMarketAsset,
+    known_at: byId("report-known-at").value.trim(),
+    valuation_date: byId("valuation-date").value,
+    basis: "latest_annual",
+  });
+  try {
+    renderValuation(await api(`/api/v1/valuation?${parameters.toString()}`));
+  } catch (error) {
+    resetValuation();
+    byId("valuation-status").textContent = error.message;
+  } finally {
+    card.setAttribute("aria-busy", "false");
+    setButtonBusy(button, false, "Consultando…", "Cargar valoración");
+  }
+}
+
+function exportValuationJson() {
+  if (!valuationPayload) return;
+  downloadText(
+    `${safeFilePart(marketAssetPresentation().symbol)}-valoracion-${safeFilePart(valuationPayload.request.valuation_date)}.json`,
+    `${JSON.stringify(valuationPayload, null, 2)}\n`,
+    "application/json",
+  );
+}
+
 function localizedIssue(issue) {
   if (issue.endsWith(": latest scheduled job failed")) {
     return `${issue.slice(0, -": latest scheduled job failed".length)}: falló la actualización más reciente`;
@@ -4195,6 +4359,8 @@ byId("export-fundamental-research-csv").addEventListener(
   "click",
   exportFundamentalResearchCsv,
 );
+byId("query-valuation").addEventListener("click", queryValuation);
+byId("export-valuation-json").addEventListener("click", exportValuationJson);
 byId("export-report-json").addEventListener("click", exportReportJson);
 byId("chart-data-disclosure").addEventListener("toggle", (event) => {
   if (event.currentTarget.open && marketChartPayload?.points) {
@@ -4218,10 +4384,15 @@ byId("market-asset-select").addEventListener("change", async (event) => {
   marketChartPayload = null;
   marketChartViewport = null;
   marketChartDrag = null;
+  resetValuation();
   applySelectedMarketAsset();
   applyChartSettings();
   const activeFundamentalLink = document.querySelector(
-    ".nav-link.active[data-fundamental-only], .nav-link.active[data-complete-analysis-only]",
+    (
+      ".nav-link.active[data-fundamental-only], "
+      + ".nav-link.active[data-valuation-only], "
+      + ".nav-link.active[data-complete-analysis-only]"
+    ),
   );
   if (activeFundamentalLink) {
     activeFundamentalLink.classList.remove("active");
@@ -4337,6 +4508,10 @@ for (const link of document.querySelectorAll(".nav-link")) {
   });
 }
 
+byId("valuation-nav-link").addEventListener("click", () => {
+  if (valuationPayload === null) void queryValuation();
+});
+
 byId("alert-inbox-panel").addEventListener("toggle", (event) => {
   if (event.currentTarget.open) void loadAlertInbox();
 });
@@ -4352,6 +4527,7 @@ byId("screening-rules-panel").addEventListener("toggle", (event) => {
 const yesterday = new Date();
 yesterday.setUTCDate(yesterday.getUTCDate() - 1);
 byId("market-end").value = yesterday.toISOString().slice(0, 10);
+byId("valuation-date").value = yesterday.toISOString().slice(0, 10);
 byId("report-known-at").value = new Date().toISOString();
 
 async function initialize() {

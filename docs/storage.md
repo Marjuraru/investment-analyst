@@ -26,4 +26,10 @@ Repository protocols isolate the core models from this implementation. A later v
 DuckDB with PostgreSQL and raw files with object storage without changing financial contracts. SQLite
 is intentionally deferred until the project adds a journal, alerts, and personal preferences.
 
-No real provider is connected yet, and this layer performs no financial calculation or diagnosis.
+La capa de storage no realiza cálculos ni diagnósticos: los pipelines de aplicación entregan modelos
+ya validados a sus repositorios.
+
+La valoración corporativa no cambia el schema DuckDB ni el formato del workspace. Sus definiciones
+usan la categoría `valuation` y sus valores evaluados usan la tabla append-only `metric_results`;
+los estados `not_evaluable`/`not_applicable` permanecen en el snapshot de consulta. Un pipeline
+guarda métricas una a una para conservar progreso válido si una escritura posterior falla.

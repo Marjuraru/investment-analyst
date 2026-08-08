@@ -8,6 +8,12 @@ from investment_analyst.analytics.market.diagnostic_models import MarketDiagnost
 from investment_analyst.analytics.market.diagnostic_pipeline import MarketDiagnosticPipeline
 from investment_analyst.analytics.market.statistics_models import MarketStatisticsRequest
 from investment_analyst.analytics.market.statistics_pipeline import MarketStatisticsPipeline
+from investment_analyst.analytics.valuation import (
+    CorporateValuationPersistencePipeline,
+    CorporateValuationRequest,
+    CorporateValuationService,
+    ValuationPersistenceSummary,
+)
 from investment_analyst.application.aapl_refresh_planner import AaplMarketRefreshPlanner
 from investment_analyst.application.listed_market_refresh_models import (
     ListedMarketRefreshRequest,
@@ -46,6 +52,8 @@ class ListedMarketRefreshPipeline:
         market_pipeline: AlpacaHistoricalPipeline,
         statistics_pipeline: MarketStatisticsPipeline,
         diagnostic_pipeline: MarketDiagnosticPipeline,
+        valuation_service: CorporateValuationService | None = None,
+        valuation_pipeline: CorporateValuationPersistencePipeline | None = None,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._configuration = configuration
@@ -53,6 +61,10 @@ class ListedMarketRefreshPipeline:
         self._market_pipeline = market_pipeline
         self._statistics_pipeline = statistics_pipeline
         self._diagnostic_pipeline = diagnostic_pipeline
+        if (valuation_service is None) != (valuation_pipeline is None):
+            raise ValueError("valuation service and pipeline must be configured together")
+        self._valuation_service = valuation_service
+        self._valuation_pipeline = valuation_pipeline
         self._clock = clock
 
     def run(self, request: ListedMarketRefreshRequest) -> ListedMarketRefreshSummary:
@@ -112,6 +124,7 @@ class ListedMarketRefreshPipeline:
             diagnostic.source_id,
             diagnostic.traceability_verified,
         )
+        valuation = self._run_valuation(request, effective_known_at)
         return ListedMarketRefreshSummary(
             asset_id=self._configuration.asset_id,
             source_id=self._configuration.source_id,
@@ -128,14 +141,45 @@ class ListedMarketRefreshPipeline:
             observations_reused=sum(item.observations_reused for item in imports),
             coverage_receipts_created=sum(item.coverage_receipts_created for item in imports),
             coverage_receipts_reused=sum(item.coverage_receipts_reused for item in imports),
-            metric_results_created=statistics.results_created,
-            metric_results_reused=statistics.results_reused,
+            metric_results_created=(statistics.results_created + valuation.metric_results_created),
+            metric_results_reused=(statistics.results_reused + valuation.metric_results_reused),
+            valuation_metric_results_created=valuation.metric_results_created,
+            valuation_metric_results_reused=valuation.metric_results_reused,
+            valuation_metrics_not_evaluable=valuation.metrics_not_evaluable,
             diagnostics_created=diagnostic.diagnostics_created,
             diagnostics_reused=diagnostic.diagnostics_reused,
             diagnostic_verdict=diagnostic.verdict,
             market_as_of=statistics.latest_as_of,
             traceability_verified=True,
         )
+
+    def _run_valuation(
+        self,
+        request: ListedMarketRefreshRequest,
+        effective_known_at: datetime,
+    ) -> ValuationPersistenceSummary:
+        if self._valuation_service is None or self._valuation_pipeline is None:
+            return ValuationPersistenceSummary(
+                definitions_created=0,
+                definitions_reused=0,
+                metric_results_created=0,
+                metric_results_reused=0,
+                metrics_not_evaluable=0,
+                metrics_not_applicable=0,
+            )
+        try:
+            snapshot = self._valuation_service.query(
+                CorporateValuationRequest(
+                    asset_id=request.asset_id,
+                    known_at=effective_known_at,
+                    valuation_date=request.market_end,
+                )
+            )
+            return self._valuation_pipeline.persist(snapshot)
+        except (RuntimeError, ValueError) as error:
+            raise ListedMarketRefreshError(
+                f"corporate valuation persistence failed: {error}"
+            ) from error
 
     def _normalized_now(self) -> datetime:
         value = self._clock()

@@ -50,6 +50,7 @@ class MetricCategory(StrEnum):
 
     MARKET = "market"
     FUNDAMENTAL = "fundamental"
+    VALUATION = "valuation"
     CRYPTO_FUNDAMENTAL = "crypto_fundamental"
     UNIFIED = "unified"
     CAZATIBURONES = "cazatiburones"

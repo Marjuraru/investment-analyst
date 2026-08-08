@@ -64,12 +64,23 @@ from investment_analyst.analytics.market.diagnostic_selection import (
 from investment_analyst.analytics.market.history_service import HistoricalMarketDataService
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
 from investment_analyst.analytics.market.statistics_pipeline import MarketStatisticsPipeline
+from investment_analyst.analytics.valuation import (
+    CorporateValuationPersistencePipeline,
+    CorporateValuationRequest,
+    CorporateValuationService,
+    CorporateValuationSnapshot,
+    ValuationPersistenceSummary,
+)
 from investment_analyst.application.aapl_bootstrap import AaplWorkspaceBootstrapPipeline
 from investment_analyst.application.aapl_bootstrap_models import (
     AaplWorkspaceBootstrapRequest,
     AaplWorkspaceBootstrapSummary,
 )
 from investment_analyst.application.aapl_refresh_planner import AaplMarketRefreshPlanner
+from investment_analyst.application.analysis_capabilities import (
+    AssetAnalysisFamily,
+    analysis_capabilities_for,
+)
 from investment_analyst.application.btc_intraday import (
     query_btc_intraday_chart,
     refresh_btc_intraday,
@@ -505,11 +516,35 @@ class InvestmentAnalystApplication:
             self._runtime.provider_resolver,
             asset_id=request.asset_id,
         )
+        asset = self._runtime.catalog.get(request.asset_id)
+        capabilities = analysis_capabilities_for(asset)
         with self._runtime.open_storage(
             location,
             access_mode=WorkspaceAccessMode.READ_WRITE,
         ) as storage:
             history = HistoricalMarketDataService(storage)
+            valuation_service: CorporateValuationService | None = None
+            valuation_pipeline: CorporateValuationPersistencePipeline | None = None
+            if (
+                capabilities.family is AssetAnalysisFamily.LISTED_COMPANY
+                and capabilities.fundamental_data_configured
+            ):
+                fundamental = resolve_sec_configuration(
+                    self._runtime.provider_resolver,
+                    asset_id=request.asset_id,
+                )
+                valuation_service = CorporateValuationService(
+                    storage,
+                    capabilities=capabilities,
+                    market_source_id=configuration.source_id,
+                    fundamental_source_id=fundamental.companyfacts_source_id,
+                    price_currency=asset.quote_currency,
+                    security_unit_factor=asset.security_unit_factor,
+                    security_unit_basis=asset.security_unit_basis,
+                    security_unit_basis_version=asset.security_unit_basis_version,
+                    security_unit_market_adjustment=asset.security_unit_market_adjustment,
+                )
+                valuation_pipeline = CorporateValuationPersistencePipeline(storage)
             return ListedMarketRefreshPipeline(
                 configuration=configuration,
                 refresh_planner=AaplMarketRefreshPlanner(
@@ -531,6 +566,8 @@ class InvestmentAnalystApplication:
                     MarketDiagnosticMetricSelector(storage),
                     MarketDiagnosticEngine(),
                 ),
+                valuation_service=valuation_service,
+                valuation_pipeline=valuation_pipeline,
             ).run(request)
 
     def refresh_sec_fundamentals(
@@ -545,6 +582,12 @@ class InvestmentAnalystApplication:
             self._runtime.provider_resolver,
             asset_id=request.asset_id,
         )
+        market_configuration = resolve_alpaca_configuration(
+            self._runtime.provider_resolver,
+            asset_id=request.asset_id,
+        )
+        asset = self._runtime.catalog.get(request.asset_id)
+        capabilities = analysis_capabilities_for(asset)
         with self._runtime.open_storage(
             location,
             access_mode=WorkspaceAccessMode.READ_WRITE,
@@ -586,6 +629,18 @@ class InvestmentAnalystApplication:
                     SecFundamentalDiagnosticEngine(configuration),
                     configuration=configuration,
                 ),
+                valuation_service=CorporateValuationService(
+                    storage,
+                    capabilities=capabilities,
+                    market_source_id=market_configuration.source_id,
+                    fundamental_source_id=configuration.companyfacts_source_id,
+                    price_currency=asset.quote_currency,
+                    security_unit_factor=asset.security_unit_factor,
+                    security_unit_basis=asset.security_unit_basis,
+                    security_unit_basis_version=asset.security_unit_basis_version,
+                    security_unit_market_adjustment=asset.security_unit_market_adjustment,
+                ),
+                valuation_pipeline=CorporateValuationPersistencePipeline(storage),
             ).run(request)
 
     def query_aapl_fundamental_trend(
@@ -724,6 +779,85 @@ class InvestmentAnalystApplication:
                 )
             ).query(request)
 
+    def query_corporate_valuation(
+        self,
+        request: CorporateValuationRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationSnapshot:
+        """Reconstruct a read-only latest-annual valuation without provider calls."""
+        asset = self._runtime.catalog.get(request.asset_id)
+        capabilities = analysis_capabilities_for(asset)
+        market_source_id: str | None = None
+        fundamental_source_id: str | None = None
+        if (
+            capabilities.family is AssetAnalysisFamily.LISTED_COMPANY
+            and capabilities.market_data_configured
+        ):
+            try:
+                market_source_id = resolve_alpaca_configuration(
+                    self._runtime.provider_resolver,
+                    asset_id=request.asset_id,
+                ).source_id
+            except ValueError:
+                market_source_id = None
+        if (
+            capabilities.family is AssetAnalysisFamily.LISTED_COMPANY
+            and capabilities.fundamental_data_configured
+        ):
+            try:
+                fundamental_source_id = resolve_sec_configuration(
+                    self._runtime.provider_resolver,
+                    asset_id=request.asset_id,
+                ).companyfacts_source_id
+            except ValueError:
+                fundamental_source_id = None
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return CorporateValuationService(
+                storage,
+                capabilities=capabilities,
+                market_source_id=market_source_id,
+                fundamental_source_id=fundamental_source_id,
+                price_currency=asset.quote_currency,
+                security_unit_factor=asset.security_unit_factor,
+                security_unit_basis=asset.security_unit_basis,
+                security_unit_basis_version=asset.security_unit_basis_version,
+                security_unit_market_adjustment=asset.security_unit_market_adjustment,
+            ).query(request)
+
+    def persist_corporate_valuation(
+        self,
+        request: CorporateValuationRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> ValuationPersistenceSummary:
+        """Materialize evaluated valuation results with the existing workspace writer."""
+        asset = self._runtime.catalog.get(request.asset_id)
+        market = resolve_alpaca_configuration(
+            self._runtime.provider_resolver, asset_id=request.asset_id
+        )
+        fundamental = resolve_sec_configuration(
+            self._runtime.provider_resolver, asset_id=request.asset_id
+        )
+        with self._runtime.open_storage(
+            location, access_mode=WorkspaceAccessMode.READ_WRITE
+        ) as storage:
+            snapshot = CorporateValuationService(
+                storage,
+                capabilities=analysis_capabilities_for(asset),
+                market_source_id=market.source_id,
+                fundamental_source_id=fundamental.companyfacts_source_id,
+                price_currency=asset.quote_currency,
+                security_unit_factor=asset.security_unit_factor,
+                security_unit_basis=asset.security_unit_basis,
+                security_unit_basis_version=asset.security_unit_basis_version,
+                security_unit_market_adjustment=asset.security_unit_market_adjustment,
+            ).query(request)
+            return CorporateValuationPersistencePipeline(storage).persist(snapshot)
+
     def _build_aapl_bootstrap_pipeline(
         self,
         storage: LocalStorage,
@@ -743,6 +877,7 @@ class InvestmentAnalystApplication:
         )
         point_in_time = SecAaplFundamentalPointInTimeService(storage)
         history = HistoricalMarketDataService(storage)
+        asset = self._runtime.catalog.get(APPLE_ASSET_ID)
         return AaplWorkspaceBootstrapPipeline(
             storage,
             workspace_id=workspace_id,
@@ -780,5 +915,17 @@ class InvestmentAnalystApplication:
                 MarketDiagnosticMetricSelector(storage),
                 MarketDiagnosticEngine(),
             ),
+            valuation_service=CorporateValuationService(
+                storage,
+                capabilities=analysis_capabilities_for(asset),
+                market_source_id=alpaca_configuration.source_id,
+                fundamental_source_id=sec_configuration.companyfacts_source_id,
+                price_currency=asset.quote_currency,
+                security_unit_factor=asset.security_unit_factor,
+                security_unit_basis=asset.security_unit_basis,
+                security_unit_basis_version=asset.security_unit_basis_version,
+                security_unit_market_adjustment=asset.security_unit_market_adjustment,
+            ),
+            valuation_pipeline=CorporateValuationPersistencePipeline(storage),
             consolidated_service=AaplConsolidatedDiagnosticService(storage),
         )

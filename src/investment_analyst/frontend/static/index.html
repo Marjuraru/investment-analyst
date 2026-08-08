@@ -36,12 +36,16 @@
             <span class="nav-index" aria-hidden="true">03</span>
             Fundamentales
           </a>
-          <a class="nav-link" href="#analisis" data-complete-analysis-only>
+          <a id="valuation-nav-link" class="nav-link" href="#valoracion" data-valuation-only>
             <span class="nav-index" aria-hidden="true">04</span>
+            Valoración
+          </a>
+          <a class="nav-link" href="#analisis" data-complete-analysis-only>
+            <span class="nav-index" aria-hidden="true">05</span>
             Análisis
           </a>
           <a class="nav-link" href="#operacion">
-            <span class="nav-index" aria-hidden="true">05</span>
+            <span class="nav-index" aria-hidden="true">06</span>
             Operación
           </a>
         </nav>
@@ -593,6 +597,73 @@
                     <tbody id="fundamental-table-body"></tbody>
                   </table>
                 </div>
+              </details>
+            </article>
+          </section>
+
+          <section
+            id="valoracion"
+            class="valuation-section"
+            aria-labelledby="valoracion-titulo"
+            data-valuation-only
+          >
+            <div class="section-intro analysis-intro">
+              <div>
+                <p class="eyebrow">VALORACIÓN</p>
+                <h2 id="valoracion-titulo">Valoración corporativa point-in-time</h2>
+                <p>
+                  Precio y último ejercicio anual alineados al corte, sin TTM, estimaciones,
+                  score ni recomendación.
+                </p>
+              </div>
+              <div class="valuation-query-controls">
+                <label class="field">
+                  <span>Fecha de valoración</span>
+                  <input id="valuation-date" type="date" required>
+                </label>
+                <button id="query-valuation" class="button primary" type="button">
+                  Cargar valoración
+                </button>
+              </div>
+            </div>
+
+            <article id="valuation-card" class="valuation-card" aria-busy="false">
+              <header class="valuation-header">
+                <div>
+                  <p id="valuation-context" class="chart-quote-context">
+                    La consulta se carga bajo demanda desde evidencia local.
+                  </p>
+                  <h3>Base latest_annual</h3>
+                </div>
+                <div class="valuation-actions">
+                  <span id="valuation-coverage" class="quality-chip">Sin consultar</span>
+                  <button
+                    id="export-valuation-json"
+                    class="data-export-button"
+                    type="button"
+                    aria-label="Exportar la valoración y evidencia Decimal exacta como JSON"
+                    disabled
+                  >
+                    Exportar evidencia
+                  </button>
+                </div>
+              </header>
+
+              <p id="valuation-status" role="status" aria-live="polite">
+                Selecciona una fecha o abre esta sección para consultar.
+              </p>
+              <div id="valuation-metrics" class="valuation-metrics"></div>
+
+              <dl class="valuation-audit-summary">
+                <div><dt>Precio</dt><dd id="valuation-price-context">—</dd></div>
+                <div><dt>Ejercicio anual</dt><dd id="valuation-period-context">—</dd></div>
+                <div><dt>Filing disponible</dt><dd id="valuation-filing-context">—</dd></div>
+                <div><dt>Moneda y unidad</dt><dd id="valuation-unit-context">—</dd></div>
+              </dl>
+
+              <details class="valuation-evidence-disclosure">
+                <summary>Fórmulas, inputs, IDs y limitaciones exactas</summary>
+                <pre id="valuation-evidence" tabindex="0">Sin evidencia cargada.</pre>
               </details>
             </article>
           </section>

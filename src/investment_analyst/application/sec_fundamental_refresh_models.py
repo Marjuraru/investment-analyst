@@ -32,6 +32,7 @@ class SecIssuerFundamentalRefreshStage(StrEnum):
     KNOWN_AT_RESOLUTION = "known_at_resolution"
     FUNDAMENTAL_METRICS = "fundamental_metrics"
     FUNDAMENTAL_DIAGNOSTIC = "fundamental_diagnostic"
+    CORPORATE_VALUATION = "corporate_valuation"
 
 
 class SecIssuerFundamentalRefreshRequest(ContractModel):
@@ -84,6 +85,9 @@ class SecIssuerFundamentalRefreshSummary(ContractModel):
     target_periods: int = Field(ge=0)
     metric_results_created: int = Field(ge=0)
     metric_results_reused: int = Field(ge=0)
+    valuation_metric_results_created: int = Field(default=0, ge=0)
+    valuation_metric_results_reused: int = Field(default=0, ge=0)
+    valuation_metrics_not_evaluable: int = Field(default=0, ge=0)
     metric_counts: dict[NonEmptyStr, int]
     metric_skipped_counts: dict[NonEmptyStr, int]
     diagnostic_target_period_end: UTCDateTime | None = None
@@ -112,7 +116,9 @@ class SecIssuerFundamentalRefreshSummary(ContractModel):
             raise ValueError("observation field counts must match generated observations")
         if self.annual_observations + self.quarterly_observations != self.observations_generated:
             raise ValueError("observation frequencies must partition generated observations")
-        generated_metrics = sum(self.metric_counts.values())
+        generated_metrics = sum(self.metric_counts.values()) + (
+            self.valuation_metric_results_created + self.valuation_metric_results_reused
+        )
         if self.metric_results_created + self.metric_results_reused != generated_metrics:
             raise ValueError("metric counts must match created plus reused results")
         if self.diagnostics_created + self.diagnostics_reused != 1:

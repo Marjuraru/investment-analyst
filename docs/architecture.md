@@ -87,6 +87,14 @@ datos mediante el frontend ni produce una puntuación conjunta. Los eventos anal
 intentos de notificación tienen identidades separadas para poder reintentar un canal sin duplicar el
 candidato.
 
+## Dominio de valoración corporativa
+
+`analytics/valuation/` compone barras y observaciones SEC persistidas mediante capacidades del
+catálogo. Mantiene contratos, selección point-in-time, fórmulas e identidad separados de los
+diagnósticos de mercado y fundamentales. Los refresh elegibles reutilizan la misma conexión writer
+y persisten `MetricResult` de categoría `valuation`; la consulta HTTP reconstruye el snapshot en
+modo read-only y nunca llama proveedores. ETF y cripto salen antes de seleccionar evidencia.
+
 ## Escalabilidad futura
 La modularidad y el desacoplamiento permiten incorporar más adelante Docker,
 PostgreSQL, un VPS y una versión de escritorio (PWA o Tauri) sin reescribir el

@@ -73,6 +73,11 @@ from investment_analyst.analytics.market.chart_service import (
     AaplMarketChartQueryError,
     BtcMarketChartQueryError,
 )
+from investment_analyst.analytics.valuation import (
+    CorporateValuationError,
+    CorporateValuationRequest,
+    CorporateValuationSnapshot,
+)
 from investment_analyst.application.aapl_bootstrap import BootstrapIncompleteError
 from investment_analyst.application.aapl_bootstrap_models import AaplWorkspaceBootstrapRequest
 from investment_analyst.application.aapl_daily_runner import (
@@ -292,6 +297,15 @@ class _RunnerOperations(Protocol):
 class _ApplicationOperations(Protocol):
     def list_market_assets(self) -> MarketAssetUniverse:
         """Return the catalog-backed assets supported by the local market UI."""
+        ...
+
+    def query_corporate_valuation(
+        self,
+        request: CorporateValuationRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationSnapshot:
+        """Return a read-only point-in-time corporate valuation."""
         ...
 
     def query_aapl_diagnostics(
@@ -546,6 +560,10 @@ class _WebOperations(Protocol):
         """Return one bounded point-in-time market chart."""
         ...
 
+    def valuation(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return one read-only latest-annual corporate valuation."""
+        ...
+
     def market_intraday(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Return one bounded point-in-time intraday chart."""
         ...
@@ -618,6 +636,9 @@ class AaplLocalController:
         self._btc_market_chart_cache: dict[BtcMarketChartRequest, BtcMarketChart] = {}
         self._listed_market_chart_cache: dict[
             tuple[str, AaplMarketChartRequest], ListedMarketChart
+        ] = {}
+        self._corporate_valuation_cache: dict[
+            CorporateValuationRequest, CorporateValuationSnapshot
         ] = {}
         self._btc_intraday_chart_cache: dict[BtcIntradayChartRequest, BtcIntradayChart] = {}
         self._fundamental_trend_cache: dict[
@@ -700,6 +721,25 @@ class AaplLocalController:
             request,
             location=StorageLocationRequest(workspace=self._workspace),
         )
+
+    def corporate_valuation_request(
+        self,
+        request: CorporateValuationRequest,
+    ) -> CorporateValuationSnapshot:
+        """Read cached valuation evidence without providers or writer acquisition."""
+        with self._cache_lock:
+            cached = self._corporate_valuation_cache.get(request)
+            if cached is not None:
+                return cached
+        snapshot = self._application.query_corporate_valuation(
+            request,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+        with self._cache_lock:
+            if len(self._corporate_valuation_cache) >= _MAX_READ_CACHE_ENTRIES:
+                self._corporate_valuation_cache.pop(next(iter(self._corporate_valuation_cache)))
+            self._corporate_valuation_cache[request] = snapshot
+        return snapshot
 
     def market_chart_request(self, request: AaplMarketChartRequest) -> AaplMarketChart:
         """Query persisted market bars and indicators without providers or writes."""
@@ -805,6 +845,7 @@ class AaplLocalController:
             finally:
                 with self._cache_lock:
                     self._listed_market_chart_cache.clear()
+                    self._corporate_valuation_cache.clear()
                 self._refresh_health_snapshot()
 
     def btc_intraday_refresh_request(
@@ -841,6 +882,7 @@ class AaplLocalController:
                     self._fundamental_research_cache.clear()
                     self._fundamental_research_history_cache.clear()
                     self._fundamental_analysis_cache.clear()
+                    self._corporate_valuation_cache.clear()
                 self._refresh_health_snapshot()
 
     def fred_catalog_refresh_request(
@@ -967,6 +1009,7 @@ class AaplLocalController:
             self._market_chart_cache.clear()
             self._btc_market_chart_cache.clear()
             self._listed_market_chart_cache.clear()
+            self._corporate_valuation_cache.clear()
             self._btc_intraday_chart_cache.clear()
             self._fundamental_trend_cache.clear()
             self._fundamental_research_cache.clear()
@@ -1324,6 +1367,23 @@ class AaplLocalWebApplication:
             ).to_json_dict()
         raise ValueError("market chart asset_id is not supported")
 
+    def valuation(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Validate and query the isolated latest-annual valuation contract."""
+        allowed = {"asset_id", "known_at", "valuation_date", "basis"}
+        if set(parameters) - allowed:
+            raise ValueError("valuation query contains unsupported parameters")
+        asset_id = _one_parameter(parameters, "asset_id", required=True)
+        self._market_asset(asset_id)
+        request = CorporateValuationRequest(
+            asset_id=asset_id,
+            known_at=_aware_datetime(_one_parameter(parameters, "known_at", required=True)),
+            valuation_date=date.fromisoformat(
+                _one_parameter(parameters, "valuation_date", required=True)
+            ),
+            basis=_one_parameter(parameters, "basis", required=False) or "latest_annual",
+        )
+        return self._controller.corporate_valuation_request(request).to_json_dict()
+
     def market_intraday(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate and return the fixed 24-hour BTC-USD intraday chart."""
         allowed = {"asset_id", "known_at", "interval"}
@@ -1625,6 +1685,11 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(HTTPStatus.OK, server.application.market_chart(parameters))
                 return
+            if parsed.path == "/api/v1/valuation":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(HTTPStatus.OK, server.application.valuation(parameters))
+                return
             if parsed.path == "/api/market-intraday":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
                 parameters = {key: tuple(values) for key, values in raw.items()}
@@ -1839,6 +1904,7 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 BtcIntradayChartQueryError,
                 BtcMarketChartQueryError,
                 ConsolidatedDiagnosticQueryError,
+                CorporateValuationError,
                 FundamentalResearchError,
                 FundamentalResearchHistoryError,
             ),

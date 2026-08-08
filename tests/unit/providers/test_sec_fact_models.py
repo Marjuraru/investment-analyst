@@ -77,6 +77,7 @@ def test_research_fact_catalog_is_additive_and_has_unique_fields_and_tags() -> N
         "fundamental.shares_outstanding",
         "fundamental.gross_profit",
         "fundamental.operating_income",
+        "fundamental.depreciation_and_amortization",
         "fundamental.operating_cash_flow",
         "fundamental.capital_expenditures",
         "fundamental.share_based_compensation",
@@ -132,6 +133,13 @@ def test_ifrs_profile_maps_only_explicit_comparable_concepts() -> None:
             taxonomy="ifrs-full",
         ).tag
         == "CashFlowsFromUsedInOperatingActivities"
+    )
+    assert (
+        get_sec_fact_definition(
+            "fundamental.depreciation_and_amortization",
+            taxonomy="ifrs-full",
+        ).tag
+        == "DepreciationAndAmortisationExpense"
     )
     assert len({item.field_name for item in SEC_IFRS_NORMALIZED_FACT_DEFINITIONS}) == len(
         SEC_IFRS_NORMALIZED_FACT_DEFINITIONS

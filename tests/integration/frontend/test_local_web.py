@@ -53,6 +53,10 @@ from investment_analyst.analytics.market.chart_models import (
     ListedMarketChart,
 )
 from investment_analyst.analytics.market.intraday_models import IntradayInterval
+from investment_analyst.analytics.valuation import (
+    CorporateValuationRequest,
+    CorporateValuationSnapshot,
+)
 from investment_analyst.application.aapl_bootstrap_models import AaplWorkspaceBootstrapRequest
 from investment_analyst.application.asset_preferences import (
     AssetPreferenceEntry,
@@ -205,6 +209,8 @@ class _FakeApplication:
         self.fundamental_refresh_requests: list[SecIssuerFundamentalRefreshRequest] = []
         self.fundamental_refresh_locations: list[StorageLocationRequest] = []
         self.fundamental_refresh_identities: list[SecEdgarIdentity] = []
+        self.valuation_requests: list[CorporateValuationRequest] = []
+        self.valuation_locations: list[StorageLocationRequest] = []
 
     def list_market_assets(self) -> MarketAssetUniverse:
         return InvestmentAnalystApplication.create_default().list_market_assets()
@@ -220,6 +226,29 @@ class _FakeApplication:
         return cast(
             AaplDailyDiagnosticReport,
             _JsonResult({"schema_version": "aapl-daily-diagnostic-report-v1"}),
+        )
+
+    def query_corporate_valuation(
+        self,
+        request: CorporateValuationRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationSnapshot:
+        self.valuation_requests.append(request)
+        self.valuation_locations.append(location)
+        return cast(
+            CorporateValuationSnapshot,
+            _JsonResult(
+                {
+                    "schema_version": "corporate-valuation-snapshot-v1",
+                    "asset_id": request.asset_id,
+                    "request": request.model_dump(mode="json"),
+                    "status": (
+                        "not_applicable" if request.asset_id == "crypto:btc-usd" else "partial"
+                    ),
+                    "metrics": [],
+                }
+            ),
         )
 
     def query_aapl_market_chart(
@@ -562,6 +591,101 @@ class _FakeApplication:
         )
 
 
+def test_valuation_api_is_versioned_read_only_and_allows_non_applicable_assets(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    with _server(web) as (_, root):
+        common = {
+            "known_at": "2026-07-16T15:46:09Z",
+            "valuation_date": "2026-07-15",
+            "basis": "latest_annual",
+        }
+        status, payload, _ = _json_request(
+            Request(
+                f"{root}/api/v1/valuation?{urlencode({'asset_id': 'equity:us:aapl', **common})}"
+            )
+        )
+        cached_status, cached_payload, _ = _json_request(
+            Request(
+                f"{root}/api/v1/valuation?{urlencode({'asset_id': 'equity:us:aapl', **common})}"
+            )
+        )
+        btc_status, btc_payload, _ = _json_request(
+            Request(
+                f"{root}/api/v1/valuation?{urlencode({'asset_id': 'crypto:btc-usd', **common})}"
+            )
+        )
+        invalid_status, invalid, _ = _json_request(
+            Request(
+                f"{root}/api/v1/valuation?"
+                f"{urlencode({'asset_id': 'equity:us:aapl', 'unknown': 'x', **common})}"
+            )
+        )
+        missing_status, missing, _ = _json_request(
+            Request(
+                f"{root}/api/v1/valuation?{urlencode({'asset_id': 'equity:us:missing', **common})}"
+            )
+        )
+
+    assert status == 200
+    assert payload["schema_version"] == "corporate-valuation-snapshot-v1"
+    assert payload["request"]["basis"] == "latest_annual"
+    assert cached_status == 200
+    assert cached_payload == payload
+    assert btc_status == 200
+    assert btc_payload["status"] == "not_applicable"
+    assert invalid_status == 400
+    assert invalid["error"]["code"] == "invalid_request"
+    assert missing_status == 400
+    assert missing["error"]["code"] == "invalid_request"
+    assert application.valuation_requests[0].valuation_date == date(2026, 7, 15)
+    assert application.valuation_locations == [
+        StorageLocationRequest(workspace=tmp_path / "workspace"),
+        StorageLocationRequest(workspace=tmp_path / "workspace"),
+    ]
+
+
+def test_valuation_api_redacts_unexpected_storage_details(tmp_path: Path) -> None:
+    application = _FakeApplication()
+
+    def fail_query(*args: object, **kwargs: object) -> CorporateValuationSnapshot:
+        raise RuntimeError("simulated storage failure with SECRET-token")
+
+    application.query_corporate_valuation = fail_query  # type: ignore[method-assign]
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    parameters = urlencode(
+        {
+            "asset_id": "equity:us:aapl",
+            "known_at": "2026-07-16T15:46:09Z",
+            "valuation_date": "2026-07-15",
+        }
+    )
+
+    with _server(web) as (_, root):
+        status, payload, _ = _json_request(Request(f"{root}/api/v1/valuation?{parameters}"))
+
+    assert status == 500
+    assert payload["error"]["code"] == "unexpected_error"
+    assert "SECRET" not in json.dumps(payload)
+
+
 class _ExplodingApplication:
     def market_assets(self) -> dict[str, object]:
         raise RuntimeError("unexpected SECRET detail")
@@ -742,6 +866,11 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'id="export-fundamental-csv"' in html
     assert 'id="export-fundamental-research-csv"' in html
     assert 'id="export-report-json"' in html
+    assert 'id="valuation-nav-link"' in html
+    assert 'id="valuation-card"' in html
+    assert 'class="valuation-card" aria-busy="false"' in html
+    assert 'id="valuation-evidence" tabindex="0"' in html
+    assert "data-valuation-only" in html
     assert 'byId("fundamental-chart-symbol").textContent = presentation.symbol;' in javascript
     assert "Evolución fundamental de ${marketAssetPresentation().name}" in javascript
     assert 'byId("market-chart").setAttribute(' in javascript
@@ -859,6 +988,10 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "function exportFundamentalCsv()" in javascript
     assert "function exportFundamentalResearchCsv()" in javascript
     assert "function exportReportJson()" in javascript
+    assert "function renderValuation(payload)" in javascript
+    assert "function exportValuationJson()" in javascript
+    assert "descriptor.has_corporate_valuation" in javascript
+    assert "api(`/api/v1/valuation?${parameters.toString()}`)" in javascript
     assert '"long_sma_input_observation_ids"' in javascript
     assert '"third_sma_input_observation_ids"' in javascript
     assert '"observation_id"' in javascript
@@ -887,12 +1020,15 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert ".fundamental-research-audit" in stylesheet
     assert ".fundamental-research-metric-change" in stylesheet
     assert ".data-export-button" in stylesheet
+    assert ".valuation-metrics" in stylesheet
+    assert ".valuation-evidence-disclosure pre" in stylesheet
     assert ":focus-visible" in stylesheet
     assert "min-height: 44px" in stylesheet
     assert "prefers-reduced-motion" in stylesheet
     assert "forced-colors: active" in stylesheet
     startup = javascript[javascript.index("async function initialize()") :]
     assert startup.index("await loadMarketAssets();") < startup.index("initializeChartSettings();")
+    assert "queryValuation()" not in startup
 
 
 def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Path) -> None:

@@ -56,6 +56,7 @@ class AaplBootstrapStage(StrEnum):
     FUNDAMENTAL_DIAGNOSTIC = "fundamental_diagnostic"
     MARKET_STATISTICS = "market_statistics"
     MARKET_DIAGNOSTIC = "market_diagnostic"
+    CORPORATE_VALUATION = "corporate_valuation"
     CONSOLIDATED_QUERY = "consolidated_query"
 
 
@@ -272,6 +273,7 @@ class AaplBootstrapStageDetails(ContractModel):
     coverage_receipts_created: int | None = Field(default=None, ge=0)
     coverage_receipts_reused: int | None = Field(default=None, ge=0)
     empty_intervals_completed: int | None = Field(default=None, ge=0)
+    metrics_not_evaluable: int | None = Field(default=None, ge=0)
     message: NonEmptyStr | None = None
 
     @field_validator(
@@ -280,6 +282,7 @@ class AaplBootstrapStageDetails(ContractModel):
         "coverage_receipts_created",
         "coverage_receipts_reused",
         "empty_intervals_completed",
+        "metrics_not_evaluable",
         mode="before",
     )
     @classmethod
@@ -313,6 +316,7 @@ class AaplBootstrapStageDetails(ContractModel):
             "coverage_receipts_created": self.coverage_receipts_created,
             "coverage_receipts_reused": self.coverage_receipts_reused,
             "empty_intervals_completed": self.empty_intervals_completed,
+            "metrics_not_evaluable": self.metrics_not_evaluable,
             "message": self.message,
         }
 
@@ -388,6 +392,9 @@ class AaplWorkspaceBootstrapSummary(ContractModel):
     observations_reused: int = Field(ge=0)
     metric_results_created: int = Field(ge=0)
     metric_results_reused: int = Field(ge=0)
+    valuation_metric_results_created: int = Field(default=0, ge=0)
+    valuation_metric_results_reused: int = Field(default=0, ge=0)
+    valuation_metrics_not_evaluable: int = Field(default=0, ge=0)
     diagnostics_created: int = Field(ge=0)
     diagnostics_reused: int = Field(ge=0)
     traceability_verified: bool
@@ -399,6 +406,9 @@ class AaplWorkspaceBootstrapSummary(ContractModel):
         "observations_reused",
         "metric_results_created",
         "metric_results_reused",
+        "valuation_metric_results_created",
+        "valuation_metric_results_reused",
+        "valuation_metrics_not_evaluable",
         "diagnostics_created",
         "diagnostics_reused",
         mode="before",
@@ -466,6 +476,9 @@ class AaplWorkspaceBootstrapSummary(ContractModel):
                 "observations_reused": self.observations_reused,
                 "metric_results_created": self.metric_results_created,
                 "metric_results_reused": self.metric_results_reused,
+                "valuation_metric_results_created": self.valuation_metric_results_created,
+                "valuation_metric_results_reused": self.valuation_metric_results_reused,
+                "valuation_metrics_not_evaluable": self.valuation_metrics_not_evaluable,
                 "diagnostics_created": self.diagnostics_created,
                 "diagnostics_reused": self.diagnostics_reused,
             },

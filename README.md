@@ -161,6 +161,9 @@ información de la que realmente contienen.
   consultar agregaciones trazables por CLI o interfaz sin mezclar la historia diaria.
 - [Refresh fundamental SEC por emisor](docs/sec_issuer_refresh.md): actualizar snapshots,
   observaciones, métricas y diagnóstico de una empresa configurada sin acoplarla a su mercado.
+- [Valoración corporativa point-in-time](docs/corporate_valuation_point_in_time.md): alinear precio
+  y último ejercicio anual, persistir múltiplos/yields descriptivos y explicar ausencias sin score,
+  recomendación, TTM ni FX.
 - [Estrategia BVL/SMV](docs/bvl_market_strategy.md): plan gratuito por fases para identidad,
   cotización diferida, fundamentales y futura sustitución de proveedores.
 - [Registro SMV y universo BVL](docs/smv_bvl_registry.md): actualizar y consultar las seis

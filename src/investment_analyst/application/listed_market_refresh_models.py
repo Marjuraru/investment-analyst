@@ -71,6 +71,9 @@ class ListedMarketRefreshSummary(ContractModel):
     coverage_receipts_reused: int = Field(ge=0)
     metric_results_created: int = Field(ge=0)
     metric_results_reused: int = Field(ge=0)
+    valuation_metric_results_created: int = Field(default=0, ge=0)
+    valuation_metric_results_reused: int = Field(default=0, ge=0)
+    valuation_metrics_not_evaluable: int = Field(default=0, ge=0)
     diagnostics_created: int = Field(ge=0)
     diagnostics_reused: int = Field(ge=0)
     diagnostic_verdict: DiagnosticVerdict
@@ -88,6 +91,9 @@ class ListedMarketRefreshSummary(ContractModel):
         "coverage_receipts_reused",
         "metric_results_created",
         "metric_results_reused",
+        "valuation_metric_results_created",
+        "valuation_metric_results_reused",
+        "valuation_metrics_not_evaluable",
         "diagnostics_created",
         "diagnostics_reused",
         mode="before",

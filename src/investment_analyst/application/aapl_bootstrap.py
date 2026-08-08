@@ -26,6 +26,12 @@ from investment_analyst.analytics.market.statistics_models import (
 from investment_analyst.analytics.market.statistics_pipeline import (
     MarketStatisticsPipeline,
 )
+from investment_analyst.analytics.valuation import (
+    CorporateValuationPersistencePipeline,
+    CorporateValuationRequest,
+    CorporateValuationService,
+    ValuationPersistenceSummary,
+)
 from investment_analyst.application.aapl_bootstrap_models import (
     AaplBootstrapStage,
     AaplBootstrapStageDetails,
@@ -178,6 +184,8 @@ class AaplWorkspaceBootstrapPipeline:
         market_statistics_pipeline: MarketStatisticsPipeline,
         market_diagnostic_pipeline: MarketDiagnosticPipeline,
         consolidated_service: AaplConsolidatedDiagnosticService,
+        valuation_service: CorporateValuationService | None = None,
+        valuation_pipeline: CorporateValuationPersistencePipeline | None = None,
         market_refresh_planner: AaplMarketRefreshPlanner | None = None,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
@@ -192,6 +200,10 @@ class AaplWorkspaceBootstrapPipeline:
         self._market_statistics_pipeline = market_statistics_pipeline
         self._market_diagnostic_pipeline = market_diagnostic_pipeline
         self._consolidated_service = consolidated_service
+        if (valuation_service is None) != (valuation_pipeline is None):
+            raise ValueError("valuation service and pipeline must be configured together")
+        self._valuation_service = valuation_service
+        self._valuation_pipeline = valuation_pipeline
         self._market_refresh_planner = market_refresh_planner or AaplMarketRefreshPlanner(storage)
         self._clock = clock
 
@@ -251,6 +263,8 @@ class AaplWorkspaceBootstrapPipeline:
         stages.append(market_statistics[0])
         market_diagnostic = self._run_market_diagnostic(market_query)
         stages.append(market_diagnostic[0])
+        valuation = self._run_valuation(request, effective_known_at)
+        stages.append(valuation[0])
         consolidated, consolidated_stage = self._run_consolidated(
             request,
             effective_known_at,
@@ -291,11 +305,18 @@ class AaplWorkspaceBootstrapPipeline:
                 + sum(item.observations_reused for item in market_fetch[1])
             ),
             metric_results_created=(
-                fundamental_metrics[1].metrics_created + market_statistics[1].results_created
+                fundamental_metrics[1].metrics_created
+                + market_statistics[1].results_created
+                + valuation[1].metric_results_created
             ),
             metric_results_reused=(
-                fundamental_metrics[1].metrics_reused + market_statistics[1].results_reused
+                fundamental_metrics[1].metrics_reused
+                + market_statistics[1].results_reused
+                + valuation[1].metric_results_reused
             ),
+            valuation_metric_results_created=valuation[1].metric_results_created,
+            valuation_metric_results_reused=valuation[1].metric_results_reused,
+            valuation_metrics_not_evaluable=valuation[1].metrics_not_evaluable,
             diagnostics_created=(
                 fundamental_diagnostic[1].diagnostics_created
                 + market_diagnostic[1].diagnostics_created
@@ -313,6 +334,68 @@ class AaplWorkspaceBootstrapPipeline:
         ):
             raise BootstrapIncompleteError(summary)
         return summary
+
+    def _run_valuation(
+        self,
+        request: AaplWorkspaceBootstrapRequest,
+        known_at: datetime,
+    ) -> tuple[AaplBootstrapStageSummary, ValuationPersistenceSummary]:
+        stage = AaplBootstrapStage.CORPORATE_VALUATION
+        if self._valuation_service is None or self._valuation_pipeline is None:
+            summary = ValuationPersistenceSummary(
+                definitions_created=0,
+                definitions_reused=0,
+                metric_results_created=0,
+                metric_results_reused=0,
+                metrics_not_evaluable=0,
+                metrics_not_applicable=0,
+            )
+            return (
+                _stage_summary(
+                    stage=stage,
+                    status=AaplBootstrapStageStatus.SKIPPED,
+                    generated=0,
+                    created=0,
+                    reused=0,
+                    timestamp=known_at,
+                    details=AaplBootstrapStageDetails(
+                        message="Corporate valuation is not configured for this pipeline."
+                    ),
+                ),
+                summary,
+            )
+        try:
+            snapshot = self._valuation_service.query(
+                CorporateValuationRequest(
+                    asset_id=ASSET_ID,
+                    known_at=known_at,
+                    valuation_date=request.market_end,
+                )
+            )
+            summary = self._valuation_pipeline.persist(snapshot)
+        except (RuntimeError, ValueError) as error:
+            raise BootstrapStageError(stage, error) from error
+        generated = (
+            summary.metric_results_created
+            + summary.metric_results_reused
+            + summary.metrics_not_evaluable
+            + summary.metrics_not_applicable
+        )
+        return (
+            _stage_summary(
+                stage=stage,
+                generated=generated,
+                created=summary.metric_results_created,
+                reused=summary.metric_results_reused,
+                timestamp=snapshot.computed_at,
+                details=AaplBootstrapStageDetails(
+                    source_id=snapshot.fundamental_source_id,
+                    metrics_not_evaluable=summary.metrics_not_evaluable,
+                    message="Independent latest-annual corporate valuation persisted or reused.",
+                ),
+            ),
+            summary,
+        )
 
     def _run_sec_fetch(self):
         stage = AaplBootstrapStage.SEC_FETCH

@@ -7,7 +7,9 @@ from pydantic import ConfigDict, Field, model_validator
 
 from investment_analyst.application.analysis_capabilities import (
     AssetAnalysisCapabilities,
+    AssetAnalysisFamily,
     CryptoAnalyticalProfile,
+    FundamentalAnalysisMode,
     analysis_capabilities_for,
 )
 from investment_analyst.catalog.provider_configuration import (
@@ -49,6 +51,7 @@ class MarketAssetDescriptor(ContractModel):
     default_market_start: date
     analysis: AssetAnalysisCapabilities
     has_fundamentals: bool
+    has_corporate_valuation: bool = False
     fundamental_frequencies: tuple[DataFrequency, ...]
     fundamental_source_ids: tuple[NonEmptyStr, ...] = ()
     supports_intraday: bool
@@ -72,6 +75,12 @@ class MarketAssetDescriptor(ContractModel):
             raise ValueError("visible market assets require configured market data")
         if self.has_fundamentals and not self.analysis.fundamental_data_configured:
             raise ValueError("fundamental analysis requires declared fundamental data")
+        if self.has_corporate_valuation and (
+            not self.has_fundamentals
+            or self.analysis.family is not AssetAnalysisFamily.LISTED_COMPANY
+            or self.analysis.fundamental_mode is not FundamentalAnalysisMode.CORPORATE
+        ):
+            raise ValueError("corporate valuation requires a listed corporate issuer")
         expected_frequencies = (
             tuple(sorted(set(self.fundamental_frequencies), key=lambda item: item.value))
             if self.has_fundamentals
@@ -193,6 +202,13 @@ def _descriptor(
             ),
             analysis=analysis,
             has_fundamentals=fundamental_pipeline_available,
+            has_corporate_valuation=(
+                fundamental_pipeline_available
+                and asset.security_unit_factor is not None
+                and asset.security_unit_basis is not None
+                and asset.security_unit_basis_version is not None
+                and asset.security_unit_market_adjustment == "all"
+            ),
             fundamental_frequencies=fundamental_frequencies,
             fundamental_source_ids=(
                 tuple(
@@ -231,6 +247,7 @@ def _descriptor(
             default_market_start=_COINBASE_HISTORY_START,
             analysis=analysis,
             has_fundamentals=False,
+            has_corporate_valuation=False,
             fundamental_frequencies=(),
             fundamental_source_ids=(),
             supports_intraday=_MINUTE_MARKET_CAPABILITY in binding.capabilities,
