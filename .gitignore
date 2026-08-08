@@ -4,6 +4,8 @@ __pycache__/
 *$py.class
 *.egg-info/
 build/
+!.agents/skills/build/
+!.agents/skills/build/**
 dist/
 .eggs/
 

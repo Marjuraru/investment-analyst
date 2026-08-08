@@ -1,0 +1,118 @@
+name: Work Block
+description: Define one cohesive development capability and its gates
+title: "[WORK-BLOCK] "
+labels:
+  - workflow:active
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Only one principal Work Block may carry workflow:active. Complete every required field so
+        PLAN, BUILD, and AUDIT can resolve the target fail-closed.
+  - type: input
+    id: work_block
+    attributes:
+      label: Work Block
+      placeholder: BASE-18 or DEV-2
+    validations:
+      required: true
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: Observable capability delivered by this block.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options: [S1, S2, S3]
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      options: [R0, R1, R2, R3]
+    validations:
+      required: true
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Profile
+      options: [FAST, STANDARD, CRITICAL]
+    validations:
+      required: true
+  - type: input
+    id: base_sha
+    attributes:
+      label: Base SHA
+      description: Full commit SHA from which implementation must start.
+    validations:
+      required: true
+  - type: input
+    id: expected_branch
+    attributes:
+      label: Expected branch
+      placeholder: codex/short-capability-name
+    validations:
+      required: true
+  - type: input
+    id: owner
+    attributes:
+      label: Implementation owner
+      description: Single writer role or specialist.
+    validations:
+      required: true
+  - type: dropdown
+    id: parallel_authoring
+    attributes:
+      label: Parallel authoring
+      options:
+        - "NO"
+        - "YES — isolated worktrees and paths defined below"
+    validations:
+      required: true
+  - type: dropdown
+    id: ci_required
+    attributes:
+      label: CI required
+      options: ["YES", "NO — justified below"]
+    validations:
+      required: true
+  - type: dropdown
+    id: smoke_required
+    attributes:
+      label: Real smoke required
+      options: ["NO", "YES"]
+    validations:
+      required: true
+  - type: dropdown
+    id: audit_required
+    attributes:
+      label: Independent audit required
+      options: ["NO", "YES"]
+    validations:
+      required: true
+  - type: textarea
+    id: scope_contract
+    attributes:
+      label: Scope and non-scope
+      description: Files/domains allowed, exclusions, invariants, compatibility and protected work.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria and negative cases
+      description: Verifiable behavior, focused tests, smoke evidence and failure cases.
+    validations:
+      required: true
+  - type: textarea
+    id: routing
+    attributes:
+      label: Routing and residual risks
+      description: Recommended builder/model, audit route, known limitations and decisions.
+    validations:
+      required: true
