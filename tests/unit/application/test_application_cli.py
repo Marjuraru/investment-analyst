@@ -100,7 +100,7 @@ def test_scripts_and_facade_keep_explicit_storage_access_modes() -> None:
     facade = (_PROJECT_ROOT / "src" / "investment_analyst" / "application" / "facade.py").read_text(
         encoding="utf-8"
     )
-    assert facade.count("access_mode=WorkspaceAccessMode.READ_ONLY") == 11
+    assert facade.count("access_mode=WorkspaceAccessMode.READ_ONLY") == 12
     assert "def query_fred_point_in_time(" in facade
     assert "def query_bvl_registry(" in facade
     assert "def query_aapl_diagnostics(" in facade
@@ -113,6 +113,8 @@ def test_scripts_and_facade_keep_explicit_storage_access_modes() -> None:
     assert "def refresh_sec_fundamentals(" in facade
     assert "def refresh_btc_intraday(" in facade
     assert "def query_aapl_fundamental_trend(" in facade
+    assert "def query_corporate_valuation(" in facade
+    assert "def persist_corporate_valuation(" in facade
     assert "def query_sec_fundamental_trend(" in facade
     assert "def query_aapl_fundamental_research(" in facade
     assert "def query_aapl_fundamental_research_history(" in facade
@@ -123,7 +125,7 @@ def test_scripts_and_facade_keep_explicit_storage_access_modes() -> None:
     assert "def refresh_fred_vintage(" in facade
     assert "def refresh_fred_catalog_series(" in facade
     assert "def refresh_bvl_registry(" in facade
-    assert facade.count("access_mode=WorkspaceAccessMode.READ_WRITE") == 8
+    assert facade.count("access_mode=WorkspaceAccessMode.READ_WRITE") == 9
 
 
 def test_operational_cli_delegates_without_direct_storage_or_dotenv() -> None:
