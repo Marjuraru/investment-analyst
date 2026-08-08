@@ -379,11 +379,15 @@ antes de habilitar cualquier canal externo.
 
 ### Etapa C — Valoración y notificaciones
 
-- métricas point-in-time;
+- consumir las métricas de valoración point-in-time ya persistidas por el dominio independiente;
 - reglas de valoración;
 - Telegram, correo o notificación local;
 - outbox reanudable;
 - resumen diario.
+
+La entrega de valoración no activa todavía reglas, candidatos, outbox ni notificaciones. Un bloque
+posterior podrá referenciar sus `MetricResult` y reason codes sin recalcular fórmulas ni convertir
+missingness en cero.
 
 ### Etapa D — Eventos e IA
 

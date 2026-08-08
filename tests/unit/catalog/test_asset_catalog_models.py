@@ -1,5 +1,7 @@
 """Unit tests for strict immutable asset catalog models."""
 
+from decimal import Decimal
+
 import pytest
 from pydantic import ValidationError
 
@@ -105,6 +107,42 @@ def test_catalog_asset_rejects_duplicate_binding_identity() -> None:
     binding = _binding()
     with pytest.raises(ValidationError, match="duplicate identities"):
         _asset(provider_bindings=(binding, binding))
+
+
+def test_security_unit_contract_is_exact_complete_and_equity_only() -> None:
+    configured = _asset(
+        security_unit_factor="1",
+        security_unit_basis="reported_common_share",
+        security_unit_basis_version="security-unit-basis-v1",
+        security_unit_market_adjustment="all",
+    )
+    assert configured.security_unit_factor == Decimal("1")
+
+    with pytest.raises(ValidationError, match="must use Decimal-compatible text"):
+        _asset(
+            security_unit_factor=1.0,
+            security_unit_basis="reported_common_share",
+            security_unit_basis_version="security-unit-basis-v1",
+            security_unit_market_adjustment="all",
+        )
+    with pytest.raises(ValidationError, match="declared together"):
+        _asset(security_unit_factor="1")
+    with pytest.raises(ValidationError, match="only valid for equities"):
+        _asset(
+            asset_id="fund:test",
+            asset_class=AssetClass.ETF,
+            security_unit_factor="1",
+            security_unit_basis="reported_common_share",
+            security_unit_basis_version="security-unit-basis-v1",
+            security_unit_market_adjustment="all",
+        )
+    with pytest.raises(ValidationError):
+        _asset(
+            security_unit_factor="1",
+            security_unit_basis="reported_common_share",
+            security_unit_basis_version="security-unit-basis-v1",
+            security_unit_market_adjustment="raw",
+        )
 
 
 def test_document_rejects_external_binding_shared_by_different_assets() -> None:

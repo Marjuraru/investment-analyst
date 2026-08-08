@@ -1,7 +1,9 @@
 """Strict, immutable models for the versioned asset catalog."""
 
 import re
+from decimal import Decimal
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import ConfigDict, StrictBool, StrictInt, field_validator, model_validator
 
@@ -85,6 +87,25 @@ class CatalogAsset(Asset):
     aliases: tuple[NonEmptyStr, ...]
     provider_bindings: tuple[ProviderBinding, ...]
     crypto_profile: CatalogCryptoProfile | None = None
+    security_unit_factor: Decimal | None = None
+    security_unit_basis: Literal["reported_common_share", "depositary_receipt"] | None = None
+    security_unit_basis_version: NonEmptyStr | None = None
+    security_unit_market_adjustment: Literal["all"] | None = None
+
+    @field_validator("security_unit_factor", mode="before")
+    @classmethod
+    def reject_unsafe_security_unit_factor(cls, value: object) -> object:
+        """Keep market-price to reported-share conversion explicit and exact."""
+        if isinstance(value, (bool, float)):
+            raise ValueError("security_unit_factor must use Decimal-compatible text, not float")
+        return value
+
+    @field_validator("security_unit_factor")
+    @classmethod
+    def validate_security_unit_factor(cls, value: Decimal | None) -> Decimal | None:
+        if value is not None and (not value.is_finite() or value <= 0):
+            raise ValueError("security_unit_factor must be a finite positive Decimal")
+        return value
 
     @field_validator("aliases")
     @classmethod
@@ -120,6 +141,20 @@ class CatalogAsset(Asset):
             raise ValueError("crypto assets require an explicit crypto_profile")
         if self.asset_class is not AssetClass.CRYPTO and self.crypto_profile is not None:
             raise ValueError("crypto_profile is only valid for crypto assets")
+        unit_contract = (
+            self.security_unit_factor,
+            self.security_unit_basis,
+            self.security_unit_basis_version,
+            self.security_unit_market_adjustment,
+        )
+        if any(value is not None for value in unit_contract) and not all(
+            value is not None for value in unit_contract
+        ):
+            raise ValueError("security unit contract fields must be declared together")
+        if self.asset_class is not AssetClass.EQUITY and any(
+            value is not None for value in unit_contract
+        ):
+            raise ValueError("security unit contracts are only valid for equities")
         return self
 
 

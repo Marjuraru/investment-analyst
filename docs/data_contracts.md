@@ -42,5 +42,14 @@ its input observation identifiers. Every normalized observation points to a raw 
 source reference. The raw record preserves the original payload and source metadata. This chain makes
 it possible to trace a diagnostic back to the records from which it was derived.
 
-These contracts define data only. The project still has no persistence layer, database, provider
-connection, financial calculation, real diagnostic logic, API, or user interface.
+These core contracts define data only; persistence, providers, calculations, diagnostics, API and
+the local interface remain in their dedicated layers.
+
+## Corporate valuation snapshot
+
+`corporate-valuation-request-v1` fija activo, `known_at`, fecha y `latest_annual`.
+`corporate-valuation-snapshot-v1` publica selección de precio/filing, edad, moneda, contrato de
+unidad, inputs con raw/source/observation IDs, definiciones versionadas, resultados y cobertura.
+Cada resultado evaluado conserva `result_id`, `available_at` e inputs específicos; una ausencia usa
+un reason code y nunca un cero. Véase
+[`corporate_valuation_point_in_time.md`](corporate_valuation_point_in_time.md).

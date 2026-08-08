@@ -118,6 +118,13 @@ SEC_RESEARCH_FACT_DEFINITIONS = (
         period_type=SecFactPeriodType.DURATION,
     ),
     SecFactDefinition(
+        field_name="fundamental.depreciation_and_amortization",
+        taxonomy="us-gaap",
+        tag="DepreciationDepletionAndAmortization",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
         field_name="fundamental.operating_cash_flow",
         taxonomy="us-gaap",
         tag="NetCashProvidedByUsedInOperatingActivities",
@@ -380,6 +387,13 @@ SEC_IFRS_RESEARCH_FACT_DEFINITIONS = (
         field_name="fundamental.operating_income",
         taxonomy="ifrs-full",
         tag="ProfitLossFromOperatingActivities",
+        unit="USD",
+        period_type=SecFactPeriodType.DURATION,
+    ),
+    SecFactDefinition(
+        field_name="fundamental.depreciation_and_amortization",
+        taxonomy="ifrs-full",
+        tag="DepreciationAndAmortisationExpense",
         unit="USD",
         period_type=SecFactPeriodType.DURATION,
     ),

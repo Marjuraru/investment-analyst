@@ -1,6 +1,6 @@
 """Tests for the stable application facade."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -17,6 +17,11 @@ from investment_analyst.analytics.market.chart_models import (
     BtcMarketChartRequest,
 )
 from investment_analyst.analytics.market.intraday_models import IntradayInterval
+from investment_analyst.analytics.valuation import (
+    CorporateValuationRequest,
+    ValuationReasonCode,
+    ValuationSnapshotStatus,
+)
 from investment_analyst.application.btc_intraday_models import BtcIntradayChartRequest
 from investment_analyst.application.facade import InvestmentAnalystApplication
 from investment_analyst.application.runtime import ApplicationRuntime, StorageLocationRequest
@@ -127,6 +132,42 @@ def test_query_returns_versioned_report_without_writes_or_providers(tmp_path: Pa
     assert report.to_json_dict()["schema_version"] == "aapl-daily-diagnostic-report-v1"
     assert report.to_json_dict()["status"] == "unavailable"
     assert report.view.request == _request()
+    assert storage_paths.database_path.read_bytes() == database_before
+
+
+def test_valuation_query_is_read_only_provider_free_and_capability_driven(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "legacy-valuation"
+    storage_paths = StoragePaths.from_root(root)
+    with LocalStorage(storage_paths):
+        pass
+    database_before = storage_paths.database_path.read_bytes()
+    application = _application(tmp_path)
+    location = StorageLocationRequest(legacy_root=root)
+
+    def query(asset_id: str):
+        return application.query_corporate_valuation(
+            CorporateValuationRequest(
+                asset_id=asset_id,
+                known_at=datetime(2026, 7, 14, 4, 41, 55, tzinfo=UTC),
+                valuation_date=date(2026, 7, 13),
+            ),
+            location=location,
+        )
+
+    apple = query("equity:us:aapl")
+    foreign_adr = query("equity:us:bvn")
+    etf = query("etf:us:ibit")
+    bitcoin = query("crypto:btc-usd")
+
+    assert apple.schema_version == "corporate-valuation-snapshot-v1"
+    assert apple.status is ValuationSnapshotStatus.NOT_EVALUABLE
+    assert {item.reason_code for item in apple.metrics} == {ValuationReasonCode.PRICE_UNAVAILABLE}
+    assert {item.reason_code for item in foreign_adr.metrics} == {
+        ValuationReasonCode.SHARE_BASIS_UNAVAILABLE
+    }
+    assert etf.status is bitcoin.status is ValuationSnapshotStatus.NOT_APPLICABLE
     assert storage_paths.database_path.read_bytes() == database_before
 
 

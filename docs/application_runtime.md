@@ -92,3 +92,10 @@ a default. Existing data is not migrated automatically. The runtime changes comp
 does not alter financial algorithms, source IDs, deterministic IDs, recommendations, or trading
 behavior. The standalone simulated demonstration remains on its legacy explicit-root interface;
 financial provider, normalization, metric, diagnostic, and consolidated commands use the runtime.
+
+## Valuation composition
+
+`InvestmentAnalystApplication.query_corporate_valuation(...)` resuelve activo, capacidades,
+fuentes y unidad desde `ApplicationRuntime`, abre storage read-only y no construye transporte.
+`persist_corporate_valuation(...)` y los refresh elegibles reutilizan una sola conexión writer. La
+composición no depende del cwd ni introduce allowlists por símbolo.

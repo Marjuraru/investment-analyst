@@ -62,6 +62,7 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     assert apple.analysis.market_mode is MarketAnalysisMode.LISTED_SECURITY
     assert apple.analysis.fundamental_mode is FundamentalAnalysisMode.CORPORATE
     assert apple.analysis.fundamental_data_configured
+    assert apple.has_corporate_valuation
     assert apple.default_market_start == date(2016, 1, 1)
     assert not apple.supports_intraday
 
@@ -72,10 +73,12 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
         "fundamentals.submissions",
     )
     assert amd.has_fundamentals
+    assert amd.has_corporate_valuation
     assert amd.refresh_kind == "market_only"
     for symbol in ("B", "BVN", "TSM"):
         foreign_issuer = by_symbol[symbol]
         assert foreign_issuer.has_fundamentals
+        assert not foreign_issuer.has_corporate_valuation
         assert foreign_issuer.fundamental_frequencies == (DataFrequency.ANNUAL,)
     intel = by_symbol["INTC"]
     assert intel.analysis.fundamental_data_configured
@@ -103,6 +106,7 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     assert bitcoin.analysis.market_mode is MarketAnalysisMode.CRYPTO_SPOT
     assert bitcoin.analysis.fundamental_mode is FundamentalAnalysisMode.CRYPTO_NETWORK
     assert not bitcoin.analysis.fundamental_data_configured
+    assert not bitcoin.has_corporate_valuation
     assert bitcoin.intraday_source_id == "coinbase-exchange:btc-usd:minute-1-candles"
     assert bitcoin.default_market_start == date(2015, 7, 20)
 

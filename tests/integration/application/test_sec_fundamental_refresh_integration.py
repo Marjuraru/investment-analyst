@@ -7,6 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from investment_analyst.analytics.valuation import (
+    CorporateValuationRequest,
+    ValuationPersistenceSummary,
+)
 from investment_analyst.application.sec_fundamental_refresh import (
     SecIssuerFundamentalKnownAtTooEarlyError,
     SecIssuerFundamentalRefreshPipeline,
@@ -95,6 +99,27 @@ class _FixtureTransport:
 class _FailingDiagnosticPipeline:
     def run(self, request):
         raise RuntimeError("synthetic diagnostic failure")
+
+
+class _ValuationService:
+    def __init__(self) -> None:
+        self.requests: list[CorporateValuationRequest] = []
+
+    def query(self, request: CorporateValuationRequest) -> CorporateValuationRequest:
+        self.requests.append(request)
+        return request
+
+
+class _ValuationPipeline:
+    def persist(self, snapshot: CorporateValuationRequest) -> ValuationPersistenceSummary:
+        return ValuationPersistenceSummary(
+            definitions_created=11,
+            definitions_reused=0,
+            metric_results_created=6,
+            metric_results_reused=0,
+            metrics_not_evaluable=5,
+            metrics_not_applicable=0,
+        )
 
 
 def _documents() -> tuple[bytes, bytes]:
@@ -202,6 +227,8 @@ def _pipeline(
     *,
     fail_diagnostic: bool = False,
     configuration: SecAssetConfiguration = _CONFIGURATION,
+    valuation_service: _ValuationService | None = None,
+    valuation_pipeline: _ValuationPipeline | None = None,
 ) -> tuple[SecIssuerFundamentalRefreshPipeline, _FixtureTransport]:
     submissions, companyfacts = _documents()
     transport = _FixtureTransport(submissions, companyfacts)
@@ -251,6 +278,8 @@ def _pipeline(
                 clock=lambda: _COMPUTED_AT,
             ),
             diagnostic_pipeline=diagnostic,
+            valuation_service=valuation_service,
+            valuation_pipeline=valuation_pipeline,
             clock=lambda: _KNOWN_AT,
         ),
         transport,
@@ -373,3 +402,24 @@ def test_unsupported_ifrs_quarterly_refresh_fails_before_provider_or_storage(
         assert transport.calls == []
         assert storage.raw_records.list() == []
         assert storage.observations.list(asset_id=ifrs_configuration.asset_id) == []
+
+
+def test_sec_refresh_materializes_local_valuation_after_the_same_provider_fetch(
+    tmp_path: Path,
+) -> None:
+    valuation_service = _ValuationService()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline, transport = _pipeline(
+            storage,
+            valuation_service=valuation_service,
+            valuation_pipeline=_ValuationPipeline(),
+        )
+
+        summary = pipeline.run(_request())
+
+    assert len(transport.calls) == 2
+    assert len(valuation_service.requests) == 1
+    assert valuation_service.requests[0].known_at == _KNOWN_AT
+    assert summary.valuation_metric_results_created == 6
+    assert summary.valuation_metrics_not_evaluable == 5
+    assert summary.metric_results_created == sum(summary.metric_counts.values()) + 6

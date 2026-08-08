@@ -549,3 +549,11 @@ Todos permanecen dentro del workspace seleccionado:
 Los archivos de estado son contratos operativos versionados y privados. La evidencia financiera
 append-only continúa en el almacenamiento normal del workspace; las alertas no la sustituyen ni
 modifican.
+
+## Panel de valoración
+
+El panel «Valoración» aparece solo cuando el descriptor del catálogo declara empresa corporativa,
+mercado/fundamentales y base de unidad del título. Se carga bajo demanda mediante
+`GET /api/v1/valuation`; muestra precio y edad, ejercicio/filing, moneda/factor, estados por métrica,
+fórmula e IDs de inputs. La exportación JSON conserva los textos Decimal exactos. ETF y cripto no
+reciben ratios corporativos; la API puede devolver `not_applicable` sin abrir writer ni proveedor.

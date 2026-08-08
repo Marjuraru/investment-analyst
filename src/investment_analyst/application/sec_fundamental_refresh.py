@@ -4,6 +4,12 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Protocol, TypeVar
 
+from investment_analyst.analytics.valuation import (
+    CorporateValuationPersistencePipeline,
+    CorporateValuationRequest,
+    CorporateValuationService,
+    ValuationPersistenceSummary,
+)
 from investment_analyst.application.sec_fundamental_refresh_models import (
     SecIssuerFundamentalRefreshRequest,
     SecIssuerFundamentalRefreshStage,
@@ -113,6 +119,8 @@ class SecIssuerFundamentalRefreshPipeline:
         observation_pipeline: _ObservationPipeline,
         metric_pipeline: _MetricPipeline,
         diagnostic_pipeline: _DiagnosticPipeline,
+        valuation_service: CorporateValuationService | None = None,
+        valuation_pipeline: CorporateValuationPersistencePipeline | None = None,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         storage.require_open()
@@ -122,6 +130,10 @@ class SecIssuerFundamentalRefreshPipeline:
         self._observation_pipeline = observation_pipeline
         self._metric_pipeline = metric_pipeline
         self._diagnostic_pipeline = diagnostic_pipeline
+        if (valuation_service is None) != (valuation_pipeline is None):
+            raise ValueError("valuation service and pipeline must be configured together")
+        self._valuation_service = valuation_service
+        self._valuation_pipeline = valuation_pipeline
         self._clock = clock
 
     def run(
@@ -211,6 +223,8 @@ class SecIssuerFundamentalRefreshPipeline:
                 ValueError("fundamental diagnostic returned an invalid issuer context"),
             )
 
+        valuation = self._run_valuation(request, effective_known_at)
+
         return SecIssuerFundamentalRefreshSummary(
             asset_id=self._configuration.asset_id,
             source_id=self._configuration.companyfacts_source_id,
@@ -231,8 +245,11 @@ class SecIssuerFundamentalRefreshPipeline:
             observation_field_counts=dict(observations.field_counts),
             observation_skipped_counts=dict(observations.skipped_counts),
             target_periods=metrics.target_periods,
-            metric_results_created=metrics.metrics_created,
-            metric_results_reused=metrics.metrics_reused,
+            metric_results_created=(metrics.metrics_created + valuation.metric_results_created),
+            metric_results_reused=(metrics.metrics_reused + valuation.metric_results_reused),
+            valuation_metric_results_created=valuation.metric_results_created,
+            valuation_metric_results_reused=valuation.metric_results_reused,
+            valuation_metrics_not_evaluable=valuation.metrics_not_evaluable,
             metric_counts=metrics.metric_counts,
             metric_skipped_counts=metrics.skipped_counts,
             diagnostic_target_period_end=diagnostic.target_period_end,
@@ -242,6 +259,33 @@ class SecIssuerFundamentalRefreshPipeline:
             diagnostics_created=diagnostic.diagnostics_created,
             diagnostics_reused=diagnostic.diagnostics_reused,
             traceability_verified=True,
+        )
+
+    def _run_valuation(
+        self,
+        request: SecIssuerFundamentalRefreshRequest,
+        effective_known_at: datetime,
+    ) -> ValuationPersistenceSummary:
+        if self._valuation_service is None or self._valuation_pipeline is None:
+            return ValuationPersistenceSummary(
+                definitions_created=0,
+                definitions_reused=0,
+                metric_results_created=0,
+                metric_results_reused=0,
+                metrics_not_evaluable=0,
+                metrics_not_applicable=0,
+            )
+        return self._run_stage(
+            SecIssuerFundamentalRefreshStage.CORPORATE_VALUATION,
+            lambda: self._valuation_pipeline.persist(
+                self._valuation_service.query(
+                    CorporateValuationRequest(
+                        asset_id=request.asset_id,
+                        known_at=effective_known_at,
+                        valuation_date=effective_known_at.date(),
+                    )
+                )
+            ),
         )
 
     def _resolve_known_at(
