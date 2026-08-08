@@ -1,0 +1,6 @@
+interface:
+  display_name: "Plan Work Block"
+  short_description: "Define y publica el Work Block activo"
+  default_prompt: "Usa $plan para definir y publicar el siguiente Work Block."
+policy:
+  allow_implicit_invocation: false

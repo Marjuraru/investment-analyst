@@ -4,6 +4,12 @@ The `CI` GitHub Actions workflow validates the repository with the same static a
 locally. It runs for every pull request, every push to `main`, and manual dispatches. Branch
 protection requires the uniquely named `Python 3.12 quality` check before merging into `main`.
 
+For Development Workflow v1, this required check is the authoritative full deterministic gate for
+the exact pull-request SHA. Builders run focused local checks while iterating; reviewers reuse a
+green check for that SHA and do not repeat the full suite without a concrete uncovered risk. A full
+local `bash scripts/check.sh` remains appropriate when CI, dependencies, lock, or toolchain changes,
+when CI is unavailable or under diagnosis, or when the Work Block explicitly requires it.
+
 ## Environment and commands
 
 The job uses the fixed `ubuntu-24.04` runner label and Python 3.12, matching the supported project
@@ -52,6 +58,10 @@ installed locked environment and fails when its vulnerability service reports a 
 CI validates the deterministic local test suite on one supported Linux/Python combination. It does
 not run the real-provider Apple bootstrap, mutate the permanent workspace, deploy software, execute
 operations, or replace the real read-only validation required for provider-sensitive changes.
+
+Provider-sensitive smoke evidence is recorded separately and bound to the same head SHA. Any new
+commit invalidates prior CI, smoke, and independent audit evidence. See
+[`development_protocol.md`](development_protocol.md).
 
 The committed lock makes installation repeatable, but vulnerability findings and package releases
 can change over time. Dependency upgrades therefore remain explicit reviewed changes. The security

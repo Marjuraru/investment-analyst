@@ -1,0 +1,6 @@
+interface:
+  display_name: "Audit Work Block"
+  short_description: "Audita el PR activo sin modificar código"
+  default_prompt: "Usa $audit para auditar el PR del Work Block activo."
+policy:
+  allow_implicit_invocation: false
