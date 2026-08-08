@@ -1,6 +1,6 @@
 ---
 name: investment-block-flow
-description: Compatibilidad para orquestar Issues y PRs explícitos de investment-analyst, corregir hallazgos, revisar CI o fusionar cuando el usuario lo autorice. Para el workflow activo normal usar $plan, $build y /audit.
+description: Compatibilidad para orquestar Issues y PRs explícitos de investment-analyst, corregir hallazgos, revisar CI o fusionar cuando el usuario lo autorice. Para el workflow activo normal usar $plan, $build y el skill audit mediante /audit en Antigravity o $audit en clientes compatibles.
 ---
 
 # Investment Block Flow
@@ -22,7 +22,8 @@ No convertir una revisión o auditoría en autorización para editar.
 ## Aplicar reglas comunes
 
 - Mantener un Issue y un PR por capacidad cohesiva, con un único escritor por rama.
-- Para el flujo sin números, delegar en `$plan`, `$build` y `/audit`; no inventar el último target.
+- Para el flujo sin números, delegar en `$plan`, `$build` y el skill `audit` (`/audit` en
+  Antigravity; `$audit` en clientes compatibles); no inventar el último target.
 - Clasificar el riesgo como R0 mecánico, R1 normal, R2 alto o R3 crítico. Tratar point-in-time, fórmulas, identidades, almacenamiento, concurrencia, seguridad y semántica financiera como R3.
 - Preservar el workspace permanente, secretos, historial y cambios locales preexistentes.
 - Detener cualquier ampliación de alcance y devolverla al arquitecto como bloque separado.
