@@ -491,6 +491,7 @@ function marketAssetFromDescriptor(descriptor) {
     intradaySchemaVersion: descriptor.intraday_schema_version,
     volumeUnit: descriptor.volume_unit,
     volumeLabel,
+    assetClass: descriptor.asset_class,
     defaultMarketStart: descriptor.default_market_start,
     analysisFamily: descriptor.analysis.family,
     marketMode: descriptor.analysis.market_mode,
@@ -531,14 +532,30 @@ async function loadMarketAssets() {
     marketStartByAsset.set(assetId, presentation.defaultMarketStart);
   }
   const selector = byId("market-asset-select");
-  selector.replaceChildren(
-    ...payload.assets.map((descriptor) => {
+  const groups = {
+    equity: { label: "Acciones", options: [] },
+    etf: { label: "ETF", options: [] },
+    crypto: { label: "Cripto", options: [] },
+  };
+  payload.assets.forEach((descriptor) => {
+    const cls = descriptor.asset_class;
+    if (groups[cls]) {
       const option = document.createElement("option");
       option.value = descriptor.asset_id;
       option.textContent = `${descriptor.symbol} — ${descriptor.name}`;
-      return option;
-    }),
-  );
+      groups[cls].options.push(option);
+    }
+  });
+  const children = [];
+  for (const group of Object.values(groups)) {
+    if (group.options.length > 0) {
+      const optgroup = document.createElement("optgroup");
+      optgroup.label = group.label;
+      optgroup.append(...group.options);
+      children.push(optgroup);
+    }
+  }
+  selector.replaceChildren(...children);
   selector.value = selectedMarketAsset;
 }
 
@@ -562,14 +579,30 @@ function preferenceToggle(asset, kind, label) {
 function prioritizeAssetSelector(payload) {
   const selector = byId("market-asset-select");
   const ordered = payload.assets.filter((asset) => asset.available && marketAssets[asset.asset_id]);
-  selector.replaceChildren(
-    ...ordered.map((asset) => {
+  const groups = {
+    equity: { label: "Acciones", options: [] },
+    etf: { label: "ETF", options: [] },
+    crypto: { label: "Cripto", options: [] },
+  };
+  ordered.forEach((asset) => {
+    const cls = marketAssets[asset.asset_id]?.assetClass || "equity";
+    if (groups[cls]) {
       const option = document.createElement("option");
       option.value = asset.asset_id;
       option.textContent = `${asset.favorite ? "★ " : ""}${asset.symbol} — ${asset.name}`;
-      return option;
-    }),
-  );
+      groups[cls].options.push(option);
+    }
+  });
+  const children = [];
+  for (const group of Object.values(groups)) {
+    if (group.options.length > 0) {
+      const optgroup = document.createElement("optgroup");
+      optgroup.label = group.label;
+      optgroup.append(...group.options);
+      children.push(optgroup);
+    }
+  }
+  selector.replaceChildren(...children);
   selector.value = selectedMarketAsset;
 }
 
@@ -706,10 +739,13 @@ function applySelectedMarketAsset() {
     }),
   );
   intervalSelect.value = chartSettings.interval;
-  byId("asset-breadcrumb").textContent = presentation.breadcrumb;
   byId("asset-symbol").textContent = presentation.symbol;
+  byId("asset-avatar-text").textContent = presentation.symbol.charAt(0);
   byId("asset-name").textContent = presentation.name;
   byId("asset-meta").textContent = presentation.meta;
+  byId("asset-price").textContent = "—";
+  byId("asset-daily-change").textContent = "—";
+  byId("asset-daily-change").className = "asset-change neutral";
   byId("market-chart-symbol").textContent = presentation.symbol;
   byId("market-chart").setAttribute(
     "aria-label",
@@ -2408,6 +2444,13 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
     ? `${formatInteger(chart.coverage.displayed_points)} velas locales`
     : `${formatRangeChange(dailyChange)} variación diaria`;
   change.className = `chart-change ${dailyChange > 0 ? "positive" : dailyChange < 0 ? "negative" : "neutral"}`;
+
+  // Update asset header
+  byId("asset-price").textContent = formatCurrency(latest.close);
+  byId("asset-daily-change").textContent = intraday
+    ? `${formatInteger(chart.coverage.displayed_points)} velas locales`
+    : `${formatRangeChange(dailyChange)} diaria`;
+  byId("asset-daily-change").className = `asset-change ${dailyChange > 0 ? "positive" : dailyChange < 0 ? "negative" : "neutral"}`;
   byId("chart-latest-sma-5").textContent = latestPoint.short_sma
     ? formatCurrency(latestPoint.short_sma.value)
     : "—";
@@ -2849,6 +2892,10 @@ function renderFundamentalResearch(payload) {
   );
   const grid = byId("fundamental-research-grid");
   grid.replaceChildren();
+  const unavailableGrid = byId("unavailable-metrics-grid");
+  if (unavailableGrid) unavailableGrid.replaceChildren();
+  let unavailableCount = 0;
+
   for (const section of payload.sections || []) {
     const group = createElement("section", "fundamental-research-group");
     const heading = createElement("h4", "", section.definition.display_name_es);
@@ -2856,22 +2903,41 @@ function renderFundamentalResearch(payload) {
     group.appendChild(heading);
     const values = createElement("div", "fundamental-research-group-grid");
     values.setAttribute("role", "list");
+    let hasAvailable = false;
+
     for (const reference of section.definition.metric_references || []) {
-      values.appendChild(
-        fundamentalResearchMetricCard(
-          reference.metric_key,
-          metrics.get(reference.metric_key),
-          definitions.get(reference.metric_key),
-          histories.get(reference.metric_key),
-          research.request?.frequency,
-        ),
+      const metric = metrics.get(reference.metric_key);
+      const card = fundamentalResearchMetricCard(
+        reference.metric_key,
+        metric,
+        definitions.get(reference.metric_key),
+        histories.get(reference.metric_key),
+        research.request?.frequency,
       );
-      values.lastElementChild.title = `${reference.relevance_es} ${
-        values.lastElementChild.title || ""
-      }`.trim();
+      card.title = `${reference.relevance_es} ${card.title || ""}`.trim();
+
+      if (!metric) {
+        if (unavailableGrid) unavailableGrid.appendChild(card);
+        unavailableCount++;
+      } else {
+        values.appendChild(card);
+        hasAvailable = true;
+      }
     }
-    group.appendChild(values);
-    grid.appendChild(group);
+    if (hasAvailable) {
+      group.appendChild(values);
+      grid.appendChild(group);
+    }
+  }
+
+  const unavailableDisclosure = byId("unavailable-metrics-disclosure");
+  if (unavailableDisclosure) {
+    if (unavailableCount > 0) {
+      unavailableDisclosure.classList.remove("hidden");
+      byId("unavailable-metrics-summary").textContent = `Métricas no disponibles (${unavailableCount})`;
+    } else {
+      unavailableDisclosure.classList.add("hidden");
+    }
   }
 
   const audit = byId("fundamental-research-audit");
@@ -4557,6 +4623,8 @@ byId("chart-settings-form").addEventListener("submit", async (event) => {
   applyChartSettings();
   persistChartSettings();
   byId("chart-settings").open = false;
+  if (requiresDataRefresh || marketChartPayload === null) await queryMarketChart();
+  else renderMarketChart(marketChartPayload, { preserveViewport: true });
   if (requiresDataRefresh || marketChartPayload === null) await queryMarketChart();
   else renderMarketChart(marketChartPayload, { preserveViewport: true });
 });

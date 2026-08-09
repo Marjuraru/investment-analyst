@@ -16,8 +16,7 @@ La página permite:
 - ver simultáneamente la hora de Lima y Wall Street, junto con el estado de la ventana regular
   09:30–16:00 ET de NYSE;
 - cargar automáticamente el último reporte elegible al abrir la página;
-- seleccionar desde el catálogo central AAPL, BTC-USD y una lista inicial de acciones y ETF
-  estadounidenses sin mantener símbolos duplicados en la interfaz;
+- seleccionar desde un combobox único agrupado por clase de activo (Acciones, ETF, Cripto), buscando por ticker o nombre;
 - explorar el histórico point-in-time de cada activo con OHLC, VWAP cuando la fuente lo entrega,
   operaciones, tres SMA configurables y volumen;
 - usar en BTC-USD el histórico diario persistido de Coinbase Exchange o una ventana intradía local
@@ -44,10 +43,11 @@ La página permite:
 - ver inmediatamente el estado de la clasificación empresarial, sus seis categorías posibles y la
   evidencia que aún falta para asignarla de forma explicable;
 - comparar cada métrica con el período disponible anterior y mostrar CAGR anual cuando sea válido;
-- inspeccionar la fórmula, versión, valor exacto y UUID de cada observación usada por esas métricas;
+- ver las métricas no disponibles resumidas en un bloque desplegable (disclosure), sin interpretarse como ceros;
+- inspeccionar la fórmula, versión, valor exacto y UUID de cada observación usada por esas métricas desde un disclosure dedicado;
 - exportar los intervalos de mercado, hechos SEC y métricas derivadas como CSV, además del reporte diagnóstico
   completo como JSON versionado;
-- alternar entre un tema oscuro de baja luminancia, predeterminado, y el tema claro;
+- alternar el tema visual mediante un botón de ícono sin texto redundante;
 - ampliar o reducir localmente el tramo visible sin descartar datos de la consulta completa;
 - ejecutar manualmente el bootstrap completo de SEC EDGAR y Alpaca Market Data IEX;
 - ejecutar una actualización exclusivamente de mercado, incremental por los bordes del histórico
@@ -96,9 +96,11 @@ será un contrato separado antes de convertir el estado horario en un estado ope
 ## Criterios de presentación
 
 La interfaz está orientada al análisis, no al trading. Mantiene el contexto del activo visible y usa
-una distribución compacta: gráfico, fecha seleccionada y estadísticas técnicas comparten la vista
-principal; la evolución y ficha fundamental permanecen en un panel propio para no mezclar su
-significado con mercado. La actualización de fuentes permanece en una sección operativa secundaria. La
+una distribución compacta: la navegación principal se colapsa en un sidebar sin numerar; la cabecera del activo
+muestra un avatar local, ticker, precio, variación diaria, calidad material y clasificación corporativa si existe;
+el gráfico, fecha seleccionada y estadísticas técnicas comparten la vista principal; la evolución y ficha
+fundamental permanecen en un panel propio. La regla histórica de "cobertura local y número de días siempre visibles"
+ha sido reemplazada por visibilidad bajo demanda (disclosure), manteniendo la calidad parcial, retrasos y limitaciones IEX compactas a simple vista. Los paneles ficticios o vacíos no se renderizan si el activo no los soporta. La
 navegación, estados, veredictos, calidad, métricas, mensajes y limitaciones se
 presentan en español; se conservan nombres técnicos ampliamente usados como AAPL, SEC EDGAR, IEX,
 SIP, SMA, JSON y point-in-time cuando aportan precisión.

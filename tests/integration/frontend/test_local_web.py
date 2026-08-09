@@ -935,7 +935,7 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "api(`/api/screening-backtest?" in javascript
     assert ".screening-backtest-grid" in stylesheet
     assert "Fórmulas y evidencia exacta" in html
-    assert "Tema claro" in html
+    assert "Cambiar al tema claro" in html
     assert 'id="lima-clock"' in html
     assert 'id="new-york-clock"' in html
     assert 'id="nyse-session-status"' in html

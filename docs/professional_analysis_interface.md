@@ -18,7 +18,7 @@ Aplicación al proyecto:
 - tipo de gráfico e intervalo de cada barra separados del zoom visible;
 - zoom local centrado en el cursor, con alternativa por teclado y restablecimiento explícito;
 - desplazamiento horizontal mediante arrastre cuando existe una vista ampliada;
-- cobertura local y número de días con datos siempre visibles;
+- cobertura local y número de días con datos disponibles bajo demanda (disclosure) por diseño compacto;
 - tabla exacta cargada solo cuando el analista la abre;
 - agregación diaria, semanal o mensual antes de dibujar el historial completo.
 
