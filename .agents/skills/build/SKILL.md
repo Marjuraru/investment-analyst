@@ -1,43 +1,16 @@
 ---
 name: build
-description: Implementa y publica el único Work Block activo de investment-analyst. Usar únicamente cuando el usuario invoque explícitamente $build; autoriza implementación, validación, commit, push y un PR draft tras resolver Issue, base, rama y working tree sin ambigüedad, pero nunca merge.
+description: Implementa y publica el único Work Block activo de investment-analyst. Usar únicamente cuando el usuario invoque explícitamente $build; para FAST/AUTO también puede ejecutar FINALIZE tras todos los guards vivos.
 ---
 
 # Build Work Block
 
-1. Leer completos `AGENTS.md`, `docs/development_protocol.md` y el Issue resuelto.
-2. Ejecutar el preflight Git obligatorio. Consultar candidatos con `gh issue list --state open
-   --label workflow:active --limit 2 --json number,title,body,labels,url`, releer directamente cada
-   uno con `gh issue view <number> --json number,state,labels,title,body,url` y contar solo los
-   abiertos que aún conserven el label. Verificar que candidatos, estado, labels y metadata no
-   cambien durante la resolución. Si hay cero o más de uno realmente activo, un Issue cerrado aún
-   etiquetado o un snapshot cambiante, terminar con `BUILD GUARD FAILURE` sin escribir.
-3. Extraer y verificar Work Block, base SHA, expected branch, owner, scope, profile y gates.
-   Buscar PRs con `gh pr list --state open --head <expected-branch> --limit 2 --json
-   number,headRefName,headRefOid,baseRefName,isDraft,url`. Ignorar PRs stale que no coincidan.
-4. Verificar el contexto actual:
-   - si el chat menciona otro bloque, detenerse con `BLOCK MISMATCH`;
-   - si ya existe la expected branch, exigir que branch/worktree actual coincidan;
-   - si no existe, crearla solo desde la base declarada y preservando todo trabajo local;
-   - cualquier otro mismatch detiene la operación.
-5. Ser el único writer e implementar el cambio cohesivo mínimo. No ampliar alcance ni tocar trabajo
-   protegido. Corregir hallazgos existentes del mismo PR sin crear otro. Un reemplazo de builder
-   solo procede tras terminar el anterior, releer Issue/PR/base/head/worktree y preservar cambios y
-   evidencia válidos; no vuelve a PLAN salvo cambio material de objetivo, scope, arquitectura o
-   aceptación.
-6. Ejecutar Ruff y Pytest focalizados durante la iteración. Ejecutar smoke real solo si el Issue lo
-   exige. Usar `scripts/check.sh` únicamente bajo las excepciones del protocolo.
-7. Revisar diff, secretos, compatibilidad y scope; stagear solo archivos previstos, commit y push.
-   Fijar el full head SHA después del push y refrescar el head vivo del PR.
-8. Crear o actualizar un único PR draft contra la base declarada. Esperar `Python 3.12 quality` y
-   ejecutar el smoke exigido para ese mismo SHA; no repetir localmente la suite completa verde.
-   Actualizar y verificar el handoff final del PR contra el head vivo con SHA, checks, smoke, riesgos
-   y siguiente gate. Nunca fusionar ni cambiar a ready.
-9. Continuar mientras quede una acción ejecutable dentro del contrato. Tests corregibles, CI
-   pendiente, integración pendiente o gates ejecutables no son bloqueos humanos. Responder solo
-   `BUILD READY` (next gate AUDIT para STANDARD/CRITICAL o HUMAN MERGE para FAST), `BUILD BLOCKED`
-   (intervención, autorización o recurso externo real) o `BUILD GUARD FAILURE` (precondición o
-   target fail-closed), más 2–4 cambios, PR, CI, smoke y riesgos.
+1. Leer completos `AGENTS.md`, `docs/development_protocol.md` y el Issue resuelto. Ejecutar preflight Git y resolver fail-closed el único Issue activo, base, expected branch, profile, policy, scope y gates.
+2. Resolver el PR sólo por expected branch. Si la rama existe, exigir branch/worktree compatibles; si no, crearla desde la base remota exacta sin alterar trabajo local. Un chat de otro bloque, snapshots cambiantes o metadata ambigua son `BUILD GUARD FAILURE` sin escribir.
+3. Antes de implementación material, ejecutar el capability preflight: derivar las necesidades declaradas y previsibles, comprobar CLI/configuración sin secretos, permisos GitHub y accesos. Agrupar al inicio como máximo una solicitud externa previsible y acotada.
+4. Ser el único writer. Para R3/superficie sensible, tocar exclusivamente la strict allowlist; en otro caso respetar semantic scope, superficies protegidas y prohibidas. Implementar el mínimo cohesivo y corregir sólo hallazgos del mismo PR.
+5. Ejecutar Ruff y pruebas focalizadas; smoke real cuando el Issue lo exija. Usar `scripts/check.sh` únicamente según el protocolo. Revisar diff, secretos, compatibilidad, scope y trabajo protegido.
+6. Stagear sólo el alcance previsto, commit, push y fijar el SHA completo. Crear o actualizar un único PR draft contra la base declarada; su body contiene sólo datos estables. Publicar/actualizar el comentario BUILD exact-SHA con checks focalizados y smoke.
+7. Esperar `Python 3.12 quality` para ese SHA, realizar el smoke de descubribilidad exigido y reconciliar el handoff contra el head vivo. Sólo FAST/AUTO puede continuar a FINALIZE según el protocolo; cualquier otro perfil permanece draft y nunca cambia a ready.
 
-Un nuevo commit invalida CI, smoke y audit previos. Un guard failure no se presenta como bloqueo
-humano ni se cierra con un mero handoff de progreso.
+Continuar mientras haya acción ejecutable. Responder sólo `BUILD READY`, `BUILD BLOCKED` o `BUILD GUARD FAILURE`, cambios, PR, CI/smoke y riesgos. Un commit invalida evidencia previa.
