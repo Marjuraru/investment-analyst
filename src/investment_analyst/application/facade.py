@@ -429,7 +429,7 @@ class InvestmentAnalystApplication:
             asset_id=request.asset_id,
         )
         with self._runtime.open_storage(
-            location, access_mode=WorkspaceAccessMode.READ_ONLY
+            location, access_mode=WorkspaceAccessMode("read_only")
         ) as storage:
             return CryptoSpotDailyMarketChartService(
                 HistoricalMarketDataService(storage),
@@ -552,7 +552,7 @@ class InvestmentAnalystApplication:
             asset_id=request.asset_id,
         )
         with self._runtime.open_storage(
-            location, access_mode=WorkspaceAccessMode.READ_WRITE
+            location, access_mode=WorkspaceAccessMode("read_write")
         ) as storage:
             execution_clock = BtcMarketExecutionClock()
             history = HistoricalMarketDataService(storage)
