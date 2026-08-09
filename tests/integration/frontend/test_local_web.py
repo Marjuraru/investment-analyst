@@ -50,6 +50,8 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
     BtcMarketChart,
     BtcMarketChartRequest,
+    CryptoSpotDailyMarketChart,
+    CryptoSpotDailyMarketChartRequest,
     ListedMarketChart,
 )
 from investment_analyst.analytics.market.intraday_models import IntradayInterval
@@ -73,6 +75,10 @@ from investment_analyst.application.btc_intraday_models import (
 from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshRequest,
     BtcMarketRefreshSummary,
+)
+from investment_analyst.application.crypto_spot_daily_models import (
+    CryptoSpotDailyRefreshRequest,
+    CryptoSpotDailyRefreshSummary,
 )
 from investment_analyst.application.facade import InvestmentAnalystApplication
 from investment_analyst.application.listed_market_refresh_models import (
@@ -184,12 +190,16 @@ class _FakeApplication:
         self.chart_locations: list[StorageLocationRequest] = []
         self.btc_chart_requests: list[BtcMarketChartRequest] = []
         self.btc_chart_locations: list[StorageLocationRequest] = []
+        self.crypto_chart_requests: list[CryptoSpotDailyMarketChartRequest] = []
+        self.crypto_chart_locations: list[StorageLocationRequest] = []
         self.btc_intraday_chart_requests: list[BtcIntradayChartRequest] = []
         self.btc_intraday_chart_locations: list[StorageLocationRequest] = []
         self.btc_intraday_refresh_requests: list[BtcIntradayRefreshRequest] = []
         self.btc_intraday_refresh_locations: list[StorageLocationRequest] = []
         self.btc_refresh_requests: list[BtcMarketRefreshRequest] = []
         self.btc_refresh_locations: list[StorageLocationRequest] = []
+        self.crypto_refresh_requests: list[CryptoSpotDailyRefreshRequest] = []
+        self.crypto_refresh_locations: list[StorageLocationRequest] = []
         self.listed_chart_requests: list[tuple[str, AaplMarketChartRequest]] = []
         self.listed_chart_locations: list[StorageLocationRequest] = []
         self.listed_refresh_requests: list[ListedMarketRefreshRequest] = []
@@ -292,6 +302,27 @@ class _FakeApplication:
             ),
         )
 
+    def query_crypto_spot_daily_market_chart(
+        self,
+        request: CryptoSpotDailyMarketChartRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CryptoSpotDailyMarketChart:
+        self.crypto_chart_requests.append(request)
+        self.crypto_chart_locations.append(location)
+        return cast(
+            CryptoSpotDailyMarketChart,
+            _JsonResult(
+                {
+                    "schema_version": "crypto-spot-daily-market-chart-v1",
+                    "asset_id": request.asset_id,
+                    "period": request.period.value,
+                    "interval": request.interval.value,
+                    "points": [],
+                }
+            ),
+        )
+
     def query_listed_market_chart(
         self,
         request: AaplMarketChartRequest,
@@ -332,6 +363,29 @@ class _FakeApplication:
                 {
                     "schema_version": "btc-market-refresh-v1",
                     "asset_id": "crypto:btc-usd",
+                    "effective_known_at": "2026-07-16T15:47:00+00:00",
+                    "refresh_plan": {"mode": "incremental"},
+                    "candles_received": 1,
+                    "metric_results_created": 7,
+                    "traceability_verified": True,
+                }
+            ),
+        )
+
+    def refresh_crypto_spot_daily(
+        self,
+        request: CryptoSpotDailyRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CryptoSpotDailyRefreshSummary:
+        self.crypto_refresh_requests.append(request)
+        self.crypto_refresh_locations.append(location)
+        return cast(
+            CryptoSpotDailyRefreshSummary,
+            _JsonResult(
+                {
+                    "schema_version": "crypto-spot-daily-market-refresh-v1",
+                    "asset_id": request.asset_id,
                     "effective_known_at": "2026-07-16T15:47:00+00:00",
                     "refresh_plan": {"mode": "incremental"},
                     "candles_received": 1,
@@ -1246,7 +1300,7 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert assets_status == 200
     assert assets["schema_version"] == "market-asset-universe-v3"
     assert assets["catalog_version"] == 1
-    assert len(assets["assets"]) == 18
+    assert len(assets["assets"]) == 19
     assets_by_id = {item["asset_id"]: item for item in assets["assets"]}
     assert assets_by_id["equity:us:aapl"]["analysis"]["fundamental_mode"] == "corporate"
     assert assets_by_id["equity:us:amd"]["has_fundamentals"] is True
@@ -1270,6 +1324,7 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
         assert assets_by_id[asset_id]["fundamental_frequencies"] == ["annual"]
     assert assets_by_id["etf:us:ibit"]["analysis"]["fundamental_mode"] == "investment_fund"
     assert assets_by_id["crypto:btc-usd"]["analysis"]["market_mode"] == "crypto_spot"
+    assert assets_by_id["crypto:eth-usd"]["source_id"] == "coinbase-exchange:eth-usd:daily-candles"
     assert run_status == 200 and run["status"] == "succeeded"
     assert runner.requests[0].market_start == date(2025, 1, 1)
     assert runner.requests[0].market_end == date(2026, 7, 15)
@@ -2161,8 +2216,8 @@ def test_local_api_rejects_invalid_typed_run_without_calling_runner(tmp_path: Pa
     assert chart_window["error"]["code"] == "invalid_request"
     assert chart_interval_status == 400
     assert chart_interval["error"]["code"] == "invalid_request"
-    assert chart_asset_status == 400
-    assert chart_asset["error"]["code"] == "invalid_request"
+    assert chart_asset_status == 200
+    assert chart_asset["schema_version"] == "crypto-spot-daily-market-chart-v1"
     assert intraday_interval_status == 400
     assert intraday_interval["error"]["code"] == "invalid_request"
     assert intraday_asset_status == 400

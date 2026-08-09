@@ -21,6 +21,11 @@ from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshSummary,
     BtcRefreshMode,
 )
+from investment_analyst.application.crypto_spot_daily import CryptoSpotDailyRefreshError
+from investment_analyst.application.crypto_spot_daily_models import (
+    CryptoSpotDailyRefreshRequest,
+    CryptoSpotDailyRefreshSummary,
+)
 from investment_analyst.application.listed_market_refresh import (
     ListedMarketKnownAtTooEarlyError,
     ListedMarketRefreshError,
@@ -97,6 +102,13 @@ class _LocalScheduledOperations(Protocol):
         request: BtcMarketRefreshRequest,
     ) -> BtcMarketRefreshSummary:
         """Refresh the Coinbase daily market source."""
+        ...
+
+    def crypto_spot_daily_refresh_request(
+        self,
+        request: CryptoSpotDailyRefreshRequest,
+    ) -> CryptoSpotDailyRefreshSummary:
+        """Refresh one catalog-scoped Coinbase daily source."""
         ...
 
     def btc_intraday_refresh_request(
@@ -381,20 +393,35 @@ def _market_job(
                 )
                 return _listed_market_execution(definition.job_id, summary)
             if descriptor.provider == "coinbase":
-                summary = controller.btc_market_refresh_request(
-                    BtcMarketRefreshRequest(
+                mode = (
+                    BtcRefreshMode.FULL
+                    if config.refresh_mode is AaplRefreshMode.FULL
+                    else BtcRefreshMode.AUTO
+                )
+                if descriptor.asset_id == "crypto:btc-usd":
+                    summary = controller.btc_market_refresh_request(
+                        BtcMarketRefreshRequest(
+                            asset_id=descriptor.asset_id,
+                            market_start=market_start,
+                            market_end=market_end,
+                            refresh_mode=mode,
+                        )
+                    )
+                    return _btc_market_execution(definition.job_id, summary)
+                summary = controller.crypto_spot_daily_refresh_request(
+                    CryptoSpotDailyRefreshRequest(
                         asset_id=descriptor.asset_id,
                         market_start=market_start,
                         market_end=market_end,
-                        refresh_mode=(
-                            BtcRefreshMode.FULL
-                            if config.refresh_mode is AaplRefreshMode.FULL
-                            else BtcRefreshMode.AUTO
-                        ),
+                        refresh_mode=mode,
                     )
                 )
-                return _btc_market_execution(definition.job_id, summary)
-        except (ListedMarketRefreshError, BtcMarketRefreshError) as error:
+                return _crypto_spot_daily_execution(definition.job_id, summary)
+        except (
+            ListedMarketRefreshError,
+            BtcMarketRefreshError,
+            CryptoSpotDailyRefreshError,
+        ) as error:
             raise _classified_provider_error(error) from error
         raise ScheduledJobRunError(
             ScheduledJobFailure(
@@ -535,6 +562,32 @@ def _listed_market_execution(
 def _btc_market_execution(
     job_id: str,
     summary: BtcMarketRefreshSummary,
+) -> ScheduledJobExecution:
+    created = (
+        summary.raw_records_created
+        + summary.observations_created
+        + summary.metric_results_created
+        + summary.diagnostics_created
+    )
+    reused = (
+        summary.raw_records_reused
+        + summary.observations_reused
+        + summary.metric_results_reused
+        + summary.diagnostics_reused
+    )
+    return ScheduledJobExecution(
+        job_id=job_id,
+        effective_known_at=summary.effective_known_at,
+        evidence_changed=created > 0,
+        source_ids=(summary.source_id,),
+        created_count=created,
+        reused_count=reused,
+    )
+
+
+def _crypto_spot_daily_execution(
+    job_id: str,
+    summary: CryptoSpotDailyRefreshSummary,
 ) -> ScheduledJobExecution:
     created = (
         summary.raw_records_created

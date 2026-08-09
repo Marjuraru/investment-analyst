@@ -226,12 +226,14 @@ def _descriptor(
             refresh_kind=("complete_analysis" if complete_refresh_available else "market_only"),
         )
 
-    if (
-        binding.provider == "coinbase"
-        and analysis.crypto_profile is CryptoAnalyticalProfile.BITCOIN
-    ):
+    if binding.provider == "coinbase" and analysis.crypto_profile is not None:
         daily = resolve_coinbase_configuration(resolver, asset_id=asset_id)
-        intraday = resolve_coinbase_intraday_configuration(resolver, asset_id=asset_id)
+        supports_intraday = _MINUTE_MARKET_CAPABILITY in binding.capabilities
+        intraday = (
+            resolve_coinbase_intraday_configuration(resolver, asset_id=asset_id)
+            if supports_intraday
+            else None
+        )
         return MarketAssetDescriptor(
             asset_id=asset.asset_id,
             symbol=daily.product_id,
@@ -242,7 +244,11 @@ def _descriptor(
             provider=binding.provider,
             provider_identifier=daily.product_id,
             source_id=daily.source_id,
-            chart_schema_version="btc-market-chart-v1",
+            chart_schema_version=(
+                "btc-market-chart-v1"
+                if analysis.crypto_profile is CryptoAnalyticalProfile.BITCOIN
+                else "crypto-spot-daily-market-chart-v1"
+            ),
             volume_unit=daily.base_unit,
             default_market_start=_COINBASE_HISTORY_START,
             analysis=analysis,
@@ -250,9 +256,9 @@ def _descriptor(
             has_corporate_valuation=False,
             fundamental_frequencies=(),
             fundamental_source_ids=(),
-            supports_intraday=_MINUTE_MARKET_CAPABILITY in binding.capabilities,
-            intraday_source_id=intraday.source_id,
-            intraday_schema_version="btc-intraday-chart-v1",
+            supports_intraday=supports_intraday,
+            intraday_source_id=intraday.source_id if intraday is not None else None,
+            intraday_schema_version=("btc-intraday-chart-v1" if intraday is not None else None),
             refresh_kind="market_only",
         )
 

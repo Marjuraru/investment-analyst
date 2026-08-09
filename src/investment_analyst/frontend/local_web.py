@@ -67,6 +67,8 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
     BtcMarketChart,
     BtcMarketChartRequest,
+    CryptoSpotDailyMarketChart,
+    CryptoSpotDailyMarketChartRequest,
     ListedMarketChart,
 )
 from investment_analyst.analytics.market.chart_service import (
@@ -116,6 +118,13 @@ from investment_analyst.application.btc_refresh_models import (
 from investment_analyst.application.capability_runtime import (
     CapabilityDrivenRuntimePlan,
     build_capability_runtime_plan,
+)
+from investment_analyst.application.crypto_spot_daily import (
+    CryptoSpotDailyRefreshError,
+)
+from investment_analyst.application.crypto_spot_daily_models import (
+    CryptoSpotDailyRefreshRequest,
+    CryptoSpotDailyRefreshSummary,
 )
 from investment_analyst.application.facade import InvestmentAnalystApplication
 from investment_analyst.application.listed_market_refresh import (
@@ -335,6 +344,15 @@ class _ApplicationOperations(Protocol):
         """Query one bounded persisted Coinbase chart."""
         ...
 
+    def query_crypto_spot_daily_market_chart(
+        self,
+        request: CryptoSpotDailyMarketChartRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CryptoSpotDailyMarketChart:
+        """Query one configured Coinbase daily chart."""
+        ...
+
     def query_listed_market_chart(
         self,
         request: AaplMarketChartRequest,
@@ -370,6 +388,15 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> BtcMarketRefreshSummary:
         """Update Coinbase BTC-USD and persist independent market analytics."""
+        ...
+
+    def refresh_crypto_spot_daily(
+        self,
+        request: CryptoSpotDailyRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CryptoSpotDailyRefreshSummary:
+        """Refresh one configured Coinbase daily source."""
         ...
 
     def refresh_listed_market(
@@ -634,6 +661,9 @@ class AaplLocalController:
         self._state_lock = threading.RLock()
         self._market_chart_cache: dict[AaplMarketChartRequest, AaplMarketChart] = {}
         self._btc_market_chart_cache: dict[BtcMarketChartRequest, BtcMarketChart] = {}
+        self._crypto_spot_daily_chart_cache: dict[
+            CryptoSpotDailyMarketChartRequest, CryptoSpotDailyMarketChart
+        ] = {}
         self._listed_market_chart_cache: dict[
             tuple[str, AaplMarketChartRequest], ListedMarketChart
         ] = {}
@@ -773,6 +803,27 @@ class AaplLocalController:
             self._btc_market_chart_cache[request] = chart
         return chart
 
+    def crypto_spot_daily_market_chart_request(
+        self,
+        request: CryptoSpotDailyMarketChartRequest,
+    ) -> CryptoSpotDailyMarketChart:
+        """Query a cached catalog-scoped Coinbase daily chart without writes."""
+        with self._cache_lock:
+            cached = self._crypto_spot_daily_chart_cache.get(request)
+            if cached is not None:
+                return cached
+        chart = self._application.query_crypto_spot_daily_market_chart(
+            request,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+        with self._cache_lock:
+            if len(self._crypto_spot_daily_chart_cache) >= _MAX_READ_CACHE_ENTRIES:
+                self._crypto_spot_daily_chart_cache.pop(
+                    next(iter(self._crypto_spot_daily_chart_cache))
+                )
+            self._crypto_spot_daily_chart_cache[request] = chart
+        return chart
+
     def listed_market_chart_request(
         self,
         asset_id: str,
@@ -828,6 +879,22 @@ class AaplLocalController:
             finally:
                 with self._cache_lock:
                     self._btc_market_chart_cache.clear()
+                self._refresh_health_snapshot()
+
+    def crypto_spot_daily_refresh_request(
+        self,
+        request: CryptoSpotDailyRefreshRequest,
+    ) -> CryptoSpotDailyRefreshSummary:
+        """Execute one catalog-scoped Coinbase daily refresh through the writer mutex."""
+        with self._writer_lock:
+            try:
+                return self._application.refresh_crypto_spot_daily(
+                    request,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                )
+            finally:
+                with self._cache_lock:
+                    self._crypto_spot_daily_chart_cache.clear()
                 self._refresh_health_snapshot()
 
     def listed_market_refresh_request(
@@ -1008,6 +1075,7 @@ class AaplLocalController:
         with self._cache_lock:
             self._market_chart_cache.clear()
             self._btc_market_chart_cache.clear()
+            self._crypto_spot_daily_chart_cache.clear()
             self._listed_market_chart_cache.clear()
             self._corporate_valuation_cache.clear()
             self._btc_intraday_chart_cache.clear()
@@ -1354,6 +1422,12 @@ class AaplLocalWebApplication:
             descriptor.analysis.market_mode is MarketAnalysisMode.CRYPTO_SPOT
             and descriptor.provider == "coinbase"
         ):
+            if descriptor.asset_id != "crypto:btc-usd":
+                request_parameters["asset_id"] = descriptor.asset_id
+                request = CryptoSpotDailyMarketChartRequest.model_validate(request_parameters)
+                return self._controller.crypto_spot_daily_market_chart_request(
+                    request
+                ).to_json_dict()
             request = BtcMarketChartRequest.model_validate(request_parameters)
             return self._controller.btc_market_chart_request(request).to_json_dict()
         if (
@@ -1476,6 +1550,9 @@ class AaplLocalWebApplication:
             descriptor.analysis.market_mode is MarketAnalysisMode.CRYPTO_SPOT
             and descriptor.provider == "coinbase"
         ):
+            if descriptor.asset_id != "crypto:btc-usd":
+                request = CryptoSpotDailyRefreshRequest.model_validate(payload)
+                return self._controller.crypto_spot_daily_refresh_request(request).to_json_dict()
             request = BtcMarketRefreshRequest.model_validate(payload)
             return self._controller.btc_market_refresh_request(request).to_json_dict()
         if (
@@ -1877,7 +1954,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 "known_at_too_early",
                 str(error)[:500],
             )
-        elif isinstance(error, (ListedMarketRefreshError, BtcMarketRefreshError)):
+        elif isinstance(
+            error,
+            (
+                ListedMarketRefreshError,
+                BtcMarketRefreshError,
+                CryptoSpotDailyRefreshError,
+            ),
+        ):
             self._send_error(
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 "market_refresh_failed",

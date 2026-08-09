@@ -49,11 +49,14 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
     BtcMarketChart,
     BtcMarketChartRequest,
+    CryptoSpotDailyMarketChart,
+    CryptoSpotDailyMarketChartRequest,
     ListedMarketChart,
 )
 from investment_analyst.analytics.market.chart_service import (
     AaplMarketChartService,
     BtcMarketChartService,
+    CryptoSpotDailyMarketChartService,
     ListedMarketChartService,
 )
 from investment_analyst.analytics.market.diagnostic_pipeline import MarketDiagnosticPipeline
@@ -100,6 +103,16 @@ from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshSummary,
 )
 from investment_analyst.application.btc_refresh_planner import BtcMarketRefreshPlanner
+from investment_analyst.application.crypto_spot_daily import (
+    CryptoSpotDailyRefreshPipeline,
+)
+from investment_analyst.application.crypto_spot_daily_models import (
+    CryptoSpotDailyRefreshRequest,
+    CryptoSpotDailyRefreshSummary,
+)
+from investment_analyst.application.crypto_spot_daily_planner import (
+    CryptoSpotDailyRefreshPlanner,
+)
 from investment_analyst.application.listed_market_refresh import ListedMarketRefreshPipeline
 from investment_analyst.application.listed_market_refresh_models import (
     ListedMarketRefreshRequest,
@@ -404,6 +417,29 @@ class InvestmentAnalystApplication:
                 MarketStatisticsEngine(),
             ).query(request)
 
+    def query_crypto_spot_daily_market_chart(
+        self,
+        request: CryptoSpotDailyMarketChartRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CryptoSpotDailyMarketChart:
+        """Return one read-only chart for an explicitly configured Coinbase daily asset."""
+        configuration = resolve_coinbase_configuration(
+            self._runtime.provider_resolver,
+            asset_id=request.asset_id,
+        )
+        with self._runtime.open_storage(
+            location, access_mode=WorkspaceAccessMode.READ_ONLY
+        ) as storage:
+            return CryptoSpotDailyMarketChartService(
+                HistoricalMarketDataService(storage),
+                MarketStatisticsEngine(),
+            ).query(
+                request,
+                source_id=configuration.source_id,
+                volume_unit=configuration.base_unit,
+            )
+
     def query_listed_market_chart(
         self,
         request: AaplMarketChartRequest,
@@ -486,6 +522,51 @@ class InvestmentAnalystApplication:
                         self._transport_factory(),
                         clock=execution_clock,
                     ),
+                    configuration=configuration,
+                    clock=execution_clock,
+                ),
+                statistics_pipeline=MarketStatisticsPipeline(
+                    storage,
+                    history,
+                    MarketStatisticsEngine(),
+                    clock=execution_clock,
+                ),
+                diagnostic_pipeline=MarketDiagnosticPipeline(
+                    storage,
+                    MarketDiagnosticMetricSelector(storage),
+                    MarketDiagnosticEngine(),
+                    clock=execution_clock,
+                ),
+                clock=execution_clock,
+            ).run(request)
+
+    def refresh_crypto_spot_daily(
+        self,
+        request: CryptoSpotDailyRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CryptoSpotDailyRefreshSummary:
+        """Refresh one catalog-scoped Coinbase daily source without BTC fallback."""
+        configuration = resolve_coinbase_configuration(
+            self._runtime.provider_resolver,
+            asset_id=request.asset_id,
+        )
+        with self._runtime.open_storage(
+            location, access_mode=WorkspaceAccessMode.READ_WRITE
+        ) as storage:
+            execution_clock = BtcMarketExecutionClock()
+            history = HistoricalMarketDataService(storage)
+            return CryptoSpotDailyRefreshPipeline(
+                asset_id=configuration.asset_id,
+                source_id=configuration.source_id,
+                refresh_planner=CryptoSpotDailyRefreshPlanner(
+                    storage,
+                    asset_id=configuration.asset_id,
+                    source_id=configuration.source_id,
+                ),
+                market_pipeline=CoinbaseHistoricalPipeline(
+                    storage,
+                    CoinbaseExchangeClient(self._transport_factory(), clock=execution_clock),
                     configuration=configuration,
                     clock=execution_clock,
                 ),

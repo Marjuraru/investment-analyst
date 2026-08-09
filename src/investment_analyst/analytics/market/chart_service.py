@@ -23,6 +23,8 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartSma,
     BtcMarketChart,
     BtcMarketChartRequest,
+    CryptoSpotDailyMarketChart,
+    CryptoSpotDailyMarketChartRequest,
     ListedMarketChart,
 )
 from investment_analyst.analytics.market.history_service import MarketHistoryError
@@ -126,7 +128,13 @@ class BtcMarketChartQueryError(RuntimeError):
     """Raised when stored Coinbase evidence cannot produce a valid chart contract."""
 
 
-_ChartResult = TypeVar("_ChartResult", AaplMarketChart, BtcMarketChart, ListedMarketChart)
+_ChartResult = TypeVar(
+    "_ChartResult",
+    AaplMarketChart,
+    BtcMarketChart,
+    CryptoSpotDailyMarketChart,
+    ListedMarketChart,
+)
 
 
 class _HistoryOperations(Protocol):
@@ -591,6 +599,31 @@ class BtcMarketChartService(AaplMarketChartService):
                 volume_unit="BTC",
                 source_limitation=_BTC_SOURCE_LIMITATION,
                 result_model=BtcMarketChart,
+            )
+        except AaplMarketChartQueryError as error:
+            raise BtcMarketChartQueryError(
+                "stored Coinbase market history could not be charted"
+            ) from error
+
+
+class CryptoSpotDailyMarketChartService(AaplMarketChartService):
+    """Compose one configured Coinbase daily chart without provider calls or writes."""
+
+    def query(
+        self,
+        request: CryptoSpotDailyMarketChartRequest,
+        *,
+        source_id: str,
+        volume_unit: str,
+    ) -> CryptoSpotDailyMarketChart:
+        try:
+            return self._query_scoped(
+                request,
+                asset_id=request.asset_id,
+                source_id=source_id,
+                volume_unit=volume_unit,
+                source_limitation=_BTC_SOURCE_LIMITATION,
+                result_model=CryptoSpotDailyMarketChart,
             )
         except AaplMarketChartQueryError as error:
             raise BtcMarketChartQueryError(

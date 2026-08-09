@@ -25,13 +25,14 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
 
     assert universe.schema_version == "market-asset-universe-v3"
     assert universe.catalog_version == 1
-    assert len(universe.assets) == 18
+    assert len(universe.assets) == 19
     assert tuple(item.asset_id for item in universe.assets) == tuple(
         sorted(item.asset_id for item in universe.assets)
     )
     by_symbol = {item.symbol: item for item in universe.assets}
     assert {
         "BTC-USD",
+        "ETH-USD",
         "AAPL",
         "AMD",
         "B",
@@ -109,7 +110,13 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     assert not bitcoin.has_corporate_valuation
     assert bitcoin.intraday_source_id == "coinbase-exchange:btc-usd:minute-1-candles"
     assert bitcoin.default_market_start == date(2015, 7, 20)
-    assert "ETH-USD" not in by_symbol
+    ethereum = by_symbol["ETH-USD"]
+    assert ethereum.asset_id == "crypto:eth-usd"
+    assert ethereum.provider == "coinbase"
+    assert ethereum.source_id == "coinbase-exchange:eth-usd:daily-candles"
+    assert ethereum.volume_unit == "ETH"
+    assert ethereum.chart_schema_version == "crypto-spot-daily-market-chart-v1"
+    assert not ethereum.supports_intraday
 
     barrick = by_symbol["B"]
     assert barrick.asset_id == "equity:us:b"
