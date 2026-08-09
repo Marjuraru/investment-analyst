@@ -1,0 +1,6 @@
+interface:
+  display_name: "UI Worker Work Block"
+  short_description: "Ejecuta BUILD para el alcance UI activo"
+  default_prompt: "Usa /ui para ejecutar BUILD como UI Worker del Work Block activo."
+policy:
+  allow_implicit_invocation: false

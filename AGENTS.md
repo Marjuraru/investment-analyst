@@ -148,6 +148,9 @@ results, and pending risks.
   For a FAST Work Block whose effective `finalize_policy` is AUTO, it also authorizes the narrow
   FINALIZE procedure after all live guards pass; otherwise it never authorizes merge,
   ready-for-review, scope expansion, or protected local work.
+- Explicit `/ui` in a supported client authorizes the same BUILD phase only for the UI Worker scope
+  declared by the active Work Block. The UI Worker is the sole writer, uses no parallel writer or
+  intra-block handoff, and returns to PLAN for any scope or capability expansion.
 - Explicit `/audit` in Antigravity or `$audit` in compatible clients authorizes the read-only
   AUDIT phase and one structured PR comment bound to the exact SHA. When the resolved Work Block
   has `finalize_policy: AUTO`, an AUDIT PASS in that same invocation may continue to the narrow

@@ -11,6 +11,10 @@ Un Work Block es una capacidad cohesiva. Sólo puede existir uno abierto con `wo
 PLAN publica deltas compactos; no copia estas reglas globales. Cada Issue declara: ID, objetivo,
 Scope/Risk/Profile, `finalize_policy`, base, expected branch, owner, alcance, invariantes,
 superficies protegidas/prohibidas, aceptación/negativos, capability delta y gates o excepciones.
+PLAN es control-plane-first: refresca primero el estado vivo y formula una hipótesis antes de
+explorar; usa progressive disclosure y exploración dirigida sólo sobre las superficies necesarias.
+Los threads persistentes pueden conservar contexto, pero no son autoridad: repo, Issue, PR y
+GitHub siempre prevalecen. Cada AUDIT de un Work Block comienza en un chat Gemini nuevo.
 
 `finalize_policy` sólo admite `AUTO` o `HUMAN`: FAST usa AUTO por defecto; STANDARD usa AUTO tras
 AUDIT PASS; CRITICAL usa HUMAN. Un override HUMAN de FAST/STANDARD requiere justificación en PLAN.
@@ -87,6 +91,9 @@ no puede devolver un handoff de progreso.
 PLAN sólo crea o actualiza el Work Block. BUILD es el único writer, implementa el mínimo cohesivo,
 ejecuta checks focalizados, preserva trabajo protegido y publica un PR draft. AUDIT fija un SHA y
 permanece read-only respecto de source, branch, candidato y workspace permanente.
+`/ui` es una autorización explícita para que el UI Worker ejecute exactamente BUILD dentro de la
+frontera UI declarada; conserva un único writer, no permite handoff dentro del bloque y vuelve a
+PLAN ante lógica financiera, contratos, APIs, storage, providers o cualquier expansión de scope.
 
 - FAST: `$plan → $build → gates → FINALIZE → COMPLETE` cuando policy es AUTO.
 - STANDARD: `$plan → $build → /audit → PASS → FINALIZE → COMPLETE` cuando policy es AUTO.
@@ -198,7 +205,10 @@ Cambios de skills, aliases o descubrimiento requieren un smoke real separado en 
 soportado. `/skills` o equivalente debe listar `plan`, `build`, `audit` e
 `investment-block-flow`; `/audit` debe resolverse sin iniciar auditoría ni mutar producto. El smoke
 demuestra además al menos un caso de terminality, rechazo de auditoría superficial y guard de
-finalización. Un unit test o fixture simulado no sustituye este gate.
+finalización. Para un Work Block UI, `/ui` debe resolver una única skill canónica, recargar el
+workspace y demostrar el preflight read-only sin target antes de cualquier branch, archivo o PR.
+El AUDIT se ejecuta en el chat Gemini nuevo declarado por el bloque. Un unit test o fixture
+simulado no sustituye este gate.
 
 La evidencia vincula SHA, comando/capacidad, entorno, resultado y timestamp. No se repite una suite
 completa verde para el mismo SHA y entorno. No se accede al workspace permanente sin autorización.

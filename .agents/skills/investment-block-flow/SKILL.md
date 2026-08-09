@@ -1,6 +1,6 @@
 ---
 name: investment-block-flow
-description: Compatibilidad para orientar el workflow explícito de investment-analyst mediante $plan, $build y /audit o $audit.
+description: Compatibilidad para orientar el workflow explícito de investment-analyst mediante $plan, $build, /ui y /audit o $audit.
 ---
 
 # Investment Block Flow
@@ -9,7 +9,7 @@ Leer completos `AGENTS.md` y `docs/development_protocol.md`. El repositorio, ár
 GitHub Issue, PR y estado vivo son autoritativos.
 
 Elegir sólo el modo autorizado explícitamente: Arquitecto (`$plan`), Implementador (`$build`),
-Auditor (`/audit` o `$audit`) o Corrección concreta de un PR. Resolver siempre el target
+UI Worker (`/ui`), Auditor (`/audit` o `$audit`) o Corrección concreta de un PR. Resolver siempre el target
 fail-closed; conservar trabajo local, secretos e historia; no ampliar scope ni admitir dos writers.
 
 PLAN crea un delta compacto. BUILD sigue la tabla canónica hasta terminalidad, publica un draft y

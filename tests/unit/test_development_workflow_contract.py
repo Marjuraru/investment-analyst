@@ -42,10 +42,11 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
         "build": ".agents/skills/build/SKILL.md",
         "audit": ".agents/skills/audit/SKILL.md",
         "investment-block-flow": ".agents/skills/investment-block-flow/SKILL.md",
+        "ui": ".agents/skills/ui/SKILL.md",
     }
     skills = {name: _read(path) for name, path in skill_paths.items()}
     core_rule = _read(".agents/rules/investment-analyst-core.md")
-    audit_alias = _read(".agents/workflows/audit.md")
+    ui_agent = _read(".agents/skills/ui/agents/openai.yaml")
 
     assert protocol.count("## Algoritmo canónico de transición operativa") == 1
     assert protocol.count("| Condición viva | Decisión | Siguiente acción obligatoria |") == 1
@@ -57,6 +58,9 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "segundo snapshot/revalidación crítica" in protocol
     assert "squash merge con --match-head-commit" in protocol
     assert "Terra High" in protocol
+    assert "threads persistentes" in protocol
+    assert "chat Gemini nuevo" in protocol
+    assert "/ui" in protocol
 
     for name, text in skills.items():
         assert _frontmatter_value(text, "name") == name
@@ -71,10 +75,63 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "read-only" in skills["audit"]
     assert "diff completo" in skills["audit"]
     assert "policy HUMAN" in skills["audit"]
+    assert "exactamente BUILD" in skills["ui"]
+    assert "único writer" in skills["ui"]
+    assert "local_web.py" in skills["ui"]
+    assert "scratch externo" in skills["ui"]
+    assert "allow_implicit_invocation: false" in ui_agent
     assert "read-only" in core_rule
     assert "snapshot antes y" in core_rule
-    assert "`.agents/skills/audit/SKILL.md`" in audit_alias
-    assert "policy HUMAN" in audit_alias
+    assert "control-plane-first" in skills["plan"]
+    assert "exploración dirigida" in skills["plan"]
+
+
+def test_canonical_skill_basenames_and_ui_frontier_are_unique() -> None:
+    skill_paths = sorted((ROOT / ".agents" / "skills").glob("*/SKILL.md"))
+    basenames = [path.parent.name for path in skill_paths]
+
+    assert basenames.count("audit") == 1
+    assert basenames.count("ui") == 1
+    assert not (ROOT / ".agents" / "workflows" / "audit.md").exists()
+    assert not (ROOT / ".agents" / "workflows" / "ui.md").exists()
+
+    ui = _read(".agents/skills/ui/SKILL.md")
+    assert "src/investment_analyst/frontend/static/**" in ui
+    assert "no tocar `local_web.py` sin allowlist explícita" in ui
+    assert "No usar subagentes writers, worktrees paralelos ni handoff" in ui
+    assert "BUILD READY`, `BUILD BLOCKED` o `BUILD GUARD FAILURE`" in ui
+
+
+@dataclass(frozen=True, slots=True)
+class UiWorkerPreflight:
+    target_valid: bool = True
+    writer_is_exclusive: bool = True
+    scope_is_ui: bool = True
+
+
+def _ui_worker_preflight(
+    snapshot: UiWorkerPreflight,
+    attempted_actions: list[str],
+) -> tuple[str, str]:
+    if not snapshot.target_valid:
+        return "GUARD FAILURE", "stop before branch, file, or PR mutation"
+    if not snapshot.writer_is_exclusive or not snapshot.scope_is_ui:
+        return "BLOCKED", "return to PLAN before expanding authority or scope"
+    attempted_actions.append("read-only target resolution")
+    return "CONTINUE", "execute the existing BUILD path"
+
+
+def test_ui_worker_preflight_rejects_missing_target_without_mutation() -> None:
+    attempted_actions: list[str] = []
+
+    status, evidence = _ui_worker_preflight(
+        UiWorkerPreflight(target_valid=False),
+        attempted_actions,
+    )
+
+    assert status == "GUARD FAILURE"
+    assert "before branch, file, or PR" in evidence
+    assert attempted_actions == []
 
 
 def test_remote_only_base_and_absent_branch_progress_from_exact_remote_sha(
