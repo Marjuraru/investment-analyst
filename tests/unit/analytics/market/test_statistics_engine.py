@@ -14,6 +14,10 @@ from investment_analyst.analytics.market.bar_models import (
 )
 from investment_analyst.analytics.market.bar_schemas import COINBASE_INTRADAY_SOURCE_ID
 from investment_analyst.analytics.market.statistics_definitions import (
+    BOLLINGER_BANDWIDTH_KEY,
+    BOLLINGER_LOWER_KEY,
+    BOLLINGER_PERCENT_B_KEY,
+    BOLLINGER_UPPER_KEY,
     RELATIVE_VOLUME_KEY,
     SIMPLE_RETURN_KEY,
     SMA_KEY,
@@ -170,6 +174,51 @@ def test_zero_volume_baseline_is_skipped() -> None:
 
     assert not _items(result, RELATIVE_VOLUME_KEY)
     assert result.zero_denominator_skips[f"{RELATIVE_VOLUME_KEY}:2"] == 1
+
+
+def test_bollinger_bands_are_population_decimal_only_and_traceable() -> None:
+    series = _series(("100", "110", "99"))
+    request = MarketStatisticsRequest(
+        query=series.query,
+        sma_windows=(1,),
+        volatility_window=2,
+        relative_volume_window=2,
+        bollinger_window=3,
+        bollinger_multiplier=Decimal("2"),
+    )
+    result = MarketStatisticsEngine().compute(series, request)
+
+    upper = _items(result, BOLLINGER_UPPER_KEY)[0]
+    lower = _items(result, BOLLINGER_LOWER_KEY)[0]
+    bandwidth = _items(result, BOLLINGER_BANDWIDTH_KEY)[0]
+    percent_b = _items(result, BOLLINGER_PERCENT_B_KEY)[0]
+
+    assert upper.value == Decimal("112.9331096171675598128878773640826")
+    assert lower.value == Decimal("93.06689038283244018711212263591737")
+    assert bandwidth.value == Decimal("0.1928759148964574720949102400792741")
+    assert percent_b.value == Decimal("0.2986531834357927064955159993767037")
+    assert upper.input_observation_ids == tuple(bar.observation_ids["close"] for bar in series.bars)
+    assert upper.parameters["multiplier"] == "2"
+    assert result.warmup_counts[f"{BOLLINGER_UPPER_KEY}:3"] == 2
+
+
+def test_flat_bollinger_band_omits_percent_b_and_counts_the_zero_denominator() -> None:
+    series = _series(("100", "100", "100"))
+    result = MarketStatisticsEngine().compute(
+        series,
+        MarketStatisticsRequest(
+            query=series.query,
+            sma_windows=(1,),
+            volatility_window=2,
+            relative_volume_window=2,
+            bollinger_window=3,
+        ),
+    )
+
+    assert _items(result, BOLLINGER_UPPER_KEY)[0].value == Decimal("100")
+    assert _items(result, BOLLINGER_LOWER_KEY)[0].value == Decimal("100")
+    assert not _items(result, BOLLINGER_PERCENT_B_KEY)
+    assert result.zero_denominator_skips[f"{BOLLINGER_PERCENT_B_KEY}:3"] == 1
 
 
 @pytest.mark.parametrize(

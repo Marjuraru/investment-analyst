@@ -219,6 +219,10 @@ def test_daily_chart_is_bounded_exact_and_uses_resolution_sma() -> None:
     assert chart.points[0].third_sma is not None
     assert chart.points[0].third_sma.value == Decimal("323.501")
     assert len(chart.points[0].third_sma.input_observation_ids) == 50
+    assert chart.points[0].bollinger is not None
+    assert chart.points[0].bollinger.window == 20
+    assert chart.points[0].bollinger.multiplier == Decimal("2")
+    assert len(chart.points[0].bollinger.input_observation_ids) == 20
     with localcontext(Context(prec=34)):
         expected_range_return = Decimal("369.001") / Decimal("348.001") - Decimal("1")
     assert chart.range_statistics.return_rate == expected_range_return

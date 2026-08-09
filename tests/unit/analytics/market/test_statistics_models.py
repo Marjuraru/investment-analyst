@@ -50,6 +50,8 @@ def test_request_defaults_and_sma_sorting() -> None:
     assert default.sma_windows == (5, 20)
     assert default.volatility_window == 20
     assert default.relative_volume_window == 20
+    assert default.bollinger_window == 20
+    assert default.bollinger_multiplier == Decimal("2")
     assert sorted_request.sma_windows == (1, 5, 20)
 
 
@@ -75,6 +77,15 @@ def test_invalid_sma_windows_are_rejected(values: tuple[object, ...]) -> None:
 def test_invalid_scalar_windows_are_rejected(field: str, value: object) -> None:
     with pytest.raises(ValidationError):
         MarketStatisticsRequest.model_validate({"query": _query(), field: value})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0.1, True, "2", Decimal("NaN"), Decimal("Infinity"), Decimal("0"), Decimal("101")],
+)
+def test_invalid_bollinger_multiplier_is_rejected(value: object) -> None:
+    with pytest.raises(ValidationError):
+        MarketStatisticsRequest.model_validate({"query": _query(), "bollinger_multiplier": value})
 
 
 def test_metric_calculation_preserves_decimal_and_serializes() -> None:

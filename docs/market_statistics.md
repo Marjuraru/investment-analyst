@@ -20,6 +20,13 @@ Relative volume is `current volume / mean(previous N available volumes)`. The cu
 excluded from its baseline. When that historical mean is zero, the engine records a skip rather than
 emitting an undefined result.
 
+Daily Bollinger Bands v1 use available closing-price windows. The middle value is the existing SMA
+for the same window (it is not persisted as a duplicate metric). The upper/lower bands use
+population standard deviation (`ddof=0`), with exact Decimal window and multiplier parameters.
+Bandwidth is `(upper - lower) / middle`; Percent B is omitted, with an observable zero-denominator
+count, when a flat window makes the band width zero. These descriptive values do not fill gaps,
+infer a calendar, emit a signal, or constitute investment advice.
+
 ## Warmup, quality, and source scope
 
 Insufficient history is normal and is recorded as warmup, not as an error. Result quality propagates
@@ -42,7 +49,9 @@ python scripts/compute_market_statistics.py \
   --end 2026-07-01 \
   --known-at 2026-07-02T00:00:00Z \
   --sma-window 5 \
-  --sma-window 20
+  --sma-window 20 \
+  --bollinger-window 20 \
+  --bollinger-multiplier 2
 ```
 
 The command reads local storage only. These are descriptive statistics, not signals, scoring,

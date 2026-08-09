@@ -1202,6 +1202,10 @@ section {
   background: var(--series-sma-50);
 }
 
+.legend-swatch.bollinger {
+  background: var(--warning);
+}
+
 .legend-swatch.candles {
   background: linear-gradient(90deg, var(--positive) 0 48%, var(--negative) 52% 100%);
 }
@@ -1278,6 +1282,13 @@ section {
   stroke-width: 1.7;
 }
 
+.bollinger-upper-line,
+.bollinger-lower-line {
+  stroke: var(--warning);
+  stroke-width: 1.25;
+  stroke-dasharray: 4 3;
+}
+
 .candlestick-wicks,
 .candlestick-bodies {
   vector-effect: non-scaling-stroke;
@@ -1334,6 +1345,8 @@ section {
 .market-chart-svg.hide-sma-20 .chart-selection-point.sma-twenty,
 .market-chart-svg.hide-sma-50 .sma-fifty-line,
 .market-chart-svg.hide-sma-50 .chart-selection-point.sma-fifty,
+.market-chart-svg.hide-bollinger .bollinger-upper-line,
+.market-chart-svg.hide-bollinger .bollinger-lower-line,
 .market-chart-svg.hide-volume .volume-bars {
   display: none;
 }

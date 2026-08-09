@@ -5,6 +5,7 @@ import argparse
 import json
 import sys
 from datetime import UTC, date, datetime
+from decimal import Decimal, InvalidOperation
 
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
 from investment_analyst.analytics.market.history_service import (
@@ -42,6 +43,10 @@ _METRIC_KEYS = {
     "market.history.sma",
     "market.history.rolling_daily_volatility",
     "market.history.relative_volume",
+    "market.technical.bollinger.upper",
+    "market.technical.bollinger.lower",
+    "market.technical.bollinger.bandwidth",
+    "market.technical.bollinger.percent_b",
 }
 
 
@@ -80,6 +85,16 @@ def _volatility_window(value: str) -> int:
     return parsed
 
 
+def _positive_decimal(value: str) -> Decimal:
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as error:
+        raise argparse.ArgumentTypeError("expected an exact decimal") from error
+    if not parsed.is_finite() or parsed <= 0 or parsed > Decimal("100"):
+        raise argparse.ArgumentTypeError("value must be finite, positive, and at most 100")
+    return parsed
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compute auditable historical market statistics.")
     add_storage_location_arguments(parser)
@@ -91,6 +106,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sma-window", action="append", type=_positive_int)
     parser.add_argument("--volatility-window", type=_volatility_window, default=20)
     parser.add_argument("--relative-volume-window", type=_positive_int, default=20)
+    parser.add_argument("--bollinger-window", type=_volatility_window, default=20)
+    parser.add_argument("--bollinger-multiplier", type=_positive_decimal, default=Decimal("2"))
     parser.add_argument("--output-limit", type=_positive_int, default=20)
     return parser
 
@@ -110,6 +127,12 @@ def _matches_request(result, request: MarketStatisticsRequest) -> bool:
         return result.parameters.get("window") == request.volatility_window
     if result.metric_key == "market.history.relative_volume":
         return result.parameters.get("window") == request.relative_volume_window
+    if result.metric_key.startswith("market.technical.bollinger."):
+        return result.parameters.get(
+            "window"
+        ) == request.bollinger_window and result.parameters.get("multiplier") == str(
+            request.bollinger_multiplier
+        )
     return True
 
 
@@ -130,6 +153,8 @@ def main() -> int:
             sma_windows=tuple(args.sma_window or (5, 20)),
             volatility_window=args.volatility_window,
             relative_volume_window=args.relative_volume_window,
+            bollinger_window=args.bollinger_window,
+            bollinger_multiplier=args.bollinger_multiplier,
         )
         runtime = ApplicationRuntime.create_default()
         with runtime.open_storage(
