@@ -1,109 +1,58 @@
 name: Work Block
-description: Define one cohesive development capability and its gates
+description: Define un delta compacto para una capacidad cohesiva
 title: "[WORK-BLOCK] "
-labels:
-  - workflow:active
+labels: [workflow:active]
 body:
   - type: markdown
     attributes:
-      value: >-
-        Only one principal Work Block may carry workflow:active. Complete every required field so
-        PLAN, BUILD, and AUDIT can resolve the target fail-closed.
+      value: "Un único Work Block abierto puede llevar workflow:active. Declare deltas; los defaults viven en docs/development_protocol.md."
   - type: input
     id: work_block
-    attributes:
-      label: Work Block
-      placeholder: BASE-18 or DEV-2
-    validations:
-      required: true
+    attributes: {label: Work Block, placeholder: "BASE-18 o DEV-3"}
+    validations: {required: true}
   - type: textarea
     id: objective
-    attributes:
-      label: Objective
-      description: Observable capability delivered by this block.
-    validations:
-      required: true
+    attributes: {label: Objective, description: "Capacidad observable."}
+    validations: {required: true}
   - type: dropdown
     id: scope
-    attributes:
-      label: Scope
-      options: [S1, S2, S3]
-    validations:
-      required: true
+    attributes: {label: Scope, options: [S1, S2, S3]}
+    validations: {required: true}
   - type: dropdown
     id: risk
-    attributes:
-      label: Risk
-      options: [R0, R1, R2, R3]
-    validations:
-      required: true
+    attributes: {label: Risk, options: [R0, R1, R2, R3]}
+    validations: {required: true}
   - type: dropdown
     id: profile
-    attributes:
-      label: Profile
-      options: [FAST, STANDARD, CRITICAL]
-    validations:
-      required: true
+    attributes: {label: Profile, options: [FAST, STANDARD, CRITICAL]}
+    validations: {required: true}
+  - type: dropdown
+    id: finalize_policy
+    attributes: {label: Finalize policy, options: [AUTO, HUMAN]}
+    validations: {required: true}
   - type: input
     id: base_sha
-    attributes:
-      label: Base SHA
-      description: Full commit SHA from which implementation must start.
-    validations:
-      required: true
+    attributes: {label: Base SHA, description: "SHA remoto completo."}
+    validations: {required: true}
   - type: input
     id: expected_branch
-    attributes:
-      label: Expected branch
-      placeholder: codex/short-capability-name
-    validations:
-      required: true
+    attributes: {label: Expected branch, placeholder: codex/capability-name}
+    validations: {required: true}
   - type: input
     id: owner
-    attributes:
-      label: Implementation owner
-      description: Single writer role or specialist. V1 does not permit parallel authoring.
-    validations:
-      required: true
-  - type: dropdown
-    id: ci_required
-    attributes:
-      label: CI required
-      options: ["YES", "NO — justified below"]
-    validations:
-      required: true
-  - type: dropdown
-    id: smoke_required
-    attributes:
-      label: Real smoke required
-      options: ["NO", "YES"]
-    validations:
-      required: true
-  - type: dropdown
-    id: audit_required
-    attributes:
-      label: Independent audit required
-      options: ["NO", "YES"]
-    validations:
-      required: true
+    attributes: {label: Implementation owner, description: "Un único writer."}
+    validations: {required: true}
   - type: textarea
-    id: scope_contract
+    id: scope_delta
     attributes:
-      label: Scope and non-scope
-      description: Files/domains allowed, exclusions, invariants, compatibility and protected work.
-    validations:
-      required: true
+      label: Semantic scope or strict allowlist
+      description: "R3/superficie sensible: strict allowlist. Otro caso: semantic scope, superficies protegidas/prohibidas e invariantes."
+    validations: {required: true}
   - type: textarea
     id: acceptance
-    attributes:
-      label: Acceptance criteria and negative cases
-      description: Verifiable behavior, focused tests, smoke evidence and failure cases.
-    validations:
-      required: true
+    attributes: {label: Acceptance and negative cases}
+    validations: {required: true}
   - type: textarea
-    id: routing
-    attributes:
-      label: Routing and residual risks
-      description: Recommended builder/model, audit route, known limitations and decisions.
-    validations:
-      required: true
+    id: capability_delta
+    attributes: {label: Capability delta and gates, description: "Sólo capacidades no triviales, gates o excepciones a defaults."}
+    validations: {required: true}

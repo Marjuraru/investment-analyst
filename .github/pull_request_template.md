@@ -1,30 +1,15 @@
 ## Work Block
 
-Closes #
-
 - Block:
-- Profile:
-- Base SHA:
+- Objective:
+- Base:
+- Scope:
 
-## Final candidate reconciliation
-
-- Live PR head SHA (refreshed after push):
-- Reconciled at (UTC):
-- Handoff verified against the live PR head: yes/no
-- Any commit after this reconciliation invalidates CI, smoke, and audit evidence.
-
-## Implementation
-
--
-
-## Evidence
-
-- Focused checks:
-- CI `Python 3.12 quality` (same live head SHA):
-- Required smoke (same live head SHA): n/a
-- Audit: pending
-
-## Scope and risk
+## Stable scope and risk
 
 - Protected/local work preserved:
-- Known limitations or residual risks:
+- Risks and limitations:
+- References:
+
+Dynamic GitHub state is read live. BUILD and AUDIT evidence belongs in their exact-SHA
+machine-owned comments, never in this body.
