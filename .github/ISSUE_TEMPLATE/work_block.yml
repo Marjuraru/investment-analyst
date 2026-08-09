@@ -62,16 +62,7 @@ body:
     id: owner
     attributes:
       label: Implementation owner
-      description: Single writer role or specialist.
-    validations:
-      required: true
-  - type: dropdown
-    id: parallel_authoring
-    attributes:
-      label: Parallel authoring
-      options:
-        - "NO"
-        - "YES — isolated worktrees and paths defined below"
+      description: Single writer role or specialist. V1 does not permit parallel authoring.
     validations:
       required: true
   - type: dropdown

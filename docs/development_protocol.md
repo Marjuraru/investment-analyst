@@ -32,13 +32,14 @@ Cada Work Block activo debe ser un Issue abierto con el label `workflow:active` 
 - Work Block ID, objetivo, alcance y fuera de alcance;
 - Scope, Risk y Profile;
 - base SHA y expected branch;
-- owner y si admite authoring paralelo;
+- owner único;
 - gates de CI, smoke y auditoría;
 - criterios de aceptación y casos negativos;
 - archivos o trabajo local protegido.
 
 Solo puede existir un Work Block principal activo. El label es un puntero, no una máquina de
-estados ni evidencia suficiente por sí solo.
+estados ni evidencia suficiente por sí solo. V1 admite un único writer; no ofrece authoring
+paralelo ni worktrees automáticos.
 
 ## Resolución fail-closed
 
@@ -52,18 +53,26 @@ open Issue + workflow:active
 → head SHA exacto
 ```
 
-La consulta inicial usa `gh issue list --state open --label workflow:active --limit 2 --json
-number,title,body,labels,url`. BUILD y AUDIT buscan el PR mediante su expected branch con `gh pr
-list --state open --head <branch>`, salida JSON y límite 2. El conteo se valida antes de interpretar
-el contenido.
+La consulta indexada inicial usa `gh issue list --state open --label workflow:active --limit 2
+--json number,title,body,labels,url`; descubre candidatos, pero no decide el target. PLAN, BUILD y
+AUDIT deben releer directamente cada candidato con `gh issue view <number> --json
+number,state,labels,title,body,url` y contar solo los que, en esa lectura actual, estén abiertos y
+conserven `workflow:active`. Se verifica que estado, label y metadata sigan iguales durante la
+resolución; un cambio de candidatos, estado o labels produce guard failure y no permite combinar
+snapshots. Un candidato indexado stale cuya lectura directa ya no tenga el label no cuenta.
 
-- Cero o más de un Issue activo: detenerse sin modificar archivos.
+BUILD y AUDIT buscan el PR mediante su expected branch con `gh pr list --state open --head <branch>`
+en salida JSON y límite 2. El conteo se valida antes de interpretar el contenido.
+
+- Cero o más de un Issue realmente activo: detenerse sin modificar archivos. Un Issue cerrado que
+  aún conserve realmente `workflow:active` bloquea PLAN hasta que una acción humana retire o
+  justifique el label; no se retira implícitamente.
 - Metadata ausente, ambigua o incompatible: detenerse.
 - Un PR stale, draft histórico o “último PR” nunca determina el target.
 - BUILD puede crear la expected branch solo si no existe, parte de la base SHA declarada y preserva
   todo trabajo local. En cualquier otro mismatch debe detenerse.
 - Si el contexto del chat menciona otro bloque, tratarlo como `BLOCK MISMATCH` aunque GitHub tenga
-  un target único.
+  un target único. Es un guard failure, no un bloqueo humano.
 - AUDIT exige exactamente un PR abierto para la expected branch y liga toda evidencia a su head
   SHA completo.
 
@@ -89,6 +98,19 @@ trabajo protegido.
 BUILD es el único writer de su branch/worktree. Agentes que escriben en paralelo necesitan
 worktrees y alcances de paths independientes expresamente aprobados; V1 no los usa.
 
+Tras un preflight válido, BUILD continúa mientras la siguiente acción necesaria esté dentro de
+scope y permisos. Trabajo pendiente, bugs corregibles, checks fallidos por la implementación, CI
+pendiente, integración pendiente o gates ejecutables no son bloqueos humanos. Sus únicos estados
+terminales son:
+
+- `BUILD READY`: candidato final completo; siguiente gate AUDIT para STANDARD/CRITICAL o HUMAN
+  MERGE para FAST.
+- `BUILD BLOCKED`: requiere una intervención, autorización o recurso externo real.
+- `BUILD GUARD FAILURE`: no resuelve fail-closed el target o una precondición, incluido `BLOCK
+  MISMATCH`.
+
+BUILD no termina con un handoff de progreso si queda trabajo ejecutable dentro del contrato.
+
 ### AUDIT
 
 AUDIT se distribuye como el skill repo-scoped `.agents/skills/audit/SKILL.md`, descubrible por
@@ -102,15 +124,25 @@ protocolo.
 
 ### HUMAN MERGE
 
-El merge siempre es humano y explícito. V1 no hace auto-merge. Tras el squash merge se sincroniza
-`main`, se confirma el cierre del Issue, se retira `workflow:active` y solo entonces PLAN puede
-activar el siguiente bloque.
+El merge siempre es humano y explícito. AUDIT nunca lo autoriza ni lo ejecuta; V1 no hace
+auto-merge. Tras el squash merge se confirma por lectura directa el PR merged, Issue cerrado y label
+ausente, se sincroniza `main` local/remoto y solo entonces PLAN puede activar el siguiente bloque.
 
 ## Validación y propiedad de evidencia
 
 Durante BUILD se ejecutan Ruff y pruebas focalizadas sobre el riesgo cambiado. Antes de publicar se
-revisan diff, status, alcance y secretos. Después del push, `Python 3.12 quality` es la autoridad de
-la suite determinista completa en ambiente limpio para el SHA exacto.
+revisan diff, status, alcance y secretos. El orden obligatorio del candidato final es:
+
+1. implementación y checks focalizados;
+2. revisión de diff, scope, secretos y trabajo protegido;
+3. stage acotado, commit y push;
+4. fijar el full head SHA y refrescar el head vivo del PR;
+5. CI y smoke requerido para ese mismo SHA;
+6. actualizar y verificar el handoff final del PR contra el head vivo;
+7. declarar BUILD READY solo si no hubo cambios posteriores.
+
+`Python 3.12 quality` es la autoridad de la suite determinista completa en ambiente limpio para el
+SHA exacto. El texto estático de un Issue o PR no es autoridad del SHA: el head vivo del PR sí lo es.
 
 No es obligatorio repetir localmente esa suite completa. `bash scripts/check.sh` permanece
 disponible y se usa cuando:
@@ -131,11 +163,23 @@ aplique. Nunca muta el workspace permanente sin autorización.
 Un commit nuevo invalida CI, smoke y auditoría anteriores. El auditor reutiliza CI verde del mismo
 SHA y solo ejecuta una prueba focalizada cuando identifica un riesgo concreto no cubierto.
 
+Todo cambio a skills, aliases o descubrimiento exige, además de validación estática, un smoke en un
+cliente soportado: debe demostrar que `/skills` o equivalente lista `plan`, `build`, `audit` e
+`investment-block-flow`, y que `/audit` se resuelve sin ejecutar auditoría ni mutar producto. El
+handoff registra cliente/versión, interacción, resultado y full SHA; un archivo válido pero no
+descubrible falla el gate.
+
 ## Handoff y auditoría persistida
 
 GitHub es el bus de handoff. PLAN deja el contrato detallado en el Issue; BUILD deja alcance,
 comandos, resultados, smoke, limitaciones y SHA en el PR; AUDIT deja hallazgos y estado en un
 comentario del PR. Ninguna decisión indispensable puede vivir solo en un chat.
+
+Una sustitución de builder solo ocurre después de que el writer anterior haya terminado. El reemplazo
+relee Issue, PR, expected branch, head/base SHA, branch/worktree o estado equivalente y trabajo
+protegido; conserva commits, evidencia y cambios válidos, y no vuelve a PLAN solo por reemplazar al
+builder. Un cambio material de objetivo, scope, arquitectura o aceptación requiere nueva
+autorización PLAN; un mismatch de base o branch sigue fallando cerrado.
 
 El comentario de auditoría usa un marker estable:
 
@@ -169,7 +213,8 @@ tiempo, costo observable y regresiones antes de ampliar su uso.
 El detalle técnico vive en GitHub. El chat muestra únicamente:
 
 - PLAN: capacidad, perfil, builder, audit, decisión y siguiente acción.
-- BUILD: `READY/BLOCKED`, 2–4 puntos, PR, CI/smoke y siguiente acción.
+- BUILD: `BUILD READY`, `BUILD BLOCKED` o `BUILD GUARD FAILURE`, 2–4 puntos, PR, CI/smoke y
+  siguiente acción.
 - AUDIT: `PASS/CHANGES REQUIRED`, SHA, hallazgos materiales, riesgo y siguiente acción.
 
 Nunca ocultar blocker, incertidumbre, scope expansion, gate no ejecutado, CI fallido, smoke ausente,
