@@ -12,8 +12,9 @@ Elegir sólo el modo autorizado explícitamente: Arquitecto (`$plan`), Implement
 Auditor (`/audit` o `$audit`) o Corrección concreta de un PR. Resolver siempre el target
 fail-closed; conservar trabajo local, secretos e historia; no ampliar scope ni admitir dos writers.
 
-PLAN crea un delta compacto. BUILD publica un draft y su evidencia exact-SHA; FAST/AUTO puede seguir
-a FINALIZE tras sus gates. AUDIT permanece read-only para source/branch/candidato; un PASS con
-policy AUTO puede continuar a FINALIZE mecánico bajo los guards globales. Una policy HUMAN, y
-siempre CRITICAL salvo excepción humana explícita, termina en HUMAN MERGE. No inventar comandos ni
-usar el último Issue/PR como target.
+PLAN crea un delta compacto. BUILD sigue la tabla canónica hasta terminalidad, publica un draft y
+mantiene un único marker exact-SHA; FAST/AUTO puede seguir a FINALIZE tras gates vivos. AUDIT revisa
+semánticamente el diff material completo, permanece read-only para source/branch/candidato y
+mantiene su marker único. Un PASS con policy AUTO puede continuar a los dos snapshots de FINALIZE.
+Una policy HUMAN, y siempre CRITICAL salvo excepción humana explícita, termina en HUMAN MERGE. No
+inventar comandos, duplicar el algoritmo global ni usar el último Issue/PR como target.
