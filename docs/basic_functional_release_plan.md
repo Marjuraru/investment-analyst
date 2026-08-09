@@ -19,37 +19,18 @@ Mercado, fundamentales, valoración, macro, eventos y análisis cualitativo cons
 independientes. Esta versión no ejecuta órdenes, no administra dinero y no predice ni recomienda
 comprar o vender.
 
-## Corte auditado
+## Referencia factual actual
 
-La revisión se realizó el 29 de julio de 2026 sobre el commit funcional `0d52a0a`, publicado en
-`codex/fred-alfred-vintage-integration` y registrado en el PR borrador #14. El commit incorpora
-orquestación multi-activo, FRED/ALFRED, registro SMV, alertas operativas y el primer screening
-analítico.
+La planificación parte de `main` en `00188caf34e045cfb5ed79d62f0289a15e6bb265` (9 de agosto de
+2026). El corte de julio, la rama `codex/fred-alfred-vintage-integration` y el PR #14 son contexto
+histórico de la consolidación inicial; no se usan como estado vivo, evidencia operativa ni gate.
 
-Evidencia local del corte:
-
-- 40 trabajos derivados del catálogo;
-- 19.384 `RawRecord`, 130.717 observaciones, 75.000 métricas y 80 diagnósticos;
-- 379 MiB en el workspace, de los cuales 121 MiB son raw y 259 MiB procesados;
-- estados operativos actuales entre 44 KiB y 132 KiB;
-- 876 pruebas aprobadas y cobertura global de 82,46 %;
-- replay de mercado AAPL y BTC, y de fundamentales AAPL, con trazabilidad verificada;
-- Ruff, formato, pruebas HTTP y revisión visual de escritorio y móvil aprobados;
-- tres candidatos analíticos nuevos en modo silencioso;
-- dos incidencias activas por agotar reintentos diarios: mercado de Barrick `B` en Alpaca y
-  fundamentales de CDE en SEC.
-
-Mediciones puntuales sobre el servicio local activo:
-
-| Consulta | Primera lectura | Lectura en caché | JSON | Transferencia gzip |
-| --- | ---: | ---: | ---: | ---: |
-| `/api/overview` | 0,054 s | no medida | 99,9 KiB | no medida |
-| catálogo de activos | 0,002 s | no medida | 17,5 KiB | no medida |
-| gráfico AAPL, un año diario | 0,613 s | 0,026 s | 1,16 MiB | 87,4 KiB |
-| fundamentales AAPL trimestrales | 0,361 s | 0,013 s | 424 KiB | 50,2 KiB |
-
-Son muestras locales, no un benchmark estadístico. Demuestran que la caché y la compresión ya
-funcionan, pero no sustituyen presupuestos p50/p95 repetibles.
+Desde entonces quedaron integrados el runtime por capacidades, las preferencias persistentes de
+watchlist/favoritos/actualización programada, la valoración corporativa point-in-time v1 para
+empresas elegibles y el mercado spot diario Coinbase para BTC-USD y ETH-USD. El intradía sigue
+siendo un contrato separado de BTC-USD. La valoración v1 mantiene sus estados `not_evaluable` o
+`not_applicable` cuando faltan inputs compatibles y no cubre ETF, cripto, valoración histórica ni
+reglas posteriores.
 
 ## Diagnóstico de la estructura actual
 
@@ -73,10 +54,9 @@ funcionan, pero no sustituyen presupuestos p50/p95 repetibles.
 
 #### P0 — estabilidad operativa
 
-- El PR #14 acumula tres commits y un diff amplio respecto de `main`; debe pasar CI y revisión antes
-  de añadir otra función.
-- Barrick `B` y CDE tienen fallos reales pendientes. No se debe declarar operación desatendida
-  mientras un error permanente consume diariamente todo su presupuesto de reintentos.
+- Validar health, clasificación de errores y presupuestos de reintentos mediante ejecuciones reales
+  antes de declarar operación desatendida; un fallo permanente no debe consumir el presupuesto
+  diario como si fuera transitorio.
 - Aún no existe una prueba documentada de backup y restauración del workspace permanente.
 - El screening todavía no ha completado una observación silenciosa de varios días y ciclos reales.
 
@@ -101,9 +81,11 @@ funcionan, pero no sustituyen presupuestos p50/p95 repetibles.
 
 #### P1 — cobertura funcional del analista
 
-- faltan valoración point-in-time, EMA, RSI, MACD, ATR, Bollinger, beta y comparación multi-activo;
-- la watchlist automática se configura al iniciar el proceso, no desde una preferencia persistente
-  validada;
+- la valoración corporativa PIT v1 está disponible para empresas elegibles; faltan valoración
+  histórica, reglas posteriores y cobertura adicional compatible;
+- faltan EMA, RSI, MACD, ATR, Bollinger, beta y comparación multi-activo;
+- la watchlist, los favoritos y la actualización programada ya son preferencias persistentes
+  versionadas; faltan ampliaciones de experiencia, plantillas y operación observada a largo plazo;
 - solo existen dos reglas analíticas iniciales;
 - no existe outbox ni canal de notificación;
 - no existe todavía un corpus local de filings, comunicados y noticias;
@@ -153,6 +135,10 @@ estado operativo          DuckDB + Parquet append-only
 
 La IA no se ubica dentro de ingestión, normalización, cálculo ni activación de reglas. Consume un
 paquete de evidencia inmutable después de una acción del usuario o un candidato determinista.
+
+La futura inferencia estadística tampoco altera esas capas. La estructura objetivo conserva tres
+dominios: evidencia PIT en DuckDB/Parquet; cálculo e inferencia local; e interfaz semántica con LLM
+opcional. No se requiere una base de datos ni servidor de inferencia cloud.
 
 ## Cambios arquitectónicos propuestos
 
@@ -249,6 +235,28 @@ La implementación detallada se mantiene en [`cazatiburones.md`](cazatiburones.m
 SMV y on-chain permanecen fuera de esta primera entrega porque necesitan fuentes e identidades
 distintas.
 
+Las anomalías de filings se evalúan localmente. Volumen y order book no se usan como evidencia
+institucional con la cobertura IEX actual; requieren un contrato futuro de microestructura y una
+fuente consolidada o de profundidad identificada.
+
+### 7. Carril predictivo local
+
+No se añadirá XGBoost o LightGBM directamente al runtime. Primero se creará un experimento aislado
+que compare ambos, y baselines más simples, mediante:
+
+1. objetivo y label versionados con horizonte temporal explícito;
+2. matriz de features PIT producida por DuckDB y materializada en Parquet;
+3. snapshot de universo que incluya deslistados y cambios de identidad cuando aplique;
+4. entrenamiento e inferencia local reproducibles;
+5. manifest con datos, features, hiperparámetros, semilla, librerías y artefacto;
+6. validación purged walk-forward, calibración y holdout cronológico final;
+7. TreeSHAP local solo para modelos y observaciones aceptados;
+8. shadow mode y rollback antes de cualquier alerta.
+
+Se seleccionará como máximo un booster. Si no supera los baselines fuera de muestra o no cumple
+presupuestos de memoria/ARM64, no se incorpora. El carril es opcional y no bloquea el uso de la
+versión cuantitativa determinista.
+
 ## Implementación básica de IA
 
 ### Función permitida
@@ -295,6 +303,11 @@ Cada ejecución persistirá:
 La clave API nunca se persiste. Una respuesta sin citas válidas falla de forma visible. El texto de
 los documentos se trata como datos no confiables y no como instrucciones.
 
+Cuando la solicitud explique un modelo, el LLM recibirá un `ModelExplanationPacket`, no una serie
+temporal: predicción o score, baseline, valores originales, principales SHAP, calibración o
+percentil, incertidumbre, evidencia y versiones. SHAP atribuye el resultado al modelo; no prueba
+causalidad. Para análisis documental se adjuntan fragmentos citables por separado.
+
 ### Control de coste y operación 24/7
 
 - IA desactivada por defecto;
@@ -307,6 +320,12 @@ los documentos se trata como datos no confiables y no como instrucciones.
   justifique;
 - ningún polling continuo al modelo.
 
+El presupuesto inicial apunta a no más de 800 tokens de evidencia condensada y una salida breve,
+pero se controlará por tokens facturados totales y moneda diaria. La llamada exige evidencia nueva,
+deduplicación, cooldown y un candidato local elegible. `P > 0,85` no es un requisito universal: se
+usará solo si existe un clasificador calibrado y el umbral fue elegido fuera de muestra. Un detector
+no supervisado publica `anomaly_score` o percentil, nunca una probabilidad ficticia.
+
 Con este diseño el scheduler cuantitativo puede operar 24/7 sin tokens y la IA consume únicamente
 cuando aporta valor.
 
@@ -314,9 +333,9 @@ cuando aporta valor.
 
 ### Bloque 0 — estabilizar la base publicada
 
-1. esperar y revisar el CI del PR #14;
-2. corregir cualquier fallo sin ampliar alcance;
-3. diagnosticar `B` y CDE y aplicar una política de error que no desperdicie reintentos;
+1. observar y revisar CI, health y telemetría del `main` vigente antes de ampliar función;
+2. corregir cualquier fallo reproducible sin ampliar alcance;
+3. clasificar los fallos de proveedor y aplicar una política que no desperdicie reintentos;
 4. validar reinicio, idempotencia y tres ciclos de scheduler en modo silencioso;
 5. fusionar solo con checks aprobados y crear la siguiente rama desde `main`.
 
@@ -339,8 +358,9 @@ crecientes.
 
 ### Bloque 2 — análisis y alertas básicas completas
 
-1. watchlist/favoritos persistentes;
-2. indicadores técnicos mínimos y valoración point-in-time;
+1. ampliar la experiencia de watchlist/favoritos persistentes y sus plantillas;
+2. añadir indicadores técnicos mínimos y extender valoración PIT v1 con historia y reglas
+   posteriores compatibles;
 3. comparación contra benchmark;
 4. catálogo pequeño de reglas útiles por dominio;
 5. outbox reanudable, notificación local y un canal externo opcional;
@@ -354,7 +374,7 @@ Salida: el sistema encuentra, explica y notifica candidatos sin IA ni intervenci
 2. búsqueda y línea temporal local;
 3. normalizar Forms 3/4/5 y Schedules 13D/13G;
 4. incorporar 13F con correspondencias verificadas de CUSIP y clase;
-5. calcular cambios descriptivos y eventos propios;
+5. calcular cambios descriptivos, features y anomalías locales con baseline robusto;
 6. añadir panel, evidencia y reglas Cazatiburones independientes.
 
 Salida: el analista puede revisar actividad declarada de participantes y recibir candidatos
@@ -362,10 +382,12 @@ trazables sin convertirlos en señal de compra o venta.
 
 ### Bloque 4 — IA cualitativa opcional
 
-1. construir paquetes de evidencia deterministas desde documentos, eventos y métricas;
-2. implementar el puerto de IA y un adaptador económico;
-3. validar citas, presupuesto, caché, prompt injection y ausencia de secretos;
-4. añadir una acción de “resumir evidencia” y un panel separado en la interfaz.
+1. ejecutar el carril predictivo como experimento local, con baselines y validación temporal;
+2. construir paquetes de evidencia deterministas desde documentos, eventos, métricas y, si fue
+   aceptado, el modelo local;
+3. implementar el puerto de IA y un adaptador económico;
+4. validar citas, presupuesto, caché, prompt injection y ausencia de secretos;
+5. añadir una acción de “resumir evidencia” y un panel separado en la interfaz.
 
 Salida: un candidato o documento puede enriquecerse con un resumen citado, pero toda la herramienta
 sigue funcionando con IA apagada.
@@ -394,12 +416,36 @@ Se validarán mediante un script repetible, no con una sola medición:
 - UI interactiva durante un refresh de proveedor;
 - cero consultas al proveedor cuando la cobertura ya está completa;
 - cero llamadas de IA sin acción o evento elegible;
+- cero series crudas o cálculos delegados al LLM;
+- inferencia y SHAP locales por lote y solo sobre evidencia nueva;
+- límite configurable de tokens de entrada, salida y coste diario, con objetivo inicial de 800
+  tokens de evidencia por evento;
 - memoria estable durante un soak de 72 horas;
 - estados y logs con retención acotada y compacción verificable;
 - un fallo de canal o IA nunca pierde el candidato ni bloquea el scheduler.
 
 Estos valores son objetivos iniciales para la laptop actual. Antes de elegir un SBC se repetirán en
 ARM64 y se fijarán límites de memoria, temperatura y almacenamiento.
+
+## Validación estadística obligatoria
+
+Todo modelo predictivo o detector supervisado que aspire a salir del workspace de investigación
+debe aprobar:
+
+1. particiones cronológicas purged walk-forward;
+2. purge de cualquier muestra de entrenamiento cuyo intervalo de label solape validación/test;
+3. embargo coherente con horizonte, frecuencia y dependencia serial;
+4. transformaciones, imputación, selección y tuning ajustados dentro de cada fold;
+5. holdout final cronológico que no participe en decisiones de modelo;
+6. comparación con baseline y reporte por fold, régimen y activo;
+7. calibración temporal para cualquier salida denominada probabilidad;
+8. sensibilidad a costes, drift, universo y múltiples intentos de modelado;
+9. reconstrucción exacta de features mediante `available_at`;
+10. shadow mode y criterio de retirada.
+
+Queda prohibido usar `KFold` aleatorio, shuffle o una partición que permita entrenar con datos
+posteriores al test. Un `TimeSeriesSplit` simple con `gap` tampoco basta cuando los intervalos de
+formación de labels se solapan: debe aplicarse purge explícito.
 
 ## Definición de terminado
 
@@ -415,6 +461,8 @@ La versión básica estará lista únicamente cuando:
 - notificaciones sean deduplicadas, reanudables y opcionales;
 - la IA entregue salida estructurada y citada dentro de presupuesto, o pueda apagarse sin degradar
   el producto cuantitativo;
+- cualquier modelo local habilitado conserve manifest, validación temporal, baseline, calibración,
+  SHAP, shadow mode y rollback; si no existe un modelo aceptable, la versión sigue operativa sin él;
 - backup, restauración, reinicio y operación de 72 horas hayan sido probados;
 - Ruff, formato, Pytest, cobertura, auditoría, CI y smokes reales pasen;
 - la documentación describa exactamente el comportamiento y las limitaciones observadas.
@@ -426,6 +474,8 @@ La versión básica estará lista únicamente cuando:
 - No se migra a PostgreSQL ni a microservicios para el volumen actual.
 - No se ejecuta un LLM continuamente.
 - No se incorpora predicción de precios a la versión operativa.
+- No se añaden XGBoost, LightGBM o SHAP como dependencias hasta completar el benchmark y autorizar
+  explícitamente su impacto reproducible y ARM64.
 - La historia desde 1950 se mantendrá en un workspace de investigación separado.
 - Cazatiburones para BVL, análisis on-chain y despliegue SBC comienzan después de la aceptación
   básica; la primera vertical SEC de Cazatiburones sí forma parte de la ruta.

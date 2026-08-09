@@ -16,6 +16,10 @@ Actualmente solo existe el espacio arquitectónico; todavía no calcula métrica
 - **Actividad de mercado:** solo podrá utilizar cobertura consolidada o una fuente cuyo alcance
   permita la inferencia concreta. El volumen parcial de Alpaca IEX queda expresamente excluido.
 
+La cartera de órdenes no forma parte de las fuentes actuales. Quotes, trades o profundidad futura
+pertenecen a un contrato de microestructura separado y tampoco identifican por sí mismos al
+participante institucional.
+
 Fuentes oficiales de referencia:
 
 - <https://www.sec.gov/rules-regulations/staff-guidance/division-investment-management-frequently-asked-questions/frequently-asked-questions-about-form-13f>
@@ -55,6 +59,55 @@ Las capas previstas permanecen separadas:
 3. métrica descriptiva versionada;
 4. evento o diagnóstico del dominio Cazatiburones;
 5. regla de screening opcional que referencia evidencia exacta.
+
+## Pipeline híbrido local
+
+```text
+SEC/SMV autorizado
+       |
+       v
+Raw + normalización PIT -> DuckDB/Parquet -> features locales
+                                                   |
+                         +-------------------------+-------------------------+
+                         |                                                   |
+               reglas/estadística robusta                       modelo local aceptado
+                         |                                          + TreeSHAP
+                         +-------------------------+-------------------------+
+                                                   |
+                                      evento/candidato trazable
+                                                   |
+                              JSON condensado + citas, si hay presupuesto
+                                                   |
+                                       narrativa LLM opcional
+```
+
+DuckDB calcula ventanas, deltas, ratios y matrices; Parquet almacena snapshots grandes. El LLM no
+calcula anomalías, correlaciones, SHAP ni probabilidades y no recibe la historia completa.
+
+### Features admisibles
+
+- transacción insider frente a tenencia previa y acciones en circulación;
+- agrupación temporal de transacciones declaradas y recurrencia por participante;
+- cambio de porcentaje en 13D/13G y naturaleza declarada del formulario;
+- delta, entrada, salida y concentración trimestral en 13F;
+- enmienda, demora del filing y calidad/completitud de la correspondencia del instrumento.
+
+Cada feature conserva fórmula, unidad, inputs, período y `available_at`. Ninguna feature convierte
+un filing tardío en actividad observada en la fecha de la operación.
+
+### Motor de anomalías
+
+1. comenzar con umbrales descriptivos, medianas/MAD, percentiles y reglas por formulario;
+2. evaluar un método no supervisado solo si el baseline deja un problema medible;
+3. usar XGBoost o LightGBM exclusivamente cuando haya un label y objetivo defendibles;
+4. comparar candidatos mediante purged walk-forward y holdout cronológico;
+5. calcular SHAP localmente solo para el modelo seleccionado y los candidatos activados;
+6. ejecutar en shadow mode antes de crear alertas visibles.
+
+Un detector no supervisado entrega `anomaly_score` o percentil. `P(anomalía)` solo se publica si
+un clasificador fue calibrado fuera de muestra. El umbral de activación se versiona y se elige por
+precision/recall, falsos positivos y presupuesto; `P > 0,85` puede ser una configuración inicial
+evaluada, pero no una constante arquitectónica.
 
 ## Ruta de implementación
 
@@ -115,6 +168,13 @@ La IA se incorpora después de normalizar y validar los filings. Podrá resumir 
 enmiendas y relacionar el evento con métricas existentes, siempre con citas. No identificará
 motivaciones, beneficiarios reales no declarados ni una oportunidad de inversión por sí sola.
 
+La puerta de llamada exige simultáneamente evidencia nueva y completa, candidato local activado,
+deduplicación, cooldown y presupuesto. El paquete incluye valores originales, resultado del modelo
+o probabilidad calibrada cuando existan, baseline, principales SHAP, limitaciones, IDs de evidencia
+y fragmentos citables. El objetivo inicial es hasta 800 tokens de evidencia condensada y una salida
+breve; también se limitan tokens facturados totales, llamadas y coste diario. Una llamada fallida no
+pierde el evento.
+
 ## Validación mínima
 
 - fixtures por formulario y enmienda;
@@ -124,6 +184,16 @@ motivaciones, beneficiarios reales no declarados ni una oportunidad de inversió
 - conservación de notas, propiedad indirecta y códigos de transacción;
 - ausencia explícita, nunca convertida en cero;
 - replay sin evidencia futura;
+- purged walk-forward y prohibición de `KFold` aleatorio para modelos;
+- calibración antes de nombrar una salida como probabilidad;
+- comparación contra baseline, estabilidad por período y shadow mode;
+- identidad local verificable `expected_value + ΣSHAP = salida del modelo` en la escala declarada y dentro de tolerancia;
 - deduplicación de eventos y candidatos;
 - fallo tardío sin pérdida del progreso anterior;
 - smoke real en workspace temporal antes de tocar el permanente.
+
+Referencias de alcance:
+
+- [SEC Insider Transactions Data Sets](https://www.sec.gov/data-research/sec-markets-data/insider-transactions-data-sets)
+- [SEC Form 13F Data Sets](https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets)
+- [Alpaca: IEX frente a SIP](https://docs.alpaca.markets/us/docs/historical-stock-data-1)

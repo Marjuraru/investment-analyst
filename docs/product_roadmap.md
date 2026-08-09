@@ -25,14 +25,59 @@ Una primera versión completa deberá:
 La IA cualitativa y la investigación predictiva son módulos opcionales posteriores. No son
 dependencias del núcleo determinista.
 
+## Decisión de arquitectura híbrida local-first
+
+La propuesta `DuckDB/Parquet → modelo tabular → atribuciones SHAP → LLM` se adopta como
+carril de investigación con las siguientes correcciones:
+
+- DuckDB es el motor OLAP local y Parquet el formato columnar para datasets voluminosos; no son la
+  capa de descarga ni sustituyen validación, modelos tipados, raw JSON/XML o catálogos de fuente;
+- SQL, `Decimal` y algoritmos versionados continúan calculando hechos, métricas, correlaciones y
+  estadísticas deterministas;
+- un motor tabular local podrá evaluar anomalías o hipótesis predictivas solamente en un
+  workspace de investigación;
+- XGBoost y LightGBM son candidatos, no dependencias decididas: primero se compararán con regresión
+  regularizada, reglas robustas y otros baselines simples por precisión fuera de muestra, memoria,
+  latencia, reproducibilidad y soporte ARM64;
+- SHAP se calcula localmente para atribuir una predicción al modelo; no demuestra causalidad, no
+  valida la predicción y no reemplaza valores, unidades, cobertura o incertidumbre;
+- el LLM no recibe series temporales crudas ni ejecuta cálculos. Solo redacta una explicación a
+  partir de un paquete JSON compacto, versionado y ya calculado;
+- la aplicación cuantitativa funciona sin modelo estadístico, SHAP, LLM o infraestructura cloud.
+
+El paquete explicativo no contiene solo SHAP. Incluye resultado, baseline, valores originales de
+las features, principales atribuciones, calibración o rango del score, corte point-in-time,
+versiones, evidencia, limitaciones y, cuando corresponda, fragmentos documentales citables. El LLM
+produce narrativa, nunca el diagnóstico matemático ni una recomendación.
+
+### Dominios estructuralmente independientes
+
+1. **Evidencia PIT:** conectores, raw, normalización, catálogo, `available_at`, DuckDB y Parquet.
+2. **Cálculo e inferencia local:** métricas deterministas, features, entrenamiento, inferencia,
+   calibración, SHAP y validación temporal.
+3. **Interfaz semántica:** API local, gráficos, reportes, citas y LLM opcional.
+
+No se permite que el dominio 3 escriba observaciones, recalcule el dominio 2 o modifique evidencia
+del dominio 1. Tampoco se desplegará una base de datos o servidor de inferencia cloud como
+dependencia del análisis central.
+
+La disciplina de desarrollo usará requisitos, diseño, implementación y verificación trazados de
+forma bidireccional. Puede inspirarse en el V-model de VDI/VDE 2206, pero el proyecto no afirmará
+conformidad con una norma destinada a sistemas mecatrónicos. Para software y modelos se tomarán como
+referencias proporcionales ISO/IEC/IEEE 12207 y las funciones `govern`, `map`, `measure` y `manage`
+de NIST AI RMF. Esto no implica certificación formal.
+
 ## Estado de referencia
 
-Checkpoint base auditado: 29 de julio de 2026, `main` en `e53f1c8`.
+Referencia de contratos: 9 de agosto de 2026, `main` en
+`00188caf34e045cfb5ed79d62f0289a15e6bb265`. Los checkpoints anteriores conservan valor histórico,
+pero no describen por sí solos el estado operativo actual.
 
 ### Funcional
 
 - persistencia local DuckDB/Parquet, identidades deterministas y evidencia append-only;
-- mercado diario para el universo gratuito Alpaca IEX y BTC-USD/Coinbase;
+- mercado diario para el universo gratuito Alpaca IEX y los pares spot BTC-USD y ETH-USD de
+  Coinbase Exchange;
 - base intradía BTC-USD de un minuto y nueve agregaciones locales;
 - fundamentales SEC completos para AAPL, diez emisores genéricos US-GAAP y tres emisores IFRS
   anuales (Barrick, BVN ADR y TSM);
@@ -40,7 +85,11 @@ Checkpoint base auditado: 29 de julio de 2026, `main` en `e53f1c8`.
   alcanza;
 - gráficos diarios, semanales, mensuales e intradía, velas, escala logarítmica, zoom, arrastre y
   tres SMA configurables;
-- interfaz local, exportaciones, cachés, compresión, scheduler Apple y servicio `systemd --user`;
+- interfaz local, exportaciones, cachés, compresión, runtime por capacidades, scheduler persistente
+  de watchlist y servicio `systemd --user`;
+- preferencias versionadas y persistentes de watchlist, favoritos y actualización programada;
+- valoración corporativa point-in-time v1 para empresas elegibles, con estados explícitos cuando la
+  base del título, el precio, el filing o la moneda no permiten evaluar una métrica;
 - importación FRED/ALFRED por vintage explícito, evidencia macro append-only y reconstrucción local
   point-in-time con disponibilidad diaria conservadora;
 - catálogo de seis cotizaciones BVL, cliente HTTPS SMV, evidencia registral append-only,
@@ -51,8 +100,6 @@ Checkpoint base auditado: 29 de julio de 2026, `main` en `e53f1c8`.
 
 - BVL mercado: lector tipado del boletín diario, todavía sin autorización resuelta para
   persistencia automática, histórico o interfaz;
-- operación multi-activo: refresh manual generalizado, pero programación persistente centrada en
-  Apple;
 - fundamentales BVL: requieren el futuro adaptador SMV y no reutilizan el perfil SEC del ADR;
 - screening automático y bandejas locales implementados; catálogo ampliado y notificaciones
   externas pendientes.
@@ -60,7 +107,6 @@ Checkpoint base auditado: 29 de julio de 2026, `main` en `e53f1c8`.
 ### Diseñado, no implementado
 
 - fundamentales SMV;
-- scheduler multi-proveedor;
 - indicadores técnicos adicionales, comparación y plantillas;
 - fundamentales de red para cripto;
 - catálogo macro y workspace de historia larga;
@@ -72,8 +118,9 @@ Checkpoint base auditado: 29 de julio de 2026, `main` en `e53f1c8`.
 ## Alcance inicial de activos
 
 El catálogo actual cubre mercado estadounidense para AAPL, AMD, Barrick (`B`), BVN, CDE, HYMC,
-INTC, MSTR, MU, MUX, NEM, PLTR, SCCO, TSM, GBTC, GLD e IBIT, además de BTC-USD. La cobertura
-fundamental no es igual para todos.
+INTC, MSTR, MU, MUX, NEM, PLTR, SCCO, TSM, GBTC, GLD e IBIT, además de BTC-USD y ETH-USD. La
+cobertura fundamental no es igual para todos; los dos criptoactivos solo tienen el dominio de
+mercado spot diario y BTC conserva, además, un contrato intradía separado.
 
 El catálogo BVL ya separa `CVERDEC1`, `BVN`, `SCCO`, `VOLCABC1`, `MINSURI1` y `POMALCC1` de los
 instrumentos estadounidenses. “FCA” permanece sin mapear. `ABX` debe tratarse como alias histórico
@@ -124,9 +171,9 @@ manual de documentos oficiales o captura diaria hacia adelante. El endpoint inte
 
 ## Fase 3 — Orquestación multi-activo
 
-Base completada localmente el 29 de julio de 2026. El scheduler dejó de representar una ejecución
-Apple y ahora ejecuta trabajos explícitos por activo, proveedor, dominio, frecuencia y zona
-horaria.
+La base quedó integrada en `main` y el scheduler dejó de representar una ejecución Apple: ahora
+ejecuta trabajos explícitos por activo, proveedor, dominio, frecuencia y zona horaria, derivados
+del catálogo, las capacidades y la watchlist persistente.
 
 Trabajos previstos:
 
@@ -150,16 +197,21 @@ Capacidades requeridas:
 - persistencia del progreso exitoso previo a un fallo;
 - panel operativo y health check generalizados.
 
-La entrega actual cubre Alpaca diario, SEC, Coinbase diario e intradía, registro SMV y seis series
-FRED/ALFRED de baja frecuencia cuando existe la API key. Incluye selección explícita o watchlist
-completa, estado, frescura y cobertura por job, un único writer, reintentos acotados, backoff,
-recuperación tras reinicios y preservación de progreso previo. BVL diario continúa bloqueado por su
-contrato de uso; noticias y filings se añadirán cuando sus conectores estén listos. Queda medir
-presupuestos reales por proveedor y diseñar almacenamiento columnar para fuentes de alto volumen.
+La entrega actual cubre Alpaca diario, SEC, Coinbase diario para BTC-USD y ETH-USD, Coinbase
+intradía para BTC-USD, registro SMV y seis series FRED/ALFRED de baja frecuencia cuando existe la
+API key. Incluye selección explícita o watchlist completa, estado, frescura y cobertura por job, un
+único writer, reintentos acotados, backoff, recuperación tras reinicios y preservación de progreso
+previo. BVL diario continúa bloqueado por su contrato de uso; noticias y filings se añadirán cuando
+sus conectores estén listos. Queda medir presupuestos reales por proveedor y diseñar almacenamiento
+columnar para fuentes de alto volumen.
 
 ## Fase 4 — Fundamentales corporativos completos
 
 ### US-GAAP
+
+La valoración corporativa point-in-time v1 ya reconstruye market cap, enterprise value y múltiplos
+anuales para empresas elegibles. No aplica a ETF o cripto, no infiere una base de acciones ausente y
+no reemplaza las ampliaciones históricas ni las reglas posteriores de esta fase.
 
 Ampliar progresivamente:
 
@@ -224,13 +276,16 @@ configurables para no saturar la vista.
 
 ## Fase 6 — Cripto como familia propia
 
-1. Programar refresh diario e intradía incremental.
-2. Añadir backfill por ventanas reanudables y recibos de cobertura.
-3. Generalizar el catálogo a otros criptoactivos solamente cuando se seleccionen fuentes.
-4. Diseñar fundamentales de red separados de mercado: oferta, emisión, actividad, fees, seguridad,
+El mercado spot diario productivo ya está activo para BTC-USD y ETH-USD mediante Coinbase Exchange.
+El intradía de un minuto, sus nueve agregaciones locales y su ventana acotada siguen siendo un
+contrato separado exclusivo de BTC-USD; no se infiere cobertura intradía para ETH-USD.
+
+1. Añadir backfill por ventanas reanudables y recibos de cobertura cuando cada contrato lo requiera.
+2. Generalizar el catálogo a otros criptoactivos solamente cuando se seleccionen fuentes.
+3. Diseñar fundamentales de red separados de mercado: oferta, emisión, actividad, fees, seguridad,
    distribución y concentración.
-5. Incorporar eventos regulatorios y noticias.
-6. Evaluar métricas on-chain bajo fuente, cadena, timestamp y evidencia propios.
+4. Incorporar eventos regulatorios y noticias.
+5. Evaluar métricas on-chain bajo fuente, cadena, timestamp y evidencia propios.
 
 Una etiqueta heurística de wallet no se interpreta como identidad institucional confirmada.
 
@@ -281,6 +336,16 @@ Versión inicial para acciones:
 Para BVL se evaluarán participaciones significativas y comunicaciones SMV. Cripto tendrá otro
 contrato on-chain. No existirá un “score de tiburones”.
 
+Las anomalías se evaluarán localmente sobre features point-in-time de filings: tamaño relativo de
+una transacción, cambio de tenencia, concentración, recurrencia, enmiendas y latencia de reporte. El
+primer baseline será determinista o estadístico robusto. Un modelo XGBoost/LightGBM solo se usará
+si existe objetivo o etiqueta defendible y supera esos baselines fuera de muestra.
+
+Volumen y cartera de órdenes pertenecen a un futuro dominio de microestructura. IEX gratuito es una
+sola bolsa y no permite atribuir actividad al mercado consolidado ni a una institución. Un score de
+anomalía no se llamará probabilidad salvo que proceda de un clasificador calibrado; por ello no se
+fija `P > 0,85` como regla universal.
+
 ## Fase 10 — Screening y alertas
 
 El diseño completo se encuentra en
@@ -305,7 +370,8 @@ La implementación se divide en:
 
 ## Fase 11 — Interfaz profesional completa
 
-- watchlists y favoritos;
+- watchlists y favoritos persistentes ya disponibles; faltan ampliaciones de experiencia y plantillas
+  guardadas;
 - ficha rápida del activo, cobertura y frescura;
 - comparación multi-activo;
 - indicadores configurables;
@@ -333,6 +399,18 @@ Solo después del corpus de noticias:
 - protección contra prompt injection;
 - salida separada de resultados cuantitativos.
 
+Para explicar una inferencia cuantitativa, el LLM recibirá solo un `ModelExplanationPacket`
+compacto: predicción o score, baseline, valores de features, atribuciones SHAP locales, calidad,
+calibración, incertidumbre, versiones y evidencia. Para resumir filings o noticias podrá recibir
+fragmentos citables del corpus, no series numéricas completas. Toda aritmética, correlación,
+selección temporal y SHAP se ejecuta antes y localmente.
+
+La activación requiere evidencia nueva, trazabilidad completa, candidato local elegible, cooldown,
+deduplicación y presupuesto disponible. El objetivo inicial de 800 tokens se aplica al contenido de
+evidencia condensada y se medirá junto con instrucciones, salida y coste realmente facturado. El
+límite final será configurable por proveedor; ningún umbral ni tamaño de prompt prometerá coste
+“cero” sin medir precios vigentes.
+
 La aplicación seguirá funcionando sin IA. La IA no modifica observaciones, decide por sí sola una
 oportunidad ni produce una recomendación o puntuación conjunta.
 
@@ -340,15 +418,29 @@ oportunidad ni produce una recomendación o puntuación conjunta.
 
 En workspace separado:
 
-- features point-in-time;
-- particiones walk-forward;
-- baselines simples;
-- costes y latencia;
-- supervivencia, deslistados y cambios de universo;
-- drift;
-- evaluación fuera de muestra;
-- registro de experimentos;
-- intervalos de incertidumbre.
+- **P0 — pregunta y etiqueta:** declarar objetivo, horizonte, unidad de observación, utilidad y
+  errores tolerables antes de elegir algoritmo;
+- **P1 — matriz PIT:** generar features mediante DuckDB y snapshots Parquet inmutables con
+  `feature_available_at`, universo histórico y versión;
+- **P2 — baselines y candidatos:** comparar reglas robustas y modelos lineales contra XGBoost y
+  LightGBM; elegir como máximo un booster para la primera implementación;
+- **P3 — validación:** purged walk-forward con embargo según horizonte de label, ajuste solo en
+  train/validation y holdout cronológico final intacto;
+- **P4 — calibración y explicación:** reliability curve, Brier/log-loss cuando exista
+  probabilidad, umbral elegido por coste de falsos positivos y SHAP local;
+- **P5 — shadow mode:** inferencia local sin alertar, drift de datos/predicción, estabilidad por
+  régimen, latencia, memoria y comparación continua con baseline;
+- **P6 — promoción reversible:** activar una salida experimental solo si supera puertas
+  predefinidas y puede deshabilitarse sin afectar el núcleo determinista.
+
+Se prohíbe `KFold` aleatorio, shuffle y cualquier partición que entrene con observaciones futuras.
+El purge elimina muestras cuyo intervalo de formación de label se solape con validación/test; el
+embargo añade separación tras la frontera. Transformaciones, imputación, selección de features,
+calibración y tuning se ajustan dentro de cada fold, nunca sobre todo el dataset.
+
+Si no existen etiquetas confiables, el resultado se denomina `anomaly_score` o percentil, no
+probabilidad. Un umbral como `0,85` solo se permitirá cuando la salida sea una probabilidad
+calibrada fuera de muestra y el umbral quede justificado por una política de alertas versionada.
 
 Una predicción seguirá siendo investigación, no una orden o recomendación.
 
@@ -387,6 +479,11 @@ Cada cambio debe completar:
 14. revisión de diff, commit, push, PR y CI remoto;
 15. smoke posterior a la fusión en `main`.
 
+Todo cambio de modelado añade además: contrato de label, auditoría de leakage, purged walk-forward,
+holdout final, comparación con baseline, calibración cuando corresponda, manifest de modelo,
+reproducibilidad de SHAP, shadow mode, drift y criterio de rollback. Una mejora media no compensa un
+modelo inestable entre regímenes ni una tasa de falsos positivos incompatible con el presupuesto.
+
 Los nuevos conectores y módulos de almacenamiento críticos deberían superar 90 % de cobertura
 local, sin elevar artificialmente el mínimo global antes de cubrir el código histórico.
 
@@ -404,22 +501,44 @@ local, sin elevar artificialmente el mínimo global antes de cubrir el código h
 - evaluación de alertas solo sobre evidencia nueva;
 - límites de memoria, respuesta y concurrencia;
 - backfills por ventanas reanudables;
-- migraciones verificadas mediante backup y restauración.
+- migraciones verificadas mediante backup y restauración;
+- matrices de features generadas por consulta local y materializadas por corte, no por DataFrames
+  completos mantenidos permanentemente en memoria;
+- inferencia por lote y SHAP solo para resultados candidatos, no para todo el universo en cada
+  polling;
+- caché por hash de evidencia, feature set, modelo y versión de explicación;
+- límites diarios de llamadas, tokens y moneda para cada proveedor LLM.
 
 ## Orden inmediato recomendado
 
 La ruta crítica vigente se mantiene en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md). Su orden es:
 
-1. estabilizar, validar y fusionar el PR de orquestación y screening;
+1. estabilizar el runtime por capacidades y observar los jobs de la watchlist persistente;
 2. eliminar el centralismo heredado de AAPL mediante contratos genéricos y adaptadores compatibles;
 3. eliminar fallos operativos recurrentes y validar backup, restauración y soak silencioso;
 4. desacoplar lecturas de refresh largos, compactar la API operativa y medir presupuestos;
-5. completar watchlist, valoración, indicadores, reglas y notificaciones reanudables;
+5. ampliar la valoración v1 hacia historia y reglas posteriores, e incorporar indicadores,
+   comparación, reglas y notificaciones reanudables;
 6. incorporar corpus oficial y la primera vertical SEC de Cazatiburones;
-7. añadir IA cualitativa opcional con citas y presupuesto sobre ese corpus;
-8. cerrar la versión mediante CI, smokes, 72 horas de operación y recuperación probada.
+7. abrir el carril predictivo local con matriz PIT, baselines y validación temporal, sin promoverlo
+   a diagnóstico operativo;
+8. añadir IA cualitativa opcional con citas y presupuesto sobre evidencia ya calculada;
+9. cerrar la versión mediante CI, smokes, 72 horas de operación y recuperación probada.
 
 Mercado BVL, macro diario columnar, extensiones Cazatiburones para BVL/cripto e investigación
 predictiva conservan sus fases de esta hoja de ruta, pero no desplazan la estabilización de la
 versión básica ni se implementan sin resolver previamente sus fuentes, licencias y contratos.
+
+## Referencias técnicas de esta decisión
+
+- [DuckDB: lectura de Parquet y pushdown](https://duckdb.org/docs/stable/data/parquet/overview)
+- [XGBoost: predicción y contribuciones TreeSHAP](https://xgboost.readthedocs.io/en/stable/prediction.html)
+- [LightGBM: algoritmos histogram-based](https://lightgbm.readthedocs.io/en/stable/Features.html)
+- [scikit-learn: particiones temporales y `gap`](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html)
+- [scikit-learn: calibración de probabilidades](https://scikit-learn.org/stable/modules/calibration.html)
+- [Lundberg y Lee: fundamento de SHAP](https://arxiv.org/abs/1705.07874)
+- [ISO/IEC/IEEE 12207:2026](https://www.iso.org/standard/90219.html)
+- [NIST AI Risk Management Framework](https://www.nist.gov/itl/ai-risk-management-framework)
+- [VDI/VDE 2206: alcance mecatrónico y ciberfísico](https://www.vdi.de/en/home/vdi-standards/details/vdivde-2206-development-of-mechatronic-and-cyber-physical-systems)
+- [Alpaca: alcance de IEX frente a SIP](https://docs.alpaca.markets/us/docs/historical-stock-data-1)
