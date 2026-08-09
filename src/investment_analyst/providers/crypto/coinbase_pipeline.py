@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from investment_analyst.core.models import (
     Asset,
+    AssetClass,
     DataFrequency,
     NormalizedObservation,
     RawRecord,
@@ -116,7 +117,6 @@ class _CoinbaseCandlePipeline:
         client: CoinbaseExchangeClient,
         *,
         configuration: CoinbaseAssetConfiguration,
-        expected_configuration: CoinbaseAssetConfiguration,
         frequency: DataFrequency,
         period: timedelta,
         asset_factory: Callable[[], Asset],
@@ -128,10 +128,6 @@ class _CoinbaseCandlePipeline:
         self._storage = storage
         self._client = client
         self._configuration = configuration
-        if self._configuration != expected_configuration:
-            raise StorageError(
-                "Coinbase configuration does not match the current persisted identity"
-            )
         self._frequency = frequency
         self._period = period
         self._asset_factory = asset_factory
@@ -141,7 +137,7 @@ class _CoinbaseCandlePipeline:
         self._clock = clock
 
     def run(self, start: datetime, end: datetime) -> CoinbaseImportSummary:
-        """Fetch BTC-USD, persist raw and normalized data, and verify traceability."""
+        """Fetch one configured Coinbase series and verify append-only traceability."""
         self._storage.require_open()
         fetch = self._client.fetch_candles(
             self._configuration.product_id,
@@ -243,11 +239,11 @@ class _CoinbaseCandlePipeline:
                 record.asset_id != self._configuration.asset_id
                 or record.source.source_id != self._configuration.source_id
             ):
-                raise StorageError("raw record asset or source does not match BTC-USD")
+                raise StorageError("raw record asset or source does not match configuration")
             if not isinstance(record.payload, dict):
                 raise StorageError("raw record payload is not an object")
             if record.payload.get("product_id") != self._configuration.product_id:
-                raise StorageError("raw record payload does not represent BTC-USD")
+                raise StorageError("raw record payload does not match the configuration")
             if record.payload.get("granularity_seconds") != self._configuration.granularity_seconds:
                 raise StorageError("raw record payload has the wrong candle granularity")
             if counts[record.record_id] != 5:
@@ -306,18 +302,35 @@ class CoinbaseHistoricalPipeline(_CoinbaseCandlePipeline):
             granularity_seconds=DAILY_GRANULARITY_SECONDS,
             base_unit="BTC",
             quote_unit="USD",
+            symbol="BTC",
+            name="Bitcoin",
+            asset_class=AssetClass.CRYPTO,
+            quote_currency="USD",
+            exchange="COINBASE",
         )
+        resolved = configuration or expected
+        if resolved.granularity_seconds != DAILY_GRANULARITY_SECONDS:
+            raise StorageError("Coinbase daily pipeline requires daily candle configuration")
         super().__init__(
             storage,
             client,
-            configuration=configuration or expected,
-            expected_configuration=expected,
+            configuration=resolved,
             frequency=DataFrequency.DAY_1,
             period=timedelta(days=1),
-            asset_factory=create_coinbase_asset,
-            source_factory=create_coinbase_source,
-            raw_record_factory=candle_to_raw_record,
-            observation_factory=candle_to_observations,
+            asset_factory=lambda: create_coinbase_asset(resolved),
+            source_factory=lambda: create_coinbase_source(resolved),
+            raw_record_factory=lambda candle, *, retrieved_at, request_url: candle_to_raw_record(
+                candle,
+                retrieved_at=retrieved_at,
+                request_url=request_url,
+                configuration=resolved,
+            ),
+            observation_factory=lambda candle, raw_record, *, normalized_at: candle_to_observations(
+                candle,
+                raw_record,
+                normalized_at=normalized_at,
+                configuration=resolved,
+            ),
             clock=clock,
         )
 
@@ -340,12 +353,19 @@ class CoinbaseIntradayPipeline(_CoinbaseCandlePipeline):
             granularity_seconds=MINUTE_GRANULARITY_SECONDS,
             base_unit="BTC",
             quote_unit="USD",
+            symbol="BTC",
+            name="Bitcoin",
+            asset_class=AssetClass.CRYPTO,
+            quote_currency="USD",
+            exchange="COINBASE",
         )
+        resolved = configuration or expected
+        if resolved != expected:
+            raise StorageError("Coinbase intraday configuration does not match BTC-USD identity")
         super().__init__(
             storage,
             client,
-            configuration=configuration or expected,
-            expected_configuration=expected,
+            configuration=resolved,
             frequency=DataFrequency.MINUTE_1,
             period=timedelta(minutes=1),
             asset_factory=create_coinbase_asset,

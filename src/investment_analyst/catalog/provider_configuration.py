@@ -82,6 +82,11 @@ def resolve_coinbase_configuration(
         granularity_seconds=DAILY_GRANULARITY_SECONDS,
         base_unit=base_unit,
         quote_unit=quote_unit,
+        symbol=context.asset.symbol,
+        name=context.asset.name,
+        asset_class=context.asset.asset_class,
+        quote_currency=context.asset.quote_currency,
+        exchange=context.asset.exchange or "UNKNOWN",
     )
 
 
@@ -106,6 +111,11 @@ def resolve_coinbase_intraday_configuration(
         granularity_seconds=MINUTE_GRANULARITY_SECONDS,
         base_unit=base_unit,
         quote_unit=quote_unit,
+        symbol=context.asset.symbol,
+        name=context.asset.name,
+        asset_class=context.asset.asset_class,
+        quote_currency=context.asset.quote_currency,
+        exchange=context.asset.exchange or "UNKNOWN",
     )
 
 

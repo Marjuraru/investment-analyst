@@ -100,6 +100,11 @@ class CoinbaseAssetConfiguration(ContractModel):
     granularity_seconds: StrictInt
     base_unit: NonEmptyStr
     quote_unit: NonEmptyStr
+    symbol: NonEmptyStr
+    name: NonEmptyStr
+    asset_class: AssetClass
+    quote_currency: NonEmptyStr
+    exchange: NonEmptyStr
 
     @field_validator("granularity_seconds")
     @classmethod
@@ -119,6 +124,10 @@ class CoinbaseAssetConfiguration(ContractModel):
             raise ValueError("Coinbase units must match product_id")
         if self.source_id != coinbase_source_id(self.product_id, self.granularity_seconds):
             raise ValueError("Coinbase source_id must match product and granularity")
+        if self.asset_class is not AssetClass.CRYPTO:
+            raise ValueError("Coinbase candle configuration requires a crypto asset")
+        if self.quote_currency != self.quote_unit:
+            raise ValueError("Coinbase quote_currency must match product quote unit")
         return self
 
 

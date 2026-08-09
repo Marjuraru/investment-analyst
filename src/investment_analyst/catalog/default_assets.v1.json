@@ -31,6 +31,34 @@
     },
     {
       "aliases": [
+        "ETH",
+        "ETH-USD",
+        "Ethereum"
+      ],
+      "asset_class": "crypto",
+      "asset_id": "crypto:eth-usd",
+      "crypto_profile": "ethereum",
+      "exchange": "COINBASE",
+      "is_active": false,
+      "name": "Ethereum",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "ETH-USD",
+          "namespace": "product_id",
+          "provider": "coinbase"
+        }
+      ],
+      "provider_symbols": {
+        "coinbase_exchange": "ETH-USD"
+      },
+      "quote_currency": "USD",
+      "symbol": "ETH"
+    },
+    {
+      "aliases": [
         "Buenaventura BVL",
         "BVN BVL"
       ],
