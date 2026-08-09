@@ -100,6 +100,8 @@ class AaplMarketChartRequest(ContractModel):
     short_sma_window: int = Field(default=5, ge=2, le=200)
     long_sma_window: int = Field(default=20, ge=3, le=400)
     third_sma_window: int = Field(default=50, ge=4, le=400)
+    bollinger_window: int = Field(default=20, ge=2, le=400)
+    bollinger_multiplier: FinancialDecimal = Field(default=Decimal("2"), gt=0, le=100)
 
     @field_validator(
         "short_sma_window",
@@ -112,6 +114,28 @@ class AaplMarketChartRequest(ContractModel):
         """Reject booleans and coercible strings before integer bounds are applied."""
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError("chart SMA windows must be integers")
+        return value
+
+    @field_validator("bollinger_window", mode="before")
+    @classmethod
+    def validate_bollinger_window_type(cls, value: object) -> object:
+        """Reject coercion for the displayed available-bar window."""
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("chart Bollinger window must be an integer")
+        return value
+
+    @field_validator("bollinger_multiplier", mode="before")
+    @classmethod
+    def validate_bollinger_multiplier_type(cls, value: object) -> object:
+        if isinstance(value, (bool, float, str)):
+            raise ValueError("chart Bollinger multiplier must use Decimal")
+        return value
+
+    @field_validator("bollinger_multiplier")
+    @classmethod
+    def validate_bollinger_multiplier(cls, value: Decimal) -> Decimal:
+        if not value.is_finite() or value <= 0 or value > Decimal("100"):
+            raise ValueError("chart Bollinger multiplier must be finite, positive, and at most 100")
         return value
 
     @field_validator("known_at")
@@ -193,6 +217,56 @@ class AaplMarketChartSma(ContractModel):
         return self
 
 
+class AaplMarketChartBollinger(ContractModel):
+    """Exact population-standard-deviation Bollinger evidence for one chart point."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    middle: FinancialDecimal
+    upper: FinancialDecimal
+    lower: FinancialDecimal
+    bandwidth: FinancialDecimal
+    percent_b: FinancialDecimal | None = None
+    window: int = Field(ge=2, le=400)
+    multiplier: FinancialDecimal
+    resolution: AaplMarketChartResolution
+    available_at: UTCDateTime
+    input_observation_ids: tuple[UUID, ...]
+    algorithm_version: Literal["market-chart-bollinger-bands-v1-decimal34"]
+
+    @field_validator("window", mode="before")
+    @classmethod
+    def validate_window_type(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("chart Bollinger window must be an integer")
+        return value
+
+    @model_validator(mode="after")
+    def validate_values(self) -> "AaplMarketChartBollinger":
+        if self.multiplier <= 0 or not self.multiplier.is_finite():
+            raise ValueError("chart Bollinger multiplier must be finite and positive")
+        if any(
+            not value.is_finite() for value in (self.middle, self.upper, self.lower, self.bandwidth)
+        ):
+            raise ValueError("chart Bollinger values must be finite")
+        if self.middle <= 0 or self.lower > self.middle or self.middle > self.upper:
+            raise ValueError("chart Bollinger bands are inconsistent")
+        if self.bandwidth < 0:
+            raise ValueError("chart Bollinger bandwidth must not be negative")
+        if self.percent_b is not None and not self.percent_b.is_finite():
+            raise ValueError("chart Bollinger percent_b must be finite")
+        if len(self.input_observation_ids) != self.window:
+            raise ValueError("chart Bollinger input count must equal its window")
+        if len(set(self.input_observation_ids)) != len(self.input_observation_ids):
+            raise ValueError("chart Bollinger input observation IDs must be unique")
+        if self.upper == self.lower:
+            if self.percent_b is not None:
+                raise ValueError("flat chart Bollinger bands must omit percent_b")
+        elif self.percent_b is None:
+            raise ValueError("non-flat chart Bollinger bands require percent_b")
+        return self
+
+
 class AaplMarketChartPoint(ContractModel):
     """One displayed OHLCV interval with exact source-session evidence."""
 
@@ -223,6 +297,7 @@ class AaplMarketChartPoint(ContractModel):
     short_sma: AaplMarketChartSma | None = None
     long_sma: AaplMarketChartSma | None = None
     third_sma: AaplMarketChartSma | None = None
+    bollinger: AaplMarketChartBollinger | None = None
     aggregation_algorithm_version: Literal["market-chart-ohlcv-v1-decimal34"] = (
         "market-chart-ohlcv-v1-decimal34"
     )
@@ -304,6 +379,8 @@ class AaplMarketChartPoint(ContractModel):
         for sma in (self.short_sma, self.long_sma, self.third_sma):
             if sma is not None and sma.resolution is not self.resolution:
                 raise ValueError("chart SMA resolution must match its point")
+        if self.bollinger is not None and self.bollinger.resolution is not self.resolution:
+            raise ValueError("chart Bollinger resolution must match its point")
         return self
 
 
@@ -504,6 +581,8 @@ class AaplMarketChart(ContractModel):
     price_unit: Literal["USD"] = "USD"
     volume_unit: Literal["shares"] = "shares"
     sma_windows: tuple[int, int, int] = (5, 20, 50)
+    bollinger_window: int = Field(default=20, ge=2, le=400)
+    bollinger_multiplier: FinancialDecimal = Field(default=Decimal("2"), gt=0, le=100)
     points: tuple[AaplMarketChartPoint, ...]
     latest_session: AaplMarketChartPoint | None = None
     range_statistics: AaplMarketChartRangeStatistics
@@ -538,6 +617,8 @@ class AaplMarketChart(ContractModel):
             raise ValueError("chart SMA windows are outside supported bounds")
         if short_window >= long_window:
             raise ValueError("short chart SMA window must be smaller than long SMA window")
+        if not self.bollinger_multiplier.is_finite() or self.bollinger_multiplier <= 0:
+            raise ValueError("chart Bollinger multiplier must be finite and positive")
         if len(self.points) != self.coverage.displayed_points:
             raise ValueError("point count must match displayed-point coverage")
         if len(self.points) != self.range_statistics.point_count:
@@ -565,6 +646,11 @@ class AaplMarketChart(ContractModel):
                 raise ValueError("long chart SMA does not match the requested window")
             if point.third_sma is not None and point.third_sma.window != third_window:
                 raise ValueError("third chart SMA does not match the requested window")
+            if point.bollinger is not None and (
+                point.bollinger.window != self.bollinger_window
+                or point.bollinger.multiplier != self.bollinger_multiplier
+            ):
+                raise ValueError("chart Bollinger does not match the requested parameters")
             for sma in (point.short_sma, point.long_sma, point.third_sma):
                 if sma is not None and sma.available_at > self.known_at:
                     raise ValueError("chart SMA was not available at known_at")
@@ -603,6 +689,11 @@ class AaplMarketChart(ContractModel):
             ):
                 if sma is not None and sma.available_at > self.known_at:
                     raise ValueError("latest chart SMA was not available at known_at")
+            if self.latest_session.bollinger is not None and (
+                self.latest_session.bollinger.window != self.bollinger_window
+                or self.latest_session.bollinger.multiplier != self.bollinger_multiplier
+            ):
+                raise ValueError("latest chart Bollinger does not match the requested parameters")
         expected_statistics = {
             "market.history.simple_return_1d": (
                 "market-simple-return-1d-v1-decimal34",

@@ -8,6 +8,10 @@ from uuid import UUID
 from investment_analyst.analytics.market.bar_models import MarketBar, MarketBarSeries
 from investment_analyst.analytics.market.bar_schemas import get_market_bar_schema
 from investment_analyst.analytics.market.statistics_definitions import (
+    BOLLINGER_BANDWIDTH_KEY,
+    BOLLINGER_LOWER_KEY,
+    BOLLINGER_PERCENT_B_KEY,
+    BOLLINGER_UPPER_KEY,
     RELATIVE_VOLUME_KEY,
     SIMPLE_RETURN_KEY,
     SMA_KEY,
@@ -24,6 +28,7 @@ _RETURN_ALGORITHM = "market-simple-return-1d-v1-decimal34"
 _SMA_ALGORITHM = "market-sma-v1-decimal34"
 _VOLATILITY_ALGORITHM = "market-rolling-daily-volatility-v1-decimal34"
 _RELATIVE_VOLUME_ALGORITHM = "market-relative-volume-v1-decimal34"
+_BOLLINGER_ALGORITHM = "market-bollinger-bands-v1-decimal34"
 
 
 class MarketStatisticsError(RuntimeError):
@@ -76,7 +81,7 @@ def _common_parameters(series: MarketBarSeries) -> dict[str, object]:
 
 
 class MarketStatisticsEngine:
-    """Compute four explicit statistics from one verified immutable bar series."""
+    """Compute explicit Decimal-only statistics from one verified immutable bar series."""
 
     def compute(
         self,
@@ -98,6 +103,15 @@ class MarketStatisticsEngine:
                 self._relative_volume(
                     series,
                     request.relative_volume_window,
+                    warmups,
+                    zero_skips,
+                )
+            )
+            calculations.extend(
+                self._bollinger(
+                    series,
+                    request.bollinger_window,
+                    request.bollinger_multiplier,
                     warmups,
                     zero_skips,
                 )
@@ -297,6 +311,89 @@ class MarketStatisticsEngine:
                     input_observation_ids=_ids(bars, "volume"),
                     algorithm_version=_RELATIVE_VOLUME_ALGORITHM,
                     quality=_quality(tuple(bar.quality for bar in bars)),
+                )
+            )
+        return output
+
+    @staticmethod
+    def _bollinger(
+        series: MarketBarSeries,
+        window: int,
+        multiplier: Decimal,
+        warmups: dict[str, int],
+        zero_skips: dict[str, int],
+    ) -> list[MetricCalculation]:
+        """Compute population-standard-deviation Bollinger values over close windows."""
+        keys = (
+            BOLLINGER_UPPER_KEY,
+            BOLLINGER_LOWER_KEY,
+            BOLLINGER_BANDWIDTH_KEY,
+            BOLLINGER_PERCENT_B_KEY,
+        )
+        for metric_key in keys:
+            warmups[_detail_key(metric_key, window)] = min(len(series.bars), window - 1)
+        zero_skips[_detail_key(BOLLINGER_PERCENT_B_KEY, window)] = 0
+        common = _common_parameters(series)
+        output: list[MetricCalculation] = []
+        for end_index in range(window - 1, len(series.bars)):
+            bars = series.bars[end_index - window + 1 : end_index + 1]
+            middle = sum((bar.close for bar in bars), Decimal("0")) / Decimal(window)
+            variance = sum(((bar.close - middle) ** 2 for bar in bars), Decimal("0")) / Decimal(
+                window
+            )
+            standard_deviation = variance.sqrt()
+            upper = middle + multiplier * standard_deviation
+            lower = middle - multiplier * standard_deviation
+            parameters = {
+                "window": window,
+                "multiplier": str(multiplier),
+                "price_field": "close",
+                "degrees_of_freedom": 0,
+                "includes_current_bar": True,
+                **common,
+            }
+            base = {
+                "asset_id": bars[-1].asset_id,
+                "source_id": bars[-1].source_id,
+                "as_of": bars[-1].timestamp,
+                "available_at": max(bar.available_at for bar in bars),
+                "parameters": parameters,
+                "input_observation_ids": _ids(bars, "close"),
+                "algorithm_version": _BOLLINGER_ALGORITHM,
+                "quality": _quality(tuple(bar.quality for bar in bars)),
+            }
+            output.extend(
+                (
+                    MetricCalculation(
+                        metric_key=BOLLINGER_UPPER_KEY,
+                        value=upper,
+                        unit="USD",
+                        **base,
+                    ),
+                    MetricCalculation(
+                        metric_key=BOLLINGER_LOWER_KEY,
+                        value=lower,
+                        unit="USD",
+                        **base,
+                    ),
+                    MetricCalculation(
+                        metric_key=BOLLINGER_BANDWIDTH_KEY,
+                        value=(upper - lower) / middle,
+                        unit="ratio",
+                        **base,
+                    ),
+                )
+            )
+            denominator = upper - lower
+            if denominator == 0:
+                zero_skips[_detail_key(BOLLINGER_PERCENT_B_KEY, window)] += 1
+                continue
+            output.append(
+                MetricCalculation(
+                    metric_key=BOLLINGER_PERCENT_B_KEY,
+                    value=(bars[-1].close - lower) / denominator,
+                    unit="ratio",
+                    **base,
                 )
             )
         return output

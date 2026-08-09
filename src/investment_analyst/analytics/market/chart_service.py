@@ -14,6 +14,7 @@ from investment_analyst.analytics.market.bar_models import (
 from investment_analyst.analytics.market.bar_schemas import ALPACA_SOURCE_ID, COINBASE_SOURCE_ID
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChart,
+    AaplMarketChartBollinger,
     AaplMarketChartCoverage,
     AaplMarketChartInterval,
     AaplMarketChartPoint,
@@ -203,6 +204,8 @@ class AaplMarketChartService:
                     sma_windows=(5, 20),
                     volatility_window=20,
                     relative_volume_window=20,
+                    bollinger_window=request.bollinger_window,
+                    bollinger_multiplier=request.bollinger_multiplier,
                 ),
             )
             latest_statistics = self._latest_statistics(computation, series)
@@ -217,26 +220,31 @@ class AaplMarketChartService:
             request.long_sma_window,
             request.third_sma_window,
         )
-        context_groups = groups[max(0, selected_group_start - (maximum_sma_window - 1)) :]
+        maximum_context_window = max(maximum_sma_window, request.bollinger_window)
+        context_groups = groups[max(0, selected_group_start - (maximum_context_window - 1)) :]
         context_points = self._build_points(
             context_groups,
             request.resolution,
             request.short_sma_window,
             request.long_sma_window,
             request.third_sma_window,
+            request.bollinger_window,
+            request.bollinger_multiplier,
             request.known_at,
         )
         points = context_points[-len(selected_groups) :] if selected_groups else ()
         selected_bars = tuple(bar for group in selected_groups for bar in group)
         daily_tail = self._build_points(
             self._group_bars(
-                series.bars[-maximum_sma_window:],
+                series.bars[-maximum_context_window:],
                 AaplMarketChartResolution.DAILY,
             ),
             AaplMarketChartResolution.DAILY,
             request.short_sma_window,
             request.long_sma_window,
             request.third_sma_window,
+            request.bollinger_window,
+            request.bollinger_multiplier,
             request.known_at,
         )
         latest_session = daily_tail[-1] if daily_tail else None
@@ -256,6 +264,8 @@ class AaplMarketChartService:
                 request.long_sma_window,
                 request.third_sma_window,
             ),
+            bollinger_window=request.bollinger_window,
+            bollinger_multiplier=request.bollinger_multiplier,
             points=points,
             latest_session=latest_session,
             range_statistics=self._range_statistics(points, request.resolution),
@@ -310,6 +320,8 @@ class AaplMarketChartService:
         short_sma_window: int,
         long_sma_window: int,
         third_sma_window: int,
+        bollinger_window: int,
+        bollinger_multiplier: Decimal,
         known_at: datetime,
     ) -> tuple[AaplMarketChartPoint, ...]:
         points: list[AaplMarketChartPoint] = []
@@ -400,6 +412,15 @@ class AaplMarketChartService:
                     resolution,
                     third_sma_window,
                 ),
+                bollinger=cls._bollinger(
+                    points,
+                    latest.close,
+                    close_observation_id,
+                    available_at,
+                    resolution,
+                    bollinger_window,
+                    bollinger_multiplier,
+                ),
                 aggregation_algorithm_version=_AGGREGATION_ALGORITHM,
             )
             points.append(point)
@@ -486,6 +507,49 @@ class AaplMarketChartService:
                 [point.close_observation_id for point in inputs] + [current_close_observation_id]
             ),
             algorithm_version=_SMA_ALGORITHM,
+        )
+
+    @staticmethod
+    def _bollinger(
+        prior_points: list[AaplMarketChartPoint],
+        current_close: Decimal,
+        current_close_observation_id: UUID,
+        current_available_at: datetime,
+        resolution: AaplMarketChartResolution,
+        window: int,
+        multiplier: Decimal,
+    ) -> AaplMarketChartBollinger | None:
+        if len(prior_points) + 1 < window:
+            return None
+        inputs = prior_points[-(window - 1) :]
+        closes = tuple(point.close for point in inputs) + (current_close,)
+        with localcontext(Context(prec=34)):
+            middle = sum(closes, Decimal("0")) / Decimal(window)
+            variance = sum(((close - middle) ** 2 for close in closes), Decimal("0")) / Decimal(
+                window
+            )
+            deviation = variance.sqrt()
+            upper = middle + multiplier * deviation
+            lower = middle - multiplier * deviation
+            denominator = upper - lower
+            percent_b = (current_close - lower) / denominator if denominator != 0 else None
+            bandwidth = denominator / middle
+        return AaplMarketChartBollinger(
+            middle=middle,
+            upper=upper,
+            lower=lower,
+            bandwidth=bandwidth,
+            percent_b=percent_b,
+            window=window,
+            multiplier=multiplier,
+            resolution=resolution,
+            available_at=max(
+                *(point.bar_available_at for point in inputs), current_available_at
+            ),
+            input_observation_ids=tuple(
+                [point.close_observation_id for point in inputs] + [current_close_observation_id]
+            ),
+            algorithm_version="market-chart-bollinger-bands-v1-decimal34",
         )
 
     @staticmethod

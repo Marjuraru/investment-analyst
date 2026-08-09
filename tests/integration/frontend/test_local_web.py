@@ -8,6 +8,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import cast
 from urllib.error import HTTPError
@@ -1136,6 +1137,8 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
                 "short_sma_window": "10",
                 "long_sma_window": "50",
                 "third_sma_window": "100",
+                "bollinger_window": "30",
+                "bollinger_multiplier": "2.5",
             }
         )
         chart_status, chart, _ = _json_request(
@@ -1343,6 +1346,8 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert application.chart_requests[0].short_sma_window == 10
     assert application.chart_requests[0].long_sma_window == 50
     assert application.chart_requests[0].third_sma_window == 100
+    assert application.chart_requests[0].bollinger_window == 30
+    assert application.chart_requests[0].bollinger_multiplier == Decimal("2.5")
     assert application.chart_locations[0].workspace == workspace.resolve()
     assert cached_chart_status == 200
     assert cached_chart == chart

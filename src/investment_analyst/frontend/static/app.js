@@ -15,6 +15,8 @@ const DEFAULT_CHART_SETTINGS = Object.freeze({
   shortWindow: 5,
   longWindow: 20,
   thirdWindow: 50,
+  bollingerWindow: 20,
+  bollingerMultiplier: "2",
   shortColor: "#e29951",
   longColor: "#a695df",
   thirdColor: "#d778aa",
@@ -452,6 +454,7 @@ const chartSeriesVisibility = {
   "sma-5": true,
   "sma-20": true,
   "sma-50": true,
+  bollinger: true,
   volume: true,
 };
 
@@ -811,6 +814,10 @@ function normalizeChartSettings(candidate) {
   const shortWindow = Number(candidate.shortWindow);
   const longWindow = Number(candidate.longWindow);
   const thirdWindow = Number(candidate.thirdWindow ?? DEFAULT_CHART_SETTINGS.thirdWindow);
+  const bollingerWindow = Number(candidate.bollingerWindow ?? DEFAULT_CHART_SETTINGS.bollingerWindow);
+  const bollingerMultiplier = String(
+    candidate.bollingerMultiplier ?? DEFAULT_CHART_SETTINGS.bollingerMultiplier,
+  );
   const thirdColor = candidate.thirdColor ?? DEFAULT_CHART_SETTINGS.thirdColor;
   const priceScale = candidate.priceScale === undefined ? "linear" : candidate.priceScale;
   const chartType =
@@ -827,6 +834,12 @@ function normalizeChartSettings(candidate) {
     longWindow > 399 ||
     thirdWindow < 4 ||
     thirdWindow > 400 ||
+    !Number.isInteger(bollingerWindow) ||
+    bollingerWindow < 2 ||
+    bollingerWindow > 400 ||
+    !/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(bollingerMultiplier) ||
+    Number(bollingerMultiplier) <= 0 ||
+    Number(bollingerMultiplier) > 100 ||
     shortWindow >= longWindow ||
     longWindow >= thirdWindow ||
     !colorPattern.test(candidate.shortColor) ||
@@ -848,6 +861,8 @@ function normalizeChartSettings(candidate) {
     shortWindow,
     longWindow,
     thirdWindow,
+    bollingerWindow,
+    bollingerMultiplier,
     shortColor: candidate.shortColor.toLowerCase(),
     longColor: candidate.longColor.toLowerCase(),
     thirdColor: thirdColor.toLowerCase(),
@@ -882,6 +897,8 @@ function applyChartSettings() {
   byId("sma-short-window").value = String(chartSettings.shortWindow);
   byId("sma-long-window").value = String(chartSettings.longWindow);
   byId("sma-third-window").value = String(chartSettings.thirdWindow);
+  byId("bollinger-window").value = String(chartSettings.bollingerWindow);
+  byId("bollinger-multiplier").value = chartSettings.bollingerMultiplier;
   byId("sma-short-color").value = chartSettings.shortColor;
   byId("sma-long-color").value = chartSettings.longColor;
   byId("sma-third-color").value = chartSettings.thirdColor;
@@ -1740,6 +1757,9 @@ function chartValues(points) {
     const shortSma = point.short_sma ? numericValue(point.short_sma.value) : null;
     const longSma = point.long_sma ? numericValue(point.long_sma.value) : null;
     const thirdSma = point.third_sma ? numericValue(point.third_sma.value) : null;
+    const bollinger = point.bollinger || null;
+    const bollingerUpper = bollinger ? numericValue(bollinger.upper) : null;
+    const bollingerLower = bollinger ? numericValue(bollinger.lower) : null;
     if (
       open === null ||
       high === null ||
@@ -1749,6 +1769,7 @@ function chartValues(points) {
       (point.short_sma && shortSma === null) ||
       (point.long_sma && longSma === null) ||
       (point.third_sma && thirdSma === null)
+      || (bollinger && (bollingerUpper === null || bollingerLower === null))
     ) {
       throw new Error("El histórico contiene un valor que no puede representarse en el gráfico.");
     }
@@ -1764,6 +1785,8 @@ function chartValues(points) {
       shortSma,
       longSma,
       thirdSma,
+      bollingerUpper,
+      bollingerLower,
       calendarIntervalClosed: point.calendar_interval_closed,
     };
   });
@@ -1824,6 +1847,8 @@ function renderChartSvg(points, resolution) {
     if (item.shortSma !== null) prices.push(item.shortSma);
     if (item.longSma !== null) prices.push(item.longSma);
     if (item.thirdSma !== null) prices.push(item.thirdSma);
+    if (item.bollingerUpper !== null) prices.push(item.bollingerUpper);
+    if (item.bollingerLower !== null) prices.push(item.bollingerLower);
     maximumVolume = Math.max(maximumVolume, item.volume);
   }
   const scalePrice = chartSettings.priceScale === "logarithmic" ? Math.log : (value) => value;
@@ -1903,6 +1928,8 @@ function renderChartSvg(points, resolution) {
     ["chart-line sma-five-line", values.map((item) => item.shortSma)],
     ["chart-line sma-twenty-line", values.map((item) => item.longSma)],
     ["chart-line sma-fifty-line", values.map((item) => item.thirdSma)],
+    ["chart-line bollinger-upper-line", values.map((item) => item.bollingerUpper)],
+    ["chart-line bollinger-lower-line", values.map((item) => item.bollingerLower)],
   ];
   for (const [className, seriesValues] of series) {
     svg.appendChild(
@@ -2072,6 +2099,11 @@ function updateChartSelection(index, points, values, yPosition) {
     : isIntradayInterval()
       ? "No aplica"
       : "En calentamiento";
+  byId("chart-point-bollinger").textContent = point.bollinger
+    ? `Sup. ${formatCurrency(point.bollinger.upper)} · Media ${formatCurrency(point.bollinger.middle)} · Inf. ${formatCurrency(point.bollinger.lower)}`
+    : isIntradayInterval()
+      ? "No aplica"
+      : "En calentamiento";
   byId("chart-point-volume").textContent = formatMarketVolume(point.volume);
   byId("chart-point-volume").title = `Valor exacto: ${point.volume} ${marketAssetPresentation().volumeLabel}`;
 }
@@ -2091,6 +2123,9 @@ function renderChartTable(points) {
       point.short_sma ? formatCurrency(point.short_sma.value) : "—",
       point.long_sma ? formatCurrency(point.long_sma.value) : "—",
       point.third_sma ? formatCurrency(point.third_sma.value) : "—",
+      point.bollinger
+        ? `${point.bollinger.lower} / ${point.bollinger.middle} / ${point.bollinger.upper}`
+        : "—",
       formatMarketVolume(point.volume, { includeUnit: false }),
       point.trade_count !== null ? formatInteger(point.trade_count) : "—",
     ];
@@ -2293,6 +2328,7 @@ function resetMarketSnapshot() {
     "chart-latest-sma-5",
     "chart-latest-sma-20",
     "chart-latest-sma-50",
+    "chart-point-bollinger",
   ];
   for (const id of ids) byId(id).textContent = "—";
   byId("snapshot-quality").textContent = "—";
@@ -2320,6 +2356,10 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
     chart.sma_windows[0] !== chartSettings.shortWindow ||
     chart.sma_windows[1] !== chartSettings.longWindow ||
     chart.sma_windows[2] !== chartSettings.thirdWindow ||
+    (!intraday && (
+      chart.bollinger_window !== chartSettings.bollingerWindow
+      || chart.bollinger_multiplier !== chartSettings.bollingerMultiplier
+    )) ||
     chart.interval !== chartSettings.interval ||
     chart.traceability_verified !== true
   ) {
@@ -2439,6 +2479,8 @@ async function queryMarketChart() {
     parameters.set("short_sma_window", String(chartSettings.shortWindow));
     parameters.set("long_sma_window", String(chartSettings.longWindow));
     parameters.set("third_sma_window", String(chartSettings.thirdWindow));
+    parameters.set("bollinger_window", String(chartSettings.bollingerWindow));
+    parameters.set("bollinger_multiplier", chartSettings.bollingerMultiplier);
   }
   try {
     const payload = await api(
@@ -4487,6 +4529,8 @@ byId("chart-settings-form").addEventListener("submit", async (event) => {
     shortWindow: byId("sma-short-window").valueAsNumber,
     longWindow: byId("sma-long-window").valueAsNumber,
     thirdWindow: byId("sma-third-window").valueAsNumber,
+    bollingerWindow: byId("bollinger-window").valueAsNumber,
+    bollingerMultiplier: byId("bollinger-multiplier").value,
     shortColor: byId("sma-short-color").value,
     longColor: byId("sma-long-color").value,
     thirdColor: byId("sma-third-color").value,
@@ -4497,7 +4541,7 @@ byId("chart-settings-form").addEventListener("submit", async (event) => {
   const error = byId("chart-settings-error");
   if (candidate === null) {
     error.textContent =
-      "Usa ventanas enteras y ordenadas: rápida 2–200, media 3–399 y lenta 4–400.";
+      "Usa ventanas enteras ordenadas y Bollinger 2–400 con multiplicador exacto positivo.";
     error.classList.remove("hidden");
     return;
   }
@@ -4506,6 +4550,8 @@ byId("chart-settings-form").addEventListener("submit", async (event) => {
     candidate.shortWindow !== chartSettings.shortWindow ||
     candidate.longWindow !== chartSettings.longWindow ||
     candidate.thirdWindow !== chartSettings.thirdWindow ||
+    candidate.bollingerWindow !== chartSettings.bollingerWindow ||
+    candidate.bollingerMultiplier !== chartSettings.bollingerMultiplier ||
     candidate.interval !== chartSettings.interval;
   chartSettings = candidate;
   applyChartSettings();
@@ -4520,6 +4566,8 @@ byId("chart-settings-reset").addEventListener("click", async () => {
     chartSettings.shortWindow !== DEFAULT_CHART_SETTINGS.shortWindow ||
     chartSettings.longWindow !== DEFAULT_CHART_SETTINGS.longWindow ||
     chartSettings.thirdWindow !== DEFAULT_CHART_SETTINGS.thirdWindow ||
+    chartSettings.bollingerWindow !== DEFAULT_CHART_SETTINGS.bollingerWindow ||
+    chartSettings.bollingerMultiplier !== DEFAULT_CHART_SETTINGS.bollingerMultiplier ||
     chartSettings.interval !== DEFAULT_CHART_SETTINGS.interval;
   chartSettings = { ...DEFAULT_CHART_SETTINGS };
   byId("chart-settings-error").classList.add("hidden");

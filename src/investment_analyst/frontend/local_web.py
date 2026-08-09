@@ -5,6 +5,7 @@ import json
 import threading
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
+from decimal import Decimal, InvalidOperation
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
@@ -1416,6 +1417,8 @@ class AaplLocalWebApplication:
             "short_sma_window",
             "long_sma_window",
             "third_sma_window",
+            "bollinger_window",
+            "bollinger_multiplier",
         }
         if set(parameters) - allowed:
             raise ValueError("market chart query contains unsupported parameters")
@@ -1426,6 +1429,8 @@ class AaplLocalWebApplication:
         short_sma_window = _one_parameter(parameters, "short_sma_window", required=False)
         long_sma_window = _one_parameter(parameters, "long_sma_window", required=False)
         third_sma_window = _one_parameter(parameters, "third_sma_window", required=False)
+        bollinger_window = _one_parameter(parameters, "bollinger_window", required=False)
+        bollinger_multiplier = _one_parameter(parameters, "bollinger_multiplier", required=False)
         request_parameters: dict[str, object] = {
             "known_at": _aware_datetime(known_at),
             "period": period or AaplMarketChartPeriod.SIX_MONTHS,
@@ -1447,6 +1452,17 @@ class AaplLocalWebApplication:
                 name="third_sma_window",
                 default=50,
             )
+        if bollinger_window is not None:
+            request_parameters["bollinger_window"] = _integer_parameter(
+                bollinger_window,
+                name="bollinger_window",
+                default=20,
+            )
+        if bollinger_multiplier is not None:
+            try:
+                request_parameters["bollinger_multiplier"] = Decimal(bollinger_multiplier)
+            except InvalidOperation as error:
+                raise ValueError("bollinger_multiplier must be an exact decimal") from error
         descriptor = self._market_asset(asset_id)
         if descriptor.refresh_kind == "complete_analysis":
             request = AaplMarketChartRequest.model_validate(request_parameters)

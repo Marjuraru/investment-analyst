@@ -156,6 +156,10 @@ completas se suman; VWAP solo se publica cuando todos los inputs existen y se po
 La calidad usa de forma conservadora el estado más restrictivo del intervalo: `suspect`, `partial`,
 `delayed` y `valid`, en ese orden de precedencia.
 Las SMA se recalculan sobre cierres de la resolución visible e incluyen el punto actual. El
+gráfico también puede mostrar Bandas de Bollinger descriptivas configurables: la ventana y el
+multiplicador exacto viajan en la consulta local, cada punto conserva los IDs de cierres usados y
+el dominio vertical incluye sus bandas superior e inferior. La banda plana expone su ausencia de
+Percent B sin inventar un valor.
 servidor carga el contexto precedente suficiente para que la primera media visible sea exacta; el
 contrato expone las ventanas efectivas y cada promedio conserva todos sus UUID de entrada. Las
 estadísticas de rango conservan la

@@ -6,13 +6,17 @@ SIMPLE_RETURN_KEY = "market.history.simple_return_1d"
 SMA_KEY = "market.history.sma"
 VOLATILITY_KEY = "market.history.rolling_daily_volatility"
 RELATIVE_VOLUME_KEY = "market.history.relative_volume"
+BOLLINGER_UPPER_KEY = "market.technical.bollinger.upper"
+BOLLINGER_LOWER_KEY = "market.technical.bollinger.lower"
+BOLLINGER_BANDWIDTH_KEY = "market.technical.bollinger.bandwidth"
+BOLLINGER_PERCENT_B_KEY = "market.technical.bollinger.percent_b"
 
 _REFERENCE = "Internal auditable market-statistics specification."
 _NO_ADVICE = "This descriptive statistic is not a financial recommendation."
 
 
 def get_market_statistics_definitions() -> tuple[MetricDefinition, ...]:
-    """Return the four versioned metric contracts supported by the engine."""
+    """Return the versioned metric contracts supported by the engine."""
     return (
         MetricDefinition(
             metric_key=SIMPLE_RETURN_KEY,
@@ -95,6 +99,75 @@ def get_market_statistics_definitions() -> tuple[MetricDefinition, ...]:
                 "Coinbase volume represents Coinbase Exchange only.",
                 "It must not yet be interpreted as institutional activity.",
                 "No result is emitted when historical mean volume is zero.",
+                _NO_ADVICE,
+            ],
+            references=[_REFERENCE],
+            definition_version="1.0.0",
+        ),
+        MetricDefinition(
+            metric_key=BOLLINGER_UPPER_KEY,
+            display_name="Bollinger Upper Band",
+            category=MetricCategory.MARKET,
+            description="Upper population-standard-deviation band of available closing prices.",
+            formula="mean(close window) + multiplier * sqrt(sum((close - mean)^2) / window)",
+            unit="USD",
+            default_parameters={
+                "window": 20,
+                "multiplier": "2",
+                "price_field": "close",
+                "degrees_of_freedom": 0,
+                "includes_current_bar": True,
+            },
+            limitations=[
+                "Uses population standard deviation, not sample standard deviation.",
+                "Uses available bars without filling gaps or inferring a calendar.",
+                _NO_ADVICE,
+            ],
+            references=[_REFERENCE],
+            definition_version="1.0.0",
+        ),
+        MetricDefinition(
+            metric_key=BOLLINGER_LOWER_KEY,
+            display_name="Bollinger Lower Band",
+            category=MetricCategory.MARKET,
+            description="Lower population-standard-deviation band of available closing prices.",
+            formula="mean(close window) - multiplier * sqrt(sum((close - mean)^2) / window)",
+            unit="USD",
+            default_parameters={
+                "window": 20,
+                "multiplier": "2",
+                "price_field": "close",
+                "degrees_of_freedom": 0,
+                "includes_current_bar": True,
+            },
+            limitations=["The middle band is the existing SMA with the same window.", _NO_ADVICE],
+            references=[_REFERENCE],
+            definition_version="1.0.0",
+        ),
+        MetricDefinition(
+            metric_key=BOLLINGER_BANDWIDTH_KEY,
+            display_name="Bollinger Bandwidth",
+            category=MetricCategory.MARKET,
+            description="Relative distance between the upper and lower Bollinger bands.",
+            formula="(upper - lower) / middle",
+            unit="ratio",
+            default_parameters={"window": 20, "multiplier": "2", "price_field": "close"},
+            limitations=["The middle band is the existing SMA with the same window.", _NO_ADVICE],
+            references=[_REFERENCE],
+            definition_version="1.0.0",
+        ),
+        MetricDefinition(
+            metric_key=BOLLINGER_PERCENT_B_KEY,
+            display_name="Bollinger Percent B",
+            category=MetricCategory.MARKET,
+            description=(
+                "Close position within the Bollinger band when the band has non-zero width."
+            ),
+            formula="(close - lower) / (upper - lower)",
+            unit="ratio",
+            default_parameters={"window": 20, "multiplier": "2", "price_field": "close"},
+            limitations=[
+                "No value is emitted for a flat band because the denominator is zero.",
                 _NO_ADVICE,
             ],
             references=[_REFERENCE],

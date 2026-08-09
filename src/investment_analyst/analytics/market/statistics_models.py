@@ -42,6 +42,8 @@ class MarketStatisticsRequest(ContractModel):
     sma_windows: tuple[int, ...] = (5, 20)
     volatility_window: int = 20
     relative_volume_window: int = 20
+    bollinger_window: int = 20
+    bollinger_multiplier: FinancialDecimal = Decimal("2")
 
     @field_validator("sma_windows", mode="before")
     @classmethod
@@ -67,6 +69,28 @@ class MarketStatisticsRequest(ContractModel):
     def validate_relative_volume_window(cls, value: object) -> int:
         """Require a valid historical-volume window."""
         return _validate_window(value, minimum=1, name="relative_volume_window")
+
+    @field_validator("bollinger_window", mode="before")
+    @classmethod
+    def validate_bollinger_window(cls, value: object) -> int:
+        """Require a finite available-bar window for population dispersion."""
+        return _validate_window(value, minimum=2, name="bollinger_window")
+
+    @field_validator("bollinger_multiplier", mode="before")
+    @classmethod
+    def validate_bollinger_multiplier_type(cls, value: object) -> object:
+        """Reject coercible financial input while preserving JSON output round-trips elsewhere."""
+        if isinstance(value, (bool, float, str)):
+            raise ValueError("bollinger_multiplier must use Decimal, not float, bool, or string")
+        return value
+
+    @field_validator("bollinger_multiplier")
+    @classmethod
+    def validate_bollinger_multiplier(cls, value: Decimal) -> Decimal:
+        """Keep the configurable multiplier exact, finite, positive, and bounded."""
+        if not value.is_finite() or value <= 0 or value > Decimal("100"):
+            raise ValueError("bollinger_multiplier must be finite, positive, and at most 100")
+        return value
 
 
 class MetricCalculation(ContractModel):

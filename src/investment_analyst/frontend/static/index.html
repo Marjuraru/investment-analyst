@@ -240,6 +240,9 @@
                       <button class="series-toggle" type="button" data-series="sma-50" data-sma-only aria-pressed="true">
                         <i class="legend-swatch sma-fifty" aria-hidden="true"></i><span id="sma-third-legend-label">SMA 50</span>
                       </button>
+                      <button class="series-toggle" type="button" data-series="bollinger" data-sma-only aria-pressed="true">
+                        <i class="legend-swatch bollinger" aria-hidden="true"></i>Bandas de Bollinger
+                      </button>
                       <button class="series-toggle" type="button" data-series="volume" aria-pressed="true">
                         <i class="legend-swatch volume" aria-hidden="true"></i>Volumen
                       </button>
@@ -266,6 +269,13 @@
                             <span class="chart-setting-inputs">
                               <input id="sma-short-window" type="number" min="2" max="200" step="1" value="5" inputmode="numeric" aria-label="Ventana de la SMA rápida" />
                               <input id="sma-short-color" type="color" value="#e29951" aria-label="Color de la SMA rápida" />
+                            </span>
+                          </label>
+                          <label data-sma-only>
+                            <span>Bandas de Bollinger</span>
+                            <span class="chart-setting-inputs">
+                              <input id="bollinger-window" type="number" min="2" max="400" step="1" value="20" inputmode="numeric" aria-label="Ventana de Bandas de Bollinger" />
+                              <input id="bollinger-multiplier" type="number" min="0.0001" max="100" step="any" value="2" inputmode="decimal" aria-label="Multiplicador exacto de Bandas de Bollinger" />
                             </span>
                           </label>
                           <label data-sma-only>
@@ -351,6 +361,10 @@
                       <dt id="chart-point-sma-third-label">SMA 50</dt>
                       <dd id="chart-point-sma-50">—</dd>
                     </div>
+                    <div data-sma-only>
+                      <dt>Bandas Bollinger</dt>
+                      <dd id="chart-point-bollinger">—</dd>
+                    </div>
                     <div>
                       <dt id="chart-point-volume-label">Volumen</dt>
                       <dd id="chart-point-volume">—</dd>
@@ -421,6 +435,7 @@
                         <th id="chart-table-sma-short-label" scope="col">SMA 5</th>
                         <th id="chart-table-sma-long-label" scope="col">SMA 20</th>
                         <th id="chart-table-sma-third-label" scope="col">SMA 50</th>
+                        <th scope="col" data-sma-only>Bandas Bollinger</th>
                         <th id="chart-table-volume-label" scope="col">Volumen</th>
                         <th scope="col">Operaciones</th>
                       </tr>

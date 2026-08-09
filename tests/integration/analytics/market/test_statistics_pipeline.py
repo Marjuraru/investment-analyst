@@ -159,8 +159,8 @@ def test_btc_and_aapl_statistics_are_persisted_with_quality_and_idempotency(tmp_
             for item in storage.metric_results.list(asset_id="crypto:btc-usd")
         )
         assert all(item.quality is DataQuality.PARTIAL for item in aapl_results)
-        assert aapl_summary.definitions_upserted == 4
-        assert len(storage.metric_definitions.list_all()) == 4
+        assert aapl_summary.definitions_upserted == 8
+        assert len(storage.metric_definitions.list_all()) == 8
         assert len(storage.raw_records.list()) == raw_count
         assert len(storage.observations.list()) == observation_count
         assert storage.diagnostics.list() == []
