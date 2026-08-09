@@ -164,7 +164,7 @@ def test_coinbase_asset_and_product_binding_are_available() -> None:
     assert service.supports(bitcoin.asset_id, "market.minute_bars")
     ethereum = service.resolve_alias("ethereum")
     assert ethereum.asset_id == "crypto:eth-usd"
-    assert ethereum.is_active is False
+    assert ethereum.is_active is True
     assert (
         service.get_binding(
             ethereum.asset_id,

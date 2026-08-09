@@ -39,7 +39,7 @@
       "asset_id": "crypto:eth-usd",
       "crypto_profile": "ethereum",
       "exchange": "COINBASE",
-      "is_active": false,
+      "is_active": true,
       "name": "Ethereum",
       "provider_bindings": [
         {

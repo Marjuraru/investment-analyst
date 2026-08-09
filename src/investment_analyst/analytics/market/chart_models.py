@@ -149,6 +149,12 @@ class BtcMarketChartRequest(AaplMarketChartRequest):
     """Request one bounded BTC-USD chart at an explicit point-in-time cut."""
 
 
+class CryptoSpotDailyMarketChartRequest(AaplMarketChartRequest):
+    """Request one bounded chart for an explicit catalog-scoped Coinbase daily asset."""
+
+    asset_id: NonEmptyStr
+
+
 class AaplMarketChartSma(ContractModel):
     """One exact SMA value with sufficient evidence to audit its calculation."""
 
@@ -724,6 +730,26 @@ class BtcMarketChart(AaplMarketChart):
         "coinbase-exchange:btc-usd:daily-candles"
     )
     volume_unit: Literal["BTC"] = "BTC"
+
+
+class CryptoSpotDailyMarketChart(AaplMarketChart):
+    """Explicit daily Coinbase chart for a non-legacy crypto spot asset."""
+
+    schema_version: Literal["crypto-spot-daily-market-chart-v1"] = (
+        "crypto-spot-daily-market-chart-v1"
+    )
+    asset_id: NonEmptyStr
+    source_id: NonEmptyStr
+    volume_unit: NonEmptyStr
+
+    @model_validator(mode="after")
+    def validate_coinbase_scope(self) -> "CryptoSpotDailyMarketChart":
+        if not (
+            self.source_id.startswith("coinbase-exchange:")
+            and self.source_id.endswith(":daily-candles")
+        ):
+            raise ValueError("crypto spot daily chart requires a Coinbase daily-candle source")
+        return self
 
 
 class ListedMarketChart(AaplMarketChart):

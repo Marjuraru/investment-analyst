@@ -17,6 +17,7 @@ from pydantic import ConfigDict, Field, JsonValue, field_validator, model_valida
 
 from investment_analyst.application.btc_intraday_models import BtcIntradayRefreshRequest
 from investment_analyst.application.btc_refresh_models import BtcMarketRefreshRequest
+from investment_analyst.application.crypto_spot_daily_models import CryptoSpotDailyRefreshRequest
 from investment_analyst.application.listed_market_refresh_models import ListedMarketRefreshRequest
 from investment_analyst.application.operational_models import AaplDailyRunRequestSnapshot
 from investment_analyst.application.operational_state import AaplOperationalStateError
@@ -81,6 +82,8 @@ class ManualOperationRequest(ContractModel):
         elif self.operation_kind is ManualOperationKind.MARKET_DAILY:
             if self.payload.get("asset_id") == "crypto:btc-usd":
                 BtcMarketRefreshRequest.model_validate(self.payload)
+            elif self.payload.get("asset_id") == "crypto:eth-usd":
+                CryptoSpotDailyRefreshRequest.model_validate(self.payload)
             else:
                 ListedMarketRefreshRequest.model_validate(self.payload)
         elif self.operation_kind is ManualOperationKind.MARKET_INTRADAY:
