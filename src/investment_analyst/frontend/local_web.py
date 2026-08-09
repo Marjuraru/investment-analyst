@@ -209,6 +209,11 @@ def _safe_nonnegative_int(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
+def _safe_optional_timestamp(value: object) -> str | None:
+    """Keep only the JSON timestamps emitted by a typed local status model."""
+    return value if isinstance(value, str) else None
+
+
 def _manual_operation_result(
     operation_kind: ManualOperationKind,
     response: dict[str, object],
@@ -1150,12 +1155,33 @@ class AaplLocalWebApplication:
         scheduled_job_count = 0
         scheduled_running_count = 0
         scheduled_failed_count = 0
+        scheduled_blocked_count = 0
+        scheduled_retry_wait_count = 0
+        scheduled_current_count = 0
+        scheduled_stale_count = 0
+        scheduled_incomplete_count = 0
+        scheduled_next_run_at: str | None = None
+        scheduled_next_retry_at: str | None = None
         if self._scheduler is not None:
             status = self._scheduler.status().to_json_dict()
             jobs = status.get("jobs", ())
             scheduled_job_count = len(jobs) if isinstance(jobs, (list, tuple)) else 0
             scheduled_running_count = _safe_nonnegative_int(status.get("running_count"))
             scheduled_failed_count = _safe_nonnegative_int(status.get("failed_count"))
+            scheduled_blocked_count = _safe_nonnegative_int(status.get("blocked_count"))
+            scheduled_retry_wait_count = _safe_nonnegative_int(status.get("retry_wait_count"))
+            scheduled_current_count = _safe_nonnegative_int(status.get("current_count"))
+            scheduled_stale_count = _safe_nonnegative_int(status.get("stale_count"))
+            scheduled_incomplete_count = _safe_nonnegative_int(status.get("incomplete_count"))
+            scheduled_next_run_at = _safe_optional_timestamp(status.get("next_run_at"))
+            retry_times = (
+                _safe_optional_timestamp(item.get("next_retry_at"))
+                for item in jobs
+                if isinstance(item, dict)
+            )
+            scheduled_next_retry_at = min(
+                (item for item in retry_times if item is not None), default=None
+            )
         queue_snapshot = self._manual_operations.snapshot() if self._manual_operations else None
         preferences = self._asset_preferences.view() if self._asset_preferences else None
         return OperationalOverviewSnapshot.now(
@@ -1168,6 +1194,13 @@ class AaplLocalWebApplication:
             scheduled_job_count=scheduled_job_count,
             scheduled_running_count=scheduled_running_count,
             scheduled_failed_count=scheduled_failed_count,
+            scheduled_blocked_count=scheduled_blocked_count,
+            scheduled_retry_wait_count=scheduled_retry_wait_count,
+            scheduled_current_count=scheduled_current_count,
+            scheduled_stale_count=scheduled_stale_count,
+            scheduled_incomplete_count=scheduled_incomplete_count,
+            scheduled_next_run_at=scheduled_next_run_at,
+            scheduled_next_retry_at=scheduled_next_retry_at,
             queued_operation_count=queue_snapshot.queued_count if queue_snapshot else 0,
             running_operation_count=queue_snapshot.running_count if queue_snapshot else 0,
             failed_operation_count=queue_snapshot.failed_count if queue_snapshot else 0,

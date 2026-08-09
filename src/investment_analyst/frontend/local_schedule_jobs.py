@@ -47,6 +47,7 @@ from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobFailureCategory,
     ScheduledJobInvocation,
     ScheduledJobRunError,
+    scheduled_job_failure,
 )
 from investment_analyst.application.operational_state import AaplOperationalStateError
 from investment_analyst.application.peru_registry import (
@@ -291,10 +292,9 @@ def _smv_registry_job(
         )
         if not source_ids or not summary.assets:
             raise ScheduledJobRunError(
-                ScheduledJobFailure(
-                    category="empty_smv_registry_scope",
-                    message="scheduled SMV registry refresh returned no configured evidence",
-                    retryable=False,
+                scheduled_job_failure(
+                    ScheduledJobFailureCategory.PROVIDER_CONTRACT,
+                    "scheduled SMV registry refresh returned no configured evidence",
                 )
             )
         checked_at = max(
@@ -375,10 +375,9 @@ def _market_job(
         market_start = max(config.market_start, descriptor.default_market_start)
         if market_end < market_start:
             raise ScheduledJobRunError(
-                ScheduledJobFailure(
-                    category="invalid_market_range",
-                    message="scheduled market end would be earlier than market start",
-                    retryable=False,
+                scheduled_job_failure(
+                    ScheduledJobFailureCategory.VALIDATION,
+                    "scheduled market end would be earlier than market start",
                 )
             )
         try:
@@ -424,10 +423,9 @@ def _market_job(
         ) as error:
             raise _classified_provider_error(error) from error
         raise ScheduledJobRunError(
-            ScheduledJobFailure(
-                category="unsupported_market_provider",
-                message="scheduled market provider is not supported",
-                retryable=False,
+            scheduled_job_failure(
+                ScheduledJobFailureCategory.UNSUPPORTED_CAPABILITY,
+                "scheduled market provider is not supported",
             )
         )
 
@@ -664,7 +662,6 @@ def _http_failure(
         return _safe_failure(
             ScheduledJobFailureCategory.TRANSPORT,
             "scheduled provider transport failed after bounded internal retries",
-            retryable=True,
         )
     if failure_kind is HttpRequestFailureKind.UNEXPECTED:
         return _safe_failure(
@@ -680,13 +677,11 @@ def _http_failure(
         return _safe_failure(
             ScheduledJobFailureCategory.RATE_LIMIT,
             "scheduled provider rate limit remained active after bounded internal retries",
-            retryable=True,
         )
     if status_code in RETRYABLE_HTTP_STATUS_CODES:
         return _safe_failure(
             ScheduledJobFailureCategory.TRANSIENT_HTTP,
             "scheduled provider returned a transient HTTP failure after bounded internal retries",
-            retryable=True,
         )
     return _safe_failure(
         ScheduledJobFailureCategory.HTTP,
@@ -709,7 +704,6 @@ def _non_http_failure(chain: tuple[BaseException, ...]) -> ScheduledJobFailure:
         return _safe_failure(
             ScheduledJobFailureCategory.TRANSPORT,
             "scheduled provider transport failed after bounded internal retries",
-            retryable=True,
         )
     if any(
         isinstance(item, (StorageError, WorkspaceError, AaplOperationalStateError, OSError))
@@ -805,14 +799,8 @@ def _exception_chain(error: BaseException) -> tuple[BaseException, ...]:
 def _safe_failure(
     category: ScheduledJobFailureCategory,
     message: str,
-    *,
-    retryable: bool = False,
 ) -> ScheduledJobFailure:
-    return ScheduledJobFailure(
-        category=category,
-        message=message,
-        retryable=retryable,
-    )
+    return scheduled_job_failure(category, message)
 
 
 def _offset_minute(value: time, minutes: int) -> time:

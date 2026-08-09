@@ -100,8 +100,9 @@ from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobDefinition,
     ScheduledJobDomain,
     ScheduledJobExecution,
-    ScheduledJobFailure,
+    ScheduledJobFailureCategory,
     ScheduledJobInvocation,
+    scheduled_job_failure,
 )
 from investment_analyst.application.operational_alerts import (
     OperationalAlertMonitor,
@@ -1669,6 +1670,9 @@ def test_preference_update_and_overview_do_not_wait_for_active_provider(
             )
             overview_status, overview, _ = _json_request(Request(f"{root}/api/overview"))
             elapsed = time.perf_counter() - started
+            compact_started = time.perf_counter()
+            compact_status, compact, _ = _json_request(Request(f"{root}/api/v1/overview"))
+            compact_elapsed = time.perf_counter() - compact_started
     finally:
         provider_release.set()
         tick.join(timeout=5)
@@ -1678,6 +1682,11 @@ def test_preference_update_and_overview_do_not_wait_for_active_provider(
     assert overview_status == 200
     assert overview["scheduler"]["jobs"][0]["definition"]["asset_id"] == "crypto:btc-usd"
     assert elapsed < 2.5
+    assert compact_status == 200
+    assert compact["schema_version"] == "operational-overview-snapshot-v1"
+    assert compact["scheduled_job_count"] == 1
+    assert len(json.dumps(compact).encode()) < 20_000
+    assert compact_elapsed < 0.1
     assert provider_calls == 1
     assert not tick.is_alive()
 
@@ -1852,10 +1861,9 @@ def test_local_api_audits_alert_inbox_transitions(tmp_path: Path) -> None:
             status=ScheduledJobAttemptStatus.FAILED,
             started_at=datetime(2026, 7, 29, 12, 1, tzinfo=UTC),
             completed_at=completed_at,
-            failure=ScheduledJobFailure(
-                category="provider_unavailable",
-                message="safe failure",
-                retryable=True,
+            failure=scheduled_job_failure(
+                ScheduledJobFailureCategory.TRANSIENT_HTTP,
+                "safe failure",
             ),
         )
     )

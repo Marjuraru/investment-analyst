@@ -63,6 +63,41 @@ class ScheduledJobFailureCategory(StrEnum):
     HTTP = "http_error"
     UNEXPECTED = "unexpected_error"
     INTERRUPTED = "interrupted_job"
+    LEGACY_UNKNOWN = "legacy_unknown"
+
+
+class ScheduledJobHealth(StrEnum):
+    """Deterministic operational health projection for one registered job.
+
+    Precedence is disabled, running, retry_wait, blocked, never_run, incomplete,
+    stale, then current. This keeps an active fault visible alongside fresh data.
+    """
+
+    DISABLED = "disabled"
+    NEVER_RUN = "never_run"
+    RUNNING = "running"
+    RETRY_WAIT = "retry_wait"
+    BLOCKED = "blocked"
+    CURRENT = "current"
+    STALE = "stale"
+    INCOMPLETE = "incomplete"
+
+
+_FAILURE_RETRY_POLICY: dict[ScheduledJobFailureCategory, bool] = {
+    ScheduledJobFailureCategory.CONFIGURATION: False,
+    ScheduledJobFailureCategory.AUTHENTICATION: False,
+    ScheduledJobFailureCategory.UNSUPPORTED_CAPABILITY: False,
+    ScheduledJobFailureCategory.PROVIDER_CONTRACT: False,
+    ScheduledJobFailureCategory.VALIDATION: False,
+    ScheduledJobFailureCategory.STORAGE_STATE: False,
+    ScheduledJobFailureCategory.RATE_LIMIT: True,
+    ScheduledJobFailureCategory.TRANSPORT: True,
+    ScheduledJobFailureCategory.TRANSIENT_HTTP: True,
+    ScheduledJobFailureCategory.HTTP: False,
+    ScheduledJobFailureCategory.UNEXPECTED: False,
+    ScheduledJobFailureCategory.INTERRUPTED: True,
+    ScheduledJobFailureCategory.LEGACY_UNKNOWN: False,
+}
 
 
 class ProviderJobTelemetry(ContractModel):
@@ -273,7 +308,7 @@ class ScheduledJobFailure(ContractModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
-    category: NonEmptyStr = Field(max_length=120)
+    category: ScheduledJobFailureCategory | NonEmptyStr = Field(max_length=120)
     message: NonEmptyStr = Field(max_length=500)
     retryable: bool
 
@@ -284,6 +319,49 @@ class ScheduledJobFailure(ContractModel):
         if not isinstance(value, bool):
             raise ValueError("retryable must be a bool")
         return value
+
+    @field_validator("category", mode="after")
+    @classmethod
+    def preserve_canonical_category(
+        cls, value: ScheduledJobFailureCategory | str
+    ) -> ScheduledJobFailureCategory | str:
+        """Keep known values typed despite ``StrEnum`` also being a string."""
+        try:
+            return ScheduledJobFailureCategory(value)
+        except ValueError:
+            return value
+
+    @model_validator(mode="after")
+    def require_canonical_policy(self, info: ValidationInfo) -> "ScheduledJobFailure":
+        """Reject new free-text categories while retaining read-only v1 history."""
+        if isinstance(self.category, ScheduledJobFailureCategory):
+            if self.retryable is not _FAILURE_RETRY_POLICY[self.category]:
+                raise ValueError("retryable must match the canonical failure category")
+            return self
+        if not (info.context or {}).get("allow_legacy_failure_categories", False):
+            raise ValueError("failure category must be canonical")
+        return self
+
+    @property
+    def safe_category(self) -> ScheduledJobFailureCategory:
+        """Project unknown retained v1 values without silently making them transient."""
+        return (
+            self.category
+            if isinstance(self.category, ScheduledJobFailureCategory)
+            else ScheduledJobFailureCategory.LEGACY_UNKNOWN
+        )
+
+
+def scheduled_job_failure(
+    category: ScheduledJobFailureCategory,
+    message: str,
+) -> ScheduledJobFailure:
+    """Create a new failure only through the canonical retry policy table."""
+    return ScheduledJobFailure(
+        category=category,
+        message=message,
+        retryable=_FAILURE_RETRY_POLICY[category],
+    )
 
 
 class ScheduledJobRunError(RuntimeError):
@@ -414,7 +492,8 @@ class MultiAssetScheduleStateStore:
                 return MultiAssetScheduleState(attempts=())
             try:
                 return MultiAssetScheduleState.model_validate_json(
-                    self._path.read_text(encoding="utf-8")
+                    self._path.read_text(encoding="utf-8"),
+                    context={"allow_legacy_failure_categories": True},
                 )
             except (OSError, UnicodeError, ValueError) as error:
                 raise AaplOperationalStateError(
@@ -513,9 +592,14 @@ class ScheduledJobStatus(ContractModel):
     definition: ScheduledJobDefinition
     latest_attempt: ScheduledJobAttempt | None = None
     latest_success: ScheduledJobAttempt | None = None
+    health: ScheduledJobHealth
     freshness: ScheduledJobFreshness
     due: bool
     next_run_at: UTCDateTime
+    next_retry_at: UTCDateTime | None = None
+    retry_budget_remaining: int = Field(ge=0, le=10)
+    failure_category: ScheduledJobFailureCategory | None = None
+    latest_duration_ms: int | None = Field(default=None, ge=0)
     issues: tuple[NonEmptyStr, ...] = ()
 
     def to_json_dict(self) -> dict[str, object]:
@@ -524,9 +608,14 @@ class ScheduledJobStatus(ContractModel):
             "definition": self.definition.to_json_dict(),
             "latest_attempt": self.latest_attempt.to_json_dict() if self.latest_attempt else None,
             "latest_success": self.latest_success.to_json_dict() if self.latest_success else None,
+            "health": self.health.value,
             "freshness": self.freshness.value,
             "due": self.due,
             "next_run_at": self.next_run_at.isoformat(),
+            "next_retry_at": self.next_retry_at.isoformat() if self.next_retry_at else None,
+            "retry_budget_remaining": self.retry_budget_remaining,
+            "failure_category": self.failure_category.value if self.failure_category else None,
+            "latest_duration_ms": self.latest_duration_ms,
             "issues": list(self.issues),
         }
 
@@ -542,6 +631,9 @@ class MultiAssetSchedulerStatus(ContractModel):
     due_count: int = Field(ge=0)
     running_count: int = Field(ge=0)
     failed_count: int = Field(ge=0)
+    blocked_count: int = Field(ge=0)
+    retry_wait_count: int = Field(ge=0)
+    current_count: int = Field(ge=0)
     stale_count: int = Field(ge=0)
     incomplete_count: int = Field(ge=0)
     next_run_at: UTCDateTime
@@ -566,10 +658,23 @@ class MultiAssetSchedulerStatus(ContractModel):
             raise ValueError("running_count must match jobs")
         if self.failed_count != sum(
             item.latest_attempt is not None
-            and item.latest_attempt.status is ScheduledJobAttemptStatus.FAILED
+            and item.latest_attempt.status
+            in {ScheduledJobAttemptStatus.FAILED, ScheduledJobAttemptStatus.SKIPPED}
             for item in self.jobs
         ):
             raise ValueError("failed_count must match jobs")
+        if self.blocked_count != sum(
+            item.health is ScheduledJobHealth.BLOCKED for item in self.jobs
+        ):
+            raise ValueError("blocked_count must match jobs")
+        if self.retry_wait_count != sum(
+            item.health is ScheduledJobHealth.RETRY_WAIT for item in self.jobs
+        ):
+            raise ValueError("retry_wait_count must match jobs")
+        if self.current_count != sum(
+            item.health is ScheduledJobHealth.CURRENT for item in self.jobs
+        ):
+            raise ValueError("current_count must match jobs")
         if self.stale_count != sum(
             item.freshness is ScheduledJobFreshness.STALE for item in self.jobs
         ):
@@ -591,6 +696,9 @@ class MultiAssetSchedulerStatus(ContractModel):
             "due_count": self.due_count,
             "running_count": self.running_count,
             "failed_count": self.failed_count,
+            "blocked_count": self.blocked_count,
+            "retry_wait_count": self.retry_wait_count,
+            "current_count": self.current_count,
             "stale_count": self.stale_count,
             "incomplete_count": self.incomplete_count,
             "next_run_at": self.next_run_at.isoformat(),
@@ -730,11 +838,7 @@ class MultiAssetScheduler:
                 **running.model_dump(
                     exclude={"status", "completed_at", "execution", "failure", "telemetry"}
                 ),
-                status=(
-                    ScheduledJobAttemptStatus.FAILED
-                    if error.failure.retryable
-                    else ScheduledJobAttemptStatus.SKIPPED
-                ),
+                status=ScheduledJobAttemptStatus.FAILED,
                 completed_at=self._now(),
                 failure=error.failure,
             )
@@ -743,12 +847,11 @@ class MultiAssetScheduler:
                 **running.model_dump(
                     exclude={"status", "completed_at", "execution", "failure", "telemetry"}
                 ),
-                status=ScheduledJobAttemptStatus.SKIPPED,
+                status=ScheduledJobAttemptStatus.FAILED,
                 completed_at=self._now(),
-                failure=ScheduledJobFailure(
-                    category=ScheduledJobFailureCategory.STORAGE_STATE,
-                    message="scheduled operational state is incompatible or unavailable",
-                    retryable=False,
+                failure=scheduled_job_failure(
+                    ScheduledJobFailureCategory.STORAGE_STATE,
+                    "scheduled operational state is incompatible or unavailable",
                 ),
             )
         except ValueError:
@@ -756,12 +859,11 @@ class MultiAssetScheduler:
                 **running.model_dump(
                     exclude={"status", "completed_at", "execution", "failure", "telemetry"}
                 ),
-                status=ScheduledJobAttemptStatus.SKIPPED,
+                status=ScheduledJobAttemptStatus.FAILED,
                 completed_at=self._now(),
-                failure=ScheduledJobFailure(
-                    category=ScheduledJobFailureCategory.VALIDATION,
-                    message="scheduled job output failed validation",
-                    retryable=False,
+                failure=scheduled_job_failure(
+                    ScheduledJobFailureCategory.VALIDATION,
+                    "scheduled job output failed validation",
                 ),
             )
         except Exception:  # noqa: BLE001
@@ -771,10 +873,9 @@ class MultiAssetScheduler:
                 ),
                 status=ScheduledJobAttemptStatus.FAILED,
                 completed_at=self._now(),
-                failure=ScheduledJobFailure(
-                    category=ScheduledJobFailureCategory.UNEXPECTED,
-                    message="the scheduled job failed unexpectedly",
-                    retryable=False,
+                failure=scheduled_job_failure(
+                    ScheduledJobFailureCategory.UNEXPECTED,
+                    "the scheduled job failed unexpectedly",
                 ),
             )
         else:
@@ -810,10 +911,9 @@ class MultiAssetScheduler:
                 ),
                 status=ScheduledJobAttemptStatus.FAILED,
                 completed_at=now,
-                failure=ScheduledJobFailure(
-                    category=ScheduledJobFailureCategory.INTERRUPTED,
-                    message="the prior scheduled job was interrupted before completion",
-                    retryable=True,
+                failure=scheduled_job_failure(
+                    ScheduledJobFailureCategory.INTERRUPTED,
+                    "the prior scheduled job was interrupted before completion",
                 ),
             )
             recovered = recovered.model_copy(update={"telemetry": _attempt_telemetry(recovered)})
@@ -842,9 +942,13 @@ class MultiAssetScheduler:
             ),
             failed_count=sum(
                 item.latest_attempt is not None
-                and item.latest_attempt.status is ScheduledJobAttemptStatus.FAILED
+                and item.latest_attempt.status
+                in {ScheduledJobAttemptStatus.FAILED, ScheduledJobAttemptStatus.SKIPPED}
                 for item in statuses
             ),
+            blocked_count=sum(item.health is ScheduledJobHealth.BLOCKED for item in statuses),
+            retry_wait_count=sum(item.health is ScheduledJobHealth.RETRY_WAIT for item in statuses),
+            current_count=sum(item.health is ScheduledJobHealth.CURRENT for item in statuses),
             stale_count=sum(item.freshness is ScheduledJobFreshness.STALE for item in statuses),
             incomplete_count=sum(
                 item.freshness is ScheduledJobFreshness.INCOMPLETE for item in statuses
@@ -884,26 +988,32 @@ class MultiAssetScheduler:
         latest_success = self._latest_success_by_job(state).get(definition.job_id)
         due = False
         next_run = scheduled
+        next_retry: datetime | None = None
         issues: list[str] = []
+        health: ScheduledJobHealth
         if not definition.enabled:
             next_run = definition.scheduled_for(local_date + timedelta(days=1))
+            health = ScheduledJobHealth.DISABLED
         elif now < scheduled:
             next_run = scheduled
+            health = ScheduledJobHealth.NEVER_RUN
         elif not attempts_today:
             due = True
             next_run = now
+            health = ScheduledJobHealth.NEVER_RUN
         else:
             today_latest = attempts_today[-1]
             if today_latest.status is ScheduledJobAttemptStatus.RUNNING:
                 next_run = definition.scheduled_for(local_date + timedelta(days=1))
+                health = ScheduledJobHealth.RUNNING
                 if definition.job_id != self._active_job_id:
                     issues.append(f"{definition.job_id}: interrupted scheduled job")
             elif today_latest.status is ScheduledJobAttemptStatus.SUCCEEDED:
                 next_run = definition.scheduled_for(local_date + timedelta(days=1))
-            elif today_latest.status is ScheduledJobAttemptStatus.SKIPPED or (
-                today_latest.failure is not None and not today_latest.failure.retryable
-            ):
+                health = ScheduledJobHealth.CURRENT
+            elif today_latest.failure is not None and not today_latest.failure.retryable:
                 next_run = definition.scheduled_for(local_date + timedelta(days=1))
+                health = ScheduledJobHealth.BLOCKED
                 issues.append(f"{definition.job_id}: latest scheduled job failed")
             elif (
                 today_latest.failure is not None
@@ -911,13 +1021,16 @@ class MultiAssetScheduler:
                 and len(attempts_today) < definition.max_attempts_per_day
             ):
                 retry_at = today_latest.completed_at + timedelta(
-                    seconds=definition.retry_backoff_seconds
+                    seconds=self._retry_delay_seconds(definition, today_latest.attempt_number)
                 )
+                next_retry = retry_at
                 due = now >= retry_at
                 next_run = now if due else retry_at
+                health = ScheduledJobHealth.RETRY_WAIT
                 issues.append(f"{definition.job_id}: latest scheduled job failed")
             else:
                 next_run = definition.scheduled_for(local_date + timedelta(days=1))
+                health = ScheduledJobHealth.BLOCKED
                 issues.append(f"{definition.job_id}: daily retry budget exhausted")
         if (
             latest is not None
@@ -931,15 +1044,32 @@ class MultiAssetScheduler:
             issues.append(f"{definition.job_id}: provider check is stale")
         elif freshness is ScheduledJobFreshness.INCOMPLETE:
             issues.append(f"{definition.job_id}: latest coverage is incomplete")
+        if health in {ScheduledJobHealth.CURRENT, ScheduledJobHealth.NEVER_RUN}:
+            if freshness is ScheduledJobFreshness.INCOMPLETE:
+                health = ScheduledJobHealth.INCOMPLETE
+            elif freshness is ScheduledJobFreshness.STALE:
+                health = ScheduledJobHealth.STALE
         return ScheduledJobStatus(
             definition=definition,
             latest_attempt=latest,
             latest_success=latest_success,
+            health=health,
             freshness=freshness,
             due=due,
             next_run_at=next_run,
+            next_retry_at=next_retry,
+            retry_budget_remaining=max(definition.max_attempts_per_day - len(attempts_today), 0),
+            failure_category=latest.failure.safe_category if latest and latest.failure else None,
+            latest_duration_ms=(
+                latest.telemetry.duration_ms if latest and latest.telemetry else None
+            ),
             issues=tuple(dict.fromkeys(issues)),
         )
+
+    @staticmethod
+    def _retry_delay_seconds(definition: ScheduledJobDefinition, attempt_number: int) -> int:
+        """Return the bounded exponential delay after a retryable attempt."""
+        return definition.retry_backoff_seconds * (2 ** (attempt_number - 1))
 
     def _notify(self, attempt: ScheduledJobAttempt) -> None:
         if self._observer is None:
@@ -1049,7 +1179,9 @@ __all__ = [
     "ScheduledJobFailure",
     "ScheduledJobFailureCategory",
     "ScheduledJobFreshness",
+    "ScheduledJobHealth",
     "ScheduledJobInvocation",
     "ScheduledJobRunError",
     "ScheduledJobStatus",
+    "scheduled_job_failure",
 ]

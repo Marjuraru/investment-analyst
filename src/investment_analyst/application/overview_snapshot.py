@@ -26,6 +26,13 @@ class OperationalOverviewSnapshot(ContractModel):
     scheduled_job_count: int = Field(default=0, ge=0)
     scheduled_running_count: int = Field(default=0, ge=0)
     scheduled_failed_count: int = Field(default=0, ge=0)
+    scheduled_blocked_count: int = Field(default=0, ge=0)
+    scheduled_retry_wait_count: int = Field(default=0, ge=0)
+    scheduled_current_count: int = Field(default=0, ge=0)
+    scheduled_stale_count: int = Field(default=0, ge=0)
+    scheduled_incomplete_count: int = Field(default=0, ge=0)
+    scheduled_next_run_at: UTCDateTime | None = None
+    scheduled_next_retry_at: UTCDateTime | None = None
     queued_operation_count: int = Field(default=0, ge=0)
     running_operation_count: int = Field(default=0, ge=0)
     failed_operation_count: int = Field(default=0, ge=0)

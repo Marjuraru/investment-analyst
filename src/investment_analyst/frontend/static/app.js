@@ -3364,6 +3364,49 @@ function setButtonBusy(button, busy, busyLabel, idleLabel) {
 }
 
 function applyOverview(payload) {
+  if (payload.schema_version === "operational-overview-snapshot-v1") {
+    badge(
+      byId("health-badge"),
+      translated(payload.operational_status, STATUS_LABELS, payload.operational_status),
+      statusTone(payload.operational_status),
+    );
+    byId("workspace-status").textContent = translated(
+      payload.workspace_status,
+      STATUS_LABELS,
+      payload.workspace_status,
+    );
+    byId("workspace-counts").textContent = "Resumen operativo compacto";
+    byId("run-status").textContent = payload.latest_run_status
+      ? translated(payload.latest_run_status, STATUS_LABELS, payload.latest_run_status)
+      : "Sin registro operativo";
+    byId("run-time").textContent = "Sin lectura de historial";
+    byId("traceability-status").textContent = "Sin verificación reciente";
+    byId("known-at-status").textContent = "—";
+    if (!payload.scheduler_enabled) {
+      byId("schedule-status").textContent = "Desactivada";
+      byId("schedule-next").textContent = "Solo actualización manual";
+      return;
+    }
+    if (payload.scheduled_blocked_count > 0 || payload.scheduled_failed_count > 0) {
+      byId("schedule-status").textContent = `${formatInteger(payload.scheduled_blocked_count || payload.scheduled_failed_count)} con fallo`;
+    } else if (payload.scheduled_retry_wait_count > 0) {
+      byId("schedule-status").textContent = `${formatInteger(payload.scheduled_retry_wait_count)} esperando reintento`;
+    } else if (payload.scheduled_incomplete_count > 0) {
+      byId("schedule-status").textContent = `${formatInteger(payload.scheduled_incomplete_count)} incompletos`;
+    } else if (payload.scheduled_stale_count > 0) {
+      byId("schedule-status").textContent = `${formatInteger(payload.scheduled_stale_count)} desactualizados`;
+    } else if (payload.scheduled_running_count > 0) {
+      byId("schedule-status").textContent = `${formatInteger(payload.scheduled_running_count)} en curso`;
+    } else {
+      byId("schedule-status").textContent = `${formatInteger(payload.scheduled_current_count)} actuales de ${formatInteger(payload.scheduled_job_count)}`;
+    }
+    byId("schedule-next").textContent = payload.scheduled_next_retry_at
+      ? `Reintento: ${formatInstant(payload.scheduled_next_retry_at)}`
+      : payload.scheduled_next_run_at
+        ? formatInstant(payload.scheduled_next_run_at)
+        : "Sin próxima ejecución";
+    return;
+  }
   const operational = payload.operational;
   const workspace = operational.workspace;
   const latest = operational.latest_run;
@@ -4044,7 +4087,7 @@ async function refreshOverview({ manual = false } = {}) {
   const button = byId("refresh-overview");
   if (manual) setButtonBusy(button, true, "Verificando…", "Verificar");
   try {
-    applyOverview(await api("/api/overview"));
+    applyOverview(await api("/api/v1/overview"));
     overviewFailureCount = 0;
   } catch (error) {
     overviewFailureCount += 1;

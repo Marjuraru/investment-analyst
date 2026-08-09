@@ -8,7 +8,8 @@ from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobAttemptStatus,
     ScheduledJobDefinition,
     ScheduledJobDomain,
-    ScheduledJobFailure,
+    ScheduledJobFailureCategory,
+    scheduled_job_failure,
 )
 from investment_analyst.application.scheduled_observers import ScheduledJobObserverChain
 
@@ -29,11 +30,7 @@ def test_observer_chain_delivers_same_attempt_in_declared_order() -> None:
         status=ScheduledJobAttemptStatus.FAILED,
         started_at=datetime(2026, 7, 29, 12, tzinfo=UTC),
         completed_at=datetime(2026, 7, 29, 12, 1, tzinfo=UTC),
-        failure=ScheduledJobFailure(
-            category="test",
-            message="safe failure",
-            retryable=False,
-        ),
+        failure=scheduled_job_failure(ScheduledJobFailureCategory.UNEXPECTED, "safe failure"),
     )
     calls: list[tuple[str, UUID]] = []
 

@@ -35,7 +35,8 @@ from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobDefinition,
     ScheduledJobDomain,
     ScheduledJobExecution,
-    ScheduledJobFailure,
+    ScheduledJobFailureCategory,
+    scheduled_job_failure,
 )
 from investment_analyst.application.operational_state import AaplOperationalStateError
 from investment_analyst.application.runtime import ApplicationRuntime
@@ -562,11 +563,7 @@ def test_monitor_records_failure_and_unchanged_attempts_without_reading_storage(
         status=ScheduledJobAttemptStatus.FAILED,
         started_at=datetime(2026, 7, 29, 12, tzinfo=UTC),
         completed_at=datetime(2026, 7, 29, 12, 1, tzinfo=UTC),
-        failure=ScheduledJobFailure(
-            category="provider_error",
-            message="safe failure",
-            retryable=True,
-        ),
+        failure=scheduled_job_failure(ScheduledJobFailureCategory.TRANSPORT, "safe failure"),
     )
 
     monitor.reconcile((failed, unchanged))
