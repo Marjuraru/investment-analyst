@@ -543,9 +543,7 @@ class AaplMarketChartService:
             window=window,
             multiplier=multiplier,
             resolution=resolution,
-            available_at=max(
-                *(point.bar_available_at for point in inputs), current_available_at
-            ),
+            available_at=max(*(point.bar_available_at for point in inputs), current_available_at),
             input_observation_ids=tuple(
                 [point.close_observation_id for point in inputs] + [current_close_observation_id]
             ),

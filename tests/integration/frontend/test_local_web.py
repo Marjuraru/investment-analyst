@@ -837,6 +837,32 @@ def test_local_server_serves_packaged_assets_with_security_headers() -> None:
         assert b'const LOCALE = "es-PE"' in gzip.decompress(compressed_body)
 
 
+def test_market_chart_gzip_preserves_the_exact_canonical_json() -> None:
+    class _LargeChartApplication(_ExplodingApplication):
+        def market_chart(self, parameters: dict[str, tuple[str, ...]]) -> dict[str, object]:
+            del parameters
+            return {
+                "schema_version": "test-market-chart-v1",
+                "evidence": "0123456789abcdef" * 256,
+            }
+
+    with _server(_LargeChartApplication()) as (_, root):
+        request = f"{root}/api/market-chart?known_at=2026-07-16T15%3A46%3A09Z"
+        with urlopen(request, timeout=5) as response:
+            canonical_body = response.read()
+            canonical_headers = dict(response.headers.items())
+        compressed = Request(request, headers={"Accept-Encoding": "gzip"})
+        with urlopen(compressed, timeout=5) as response:
+            compressed_body = response.read()
+            compressed_headers = dict(response.headers.items())
+
+    assert "Content-Encoding" not in canonical_headers
+    assert compressed_headers["Content-Encoding"] == "gzip"
+    assert compressed_headers["Vary"] == "Accept-Encoding"
+    assert gzip.decompress(compressed_body) == canonical_body
+    assert json.loads(canonical_body) == json.loads(gzip.decompress(compressed_body))
+
+
 def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     with _server(_ExplodingApplication()) as (_, root):
         with urlopen(f"{root}/", timeout=5) as response:
