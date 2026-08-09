@@ -68,10 +68,11 @@ veredicto, confianza, calidad, recomendación o ranking combinado.
 
 ## Estado operativo automático
 
-Las cinco celdas compactas de datos, ejecución, programación, trazabilidad y alertas se consultan
-mediante el endpoint compatible `GET /api/overview` al abrir la página y cada 30 segundos. La API
-añade `GET /api/v1/overview` para consumidores que requieren un snapshot pequeño y no bloqueante.
-Solo leen estado local: no
+Las celdas operativas que se actualizan cada 30 segundos consultan
+`GET /api/v1/overview`, un snapshot pequeño y no bloqueante. `GET /api/overview` se conserva para
+compatibilidad y detalle bajo demanda, pero no participa en el polling periódico. El snapshot
+resume estado, frescura, fallos bloqueados, esperas de reintento y la próxima ejecución sin
+transportar el historial ni el detalle de los jobs. Solo leen estado local: no
 ejecutan SEC, Alpaca ni Coinbase, no escriben en el workspace y no recargan series pesadas. Nunca
 hay más de una solicitud en curso; los fallos aplican backoff exponencial hasta cinco minutos y la
 consulta se pausa con la pestaña oculta. `Verificar` queda como recuperación manual, no como

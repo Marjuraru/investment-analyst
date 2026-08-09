@@ -10,7 +10,8 @@ from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobDefinition,
     ScheduledJobDomain,
     ScheduledJobExecution,
-    ScheduledJobFailure,
+    ScheduledJobFailureCategory,
+    scheduled_job_failure,
 )
 from investment_analyst.application.operational_alerts import (
     OperationalAlertEngine,
@@ -40,7 +41,7 @@ def _attempt(
     status: ScheduledJobAttemptStatus,
     *,
     attempt_id: UUID = _DEFAULT_ATTEMPT_ID,
-    category: str = "provider_unavailable",
+    category: ScheduledJobFailureCategory = ScheduledJobFailureCategory.TRANSPORT,
     coverage_complete: bool = True,
 ) -> ScheduledJobAttempt:
     definition = _definition()
@@ -65,11 +66,7 @@ def _attempt(
             coverage_complete=coverage_complete,
         )
     else:
-        base["failure"] = ScheduledJobFailure(
-            category=category,
-            message="safe failure",
-            retryable=status is ScheduledJobAttemptStatus.FAILED,
-        )
+        base["failure"] = scheduled_job_failure(category, "safe failure")
     return ScheduledJobAttempt.model_validate(base)
 
 
@@ -202,7 +199,7 @@ def test_interruption_uses_specific_rule_without_duplicate_failure_alert(
         _attempt(
             ScheduledJobAttemptStatus.FAILED,
             attempt_id=UUID("00000000-0000-4000-8000-000000000102"),
-            category="interrupted_job",
+            category=ScheduledJobFailureCategory.INTERRUPTED,
         )
     )
 

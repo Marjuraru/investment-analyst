@@ -1,5 +1,6 @@
 """Tests for provider-independent multi-asset scheduling and recovery."""
 
+import json
 import threading
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -19,8 +20,10 @@ from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobFailure,
     ScheduledJobFailureCategory,
     ScheduledJobFreshness,
+    ScheduledJobHealth,
     ScheduledJobInvocation,
     ScheduledJobRunError,
+    scheduled_job_failure,
 )
 
 
@@ -49,6 +52,78 @@ def _execution(invocation: ScheduledJobInvocation, *, created: int = 1) -> Sched
     )
 
 
+@pytest.mark.parametrize(
+    ("category", "retryable"),
+    [
+        (ScheduledJobFailureCategory.RATE_LIMIT, True),
+        (ScheduledJobFailureCategory.TRANSPORT, True),
+        (ScheduledJobFailureCategory.TRANSIENT_HTTP, True),
+        (ScheduledJobFailureCategory.INTERRUPTED, True),
+        (ScheduledJobFailureCategory.CONFIGURATION, False),
+        (ScheduledJobFailureCategory.AUTHENTICATION, False),
+        (ScheduledJobFailureCategory.UNSUPPORTED_CAPABILITY, False),
+        (ScheduledJobFailureCategory.PROVIDER_CONTRACT, False),
+        (ScheduledJobFailureCategory.VALIDATION, False),
+        (ScheduledJobFailureCategory.STORAGE_STATE, False),
+        (ScheduledJobFailureCategory.HTTP, False),
+        (ScheduledJobFailureCategory.UNEXPECTED, False),
+    ],
+)
+def test_new_failures_use_the_canonical_category_policy(
+    category: ScheduledJobFailureCategory,
+    retryable: bool,
+) -> None:
+    failure = scheduled_job_failure(category, "safe failure")
+
+    assert failure.retryable is retryable
+    with pytest.raises(ValueError, match="retryable must match"):
+        ScheduledJobFailure(category=category, message="safe failure", retryable=not retryable)
+    with pytest.raises(ValueError, match="canonical"):
+        ScheduledJobFailure(
+            category="legacy-provider-error",
+            message="safe failure",
+            retryable=False,
+        )
+
+
+def test_state_store_loads_legacy_failure_categories_without_rewriting_bytes(
+    tmp_path: Path,
+) -> None:
+    definition = _definition("legacy-state")
+    legacy = {
+        "schema_version": "multi-asset-schedule-state-v1",
+        "attempts": [
+            {
+                "schema_version": "scheduled-job-attempt-v1",
+                "attempt_id": "00000000-0000-4000-8000-000000000099",
+                "definition": definition.to_json_dict(),
+                "local_date": "2026-07-29",
+                "scheduled_for": "2026-07-29T12:00:00+00:00",
+                "attempt_number": 1,
+                "status": "failed",
+                "started_at": "2026-07-29T12:01:00+00:00",
+                "completed_at": "2026-07-29T12:02:00+00:00",
+                "execution": None,
+                "failure": {
+                    "category": "ListedMarketRefreshError",
+                    "message": "historical safe failure",
+                    "retryable": True,
+                },
+                "telemetry": None,
+            }
+        ],
+    }
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+    original = path.read_bytes()
+
+    state = MultiAssetScheduleStateStore(path).load()
+
+    assert state.attempts[0].failure is not None
+    assert state.attempts[0].failure.safe_category is ScheduledJobFailureCategory.LEGACY_UNKNOWN
+    assert path.read_bytes() == original
+
+
 def test_scheduler_runs_all_due_jobs_and_preserves_success_after_later_failure(
     tmp_path: Path,
 ) -> None:
@@ -64,10 +139,9 @@ def test_scheduler_runs_all_due_jobs_and_preserves_success_after_later_failure(
     def fail(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
         calls.append(invocation.definition.job_id)
         raise ScheduledJobRunError(
-            ScheduledJobFailure(
-                category="provider_unavailable",
-                message="provider unavailable",
-                retryable=True,
+            scheduled_job_failure(
+                ScheduledJobFailureCategory.TRANSIENT_HTTP,
+                "provider unavailable",
             )
         )
 
@@ -103,7 +177,7 @@ def test_scheduler_runs_all_due_jobs_and_preserves_success_after_later_failure(
     assert completed[0].telemetry.created_count == 1
     assert completed[0].telemetry.coverage_complete is True
     assert completed[1].telemetry is not None
-    assert completed[1].telemetry.failure_category == "provider_unavailable"
+    assert completed[1].telemetry.failure_category == "transient_http_error"
     assert completed[1].telemetry.provider_call_count is None
     assert completed[1].telemetry.response_bytes is None
     status = scheduler.status()
@@ -120,12 +194,11 @@ def test_scheduler_retries_only_failed_job_after_backoff(tmp_path: Path) -> None
     def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
         nonlocal calls
         calls += 1
-        if calls == 1:
+        if calls < 3:
             raise ScheduledJobRunError(
-                ScheduledJobFailure(
-                    category="temporary",
-                    message="temporary provider failure",
-                    retryable=True,
+                scheduled_job_failure(
+                    ScheduledJobFailureCategory.TRANSPORT,
+                    "temporary provider failure",
                 )
             )
         return _execution(invocation, created=0)
@@ -141,10 +214,18 @@ def test_scheduler_retries_only_failed_job_after_backoff(tmp_path: Path) -> None
     assert scheduler.tick() == ()
     now += timedelta(seconds=61)
     second = scheduler.tick()
+    retry_status = scheduler.status().jobs[0]
+    now += timedelta(seconds=121)
+    third = scheduler.tick()
 
-    assert calls == 2
+    assert calls == 3
     assert second[0].attempt_number == 2
-    assert second[0].status is ScheduledJobAttemptStatus.SUCCEEDED
+    assert second[0].status is ScheduledJobAttemptStatus.FAILED
+    assert retry_status.health is ScheduledJobHealth.RETRY_WAIT
+    assert retry_status.next_retry_at == now - timedelta(seconds=1)
+    assert retry_status.retry_budget_remaining == 1
+    assert third[0].attempt_number == 3
+    assert third[0].status is ScheduledJobAttemptStatus.SUCCEEDED
     assert scheduler.status().failed_count == 0
 
 
@@ -153,12 +234,12 @@ def test_scheduler_retries_only_failed_job_after_backoff(tmp_path: Path) -> None
     [
         (
             "permanent",
-            ScheduledJobAttemptStatus.SKIPPED,
+            ScheduledJobAttemptStatus.FAILED,
             ScheduledJobFailureCategory.AUTHENTICATION,
         ),
         (
             "validation",
-            ScheduledJobAttemptStatus.SKIPPED,
+            ScheduledJobAttemptStatus.FAILED,
             ScheduledJobFailureCategory.VALIDATION,
         ),
         (
@@ -183,10 +264,9 @@ def test_scheduler_never_retries_permanent_validation_or_unexpected_failures(
         calls += 1
         if mode == "permanent":
             raise ScheduledJobRunError(
-                ScheduledJobFailure(
-                    category=ScheduledJobFailureCategory.AUTHENTICATION,
-                    message="safe authentication failure",
-                    retryable=False,
+                scheduled_job_failure(
+                    ScheduledJobFailureCategory.AUTHENTICATION,
+                    "safe authentication failure",
                 )
             )
         if mode == "validation":
@@ -211,6 +291,8 @@ def test_scheduler_never_retries_permanent_validation_or_unexpected_failures(
     assert calls == 1
     job_status = scheduler.status().jobs[0]
     assert job_status.due is False
+    assert job_status.health is ScheduledJobHealth.BLOCKED
+    assert job_status.failure_category is expected_category
     assert any("latest scheduled job failed" in issue for issue in job_status.issues)
 
 
@@ -221,10 +303,9 @@ def test_scheduler_preserves_last_success_after_later_permanent_failure(tmp_path
     def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
         if should_fail:
             raise ScheduledJobRunError(
-                ScheduledJobFailure(
-                    category=ScheduledJobFailureCategory.CONFIGURATION,
-                    message="safe configuration failure",
-                    retryable=False,
+                scheduled_job_failure(
+                    ScheduledJobFailureCategory.CONFIGURATION,
+                    "safe configuration failure",
                 )
             )
         return _execution(invocation)
@@ -242,7 +323,7 @@ def test_scheduler_preserves_last_success_after_later_permanent_failure(tmp_path
     status = scheduler.status().jobs[0]
 
     assert first.status is ScheduledJobAttemptStatus.SUCCEEDED
-    assert second.status is ScheduledJobAttemptStatus.SKIPPED
+    assert second.status is ScheduledJobAttemptStatus.FAILED
     assert status.latest_attempt == second
     assert status.latest_success == first
 
@@ -390,9 +471,11 @@ def test_scheduler_exposes_current_stale_and_incomplete_coverage(tmp_path: Path)
     assert scheduler.status().jobs[0].freshness is ScheduledJobFreshness.NEVER_RUN
     scheduler.tick()
     assert scheduler.status().jobs[0].freshness is ScheduledJobFreshness.CURRENT
+    assert scheduler.status().jobs[0].health is ScheduledJobHealth.CURRENT
     now += timedelta(days=3)
     stale = scheduler.status()
     assert stale.jobs[0].freshness is ScheduledJobFreshness.STALE
+    assert stale.jobs[0].health is ScheduledJobHealth.STALE
     assert stale.stale_count == 1
 
     second = _definition("incomplete")
@@ -405,6 +488,7 @@ def test_scheduler_exposes_current_stale_and_incomplete_coverage(tmp_path: Path)
     incomplete_scheduler.tick()
     incomplete = incomplete_scheduler.status()
     assert incomplete.jobs[0].freshness is ScheduledJobFreshness.INCOMPLETE
+    assert incomplete.jobs[0].health is ScheduledJobHealth.INCOMPLETE
     assert incomplete.incomplete_count == 1
 
 
