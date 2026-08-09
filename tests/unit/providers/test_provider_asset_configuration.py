@@ -19,6 +19,7 @@ from investment_analyst.catalog.provider_configuration import (
 from investment_analyst.catalog.provider_context import (
     ProviderAssetContextResolver,
     ProviderAssetNotConfiguredError,
+    ProviderCapabilityMissingError,
 )
 from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.core.models import AssetClass
@@ -82,6 +83,11 @@ def test_factories_preserve_current_provider_and_persisted_identities() -> None:
         granularity_seconds=DAILY_GRANULARITY_SECONDS,
         base_unit="BTC",
         quote_unit="USD",
+        symbol="BTC",
+        name="Bitcoin",
+        asset_class=AssetClass.CRYPTO,
+        quote_currency="USD",
+        exchange="COINBASE",
     )
     assert coinbase_intraday == CoinbaseAssetConfiguration(
         asset_id=COINBASE_ASSET_ID,
@@ -90,6 +96,11 @@ def test_factories_preserve_current_provider_and_persisted_identities() -> None:
         granularity_seconds=MINUTE_GRANULARITY_SECONDS,
         base_unit="BTC",
         quote_unit="USD",
+        symbol="BTC",
+        name="Bitcoin",
+        asset_class=AssetClass.CRYPTO,
+        quote_currency="USD",
+        exchange="COINBASE",
     )
     assert sec == SecAssetConfiguration(
         asset_id=APPLE_ASSET_ID,
@@ -125,6 +136,28 @@ def test_alpaca_configuration_scales_from_catalog_without_changing_apple_identit
     )
     assert bvn.history_start is None
     assert gld.history_start is None
+
+
+def test_coinbase_daily_configuration_resolves_inactive_ethereum_without_intraday() -> None:
+    resolver = _resolver()
+
+    ethereum = resolve_coinbase_configuration(resolver, asset_id="crypto:eth-usd")
+
+    assert ethereum == CoinbaseAssetConfiguration(
+        asset_id="crypto:eth-usd",
+        product_id="ETH-USD",
+        source_id="coinbase-exchange:eth-usd:daily-candles",
+        granularity_seconds=DAILY_GRANULARITY_SECONDS,
+        base_unit="ETH",
+        quote_unit="USD",
+        symbol="ETH",
+        name="Ethereum",
+        asset_class=AssetClass.CRYPTO,
+        quote_currency="USD",
+        exchange="COINBASE",
+    )
+    with pytest.raises(ProviderCapabilityMissingError):
+        resolve_coinbase_intraday_configuration(resolver, asset_id="crypto:eth-usd")
 
 
 def test_alpaca_configuration_requires_explicit_asset_metadata() -> None:
@@ -179,6 +212,11 @@ def test_configurations_are_strict_frozen_and_preserve_identifier_text() -> None
             granularity_seconds=True,
             base_unit="BTC",
             quote_unit="USD",
+            symbol="BTC",
+            name="Bitcoin",
+            asset_class=AssetClass.CRYPTO,
+            quote_currency="USD",
+            exchange="COINBASE",
         )
 
 

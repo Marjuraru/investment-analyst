@@ -155,6 +155,27 @@ def test_reconstructs_registered_minute_source_point_in_time(tmp_path) -> None:
     assert result.traceability_verified
 
 
+def test_reconstructs_eth_daily_bars_with_eth_volume_unit(tmp_path) -> None:
+    source_id = "coinbase-exchange:eth-usd:daily-candles"
+    timestamp = datetime(2026, 7, 2, tzinfo=UTC)
+    available = datetime(2026, 7, 3, tzinfo=UTC)
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        _store_version(
+            storage,
+            asset_id="crypto:eth-usd",
+            source_id=source_id,
+            timestamp=timestamp,
+            available_at=available,
+        )
+        result = HistoricalMarketDataService(storage).query(
+            _query(asset_id="crypto:eth-usd", source_id=source_id)
+        )
+
+    assert len(result.bars) == 1
+    assert get_market_bar_schema(source_id).units["volume"] == "ETH"
+    assert result.bars[0].asset_id == "crypto:eth-usd"
+
+
 @pytest.mark.parametrize(
     ("asset_id", "source_id", "expected_fields", "expected_quality"),
     [

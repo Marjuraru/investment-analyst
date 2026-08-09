@@ -5,6 +5,11 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
+from investment_analyst.analytics.market.history_service import HistoricalMarketDataService
+from investment_analyst.catalog.provider_configuration import resolve_coinbase_configuration
+from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
+from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.providers.crypto.coinbase_exchange import CoinbaseExchangeClient
 from investment_analyst.providers.crypto.coinbase_normalizer import ASSET_ID, SOURCE_ID
 from investment_analyst.providers.crypto.coinbase_pipeline import CoinbaseHistoricalPipeline
@@ -12,6 +17,7 @@ from investment_analyst.providers.http import HttpResponse
 from investment_analyst.storage import LocalStorage, StoragePaths
 
 FIXTURE_PATH = Path("tests/fixtures/coinbase/btc_usd_daily.json")
+ETH_FIXTURE_PATH = Path("tests/fixtures/coinbase/eth_usd_daily.json")
 START = datetime(2026, 7, 9, tzinfo=UTC)
 END = datetime(2026, 7, 12, tzinfo=UTC)
 FETCHED_AT = datetime(2026, 7, 12, 12, tzinfo=UTC)
@@ -57,6 +63,10 @@ def _pipeline(
 
 def _fixture() -> bytes:
     return FIXTURE_PATH.read_bytes()
+
+
+def _eth_fixture() -> bytes:
+    return ETH_FIXTURE_PATH.read_bytes()
 
 
 def test_complete_pipeline_round_trip_and_idempotence(tmp_path: Path) -> None:
@@ -162,3 +172,66 @@ def test_revised_candle_creates_new_historical_version(tmp_path: Path) -> None:
         assert summary.observations_reused == 10
         assert len(storage.raw_records.list(source_id=SOURCE_ID)) == 4
         assert len(storage.observations.list(asset_id=ASSET_ID)) == 20
+
+
+def test_eth_daily_pipeline_is_idempotent_and_isolated_from_btc(tmp_path: Path) -> None:
+    resolver = ProviderAssetContextResolver(AssetCatalogService.load_default())
+    eth_configuration = resolve_coinbase_configuration(resolver, asset_id="crypto:eth-usd")
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        btc_pipeline, _ = _pipeline(storage, _fixture())
+        btc_pipeline.run(START, END)
+        eth_transport = FixtureTransport(_eth_fixture())
+        first = CoinbaseHistoricalPipeline(
+            storage,
+            CoinbaseExchangeClient(
+                eth_transport,
+                sleep=lambda _: None,
+                clock=lambda: FETCHED_AT,
+            ),
+            configuration=eth_configuration,
+            clock=lambda: NORMALIZED_AT,
+        ).run(START, END)
+        second_transport = FixtureTransport(_eth_fixture())
+        second = CoinbaseHistoricalPipeline(
+            storage,
+            CoinbaseExchangeClient(
+                second_transport,
+                sleep=lambda _: None,
+                clock=lambda: FETCHED_AT,
+            ),
+            configuration=eth_configuration,
+            clock=lambda: NORMALIZED_AT,
+        ).run(START, END)
+        history = HistoricalMarketDataService(storage)
+        eth = history.query(
+            HistoricalBarQuery(
+                asset_id="crypto:eth-usd",
+                source_id=eth_configuration.source_id,
+                start=START,
+                end=END,
+                known_at=NORMALIZED_AT,
+            )
+        )
+        btc = history.query(
+            HistoricalBarQuery(
+                asset_id=ASSET_ID,
+                source_id=SOURCE_ID,
+                start=START,
+                end=END,
+                known_at=NORMALIZED_AT,
+            )
+        )
+
+    assert first.raw_records_created == 3
+    assert first.observations_created == 15
+    assert first.traceability_verified
+    assert second.raw_records_reused == 3
+    assert second.observations_reused == 15
+    assert len(eth_transport.calls) == 1
+    assert "products/ETH-USD/candles" in eth_transport.calls[0]
+    assert len(second_transport.calls) == 1
+    assert {bar.raw_record_id for bar in eth.bars}.isdisjoint(
+        {bar.raw_record_id for bar in btc.bars}
+    )
+    assert {bar.asset_id for bar in eth.bars} == {"crypto:eth-usd"}
+    assert {bar.asset_id for bar in btc.bars} == {ASSET_ID}

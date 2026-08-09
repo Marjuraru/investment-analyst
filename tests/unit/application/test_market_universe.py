@@ -109,6 +109,7 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     assert not bitcoin.has_corporate_valuation
     assert bitcoin.intraday_source_id == "coinbase-exchange:btc-usd:minute-1-candles"
     assert bitcoin.default_market_start == date(2015, 7, 20)
+    assert "ETH-USD" not in by_symbol
 
     barrick = by_symbol["B"]
     assert barrick.asset_id == "equity:us:b"

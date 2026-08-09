@@ -25,6 +25,7 @@ from investment_analyst.core.models import AssetClass
 
 _DEFAULT_ASSET_IDS = [
     "crypto:btc-usd",
+    "crypto:eth-usd",
     "equity:pe:bvl:bvn",
     "equity:pe:bvl:cverdec1",
     "equity:pe:bvl:minsuri1",
@@ -161,6 +162,18 @@ def test_coinbase_asset_and_product_binding_are_available() -> None:
         == bitcoin
     )
     assert service.supports(bitcoin.asset_id, "market.minute_bars")
+    ethereum = service.resolve_alias("ethereum")
+    assert ethereum.asset_id == "crypto:eth-usd"
+    assert ethereum.is_active is False
+    assert (
+        service.get_binding(
+            ethereum.asset_id,
+            provider="coinbase",
+            namespace="product_id",
+        ).identifier
+        == "ETH-USD"
+    )
+    assert not service.supports(ethereum.asset_id, "market.minute_bars")
 
 
 def test_bvl_listings_have_separate_exchange_identity_and_corroborated_isin() -> None:

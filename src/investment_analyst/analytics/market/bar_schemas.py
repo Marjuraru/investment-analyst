@@ -13,6 +13,7 @@ ALPACA_SOURCE_ID = "alpaca-market-data:iex:aapl:daily-bars:adjustment-all"
 _ALPACA_SOURCE_PATTERN = re.compile(
     r"^alpaca-market-data:iex:[a-z][a-z0-9.-]{0,15}:daily-bars:adjustment-all$"
 )
+_COINBASE_DAILY_SOURCE_PATTERN = re.compile(r"^coinbase-exchange:([a-z0-9]+)-usd:daily-candles$")
 SIMULATED_SOURCE_ID = "simulated:daily-bars"
 
 
@@ -100,6 +101,25 @@ _SCHEMAS = {
 
 def get_market_bar_schema(source_id: str) -> MarketBarSchema:
     """Return the exact schema for a supported source or fail explicitly."""
+    coinbase_daily = _COINBASE_DAILY_SOURCE_PATTERN.fullmatch(source_id)
+    if coinbase_daily:
+        base_unit = coinbase_daily.group(1).upper()
+        return MarketBarSchema(
+            source_id=source_id,
+            frequency=_COINBASE_SCHEMA.frequency,
+            required_fields=_COINBASE_SCHEMA.required_fields,
+            optional_fields=_COINBASE_SCHEMA.optional_fields,
+            units=MappingProxyType(
+                {
+                    "open": "USD",
+                    "high": "USD",
+                    "low": "USD",
+                    "close": "USD",
+                    "volume": base_unit,
+                }
+            ),
+            expected_quality=_COINBASE_SCHEMA.expected_quality,
+        )
     if _ALPACA_SOURCE_PATTERN.fullmatch(source_id):
         return MarketBarSchema(
             source_id=source_id,
