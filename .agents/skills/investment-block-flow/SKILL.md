@@ -1,6 +1,6 @@
 ---
 name: investment-block-flow
-description: Compatibilidad para orquestar Issues y PRs explícitos de investment-analyst, corregir hallazgos, revisar CI o fusionar cuando el usuario lo autorice. Para el workflow activo normal usar $plan, $build y el skill audit mediante /audit en Antigravity o $audit en clientes compatibles.
+description: Compatibilidad para orientar el workflow explícito de investment-analyst. Para el flujo normal delega en $plan, $build y el skill audit mediante /audit en Antigravity o $audit en clientes compatibles; AUDIT nunca fusiona.
 ---
 
 # Investment Block Flow
@@ -14,10 +14,11 @@ Elegir únicamente el modo autorizado por la petición explícita:
 
 1. **Arquitecto:** definir el siguiente bloque y crear su Issue; no implementar.
 2. **Implementador:** implementar un Issue concreto y publicar o actualizar su PR; no fusionar.
-3. **Auditor:** revisar Issue, PR, diff, informe y CI; permanecer en solo lectura salvo autorización explícita para fusionar.
+3. **Auditor:** revisar Issue, PR, diff, informe y CI; permanecer siempre en solo lectura.
 4. **Corrección:** resolver únicamente comentarios o bloqueos concretos del PR; no ampliar alcance.
 
-No convertir una revisión o auditoría en autorización para editar.
+No convertir una revisión o auditoría en autorización para editar o fusionar. El flujo normal se
+delega en `$plan`, `$build` y `/audit`/`$audit`; HUMAN MERGE es humano, explícito y separado.
 
 ## Aplicar reglas comunes
 
@@ -58,7 +59,8 @@ No convertir una revisión o auditoría en autorización para editar.
 3. Reutilizar CI verde del HEAD exacto; no volver a ejecutar localmente la suite completa.
 4. Ejecutar como máximo pruebas focalizadas justificadas por un riesgo no cubierto.
 5. Si no cumple, publicar o devolver solo bloqueos accionables.
-6. Si cumple y el usuario autorizó la fusión, hacer squash-merge, sincronizar `main` y responder `ok`.
+6. Si cumple, publicar el resultado de la auditoría sin fusionar ni cambiar el PR a ready. El
+   siguiente gate es HUMAN MERGE explícito y separado.
 
 ## Handoff entre modelos
 
