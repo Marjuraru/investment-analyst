@@ -190,37 +190,38 @@
                   <small id="alert-latest">Modo silencioso</small>
                 </div>
               </div>
+
+              <details id="asset-preferences-panel" class="preferences-panel">
+                <summary>
+                  <span>
+                    <strong>Watchlist y automatización</strong>
+                    <small id="asset-preferences-summary">Cargando selección local…</small>
+                  </span>
+                </summary>
+                <form id="asset-preferences-form">
+                  <p class="panel-copy">
+                    Define cada activo de forma independiente. Los favoritos se muestran primero;
+                    la programación cambia en ejecución sin consultar proveedores.
+                  </p>
+                  <div class="preferences-table" role="group" aria-label="Preferencias por activo">
+                    <div class="preferences-heading" aria-hidden="true">
+                      <span>Activo y cobertura</span>
+                      <span>Watchlist</span>
+                      <span>Favorito</span>
+                      <span>Programado</span>
+                    </div>
+                    <div id="asset-preferences-list"></div>
+                  </div>
+                  <div class="preferences-actions">
+                    <button id="save-asset-preferences" class="button primary compact" type="submit">
+                      Guardar preferencias
+                    </button>
+                    <span id="asset-preferences-status" role="status" aria-live="polite"></span>
+                  </div>
+                </form>
+              </details>
             </details>
 
-            <details id="asset-preferences-panel" class="preferences-panel">
-              <summary>
-                <span>
-                  <strong>Watchlist y automatización</strong>
-                  <small id="asset-preferences-summary">Cargando selección local…</small>
-                </span>
-              </summary>
-              <form id="asset-preferences-form">
-                <p class="panel-copy">
-                  Define cada activo de forma independiente. Los favoritos se muestran primero;
-                  la programación cambia en ejecución sin consultar proveedores.
-                </p>
-                <div class="preferences-table" role="group" aria-label="Preferencias por activo">
-                  <div class="preferences-heading" aria-hidden="true">
-                    <span>Activo y cobertura</span>
-                    <span>Watchlist</span>
-                    <span>Favorito</span>
-                    <span>Programado</span>
-                  </div>
-                  <div id="asset-preferences-list"></div>
-                </div>
-                <div class="preferences-actions">
-                  <button id="save-asset-preferences" class="button primary compact" type="submit">
-                    Guardar preferencias
-                  </button>
-                  <span id="asset-preferences-status" role="status" aria-live="polite"></span>
-                </div>
-              </form>
-            </details>
 
           </section>
 

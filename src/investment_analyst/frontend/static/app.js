@@ -902,8 +902,9 @@ function applySelectedMarketAsset() {
   );
   intervalSelect.value = chartSettings.interval;
   byId("asset-symbol").textContent = presentation.symbol;
-  byId("asset-avatar-text").textContent = presentation.symbol.charAt(0);
   byId("asset-name").textContent = presentation.name;
+  byId("asset-name").title = presentation.name;
+  byId("asset-avatar-text").textContent = presentation.symbol.charAt(0);
   byId("asset-meta").textContent = presentation.meta;
   byId("asset-price").textContent = "—";
   byId("asset-daily-change").textContent = "—";
@@ -4815,6 +4816,19 @@ yesterday.setUTCDate(yesterday.getUTCDate() - 1);
 byId("market-end").value = yesterday.toISOString().slice(0, 10);
 byId("valuation-date").value = yesterday.toISOString().slice(0, 10);
 byId("report-known-at").value = new Date().toISOString();
+
+byId("sidebar-toggle").addEventListener("click", () => {
+  const sidebar = byId("app-sidebar");
+  const workspace = document.querySelector(".workspace");
+  const toggle = byId("sidebar-toggle");
+
+  sidebar.classList.toggle("collapsed");
+  workspace.classList.toggle("sidebar-collapsed");
+
+  const isCollapsed = sidebar.classList.contains("collapsed");
+  toggle.setAttribute("aria-expanded", String(!isCollapsed));
+  toggle.setAttribute("aria-label", isCollapsed ? "Expandir navegación" : "Colapsar navegación");
+});
 
 async function initialize() {
   initializeTheme();

@@ -360,10 +360,9 @@ h4 {
 }
 
 .topbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
   column-gap: 1.2rem;
   row-gap: 0.75rem;
   min-height: 88px;
@@ -470,6 +469,10 @@ h4 {
   border-radius: 8px;
   background-color: var(--surface);
   color: var(--ink-strong);
+  outline: none;
+}
+
+.combobox input:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: -1px;
 }
@@ -594,7 +597,7 @@ section {
 
 .overview-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 0;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -3316,28 +3319,6 @@ footer p:last-child {
   :root {
     --sidebar-width: 190px;
   }
-
-  .overview-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .status-card:nth-child(2n) {
-    border-right: 0;
-  }
-
-  .status-card:nth-child(-n + 2) {
-    border-bottom: 1px solid var(--line);
-  }
-
-  .status-card:nth-child(n + 3) {
-    border-bottom: 1px solid var(--line);
-  }
-
-  .status-card:last-child {
-    border-right: 0;
-    border-bottom: 0;
-  }
-
   .market-workbench {
     grid-template-columns: 1fr;
   }

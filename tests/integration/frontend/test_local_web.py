@@ -1056,6 +1056,7 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "MARKET_ASSETS" not in javascript
     assert "market-asset-select" not in html
     assert "market-asset-select" not in javascript
+    assert 'byId("sidebar-toggle").addEventListener("click"' in javascript
     assert "chart.sma_windows[0] !== chartSettings.shortWindow" in javascript
     assert 'parameters.set("short_sma_window", String(chartSettings.shortWindow))' in javascript
     assert 'parameters.set("long_sma_window", String(chartSettings.longWindow))' in javascript
