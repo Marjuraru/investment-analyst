@@ -263,6 +263,14 @@ h4 {
   flex-shrink: 0;
 }
 
+.sidebar-toggle svg {
+  transition: transform 0.2s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.sidebar.collapsed .sidebar-toggle svg {
+  transform: rotate(180deg);
+}
+
 .sidebar-toggle:hover {
   background: rgb(255 255 255 / 10%);
   color: #fff;
@@ -3443,6 +3451,32 @@ footer p:last-child {
     margin-left: 0;
   }
 
+  .workspace.sidebar-collapsed {
+    margin-left: 0;
+  }
+
+  .sidebar.collapsed {
+    width: 100%;
+    padding: 0.8rem 1rem;
+  }
+
+  .sidebar.collapsed .sidebar-header {
+    flex-direction: row;
+    gap: 0;
+  }
+
+  .sidebar.collapsed .brand {
+    justify-content: flex-start;
+  }
+
+  .sidebar.collapsed .primary-nav {
+    display: none;
+  }
+
+  .sidebar.collapsed .brand-text {
+    display: block;
+  }
+
   .topbar > *,
   .section-intro > *,
   .market-chart-header > *,
@@ -3770,7 +3804,7 @@ footer p:last-child {
   }
 }
 
-@media (max-width: 360px) {
+@media (max-width: 480px) {
   .sidebar {
     padding-inline: 0.5rem;
   }

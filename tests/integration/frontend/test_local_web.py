@@ -886,7 +886,9 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'id="sma-long-window"' in html
     assert 'id="sma-third-window"' in html
     assert 'id="sma-short-color"' in html
-    assert 'id="sma-long-color"' in html
+    assert "grid-template-columns: minmax(0, 1fr) auto" in stylesheet
+    assert "transform: rotate(180deg)" in stylesheet
+    assert ".sidebar.collapsed .primary-nav" in stylesheet
     assert 'id="sma-third-color"' in html
     assert 'id="chart-price-scale"' in html
     assert '<option value="logarithmic">Logarítmica</option>' in html
