@@ -3631,7 +3631,9 @@ async function api(path, options = {}) {
 function setButtonBusy(button, busy, busyLabel, idleLabel) {
   button.disabled = busy;
   button.setAttribute("aria-busy", String(busy));
-  button.textContent = busy ? busyLabel : idleLabel;
+  if (!button.classList.contains("icon-button")) {
+    button.textContent = busy ? busyLabel : idleLabel;
+  }
 }
 
 function applyOverview(payload) {
