@@ -609,13 +609,13 @@ async function loadMarketAssets() {
   }
 
   function openListbox() {
-    byId("asset-combobox-container").setAttribute("aria-expanded", "true");
+    input.setAttribute("aria-expanded", "true");
     listbox.hidden = false;
     renderListbox(input.value !== (marketAssets[selectedMarketAsset].symbol + " — " + marketAssets[selectedMarketAsset].name) ? input.value : "");
   }
 
   function closeListbox() {
-    byId("asset-combobox-container").setAttribute("aria-expanded", "false");
+    input.setAttribute("aria-expanded", "false");
     listbox.hidden = true;
     input.removeAttribute("aria-activedescendant");
     const active = listbox.querySelector(".combobox-option.active");
@@ -650,13 +650,19 @@ async function loadMarketAssets() {
     if (activeFundamentalLink) {
       activeFundamentalLink.classList.remove("active");
       activeFundamentalLink.removeAttribute("aria-current");
-      if (document.querySelector(".nav-link[data-market-only]")) {
-        document.querySelector(".nav-link[data-market-only]").click();
+      const marketLink = document.querySelector('.nav-link[href="#mercado"]');
+      if (marketLink) {
+        marketLink.classList.add("active");
+        marketLink.setAttribute("aria-current", "page");
       }
-    } else {
-      if (marketChartPayload === null) await queryMarketChart();
-      else renderMarketChart(marketChartPayload, { preserveViewport: true });
     }
+
+    await Promise.all([
+      queryMarketChart(),
+      ...(marketAssetPresentation().hasFundamentals
+        ? [queryFundamentalTrend(), queryFundamentalResearch()]
+        : []),
+    ]);
   }
 
   input.addEventListener("focus", openListbox);
@@ -734,7 +740,6 @@ function preferenceToggle(asset, kind, label) {
 }
 
 function prioritizeAssetSelector(payload) {
-  const selector = byId("market-asset-select");
   const ordered = payload.assets.filter((asset) => asset.available && marketAssets[asset.asset_id]);
   const groups = {
     equity: { label: "Acciones", options: [] },
@@ -744,23 +749,23 @@ function prioritizeAssetSelector(payload) {
   ordered.forEach((asset) => {
     const cls = marketAssets[asset.asset_id]?.assetClass || "equity";
     if (groups[cls]) {
-      const option = document.createElement("option");
-      option.value = asset.asset_id;
-      option.textContent = `${asset.favorite ? "★ " : ""}${asset.symbol} — ${asset.name}`;
-      groups[cls].options.push(option);
+      groups[cls].options.push({
+        asset_id: asset.asset_id,
+        symbol: asset.favorite ? `★ ${asset.symbol}` : asset.symbol,
+        name: asset.name
+      });
     }
   });
-  const children = [];
+
+  window.comboboxData = [];
   for (const group of Object.values(groups)) {
     if (group.options.length > 0) {
-      const optgroup = document.createElement("optgroup");
-      optgroup.label = group.label;
-      optgroup.append(...group.options);
-      children.push(optgroup);
+      window.comboboxData.push({ type: "group", label: group.label });
+      group.options.forEach(opt => {
+        window.comboboxData.push({ type: "option", data: opt });
+      });
     }
   }
-  selector.replaceChildren(...children);
-  selector.value = selectedMarketAsset;
 }
 
 function renderAssetPreferences(payload) {
@@ -967,7 +972,6 @@ function applySelectedMarketAsset() {
     ? "Ejecutar actualización"
     : presentation.refreshLabel;
   byId("market-start").value = marketStartByAsset.get(selectedMarketAsset);
-  byId("market-asset-select").value = selectedMarketAsset;
 }
 
 function applyTheme(theme) {
@@ -2655,7 +2659,6 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
 function setChartBusy(busy) {
   byId("market-chart-card").setAttribute("aria-busy", String(busy));
   for (const button of document.querySelectorAll(".chart-type-button")) button.disabled = busy;
-  byId("market-asset-select").disabled = busy;
   byId("chart-interval").disabled = busy;
   updateMarketChartZoomState();
   for (const control of document.querySelectorAll("#chart-settings-form input, #chart-settings-form select, #chart-settings-form button")) {
@@ -4684,40 +4687,7 @@ byId("theme-toggle").addEventListener("click", () => {
   persistTheme(next);
 });
 
-byId("market-asset-select").addEventListener("change", async (event) => {
-  const assetId = event.target.value;
-  if (!marketAssets[assetId] || assetId === selectedMarketAsset) return;
-  marketStartByAsset.set(selectedMarketAsset, byId("market-start").value);
-  knownAtByAsset.set(selectedMarketAsset, byId("report-known-at").value.trim());
-  selectedMarketAsset = assetId;
-  byId("report-known-at").value = knownAtByAsset.get(assetId) || new Date().toISOString();
-  marketChartPayload = null;
-  marketChartViewport = null;
-  marketChartDrag = null;
-  resetValuation();
-  applySelectedMarketAsset();
-  applyChartSettings();
-  const activeFundamentalLink = document.querySelector(
-    (
-      ".nav-link.active[data-fundamental-only], "
-      + ".nav-link.active[data-valuation-only], "
-      + ".nav-link.active[data-complete-analysis-only]"
-    ),
-  );
-  if (activeFundamentalLink) {
-    activeFundamentalLink.classList.remove("active");
-    activeFundamentalLink.removeAttribute("aria-current");
-    const marketLink = document.querySelector('.nav-link[href="#mercado"]');
-    marketLink.classList.add("active");
-    marketLink.setAttribute("aria-current", "page");
-  }
-  await Promise.all([
-    queryMarketChart(),
-    ...(marketAssetPresentation().hasFundamentals
-      ? [queryFundamentalTrend(), queryFundamentalResearch()]
-      : []),
-  ]);
-});
+
 
 for (const button of document.querySelectorAll(".series-toggle")) {
   button.addEventListener("click", () => {
