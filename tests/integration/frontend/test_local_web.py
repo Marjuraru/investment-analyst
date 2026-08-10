@@ -1045,7 +1045,8 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "latest_change_from_previous_available" in javascript
     assert "window.localStorage.setItem(THEME_STORAGE_KEY, theme)" in javascript
     assert "window.localStorage.setItem(CHART_SETTINGS_STORAGE_KEY" in javascript
-    assert 'id="market-asset-select"' in html
+    assert 'id="market-asset-search"' in html
+    assert 'id="market-asset-listbox"' in html
     assert 'api("/api/market-assets")' in javascript
     assert "marketAssetFromDescriptor(descriptor)" in javascript
     assert "descriptor.analysis.market_mode" in javascript

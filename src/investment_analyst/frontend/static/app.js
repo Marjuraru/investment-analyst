@@ -484,7 +484,7 @@ function marketAssetFromDescriptor(descriptor) {
     symbol: descriptor.symbol,
     name: descriptor.name,
     breadcrumb: `${assetClassLabels[descriptor.asset_class] || "Análisis de mercado"} / ${descriptor.exchange}`,
-    meta: `${descriptor.exchange} · ${descriptor.quote_currency} · ${providerLabel}`,
+    meta: `${descriptor.exchange} · ${descriptor.quote_currency}${descriptor.source_id.includes("iex") ? " · IEX parcial" : descriptor.source_id.includes("coinbase") ? " · mercado 24/7" : ""}`,
     sourceId: descriptor.source_id,
     schemaVersion: descriptor.chart_schema_version,
     intradaySourceId: descriptor.intraday_source_id,
@@ -531,7 +531,8 @@ async function loadMarketAssets() {
   for (const [assetId, presentation] of Object.entries(marketAssets)) {
     marketStartByAsset.set(assetId, presentation.defaultMarketStart);
   }
-  const selector = byId("market-asset-select");
+  const input = byId("market-asset-search");
+  const listbox = byId("market-asset-listbox");
   const groups = {
     equity: { label: "Acciones", options: [] },
     etf: { label: "ETF", options: [] },
@@ -540,23 +541,179 @@ async function loadMarketAssets() {
   payload.assets.forEach((descriptor) => {
     const cls = descriptor.asset_class;
     if (groups[cls]) {
-      const option = document.createElement("option");
-      option.value = descriptor.asset_id;
-      option.textContent = `${descriptor.symbol} — ${descriptor.name}`;
-      groups[cls].options.push(option);
+      groups[cls].options.push(descriptor);
     }
   });
-  const children = [];
+
+  window.comboboxData = [];
   for (const group of Object.values(groups)) {
     if (group.options.length > 0) {
-      const optgroup = document.createElement("optgroup");
-      optgroup.label = group.label;
-      optgroup.append(...group.options);
-      children.push(optgroup);
+      window.comboboxData.push({ type: "group", label: group.label });
+      group.options.forEach(opt => {
+        window.comboboxData.push({ type: "option", data: opt });
+      });
     }
   }
-  selector.replaceChildren(...children);
-  selector.value = selectedMarketAsset;
+
+  input.value = marketAssets[selectedMarketAsset].symbol + " — " + marketAssets[selectedMarketAsset].name;
+
+  function renderListbox(filter = "") {
+    listbox.replaceChildren();
+    const lowerFilter = filter.toLowerCase();
+    let hasOptions = false;
+    let currentGroupLi = null;
+    let groupHasOptions = false;
+
+    window.comboboxData.forEach((item, index) => {
+      if (item.type === "group") {
+        if (currentGroupLi && !groupHasOptions) {
+           currentGroupLi.remove();
+        }
+        currentGroupLi = document.createElement("li");
+        currentGroupLi.className = "combobox-group";
+        currentGroupLi.role = "presentation";
+        currentGroupLi.textContent = item.label;
+        listbox.appendChild(currentGroupLi);
+        groupHasOptions = false;
+      } else {
+        const text = `${item.data.symbol} — ${item.data.name}`;
+        if (!filter || text.toLowerCase().includes(lowerFilter)) {
+          const li = document.createElement("li");
+          li.className = "combobox-option";
+          li.role = "option";
+          li.id = `combobox-option-${item.data.asset_id.replace(/:/g, "-")}`;
+          li.dataset.value = item.data.asset_id;
+          li.textContent = text;
+          if (item.data.asset_id === selectedMarketAsset && !filter) {
+            li.setAttribute("aria-selected", "true");
+          }
+          li.addEventListener("click", () => {
+            selectComboboxOption(item.data.asset_id);
+          });
+          listbox.appendChild(li);
+          groupHasOptions = true;
+          hasOptions = true;
+        }
+      }
+    });
+    if (currentGroupLi && !groupHasOptions) {
+       currentGroupLi.remove();
+    }
+    if (!hasOptions) {
+      const li = document.createElement("li");
+      li.className = "combobox-empty";
+      li.role = "presentation";
+      li.textContent = "No se encontraron activos.";
+      listbox.appendChild(li);
+    }
+  }
+
+  function openListbox() {
+    byId("asset-combobox-container").setAttribute("aria-expanded", "true");
+    listbox.hidden = false;
+    renderListbox(input.value !== (marketAssets[selectedMarketAsset].symbol + " — " + marketAssets[selectedMarketAsset].name) ? input.value : "");
+  }
+
+  function closeListbox() {
+    byId("asset-combobox-container").setAttribute("aria-expanded", "false");
+    listbox.hidden = true;
+    input.removeAttribute("aria-activedescendant");
+    const active = listbox.querySelector(".combobox-option.active");
+    if (active) active.classList.remove("active");
+  }
+
+  async function selectComboboxOption(assetId) {
+    if (!marketAssets[assetId] || assetId === selectedMarketAsset) {
+      closeListbox();
+      input.value = marketAssets[assetId].symbol + " — " + marketAssets[assetId].name;
+      return;
+    }
+    input.value = marketAssets[assetId].symbol + " — " + marketAssets[assetId].name;
+    closeListbox();
+    marketStartByAsset.set(selectedMarketAsset, byId("market-start").value);
+    knownAtByAsset.set(selectedMarketAsset, byId("report-known-at").value.trim());
+    selectedMarketAsset = assetId;
+    byId("report-known-at").value = knownAtByAsset.get(assetId) || new Date().toISOString();
+    marketChartPayload = null;
+    marketChartViewport = null;
+    marketChartDrag = null;
+    resetValuation();
+    applySelectedMarketAsset();
+    applyChartSettings();
+    const activeFundamentalLink = document.querySelector(
+      (
+        ".nav-link.active[data-fundamental-only], "
+        + ".nav-link.active[data-valuation-only], "
+        + ".nav-link.active[data-complete-analysis-only]"
+      ),
+    );
+    if (activeFundamentalLink) {
+      activeFundamentalLink.classList.remove("active");
+      activeFundamentalLink.removeAttribute("aria-current");
+      if (document.querySelector(".nav-link[data-market-only]")) {
+        document.querySelector(".nav-link[data-market-only]").click();
+      }
+    } else {
+      if (marketChartPayload === null) await queryMarketChart();
+      else renderMarketChart(marketChartPayload, { preserveViewport: true });
+    }
+  }
+
+  input.addEventListener("focus", openListbox);
+  input.addEventListener("input", () => {
+    openListbox();
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (listbox.hidden && e.key !== "Escape" && e.key !== "Tab") {
+      openListbox();
+    }
+    const options = Array.from(listbox.querySelectorAll(".combobox-option"));
+    if (!options.length) return;
+
+    let activeIndex = options.findIndex(opt => opt.classList.contains("active"));
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (activeIndex < options.length - 1) activeIndex++;
+      else activeIndex = 0;
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (activeIndex > 0) activeIndex--;
+      else activeIndex = options.length - 1;
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (activeIndex >= 0) {
+        selectComboboxOption(options[activeIndex].dataset.value);
+      } else if (options.length === 1) {
+        selectComboboxOption(options[0].dataset.value);
+      }
+      return;
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeListbox();
+      input.value = marketAssets[selectedMarketAsset].symbol + " — " + marketAssets[selectedMarketAsset].name;
+      return;
+    } else {
+      return;
+    }
+
+    options.forEach(opt => opt.classList.remove("active"));
+    if (activeIndex >= 0) {
+      options[activeIndex].classList.add("active");
+      input.setAttribute("aria-activedescendant", options[activeIndex].id);
+      options[activeIndex].scrollIntoView({ block: "nearest" });
+    }
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!byId("asset-combobox-container").contains(e.target)) {
+      if (!listbox.hidden) {
+        closeListbox();
+        input.value = marketAssets[selectedMarketAsset].symbol + " — " + marketAssets[selectedMarketAsset].name;
+      }
+    }
+  });
 }
 
 function preferenceToggle(asset, kind, label) {
@@ -819,7 +976,7 @@ function applyTheme(theme) {
   document.querySelector('meta[name="theme-color"]').content =
     selected === "dark" ? "#0b111c" : "#f3f5f7";
   const button = byId("theme-toggle");
-  button.textContent = selected === "dark" ? "Tema claro" : "Tema oscuro";
+  button.title = selected === "dark" ? "Tema claro" : "Tema oscuro";
   button.setAttribute("aria-pressed", String(selected === "dark"));
   button.setAttribute(
     "aria-label",
@@ -2418,8 +2575,9 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
     byId("chart-latest-date").textContent = "Sin datos locales para el corte seleccionado";
     empty.textContent = intraday
       ? "No hay velas intradía locales para este corte. Usa «Actualizar BTC-USD» para importar las últimas 24 horas."
-      : "No hay precios disponibles para este corte histórico.";
+      : "No hay historial de precios para este corte.";
     empty.classList.remove("hidden");
+    byId("market-chart-card").classList.add("is-empty-state");
     byId("market-chart").replaceChildren();
     byId("chart-table-body").replaceChildren();
     resetMarketSnapshot();
@@ -2430,6 +2588,7 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
     byId("chart-status").textContent = `Corte: ${formatInstant(chart.known_at)} · sin precios disponibles.`;
     return;
   }
+  byId("market-chart-card").classList.remove("is-empty-state");
   empty.classList.add("hidden");
   const latestPoint = allPoints[allPoints.length - 1];
   const latest = chart.latest_session || latestPoint;
@@ -4623,8 +4782,6 @@ byId("chart-settings-form").addEventListener("submit", async (event) => {
   applyChartSettings();
   persistChartSettings();
   byId("chart-settings").open = false;
-  if (requiresDataRefresh || marketChartPayload === null) await queryMarketChart();
-  else renderMarketChart(marketChartPayload, { preserveViewport: true });
   if (requiresDataRefresh || marketChartPayload === null) await queryMarketChart();
   else renderMarketChart(marketChartPayload, { preserveViewport: true });
 });

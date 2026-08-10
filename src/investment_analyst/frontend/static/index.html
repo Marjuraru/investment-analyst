@@ -87,8 +87,11 @@
           </div>
           <div class="topbar-actions">
             <div class="combobox-wrapper">
-              <label id="asset-selector-label" for="market-asset-select" class="visually-hidden">Activo</label>
-              <select id="market-asset-select" aria-labelledby="asset-selector-label"></select>
+              <label id="asset-selector-label" for="market-asset-search" class="visually-hidden">Activo</label>
+              <div class="combobox" role="combobox" aria-expanded="false" aria-owns="market-asset-listbox" aria-haspopup="listbox" id="asset-combobox-container">
+                <input type="text" id="market-asset-search" aria-autocomplete="list" aria-controls="market-asset-listbox" autocomplete="off" placeholder="Buscar activo..." aria-labelledby="asset-selector-label">
+                <ul id="market-asset-listbox" role="listbox" aria-labelledby="asset-selector-label" hidden></ul>
+              </div>
             </div>
             <span id="health-badge" class="badge neutral">Consultando estado</span>
             <button id="theme-toggle" class="icon-button" type="button" aria-pressed="true" aria-label="Cambiar al tema claro">
