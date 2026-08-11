@@ -112,6 +112,17 @@ registrales completas son RawRecords con `asset_id=None`, mientras el catálogo 
 las identidades de cotización. La consulta las relaciona sin convertir campos registrales en
 precios, fundamentales o señales.
 
-## Prohibición actual de ejecución de órdenes
-El sistema no ejecuta operaciones ni se integra con brokers. Solo produce
-información y diagnósticos para decisión humana.
+## Estado actual y horizontes separados
+
+El sistema actual no ejecuta operaciones ni se integra con brokers. Produce información,
+diagnósticos y candidatos analíticos para decisión humana; no emite señales predictivas operativas,
+recomendaciones de inversión ni asesoramiento personalizado.
+
+La evolución posible mantiene capas explícitas: evidencia PIT → análisis → detección de
+oportunidades → señales/predicción validada → recomendación explícita y trazable → decisión humana
+o de política → broker y ejecución controlada futura. Una capa posterior sólo referencia los
+artefactos versionados de la anterior y nunca reescribe evidencia histórica. Señales o predicciones
+futuras exigen objetivo/label versionado, baselines, validación temporal fuera de muestra,
+calibración cuando aplique, explicación, shadow mode y rollback. Una recomendación futura será
+separada y no personalizada; cualquier ejecución futura quedará fuera del núcleo analítico, detrás
+de contratos propios, autorización explícita y controles de riesgo.

@@ -18,16 +18,30 @@ The product must remain:
 - based on official or explicitly identified data sources;
 - local-first, with persistent storage and traceable inputs;
 - independent of providers at the analytical core;
-- descriptive rather than prescriptive.
+- currently descriptive: diagnostics and candidates support a human analyst and are not signals,
+  personalized advice, recommendations, broker instructions, or execution.
 
-The product must not:
+The current product does not:
 
-- buy, sell, place orders, or use a Trading API;
-- manage money or execute automated trading;
-- produce personalized financial advice or direct investment recommendations;
+- buy, sell, place orders, use a Trading API, manage money, or execute automated trading;
+- produce personalized financial advice, direct investment recommendations, or operational
+  predictive signals;
 - hide formulas, weights, inputs, limitations, or evidence;
 - combine market and fundamental analysis into an arbitrary aggregate score, verdict, confidence, quality, recommendation, or ranking;
 - require an active LLM or token consumption during normal product execution.
+
+Planned and future capability boundaries do not authorize implementation. Any future opportunity
+detection or prediction requires PIT evidence, a versioned objective/label, baselines, temporal
+out-of-sample validation, explanation, shadow mode, and rollback. Any future recommendation must be
+a separate, explicit, non-personalized, versioned artifact traceable to evidence, signals, policy,
+and limitations. Any future broker integration or controlled execution requires separate contracts,
+explicit authorization, human or policy decision, risk controls, and an explicit Work Block.
+
+These architectural constraints remain permanent: evidence, analytics, signal, recommendation,
+decision, and execution are separate layers; later layers reference prior artifacts without rewriting
+history. The analytical core remains provider-independent, transparent, auditable, deterministic,
+reproducible, point-in-time, Decimal-exact, and append-only. Market and fundamental meaning remains
+separate and must never be collapsed into an arbitrary or opaque aggregate score or recommendation.
 
 Market and fundamental diagnostics remain independent. A consolidated query may present both, but must not merge their analytical meaning.
 

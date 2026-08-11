@@ -3,10 +3,20 @@
 ## Propósito y definición de producto completo
 
 Esta hoja de ruta ordena las ampliaciones necesarias para convertir el MVP local actual en una
-herramienta profesional completa de apoyo al análisis. No modifica los límites del producto:
-mercado, fundamentales, macro, noticias y actividad de participantes conservan significado,
-evidencia y diagnósticos independientes. La aplicación no ejecuta órdenes, no administra dinero y
-no convierte sus resultados en una recomendación personalizada o puntuación agregada.
+herramienta profesional completa de apoyo al análisis. Mercado, fundamentales, macro, noticias y
+actividad de participantes conservan significado, evidencia y diagnósticos independientes. La
+versión actual no ejecuta órdenes, no administra dinero ni convierte sus resultados en una
+recomendación personalizada o puntuación agregada.
+
+La evolución conserva una dirección por capas, no una autorización presente:
+
+`evidencia PIT → análisis → detección de oportunidades → señales/predicción validada → recomendación explícita y trazable → decisión humana/política → broker y ejecución controlada futura → posible automatización acotada posterior`
+
+Las restricciones permanentes son transparencia, auditabilidad, reproducibilidad, `available_at`,
+`Decimal`, identidades deterministas, historia append-only, separación de capas e independencia de
+proveedores en analytics. Una recomendación futura será explícita, no personalizada, versionada y
+trazable; una futura ejecución estará fuera del núcleo analítico y requerirá contratos, autorización
+y controles de riesgo propios.
 
 Una primera versión completa deberá:
 
@@ -442,7 +452,10 @@ Si no existen etiquetas confiables, el resultado se denomina `anomaly_score` o p
 probabilidad. Un umbral como `0,85` solo se permitirá cuando la salida sea una probabilidad
 calibrada fuera de muestra y el umbral quede justificado por una política de alertas versionada.
 
-Una predicción seguirá siendo investigación, no una orden o recomendación.
+Una predicción seguirá siendo investigación, no una orden ni una recomendación actual. Sólo después
+de todas las puertas PIT, validación temporal, calibración cuando aplique, explicación, shadow mode
+y rollback podrá promoverse a una señal o detección de oportunidad versionada; cualquier
+recomendación futura seguirá siendo un artefacto separado y trazable.
 
 ## Fase 14 — Operación 24/7 y release
 
@@ -458,6 +471,14 @@ Después de estabilizar el scheduler multi-fuente:
 - actualización y rollback compatibles con el workspace.
 
 El servidor local no se expondrá directamente en `0.0.0.0`.
+
+## Horizonte posterior — recomendación y ejecución controlada
+
+Este horizonte no está implementado, autorizado ni calendarizado. Tras una señal validada, una
+recomendación futura requerirá política explícita, evidencia separada de mercado y fundamentales,
+limitaciones y trazabilidad completa. Sólo después de una decisión humana o de política y contratos
+de broker independientes podría evaluarse ejecución controlada; una automatización acotada sería un
+horizonte todavía posterior y nunca reescribiría evidencia, señales, recomendaciones o decisiones.
 
 ## Puerta sistemática de calidad
 
