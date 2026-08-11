@@ -2,7 +2,9 @@
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -13,11 +15,20 @@ from investment_analyst.application.asset_preferences import (
     EffectiveAssetPreferences,
     asset_preferences_fingerprint,
 )
+from investment_analyst.core.models import (
+    DataFrequency,
+    DataQuality,
+    MetricResult,
+    NormalizedObservation,
+    RawRecord,
+    SourceReference,
+)
 from investment_analyst.workspace.backup import (
     BACKUP_MANIFEST_NAME,
     WorkspaceBackupError,
     WorkspaceBackupService,
 )
+from investment_analyst.workspace.models import WorkspaceAccessMode
 from investment_analyst.workspace.service import WorkspaceService
 
 
@@ -119,6 +130,74 @@ def test_backup_rejects_internal_symlink_without_copying_external_file(tmp_path:
         service.create(source, destination)
 
     assert not destination.exists()
+
+
+def test_backup_rejects_metric_with_missing_derived_metric(tmp_path: Path) -> None:
+    workspace_service, service, source = _service(tmp_path)
+    record_id = uuid4()
+    observation_id = uuid4()
+    timestamp = datetime(2026, 8, 1, tzinfo=UTC)
+    source_reference = SourceReference(
+        source_id="test:workspace",
+        record_key="backup-derived-lineage",
+        retrieved_at=timestamp,
+    )
+    writer = workspace_service.open_storage(
+        workspace_service.resolve(source),
+        WorkspaceAccessMode.READ_WRITE,
+    )
+    try:
+        writer.raw_records.save(
+            RawRecord(
+                record_id=record_id,
+                asset_id="equity:us:aapl",
+                source=source_reference,
+                event_time=timestamp,
+                available_at=timestamp,
+                received_at=timestamp,
+                payload={"close": "210"},
+                schema_version="backup-test-v1",
+            )
+        )
+        writer.observations.save(
+            NormalizedObservation(
+                observation_id=observation_id,
+                raw_record_id=record_id,
+                asset_id="equity:us:aapl",
+                field_name="close",
+                value=Decimal("210"),
+                unit="USD",
+                frequency=DataFrequency.DAY_1,
+                observed_at=timestamp,
+                available_at=timestamp,
+                normalized_at=timestamp,
+                source=source_reference,
+                quality=DataQuality.VALID,
+                transformation_version="backup-test-v1",
+            )
+        )
+        writer.metric_results.save(
+            MetricResult(
+                asset_id="equity:us:aapl",
+                metric_key="market.technical.ema",
+                value=Decimal("210"),
+                unit="USD",
+                as_of=timestamp,
+                available_at=timestamp,
+                computed_at=timestamp,
+                parameters={"source_id": "test:workspace", "known_at": timestamp.isoformat()},
+                input_observation_ids=[observation_id],
+                input_metric_result_ids=[uuid4()],
+                algorithm_version="market-ema-v1-decimal34",
+                quality=DataQuality.VALID,
+            )
+        )
+    finally:
+        writer.close()
+
+    with pytest.raises(WorkspaceBackupError, match="derived metrics"):
+        service.create(source, tmp_path / "backup")
+    assert not (tmp_path / "backup").exists()
 
 
 def test_restore_verification_rejects_symlinked_inventory_file(tmp_path: Path) -> None:

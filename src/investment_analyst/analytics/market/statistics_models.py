@@ -44,6 +44,7 @@ class MarketStatisticsRequest(ContractModel):
     relative_volume_window: int = 20
     bollinger_window: int = 20
     bollinger_multiplier: FinancialDecimal = Decimal("2")
+    ema_windows: tuple[int, ...] = (20,)
 
     @field_validator("sma_windows", mode="before")
     @classmethod
@@ -92,6 +93,21 @@ class MarketStatisticsRequest(ContractModel):
             raise ValueError("bollinger_multiplier must be finite, positive, and at most 100")
         return value
 
+    @field_validator("ema_windows", mode="before")
+    @classmethod
+    def validate_ema_windows(cls, value: object) -> tuple[int, ...]:
+        """Validate ordered EMA windows without coercing bools, floats, or strings."""
+        if not isinstance(value, (tuple, list)):
+            raise ValueError("ema_windows must be a tuple or list of integers")
+        windows = tuple(_validate_window(item, minimum=2, name="EMA window") for item in value)
+        if not windows:
+            raise ValueError("ema_windows must not be empty")
+        if len(set(windows)) != len(windows):
+            raise ValueError("ema_windows must be unique")
+        if any(item > 400 for item in windows):
+            raise ValueError("EMA window must not exceed 400")
+        return tuple(sorted(windows))
+
 
 class MetricCalculation(ContractModel):
     """Validated analytical output before persistence assigns identity and computation time."""
@@ -107,6 +123,7 @@ class MetricCalculation(ContractModel):
     available_at: UTCDateTime
     parameters: dict[NonEmptyStr, JsonValue]
     input_observation_ids: tuple[UUID, ...]
+    input_metric_result_ids: tuple[UUID, ...] = ()
     algorithm_version: NonEmptyStr
     quality: DataQuality
 
@@ -125,6 +142,8 @@ class MetricCalculation(ContractModel):
             raise ValueError("at least one input observation ID is required")
         if len(set(self.input_observation_ids)) != len(self.input_observation_ids):
             raise ValueError("input observation IDs must be unique")
+        if len(set(self.input_metric_result_ids)) != len(self.input_metric_result_ids):
+            raise ValueError("input metric result IDs must be unique")
         try:
             json.dumps(self.parameters, allow_nan=False, sort_keys=True)
         except (TypeError, ValueError) as error:

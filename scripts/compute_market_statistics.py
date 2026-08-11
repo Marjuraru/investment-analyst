@@ -47,6 +47,7 @@ _METRIC_KEYS = {
     "market.technical.bollinger.lower",
     "market.technical.bollinger.bandwidth",
     "market.technical.bollinger.percent_b",
+    "market.technical.ema",
 }
 
 
@@ -85,6 +86,13 @@ def _volatility_window(value: str) -> int:
     return parsed
 
 
+def _ema_window(value: str) -> int:
+    parsed = _volatility_window(value)
+    if parsed > 400:
+        raise argparse.ArgumentTypeError("EMA window must not exceed 400")
+    return parsed
+
+
 def _positive_decimal(value: str) -> Decimal:
     try:
         parsed = Decimal(value)
@@ -108,6 +116,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--relative-volume-window", type=_positive_int, default=20)
     parser.add_argument("--bollinger-window", type=_volatility_window, default=20)
     parser.add_argument("--bollinger-multiplier", type=_positive_decimal, default=Decimal("2"))
+    parser.add_argument("--ema-window", action="append", type=_ema_window)
     parser.add_argument("--output-limit", type=_positive_int, default=20)
     return parser
 
@@ -133,6 +142,8 @@ def _matches_request(result, request: MarketStatisticsRequest) -> bool:
         ) == request.bollinger_window and result.parameters.get("multiplier") == str(
             request.bollinger_multiplier
         )
+    if result.metric_key == "market.technical.ema":
+        return result.parameters.get("window") in request.ema_windows
     return True
 
 
@@ -155,6 +166,7 @@ def main() -> int:
             relative_volume_window=args.relative_volume_window,
             bollinger_window=args.bollinger_window,
             bollinger_multiplier=args.bollinger_multiplier,
+            ema_windows=tuple(args.ema_window or (20,)),
         )
         runtime = ApplicationRuntime.create_default()
         with runtime.open_storage(

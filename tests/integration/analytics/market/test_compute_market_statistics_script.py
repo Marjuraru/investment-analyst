@@ -88,6 +88,8 @@ def _command(root: Path, source: str = _SOURCE) -> list[str]:
         "2",
         "--relative-volume-window",
         "2",
+        "--ema-window",
+        "2",
         "--output-limit",
         "2",
     ]

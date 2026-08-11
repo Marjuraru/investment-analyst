@@ -388,6 +388,12 @@ def _verify_workspace_traceability(service: WorkspaceService, root: Path) -> Non
         for input_id in metric.input_observation_ids
     ):
         raise WorkspaceBackupError("workspace contains a metric without its observations")
+    if any(
+        input_id not in metric_ids
+        for metric in metrics
+        for input_id in metric.input_metric_result_ids
+    ):
+        raise WorkspaceBackupError("workspace contains a metric without its derived metrics")
     diagnostic_metric_ids = {
         metric_id
         for diagnostic in diagnostics

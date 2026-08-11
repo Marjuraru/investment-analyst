@@ -87,6 +87,16 @@ datos mediante el frontend ni produce una puntuación conjunta. Los eventos anal
 intentos de notificación tienen identidades separadas para poder reintentar un canal sin duplicar el
 candidato.
 
+## Estadísticas de mercado derivadas
+
+`analytics/market/` conserva la separación entre barras normalizadas, cálculos de métricas y
+diagnósticos. Las EMA diarias MKT-2 se siembran dentro de la consulta point-in-time y cada paso
+posterior referencia la observación de cierre actual más el UUID del EMA previo en
+`input_metric_result_ids`. La identidad UUID5 añade esas dependencias solo cuando existen, por lo
+que las métricas históricas sin linaje derivado mantienen su preimagen e identidad. La verificación
+de pipeline y backup exige que toda dependencia derivada exista y sea compatible con activo, fuente,
+ventana, algoritmo y corte temporal.
+
 ## Dominio de valoración corporativa
 
 `analytics/valuation/` compone barras y observaciones SEC persistidas mediante capacidades del
