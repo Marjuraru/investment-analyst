@@ -10,9 +10,23 @@ Herramienta personal para recolectar, procesar, relacionar, visualizar y explica
 - Diagnósticos de mercado y fundamentales independientes, con presentación consolidada sin agregar
   sus resultados.
 - Métricas y resultados transparentes, reproducibles y auditables.
-- Sin compra, venta ni ejecución de órdenes.
-- Sin trading automático ni conexión operativa con brokers.
-- Sin recomendaciones directas de inversión.
+- **Estado actual:** sin compra, venta ni ejecución de órdenes.
+- **Estado actual:** sin trading automático ni conexión operativa con brokers.
+- **Estado actual:** sin recomendaciones directas de inversión; los diagnósticos y candidatos son
+  descriptivos y no sustituyen el criterio humano.
+
+## Horizonte por capas
+
+La versión viva no implementa señales predictivas, recomendaciones ni integración con brokers. La
+evolución posible mantiene capas y gates separados:
+
+`evidencia PIT → análisis → detección de oportunidades → señales/predicción validada → recomendación explícita y trazable → decisión humana/política → broker y ejecución controlada futura → posible automatización acotada posterior`
+
+Una señal o predicción planificada requiere evidencia PIT, objetivo y label versionados, baselines,
+validación temporal fuera de muestra, explicación, shadow mode y rollback. Una recomendación futura
+sería un artefacto separado, no personalizado, versionado y trazable; una integración o ejecución
+futura requeriría además contratos propios, autorización explícita, controles de riesgo y decisión
+humana o de política. Ninguna de estas capas está implementada, autorizada ni calendarizada.
 
 ## Principios
 
@@ -23,6 +37,9 @@ Herramienta personal para recolectar, procesar, relacionar, visualizar y explica
 - **Independencia de proveedores:** los conectores de datos podrán sustituirse sin modificar el motor analítico.
 - **Determinismo:** el MVP no utiliza un LLM activo ni consume tokens durante su funcionamiento.
 - **Escalabilidad:** la estructura está preparada para crecer sin añadir complejidad innecesaria al inicio.
+- **Restricciones permanentes:** transparencia, auditabilidad, reproducibilidad, `available_at`,
+  `Decimal`, identidades deterministas, historia append-only y separación entre evidencia,
+  analytics, señal, recomendación, decisión y ejecución.
 
 ## Estado actual
 

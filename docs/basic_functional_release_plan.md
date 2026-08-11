@@ -16,8 +16,15 @@ funcional debe permitir que un analista:
 - cierre, reinicie, respalde y restaure el servicio sin perder trazabilidad.
 
 Mercado, fundamentales, valoración, macro, eventos y análisis cualitativo conservan resultados
-independientes. Esta versión no ejecuta órdenes, no administra dinero y no predice ni recomienda
-comprar o vender.
+independientes. Esta versión básica no ejecuta órdenes, no administra dinero y no predice ni
+recomienda comprar o vender. Es una frontera de esta release, no una autorización para adelantar
+capas futuras: evidencia PIT → análisis → detección de oportunidades → señales/predicción validada
+→ recomendación explícita y trazable → decisión humana/política → broker y ejecución controlada
+futura.
+
+Las restricciones permanentes son transparencia, auditabilidad, reproducibilidad, `available_at`,
+`Decimal`, identidades deterministas, historia append-only, independencia de proveedores en
+analytics y separación entre evidencia, análisis, señal, recomendación, decisión y ejecución.
 
 ## Referencia factual actual
 
@@ -255,7 +262,10 @@ que compare ambos, y baselines más simples, mediante:
 
 Se seleccionará como máximo un booster. Si no supera los baselines fuera de muestra o no cumple
 presupuestos de memoria/ARM64, no se incorpora. El carril es opcional y no bloquea el uso de la
-versión cuantitativa determinista.
+versión cuantitativa determinista. Si llega a promoverse después de validación, calibración cuando
+aplique, explicación, shadow mode y rollback, seguirá siendo una señal o detección separada; una
+recomendación futura sería un artefacto explícito, no personalizado y trazable, nunca un renombre
+del diagnóstico ni una salida libre del LLM.
 
 ## Implementación básica de IA
 
@@ -270,7 +280,9 @@ La primera IA cualitativa podrá:
 - proponer preguntas concretas para la revisión humana;
 - redactar en español y citar cada afirmación al documento exacto.
 
-No calificará una inversión, no predecirá precio, no activará reglas y no generará una recomendación.
+En esta primera capa cualitativa no calificará una inversión, no predecirá precio, no activará reglas
+ni generará una recomendación; su salida no sustituye la promoción validada y separada de capas
+posteriores.
 
 ### Prerrequisito: corpus local
 
@@ -473,9 +485,13 @@ La versión básica estará lista únicamente cuando:
 - No se añade una base vectorial hasta que la búsqueda local del corpus demuestre que es necesaria.
 - No se migra a PostgreSQL ni a microservicios para el volumen actual.
 - No se ejecuta un LLM continuamente.
-- No se incorpora predicción de precios a la versión operativa.
+- La predicción de precios no se incorpora a esta versión operativa; cualquier investigación futura
+  debe superar su matriz PIT, baseline, validación temporal y criterios de promoción propios.
 - No se añaden XGBoost, LightGBM o SHAP como dependencias hasta completar el benchmark y autorizar
   explícitamente su impacto reproducible y ARM64.
 - La historia desde 1950 se mantendrá en un workspace de investigación separado.
 - Cazatiburones para BVL, análisis on-chain y despliegue SBC comienzan después de la aceptación
   básica; la primera vertical SEC de Cazatiburones sí forma parte de la ruta.
+- Integración con brokers, ejecución controlada y posible automatización acotada pertenecen a un
+  horizonte posterior: requieren decisión humana o de política, autorización explícita, contratos
+  propios, trazabilidad y controles de riesgo, sin tocar el núcleo analítico ni reescribir historia.

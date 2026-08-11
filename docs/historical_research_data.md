@@ -69,8 +69,16 @@ alterar sus diagnósticos fundamentales o de mercado.
 4. Baselines simples, costos, delistings, drift, intervalos de incertidumbre y comparación fuera de
    muestra.
 5. Decidir entre CRSP y Finaeon para valores individuales antes de integrar un proveedor estable.
-6. Exponer únicamente relaciones y modelos que conserven trazabilidad; nunca convertir una
-   predicción en recomendación u orden automática.
+6. Exponer únicamente relaciones y modelos que conserven trazabilidad. Una promoción futura exige
+   evidencia PIT, objetivo/label versionado, baselines, validación temporal fuera de muestra,
+   explicación, shadow mode y rollback; sólo entonces podría emitirse una señal o detección de
+   oportunidad separada.
+7. Una recomendación futura será un artefacto explícito, no personalizado, versionado y trazable a
+   evidencia, señal, política y limitaciones. Nunca puede ejecutar una orden directamente: cualquier
+   broker o ejecución controlada futura requiere decisión humana o de política, autorización,
+   contratos y controles de riesgo separados.
 
 Hasta completar los puntos 1 y 2, entrenar un predictor dentro de la herramienta principal no es una
-base suficientemente sólida.
+base suficientemente sólida. La restricción permanente es preservar transparencia, auditabilidad,
+reproducibilidad, `available_at`, `Decimal`, identidades deterministas e historia append-only: una
+capa posterior puede referenciar la evidencia o la señal anterior, pero nunca reescribirla.
