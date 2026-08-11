@@ -14,7 +14,9 @@ superficies protegidas/prohibidas, aceptación/negativos, capability delta y gat
 PLAN es control-plane-first: refresca primero el estado vivo y formula una hipótesis antes de
 explorar; usa progressive disclosure y exploración dirigida sólo sobre las superficies necesarias.
 Los threads persistentes pueden conservar contexto, pero no son autoridad: repo, Issue, PR y
-GitHub siempre prevalecen. Cada AUDIT de un Work Block comienza en un chat Gemini nuevo.
+GitHub siempre prevalecen. PLAN, BUILD, UI_WORKER y AUDIT se definen por permisos, responsabilidad,
+entradas, salidas y gates; el modelo o cliente sólo puede registrarse como metadata de evidencia y
+nunca altera autoridad. Cada AUDIT de un Work Block comienza en una sesión fresca e independiente.
 
 `finalize_policy` sólo admite `AUTO` o `HUMAN`: FAST usa AUTO por defecto; STANDARD usa AUTO tras
 AUDIT PASS; CRITICAL usa HUMAN. Un override HUMAN de FAST/STANDARD requiere justificación en PLAN.
@@ -100,9 +102,7 @@ PLAN ante lógica financiera, contratos, APIs, storage, providers o cualquier ex
 - CRITICAL: `$plan → $build → /audit → PASS → AWAITING HUMAN APPROVAL → HUMAN MERGE`.
 
 No se crean comandos `$merge` ni `$finalize`. Un cambio material de objetivo, scope, arquitectura o
-aceptación vuelve a PLAN; un mismatch de base o rama falla cerrado. El primer Work Block ordinario
-seguro con AUTO posterior a DEV-4 usa Terra High como canary observado antes de cambiar routing
-permanente.
+aceptación vuelve a PLAN; un mismatch de base o rama falla cerrado.
 
 ## Evidencia viva y markers únicos
 
@@ -123,9 +123,12 @@ status=PENDING|PASS|FAIL
 block=<WORK-BLOCK>
 sha=<FULL-SHA>
 status=PASS|FAIL
-reviewer=<EXACT-MODEL>
+reviewer=<EVIDENCE-METADATA>
 -->
 ```
+
+`reviewer` identifica la evidencia del revisor o cliente usado; es metadata, nunca una fuente de
+autoridad ni un sustituto de los gates del rol AUDIT.
 
 BUILD usa `PENDING` para candidato exact-SHA incompleto o gate en curso; nunca autoriza AUDIT PASS
 ni una salida terminal. Usa `PASS` sólo cuando todos los gates BUILD requeridos del SHA vivo
@@ -162,33 +165,43 @@ toolchain, CI no está disponible, el bloque lo justifica o el usuario lo pide.
 
 AUDIT no infiere PASS de BUILD PASS, CI PASS, smoke PASS ni filenames. Para el SHA fijado:
 
-1. Materializa el rango base declarada...SHA y contabiliza todos los archivos cambiados.
-2. Inspecciona el diff completo y el contexto necesario de código, contratos y tests críticos. Sólo
-   excluye contenido realmente generado/no material con justificación explícita y conserva el
-   conteo total, revisado y excluido.
-3. Mapea cambios y evidencia contra cada acceptance e invariante relevante; verifica negativos
-   críticos, compatibilidad, scope creep, secretos, superficies protegidas y contratos sensibles.
-4. Verifica target/head, comentario BUILD único y PASS, CI, smoke, requested changes y threads para
-   el mismo SHA. Reutiliza CI verde y ejecuta a lo sumo una prueba focalizada por riesgo no cubierto.
-5. Publica rango, cobertura del diff, hallazgos con evidencia concreta y riesgo residual en el
-   comentario AUDIT exact-SHA.
+1. Materializa el rango base declarada...SHA y contabiliza todos los archivos cambiados; declara
+   literalmente base SHA, head SHA y branch leídos de fuentes vivas.
+2. Antes de PASS intenta refutar el candidato: inspecciona el diff completo y el contexto necesario
+   de código, contratos y tests críticos. Sólo excluye contenido realmente generado/no material con
+   justificación explícita y conserva el conteo total, revisado y excluido.
+3. Mapea explícitamente cada acceptance, invariante y negativo a evidencia comprobada. Busca
+   contradicciones, scope creep, identificadores contractuales sintetizados, evidencia stale y tests
+   eliminados o debilitados frente a base. Reutiliza cada fallo material de BUILD/FIX como probe de
+   regresión, o declara expresamente que no existieron.
+4. Verifica target/head, comentario BUILD único y PASS, el gate literal `Python 3.12 quality`, CI,
+   smoke, requested changes y threads para el mismo SHA. Un estado no reconocido, una acción
+   obligatoria pendiente o cualquier identificador no leído literalmente falla cerrado. AUDIT sólo
+   ejecuta validación read-only; formatter, fixer u otro comando mutante están prohibidos.
+5. Publica rango, contabilidad de cobertura, matriz de acceptance/invariantes/negativos, probes,
+   hallazgos con evidencia concreta y riesgo residual en el comentario AUDIT exact-SHA.
 
-`PASS` es imposible con BLOCKER, MAJOR, bug semántico, scope creep, acceptance crítica no
-demostrada, negativo crítico omitido, evidencia crítica ausente, BUILD no-PASS/ambiguo, SHA stale,
-smoke insuficiente, requested changes o thread pendiente. Sólo un happy path con diff material
-completo revisado puede producir AUDIT PASS. AUDIT sigue read-only respecto del candidato.
+`PASS` es imposible con BLOCKER, MAJOR, bug semántico, scope creep, acceptance o invariante crítica
+no demostrada, negativo crítico omitido, contradicción sin resolver, test eliminado/debilitado sin
+equivalencia, probe material de FIX no verificado, evidencia crítica ausente, BUILD no-PASS/ambiguo,
+SHA stale, smoke insuficiente, requested changes o thread pendiente. Sólo un happy path con diff
+material completo revisado puede producir AUDIT PASS. AUDIT sigue read-only respecto del candidato.
 
 ## FINALIZE determinista
 
-FINALIZE sólo existe tras policy AUTO autorizada; DEV-4 tiene HUMAN y termina en HUMAN MERGE. Su
-secuencia única es:
+FINALIZE sólo existe tras policy AUTO autorizada. Tras AUDIT PASS termina la autoridad de AUDIT y
+comienza una transición mecánica explícita; no es un rol LLM ni una tercera decisión. Su secuencia
+única es:
 
 `snapshot batched de guards vivos → mark ready → segundo snapshot/revalidación crítica → confirmar
 exact live head → squash merge con --match-head-commit → reconciliación/cleanup idempotentes`.
 
 El primer snapshot demuestra, cuando aplique: Work Block único y metadata/policy coherentes;
-PR/base/branch/head exactos; CI, smoke, BUILD y AUDIT del mismo SHA; cero BLOCKER/MAJOR;
-requested changes y threads en cero; mergeability, permisos y protección vigente de `main`.
+PR/base/branch/head exactos; único marker BUILD PASS y único marker AUDIT PASS; SHA auditado = SHA
+BUILD = head PR = SHA con CI verde del gate literal `Python 3.12 quality`; smoke del mismo SHA; cero
+BLOCKER/MAJOR; requested changes y threads en cero; mergeability, permisos y protección vigente de
+`main`. Cualquier divergencia, `PENDING`, `UNKNOWN` o fase no explícitamente transicionada detiene
+FINALIZE sin merge.
 Después de ready, el segundo snapshot vuelve a comprobar head, CI/audit/evidencia y revisión. Todo
 cambio o estado no terminal falla cerrado. `--match-head-commit` protege sólo la identidad del head
 en el merge y no sustituye ningún guard.
@@ -207,8 +220,8 @@ soportado. `/skills` o equivalente debe listar `plan`, `build`, `audit` e
 demuestra además al menos un caso de terminality, rechazo de auditoría superficial y guard de
 finalización. Para un Work Block UI, `/ui` debe resolver una única skill canónica, recargar el
 workspace y demostrar el preflight read-only sin target antes de cualquier branch, archivo o PR.
-El AUDIT se ejecuta en el chat Gemini nuevo declarado por el bloque. Un unit test o fixture
-simulado no sustituye este gate.
+El AUDIT se ejecuta en la sesión fresca e independiente declarada por el bloque. Un unit test o
+fixture simulado no sustituye este gate.
 
 La evidencia vincula SHA, comando/capacidad, entorno, resultado y timestamp. No se repite una suite
 completa verde para el mismo SHA y entorno. No se accede al workspace permanente sin autorización.

@@ -47,6 +47,7 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     skills = {name: _read(path) for name, path in skill_paths.items()}
     core_rule = _read(".agents/rules/investment-analyst-core.md")
     ui_agent = _read(".agents/skills/ui/agents/openai.yaml")
+    template = _read(".github/ISSUE_TEMPLATE/work_block.yml")
 
     assert protocol.count("## Algoritmo canónico de transición operativa") == 1
     assert protocol.count("| Condición viva | Decisión | Siguiente acción obligatoria |") == 1
@@ -57,9 +58,15 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "snapshot batched de guards vivos" in protocol
     assert "segundo snapshot/revalidación crítica" in protocol
     assert "squash merge con --match-head-commit" in protocol
-    assert "Terra High" in protocol
     assert "threads persistentes" in protocol
-    assert "chat Gemini nuevo" in protocol
+    assert "sesión fresca e independiente" in protocol
+    assert "chat Gemini nuevo" not in protocol
+    assert "Terra High" not in protocol
+    assert "modelo o cliente" in protocol
+    assert "Python 3.12 quality" in protocol
+    assert "fallo material de BUILD/FIX" in protocol
+    assert "otro comando mutante están prohibidos" in protocol
+    assert "transición mecánica explícita" in protocol
     assert "/ui" in protocol
 
     for name, text in skills.items():
@@ -75,15 +82,23 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "read-only" in skills["audit"]
     assert "diff completo" in skills["audit"]
     assert "policy HUMAN" in skills["audit"]
+    assert "intenta refutar" in skills["audit"]
+    assert "comandos mutantes" in skills["audit"]
+    assert "writer role válido" in skills["plan"]
     assert "exactamente BUILD" in skills["ui"]
     assert "único writer" in skills["ui"]
     assert "local_web.py" in skills["ui"]
     assert "scratch externo" in skills["ui"]
+    assert "Gemini persistente" not in skills["ui"]
     assert "allow_implicit_invocation: false" in ui_agent
     assert "read-only" in core_rule
+    assert "Formatter, fixer" in core_rule
     assert "snapshot antes y" in core_rule
     assert "control-plane-first" in skills["plan"]
     assert "exploración dirigida" in skills["plan"]
+    assert "id: writer_role" in template
+    assert "options: [BUILD, UI_WORKER]" in template
+    assert "id: owner" not in template
 
 
 def test_canonical_skill_basenames_and_ui_frontier_are_unique() -> None:
@@ -213,6 +228,10 @@ def test_protected_hash_uses_worktree_bytes_and_never_repairs_a_mismatch(
 class BuildSnapshot:
     target_valid: bool = True
     protected_hashes_match: bool = True
+    protected_set_exact: bool = True
+    canonical_markers: bool = True
+    required_gate_name: str = "Python 3.12 quality"
+    required_action_pending: bool = False
     scope_expansion: bool = False
     external_resource_available: bool = True
     base_acquired: bool = True
@@ -227,6 +246,12 @@ def _build_transition(snapshot: BuildSnapshot) -> tuple[str, str]:
         return "GUARD FAILURE", "stop on contradictory target metadata"
     if not snapshot.protected_hashes_match:
         return "GUARD FAILURE", "stop without modifying protected work"
+    if not snapshot.protected_set_exact:
+        return "GUARD FAILURE", "declared and observed protected sets differ"
+    if not snapshot.canonical_markers:
+        return "GUARD FAILURE", "active markers are not canonical"
+    if snapshot.required_gate_name != "Python 3.12 quality":
+        return "GUARD FAILURE", "required CI gate name is not literal"
     if snapshot.scope_expansion:
         return "BLOCKED", "return to PLAN for material scope expansion"
     if not snapshot.external_resource_available:
@@ -239,12 +264,18 @@ def _build_transition(snapshot: BuildSnapshot) -> tuple[str, str]:
         return "FIX", "correct focused test failure within scope"
     if snapshot.ci == "pending":
         return "WAIT/POLL", "poll required CI until terminal"
+    if snapshot.ci in {"queued", "in_progress"}:
+        return "WAIT/POLL", "poll required CI until terminal"
+    if snapshot.ci == "unknown":
+        return "GUARD FAILURE", "required CI state is not recognized"
     if snapshot.ci == "correctable-fail":
         return "FIX", "correct own CI failure and publish a new candidate"
     if snapshot.smoke in {"pending", "long-running"}:
         return "CONTINUE", "execute or continue authorized smoke until terminal"
     if snapshot.smoke == "correctable-fail":
         return "FIX", "correct smoke failure within scope and rerun"
+    if snapshot.required_action_pending:
+        return "CONTINUE", "complete the remaining required action"
     return "READY", "publish BUILD PASS for the live SHA"
 
 
@@ -264,12 +295,32 @@ def _build_transition(snapshot: BuildSnapshot) -> tuple[str, str]:
             ("GUARD FAILURE", "stop without modifying protected work"),
         ),
         (
+            BuildSnapshot(protected_set_exact=False),
+            ("GUARD FAILURE", "declared and observed protected sets differ"),
+        ),
+        (
+            BuildSnapshot(canonical_markers=False),
+            ("GUARD FAILURE", "active markers are not canonical"),
+        ),
+        (
+            BuildSnapshot(required_gate_name="Python quality"),
+            ("GUARD FAILURE", "required CI gate name is not literal"),
+        ),
+        (
             BuildSnapshot(focused_tests="correctable-fail"),
             ("FIX", "correct focused test failure within scope"),
         ),
         (
             BuildSnapshot(ci="pending"),
             ("WAIT/POLL", "poll required CI until terminal"),
+        ),
+        (
+            BuildSnapshot(ci="queued"),
+            ("WAIT/POLL", "poll required CI until terminal"),
+        ),
+        (
+            BuildSnapshot(ci="unknown"),
+            ("GUARD FAILURE", "required CI state is not recognized"),
         ),
         (
             BuildSnapshot(ci="correctable-fail"),
@@ -298,6 +349,10 @@ def _build_transition(snapshot: BuildSnapshot) -> tuple[str, str]:
         (
             BuildSnapshot(scope_expansion=True),
             ("BLOCKED", "return to PLAN for material scope expansion"),
+        ),
+        (
+            BuildSnapshot(required_action_pending=True),
+            ("CONTINUE", "complete the remaining required action"),
         ),
     ],
 )
@@ -513,9 +568,16 @@ class AuditSnapshot:
     semantic_bug: bool = False
     scope_creep: bool = False
     critical_acceptance_covered: bool = True
+    critical_invariant_covered: bool = True
     critical_negative_covered: bool = True
+    base_sha: str = FULL_SHA
     live_sha: str = FULL_SHA
     evidence_sha: str = FULL_SHA
+    branch_read_live: bool = True
+    contradiction_resolved: bool = True
+    tests_preserved_or_equivalent: bool = True
+    material_fix_exists: bool = False
+    fix_probe_verified: bool = True
     smoke_sufficient: bool = True
     requested_changes: bool = False
     open_threads: int = 0
@@ -526,6 +588,8 @@ class AuditSnapshot:
 
 
 def _audit_decision(snapshot: AuditSnapshot) -> tuple[str, str]:
+    if snapshot.base_sha != FULL_SHA or not snapshot.branch_read_live:
+        return "FAIL", "base or branch identifier was not read live"
     if snapshot.live_sha != snapshot.evidence_sha:
         return "FAIL", "SHA stale: BUILD evidence does not match live head"
     if not snapshot.build_pass or not snapshot.ci_pass:
@@ -536,8 +600,16 @@ def _audit_decision(snapshot: AuditSnapshot) -> tuple[str, str]:
         return "FAIL", "material file outside authorized scope"
     if not snapshot.critical_acceptance_covered:
         return "FAIL", "critical acceptance lacks evidence"
+    if not snapshot.critical_invariant_covered:
+        return "FAIL", "critical invariant lacks evidence"
     if not snapshot.critical_negative_covered:
         return "FAIL", "critical negative case omitted"
+    if not snapshot.contradiction_resolved:
+        return "FAIL", "contradictory evidence remains unresolved"
+    if not snapshot.tests_preserved_or_equivalent:
+        return "FAIL", "test coverage was removed or weakened"
+    if snapshot.material_fix_exists and not snapshot.fix_probe_verified:
+        return "FAIL", "material BUILD/FIX probe was not verified"
     if not snapshot.smoke_sufficient:
         return "FAIL", "real smoke does not demonstrate required behavior"
     if snapshot.requested_changes:
@@ -558,8 +630,18 @@ def _audit_decision(snapshot: AuditSnapshot) -> tuple[str, str]:
         (AuditSnapshot(semantic_bug=True), "FAIL", "semantic bug"),
         (AuditSnapshot(scope_creep=True), "FAIL", "outside authorized scope"),
         (AuditSnapshot(critical_acceptance_covered=False), "FAIL", "critical acceptance"),
+        (AuditSnapshot(critical_invariant_covered=False), "FAIL", "critical invariant"),
         (AuditSnapshot(critical_negative_covered=False), "FAIL", "negative case omitted"),
+        (AuditSnapshot(base_sha="b" * 40), "FAIL", "base or branch"),
+        (AuditSnapshot(branch_read_live=False), "FAIL", "base or branch"),
         (AuditSnapshot(evidence_sha="b" * 40), "FAIL", "SHA stale"),
+        (AuditSnapshot(contradiction_resolved=False), "FAIL", "contradictory evidence"),
+        (AuditSnapshot(tests_preserved_or_equivalent=False), "FAIL", "removed or weakened"),
+        (
+            AuditSnapshot(material_fix_exists=True, fix_probe_verified=False),
+            "FAIL",
+            "BUILD/FIX probe",
+        ),
         (AuditSnapshot(smoke_sufficient=False), "FAIL", "smoke"),
         (AuditSnapshot(requested_changes=True), "FAIL", "requested changes"),
         (AuditSnapshot(open_threads=1), "FAIL", "review thread"),
@@ -577,6 +659,46 @@ def test_audit_semantic_matrix_requires_concrete_evidence_and_full_diff(
     assert evidence_fragment in evidence
 
 
+@pytest.mark.parametrize("command", ["ruff format file.py", "ruff check --fix file.py"])
+def test_audit_rejects_mutating_validation_commands(command: str) -> None:
+    assert _audit_validation_command(command) == "REJECT MUTATING COMMAND"
+
+
+def test_audit_allows_read_only_focused_validation() -> None:
+    assert _audit_validation_command("pytest tests/unit/test_contract.py") == "ALLOW READ-ONLY"
+
+
+def _audit_validation_command(command: str) -> str:
+    if " format" in command or "--fix" in command:
+        return "REJECT MUTATING COMMAND"
+    return "ALLOW READ-ONLY"
+
+
+@pytest.mark.parametrize("model_metadata", ["model-a", "model-b", "client-c"])
+def test_role_permissions_do_not_depend_on_model_metadata(model_metadata: str) -> None:
+    assert _role_permissions(model_metadata) == _role_permissions("other-client")
+
+
+def _role_permissions(model_metadata: str) -> dict[str, str]:
+    del model_metadata
+    return {
+        "PLAN": "control-plane",
+        "BUILD": "single-writer",
+        "UI_WORKER": "ui-only-writer",
+        "AUDIT": "read-only",
+    }
+
+
+def test_role_permissions_are_explicit_and_complete() -> None:
+    permissions = {
+        "PLAN": "control-plane",
+        "BUILD": "single-writer",
+        "UI_WORKER": "ui-only-writer",
+        "AUDIT": "read-only",
+    }
+    assert _role_permissions("evidence-only") == permissions
+
+
 @dataclass(frozen=True, slots=True)
 class FinalizeSnapshot:
     live_head: str = FULL_SHA
@@ -586,7 +708,9 @@ class FinalizeSnapshot:
     build_pass: bool = True
     audit_pass: bool = True
     ci_pass: bool = True
+    required_gate_name: str = "Python 3.12 quality"
     smoke_pass: bool = True
+    phase_transitioned: bool = True
     requested_changes: bool = False
     open_threads: int = 0
     mergeable: bool = True
@@ -599,6 +723,10 @@ def _finalize_guard(snapshot: FinalizeSnapshot, expected_sha: str) -> str | None
         return "live head changed"
     if {snapshot.build_sha, snapshot.audit_sha, snapshot.ci_sha} != {expected_sha}:
         return "BUILD, AUDIT or CI evidence is stale"
+    if snapshot.required_gate_name != "Python 3.12 quality":
+        return "required CI gate name is not literal"
+    if not snapshot.phase_transitioned:
+        return "mechanical phase transition is absent"
     if not all([snapshot.build_pass, snapshot.audit_pass, snapshot.ci_pass, snapshot.smoke_pass]):
         return "required evidence is not PASS"
     if snapshot.requested_changes:
@@ -638,6 +766,16 @@ def _finalize_decision(
         (FinalizeSnapshot(), FinalizeSnapshot(live_head="b" * 40), "second snapshot: live head"),
         (FinalizeSnapshot(ci_sha="b" * 40), FinalizeSnapshot(), "evidence is stale"),
         (FinalizeSnapshot(), FinalizeSnapshot(audit_sha="b" * 40), "evidence is stale"),
+        (
+            FinalizeSnapshot(phase_transitioned=False),
+            FinalizeSnapshot(),
+            "mechanical phase transition",
+        ),
+        (
+            FinalizeSnapshot(required_gate_name="Python quality"),
+            FinalizeSnapshot(),
+            "gate name is not literal",
+        ),
         (FinalizeSnapshot(requested_changes=True), FinalizeSnapshot(), "requested changes"),
         (FinalizeSnapshot(open_threads=1), FinalizeSnapshot(), "review thread"),
         (FinalizeSnapshot(mergeable=False), FinalizeSnapshot(), "not mergeable"),

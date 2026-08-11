@@ -38,9 +38,9 @@ body:
     id: expected_branch
     attributes: {label: Expected branch, placeholder: codex/capability-name}
     validations: {required: true}
-  - type: input
-    id: owner
-    attributes: {label: Implementation owner, description: "Un único writer."}
+  - type: dropdown
+    id: writer_role
+    attributes: {label: Writer role, description: "Rol único que puede escribir; el modelo/cliente no cambia autoridad.", options: [BUILD, UI_WORKER]}
     validations: {required: true}
   - type: textarea
     id: scope_delta
