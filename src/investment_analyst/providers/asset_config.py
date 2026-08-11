@@ -16,6 +16,8 @@ class ProviderConfigurationError(ValueError):
 
 _SEC_TICKER_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9.-]{0,31}$")
 _COINBASE_PRODUCT_PATTERN = re.compile(r"^[A-Z0-9]+-[A-Z0-9]+$")
+_DERIBIT_CURRENCY_PATTERN = re.compile(r"^[A-Z0-9]{2,16}$")
+_DERIBIT_PERPETUAL_PATTERN = re.compile(r"^[A-Z0-9]{2,16}-PERPETUAL$")
 
 
 class SecAccountingStandard(StrEnum):
@@ -53,6 +55,25 @@ def coinbase_source_id(product_id: str, granularity_seconds: int) -> str:
         else f"second-{granularity_seconds}-candles"
     )
     return f"coinbase-exchange:{slug}:{suffix}"
+
+
+def deribit_source_ids(currency: str, instrument_name: str) -> tuple[str, str, str]:
+    """Derive the three immutable Deribit source IDs for one perpetual."""
+    if currency != currency.strip() or not _DERIBIT_CURRENCY_PATTERN.fullmatch(currency):
+        raise ProviderConfigurationError("Deribit currency must use upper-case letters or digits")
+    if (
+        instrument_name != instrument_name.strip()
+        or not _DERIBIT_PERPETUAL_PATTERN.fullmatch(instrument_name)
+        or instrument_name != f"{currency}-PERPETUAL"
+    ):
+        raise ProviderConfigurationError("Deribit instrument_name must match CURRENCY-PERPETUAL")
+    slug = currency.casefold()
+    perpetual_slug = instrument_name.casefold()
+    return (
+        f"deribit:{perpetual_slug}:funding-rate-history",
+        f"deribit:{slug}:dvol:daily",
+        f"deribit:{perpetual_slug}:book-summary",
+    )
 
 
 class AlpacaAssetConfiguration(ContractModel):
@@ -128,6 +149,44 @@ class CoinbaseAssetConfiguration(ContractModel):
             raise ValueError("Coinbase candle configuration requires a crypto asset")
         if self.quote_currency != self.quote_unit:
             raise ValueError("Coinbase quote_currency must match product quote unit")
+        return self
+
+
+class DeribitAssetConfiguration(ContractModel):
+    """Catalog-backed Deribit currency, perpetual, units, and source identities."""
+
+    model_config = ConfigDict(frozen=True)
+
+    asset_id: NonEmptyStr
+    currency: NonEmptyStr
+    instrument_name: NonEmptyStr
+    funding_source_id: NonEmptyStr
+    dvol_source_id: NonEmptyStr
+    summary_source_id: NonEmptyStr
+    symbol: NonEmptyStr
+    name: NonEmptyStr
+    asset_class: AssetClass
+    quote_currency: NonEmptyStr
+    exchange: NonEmptyStr
+    provider_symbols: dict[NonEmptyStr, NonEmptyStr]
+
+    @model_validator(mode="after")
+    def validate_deribit_contract(self) -> "DeribitAssetConfiguration":
+        """Keep catalog identifiers, sources, and v1 units aligned."""
+        expected = deribit_source_ids(self.currency, self.instrument_name)
+        actual = (
+            self.funding_source_id,
+            self.dvol_source_id,
+            self.summary_source_id,
+        )
+        if actual != expected:
+            raise ValueError("Deribit source IDs must match currency and perpetual instrument")
+        if self.asset_class is not AssetClass.CRYPTO:
+            raise ValueError("Deribit derivatives configuration requires a crypto asset")
+        if self.symbol != self.currency:
+            raise ValueError("Deribit currency must match the canonical asset symbol")
+        if self.quote_currency != "USD":
+            raise ValueError("Deribit derivatives v1 requires USD quote currency")
         return self
 
 

@@ -1,6 +1,6 @@
 """Compose catalog-driven local scheduler jobs over the shared controller mutex."""
 
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Protocol
 from urllib.error import URLError
 
@@ -20,6 +20,14 @@ from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshRequest,
     BtcMarketRefreshSummary,
     BtcRefreshMode,
+)
+from investment_analyst.application.crypto_derivatives import (
+    CryptoDerivativesRefreshError,
+)
+from investment_analyst.application.crypto_derivatives_models import (
+    CryptoDerivativesRefreshMode,
+    CryptoDerivativesRefreshRequest,
+    CryptoDerivativesRefreshSummary,
 )
 from investment_analyst.application.crypto_spot_daily import CryptoSpotDailyRefreshError
 from investment_analyst.application.crypto_spot_daily_models import (
@@ -66,6 +74,7 @@ from investment_analyst.core.models import DataFrequency
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
 from investment_analyst.providers.asset_config import ProviderConfigurationError
 from investment_analyst.providers.crypto.coinbase_exchange import CoinbaseExchangeError
+from investment_analyst.providers.crypto.deribit import DeribitError
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarError
 from investment_analyst.providers.http import (
     RETRYABLE_HTTP_STATUS_CODES,
@@ -110,6 +119,13 @@ class _LocalScheduledOperations(Protocol):
         request: CryptoSpotDailyRefreshRequest,
     ) -> CryptoSpotDailyRefreshSummary:
         """Refresh one catalog-scoped Coinbase daily source."""
+        ...
+
+    def crypto_derivatives_refresh_request(
+        self,
+        request: CryptoDerivativesRefreshRequest,
+    ) -> CryptoDerivativesRefreshSummary:
+        """Refresh one complete Deribit derivatives family."""
         ...
 
     def btc_intraday_refresh_request(
@@ -157,6 +173,7 @@ class LocalWatchlistScheduleConfig(ContractModel):
     include_intraday: bool = True
     include_smv_registry: bool = False
     include_macro: bool = False
+    crypto_derivatives_asset_ids: tuple[NonEmptyStr, ...] = ()
 
     @field_validator("market_start", mode="before")
     @classmethod
@@ -217,6 +234,10 @@ class LocalWatchlistScheduleConfig(ContractModel):
         """Require a deterministic optional asset selection."""
         if self.selected_asset_ids != tuple(sorted(set(self.selected_asset_ids))):
             raise ValueError("selected_asset_ids must be unique and sorted")
+        if self.crypto_derivatives_asset_ids != tuple(
+            sorted(set(self.crypto_derivatives_asset_ids))
+        ):
+            raise ValueError("crypto_derivatives_asset_ids must be unique and sorted")
         if self.fundamental_frequency not in {
             DataFrequency.ANNUAL,
             DataFrequency.QUARTERLY,
@@ -244,6 +265,8 @@ def build_local_watchlist_jobs(
     jobs: list[RegisteredScheduledJob] = []
     for descriptor in descriptors:
         jobs.append(_market_job(controller, descriptor, config))
+        if descriptor.asset_id in config.crypto_derivatives_asset_ids:
+            jobs.append(_crypto_derivatives_job(controller, descriptor, config))
         if descriptor.has_fundamentals:
             jobs.append(_fundamental_job(controller, descriptor, config))
         if descriptor.supports_intraday and config.include_intraday:
@@ -427,6 +450,48 @@ def _market_job(
                 ScheduledJobFailureCategory.UNSUPPORTED_CAPABILITY,
                 "scheduled market provider is not supported",
             )
+        )
+
+    return RegisteredScheduledJob(definition, run)
+
+
+def _crypto_derivatives_job(
+    controller: _LocalScheduledOperations,
+    descriptor: MarketAssetDescriptor,
+    config: LocalWatchlistScheduleConfig,
+) -> RegisteredScheduledJob:
+    definition = ScheduledJobDefinition(
+        job_id=f"deribit:{descriptor.asset_id}:crypto-derivatives",
+        asset_id=descriptor.asset_id,
+        provider="deribit",
+        domain=ScheduledJobDomain.CRYPTO_DERIVATIVES,
+        data_frequency="hour_1/day_1/event",
+        timezone=config.timezone,
+        run_at=_offset_minute(config.run_at, 10),
+        freshness_threshold_seconds=129_600,
+    )
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        latest_closed_utc_date = invocation.scheduled_for.astimezone(UTC).date() - timedelta(days=1)
+        try:
+            summary = controller.crypto_derivatives_refresh_request(
+                CryptoDerivativesRefreshRequest(
+                    asset_id=descriptor.asset_id,
+                    start_date=latest_closed_utc_date - timedelta(days=89),
+                    end_date=latest_closed_utc_date,
+                    refresh_mode=CryptoDerivativesRefreshMode.AUTO,
+                )
+            )
+        except (CryptoDerivativesRefreshError, DeribitError, StorageError, ValueError) as error:
+            raise _classified_provider_error(error) from error
+        return ScheduledJobExecution(
+            job_id=definition.job_id,
+            effective_known_at=summary.effective_known_at,
+            evidence_changed=summary.created_count > 0,
+            source_ids=summary.source_ids,
+            created_count=summary.created_count,
+            reused_count=summary.reused_count,
+            coverage_complete=summary.traceability_verified,
         )
 
     return RegisteredScheduledJob(definition, run)
@@ -742,6 +807,7 @@ def _non_http_failure(chain: tuple[BaseException, ...]) -> ScheduledJobFailure:
             (
                 AlpacaStockError,
                 CoinbaseExchangeError,
+                DeribitError,
                 SecEdgarError,
                 FredAlfredError,
                 SmvOpenDataError,
@@ -771,6 +837,7 @@ def _provider_status_code(chain: tuple[BaseException, ...]) -> int | None:
                 (
                     AlpacaStockError,
                     CoinbaseExchangeError,
+                    DeribitError,
                     SecEdgarError,
                     FredAlfredError,
                     SmvOpenDataError,

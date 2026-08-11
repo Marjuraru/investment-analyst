@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","result":[{"ask_price":4002,"base_currency":"ETH","bid_price":4000,"creation_timestamp":1785630600000,"current_funding":-0.000012,"funding_8h":-0.000096,"instrument_name":"ETH-PERPETUAL","last":4001,"mark_price":4001,"mid_price":4001,"open_interest":250000000,"price_change":-0.5,"quote_currency":"USD","volume":54321,"volume_usd":217338321}],"testnet":false}

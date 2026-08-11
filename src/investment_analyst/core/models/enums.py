@@ -52,6 +52,7 @@ class MetricCategory(StrEnum):
     FUNDAMENTAL = "fundamental"
     VALUATION = "valuation"
     CRYPTO_FUNDAMENTAL = "crypto_fundamental"
+    CRYPTO_DERIVATIVES = "crypto_derivatives"
     UNIFIED = "unified"
     CAZATIBURONES = "cazatiburones"
     DATA_QUALITY = "data_quality"

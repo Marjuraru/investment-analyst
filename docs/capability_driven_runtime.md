@@ -15,13 +15,20 @@ existe. `GET /api/v1/capabilities` expone este inventario inmutable.
 Todo criptoactivo del catálogo debe declarar `crypto_profile`; no existe fallback para un perfil
 ausente. La taxonomía analítica distingue `bitcoin`, `ethereum`, `altcoin` y `unsupported`;
 stablecoins y activos wrapped se clasifican explícitamente como no soportados. Solo Bitcoin tiene
-pipelines productivos. Ethereum y altcoins se caracterizan mediante contratos sintéticos, sin
-fórmulas on-chain ni reutilización de diagnósticos de Bitcoin.
+pipelines spot específicos adicionales. BTC y ETH comparten spot diario y derivados; Ethereum y
+altcoins no reutilizan fórmulas on-chain ni diagnósticos spot específicos de Bitcoin.
 
 La configuración Coinbase declara producto, `asset_id`, source ID, granularity, unidad base y unidad
 de cotización. `coinbase_source_id(product_id, granularity_seconds)` conserva exactamente las
 identidades BTC existentes y permite resolver otro producto sin copiar constantes de BTC. Añadir
 otro producto al catálogo no activa por sí solo ingestión o análisis productivos.
+
+La configuración Deribit exige conjuntamente currency, instrumento perpetuo y las capacidades de
+funding horario, DVOL diario y snapshot. Sólo esa resolución completa habilita el job
+`deribit:<asset_id>:crypto-derivatives`; una selección sin las tres capacidades no lo registra. El
+job conserva dominio `crypto_derivatives`, offset +10 minutos, freshness 36h y planner rolling de 90
+días. No añade rutas HTTP/UI, polling ni WebSocket. Véase
+[`crypto_derivatives.md`](crypto_derivatives.md).
 
 ## Lecturas y writer
 
@@ -110,5 +117,5 @@ sustituye el workspace de origen. No hay nube, compresión nueva, dependencia ni
   clientes nuevos deben preferir la cola versionada.
 - La telemetría de llamadas y bytes requiere instrumentación explícita por transporte para dejar de
   ser desconocida.
-- Solo Bitcoin dispone de ingestión y diagnóstico cripto productivos; los demás perfiles son límites
-  tipados, no promesas de cobertura.
+- BTC y ETH disponen de spot diario y derivados productivos; intradía y análisis spot específicos de
+  Bitcoin no se generalizan implícitamente a otros perfiles.

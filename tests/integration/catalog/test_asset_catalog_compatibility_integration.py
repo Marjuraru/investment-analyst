@@ -61,3 +61,8 @@ def test_catalog_capabilities_match_current_working_integrations() -> None:
     assert service.supports(COINBASE_ASSET_ID, "market.minute_bars")
     assert not service.supports(APPLE_ASSET_ID, "market.minute_bars")
     assert not service.supports(COINBASE_ASSET_ID, "fundamentals.company_facts")
+    for asset_id in (COINBASE_ASSET_ID, "crypto:eth-usd"):
+        assert service.supports(asset_id, "derivatives.funding.hourly")
+        assert service.supports(asset_id, "derivatives.perpetual.snapshot")
+        assert service.supports(asset_id, "derivatives.volatility_index.daily")
+    assert not service.supports(APPLE_ASSET_ID, "derivatives.funding.hourly")

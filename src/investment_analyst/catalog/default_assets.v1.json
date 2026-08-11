@@ -21,6 +21,23 @@
           "identifier": "BTC-USD",
           "namespace": "product_id",
           "provider": "coinbase"
+        },
+        {
+          "capabilities": [
+            "derivatives.volatility_index.daily"
+          ],
+          "identifier": "BTC",
+          "namespace": "currency",
+          "provider": "deribit"
+        },
+        {
+          "capabilities": [
+            "derivatives.funding.hourly",
+            "derivatives.perpetual.snapshot"
+          ],
+          "identifier": "BTC-PERPETUAL",
+          "namespace": "instrument_name",
+          "provider": "deribit"
         }
       ],
       "provider_symbols": {
@@ -49,6 +66,23 @@
           "identifier": "ETH-USD",
           "namespace": "product_id",
           "provider": "coinbase"
+        },
+        {
+          "capabilities": [
+            "derivatives.volatility_index.daily"
+          ],
+          "identifier": "ETH",
+          "namespace": "currency",
+          "provider": "deribit"
+        },
+        {
+          "capabilities": [
+            "derivatives.funding.hourly",
+            "derivatives.perpetual.snapshot"
+          ],
+          "identifier": "ETH-PERPETUAL",
+          "namespace": "instrument_name",
+          "provider": "deribit"
         }
       ],
       "provider_symbols": {

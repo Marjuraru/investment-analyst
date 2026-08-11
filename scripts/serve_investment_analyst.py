@@ -32,6 +32,10 @@ from investment_analyst.application.asset_preferences import (
     effective_asset_preferences,
     scheduled_available_asset_ids,
 )
+from investment_analyst.application.crypto_derivatives_models import (
+    CryptoDerivativesRefreshRequest,
+    CryptoDerivativesRefreshSummary,
+)
 from investment_analyst.application.facade import InvestmentAnalystApplication
 from investment_analyst.application.manual_operations import (
     ManualOperationQueue,
@@ -47,7 +51,11 @@ from investment_analyst.application.operational_alerts import (
     OperationalAlertStateStore,
 )
 from investment_analyst.application.operational_state import AaplOperationalStateError
-from investment_analyst.application.runtime import ApplicationRuntime, ApplicationRuntimeError
+from investment_analyst.application.runtime import (
+    ApplicationRuntime,
+    ApplicationRuntimeError,
+    StorageLocationRequest,
+)
 from investment_analyst.application.scheduled_observers import ScheduledJobObserverChain
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.frontend.local_schedule_jobs import (
@@ -72,6 +80,26 @@ _ANALYTICAL_RULE_REGISTRY_FILE = "analytical_rule_registry_state_v1.json"
 _MANUAL_OPERATION_STATE_FILE = "manual_operation_state_v1.json"
 _ASSET_PREFERENCES_STATE_FILE = "asset_preferences_state_v1.json"
 _SERVICE_LOCK_FILE = "aapl_local_service.lock"
+
+
+class _DerivativesLocalController(AaplLocalController):
+    """Extend the existing ``AaplLocalController(...)`` application boundary.
+
+    The added scheduler route deliberately reuses the controller's writer mutex.
+    """
+
+    def crypto_derivatives_refresh_request(
+        self,
+        request: CryptoDerivativesRefreshRequest,
+    ) -> CryptoDerivativesRefreshSummary:
+        with self._writer_lock:
+            try:
+                return self._application.refresh_crypto_derivatives(
+                    request,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                )
+            finally:
+                self._refresh_health_snapshot()
 
 
 def _date_value(value: str) -> date:
@@ -173,7 +201,7 @@ def _serve(
     application = InvestmentAnalystApplication(runtime)
     runner = AaplDailyRunner(application, runtime.workspace_service)
     alpaca_credentials, sec_identity, fred_api_key = credentials
-    controller = AaplLocalController(
+    controller = _DerivativesLocalController(
         runner,
         application,
         workspace=paths.root,
@@ -216,6 +244,7 @@ def _serve(
         include_intraday=not arguments.no_schedule_intraday,
         include_smv_registry=not arguments.no_schedule_smv,
         include_macro=fred_api_key is not None and not arguments.no_schedule_macro,
+        crypto_derivatives_asset_ids=application.list_crypto_derivatives_assets(),
     )
     preference_store = AssetPreferencesStore(paths.state_root / _ASSET_PREFERENCES_STATE_FILE)
     preference_seed = cli_seed_asset_preferences(

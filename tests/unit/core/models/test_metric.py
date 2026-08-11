@@ -49,6 +49,7 @@ def test_metric_definition_and_result_are_serializable() -> None:
     assert str(result.result_id) in serialized
     assert str(observation_id) in serialized
     assert '"value":"0.0125"' in serialized
+    assert MetricCategory.CRYPTO_DERIVATIVES.value == "crypto_derivatives"
 
 
 def test_metric_result_requires_input_observations() -> None:

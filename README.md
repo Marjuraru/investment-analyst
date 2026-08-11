@@ -55,6 +55,10 @@ propia. No se añadirán nuevas rutas o modelos específicos de Apple.
 - workspace persistente con DuckDB, RawRecords, observaciones normalizadas, métricas, diagnósticos y
   exportación Parquet;
 - catálogo central de activos y resolución independiente de proveedores;
+- evidencia pública de derivados Deribit para BTC y ETH: funding horario, DVOL diario y snapshots
+  prospectivos de perpetuos con receipts, revisiones append-only, métricas Decimal34 y diagnóstico
+  multidimensional sin score; el backfill sólo es visible desde su primera recepción local y no se
+  mezcla con Coinbase spot;
 - importación de barras diarias de AAPL mediante Alpaca Market Data IEX, con la limitación explícita
   de que IEX no equivale a cobertura consolidada SIP;
 - base intradía separada para BTC-USD mediante velas públicas de un minuto de Coinbase Exchange,
@@ -178,6 +182,8 @@ información de la que realmente contienen.
   automática con precedencia CLI documentada y reconciliación sin reinicio.
 - [Base intradía de Coinbase](docs/coinbase_intraday.md): importar ventanas acotadas de un minuto y
   consultar agregaciones trazables por CLI o interfaz sin mezclar la historia diaria.
+- [Derivados cripto Deribit](docs/crypto_derivatives.md): refrescar funding, DVOL y snapshots de
+  perpetuos para BTC/ETH, consultar replay PIT y entender receipts, scheduler y limitaciones.
 - [Refresh fundamental SEC por emisor](docs/sec_issuer_refresh.md): actualizar snapshots,
   observaciones, métricas y diagnóstico de una empresa configurada sin acoplarla a su mercado.
 - [Valoración corporativa point-in-time](docs/corporate_valuation_point_in_time.md): alinear precio

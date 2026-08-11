@@ -23,11 +23,15 @@ from investment_analyst.analytics.valuation import (
     ValuationSnapshotStatus,
 )
 from investment_analyst.application.btc_intraday_models import BtcIntradayChartRequest
+from investment_analyst.application.crypto_derivatives_models import (
+    CryptoDerivativesQueryRequest,
+)
 from investment_analyst.application.facade import InvestmentAnalystApplication
 from investment_analyst.application.runtime import ApplicationRuntime, StorageLocationRequest
 from investment_analyst.catalog.models import (
     AssetCatalogDocument,
     CatalogAsset,
+    CatalogCryptoProfile,
     ProviderBinding,
 )
 from investment_analyst.catalog.provider_context import (
@@ -236,6 +240,74 @@ def test_btc_intraday_chart_query_is_empty_bounded_and_read_only(tmp_path: Path)
     assert chart.source_bar_count == 0
     assert chart.traceability_verified
     assert storage_paths.database_path.read_bytes() == database_before
+
+
+def test_derivatives_capability_and_empty_query_are_catalog_driven_and_read_only(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "legacy-derivatives"
+    storage_paths = StoragePaths.from_root(root)
+    with LocalStorage(storage_paths):
+        pass
+    database_before = storage_paths.database_path.read_bytes()
+    application = _application(tmp_path)
+
+    result = application.query_crypto_derivatives(
+        CryptoDerivativesQueryRequest(
+            asset_id="crypto:btc-usd",
+            start_date=date(2026, 8, 1),
+            end_date=date(2026, 8, 7),
+            known_at=datetime(2026, 8, 8, tzinfo=UTC),
+        ),
+        location=StorageLocationRequest(legacy_root=root),
+    )
+
+    assert application.list_crypto_derivatives_assets() == (
+        "crypto:btc-usd",
+        "crypto:eth-usd",
+    )
+    assert result.diagnostic.status.value == "insufficient_data"
+    assert len(result.source_ids) == 6
+    assert result.metrics == ()
+    assert result.raw_record_ids == ()
+    assert result.traceability_verified
+    assert storage_paths.database_path.read_bytes() == database_before
+
+
+def test_derivatives_asset_listing_requires_all_three_capabilities(tmp_path: Path) -> None:
+    catalog = AssetCatalogService(
+        AssetCatalogDocument(
+            catalog_version=1,
+            assets=(
+                CatalogAsset(
+                    asset_id="crypto:test-usd",
+                    symbol="TEST",
+                    name="Incomplete derivative test asset",
+                    asset_class=AssetClass.CRYPTO,
+                    quote_currency="USD",
+                    exchange="DERIBIT",
+                    provider_symbols={},
+                    aliases=("TEST",),
+                    crypto_profile=CatalogCryptoProfile.ALTCOIN,
+                    provider_bindings=(
+                        ProviderBinding(
+                            provider="deribit",
+                            namespace="currency",
+                            identifier="TEST",
+                            capabilities=("derivatives.funding.hourly",),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    runtime = ApplicationRuntime(
+        WorkspaceService(environ={}, home=tmp_path),
+        catalog,
+        ProviderAssetContextResolver(catalog),
+    )
+
+    assert InvestmentAnalystApplication(runtime).list_crypto_derivatives_assets() == ()
 
 
 def test_fundamental_trend_query_is_empty_bounded_and_read_only(tmp_path: Path) -> None:

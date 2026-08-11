@@ -39,6 +39,11 @@ siendo un contrato separado de BTC-USD. La valoración v1 mantiene sus estados `
 `not_applicable` cuando faltan inputs compatibles y no cubre ETF, cripto, valoración histórica ni
 reglas posteriores.
 
+BTC y ETH incorporan además una familia productiva separada de derivados Deribit: funding horario,
+DVOL diario, snapshots prospectivos, replay PIT y scheduler. El diagnóstico es descriptivo y sin
+score; el backfill no se presenta como vintage y no se mezcla con Coinbase spot. Véase
+[`crypto_derivatives.md`](crypto_derivatives.md).
+
 ## Diagnóstico de la estructura actual
 
 ### Base que debe conservarse
@@ -196,6 +201,8 @@ resultados; añadir una dependencia solo por routing no aporta valor al MVP.
 - distribuir los trabajos durante el día y priorizar por frescura y watchlist;
 - no recalcular ni evaluar screening si no cambió la evidencia;
 - conservar recibos de cobertura y progreso por ventana para backfills;
+- mantener el job Deribit por activo elegible a +10 minutos, con ventana rolling de 90 días,
+  freshness 36h y snapshot actual aun cuando los históricos estén cubiertos;
 - crear un health resumido que diferencie datos desactualizados, fuente bloqueada y fallo del
   producto;
 - registrar tiempo, memoria aproximada, bytes y resultado de cada trabajo sin secretos.

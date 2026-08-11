@@ -1,6 +1,7 @@
 """Tests for catalog-driven local watchlist scheduling composition."""
 
 from datetime import UTC, date, datetime, time
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,7 @@ from investment_analyst.application.listed_market_refresh import (
 from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobDomain,
     ScheduledJobFailureCategory,
+    ScheduledJobInvocation,
 )
 from investment_analyst.application.runtime import ApplicationRuntime
 from investment_analyst.application.sec_fundamental_refresh import (
@@ -23,6 +25,7 @@ from investment_analyst.frontend.local_schedule_jobs import (
     build_local_watchlist_jobs,
 )
 from investment_analyst.providers.asset_config import ProviderConfigurationError
+from investment_analyst.providers.crypto.deribit import DeribitError
 from investment_analyst.providers.http import HttpRequestError
 from investment_analyst.providers.macro.fred_alfred import FredAlfredError
 from investment_analyst.providers.macro.fred_catalog import FRED_SERIES_CATALOG
@@ -39,6 +42,12 @@ class _UnusedController:
         raise AssertionError(request)
 
     def btc_intraday_refresh_request(self, request):
+        raise AssertionError(request)
+
+    def crypto_spot_daily_refresh_request(self, request):
+        raise AssertionError(request)
+
+    def crypto_derivatives_refresh_request(self, request):
         raise AssertionError(request)
 
     def sec_fundamental_refresh_request(self, request):
@@ -114,6 +123,54 @@ def test_selected_equity_and_crypto_receive_only_compatible_jobs() -> None:
     }
 
 
+def test_derivatives_job_is_capability_opt_in_offset_and_requests_rolling_90_days() -> None:
+    class _Controller(_UnusedController):
+        def __init__(self) -> None:
+            self.request = None
+
+        def crypto_derivatives_refresh_request(self, request):
+            self.request = request
+            return SimpleNamespace(
+                effective_known_at=datetime(2026, 8, 11, 12, 11, tzinfo=UTC),
+                created_count=7,
+                reused_count=3,
+                source_ids=(
+                    "deribit:btc-perpetual:book-summary",
+                    "deribit:btc-perpetual:funding-rate-history",
+                    "deribit:btc:dvol:daily",
+                ),
+                traceability_verified=True,
+            )
+
+    controller = _Controller()
+    config = _config("crypto:btc-usd").model_copy(
+        update={"crypto_derivatives_asset_ids": ("crypto:btc-usd", "crypto:eth-usd")}
+    )
+    jobs = build_local_watchlist_jobs(controller, _universe(), config)
+    job = next(
+        item for item in jobs if item.definition.domain is ScheduledJobDomain.CRYPTO_DERIVATIVES
+    )
+    invocation = ScheduledJobInvocation(
+        definition=job.definition,
+        local_date=date(2026, 8, 11),
+        scheduled_for=job.definition.scheduled_for(date(2026, 8, 11)),
+        started_at=datetime(2026, 8, 11, 12, 10, tzinfo=UTC),
+        attempt_number=1,
+    )
+
+    execution = job.run(invocation)
+
+    assert job.definition.job_id == "deribit:crypto:btc-usd:crypto-derivatives"
+    assert job.definition.run_at == time(hour=7, minute=10)
+    assert job.definition.freshness_threshold_seconds == 129_600
+    assert controller.request.start_date == date(2026, 5, 13)
+    assert controller.request.end_date == date(2026, 8, 10)
+    assert controller.request.refresh_mode.value == "auto"
+    assert execution.created_count == 7
+    assert execution.reused_count == 3
+    assert execution.coverage_complete is True
+
+
 def test_selected_asset_must_exist_in_visible_catalog() -> None:
     with pytest.raises(ValueError, match="not supported"):
         build_local_watchlist_jobs(
@@ -175,6 +232,11 @@ def test_optional_macro_and_smv_jobs_have_independent_provider_scopes() -> None:
             AlpacaStockError("forbidden simulated-secret", status_code=403),
             ScheduledJobFailureCategory.AUTHENTICATION,
             False,
+        ),
+        (
+            DeribitError("limited simulated-secret", status_code=429),
+            ScheduledJobFailureCategory.RATE_LIMIT,
+            True,
         ),
         (
             SmvOpenDataNotFoundError("unsupported simulated-secret"),

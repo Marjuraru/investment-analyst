@@ -14,6 +14,7 @@ from investment_analyst.catalog.provider_configuration import (
     resolve_alpaca_configuration,
     resolve_coinbase_configuration,
     resolve_coinbase_intraday_configuration,
+    resolve_deribit_configuration,
     resolve_sec_configuration,
 )
 from investment_analyst.catalog.provider_context import (
@@ -26,10 +27,12 @@ from investment_analyst.core.models import AssetClass
 from investment_analyst.providers.asset_config import (
     AlpacaAssetConfiguration,
     CoinbaseAssetConfiguration,
+    DeribitAssetConfiguration,
     ProviderConfigurationError,
     SecAccountingStandard,
     SecAssetConfiguration,
     coinbase_source_id,
+    deribit_source_ids,
     sec_source_ids,
 )
 from investment_analyst.providers.crypto.coinbase_exchange import (
@@ -244,6 +247,63 @@ def test_coinbase_source_identity_scales_by_product_and_granularity() -> None:
     )
     with pytest.raises(ProviderConfigurationError):
         coinbase_source_id("eth/usd", DAILY_GRANULARITY_SECONDS)
+
+
+@pytest.mark.parametrize(
+    ("asset_id", "currency", "instrument_name", "expected_sources"),
+    [
+        (
+            "crypto:btc-usd",
+            "BTC",
+            "BTC-PERPETUAL",
+            (
+                "deribit:btc-perpetual:funding-rate-history",
+                "deribit:btc:dvol:daily",
+                "deribit:btc-perpetual:book-summary",
+            ),
+        ),
+        (
+            "crypto:eth-usd",
+            "ETH",
+            "ETH-PERPETUAL",
+            (
+                "deribit:eth-perpetual:funding-rate-history",
+                "deribit:eth:dvol:daily",
+                "deribit:eth-perpetual:book-summary",
+            ),
+        ),
+    ],
+)
+def test_deribit_configuration_resolves_exact_three_source_contract(
+    asset_id: str,
+    currency: str,
+    instrument_name: str,
+    expected_sources: tuple[str, str, str],
+) -> None:
+    configuration = resolve_deribit_configuration(_resolver(), asset_id=asset_id)
+
+    assert configuration == DeribitAssetConfiguration(
+        asset_id=asset_id,
+        currency=currency,
+        instrument_name=instrument_name,
+        funding_source_id=expected_sources[0],
+        dvol_source_id=expected_sources[1],
+        summary_source_id=expected_sources[2],
+        symbol=currency,
+        name="Bitcoin" if currency == "BTC" else "Ethereum",
+        asset_class=AssetClass.CRYPTO,
+        quote_currency="USD",
+        exchange="COINBASE",
+        provider_symbols={"coinbase_exchange": f"{currency}-USD"},
+    )
+    assert deribit_source_ids(currency, instrument_name) == expected_sources
+
+
+def test_deribit_source_identity_rejects_cross_currency_or_non_perpetual() -> None:
+    with pytest.raises(ProviderConfigurationError):
+        deribit_source_ids("BTC", "ETH-PERPETUAL")
+    with pytest.raises(ProviderConfigurationError):
+        deribit_source_ids("BTC", "BTC-30DEC26")
 
 
 def test_sec_configuration_resolves_a_future_us_issuer_without_apple_ids() -> None:

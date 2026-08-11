@@ -24,6 +24,7 @@ class ScheduledJobDomain(StrEnum):
 
     MARKET_DAILY = "market_daily"
     MARKET_INTRADAY = "market_intraday"
+    CRYPTO_DERIVATIVES = "crypto_derivatives"
     FUNDAMENTALS = "fundamentals"
     CATALOG = "catalog"
     MACRO = "macro"

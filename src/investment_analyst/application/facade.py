@@ -15,6 +15,15 @@ from investment_analyst.analytics.consolidated_diagnostic_models import (
 from investment_analyst.analytics.consolidated_diagnostic_service import (
     AaplConsolidatedDiagnosticService,
 )
+from investment_analyst.analytics.crypto.derivatives_engine import (
+    CryptoDerivativesMetricEngine,
+)
+from investment_analyst.analytics.crypto.derivatives_models import (
+    CryptoDerivativesQueryResult,
+)
+from investment_analyst.analytics.crypto.derivatives_service import (
+    CryptoDerivativesService,
+)
 from investment_analyst.analytics.fundamental_trend_models import (
     AaplFundamentalTrend,
     AaplFundamentalTrendRequest,
@@ -103,6 +112,15 @@ from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshSummary,
 )
 from investment_analyst.application.btc_refresh_planner import BtcMarketRefreshPlanner
+from investment_analyst.application.crypto_derivatives import (
+    CryptoDerivativesRefreshService,
+)
+from investment_analyst.application.crypto_derivatives_models import (
+    CryptoDerivativesQueryRequest,
+    CryptoDerivativesRefreshRequest,
+    CryptoDerivativesRefreshSummary,
+    public_date_bounds,
+)
 from investment_analyst.application.crypto_spot_daily import (
     CryptoSpotDailyRefreshPipeline,
 )
@@ -142,6 +160,7 @@ from investment_analyst.catalog.provider_configuration import (
     resolve_alpaca_configuration,
     resolve_coinbase_configuration,
     resolve_coinbase_intraday_configuration,
+    resolve_deribit_configuration,
     resolve_sec_configuration,
 )
 from investment_analyst.core.models.base import ContractModel
@@ -150,6 +169,7 @@ from investment_analyst.providers.crypto.coinbase_pipeline import (
     CoinbaseHistoricalPipeline,
     CoinbaseIntradayPipeline,
 )
+from investment_analyst.providers.crypto.deribit import DeribitClient
 from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
     SecCompanyFactsNormalizer,
 )
@@ -584,6 +604,106 @@ class InvestmentAnalystApplication:
                 ),
                 clock=execution_clock,
             ).run(request)
+
+    def list_crypto_derivatives_assets(self) -> tuple[str, ...]:
+        """Return assets exposing the complete Deribit v1 capability set."""
+        capabilities = (
+            "derivatives.funding.hourly",
+            "derivatives.perpetual.snapshot",
+            "derivatives.volatility_index.daily",
+        )
+        eligible_ids = {
+            asset.asset_id
+            for asset in self._runtime.catalog.list_assets(capability=capabilities[0])
+        }
+        for capability in capabilities[1:]:
+            eligible_ids.intersection_update(
+                asset.asset_id for asset in self._runtime.catalog.list_assets(capability=capability)
+            )
+        configured = tuple(
+            resolve_deribit_configuration(
+                self._runtime.provider_resolver,
+                asset_id=asset_id,
+            )
+            for asset_id in sorted(eligible_ids)
+        )
+        return tuple(sorted(item.asset_id for item in configured))
+
+    def refresh_crypto_derivatives(
+        self,
+        request: CryptoDerivativesRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CryptoDerivativesRefreshSummary:
+        """Refresh one catalog-scoped Deribit derivatives evidence family."""
+        configuration = resolve_deribit_configuration(
+            self._runtime.provider_resolver,
+            asset_id=request.asset_id,
+        )
+        read_write = WorkspaceAccessMode.READ_WRITE
+        with self._runtime.open_storage(
+            location,
+            access_mode=read_write,
+        ) as storage:
+            execution_clock = BtcMarketExecutionClock()
+            return CryptoDerivativesRefreshService(
+                storage,
+                DeribitClient(
+                    self._transport_factory(),
+                    clock=execution_clock,
+                ),
+                configuration=configuration,
+                clock=execution_clock,
+            ).run(request)
+
+    def query_crypto_derivatives(
+        self,
+        request: CryptoDerivativesQueryRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CryptoDerivativesQueryResult:
+        """Replay one derivatives information set without provider or storage writes."""
+        configuration = resolve_deribit_configuration(
+            self._runtime.provider_resolver,
+            asset_id=request.asset_id,
+        )
+        family_configurations = tuple(
+            resolve_deribit_configuration(
+                self._runtime.provider_resolver,
+                asset_id=asset_id,
+            )
+            for asset_id in self.list_crypto_derivatives_assets()
+        )
+        diagnostic_source_ids = tuple(
+            sorted(
+                source_id
+                for item in family_configurations
+                for source_id in (
+                    item.funding_source_id,
+                    item.dvol_source_id,
+                    item.summary_source_id,
+                )
+            )
+        )
+        start, end = public_date_bounds(request.start_date, request.end_date)
+        read_only = WorkspaceAccessMode.READ_ONLY
+        with self._runtime.open_storage(
+            location,
+            access_mode=read_only,
+        ) as storage:
+            return CryptoDerivativesService(
+                storage,
+                CryptoDerivativesMetricEngine(),
+            ).query(
+                asset_id=configuration.asset_id,
+                funding_source_id=configuration.funding_source_id,
+                dvol_source_id=configuration.dvol_source_id,
+                summary_source_id=configuration.summary_source_id,
+                diagnostic_source_ids=diagnostic_source_ids,
+                start=start,
+                end=end,
+                known_at=request.known_at,
+            )
 
     def refresh_listed_market(
         self,

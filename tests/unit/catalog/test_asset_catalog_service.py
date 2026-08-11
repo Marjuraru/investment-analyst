@@ -176,6 +176,34 @@ def test_coinbase_asset_and_product_binding_are_available() -> None:
     assert not service.supports(ethereum.asset_id, "market.minute_bars")
 
 
+def test_deribit_bindings_are_exact_ordered_and_capability_scoped() -> None:
+    service = AssetCatalogService.load_default()
+
+    for asset_id, currency in (
+        ("crypto:btc-usd", "BTC"),
+        ("crypto:eth-usd", "ETH"),
+    ):
+        asset = service.get(asset_id)
+        deribit = tuple(
+            binding for binding in asset.provider_bindings if binding.provider == "deribit"
+        )
+        assert tuple(binding.namespace for binding in deribit) == (
+            "currency",
+            "instrument_name",
+        )
+        assert tuple(binding.identifier for binding in deribit) == (
+            currency,
+            f"{currency}-PERPETUAL",
+        )
+        assert service.supports(asset_id, "derivatives.funding.hourly")
+        assert service.supports(asset_id, "derivatives.perpetual.snapshot")
+        assert service.supports(asset_id, "derivatives.volatility_index.daily")
+    assert [
+        item.asset_id for item in service.list_assets(capability="derivatives.funding.hourly")
+    ] == ["crypto:btc-usd", "crypto:eth-usd"]
+    assert not service.supports("equity:us:aapl", "derivatives.funding.hourly")
+
+
 def test_bvl_listings_have_separate_exchange_identity_and_corroborated_isin() -> None:
     service = AssetCatalogService.load_default()
     cerro = service.resolve_external(
