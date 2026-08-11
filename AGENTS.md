@@ -151,6 +151,8 @@ results, and pending risks.
 - Explicit `/ui` in a supported client authorizes the same BUILD phase only for the UI Worker scope
   declared by the active Work Block. The UI Worker is the sole writer, uses no parallel writer or
   intra-block handoff, and returns to PLAN for any scope or capability expansion.
+- PLAN, BUILD, UI_WORKER and AUDIT are roles defined by their permissions, inputs, outputs and
+  gates. The selected model or client is evidence metadata only and never changes authority.
 - Explicit `/audit` in Antigravity or `$audit` in compatible clients authorizes the read-only
   AUDIT phase and one structured PR comment bound to the exact SHA. When the resolved Work Block
   has `finalize_policy: AUTO`, an AUDIT PASS in that same invocation may continue to the narrow
