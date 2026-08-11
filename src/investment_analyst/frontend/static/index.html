@@ -14,78 +14,105 @@
     <a class="skip-link" href="#contenido">Saltar al contenido principal</a>
 
     <div class="app-shell">
-      <aside class="sidebar" aria-label="Navegación principal">
-        <a class="brand" href="#resumen" aria-label="Investment Analyst, inicio">
-          <span class="brand-mark" aria-hidden="true">IA</span>
-          <span>
-            <strong>Investment</strong>
-            <small>Analyst</small>
-          </span>
-        </a>
+      <aside id="app-sidebar" class="sidebar" aria-label="Navegación principal">
+        <div class="sidebar-header">
+          <a class="brand" href="#resumen" aria-label="Investment Analyst, inicio">
+            <span class="brand-mark" aria-hidden="true">IA</span>
+            <span class="brand-text">
+              <strong>Investment</strong>
+              <small>Analyst</small>
+            </span>
+          </a>
+          <button id="sidebar-toggle" class="icon-button sidebar-toggle" aria-expanded="true" aria-controls="app-sidebar" aria-label="Colapsar navegación">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 12H5M12 19l-7-7 7-7"/>
+            </svg>
+          </button>
+        </div>
 
-        <nav class="primary-nav" aria-label="Secciones">
+        <nav class="primary-nav" aria-label="Navegación global">
           <a class="nav-link active" href="#resumen" aria-current="page">
-            <span class="nav-index" aria-hidden="true">01</span>
-            Resumen
-          </a>
-          <a class="nav-link" href="#mercado">
-            <span class="nav-index" aria-hidden="true">02</span>
-            Mercado
-          </a>
-          <a class="nav-link" href="#fundamentales" data-fundamental-only>
-            <span class="nav-index" aria-hidden="true">03</span>
-            Fundamentales
-          </a>
-          <a id="valuation-nav-link" class="nav-link" href="#valoracion" data-valuation-only>
-            <span class="nav-index" aria-hidden="true">04</span>
-            Valoración
-          </a>
-          <a class="nav-link" href="#analisis" data-complete-analysis-only>
-            <span class="nav-index" aria-hidden="true">05</span>
-            Análisis
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+            <span class="nav-text">Resumen</span>
           </a>
           <a class="nav-link" href="#operacion">
-            <span class="nav-index" aria-hidden="true">06</span>
-            Operación
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            <span class="nav-text">Operación</span>
           </a>
         </nav>
 
-        <div class="sidebar-sources">
-          <p>Fuentes verificables</p>
-          <span>SEC EDGAR</span>
-          <span>Alpaca Market Data · IEX</span>
-          <span>Coinbase Exchange · BTC-USD</span>
-        </div>
+        <nav class="asset-nav" aria-label="Tabs del activo">
+          <p class="nav-group-title">Análisis de activo</p>
+          <a class="nav-link" href="#mercado">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+            <span class="nav-text">Mercado</span>
+          </a>
+          <a class="nav-link" href="#fundamentales" data-fundamental-only>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="20" x2="12" y2="10"></line><line x1="18" y1="20" x2="18" y2="4"></line><line x1="6" y1="20" x2="6" y2="16"></line></svg>
+            <span class="nav-text">Fundamentales</span>
+          </a>
+          <a id="valuation-nav-link" class="nav-link" href="#valoracion" data-valuation-only>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>
+            <span class="nav-text">Valoración</span>
+          </a>
+          <a class="nav-link" href="#analisis" data-complete-analysis-only>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+            <span class="nav-text">Análisis</span>
+          </a>
+        </nav>
       </aside>
 
       <div class="workspace">
         <header class="topbar">
           <div class="asset-context">
-            <p id="asset-breadcrumb" class="breadcrumb">Análisis de acciones <span aria-hidden="true">/</span> Estados Unidos</p>
             <div class="asset-heading">
-              <span id="asset-symbol" class="asset-symbol" aria-hidden="true">AAPL</span>
-              <div>
-                <h1 id="asset-name">Apple Inc.</h1>
-                <p id="asset-meta">NASDAQ · USD · Datos diarios</p>
+              <div id="asset-avatar" class="asset-avatar" aria-hidden="true">
+                <svg viewBox="0 0 64 64" fill="currentColor"><rect width="64" height="64" rx="14" fill="var(--surface-subtle)"/><text id="asset-avatar-text" x="32" y="40" text-anchor="middle" font-family="Arial,sans-serif" font-size="24" font-weight="700">A</text></svg>
+              </div>
+              <div class="asset-heading-content">
+                <div class="asset-title-group">
+                  <h1 id="asset-name">Apple Inc.</h1>
+                  <span id="asset-symbol" class="asset-symbol-compact">AAPL</span>
+                  <span id="asset-classification" class="quality-chip asset-classification hidden"></span>
+                </div>
+                <div class="asset-meta-group">
+                  <strong id="asset-price" class="asset-price">—</strong>
+                  <span id="asset-daily-change" class="asset-change neutral">—</span>
+                  <span class="meta-divider" aria-hidden="true">·</span>
+                  <span id="asset-meta">NASDAQ · USD</span>
+                  <span id="asset-quality" class="quality-chip hidden">—</span>
+                </div>
               </div>
             </div>
           </div>
           <div class="topbar-actions">
-            <label class="asset-selector" for="market-asset-select">
-              <span>Activo</span>
-              <select id="market-asset-select" aria-label="Activo de mercado"></select>
-            </label>
+            <div class="combobox-wrapper">
+              <label id="asset-selector-label" for="market-asset-search" class="visually-hidden">Activo</label>
+              <div id="asset-combobox-container" class="combobox">
+                <input type="text" id="market-asset-search" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-controls="market-asset-listbox" aria-autocomplete="list" autocomplete="off" placeholder="Buscar activo..." aria-labelledby="asset-selector-label">
+                <ul id="market-asset-listbox" role="listbox" aria-labelledby="asset-selector-label" hidden></ul>
+              </div>
+            </div>
             <span id="health-badge" class="badge neutral">Consultando estado</span>
-            <button id="theme-toggle" class="button secondary compact theme-toggle" type="button" aria-pressed="true">
-              Tema claro
+            <button id="theme-toggle" class="icon-button" type="button" aria-pressed="true" aria-label="Cambiar al tema claro">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="5"></circle>
+                <line x1="12" y1="1" x2="12" y2="3"></line>
+                <line x1="12" y1="21" x2="12" y2="23"></line>
+                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                <line x1="1" y1="12" x2="3" y2="12"></line>
+                <line x1="21" y1="12" x2="23" y2="12"></line>
+                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+              </svg>
             </button>
-            <button
-              id="refresh-overview"
-              class="button secondary compact"
-              type="button"
-              title="El estado se actualiza automáticamente cada 30 segundos"
-            >
-              Verificar
+            <button id="refresh-overview" class="icon-button" type="button" aria-label="Verificar estado (se actualiza automáticamente cada 30 segundos)">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <polyline points="1 20 1 14 7 14"></polyline>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+              </svg>
             </button>
           </div>
           <div
@@ -138,69 +165,63 @@
                 <strong id="run-status">—</strong>
                 <small id="run-time">—</small>
               </article>
-              <article class="status-card">
-                <div class="status-label">
-                  <span class="status-dot" aria-hidden="true"></span>
-                  Programación
-                </div>
-                <strong id="schedule-status">—</strong>
-                <small id="schedule-next">—</small>
-              </article>
-              <article class="status-card">
-                <div class="status-label">
-                  <span class="status-dot" aria-hidden="true"></span>
-                  Trazabilidad
-                </div>
-                <strong id="traceability-status">—</strong>
-                <small id="known-at-status">—</small>
-              </article>
-              <article class="status-card">
-                <div class="status-label">
-                  <span class="status-dot" aria-hidden="true"></span>
-                  Candidatos
-                </div>
-                <strong id="candidate-status">—</strong>
-                <small id="candidate-latest">Modo silencioso</small>
-              </article>
-              <article class="status-card">
-                <div class="status-label">
-                  <span class="status-dot" aria-hidden="true"></span>
-                  Alertas
-                </div>
-                <strong id="alert-status">—</strong>
-                <small id="alert-latest">Modo silencioso</small>
-              </article>
             </div>
+            <details class="traceability-disclosure">
+              <summary>Trazabilidad, programación y alertas</summary>
+              <div class="traceability-grid">
+                <div>
+                  <strong>Programación</strong>
+                  <span id="schedule-status">—</span>
+                  <small id="schedule-next">—</small>
+                </div>
+                <div>
+                  <strong>Trazabilidad</strong>
+                  <span id="traceability-status">—</span>
+                  <small id="known-at-status">—</small>
+                </div>
+                <div>
+                  <strong>Candidatos</strong>
+                  <span id="candidate-status">—</span>
+                  <small id="candidate-latest">Modo silencioso</small>
+                </div>
+                <div>
+                  <strong>Alertas</strong>
+                  <span id="alert-status">—</span>
+                  <small id="alert-latest">Modo silencioso</small>
+                </div>
+              </div>
 
-            <details id="asset-preferences-panel" class="preferences-panel">
-              <summary>
-                <span>
-                  <strong>Watchlist y automatización</strong>
-                  <small id="asset-preferences-summary">Cargando selección local…</small>
-                </span>
-              </summary>
-              <form id="asset-preferences-form">
-                <p class="panel-copy">
-                  Define cada activo de forma independiente. Los favoritos se muestran primero;
-                  la programación cambia en ejecución sin consultar proveedores.
-                </p>
-                <div class="preferences-table" role="group" aria-label="Preferencias por activo">
-                  <div class="preferences-heading" aria-hidden="true">
-                    <span>Activo y cobertura</span>
-                    <span>Watchlist</span>
-                    <span>Favorito</span>
-                    <span>Programado</span>
+              <details id="asset-preferences-panel" class="preferences-panel">
+                <summary>
+                  <span>
+                    <strong>Watchlist y automatización</strong>
+                    <small id="asset-preferences-summary">Cargando selección local…</small>
+                  </span>
+                </summary>
+                <form id="asset-preferences-form">
+                  <p class="panel-copy">
+                    Define cada activo de forma independiente. Los favoritos se muestran primero;
+                    la programación cambia en ejecución sin consultar proveedores.
+                  </p>
+                  <div class="preferences-table" role="group" aria-label="Preferencias por activo">
+                    <div class="preferences-heading" aria-hidden="true">
+                      <span>Activo y cobertura</span>
+                      <span>Watchlist</span>
+                      <span>Favorito</span>
+                      <span>Programado</span>
+                    </div>
+                    <div id="asset-preferences-list"></div>
                   </div>
-                  <div id="asset-preferences-list"></div>
-                </div>
-                <div class="preferences-actions">
-                  <button id="save-asset-preferences" class="button primary compact" type="submit">
-                    Guardar preferencias
-                  </button>
-                  <span id="asset-preferences-status" role="status" aria-live="polite"></span>
-                </div>
-              </form>
+                  <div class="preferences-actions">
+                    <button id="save-asset-preferences" class="button primary compact" type="submit">
+                      Guardar preferencias
+                    </button>
+                    <span id="asset-preferences-status" role="status" aria-live="polite"></span>
+                  </div>
+                </form>
+              </details>
             </details>
+
 
           </section>
 
@@ -582,6 +603,14 @@
                 </section>
 
                 <div id="fundamental-research-grid" class="fundamental-research-grid"></div>
+
+                <details id="unavailable-metrics-disclosure" class="fundamental-research-disclosure hidden">
+                  <summary id="unavailable-metrics-summary">Métricas no disponibles</summary>
+                  <div class="methodological-explanation">
+                    <p>Las siguientes métricas no pueden calcularse debido a que la empresa no ha reportado los componentes necesarios en la periodicidad solicitada. Estas ausencias no se interpretan como cero.</p>
+                  </div>
+                  <div id="unavailable-metrics-grid" class="fundamental-research-grid unavailable-metrics-grid"></div>
+                </details>
 
                 <details class="fundamental-research-disclosure">
                   <summary>Fórmulas y evidencia exacta</summary>

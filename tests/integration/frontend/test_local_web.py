@@ -887,6 +887,9 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'id="sma-third-window"' in html
     assert 'id="sma-short-color"' in html
     assert 'id="sma-long-color"' in html
+    assert "grid-template-columns: minmax(0, 1fr) auto" in stylesheet
+    assert "transform: rotate(180deg)" in stylesheet
+    assert ".sidebar.collapsed .primary-nav" in stylesheet
     assert 'id="sma-third-color"' in html
     assert 'id="chart-price-scale"' in html
     assert '<option value="logarithmic">Logarítmica</option>' in html
@@ -935,7 +938,7 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "api(`/api/screening-backtest?" in javascript
     assert ".screening-backtest-grid" in stylesheet
     assert "Fórmulas y evidencia exacta" in html
-    assert "Tema claro" in html
+    assert "Cambiar al tema claro" in html
     assert 'id="lima-clock"' in html
     assert 'id="new-york-clock"' in html
     assert 'id="nyse-session-status"' in html
@@ -1045,7 +1048,8 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "latest_change_from_previous_available" in javascript
     assert "window.localStorage.setItem(THEME_STORAGE_KEY, theme)" in javascript
     assert "window.localStorage.setItem(CHART_SETTINGS_STORAGE_KEY" in javascript
-    assert 'id="market-asset-select"' in html
+    assert 'id="market-asset-search"' in html
+    assert 'id="market-asset-listbox"' in html
     assert 'api("/api/market-assets")' in javascript
     assert "marketAssetFromDescriptor(descriptor)" in javascript
     assert "descriptor.analysis.market_mode" in javascript
@@ -1053,6 +1057,9 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "const presentation = marketAssets[selectedMarketAsset];" in javascript
     assert 'selectedMarketAsset === "crypto:btc-usd"' not in javascript
     assert "MARKET_ASSETS" not in javascript
+    assert "market-asset-select" not in html
+    assert "market-asset-select" not in javascript
+    assert 'byId("sidebar-toggle").addEventListener("click"' in javascript
     assert "chart.sma_windows[0] !== chartSettings.shortWindow" in javascript
     assert 'parameters.set("short_sma_window", String(chartSettings.shortWindow))' in javascript
     assert 'parameters.set("long_sma_window", String(chartSettings.longWindow))' in javascript
@@ -1111,6 +1118,63 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     startup = javascript[javascript.index("async function initialize()") :]
     assert startup.index("await loadMarketAssets();") < startup.index("initializeChartSettings();")
     assert "queryValuation()" not in startup
+
+
+def test_icon_button_refresh_svg_is_preserved_on_busy_state() -> None:
+    """Regression: setButtonBusy must not destroy the inner SVG of icon-only buttons.
+
+    The refresh-overview button carries an inline SVG icon. Calling
+    setButtonBusy with a text label must NOT replace its textContent when the
+    button has the 'icon-button' CSS class. The busy state is instead signalled
+    via aria-busy + disabled + a CSS spin animation on the SVG.
+    """
+    with _server(_ExplodingApplication()) as (_, root):
+        with urlopen(f"{root}/assets/app.js", timeout=5) as response:
+            javascript = response.read().decode("utf-8")
+        with urlopen(f"{root}/assets/styles.css", timeout=5) as response:
+            stylesheet = response.read().decode("utf-8")
+        with urlopen(f"{root}/", timeout=5) as response:
+            html = response.read().decode("utf-8")
+
+    # setButtonBusy must guard icon-button class: no textContent change for them.
+    assert 'button.classList.contains("icon-button")' in javascript
+    # The guard must appear inside setButtonBusy before the textContent write.
+    busy_fn_start = javascript.index("function setButtonBusy(")
+    busy_fn_body = javascript[busy_fn_start : busy_fn_start + 400]
+    assert 'classList.contains("icon-button")' in busy_fn_body
+    # textContent mutation must be conditional (inside an if block).
+    assert "button.textContent" in busy_fn_body
+    class_check_pos = busy_fn_body.index('classList.contains("icon-button")')
+    text_pos = busy_fn_body.index("button.textContent")
+    assert class_check_pos < text_pos, (
+        "icon-button guard must appear before textContent mutation in setButtonBusy"
+    )
+
+    # CSS spin animation must be defined and applied to icon-button[aria-busy] svg.
+    assert "@keyframes ia-spin" in stylesheet
+    assert '.icon-button[aria-busy="true"] svg' in stylesheet
+    assert "ia-spin" in stylesheet
+
+    # The refresh-overview button must be an icon-button in the HTML
+    # (so the guard actually protects it at runtime).
+    assert 'id="refresh-overview"' in html
+    assert 'class="icon-button"' in html
+    refresh_btn_idx = html.index('id="refresh-overview"')
+    icon_class_before = html.rfind('class="icon-button"', 0, refresh_btn_idx + 80)
+    assert icon_class_before != -1, (
+        "refresh-overview must carry the icon-button class so SVG is preserved"
+    )
+
+    # prefers-reduced-motion must suppress the animation.
+    reduced_block_start = stylesheet.index("prefers-reduced-motion")
+    reduced_block = stylesheet[reduced_block_start : reduced_block_start + 300]
+    assert "animation-duration" in reduced_block
+
+    # Desktop layout: main must not be capped at 1280px.
+    assert "min(1280px" not in stylesheet, (
+        "main/footer must not hard-cap at 1280px; desktop viewport should be better utilised"
+    )
+    assert "1800px" in stylesheet or "max-width: 100%" in stylesheet
 
 
 def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Path) -> None:
