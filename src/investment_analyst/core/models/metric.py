@@ -37,6 +37,7 @@ class MetricResult(ContractModel):
     computed_at: UTCDateTime
     parameters: dict[NonEmptyStr, JsonValue] = Field(default_factory=dict)
     input_observation_ids: list[UUID]
+    input_metric_result_ids: list[UUID] = Field(default_factory=list)
     algorithm_version: NonEmptyStr
     quality: DataQuality
 
@@ -47,4 +48,8 @@ class MetricResult(ContractModel):
             raise ValueError("available_at must not be later than computed_at")
         if not self.input_observation_ids:
             raise ValueError("at least one input_observation_id is required")
+        if len(set(self.input_observation_ids)) != len(self.input_observation_ids):
+            raise ValueError("input_observation_ids must be unique")
+        if len(set(self.input_metric_result_ids)) != len(self.input_metric_result_ids):
+            raise ValueError("input_metric_result_ids must be unique")
         return self

@@ -1,25 +1,24 @@
 """Persistence pipeline for point-in-time historical market statistics."""
 
-import json
 from collections import Counter
 from datetime import UTC, datetime
-from uuid import UUID, uuid5
+from uuid import UUID
 
 from investment_analyst.analytics.market.history_service import HistoricalMarketDataService
 from investment_analyst.analytics.market.statistics_definitions import (
+    EMA_KEY,
     get_market_statistics_definitions,
 )
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
+from investment_analyst.analytics.market.statistics_identity import metric_result_id
 from investment_analyst.analytics.market.statistics_models import (
     MarketStatisticsRequest,
     MarketStatisticsRunSummary,
     MetricCalculation,
 )
-from investment_analyst.core.models import DataQuality, MetricResult, NormalizedObservation
+from investment_analyst.core.models import DataQuality, MetricResult
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import RecordNotFoundError, StorageError
-
-_RESULT_NAMESPACE = UUID("b5022527-e62b-5cb5-914e-3f67eedeb9be")
 
 
 class MarketStatisticsPipelineError(RuntimeError):
@@ -34,41 +33,17 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _canonical_identity(calculation: MetricCalculation, known_at: datetime) -> str:
-    document = {
-        "asset_id": calculation.asset_id,
-        "source_id": calculation.source_id,
-        "metric_key": calculation.metric_key,
-        "as_of": calculation.as_of.isoformat(),
-        "available_at": calculation.available_at.isoformat(),
-        "known_at": known_at.isoformat(),
-        "parameters": calculation.parameters,
-        "input_observation_ids": [str(item) for item in calculation.input_observation_ids],
-        "algorithm_version": calculation.algorithm_version,
-        "value": str(calculation.value),
-        "unit": calculation.unit,
-        "quality": calculation.quality.value,
-    }
-    return json.dumps(document, allow_nan=False, separators=(",", ":"), sort_keys=True)
-
-
-def metric_result_id(calculation: MetricCalculation, known_at: datetime) -> UUID:
-    """Return the stable UUID5 identity for one point-in-time calculation."""
-    return uuid5(_RESULT_NAMESPACE, _canonical_identity(calculation, known_at))
-
-
-def _quality(observations: tuple[NormalizedObservation, ...]) -> DataQuality:
+def _quality(values: tuple[DataQuality, ...]) -> DataQuality:
     precedence = (
         DataQuality.SUSPECT,
         DataQuality.PARTIAL,
         DataQuality.DELAYED,
         DataQuality.VALID,
     )
-    qualities = {item.quality for item in observations}
     for candidate in precedence:
-        if candidate in qualities:
+        if candidate in values:
             return candidate
-    raise MarketStatisticsPipelineError("result has no input observations")
+    raise MarketStatisticsPipelineError("result has no input quality")
 
 
 class MarketStatisticsPipeline:
@@ -112,7 +87,10 @@ class MarketStatisticsPipeline:
         created = 0
         reused = 0
         stored_results: list[MetricResult] = []
-        for calculation in computation.calculations:
+        for calculation in self._topologically_order(
+            computation.calculations,
+            request.query.known_at,
+        ):
             if calculation.available_at > computed_at:
                 raise MarketStatisticsPipelineError(
                     "computed_at must not be earlier than result availability"
@@ -176,6 +154,7 @@ class MarketStatisticsPipeline:
             computed_at=computed_at,
             parameters=dict(calculation.parameters),
             input_observation_ids=list(calculation.input_observation_ids),
+            input_metric_result_ids=list(calculation.input_metric_result_ids),
             algorithm_version=calculation.algorithm_version,
             quality=calculation.quality,
         )
@@ -191,6 +170,7 @@ class MarketStatisticsPipeline:
             "available_at": calculation.available_at,
             "parameters": calculation.parameters,
             "input_observation_ids": list(calculation.input_observation_ids),
+            "input_metric_result_ids": list(calculation.input_metric_result_ids),
             "algorithm_version": calculation.algorithm_version,
             "quality": calculation.quality,
         }
@@ -199,6 +179,53 @@ class MarketStatisticsPipeline:
             raise MetricIdentityConflictError(
                 f"metric result {result.result_id} conflicts with its deterministic identity"
             )
+
+    def _topologically_order(
+        self,
+        calculations: tuple[MetricCalculation, ...],
+        known_at: datetime,
+    ) -> tuple[MetricCalculation, ...]:
+        """Order generated derived metrics after their same-run dependencies."""
+        entries = tuple(
+            (calculation, metric_result_id(calculation, known_at)) for calculation in calculations
+        )
+        identifiers = [identifier for _, identifier in entries]
+        if len(set(identifiers)) != len(identifiers):
+            raise MarketStatisticsPipelineError("calculation identities must be unique")
+        generated_ids = set(identifiers)
+        for calculation, identifier in entries:
+            if identifier in calculation.input_metric_result_ids:
+                raise MarketStatisticsPipelineError("metric result cannot depend on itself")
+            for dependency_id in calculation.input_metric_result_ids:
+                if dependency_id in generated_ids:
+                    continue
+                try:
+                    self._storage.metric_results.get(dependency_id)
+                except RecordNotFoundError as error:
+                    raise MarketStatisticsPipelineError(
+                        "derived metric dependency is missing"
+                    ) from error
+
+        pending = list(entries)
+        established: set[UUID] = set()
+        ordered: list[MetricCalculation] = []
+        while pending:
+            ready = [
+                entry
+                for entry in pending
+                if all(
+                    dependency_id not in generated_ids or dependency_id in established
+                    for dependency_id in entry[0].input_metric_result_ids
+                )
+            ]
+            if not ready:
+                raise MarketStatisticsPipelineError("derived metric dependencies contain a cycle")
+            for calculation, identifier in ready:
+                ordered.append(calculation)
+                established.add(identifier)
+            ready_ids = {identifier for _, identifier in ready}
+            pending = [entry for entry in pending if entry[1] not in ready_ids]
+        return tuple(ordered)
 
     def _verify_run(
         self,
@@ -215,10 +242,23 @@ class MarketStatisticsPipeline:
             definition = self._storage.metric_definitions.get(result.metric_key)
             if definition.metric_key != result.metric_key:
                 raise MarketStatisticsPipelineError("stored metric definition cannot be verified")
+            if result.parameters.get("source_id") != request.query.source_id:
+                raise MarketStatisticsPipelineError(
+                    "result source parameter does not match request"
+                )
+            if result.parameters.get("known_at") != request.query.known_at.isoformat():
+                raise MarketStatisticsPipelineError(
+                    "result known_at parameter does not match request"
+                )
             observations = tuple(
                 self._storage.observations.get(identifier)
                 for identifier in result.input_observation_ids
             )
+            dependencies = tuple(
+                self._storage.metric_results.get(identifier)
+                for identifier in result.input_metric_result_ids
+            )
+            self._verify_derived_dependencies(request, result, dependencies)
             if any(item.asset_id != request.query.asset_id for item in observations):
                 raise MarketStatisticsPipelineError("result mixes assets")
             if any(item.source.source_id != request.query.source_id for item in observations):
@@ -227,14 +267,24 @@ class MarketStatisticsPipeline:
                 raise MarketStatisticsPipelineError(
                     "result uses information unavailable at known_at"
                 )
-            if max(item.available_at for item in observations) != result.available_at:
+            if any(item.available_at > request.query.known_at for item in dependencies):
+                raise MarketStatisticsPipelineError(
+                    "result uses derived information unavailable at known_at"
+                )
+            availability_inputs = tuple(item.available_at for item in observations) + tuple(
+                item.available_at for item in dependencies
+            )
+            if max(availability_inputs) != result.available_at:
                 raise MarketStatisticsPipelineError("result available_at does not match its inputs")
             observed_times = [item.observed_at for item in observations if item.observed_at]
             if not observed_times or max(observed_times) != result.as_of:
                 raise MarketStatisticsPipelineError(
                     "result as_of does not match its final input bar"
                 )
-            if _quality(observations) is not result.quality:
+            qualities = tuple(item.quality for item in observations) + tuple(
+                item.quality for item in dependencies
+            )
+            if _quality(qualities) is not result.quality:
                 raise MarketStatisticsPipelineError("result quality does not match its inputs")
             if self._storage.metric_results.get(result.result_id) != result:
                 raise MarketStatisticsPipelineError("stored metric result round-trip failed")
@@ -253,3 +303,57 @@ class MarketStatisticsPipeline:
                 raise MarketStatisticsPipelineError("statistics pipeline created diagnostics")
         except StorageError as error:
             raise MarketStatisticsPipelineError("storage counts could not be verified") from error
+
+    def _verify_derived_dependencies(
+        self,
+        request: MarketStatisticsRequest,
+        result: MetricResult,
+        dependencies: tuple[MetricResult, ...],
+    ) -> None:
+        """Prove derived lineage is a compatible, strictly prior EMA chain."""
+        if result.result_id in result.input_metric_result_ids:
+            raise MarketStatisticsPipelineError("metric result cannot depend on itself")
+        if not dependencies:
+            return
+        if result.metric_key != EMA_KEY or len(dependencies) != 1:
+            raise MarketStatisticsPipelineError("only EMA supports one derived metric dependency")
+        dependency = dependencies[0]
+        if dependency.asset_id != result.asset_id or dependency.asset_id != request.query.asset_id:
+            raise MarketStatisticsPipelineError("derived metric dependency mixes assets")
+        if dependency.metric_key != EMA_KEY:
+            raise MarketStatisticsPipelineError("derived metric dependency has a different metric")
+        if dependency.algorithm_version != result.algorithm_version:
+            raise MarketStatisticsPipelineError(
+                "derived metric dependency has a different algorithm"
+            )
+        for parameter in ("source_id", "known_at", "window", "alpha", "seed_method", "seed_start"):
+            if dependency.parameters.get(parameter) != result.parameters.get(parameter):
+                raise MarketStatisticsPipelineError(
+                    "derived metric dependency has incompatible parameters"
+                )
+        if dependency.parameters.get("source_id") != request.query.source_id:
+            raise MarketStatisticsPipelineError("derived metric dependency mixes sources")
+        if dependency.parameters.get("known_at") != request.query.known_at.isoformat():
+            raise MarketStatisticsPipelineError(
+                "derived metric dependency uses a different known_at"
+            )
+        if dependency.as_of >= result.as_of:
+            raise MarketStatisticsPipelineError("derived metric dependency is not strictly prior")
+        self._verify_derived_graph(result.result_id, set(), set())
+
+    def _verify_derived_graph(
+        self,
+        identifier: UUID,
+        active: set[UUID],
+        verified: set[UUID],
+    ) -> None:
+        if identifier in active:
+            raise MarketStatisticsPipelineError("derived metric dependencies contain a cycle")
+        if identifier in verified:
+            return
+        active.add(identifier)
+        metric = self._storage.metric_results.get(identifier)
+        for dependency_id in metric.input_metric_result_ids:
+            self._verify_derived_graph(dependency_id, active, verified)
+        active.remove(identifier)
+        verified.add(identifier)

@@ -12,11 +12,13 @@ from investment_analyst.analytics.market.statistics_definitions import (
     BOLLINGER_LOWER_KEY,
     BOLLINGER_PERCENT_B_KEY,
     BOLLINGER_UPPER_KEY,
+    EMA_KEY,
     RELATIVE_VOLUME_KEY,
     SIMPLE_RETURN_KEY,
     SMA_KEY,
     VOLATILITY_KEY,
 )
+from investment_analyst.analytics.market.statistics_identity import metric_result_id
 from investment_analyst.analytics.market.statistics_models import (
     MarketStatisticsComputation,
     MarketStatisticsRequest,
@@ -29,6 +31,7 @@ _SMA_ALGORITHM = "market-sma-v1-decimal34"
 _VOLATILITY_ALGORITHM = "market-rolling-daily-volatility-v1-decimal34"
 _RELATIVE_VOLUME_ALGORITHM = "market-relative-volume-v1-decimal34"
 _BOLLINGER_ALGORITHM = "market-bollinger-bands-v1-decimal34"
+_EMA_ALGORITHM = "market-ema-v1-decimal34"
 
 
 class MarketStatisticsError(RuntimeError):
@@ -88,7 +91,7 @@ class MarketStatisticsEngine:
         series: MarketBarSeries,
         request: MarketStatisticsRequest,
     ) -> MarketStatisticsComputation:
-        """Calculate returns, SMAs, volatility, and relative volume."""
+        """Calculate descriptive market statistics from one point-in-time bar series."""
         self._validate_inputs(series, request)
         calculations: list[MetricCalculation] = []
         warmups: dict[str, int] = {}
@@ -116,6 +119,8 @@ class MarketStatisticsEngine:
                     zero_skips,
                 )
             )
+            for window in request.ema_windows:
+                calculations.extend(self._ema(series, window, warmups))
 
         calculations.sort(
             key=lambda item: (item.as_of, item.metric_key, _parameter_sort_key(item.parameters))
@@ -396,4 +401,62 @@ class MarketStatisticsEngine:
                     **base,
                 )
             )
+        return output
+
+    @staticmethod
+    def _ema(
+        series: MarketBarSeries,
+        window: int,
+        warmups: dict[str, int],
+    ) -> list[MetricCalculation]:
+        """Compute a point-in-time EMA with a linear derived-metric lineage."""
+        key = _detail_key(EMA_KEY, window)
+        bars = series.bars
+        warmups[key] = min(len(bars), window - 1)
+        if len(bars) < window:
+            return []
+
+        alpha = Decimal("2") / Decimal(window + 1)
+        parameters = {
+            "window": window,
+            "alpha": str(alpha),
+            "seed_method": "sma_first_window",
+            "seed_start": bars[0].timestamp.isoformat(),
+            "price_field": "close",
+            "includes_current_bar": True,
+            **_common_parameters(series),
+        }
+        seed_bars = bars[:window]
+        seed = MetricCalculation(
+            asset_id=seed_bars[-1].asset_id,
+            source_id=seed_bars[-1].source_id,
+            metric_key=EMA_KEY,
+            value=sum((bar.close for bar in seed_bars), Decimal("0")) / Decimal(window),
+            unit="USD",
+            as_of=seed_bars[-1].timestamp,
+            available_at=max(bar.available_at for bar in seed_bars),
+            parameters=parameters,
+            input_observation_ids=_ids(seed_bars, "close"),
+            algorithm_version=_EMA_ALGORITHM,
+            quality=_quality(tuple(bar.quality for bar in seed_bars)),
+        )
+        output = [seed]
+        previous = seed
+        for current in bars[window:]:
+            calculation = MetricCalculation(
+                asset_id=current.asset_id,
+                source_id=current.source_id,
+                metric_key=EMA_KEY,
+                value=alpha * current.close + (Decimal("1") - alpha) * previous.value,
+                unit="USD",
+                as_of=current.timestamp,
+                available_at=max(current.available_at, previous.available_at),
+                parameters=parameters,
+                input_observation_ids=_ids((current,), "close"),
+                input_metric_result_ids=(metric_result_id(previous, series.query.known_at),),
+                algorithm_version=_EMA_ALGORITHM,
+                quality=_quality((current.quality, previous.quality)),
+            )
+            output.append(calculation)
+            previous = calculation
         return output

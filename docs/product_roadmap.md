@@ -265,12 +265,11 @@ regímenes, no a ratios corporativos artificiales.
 
 ## Fase 5 — Herramientas de mercado y comparación
 
-Incorporar por contratos pequeños y probados:
+Ya disponibles por contratos pequeños y probados: EMA configurables con linaje derivado MKT-2 y
+Bandas de Bollinger. Pendientes:
 
-- EMA configurables;
 - RSI;
 - MACD;
-- Bandas de Bollinger;
 - ATR y volatilidad histórica;
 - beta y correlación frente a un benchmark identificado;
 - recuperación de drawdown;

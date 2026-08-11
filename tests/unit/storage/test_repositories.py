@@ -63,6 +63,26 @@ def test_metric_and_diagnostic_round_trip(storage) -> None:
     assert recovered_diagnostic.final_score == Decimal("80")
 
 
+def test_metric_result_round_trip_preserves_derived_lineage(storage) -> None:
+    raw_record = make_raw_record()
+    observation = make_observation(raw_record_id=raw_record.record_id)
+    seed = make_metric_result(observation_id=observation.observation_id)
+    derived = make_metric_result(
+        observation_id=observation.observation_id,
+        as_of=seed.as_of + timedelta(days=1),
+    ).model_copy(
+        update={
+            "input_metric_result_ids": [seed.result_id],
+            "available_at": seed.available_at,
+        }
+    )
+
+    storage.metric_results.save(seed)
+    storage.metric_results.save(derived)
+
+    assert storage.metric_results.get(derived.result_id).input_metric_result_ids == [seed.result_id]
+
+
 def test_append_only_repositories_are_idempotent_and_detect_conflicts(storage) -> None:
     raw_record = make_raw_record()
     observation = make_observation(raw_record_id=raw_record.record_id)

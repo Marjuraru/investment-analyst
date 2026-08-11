@@ -18,6 +18,7 @@ from investment_analyst.analytics.market.statistics_definitions import (
     BOLLINGER_LOWER_KEY,
     BOLLINGER_PERCENT_B_KEY,
     BOLLINGER_UPPER_KEY,
+    EMA_KEY,
     RELATIVE_VOLUME_KEY,
     SIMPLE_RETURN_KEY,
     SMA_KEY,
@@ -27,6 +28,7 @@ from investment_analyst.analytics.market.statistics_engine import (
     MarketStatisticsEngine,
     MarketStatisticsTraceabilityError,
 )
+from investment_analyst.analytics.market.statistics_identity import metric_result_id
 from investment_analyst.analytics.market.statistics_models import MarketStatisticsRequest
 from investment_analyst.core.models import DataFrequency, DataQuality
 
@@ -58,7 +60,7 @@ def _series(
             available_at=start + timedelta(days=index, hours=1),
             open=Decimal(close),
             high=Decimal(close) + Decimal("1"),
-            low=Decimal(close) - Decimal("1"),
+            low=Decimal(close) - Decimal("0.5"),
             close=Decimal(close),
             volume=Decimal(volume_values[index]),
             quality=quality_values[index],
@@ -219,6 +221,35 @@ def test_flat_bollinger_band_omits_percent_b_and_counts_the_zero_denominator() -
     assert _items(result, BOLLINGER_LOWER_KEY)[0].value == Decimal("100")
     assert not _items(result, BOLLINGER_PERCENT_B_KEY)
     assert result.zero_denominator_skips[f"{BOLLINGER_PERCENT_B_KEY}:3"] == 1
+
+
+def test_ema_uses_in_query_sma_seed_and_linear_derived_lineage() -> None:
+    series = _series(("1", "2", "3", "4", "5"))
+    result = MarketStatisticsEngine().compute(
+        series,
+        MarketStatisticsRequest(
+            query=series.query,
+            sma_windows=(1,),
+            volatility_window=2,
+            relative_volume_window=2,
+            bollinger_window=2,
+            ema_windows=(3,),
+        ),
+    )
+
+    ema = _items(result, EMA_KEY)
+
+    assert [item.value for item in ema] == [Decimal("2"), Decimal("3"), Decimal("4")]
+    assert ema[0].input_observation_ids == tuple(
+        bar.observation_ids["close"] for bar in series.bars[:3]
+    )
+    assert ema[0].input_metric_result_ids == ()
+    assert ema[1].input_observation_ids == (series.bars[3].observation_ids["close"],)
+    assert ema[1].input_metric_result_ids == (metric_result_id(ema[0], series.query.known_at),)
+    assert ema[2].input_metric_result_ids == (metric_result_id(ema[1], series.query.known_at),)
+    assert ema[0].parameters["alpha"] == "0.5"
+    assert ema[0].parameters["seed_start"] == series.query.start.isoformat()
+    assert result.warmup_counts[f"{EMA_KEY}:3"] == 2
 
 
 @pytest.mark.parametrize(

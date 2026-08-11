@@ -90,7 +90,8 @@ reglas posteriores.
 
 - la valoración corporativa PIT v1 está disponible para empresas elegibles; faltan valoración
   histórica, reglas posteriores y cobertura adicional compatible;
-- faltan EMA, RSI, MACD, ATR, Bollinger, beta y comparación multi-activo;
+- faltan RSI, MACD, ATR, beta y comparación multi-activo; EMA MKT-2 y Bollinger ya son métricas
+  descriptivas independientes y trazables;
 - la watchlist, los favoritos y la actualización programada ya son preferencias persistentes
   versionadas; faltan ampliaciones de experiencia, plantillas y operación observada a largo plazo;
 - solo existen dos reglas analíticas iniciales;
@@ -203,7 +204,8 @@ resultados; añadir una dependencia solo por routing no aporta valor al MVP.
 
 El cierre básico debe añadir, en contratos independientes:
 
-1. mercado: EMA, RSI, MACD, ATR y volatilidad/Bollinger con ventanas configurables;
+1. mercado: RSI, MACD, ATR y extensiones de volatilidad/Bollinger con ventanas configurables; EMA
+   MKT-2 ya está disponible como métrica descriptiva independiente;
 2. comparación: retorno, volatilidad, drawdown, correlación y beta contra un benchmark identificado;
 3. valoración: market cap, enterprise value, P/E, P/B, P/S, EV/ventas, EV/EBITDA, FCF yield y
    earnings yield cuando los denominadores sean compatibles;

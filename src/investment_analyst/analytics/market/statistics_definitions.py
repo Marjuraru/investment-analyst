@@ -10,6 +10,7 @@ BOLLINGER_UPPER_KEY = "market.technical.bollinger.upper"
 BOLLINGER_LOWER_KEY = "market.technical.bollinger.lower"
 BOLLINGER_BANDWIDTH_KEY = "market.technical.bollinger.bandwidth"
 BOLLINGER_PERCENT_B_KEY = "market.technical.bollinger.percent_b"
+EMA_KEY = "market.technical.ema"
 
 _REFERENCE = "Internal auditable market-statistics specification."
 _NO_ADVICE = "This descriptive statistic is not a financial recommendation."
@@ -99,6 +100,33 @@ def get_market_statistics_definitions() -> tuple[MetricDefinition, ...]:
                 "Coinbase volume represents Coinbase Exchange only.",
                 "It must not yet be interpreted as institutional activity.",
                 "No result is emitted when historical mean volume is zero.",
+                _NO_ADVICE,
+            ],
+            references=[_REFERENCE],
+            definition_version="1.0.0",
+        ),
+        MetricDefinition(
+            metric_key=EMA_KEY,
+            display_name="Exponential Moving Average",
+            category=MetricCategory.MARKET,
+            description=(
+                "Recursive exponential moving average of available closing prices seeded by the "
+                "first in-query simple moving average."
+            ),
+            formula=(
+                "ema_t = alpha * close_t + (1 - alpha) * ema_previous; alpha = 2 / (window + 1)"
+            ),
+            unit="USD",
+            default_parameters={
+                "window": 20,
+                "alpha": "0.09523809523809523809523809523809524",
+                "seed_method": "sma_first_window",
+                "price_field": "close",
+                "includes_current_bar": True,
+            },
+            limitations=[
+                "The seed and recurrence use only bars selected by the point-in-time query.",
+                "Uses available bars without filling gaps or inferring a calendar.",
                 _NO_ADVICE,
             ],
             references=[_REFERENCE],
