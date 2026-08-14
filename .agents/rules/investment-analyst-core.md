@@ -15,6 +15,7 @@ demuestran corrección semántica. No repetir una suite verde sin riesgo concret
 `$audit` puede reconciliar y publicar el marker AUDIT único.
 
 Con policy HUMAN, AUDIT nunca hace merge. Con AUTO, sólo el FINALIZE posterior a PASS de la misma
-invocación puede realizar las mutaciones GitHub estrechas del protocolo, con snapshot antes y
-después de ready; no autoriza admin/bypass, source edits, branch writes, workspace ni relajación de
-guards. Devolver estado, SHA, BLOCKER/MAJOR, decisión/riesgo y siguiente acción.
+invocación puede realizar las mutaciones GitHub estrechas del protocolo, con dos adquisiciones
+`--live --phase finalize` completas: snapshot antes y después de ready; no autoriza admin/bypass, source
+edits, branch writes, workspace ni relajación de guards. Devolver estado, SHA, BLOCKER/MAJOR,
+decisión/riesgo y siguiente acción.

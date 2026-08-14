@@ -58,8 +58,9 @@ Hash correcto continúa; hash ausente o distinto falla cerrado sin restaurar ni 
 
 `scripts/check_workflow_guards.py` es el único parser/guard ejecutable compartido por BUILD, AUDIT
 y FINALIZE. Es read-only, tipado, determinista, no imprime bodies ni secretos y acepta un snapshot
-JSON temporal o lecturas vivas mediante `gh`; nunca edita Issue, PR, comentarios, branch, workspace
-ni el snapshot. BUILD lo ejecuta en fase `build`, AUDIT antes y después de reconciliar su marker en
+JSON temporal para BUILD/AUDIT o lecturas vivas mediante `gh`; FINALIZE es estrictamente live-only y
+rechaza `--json` antes de evaluar. Nunca edita Issue, PR, comentarios, branch, workspace ni el
+snapshot. BUILD lo ejecuta en fase `build`, AUDIT antes y después de reconciliar su marker en
 fase `audit`, y cualquier transición mecánica lo ejecuta en fase `finalize`.
 
 El guard exige metadata estructural única del Work Block, target/base/head literales, markers HTML
@@ -218,13 +219,15 @@ comienza una transición mecánica explícita; no es un rol LLM ni una tercera d
 `snapshot batched de guards vivos → mark ready → segundo snapshot/revalidación crítica → confirmar
 exact live head → squash merge con --match-head-commit → reconciliación/cleanup idempotentes`.
 
-El primer snapshot demuestra, cuando aplique: Work Block único y metadata/policy coherentes;
-PR/base/branch/head exactos; único marker BUILD PASS y único marker AUDIT PASS; SHA auditado = SHA
-BUILD = head PR = SHA con CI verde del gate literal `Python 3.12 quality`; smoke del mismo SHA; cero
-BLOCKER/MAJOR; requested changes y threads en cero; mergeability, permisos y protección vigente de
-`main`. Cualquier divergencia, `PENDING`, `UNKNOWN` o fase no explícitamente transicionada detiene
-FINALIZE sin merge.
-Después de ready, el segundo snapshot vuelve a comprobar head, CI/audit/evidencia y revisión. Todo
+El primer snapshot es una adquisición live completa y demuestra, cuando aplique: Work Block único y
+metadata/policy coherentes; PR/base/branch/head exactos; único marker BUILD PASS y único marker
+AUDIT PASS; SHA auditado = SHA BUILD = head PR = SHA con CI verde del gate literal `Python 3.12
+quality`; smoke del mismo SHA; cero BLOCKER/MAJOR; requested changes vigentes por reviewer y todas
+las páginas de `reviewThreads` resueltas; mergeability terminal, permisos repo-scoped y protección
+vigente de `main`. Cualquier divergencia, paginación parcial, `PENDING`, `UNKNOWN` o fase no
+explícitamente transicionada detiene FINALIZE sin merge.
+Después de ready se descarta el primer snapshot. El segundo es otra adquisición live completa e
+independiente: repite todos los guards, no sólo `headRefOid`, CI/audit/evidencia o revisiones. Todo
 cambio o estado no terminal falla cerrado. `--match-head-commit` protege sólo la identidad del head
 en el merge y no sustituye ningún guard.
 
@@ -237,7 +240,9 @@ idempotente.
 ## Smoke real, handoff y salidas
 
 Cambios de skills, aliases o descubrimiento requieren un smoke real separado en un cliente
-soportado. `/skills` o equivalente debe listar `plan`, `build`, `audit` e
+soportado. Los cambios de FINALIZE además demuestran una adquisición live read-only de reviews y
+`reviewThreads` mediante GraphQL, sin reutilizar un snapshot. `/skills` o equivalente debe listar
+`plan`, `build`, `audit` e
 `investment-block-flow`; `/audit` debe resolverse sin iniciar auditoría ni mutar producto. El smoke
 demuestra además al menos un caso de terminality, rechazo de auditoría superficial y guard de
 finalización. Para un Work Block UI, `/ui` debe resolver una única skill canónica, recargar el

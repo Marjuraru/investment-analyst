@@ -13,7 +13,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
@@ -94,6 +94,11 @@ class GuardSnapshot:
     open_threads: int | None
     active_issue_count: int | None = None
     open_pr_count: int | None = None
+    source: str = "unknown"
+    mergeable: bool | None = None
+    mergeability_state: str | None = None
+    viewer_permission: str | None = None
+    base_protected: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +203,14 @@ def _optional_bool(mapping: Mapping[str, object], keys: tuple[str, ...]) -> bool
     for key in keys:
         value = mapping.get(key)
         if isinstance(value, bool):
+            return value
+    return None
+
+
+def _optional_str(mapping: Mapping[str, object], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value:
             return value
     return None
 
@@ -371,6 +384,11 @@ def snapshot_from_json(value: object) -> GuardSnapshot:
         open_threads=cast(int | None, open_threads),
         active_issue_count=cast(int | None, active_issue_count),
         open_pr_count=cast(int | None, open_pr_count),
+        source="json",
+        mergeable=_optional_bool(root, ("mergeable",)),
+        mergeability_state=_optional_str(root, ("mergeability_state",)),
+        viewer_permission=_optional_str(root, ("viewer_permission",)),
+        base_protected=_optional_bool(root, ("base_protected",)),
     )
 
 
@@ -516,6 +534,19 @@ def _validate_checks(snapshot: GuardSnapshot) -> None:
         raise GuardFailure("required gate Python 3.12 quality is not PASS")
 
 
+def _validate_finalize_live_evidence(snapshot: GuardSnapshot) -> None:
+    if snapshot.source != "live":
+        raise GuardFailure("finalize requires live acquisition")
+    if snapshot.mergeable is not True:
+        raise GuardFailure("PR mergeability is absent, unknown, or not mergeable")
+    if snapshot.mergeability_state != "clean":
+        raise GuardFailure("PR mergeability is not terminal clean")
+    if snapshot.viewer_permission not in {"ADMIN", "MAINTAIN", "WRITE"}:
+        raise GuardFailure("repository-scoped merge permission is absent or insufficient")
+    if snapshot.base_protected is not True:
+        raise GuardFailure("declared base branch protection is absent or unreadable")
+
+
 def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
     empty = MarkerResolution(marker=None, duplicates=())
     metadata: WorkBlockMetadata | None = None
@@ -558,6 +589,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
             raise GuardFailure("open thread evidence is absent")
         if snapshot.open_threads != 0:
             raise GuardFailure("open review threads remain")
+        _validate_finalize_live_evidence(snapshot)
         decision = (
             "AWAITING HUMAN APPROVAL" if metadata.policy == "HUMAN" else "AUTO_FINALIZE_AUTHORIZED"
         )
@@ -612,11 +644,140 @@ def _gh_json_lines(arguments: Sequence[str], label: str) -> tuple[object, ...]:
     return tuple(values)
 
 
+def _repo_parts(repo: str) -> tuple[str, str]:
+    owner, separator, name = repo.partition("/")
+    if not separator or not owner or not name or "/" in name:
+        raise GuardFailure("repository must be owner/name")
+    return owner, name
+
+
+def _gh_graphql(
+    query: str,
+    variables: Mapping[str, str | int],
+    label: str,
+) -> object:
+    arguments: list[str] = ["api", "graphql", "-f", f"query={query}"]
+    for key, value in variables.items():
+        arguments.extend(["-F" if isinstance(value, int) else "-f", f"{key}={value}"])
+    return _gh_json(arguments, label)
+
+
+def _graphql_connection(
+    repo: str,
+    pr_number: int,
+    connection_name: str,
+    node_fields: str,
+) -> tuple[Mapping[str, object], ...]:
+    owner, name = _repo_parts(repo)
+    query = (
+        "query($owner: String!, $name: String!, $number: Int!, $cursor: String) {"
+        " repository(owner: $owner, name: $name) {"
+        " pullRequest(number: $number) {"
+        f" {connection_name}(first: 100, after: $cursor) {{"
+        f" nodes {{ {node_fields} }} pageInfo {{ hasNextPage endCursor }}"
+        " } } } }"
+    )
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    nodes: list[Mapping[str, object]] = []
+    while True:
+        variables: dict[str, str | int] = {
+            "owner": owner,
+            "name": name,
+            "number": pr_number,
+        }
+        if cursor is not None:
+            variables["cursor"] = cursor
+        response = _mapping(_gh_graphql(query, variables, connection_name), connection_name)
+        data = _mapping(response.get("data"), f"{connection_name}.data")
+        repository = _mapping(data.get("repository"), f"{connection_name}.repository")
+        pull_request = _mapping(repository.get("pullRequest"), f"{connection_name}.pull_request")
+        connection = _mapping(pull_request.get(connection_name), connection_name)
+        for node in _sequence(connection.get("nodes", ()), f"{connection_name}.nodes"):
+            nodes.append(_mapping(node, f"{connection_name}.node"))
+        page_info = _mapping(connection.get("pageInfo"), f"{connection_name}.page_info")
+        has_next = _required_bool(page_info, ("hasNextPage",), f"{connection_name}.has_next")
+        if not has_next:
+            return tuple(nodes)
+        next_cursor = _required_str(page_info, ("endCursor",), f"{connection_name}.end_cursor")
+        if next_cursor in seen_cursors:
+            raise GuardFailure(f"{connection_name} pagination cursor repeated")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+
+def _latest_reviews_requested_changes(reviews: Sequence[Mapping[str, object]]) -> bool:
+    allowed_states = {"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"}
+    latest: dict[str, tuple[str, str, str]] = {}
+    for review in reviews:
+        author = _mapping(review.get("author"), "review author")
+        reviewer = _required_str(author, ("login",), "review author login")
+        state = _required_str(review, ("state",), "review state").upper()
+        submitted_at = _required_str(review, ("submittedAt",), "review submitted_at")
+        review_id = _required_str(review, ("id",), "review id")
+        if state not in allowed_states:
+            raise GuardFailure("review state is unknown")
+        candidate = (submitted_at, review_id, state)
+        current = latest.get(reviewer)
+        if current is None or candidate[:2] > current[:2]:
+            latest[reviewer] = candidate
+    if any(state == "PENDING" for _, _, state in latest.values()):
+        raise GuardFailure("latest review state is not terminal")
+    return any(state == "CHANGES_REQUESTED" for _, _, state in latest.values())
+
+
+def _open_review_threads(threads: Sequence[Mapping[str, object]]) -> int:
+    open_threads = 0
+    for thread in threads:
+        if not _required_bool(thread, ("isResolved",), "review thread resolution"):
+            open_threads += 1
+    return open_threads
+
+
+def _viewer_permission(repo: str) -> str:
+    owner, name = _repo_parts(repo)
+    query = (
+        "query($owner: String!, $name: String!) {"
+        " repository(owner: $owner, name: $name) { viewerPermission } }"
+    )
+    response = _mapping(
+        _gh_graphql(query, {"owner": owner, "name": name}, "repository permission"),
+        "repository permission",
+    )
+    data = _mapping(response.get("data"), "repository permission.data")
+    repository = _mapping(data.get("repository"), "repository permission.repository")
+    return _required_str(repository, ("viewerPermission",), "viewer permission").upper()
+
+
+def _finalize_live_evidence(
+    repo: str,
+    pr_number: int,
+    base_branch: str,
+    pull_request: Mapping[str, object],
+) -> tuple[bool, int, bool, str, str]:
+    reviews = _graphql_connection(
+        repo, pr_number, "reviews", "id state submittedAt author { login }"
+    )
+    threads = _graphql_connection(repo, pr_number, "reviewThreads", "isResolved")
+    _mapping(
+        _gh_json(["api", f"repos/{repo}/branches/{base_branch}/protection"], "branch protection"),
+        "branch protection",
+    )
+    return (
+        _latest_reviews_requested_changes(reviews),
+        _open_review_threads(threads),
+        _required_bool(pull_request, ("mergeable",), "pull_request.mergeable"),
+        _required_str(pull_request, ("mergeable_state",), "pull_request.mergeable_state").lower(),
+        _viewer_permission(repo),
+    )
+
+
 def snapshot_from_live(
     repo: str,
     issue_number: int,
     pr_number: int,
     smoke_status: str | None,
+    phase: str,
 ) -> GuardSnapshot:
     issue = _gh_json(
         ["issue", "view", str(issue_number), "--repo", repo, "--json", "number,state,labels,body"],
@@ -744,7 +905,27 @@ def snapshot_from_live(
         ),
         "check runs",
     )
-    return snapshot_from_json(
+    requested_changes: bool | None = None
+    open_threads: int | None = None
+    mergeable: bool | None = None
+    mergeability_state: str | None = None
+    viewer_permission: str | None = None
+    base_protected: bool | None = None
+    if phase == "finalize":
+        (
+            requested_changes,
+            open_threads,
+            mergeable,
+            mergeability_state,
+            viewer_permission,
+        ) = _finalize_live_evidence(
+            repo,
+            pr_number,
+            _required_str(base_raw, ("ref",), "base"),
+            pull_request_raw,
+        )
+        base_protected = True
+    snapshot = snapshot_from_json(
         {
             "issue": issue,
             "pull_request": pull_request,
@@ -753,8 +934,15 @@ def snapshot_from_live(
             "smoke": {"status": smoke_status} if smoke_status is not None else None,
             "active_issue_count": len(issue_candidates),
             "open_pr_count": len(pr_candidates),
+            "requested_changes": requested_changes,
+            "open_threads": open_threads,
+            "mergeable": mergeable,
+            "mergeability_state": mergeability_state,
+            "viewer_permission": viewer_permission,
+            "base_protected": base_protected,
         }
     )
+    return replace(snapshot, source="live")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -778,13 +966,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.json_path is not None:
+            if args.phase == "finalize":
+                raise GuardFailure("finalize phase is live-only")
             snapshot = snapshot_from_json(
                 _json_value(args.json_path.read_text(encoding="utf-8"), "snapshot")
             )
         else:
             if not args.repo or args.issue is None or args.pr is None:
                 raise GuardFailure("--live requires --repo, --issue and --pr")
-            snapshot = snapshot_from_live(args.repo, args.issue, args.pr, args.smoke_status)
+            snapshot = snapshot_from_live(
+                args.repo, args.issue, args.pr, args.smoke_status, args.phase
+            )
         result = evaluate(snapshot, args.phase)
     except (GuardFailure, OSError) as error:
         result = GuardResult(
