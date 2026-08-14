@@ -49,6 +49,12 @@ body:
       description: "R3/superficie sensible: strict allowlist. Otro caso: semantic scope, superficies protegidas/prohibidas e invariantes."
     validations: {required: true}
   - type: textarea
+    id: delivery_route_context
+    attributes:
+      label: Delivery route context
+      description: "Horizonte estratégico, route item(s), avance que cierra, siguiente esperado y desviación (ninguna o razón/evidencia)."
+    validations: {required: true}
+  - type: textarea
     id: acceptance
     attributes: {label: Acceptance and negative cases}
     validations: {required: true}

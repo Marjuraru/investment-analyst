@@ -119,7 +119,7 @@ pero no describen por sí solos el estado operativo actual.
 ### Diseñado, no implementado
 
 - fundamentales SMV;
-- indicadores técnicos adicionales, comparación y plantillas;
+- indicadores técnicos adicionales y plantillas;
 - fundamentales de red para cripto;
 - catálogo macro y workspace de historia larga;
 - corpus y búsqueda de noticias;
@@ -267,16 +267,14 @@ regímenes, no a ratios corporativos artificiales.
 
 ## Fase 5 — Herramientas de mercado y comparación
 
-Ya disponibles por contratos pequeños y probados: EMA configurables con linaje derivado MKT-2 y
-Bandas de Bollinger. Pendientes:
+Ya disponibles por contratos pequeños y probados: EMA configurables con linaje derivado MKT-2,
+Bandas de Bollinger y MKT-3: comparación diaria multi-activo PIT con normalización base 100,
+retorno, volatilidad, drawdown, correlación y beta v1 sobre una muestra común. Pendientes:
 
 - RSI;
 - MACD;
 - ATR y volatilidad histórica;
-- beta y correlación frente a un benchmark identificado;
-- recuperación de drawdown;
 - indicadores de volumen solo cuando la cobertura lo permita;
-- comparación normalizada de varios activos;
 - benchmarks por mercado y sector;
 - acciones corporativas y eventos en la gráfica;
 - anotaciones y plantillas locales.
@@ -392,7 +390,7 @@ La implementación se divide en:
 - watchlists y favoritos persistentes ya disponibles; faltan ampliaciones de experiencia y plantillas
   guardadas;
 - ficha rápida del activo, cobertura y frescura;
-- comparación multi-activo;
+- comparaciones ampliadas por mercado o sector, separadas de la muestra diaria MKT-3;
 - indicadores configurables;
 - evolución fundamental y valoración histórica;
 - contexto macro;
@@ -548,8 +546,8 @@ La ruta crítica vigente se mantiene en
 2. eliminar el centralismo heredado de AAPL mediante contratos genéricos y adaptadores compatibles;
 3. eliminar fallos operativos recurrentes y validar backup, restauración y soak silencioso;
 4. desacoplar lecturas de refresh largos, compactar la API operativa y medir presupuestos;
-5. ampliar la valoración v1 hacia historia y reglas posteriores, e incorporar indicadores,
-   comparación, reglas y notificaciones reanudables;
+5. ampliar la valoración v1 hacia historia y reglas posteriores, e incorporar indicadores
+   restantes, reglas y notificaciones reanudables;
 6. incorporar corpus oficial y la primera vertical SEC de Cazatiburones;
 7. abrir el carril predictivo local con matriz PIT, baselines y validación temporal, sin promoverlo
    a diagnóstico operativo;
