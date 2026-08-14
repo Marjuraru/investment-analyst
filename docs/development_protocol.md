@@ -51,6 +51,22 @@ El trabajo protegido se comprueba calculando SHA-256 sobre los bytes leídos dir
 archivo del worktree. No se usa blob, index, tree, base, diff ni una reconstrucción del contenido.
 Hash correcto continúa; hash ausente o distinto falla cerrado sin restaurar ni modificar el archivo.
 
+## Guard estructural común
+
+`scripts/check_workflow_guards.py` es el único parser/guard ejecutable compartido por BUILD, AUDIT
+y FINALIZE. Es read-only, tipado, determinista, no imprime bodies ni secretos y acepta un snapshot
+JSON temporal o lecturas vivas mediante `gh`; nunca edita Issue, PR, comentarios, branch, workspace
+ni el snapshot. BUILD lo ejecuta en fase `build`, AUDIT antes y después de reconciliar su marker en
+fase `audit`, y cualquier transición mecánica lo ejecuta en fase `finalize`.
+
+El guard exige metadata estructural única del Work Block, target/base/head literales, markers HTML
+estructuralmente válidos, el gate literal `Python 3.12 quality` y evidencia reconocida. Rechaza
+tokens reservados fuera de bloques válidos, duplicados no equivalentes, SHA stale, metadata
+contradictoria y estados no terminales. Devuelve un plan read-only de supersedes sólo para
+duplicados equivalentes; la skill muta, relee y vuelve a ejecutar el guard. `CRITICAL` o cualquier
+policy `HUMAN` sólo puede terminar en `AWAITING HUMAN APPROVAL`; nunca autoriza ready, merge o
+cleanup automático.
+
 ## Capability envelope y preflight BUILD
 
 PLAN declara sólo capacidades no triviales que podrían interrumpir BUILD: provider/host real,

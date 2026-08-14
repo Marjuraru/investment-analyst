@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import subprocess
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -82,6 +81,9 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "read-only" in skills["audit"]
     assert "diff completo" in skills["audit"]
     assert "policy HUMAN" in skills["audit"]
+    assert "scripts/check_workflow_guards.py" in skills["audit"]
+    assert "scripts/check_workflow_guards.py" in skills["build"]
+    assert "scripts/check_workflow_guards.py" in skills["investment-block-flow"]
     assert "intenta refutar" in skills["audit"]
     assert "comandos mutantes" in skills["audit"]
     assert "writer role válido" in skills["plan"]
@@ -361,204 +363,6 @@ def test_build_transition_matrix(
     expected: tuple[str, str],
 ) -> None:
     assert _build_transition(snapshot) == expected
-
-
-@dataclass(frozen=True, slots=True)
-class Comment:
-    comment_id: int
-    body: str
-
-
-@dataclass(frozen=True, slots=True)
-class Marker:
-    role: str
-    block: str
-    sha: str
-    status: str
-    payload: str
-
-
-ACTIVE_MARKER = re.compile(
-    r"<!-- development-workflow:(?P<role>build|audit)-v1\n"
-    r"(?P<fields>.*?)\n-->",
-    flags=re.DOTALL,
-)
-
-
-def _normalize_payload(body: str) -> str:
-    normalized = body.replace("\r\n", "\n").replace("\r", "\n")
-    return "\n".join(line.rstrip() for line in normalized.splitlines()).rstrip()
-
-
-def _parse_marker(comment: Comment, role: str) -> Marker | None:
-    matches = list(ACTIVE_MARKER.finditer(comment.body))
-    role_openers = comment.body.count(f"<!-- development-workflow:{role}-v1")
-    role_matches = [match for match in matches if match.group("role") == role]
-    if role_openers != len(role_matches) or len(role_matches) > 1:
-        raise ValueError("malformed or repeated active marker")
-    if not role_matches:
-        return None
-
-    match = role_matches[0]
-    fields: dict[str, str] = {}
-    for line in match.group("fields").splitlines():
-        if "=" not in line:
-            raise ValueError("malformed marker field")
-        key, value = line.split("=", maxsplit=1)
-        if not key or not value or key in fields:
-            raise ValueError("malformed marker field")
-        fields[key] = value
-    if fields.get("role", role) != role:
-        raise ValueError("marker role mismatch")
-    if not fields.get("block") or not re.fullmatch(r"[0-9a-f]{40}", fields.get("sha", "")):
-        raise ValueError("missing block or full SHA")
-    allowed_statuses = {"PENDING", "PASS", "FAIL"} if role == "build" else {"PASS", "FAIL"}
-    if fields.get("status") not in allowed_statuses:
-        raise ValueError("invalid marker status")
-    if role == "audit" and not fields.get("reviewer"):
-        raise ValueError("missing audit reviewer")
-    return Marker(
-        role=role,
-        block=fields["block"],
-        sha=fields["sha"],
-        status=fields["status"],
-        payload=_normalize_payload(comment.body),
-    )
-
-
-def _supersede(comment: Comment, role: str, canonical_id: int) -> Comment:
-    marker_name = f"<!-- development-workflow:{role}-v1"
-    superseded = comment.body.replace(
-        marker_name,
-        "<!-- development-workflow:superseded-v1",
-        1,
-    )
-    closing_index = superseded.index("-->")
-    fields = f"role={role}\ncanonical_comment_id={canonical_id}\nreason=equivalent-duplicate\n"
-    superseded = superseded[:closing_index] + fields + superseded[closing_index:]
-    return replace(comment, body=superseded)
-
-
-def _reconcile_markers(
-    comments: tuple[Comment, ...],
-    role: str,
-) -> tuple[str, tuple[Comment, ...], int | None]:
-    try:
-        parsed = [(comment, _parse_marker(comment, role)) for comment in comments]
-    except ValueError:
-        return "GUARD FAILURE", comments, None
-    active = [(comment, marker) for comment, marker in parsed if marker is not None]
-    if not active:
-        return "CREATE", comments, None
-    if len(active) == 1:
-        return "UPDATE", comments, active[0][0].comment_id
-
-    first_marker = active[0][1]
-    if any(marker != first_marker for _, marker in active[1:]):
-        return "GUARD FAILURE", comments, None
-    canonical_id = min(comment.comment_id for comment, _ in active)
-    reconciled = tuple(
-        comment
-        if marker is None or comment.comment_id == canonical_id
-        else _supersede(comment, role, canonical_id)
-        for comment, marker in parsed
-    )
-    remaining = [
-        marker for comment in reconciled if (marker := _parse_marker(comment, role)) is not None
-    ]
-    if len(remaining) != 1:
-        return "GUARD FAILURE", comments, None
-    return "RECONCILED", reconciled, canonical_id
-
-
-def _marker_body(
-    role: str,
-    *,
-    block: str = "DEV-4",
-    sha: str = FULL_SHA,
-    status: str = "PASS",
-    evidence: str = "gate=CI PASS\nnegative=scope protected",
-    marker_role: str | None = None,
-) -> str:
-    reviewer = "reviewer=independent-model\n" if role == "audit" else ""
-    explicit_role = f"role={marker_role}\n" if marker_role is not None else ""
-    return (
-        f"<!-- development-workflow:{role}-v1\n"
-        f"block={block}\n"
-        f"sha={sha}\n"
-        f"status={status}\n"
-        f"{reviewer}{explicit_role}-->\n"
-        f"{evidence}\n"
-    )
-
-
-@pytest.mark.parametrize("role", ["build", "audit"])
-def test_equivalent_markers_reconcile_to_lowest_id_without_losing_evidence(role: str) -> None:
-    body = _marker_body(role)
-    comments = (Comment(41, body), Comment(7, body), Comment(19, "human comment"))
-
-    result, reconciled, canonical_id = _reconcile_markers(comments, role)
-
-    assert result == "RECONCILED"
-    assert canonical_id == 7
-    assert sum(f"development-workflow:{role}-v1" in item.body for item in reconciled) == 1
-    duplicate = next(item for item in reconciled if item.comment_id == 41)
-    assert "development-workflow:superseded-v1" in duplicate.body
-    assert f"role={role}" in duplicate.body
-    assert "canonical_comment_id=7" in duplicate.body
-    assert "reason=equivalent-duplicate" in duplicate.body
-    assert "gate=CI PASS" in duplicate.body
-    assert "negative=scope protected" in duplicate.body
-
-
-@pytest.mark.parametrize(
-    ("role", "conflicting_body"),
-    [
-        ("build", _marker_body("build", marker_role="audit")),
-        ("build", _marker_body("build", block="DEV-OTHER")),
-        ("build", _marker_body("build", sha="b" * 40)),
-        ("build", _marker_body("build", status="FAIL")),
-        (
-            "build",
-            _marker_body("build", evidence="gate=CI PASS\nnegative=changed payload"),
-        ),
-        ("build", "<!-- development-workflow:build-v1\nblock=DEV-4\n"),
-        ("audit", _marker_body("audit", marker_role="build")),
-        ("audit", _marker_body("audit", block="DEV-OTHER")),
-        ("audit", _marker_body("audit", sha="b" * 40)),
-        ("audit", _marker_body("audit", status="FAIL")),
-        (
-            "audit",
-            _marker_body("audit", evidence="gate=CI PASS\nnegative=changed payload"),
-        ),
-        ("audit", "<!-- development-workflow:audit-v1\nblock=DEV-4\n"),
-    ],
-    ids=[
-        "build-role",
-        "build-block",
-        "build-sha",
-        "build-status",
-        "build-payload",
-        "build-malformed",
-        "audit-role",
-        "audit-block",
-        "audit-sha",
-        "audit-status",
-        "audit-payload",
-        "audit-malformed",
-    ],
-)
-def test_conflicting_or_malformed_markers_fail_without_mutation(
-    role: str,
-    conflicting_body: str,
-) -> None:
-    original = (Comment(7, _marker_body(role)), Comment(41, conflicting_body))
-
-    result, reconciled, canonical_id = _reconcile_markers(original, role)
-
-    assert result == "GUARD FAILURE"
-    assert reconciled == original
-    assert canonical_id is None
 
 
 @dataclass(frozen=True, slots=True)

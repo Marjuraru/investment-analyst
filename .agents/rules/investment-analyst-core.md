@@ -8,6 +8,8 @@ workspace persistente. Formatter, fixer y cualquier comando mutante están prohi
 refutar el candidato antes de PASS; contabilizar e inspeccionar el diff material completo, mapear
 cada acceptance/invariante/negativo y verificar SHA/base/branch literales, marker BUILD único PASS,
 gate `Python 3.12 quality`, CI, smoke, reviews/threads, alcance, secretos y trabajo protegido.
+Ejecutar el guard común `scripts/check_workflow_guards.py --phase audit` antes y después de la
+reconciliación; no reimplementar su parser en la skill, regla o tests.
 Buscar contradicciones, tests debilitados y probes de BUILD/FIX no verificados. Gates o filenames no
 demuestran corrección semántica. No repetir una suite verde sin riesgo concreto. Sólo `/audit` o
 `$audit` puede reconciliar y publicar el marker AUDIT único.
