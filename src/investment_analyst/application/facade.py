@@ -453,7 +453,7 @@ class InvestmentAnalystApplication:
             )
         with self._runtime.open_storage(
             location,
-            access_mode=WorkspaceAccessMode.READ_ONLY,
+            access_mode=WorkspaceAccessMode("read_only"),
         ) as storage:
             return MarketComparisonService(HistoricalMarketDataService(storage)).query(
                 request,
