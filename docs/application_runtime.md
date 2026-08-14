@@ -42,11 +42,16 @@ resolved location carries the manifest workspace UUID without rewriting any work
 
 `ApplicationRuntime.create_default()` loads `AssetCatalogService` once and creates one
 `ProviderAssetContextResolver`. Provider composition roots reuse that resolver to obtain Alpaca,
-Coinbase, or SEC identifiers. HTTP clients remain independent from application composition and do
+Coinbase, Deribit, or SEC identifiers. HTTP clients remain independent from application composition and do
 not load the catalog themselves.
 
 The runtime is an ordinary injected object, not a singleton. It has no mutable global state, reads
 no `.env` file, and stores no credentials.
+
+Deribit composition resolves the three required capabilities as one immutable asset configuration.
+Refresh opens one writer and orders funding, DVOL, summary and metrics; query opens DuckDB read-only,
+does not construct a transport and replays only evidence eligible at `known_at`. The public CLI and
+scheduler contracts are documented in [`crypto_derivatives.md`](crypto_derivatives.md).
 
 `CapabilityDrivenRuntimePlan` complementa esta composición con un inventario inmutable por activo,
 proveedor, dominio y frecuencia. Conserva source IDs y fachadas públicas; no reemplaza storage ni

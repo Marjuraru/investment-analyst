@@ -42,8 +42,14 @@ destructivas.
 Los criptoactivos deben declarar `crypto_profile`: `bitcoin`, `ethereum`, `altcoin`, `stablecoin` o
 `wrapped`; la ausencia invalida el catálogo. Bitcoin, Ethereum y altcoins permanecen como perfiles
 analíticos separados. Stablecoin y wrapped se traducen explícitamente a `unsupported` y no heredan
-análisis de Bitcoin. El catálogo productivo conserva únicamente Bitcoin. Los otros perfiles se
-prueban sintéticamente para fijar el límite sin anunciar ingestión productiva.
+análisis de Bitcoin. BTC y ETH tienen mercado spot diario Coinbase y la familia de derivados
+Deribit; el intradía y los diagnósticos spot específicos de Bitcoin continúan siendo contratos
+separados y no se transfieren a Ethereum.
+
+Los bindings Deribit usan `currency=BTC|ETH` para `derivatives.volatility_index.daily` e
+`instrument_name=BTC-PERPETUAL|ETH-PERPETUAL` para `derivatives.funding.hourly` y
+`derivatives.perpetual.snapshot`. Las seis fuentes se derivan de esas identidades sin modificar los
+source IDs Coinbase. La resolución exige las tres capacidades; no existe fallback por símbolo.
 
 Las cotizaciones BVL usan vinculaciones `bvl/mnemonic`, `bvl/isin`, `smv/legal_name` y, cuando la
 consulta de valores lo expone, `smv/security_code`. Este último tiene ocho caracteres y no se

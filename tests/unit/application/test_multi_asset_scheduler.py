@@ -86,6 +86,21 @@ def test_new_failures_use_the_canonical_category_policy(
         )
 
 
+def test_crypto_derivatives_domain_round_trips_without_changing_existing_domains() -> None:
+    definition = ScheduledJobDefinition(
+        job_id="deribit:crypto:btc-usd:crypto-derivatives",
+        asset_id="crypto:btc-usd",
+        provider="deribit",
+        domain=ScheduledJobDomain.CRYPTO_DERIVATIVES,
+        data_frequency="hour_1/day_1/event",
+        run_at=time(hour=7, minute=10),
+        freshness_threshold_seconds=129_600,
+    )
+
+    assert definition.to_json_dict()["domain"] == "crypto_derivatives"
+    assert ScheduledJobDomain.MARKET_DAILY.value == "market_daily"
+
+
 def test_state_store_loads_legacy_failure_categories_without_rewriting_bytes(
     tmp_path: Path,
 ) -> None:

@@ -6,9 +6,11 @@ from investment_analyst.catalog.provider_context import ProviderAssetContextReso
 from investment_analyst.providers.asset_config import (
     AlpacaAssetConfiguration,
     CoinbaseAssetConfiguration,
+    DeribitAssetConfiguration,
     SecAccountingStandard,
     SecAssetConfiguration,
     coinbase_source_id,
+    deribit_source_ids,
     sec_source_ids,
 )
 from investment_analyst.providers.crypto.coinbase_exchange import (
@@ -116,6 +118,44 @@ def resolve_coinbase_intraday_configuration(
         asset_class=context.asset.asset_class,
         quote_currency=context.asset.quote_currency,
         exchange=context.asset.exchange or "UNKNOWN",
+    )
+
+
+def resolve_deribit_configuration(
+    resolver: ProviderAssetContextResolver,
+    *,
+    asset_id: str,
+) -> DeribitAssetConfiguration:
+    """Resolve the complete public Deribit derivatives contract for one crypto asset."""
+    context = resolver.resolve(
+        asset_id,
+        provider="deribit",
+        required_namespaces=("currency", "instrument_name"),
+        required_capabilities=(
+            "derivatives.funding.hourly",
+            "derivatives.perpetual.snapshot",
+            "derivatives.volatility_index.daily",
+        ),
+    )
+    currency = context.require_identifier("currency")
+    instrument_name = context.require_identifier("instrument_name")
+    funding_source_id, dvol_source_id, summary_source_id = deribit_source_ids(
+        currency,
+        instrument_name,
+    )
+    return DeribitAssetConfiguration(
+        asset_id=context.asset.asset_id,
+        currency=currency,
+        instrument_name=instrument_name,
+        funding_source_id=funding_source_id,
+        dvol_source_id=dvol_source_id,
+        summary_source_id=summary_source_id,
+        symbol=context.asset.symbol,
+        name=context.asset.name,
+        asset_class=context.asset.asset_class,
+        quote_currency=context.asset.quote_currency,
+        exchange=context.asset.exchange or "UNKNOWN",
+        provider_symbols=context.asset.provider_symbols,
     )
 
 

@@ -45,6 +45,16 @@ it possible to trace a diagnostic back to the records from which it was derived.
 These core contracts define data only; persistence, providers, calculations, diagnostics, API and
 the local interface remain in their dedicated layers.
 
+## Crypto derivatives evidence
+
+Deribit backfill uses the first local `received_at` as `available_at`; an historical event timestamp
+never makes a later retrieval visible early. Funding, daily DVOL and prospective summary snapshots
+have separate schemas, sources, units and periods. Complete-interval receipts are raw evidence but
+never observations or analytical inputs. The provider field `last` maps explicitly to
+`last_price`, while snapshot `current_funding`/`funding_8h` remain distinct from historical
+`interest_1h`/`interest_8h`. Metric and read-only diagnostic identities include their exact PIT
+inputs and cut. See [`crypto_derivatives.md`](crypto_derivatives.md).
+
 ## Corporate valuation snapshot
 
 `corporate-valuation-request-v1` fija activo, `known_at`, fecha y `latest_annual`.

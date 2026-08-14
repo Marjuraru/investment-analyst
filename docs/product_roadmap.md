@@ -289,7 +289,13 @@ El mercado spot diario productivo ya está activo para BTC-USD y ETH-USD mediant
 El intradía de un minuto, sus nueve agregaciones locales y su ventana acotada siguen siendo un
 contrato separado exclusivo de BTC-USD; no se infiere cobertura intradía para ETH-USD.
 
-1. Añadir backfill por ventanas reanudables y recibos de cobertura cuando cada contrato lo requiera.
+La base de derivados productiva también está implementada para BTC y ETH mediante métodos públicos
+Deribit: funding horario, DVOL diario, snapshots prospectivos, receipts, métricas Decimal34, replay
+PIT y scheduler. Es descriptiva, no puntuada, y no autoriza opciones, basis, señales ni trading. Su
+semántica y limitaciones están en [`crypto_derivatives.md`](crypto_derivatives.md).
+
+1. Mantener el backfill Deribit por ventanas/receipts y extenderlo a otra fuente sólo mediante un
+   contrato independiente.
 2. Generalizar el catálogo a otros criptoactivos solamente cuando se seleccionen fuentes.
 3. Diseñar fundamentales de red separados de mercado: oferta, emisión, actividad, fees, seguridad,
    distribución y concentración.

@@ -52,6 +52,15 @@ diarias ya conservan OHLC, volumen, número de operaciones y VWAP. Incorporar qu
 corporate actions, opciones o cobertura SIP exige fuentes y contratos independientes; no se
 inventan a partir de una barra ni se atribuyen al feed IEX.
 
+## Dominio de derivados cripto
+
+Deribit añade tres cadencias separadas —funding horario, DVOL diario y snapshots prospectivos— para
+BTC y ETH. El provider valida y persiste raw/receipts; `analytics/crypto/derivatives_*` consume sólo
+observaciones genéricas y no importa el conector. La revisión PIT se elige por `available_at`, las
+métricas se calculan con Decimal34 y el diagnóstico read-only no usa el `DiagnosticResult` puntuado
+ni se combina con spot. El contrato completo está en
+[`crypto_derivatives.md`](crypto_derivatives.md).
+
 ## Diagnósticos separados y presentación consolidada
 Los diagnósticos de mercado y fundamental se calculan de forma independiente y
 pueden consultarse por separado. La consulta consolidada los presenta juntos sin

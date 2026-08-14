@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","result":[{"index_price":4000,"interest_1h":0.000003,"interest_8h":0.000009,"prev_index_price":3999,"timestamp":1785542400000},{"index_price":4001,"interest_1h":0.000004,"interest_8h":0.000010,"prev_index_price":4000,"timestamp":1785546000000}],"testnet":false}
