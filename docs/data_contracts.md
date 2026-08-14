@@ -12,6 +12,8 @@ reconstructed without hiding transformations.
 - A **metric result** is a deterministic calculation over one or more normalized observations. Its
   definition, parameters, input observation identifiers, algorithm version, and timestamps remain
   explicit.
+
+`market-multi-asset-comparison-v1` conserva fechas comunes UTC, cobertura por activo, fuentes, UUID de observaciones de cierre y `available_at`. Las métricas se calculan sobre la misma muestra de 21–1300 fechas con `Decimal` de precisión 34; cuando una varianza es cero, correlación o beta son explícitamente no disponibles.
 - A **diagnostic** combines versioned metric results into components and evidence. Scores, weights,
   weighted contributions, confidence, verdict, and explanation are stored as auditable outputs.
 

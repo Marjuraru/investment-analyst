@@ -53,6 +53,7 @@ from investment_analyst.analytics.fundamentals.research_models import (
 from investment_analyst.analytics.fundamentals.research_service import (
     SecIssuerFundamentalResearchService,
 )
+from investment_analyst.analytics.market.bar_schemas import get_market_bar_schema
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChart,
     AaplMarketChartRequest,
@@ -68,6 +69,12 @@ from investment_analyst.analytics.market.chart_service import (
     CryptoSpotDailyMarketChartService,
     ListedMarketChartService,
 )
+from investment_analyst.analytics.market.comparison_models import (
+    MarketComparisonAsset,
+    MarketComparisonRequest,
+    MarketMultiAssetComparisonResult,
+)
+from investment_analyst.analytics.market.comparison_service import MarketComparisonService
 from investment_analyst.analytics.market.diagnostic_pipeline import MarketDiagnosticPipeline
 from investment_analyst.analytics.market.diagnostic_rules import MarketDiagnosticEngine
 from investment_analyst.analytics.market.diagnostic_selection import (
@@ -420,6 +427,38 @@ class InvestmentAnalystApplication:
                 HistoricalMarketDataService(storage),
                 MarketStatisticsEngine(),
             ).query(request)
+
+    def query_market_comparison(
+        self,
+        request: MarketComparisonRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> MarketMultiAssetComparisonResult:
+        """Compare eligible catalog daily assets from one read-only local session."""
+        visible_assets = {item.asset_id: item for item in self.list_market_assets().assets}
+        resolved: dict[str, MarketComparisonAsset] = {}
+        for asset_id in request.asset_ids:
+            try:
+                descriptor = visible_assets[asset_id]
+            except KeyError as error:
+                raise ValueError(
+                    f"asset_id is not in the visible market universe: {asset_id}"
+                ) from error
+            if get_market_bar_schema(descriptor.source_id).frequency.value != "1d":
+                raise ValueError("comparison requires a visible daily market asset")
+            resolved[asset_id] = MarketComparisonAsset(
+                asset_id=descriptor.asset_id,
+                source_id=descriptor.source_id,
+                quote_currency=descriptor.quote_currency,
+            )
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return MarketComparisonService(HistoricalMarketDataService(storage)).query(
+                request,
+                resolved,
+            )
 
     def query_btc_market_chart(
         self,

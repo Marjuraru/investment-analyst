@@ -10,6 +10,8 @@
 - `validation`, `alerts`, `audit`, `knowledge`, `storage`: soporte transversal.
 - `api` y `frontend`: capas de exposición, aisladas del núcleo.
 
+La comparación multi-activo es una capa analítica efímera: consume series ya reconstruidas por `HistoricalMarketDataService` dentro de una sola sesión de solo lectura y no persiste resultados. Permanece separada de fundamentales, diagnósticos, señales, decisiones y ejecución.
+
 ## Independencia de proveedores
 El acceso a datos se define mediante interfaces en `core/interfaces`. Los
 proveedores concretos son intercambiables; ningún módulo de análisis depende

@@ -7,6 +7,8 @@ funcional debe permitir que un analista:
 
 - seleccione una watchlist, actualice sus fuentes y conozca cobertura, frescura y fallos;
 - consulte mercado y fundamentales por activo con evidencia point-in-time;
+
+La interfaz puede consultar comparaciones diarias de 2–5 activos con evidencia PIT común. La salida es de solo lectura y no altera el plan de actualización ni los artefactos históricos.
 - reciba candidatos deterministas para revisión sin una puntuación agregada ni recomendación;
 - reciba una notificación deduplicada cuando exista evidencia nueva;
 - consulte actividad declarada de insiders, propietarios relevantes e instituciones en una sección

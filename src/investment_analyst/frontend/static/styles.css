@@ -3986,6 +3986,70 @@ footer p:last-child {
   }
 }
 
+.comparison-section {
+  border-top: 1px solid var(--line);
+  padding: 2.5rem 0;
+}
+
+.comparison-controls,
+.comparison-cards {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin: 1.25rem 0;
+}
+
+.comparison-controls .button {
+  align-self: end;
+}
+
+.comparison-results {
+  display: grid;
+  gap: 1rem;
+}
+
+.comparison-chart {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  min-height: 260px;
+  overflow-x: auto;
+  padding: 0.75rem;
+}
+
+.comparison-chart svg {
+  display: block;
+  min-width: 560px;
+  width: 100%;
+}
+
+.comparison-cards {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+.comparison-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  padding: 1rem;
+}
+
+.comparison-card dl {
+  display: grid;
+  gap: 0.35rem;
+  grid-template-columns: 1fr auto;
+  margin: 0.75rem 0 0;
+}
+
+.comparison-card dd {
+  margin: 0;
+  text-align: right;
+}
+
+@media (max-width: 900px) {
+  .comparison-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

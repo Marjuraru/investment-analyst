@@ -2,6 +2,8 @@
 
 ## Patrones adoptados
 
+La vista de comparación de mercado presenta series normalizadas, retorno, drawdown, volatilidad, correlación y beta para una referencia y pares sobre la misma muestra. No comunica orden, calidad relativa, señal, recomendación ni consejo personalizado.
+
 La interfaz toma referencias funcionales sin copiar código, identidad visual ni componentes
 propietarios.
 

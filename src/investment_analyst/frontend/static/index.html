@@ -864,6 +864,32 @@
             </section>
           </section>
 
+          <section id="comparacion-mercado" class="comparison-section" aria-labelledby="comparacion-mercado-titulo">
+            <div class="section-intro">
+              <div>
+                <p class="eyebrow">MUESTRA COMÚN</p>
+                <h2 id="comparacion-mercado-titulo">Comparación de mercado</h2>
+                <p>Lectura descriptiva de cierres diarios locales; no clasifica activos ni genera recomendaciones.</p>
+              </div>
+            </div>
+            <form id="market-comparison-form" class="comparison-controls">
+              <label class="field"><span>Referencia</span><select id="comparison-benchmark" required></select></label>
+              <label class="field"><span>Activos (incluye la referencia; 2–5)</span><select id="comparison-assets" multiple size="5" required></select></label>
+              <label class="field"><span>Inicio</span><input id="comparison-start" type="date" required></label>
+              <label class="field"><span>Fin</span><input id="comparison-end" type="date" required></label>
+              <button id="comparison-submit" class="button primary" type="submit">Comparar</button>
+            </form>
+            <p id="comparison-status" class="chart-status" aria-live="polite">Selecciona dos o más activos con la misma moneda de cotización.</p>
+            <div id="comparison-results" class="comparison-results hidden" aria-busy="false">
+              <div id="comparison-chart" class="comparison-chart" aria-label="Series normalizadas a base 100 en fechas comunes"></div>
+              <div id="comparison-cards" class="comparison-cards"></div>
+              <details class="json-disclosure">
+                <summary>Cobertura y contrato técnico</summary>
+                <pre id="comparison-json" tabindex="0"></pre>
+              </details>
+            </div>
+          </section>
+
           <section id="operacion" class="operations-section" aria-labelledby="operacion-titulo">
             <div class="section-intro">
               <div>

@@ -7,6 +7,8 @@ Trading API ni un LLM activo.
 
 ## Capacidades
 
+`GET /api/v1/market-comparison` acepta `asset_id` repetido, `benchmark_id`, `start`, `end` y `known_at`. Devuelve `market-multi-asset-comparison-v1` desde almacenamiento local de solo lectura; la interfaz carga el gráfico normalizado bajo demanda.
+
 La página permite:
 
 - revisar el workspace, la última ejecución, la trazabilidad y la programación;

@@ -8,6 +8,8 @@ actividad de participantes conservan significado, evidencia y diagnósticos inde
 versión actual no ejecuta órdenes, no administra dinero ni convierte sus resultados en una
 recomendación personalizada o puntuación agregada.
 
+La comparación diaria multi-activo disponible es una lectura descriptiva local sobre una muestra común; no introduce ranking, recomendaciones, señales ni automatización de ejecución.
+
 La evolución conserva una dirección por capas, no una autorización presente:
 
 `evidencia PIT → análisis → detección de oportunidades → señales/predicción validada → recomendación explícita y trazable → decisión humana/política → broker y ejecución controlada futura → posible automatización acotada posterior`
