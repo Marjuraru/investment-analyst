@@ -16,9 +16,13 @@ from investment_analyst.catalog.provider_configuration import (
     resolve_alpaca_configuration,
     resolve_coinbase_configuration,
     resolve_coinbase_intraday_configuration,
+    resolve_deribit_configuration,
     resolve_sec_configuration,
 )
-from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
+from investment_analyst.catalog.provider_context import (
+    ProviderAssetContextError,
+    ProviderAssetContextResolver,
+)
 from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.core.models import AssetClass, DataFrequency
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
@@ -55,6 +59,7 @@ class MarketAssetDescriptor(ContractModel):
     fundamental_frequencies: tuple[DataFrequency, ...]
     fundamental_source_ids: tuple[NonEmptyStr, ...] = ()
     supports_intraday: bool
+    supports_crypto_derivatives: bool = False
     intraday_source_id: NonEmptyStr | None = None
     intraday_schema_version: NonEmptyStr | None = None
     refresh_kind: Literal["complete_analysis", "market_only"]
@@ -65,6 +70,11 @@ class MarketAssetDescriptor(ContractModel):
         intraday_fields = (self.intraday_source_id, self.intraday_schema_version)
         if self.supports_intraday != all(value is not None for value in intraday_fields):
             raise ValueError("intraday support requires both source and schema identities")
+        if self.supports_crypto_derivatives and (
+            self.asset_class is not AssetClass.CRYPTO
+            or self.analysis.family is not AssetAnalysisFamily.CRYPTOASSET
+        ):
+            raise ValueError("crypto derivatives require a cryptoasset descriptor")
         if self.analysis.asset_id != self.asset_id:
             raise ValueError("analysis capabilities must match descriptor asset_id")
         if self.analysis.asset_class is not self.asset_class:
@@ -105,7 +115,7 @@ class MarketAssetUniverse(ContractModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["market-asset-universe-v3"] = "market-asset-universe-v3"
+    schema_version: Literal["market-asset-universe-v4"] = "market-asset-universe-v4"
     catalog_version: int = Field(ge=1)
     assets: tuple[MarketAssetDescriptor, ...]
 
@@ -228,6 +238,7 @@ def _descriptor(
 
     if binding.provider == "coinbase" and analysis.crypto_profile is not None:
         daily = resolve_coinbase_configuration(resolver, asset_id=asset_id)
+        supports_crypto_derivatives = _supports_crypto_derivatives(resolver, asset_id=asset_id)
         supports_intraday = _MINUTE_MARKET_CAPABILITY in binding.capabilities
         intraday = (
             resolve_coinbase_intraday_configuration(resolver, asset_id=asset_id)
@@ -257,6 +268,7 @@ def _descriptor(
             fundamental_frequencies=(),
             fundamental_source_ids=(),
             supports_intraday=supports_intraday,
+            supports_crypto_derivatives=supports_crypto_derivatives,
             intraday_source_id=intraday.source_id if intraday is not None else None,
             intraday_schema_version=("btc-intraday-chart-v1" if intraday is not None else None),
             refresh_kind="market_only",
@@ -265,6 +277,19 @@ def _descriptor(
     raise ValueError(
         f"unsupported default daily-market provider for {asset_id}: {binding.provider}"
     )
+
+
+def _supports_crypto_derivatives(
+    resolver: ProviderAssetContextResolver,
+    *,
+    asset_id: str,
+) -> bool:
+    """Return whether the catalog resolves the complete Deribit v1 data family."""
+    try:
+        resolve_deribit_configuration(resolver, asset_id=asset_id)
+    except ProviderAssetContextError:
+        return False
+    return True
 
 
 __all__ = [

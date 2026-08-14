@@ -44,6 +44,11 @@ DVOL diario, snapshots prospectivos, replay PIT y scheduler. El diagnóstico es 
 score; el backfill no se presenta como vintage y no se mezcla con Coinbase spot. Véase
 [`crypto_derivatives.md`](crypto_derivatives.md).
 
+La interfaz local entrega ese replay solamente para los activos que el catálogo declara elegibles:
+el panel lazy conserva el corte visible, consulta 90 días UTC de evidencia persistida y muestra
+cobertura, fuentes, ausencias, limitaciones e identidades sin ejecutar refresh ni usar Deribit desde
+el navegador.
+
 ## Diagnóstico de la estructura actual
 
 ### Base que debe conservarse

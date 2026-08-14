@@ -979,6 +979,7 @@ section {
 }
 
 .market-section,
+.crypto-derivatives-section,
 .analysis-section,
 .operations-section {
   margin-top: 1.55rem;
@@ -986,6 +987,110 @@ section {
 
 .market-section {
   margin-top: 1.25rem;
+}
+
+.crypto-derivatives-section {
+  margin-top: 1.55rem;
+}
+
+.crypto-derivatives-card {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.crypto-derivatives-card > summary {
+  min-height: 44px;
+  padding: 0.9rem 1.1rem;
+  cursor: pointer;
+  color: var(--ink-strong);
+  font-weight: 700;
+}
+
+.crypto-derivatives-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1.1rem;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+#crypto-derivatives-status {
+  margin: 0;
+  padding: 0.8rem 1.1rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.crypto-derivatives-metrics,
+.crypto-derivatives-audit {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.crypto-derivatives-metrics > div,
+.crypto-derivatives-audit > div {
+  min-width: 0;
+  padding: 0.8rem 1.1rem;
+  border-right: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.crypto-derivatives-metrics > div:nth-child(4n),
+.crypto-derivatives-audit > div:nth-child(4n) {
+  border-right: 0;
+}
+
+.crypto-derivatives-metrics dt,
+.crypto-derivatives-audit dt {
+  color: var(--muted);
+  font-size: 0.69rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.crypto-derivatives-metrics dd,
+.crypto-derivatives-audit dd {
+  margin: 0.35rem 0 0;
+  overflow-wrap: anywhere;
+  color: var(--ink-strong);
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.crypto-derivatives-disclosure > summary {
+  padding: 0.9rem 1.1rem;
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.crypto-derivatives-disclosure > div {
+  padding: 0 1.1rem 1.1rem;
+  border-top: 1px solid var(--line-soft);
+}
+
+.crypto-derivatives-disclosure p {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.crypto-derivatives-disclosure pre {
+  max-height: 20rem;
+  margin: 0;
+  padding: 0.85rem;
+  overflow: auto;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 0.72rem;
+  white-space: pre-wrap;
 }
 
 .market-chart-card {
@@ -3402,6 +3507,25 @@ footer p:last-child {
 }
 
 @media (max-width: 760px) {
+  .crypto-derivatives-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .crypto-derivatives-metrics,
+  .crypto-derivatives-audit {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .crypto-derivatives-metrics > div:nth-child(4n),
+  .crypto-derivatives-audit > div:nth-child(4n) {
+    border-right: 1px solid var(--line-soft);
+  }
+
+  .crypto-derivatives-metrics > div:nth-child(2n),
+  .crypto-derivatives-audit > div:nth-child(2n) {
+    border-right: 0;
+  }
   .valuation-query-controls,
   .valuation-header {
     align-items: stretch;
@@ -3633,6 +3757,19 @@ footer p:last-child {
 }
 
 @media (max-width: 540px) {
+  .crypto-derivatives-metrics,
+  .crypto-derivatives-audit {
+    grid-template-columns: 1fr;
+  }
+
+  .crypto-derivatives-metrics > div,
+  .crypto-derivatives-metrics > div:nth-child(2n),
+  .crypto-derivatives-metrics > div:nth-child(4n),
+  .crypto-derivatives-audit > div,
+  .crypto-derivatives-audit > div:nth-child(2n),
+  .crypto-derivatives-audit > div:nth-child(4n) {
+    border-right: 0;
+  }
   .valuation-metrics,
   .valuation-audit-summary {
     grid-template-columns: 1fr;

@@ -47,6 +47,10 @@
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
             <span class="nav-text">Mercado</span>
           </a>
+          <a class="nav-link hidden" href="#derivados-crypto" data-crypto-derivatives-only>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19V5"></path><path d="M4 19h16"></path><path d="m7 15 4-5 3 3 4-6"></path></svg>
+            <span class="nav-text">Derivados</span>
+          </a>
           <a class="nav-link" href="#fundamentales" data-fundamental-only>
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="20" x2="12" y2="10"></line><line x1="18" y1="20" x2="18" y2="4"></line><line x1="6" y1="20" x2="6" y2="16"></line></svg>
             <span class="nav-text">Fundamentales</span>
@@ -466,6 +470,58 @@
                 </div>
               </details>
             </article>
+          </section>
+
+          <section
+            id="derivados-crypto"
+            class="crypto-derivatives-section hidden"
+            aria-labelledby="derivados-crypto-titulo"
+            data-crypto-derivatives-only
+          >
+            <div class="section-intro analysis-intro">
+              <div>
+                <p class="eyebrow">DERIVADOS CRIPTO</p>
+                <h2 id="derivados-crypto-titulo">Evidencia Deribit point-in-time</h2>
+                <p>Lectura descriptiva separada del mercado spot; no genera señales, score ni recomendación.</p>
+              </div>
+            </div>
+            <details id="crypto-derivatives-panel" class="crypto-derivatives-card">
+              <summary>Consultar los últimos 90 días de evidencia local</summary>
+              <div id="crypto-derivatives-content" aria-busy="false">
+                <header class="crypto-derivatives-header">
+                  <div>
+                    <p id="crypto-derivatives-context" class="chart-quote-context">La consulta se carga bajo demanda con el mismo corte visible.</p>
+                    <h3>Financiación, volatilidad y resumen perpetuo</h3>
+                  </div>
+                  <span id="crypto-derivatives-coverage" class="quality-chip">Sin consultar</span>
+                </header>
+                <p id="crypto-derivatives-status" role="status" aria-live="polite">Abre este panel para consultar evidencia local.</p>
+                <dl class="crypto-derivatives-metrics">
+                  <div><dt>Financiación acumulada 168 h</dt><dd id="derivatives-funding-168h">—</dd></div>
+                  <div><dt>Dirección de financiación</dt><dd id="derivatives-funding-direction">—</dd></div>
+                  <div><dt>Cambio DVOL 7 d</dt><dd id="derivatives-dvol-7d">—</dd></div>
+                  <div><dt>Dirección DVOL</dt><dd id="derivatives-dvol-direction">—</dd></div>
+                  <div><dt>Interés abierto</dt><dd id="derivatives-open-interest">—</dd></div>
+                  <div><dt>Financiación actual / 8 h</dt><dd id="derivatives-current-funding">—</dd></div>
+                  <div><dt>Spread</dt><dd id="derivatives-spread">—</dd></div>
+                  <div><dt>Estado descriptivo</dt><dd id="derivatives-diagnostic-status">—</dd></div>
+                </dl>
+                <dl class="crypto-derivatives-audit">
+                  <div><dt>Cobertura consultada</dt><dd id="derivatives-range">—</dd></div>
+                  <div><dt>Corte conocido</dt><dd id="derivatives-known-at">—</dd></div>
+                  <div><dt>Fuentes</dt><dd id="derivatives-source-ids">—</dd></div>
+                  <div><dt>Trazabilidad</dt><dd id="derivatives-traceability">—</dd></div>
+                </dl>
+                <details class="crypto-derivatives-disclosure">
+                  <summary>Ausencias, limitaciones e identidades de evidencia</summary>
+                  <div>
+                    <p><strong>Requisitos ausentes:</strong> <span id="derivatives-missing">—</span></p>
+                    <p><strong>Limitaciones:</strong> <span id="derivatives-limitations">—</span></p>
+                    <pre id="derivatives-evidence" tabindex="0">Sin evidencia cargada.</pre>
+                  </div>
+                </details>
+              </div>
+            </details>
           </section>
 
           <section id="fundamentales" class="fundamental-section" aria-labelledby="fundamentales-titulo" data-fundamental-only>

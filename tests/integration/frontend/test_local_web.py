@@ -32,6 +32,7 @@ from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagn
 from investment_analyst.analytics.consolidated_diagnostic_models import (
     ConsolidatedDiagnosticRequest,
 )
+from investment_analyst.analytics.crypto.derivatives_models import CryptoDerivativesQueryResult
 from investment_analyst.analytics.fundamental_trend_models import (
     AaplFundamentalTrend,
     AaplFundamentalTrendRequest,
@@ -77,6 +78,7 @@ from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshRequest,
     BtcMarketRefreshSummary,
 )
+from investment_analyst.application.crypto_derivatives_models import CryptoDerivativesQueryRequest
 from investment_analyst.application.crypto_spot_daily_models import (
     CryptoSpotDailyRefreshRequest,
     CryptoSpotDailyRefreshSummary,
@@ -223,6 +225,8 @@ class _FakeApplication:
         self.fundamental_refresh_identities: list[SecEdgarIdentity] = []
         self.valuation_requests: list[CorporateValuationRequest] = []
         self.valuation_locations: list[StorageLocationRequest] = []
+        self.crypto_derivatives_requests: list[CryptoDerivativesQueryRequest] = []
+        self.crypto_derivatives_locations: list[StorageLocationRequest] = []
 
     def list_market_assets(self) -> MarketAssetUniverse:
         return InvestmentAnalystApplication.create_default().list_market_assets()
@@ -322,6 +326,58 @@ class _FakeApplication:
                     "interval": request.interval.value,
                     "points": [],
                 }
+            ),
+        )
+
+    def query_crypto_derivatives(
+        self,
+        request: CryptoDerivativesQueryRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CryptoDerivativesQueryResult:
+        self.crypto_derivatives_requests.append(request)
+        self.crypto_derivatives_locations.append(location)
+        return cast(
+            CryptoDerivativesQueryResult,
+            _JsonResult(
+                {
+                    "schema_version": "crypto-derivatives-query-result-v1",
+                    "asset_id": request.asset_id,
+                    "source_ids": ["deribit:btc"],
+                    "known_at": request.known_at.isoformat(),
+                    "metrics": [],
+                    "diagnostic": {
+                        "schema_version": "crypto-derivatives-diagnostic-v1",
+                        "diagnostic_id": "00000000-0000-0000-0000-000000000001",
+                        "asset_id": request.asset_id,
+                        "source_ids": ["deribit:btc"],
+                        "known_at": request.known_at.isoformat(),
+                        "status": "insufficient_data",
+                        "funding_direction": "unavailable",
+                        "dvol_direction": "unavailable",
+                        "funding_sum_168h": None,
+                        "dvol_change_7d": None,
+                        "latest_open_interest": None,
+                        "latest_current_funding": None,
+                        "latest_funding_8h": None,
+                        "latest_spread_bps": None,
+                        "observation_ids": [],
+                        "metric_result_ids": [],
+                        "missing_requirements": ["derivatives.funding.hourly"],
+                        "limitations": ["fixture has no persisted derivatives evidence"],
+                    },
+                    "coverage": {
+                        "requested_start": f"{request.start_date.isoformat()}T00:00:00+00:00",
+                        "requested_end": f"{request.end_date.isoformat()}T00:00:00+00:00",
+                        "known_at": request.known_at.isoformat(),
+                        "funding_observation_count": 0,
+                        "dvol_observation_count": 0,
+                        "summary_snapshot_count": 0,
+                        "metric_count": 0,
+                    },
+                    "raw_record_ids": [],
+                    "traceability_verified": True,
+                },
             ),
         )
 
@@ -742,6 +798,94 @@ def test_valuation_api_redacts_unexpected_storage_details(tmp_path: Path) -> Non
     assert "SECRET" not in json.dumps(payload)
 
 
+def test_crypto_derivatives_api_is_catalog_authorized_point_in_time_and_read_only(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    workspace = tmp_path / "workspace"
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=workspace,
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    parameters = {
+        "asset_id": "crypto:btc-usd",
+        "start": "2026-07-01",
+        "end": "2026-07-31",
+        "known_at": "2026-08-01T12:00:00Z",
+    }
+
+    with _server(web) as (_, root):
+        status, payload, _ = _json_request(
+            Request(f"{root}/api/v1/crypto-derivatives?{urlencode(parameters)}")
+        )
+        repeated_status, repeated, _ = _json_request(
+            Request(f"{root}/api/v1/crypto-derivatives?{urlencode(parameters)}&start=2026-07-02")
+        )
+        unknown_status, unknown, _ = _json_request(
+            Request(f"{root}/api/v1/crypto-derivatives?{urlencode({**parameters, 'extra': 'x'})}")
+        )
+        noneligible_status, noneligible, _ = _json_request(
+            Request(
+                f"{root}/api/v1/crypto-derivatives?{
+                    urlencode(
+                        {
+                            **parameters,
+                            'asset_id': 'equity:us:aapl',
+                        }
+                    )
+                }"
+            )
+        )
+        naive_status, naive, _ = _json_request(
+            Request(
+                f"{root}/api/v1/crypto-derivatives?{
+                    urlencode(
+                        {
+                            **parameters,
+                            'known_at': '2026-08-01T12:00:00',
+                        }
+                    )
+                }"
+            )
+        )
+        invalid_date_status, invalid_date, _ = _json_request(
+            Request(
+                f"{root}/api/v1/crypto-derivatives?{urlencode({**parameters, 'start': '20260701'})}"
+            )
+        )
+        post_status, post, _ = _json_request(
+            Request(
+                f"{root}/api/v1/crypto-derivatives?{urlencode(parameters)}",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 200
+    assert payload["schema_version"] == "crypto-derivatives-query-result-v1"
+    assert payload["asset_id"] == "crypto:btc-usd"
+    assert payload["diagnostic"]["missing_requirements"] == ["derivatives.funding.hourly"]
+    assert repeated_status == 400 and repeated["error"]["code"] == "invalid_request"
+    assert unknown_status == 400 and unknown["error"]["code"] == "invalid_request"
+    assert noneligible_status == 400 and noneligible["error"]["code"] == "invalid_request"
+    assert naive_status == 400 and naive["error"]["code"] == "invalid_request"
+    assert invalid_date_status == 400 and invalid_date["error"]["code"] == "invalid_request"
+    assert post_status == 404 and post["error"]["code"] == "not_found"
+    assert len(application.crypto_derivatives_requests) == 1
+    request = application.crypto_derivatives_requests[0]
+    assert request.start_date == date(2026, 7, 1)
+    assert request.end_date == date(2026, 7, 31)
+    assert request.known_at == datetime(2026, 8, 1, 12, tzinfo=UTC)
+    assert application.crypto_derivatives_locations == [
+        StorageLocationRequest(workspace=workspace.resolve())
+    ]
+
+
 class _ExplodingApplication:
     def market_assets(self) -> dict[str, object]:
         raise RuntimeError("unexpected SECRET detail")
@@ -956,6 +1100,15 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'class="valuation-card" aria-busy="false"' in html
     assert 'id="valuation-evidence" tabindex="0"' in html
     assert "data-valuation-only" in html
+    assert 'id="crypto-derivatives-panel"' in html
+    assert "data-crypto-derivatives-only" in html
+    assert "Financiación acumulada 168 h" in html
+    assert "Cambio DVOL 7 d" in html
+    assert "Ausencias, limitaciones e identidades de evidencia" in html
+    assert "api(`/api/v1/crypto-derivatives?${parameters.toString()}`)" in javascript
+    assert "supportsCryptoDerivatives" in javascript
+    assert "cryptoDerivativesRequest" in javascript
+    assert ".crypto-derivatives-card" in stylesheet
     assert 'byId("fundamental-chart-symbol").textContent = presentation.symbol;' in javascript
     assert "Evolución fundamental de ${marketAssetPresentation().name}" in javascript
     assert 'byId("market-chart").setAttribute(' in javascript
@@ -1392,7 +1545,7 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert overview["operational"]["status"] == "ready"
     assert overview["scheduler"] == {"enabled": False}
     assert assets_status == 200
-    assert assets["schema_version"] == "market-asset-universe-v3"
+    assert assets["schema_version"] == "market-asset-universe-v4"
     assert assets["catalog_version"] == 1
     assert len(assets["assets"]) == 19
     assets_by_id = {item["asset_id"]: item for item in assets["assets"]}
@@ -1418,7 +1571,10 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
         assert assets_by_id[asset_id]["fundamental_frequencies"] == ["annual"]
     assert assets_by_id["etf:us:ibit"]["analysis"]["fundamental_mode"] == "investment_fund"
     assert assets_by_id["crypto:btc-usd"]["analysis"]["market_mode"] == "crypto_spot"
+    assert assets_by_id["crypto:btc-usd"]["supports_crypto_derivatives"] is True
     assert assets_by_id["crypto:eth-usd"]["source_id"] == "coinbase-exchange:eth-usd:daily-candles"
+    assert assets_by_id["crypto:eth-usd"]["supports_crypto_derivatives"] is True
+    assert assets_by_id["equity:us:aapl"]["supports_crypto_derivatives"] is False
     assert run_status == 200 and run["status"] == "succeeded"
     assert runner.requests[0].market_start == date(2025, 1, 1)
     assert runner.requests[0].market_end == date(2026, 7, 15)

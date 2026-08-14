@@ -289,11 +289,12 @@ estadísticas o diagnósticos diarios a esta fuente.
 
 ## Universo de mercado
 
-El endpoint `/api/market-assets` entrega `market-asset-universe-v3`, generado directamente desde el
+El endpoint `/api/market-assets` entrega `market-asset-universe-v4`, generado directamente desde el
 catálogo central y las configuraciones tipadas de proveedores. El navegador construye el selector
 con esa respuesta; no mantiene otra lista de símbolos. Cada descriptor declara identidad canónica,
 símbolo del proveedor, fuente, esquema de gráfico, fecha inicial soportada, unidad de volumen,
-capacidad intradía, tipo de actualización y un perfil analítico por familia. La interfaz decide si
+capacidad intradía, elegibilidad de derivados cripto, tipo de actualización y un perfil analítico
+por familia. La interfaz decide si
 un intervalo es intradía a partir de la capacidad del descriptor, no comparando el ID con Bitcoin.
 
 El perfil separa empresas cotizadas, fondos cotizados y criptoactivos. También distingue análisis
@@ -358,6 +359,20 @@ operativa persiste estadísticas únicamente sobre los 90 días calendario final
 holgadamente las ventanas técnicas actuales de 20 días y evita recalcular once años en cada corte
 diario. El contrato declara `analytics_start`, `analytics_end` y `analytics_lookback_days`; esta
 optimización no recorta los datos históricos guardados ni la vista de máximo histórico.
+
+## Derivados cripto en la interfaz
+
+Para un descriptor con `supports_crypto_derivatives=true`, la navegación muestra un panel separado
+de la gráfica spot. El panel es lazy: al abrirlo consulta `GET /api/v1/crypto-derivatives` con
+`asset_id`, `start`, `end` y `known_at`; los límites son fechas UTC inclusivas de una ventana de 90
+días terminada en la fecha UTC del corte visible. El endpoint rechaza parámetros repetidos,
+desconocidos, fechas inválidas, cortes sin zona y activos no elegibles antes de abrir storage.
+
+La respuesta se conserva como `crypto-derivatives-query-result-v1`. La presentación muestra estado
+descriptivo, dirección de funding y DVOL, funding acumulado 168 h, cambio DVOL 7 d, interés abierto,
+funding actual/8 h, spread, cobertura, corte, fuentes, requisitos faltantes, limitaciones e
+identidades. No infiere calidad, señal, recomendación, ranking ni mezcla esos datos con spot,
+fundamentales o valoración.
 
 ## Programación de la watchlist
 

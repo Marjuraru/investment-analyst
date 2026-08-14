@@ -38,6 +38,7 @@ from investment_analyst.analytics.consolidated_diagnostic_models import (
 from investment_analyst.analytics.consolidated_diagnostic_service import (
     ConsolidatedDiagnosticQueryError,
 )
+from investment_analyst.analytics.crypto.derivatives_models import CryptoDerivativesQueryResult
 from investment_analyst.analytics.fundamental_trend_models import (
     AaplFundamentalTrend,
     AaplFundamentalTrendRequest,
@@ -120,6 +121,7 @@ from investment_analyst.application.capability_runtime import (
     CapabilityDrivenRuntimePlan,
     build_capability_runtime_plan,
 )
+from investment_analyst.application.crypto_derivatives_models import CryptoDerivativesQueryRequest
 from investment_analyst.application.crypto_spot_daily import (
     CryptoSpotDailyRefreshError,
 )
@@ -359,6 +361,15 @@ class _ApplicationOperations(Protocol):
         """Query one configured Coinbase daily chart."""
         ...
 
+    def query_crypto_derivatives(
+        self,
+        request: CryptoDerivativesQueryRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CryptoDerivativesQueryResult:
+        """Replay one persisted derivatives information set without writes."""
+        ...
+
     def query_listed_market_chart(
         self,
         request: AaplMarketChartRequest,
@@ -591,6 +602,10 @@ class _WebOperations(Protocol):
 
     def market_chart(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Return one bounded point-in-time market chart."""
+        ...
+
+    def crypto_derivatives(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return one bounded point-in-time Deribit derivatives query."""
         ...
 
     def valuation(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
@@ -829,6 +844,16 @@ class AaplLocalController:
                 )
             self._crypto_spot_daily_chart_cache[request] = chart
         return chart
+
+    def crypto_derivatives_request(
+        self,
+        request: CryptoDerivativesQueryRequest,
+    ) -> CryptoDerivativesQueryResult:
+        """Query persisted derivatives evidence without providers or writer acquisition."""
+        return self._application.query_crypto_derivatives(
+            request,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
 
     def listed_market_chart_request(
         self,
@@ -1490,6 +1515,26 @@ class AaplLocalWebApplication:
             ).to_json_dict()
         raise ValueError("market chart asset_id is not supported")
 
+    def crypto_derivatives(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Validate one read-only catalog-authorized derivatives replay."""
+        allowed = {"asset_id", "start", "end", "known_at"}
+        if set(parameters) - allowed:
+            raise ValueError("crypto derivatives query contains unsupported parameters")
+        asset_id = _one_parameter(parameters, "asset_id", required=True)
+        descriptor = self._market_asset(asset_id)
+        if not descriptor.supports_crypto_derivatives:
+            raise ValueError("crypto derivatives are not available for asset_id")
+        request = CryptoDerivativesQueryRequest(
+            asset_id=descriptor.asset_id,
+            start_date=_date_parameter(_one_parameter(parameters, "start", required=True)),
+            end_date=_date_parameter(_one_parameter(parameters, "end", required=True)),
+            known_at=_aware_datetime(_one_parameter(parameters, "known_at", required=True)),
+        )
+        return self._controller.crypto_derivatives_request(request).to_json_dict()
+
     def valuation(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate and query the isolated latest-annual valuation contract."""
         allowed = {"asset_id", "known_at", "valuation_date", "basis"}
@@ -1810,6 +1855,11 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=9)
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(HTTPStatus.OK, server.application.market_chart(parameters))
+                return
+            if parsed.path == "/api/v1/crypto-derivatives":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(HTTPStatus.OK, server.application.crypto_derivatives(parameters))
                 return
             if parsed.path == "/api/v1/valuation":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
@@ -2186,3 +2236,14 @@ def _optional_date(value: str | None) -> date | None:
         return date.fromisoformat(value)
     except ValueError as error:
         raise ValueError("requested as-of dates must use YYYY-MM-DD") from error
+
+
+def _date_parameter(value: str | None) -> date:
+    if value is None:
+        raise ValueError("date is required")
+    if len(value) != 10 or value[4] != "-" or value[7] != "-":
+        raise ValueError("dates must use YYYY-MM-DD")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError("dates must use YYYY-MM-DD") from error
