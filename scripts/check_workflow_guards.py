@@ -315,15 +315,14 @@ def _parse_checks(value: object) -> tuple[CheckSnapshot, ...]:
     checks: list[CheckSnapshot] = []
     for index, item in enumerate(_sequence(value, "checks")):
         mapping = _mapping(item, f"checks[{index}]")
+        conclusion = mapping.get("conclusion", "")
+        if not isinstance(conclusion, str):
+            conclusion = ""
         checks.append(
             CheckSnapshot(
                 name=_required_str(mapping, ("name",), f"checks[{index}].name"),
                 status=_required_str(mapping, ("status",), f"checks[{index}].status").lower(),
-                conclusion=_required_str(
-                    mapping,
-                    ("conclusion",),
-                    f"checks[{index}].conclusion",
-                ).lower(),
+                conclusion=conclusion.lower(),
             )
         )
     return tuple(checks)
@@ -678,7 +677,7 @@ def snapshot_from_live(
         raise GuardFailure("requested PR is not the expected branch target")
     pull_request_raw = _mapping(
         _gh_json(
-            ["api", "--repo", repo, f"repos/{repo}/pulls/{pr_number}"],
+            ["api", f"repos/{repo}/pulls/{pr_number}"],
             "pull request",
         ),
         "pull request",
@@ -698,8 +697,6 @@ def snapshot_from_live(
     issue_comments = _gh_json_lines(
         [
             "api",
-            "--repo",
-            repo,
             "--paginate",
             "--jq",
             ".[]",
@@ -710,8 +707,6 @@ def snapshot_from_live(
     review_comments = _gh_json_lines(
         [
             "api",
-            "--repo",
-            repo,
             "--paginate",
             "--jq",
             ".[]",
@@ -722,8 +717,6 @@ def snapshot_from_live(
     reviews = _gh_json_lines(
         [
             "api",
-            "--repo",
-            repo,
             "--paginate",
             "--jq",
             ".[]",
@@ -742,8 +735,6 @@ def snapshot_from_live(
         _gh_json(
             [
                 "api",
-                "--repo",
-                repo,
                 (
                     f"repos/{repo}/commits/"
                     f"{_required_str(pull_request_map, ('headRefOid',), 'head SHA')}/check-runs"
