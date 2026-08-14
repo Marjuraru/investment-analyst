@@ -67,6 +67,10 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "otro comando mutante están prohibidos" in protocol
     assert "transición mecánica explícita" in protocol
     assert "/ui" in protocol
+    assert (
+        "salvo la publicación/reconciliación estrecha de su propio marker machine-owned" in protocol
+    )
+    assert "AWAITING HUMAN APPROVAL" in protocol
 
     for name, text in skills.items():
         assert _frontmatter_value(text, "name") == name
@@ -86,6 +90,25 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "scripts/check_workflow_guards.py" in skills["investment-block-flow"]
     assert "intenta refutar" in skills["audit"]
     assert "comandos mutantes" in skills["audit"]
+    assert (
+        "La única mutación autorizada es la estrecha y machine-owned del propio comentario AUDIT"
+        in skills["audit"]
+    )
+    assert "publica o reconcilia primero su único marker machine-owned exact-SHA" in skills["audit"]
+    assert "un resultado FAIL registra `status=FAIL`" in skills["audit"]
+    assert "Después de esa mutación estrecha relee GitHub y ejecuta nuevamente" in skills["audit"]
+    assert (
+        "Con PASS y policy HUMAN, el handoff termina `AWAITING HUMAN APPROVAL`" in skills["audit"]
+    )
+    assert "Con FAIL o policy HUMAN, terminar sin mutar PR." not in skills["audit"]
+    for forbidden_action in (
+        "gh pr ready",
+        "merge",
+        "cleanup",
+        "cierre del Issue",
+        "cambios de label",
+    ):
+        assert forbidden_action in skills["audit"]
     assert "writer role válido" in skills["plan"]
     assert "exactamente BUILD" in skills["ui"]
     assert "único writer" in skills["ui"]

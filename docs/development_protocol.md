@@ -201,7 +201,10 @@ AUDIT no infiere PASS de BUILD PASS, CI PASS, smoke PASS ni filenames. Para el S
 no demostrada, negativo crítico omitido, contradicción sin resolver, test eliminado/debilitado sin
 equivalencia, probe material de FIX no verificado, evidencia crítica ausente, BUILD no-PASS/ambiguo,
 SHA stale, smoke insuficiente, requested changes o thread pendiente. Sólo un happy path con diff
-material completo revisado puede producir AUDIT PASS. AUDIT sigue read-only respecto del candidato.
+material completo revisado puede producir AUDIT PASS. AUDIT sigue read-only respecto del candidato,
+salvo la publicación/reconciliación estrecha de su propio marker machine-owned; después lo relee y
+ejecuta otra vez el guard. HUMAN no bloquea esa evidencia: tras un marker PASS exact-SHA termina en
+`AWAITING HUMAN APPROVAL` sin ready, merge, cleanup, cierre del Issue ni cambios de label.
 
 ## FINALIZE determinista
 
