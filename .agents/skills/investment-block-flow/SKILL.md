@@ -14,7 +14,7 @@ modelo/cliente sólo es metadata de evidencia. Resolver siempre el target fail-c
 trabajo local, secretos e historia; no ampliar scope ni admitir dos writers.
 
 PLAN crea un delta compacto. BUILD sigue la tabla canónica hasta terminalidad, publica un draft y
-mantiene un único marker exact-SHA; FAST/AUTO puede seguir a FINALIZE tras gates vivos. AUDIT revisa
+mantiene un único marker exact-SHA y ejecuta el guard común `scripts/check_workflow_guards.py`; FAST/AUTO puede seguir a FINALIZE tras gates vivos. AUDIT revisa
 semánticamente el diff material completo, permanece read-only para source/branch/candidato y
 mantiene su marker único. Un PASS con policy AUTO puede continuar a los dos snapshots de FINALIZE.
 Una policy HUMAN, y siempre CRITICAL salvo excepción humana explícita, termina en HUMAN MERGE. No
