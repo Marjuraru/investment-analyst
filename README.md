@@ -12,6 +12,8 @@ Herramienta personal para recolectar, procesar, relacionar, visualizar y explica
 - Métricas y resultados transparentes, reproducibles y auditables.
 - **Estado actual:** sin compra, venta ni ejecución de órdenes.
 - **Estado actual:** sin trading automático ni conexión operativa con brokers.
+
+La interfaz incluye una comparación diaria de 2–5 activos locales con la misma moneda de cotización. Es una lectura descriptiva de una muestra común PIT, no una clasificación ni recomendación. Véase [la documentación de comparación](docs/market_comparison.md).
 - **Estado actual:** sin recomendaciones directas de inversión; los diagnósticos y candidatos son
   descriptivos y no sustituyen el criterio humano.
 

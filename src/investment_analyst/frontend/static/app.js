@@ -122,6 +122,7 @@ const MARKET_CHART_PERIOD_LABELS = Object.freeze({
 });
 let marketAssets = Object.freeze({});
 let assetPreferencesSnapshot = null;
+let marketComparisonRequestSequence = 0;
 
 const MARKET_RESOLUTION_PRESENTATION = Object.freeze({
   daily: Object.freeze({ singular: "día", plural: "días", adjective: "diarios" }),
@@ -483,8 +484,10 @@ function marketAssetFromDescriptor(descriptor) {
       ? descriptor.volume_unit
       : "acciones";
   return Object.freeze({
+    assetId: descriptor.asset_id,
     symbol: descriptor.symbol,
     name: descriptor.name,
+    quoteCurrency: descriptor.quote_currency,
     breadcrumb: `${assetClassLabels[descriptor.asset_class] || "Análisis de mercado"} / ${descriptor.exchange}`,
     meta: `${descriptor.exchange} · ${descriptor.quote_currency}${descriptor.source_id.includes("iex") ? " · IEX parcial" : descriptor.source_id.includes("coinbase") ? " · mercado 24/7" : ""}`,
     sourceId: descriptor.source_id,
@@ -4971,11 +4974,151 @@ byId("report-known-at").addEventListener("change", () => {
   }
 });
 
+function populateMarketComparisonAssets() {
+  const benchmark = byId("comparison-benchmark");
+  const assets = byId("comparison-assets");
+  const selectedCurrency = marketAssetPresentation().quoteCurrency;
+  benchmark.replaceChildren();
+  assets.replaceChildren();
+  for (const presentation of Object.values(marketAssets)) {
+    if (presentation.quoteCurrency !== selectedCurrency) continue;
+    const label = `${presentation.symbol} · ${presentation.name}`;
+    const benchmarkOption = document.createElement("option");
+    benchmarkOption.value = presentation.assetId;
+    benchmarkOption.textContent = label;
+    benchmark.append(benchmarkOption);
+    const assetOption = document.createElement("option");
+    assetOption.value = presentation.assetId;
+    assetOption.textContent = label;
+    assetOption.selected = presentation.assetId === selectedMarketAsset;
+    assets.append(assetOption);
+  }
+  benchmark.value = selectedMarketAsset;
+  const firstPeer = [...assets.options].find((option) => option.value !== selectedMarketAsset);
+  if (firstPeer) firstPeer.selected = true;
+}
+
+function comparisonSelectedAssets() {
+  return [...byId("comparison-assets").selectedOptions].map((option) => option.value);
+}
+
+function comparisonPercent(value) {
+  const parsed = numericValue(value);
+  return parsed === null ? "—" : formatRangeChange(parsed);
+}
+
+function renderMarketComparison(payload) {
+  if (payload.schema_version !== "market-multi-asset-comparison-v1" || payload.traceability_verified !== true) {
+    throw new Error("La comparación local no respetó su contrato versionado.");
+  }
+  const results = byId("comparison-results");
+  const cards = byId("comparison-cards");
+  const chart = byId("comparison-chart");
+  const palette = ["#477db3", "#c58b3d", "#8f6eb5", "#4f9a7e", "#bd6284"];
+  chart.replaceChildren();
+  const svg = document.createElementNS(SVG_NAMESPACE, "svg");
+  svg.setAttribute("viewBox", "0 0 800 230");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Cierres normalizados a base 100 para la muestra común");
+  const dates = payload.common_dates;
+  const values = payload.series.flatMap((series) => series.points.map((point) => numericValue(point.normalized_close)));
+  const minimum = Math.min(...values.filter((value) => value !== null));
+  const maximum = Math.max(...values.filter((value) => value !== null));
+  const span = maximum - minimum || 1;
+  for (const [index, series] of payload.series.entries()) {
+    const line = document.createElementNS(SVG_NAMESPACE, "polyline");
+    const points = series.points.map((point, pointIndex) => {
+      const x = 35 + (pointIndex * 740) / Math.max(1, dates.length - 1);
+      const y = 205 - ((numericValue(point.normalized_close) - minimum) * 175) / span;
+      return `${x},${y}`;
+    });
+    line.setAttribute("points", points.join(" "));
+    line.setAttribute("fill", "none");
+    line.setAttribute("stroke", palette[index]);
+    line.setAttribute("stroke-width", "2.5");
+    const title = document.createElementNS(SVG_NAMESPACE, "title");
+    title.textContent = `${marketAssets[series.asset_id]?.symbol || series.asset_id}: base 100`;
+    line.append(title);
+    svg.append(line);
+  }
+  chart.append(svg);
+  cards.replaceChildren();
+  for (const series of payload.series) {
+    const card = document.createElement("article");
+    card.className = "comparison-card";
+    const identity = marketAssets[series.asset_id];
+    const correlation = series.metrics.correlation_status === "not_applicable"
+      ? "No aplica (referencia)"
+      : comparisonPercent(series.metrics.correlation_to_benchmark);
+    const beta = series.metrics.beta_status === "not_applicable"
+      ? "No aplica (referencia)"
+      : series.metrics.beta_to_benchmark ?? "No disponible";
+    card.innerHTML = `<p class="eyebrow">${identity?.symbol || series.asset_id}</p><h3>${identity?.name || series.asset_id}</h3><dl><dt>Retorno total</dt><dd>${comparisonPercent(series.metrics.total_return)}</dd><dt>Drawdown máximo</dt><dd>${comparisonPercent(series.metrics.maximum_drawdown)}</dd><dt>Volatilidad diaria</dt><dd>${comparisonPercent(series.metrics.daily_volatility)}</dd><dt>Correlación</dt><dd>${correlation}</dd><dt>Beta</dt><dd>${beta}</dd></dl>`;
+    cards.append(card);
+  }
+  byId("comparison-json").textContent = JSON.stringify(payload, null, 2);
+  byId("comparison-status").textContent = `${payload.common_dates.length} fechas UTC comunes · ${payload.quote_currency} · corte ${formatInstant(payload.known_at)}.`;
+  results.classList.remove("hidden");
+}
+
+async function queryMarketComparison() {
+  const assets = comparisonSelectedAssets();
+  const benchmark = byId("comparison-benchmark").value;
+  if (!assets.includes(benchmark)) assets.unshift(benchmark);
+  if (assets.length < 2 || assets.length > 5) {
+    throw new Error("Selecciona entre dos y cinco activos, incluida la referencia.");
+  }
+  const sequence = ++marketComparisonRequestSequence;
+  const results = byId("comparison-results");
+  results.setAttribute("aria-busy", "true");
+  byId("comparison-submit").disabled = true;
+  byId("comparison-status").textContent = "Construyendo la muestra común local…";
+  const parameters = new URLSearchParams({
+    benchmark_id: benchmark,
+    start: byId("comparison-start").value,
+    end: byId("comparison-end").value,
+    known_at: byId("report-known-at").value.trim(),
+  });
+  for (const assetId of assets) parameters.append("asset_id", assetId);
+  try {
+    const payload = await api(`/api/v1/market-comparison?${parameters.toString()}`);
+    if (sequence !== marketComparisonRequestSequence) return;
+    renderMarketComparison(payload);
+  } catch (error) {
+    if (sequence !== marketComparisonRequestSequence) return;
+    byId("comparison-status").textContent = error.message;
+  } finally {
+    if (sequence === marketComparisonRequestSequence) {
+      results.setAttribute("aria-busy", "false");
+      byId("comparison-submit").disabled = false;
+    }
+  }
+}
+
+byId("market-comparison-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await queryMarketComparison();
+  } catch (error) {
+    byId("comparison-status").textContent = error.message;
+  }
+});
+
+byId("comparison-benchmark").addEventListener("change", () => {
+  for (const option of byId("comparison-assets").options) {
+    if (option.value === byId("comparison-benchmark").value) option.selected = true;
+  }
+});
+
 const yesterday = new Date();
 yesterday.setUTCDate(yesterday.getUTCDate() - 1);
 byId("market-end").value = yesterday.toISOString().slice(0, 10);
 byId("valuation-date").value = yesterday.toISOString().slice(0, 10);
 byId("report-known-at").value = new Date().toISOString();
+byId("comparison-end").value = yesterday.toISOString().slice(0, 10);
+const comparisonStart = new Date(yesterday);
+comparisonStart.setUTCFullYear(comparisonStart.getUTCFullYear() - 1);
+byId("comparison-start").value = comparisonStart.toISOString().slice(0, 10);
 
 byId("sidebar-toggle").addEventListener("click", () => {
   const sidebar = byId("app-sidebar");
@@ -4996,6 +5139,7 @@ async function initialize() {
   await loadAssetPreferences();
   initializeChartSettings();
   applySelectedMarketAsset();
+  populateMarketComparisonAssets();
   startMarketClocks();
   await refreshOverview();
   await Promise.all([

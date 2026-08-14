@@ -77,6 +77,10 @@ from investment_analyst.analytics.market.chart_service import (
     AaplMarketChartQueryError,
     BtcMarketChartQueryError,
 )
+from investment_analyst.analytics.market.comparison_models import (
+    MarketComparisonRequest,
+    MarketMultiAssetComparisonResult,
+)
 from investment_analyst.analytics.valuation import (
     CorporateValuationError,
     CorporateValuationRequest,
@@ -341,6 +345,15 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> AaplMarketChart:
         """Query one bounded persisted market chart."""
+        ...
+
+    def query_market_comparison(
+        self,
+        request: MarketComparisonRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> MarketMultiAssetComparisonResult:
+        """Query one read-only daily comparison from the visible universe."""
         ...
 
     def query_btc_market_chart(
@@ -807,6 +820,16 @@ class AaplLocalController:
                 self._market_chart_cache.pop(next(iter(self._market_chart_cache)))
             self._market_chart_cache[request] = chart
         return chart
+
+    def market_comparison_request(
+        self,
+        request: MarketComparisonRequest,
+    ) -> MarketMultiAssetComparisonResult:
+        """Query a comparison without provider, writer, or scheduler access."""
+        return self._application.query_market_comparison(
+            request,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
 
     def btc_market_chart_request(self, request: BtcMarketChartRequest) -> BtcMarketChart:
         """Query persisted Coinbase bars and indicators without providers or writes."""
@@ -1515,6 +1538,25 @@ class AaplLocalWebApplication:
             ).to_json_dict()
         raise ValueError("market chart asset_id is not supported")
 
+    def market_comparison(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Validate the exact repeated-asset comparison query contract."""
+        allowed = {"asset_id", "benchmark_id", "start", "end", "known_at"}
+        if set(parameters) - allowed:
+            raise ValueError("market comparison query contains unsupported parameters")
+        asset_ids = parameters.get("asset_id", ())
+        if not asset_ids:
+            raise ValueError("market comparison requires asset_id")
+        for asset_id in asset_ids:
+            self._market_asset(asset_id)
+        request = MarketComparisonRequest(
+            asset_ids=asset_ids,
+            benchmark_id=_one_parameter(parameters, "benchmark_id", required=True),
+            start_date=_date_parameter(_one_parameter(parameters, "start", required=True)),
+            end_date=_date_parameter(_one_parameter(parameters, "end", required=True)),
+            known_at=_aware_datetime(_one_parameter(parameters, "known_at", required=True)),
+        )
+        return self._controller.market_comparison_request(request).to_json_dict()
+
     def crypto_derivatives(
         self,
         parameters: Mapping[str, tuple[str, ...]],
@@ -1855,6 +1897,11 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=9)
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(HTTPStatus.OK, server.application.market_chart(parameters))
+                return
+            if parsed.path == "/api/v1/market-comparison":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=9)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(HTTPStatus.OK, server.application.market_comparison(parameters))
                 return
             if parsed.path == "/api/v1/crypto-derivatives":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)

@@ -56,6 +56,10 @@ from investment_analyst.analytics.market.chart_models import (
     CryptoSpotDailyMarketChartRequest,
     ListedMarketChart,
 )
+from investment_analyst.analytics.market.comparison_models import (
+    MarketComparisonRequest,
+    MarketMultiAssetComparisonResult,
+)
 from investment_analyst.analytics.market.intraday_models import IntradayInterval
 from investment_analyst.analytics.valuation import (
     CorporateValuationRequest,
@@ -227,6 +231,8 @@ class _FakeApplication:
         self.valuation_locations: list[StorageLocationRequest] = []
         self.crypto_derivatives_requests: list[CryptoDerivativesQueryRequest] = []
         self.crypto_derivatives_locations: list[StorageLocationRequest] = []
+        self.comparison_requests: list[MarketComparisonRequest] = []
+        self.comparison_locations: list[StorageLocationRequest] = []
 
     def list_market_assets(self) -> MarketAssetUniverse:
         return InvestmentAnalystApplication.create_default().list_market_assets()
@@ -283,6 +289,27 @@ class _FakeApplication:
                     "period": request.period.value,
                     "interval": request.interval.value,
                     "points": [],
+                }
+            ),
+        )
+
+    def query_market_comparison(
+        self,
+        request: MarketComparisonRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> MarketMultiAssetComparisonResult:
+        self.comparison_requests.append(request)
+        self.comparison_locations.append(location)
+        return cast(
+            MarketMultiAssetComparisonResult,
+            _JsonResult(
+                {
+                    "schema_version": "market-multi-asset-comparison-v1",
+                    "benchmark_id": request.benchmark_id,
+                    "asset_ids": list(request.canonical_asset_ids),
+                    "known_at": request.known_at.isoformat(),
+                    "traceability_verified": True,
                 }
             ),
         )
@@ -2693,3 +2720,42 @@ def test_manual_operation_api_rejects_kind_payload_before_writing_state(tmp_path
     assert status == 400
     assert response["error"]["code"] == "invalid_request"
     assert not state_path.exists()
+
+
+def test_market_comparison_api_accepts_repeated_assets_and_is_read_only(tmp_path: Path) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    query = urlencode(
+        [
+            ("asset_id", "equity:us:aapl"),
+            ("asset_id", "equity:us:amd"),
+            ("benchmark_id", "equity:us:aapl"),
+            ("start", "2026-01-01"),
+            ("end", "2026-02-01"),
+            ("known_at", "2026-02-02T00:00:00Z"),
+        ]
+    )
+
+    with _server(web) as (_, root):
+        status, payload, _ = _json_request(Request(f"{root}/api/v1/market-comparison?{query}"))
+        invalid_status, invalid, _ = _json_request(
+            Request(
+                f"{root}/api/v1/market-comparison?asset_id=equity%3Aus%3Aaapl"
+                "&asset_id=equity%3Aus%3Aaapl&benchmark_id=equity%3Aus%3Aaapl"
+                "&start=2026-01-01&end=2026-02-01&known_at=2026-02-02T00%3A00%3A00Z"
+            )
+        )
+
+    assert status == 200
+    assert payload["schema_version"] == "market-multi-asset-comparison-v1"
+    assert application.comparison_requests[0].asset_ids == ("equity:us:aapl", "equity:us:amd")
+    assert application.comparison_locations[0].workspace == tmp_path / "workspace"
+    assert invalid_status == 400
+    assert invalid["error"]["code"] == "invalid_request"
