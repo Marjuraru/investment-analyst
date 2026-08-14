@@ -23,7 +23,7 @@ from investment_analyst.core.models import AssetClass, DataFrequency
 def test_default_universe_exposes_supported_assets_and_source_contracts() -> None:
     universe = InvestmentAnalystApplication.create_default().list_market_assets()
 
-    assert universe.schema_version == "market-asset-universe-v3"
+    assert universe.schema_version == "market-asset-universe-v4"
     assert universe.catalog_version == 1
     assert len(universe.assets) == 19
     assert tuple(item.asset_id for item in universe.assets) == tuple(
@@ -103,6 +103,7 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     assert bitcoin.provider == "coinbase"
     assert bitcoin.refresh_kind == "market_only"
     assert bitcoin.supports_intraday
+    assert bitcoin.supports_crypto_derivatives
     assert bitcoin.analysis.family is AssetAnalysisFamily.CRYPTOASSET
     assert bitcoin.analysis.market_mode is MarketAnalysisMode.CRYPTO_SPOT
     assert bitcoin.analysis.fundamental_mode is FundamentalAnalysisMode.CRYPTO_NETWORK
@@ -117,6 +118,10 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     assert ethereum.volume_unit == "ETH"
     assert ethereum.chart_schema_version == "crypto-spot-daily-market-chart-v1"
     assert not ethereum.supports_intraday
+    assert ethereum.supports_crypto_derivatives
+
+    assert not apple.supports_crypto_derivatives
+    assert not by_symbol["IBIT"].supports_crypto_derivatives
 
     barrick = by_symbol["B"]
     assert barrick.asset_id == "equity:us:b"

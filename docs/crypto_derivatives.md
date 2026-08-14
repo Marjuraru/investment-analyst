@@ -110,6 +110,20 @@ ni gaps internos. `full` vuelve a solicitar el intervalo sin borrar ni duplicar 
 refresh ejecuta funding, DVOL, summary actual y métricas en ese orden; el summary se captura incluso
 cuando los históricos ya están cubiertos. Query no crea transporte ni escribe storage.
 
+## Consulta local HTTP e interfaz
+
+La interfaz loopback ofrece `GET /api/v1/crypto-derivatives` exclusivamente para activos cuyo
+descriptor `market-asset-universe-v4` declara `supports_crypto_derivatives=true`. La elegibilidad
+se resuelve al completar las tres capacidades Deribit del catálogo; no existe una lista HTTP o de
+navegador de símbolos permitidos. La ruta acepta exactamente `asset_id`, `start`, `end` y
+`known_at`, con límites inclusivos `YYYY-MM-DD` y un corte ISO 8601 con zona.
+
+La ruta construye `CryptoDerivativesQueryRequest` y llama sólo a la consulta read-only de la
+fachada. Devuelve sin transformación `crypto-derivatives-query-result-v1`; no inicializa workspace,
+no usa transporte Deribit, no recalcula ni escribe. El panel visible es independiente del gráfico
+spot, carga una ventana UTC de 90 días bajo demanda y conserva cobertura, frescura, ausencias,
+limitaciones e IDs como evidencia, sin score, señal ni recomendación.
+
 Para cada criptoactivo seleccionado y elegible, el scheduler registra
 `deribit:<asset_id>:crypto-derivatives`, dominio `crypto_derivatives`, a +10 minutos del job diario y
 con frescura de 36 horas. Solicita una ventana móvil de 90 días terminada en el último día UTC

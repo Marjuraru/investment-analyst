@@ -292,7 +292,9 @@ contrato separado exclusivo de BTC-USD; no se infiere cobertura intradía para E
 La base de derivados productiva también está implementada para BTC y ETH mediante métodos públicos
 Deribit: funding horario, DVOL diario, snapshots prospectivos, receipts, métricas Decimal34, replay
 PIT y scheduler. Es descriptiva, no puntuada, y no autoriza opciones, basis, señales ni trading. Su
-semántica y limitaciones están en [`crypto_derivatives.md`](crypto_derivatives.md).
+semántica y limitaciones están en [`crypto_derivatives.md`](crypto_derivatives.md). La interfaz
+local expone ahora ese replay en un panel separado y lazy para activos elegibles del catálogo, sin
+mezclarlo con el mercado spot ni convertirlo en señal.
 
 1. Mantener el backfill Deribit por ventanas/receipts y extenderlo a otra fuente sólo mediante un
    contrato independiente.

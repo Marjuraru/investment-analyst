@@ -57,8 +57,9 @@ propia. No se añadirán nuevas rutas o modelos específicos de Apple.
 - catálogo central de activos y resolución independiente de proveedores;
 - evidencia pública de derivados Deribit para BTC y ETH: funding horario, DVOL diario y snapshots
   prospectivos de perpetuos con receipts, revisiones append-only, métricas Decimal34 y diagnóstico
-  multidimensional sin score; el backfill sólo es visible desde su primera recepción local y no se
-  mezcla con Coinbase spot;
+  multidimensional sin score; la interfaz local expone esa evidencia bajo demanda para los activos
+  elegibles del catálogo mediante un corte point-in-time y sin mezclarla con Coinbase spot; el
+  backfill sólo es visible desde su primera recepción local;
 - importación de barras diarias de AAPL mediante Alpaca Market Data IEX, con la limitación explícita
   de que IEX no equivale a cobertura consolidada SIP;
 - base intradía separada para BTC-USD mediante velas públicas de un minuto de Coinbase Exchange,

@@ -447,6 +447,8 @@ let screeningRuleSnapshot = null;
 let fundamentalTrendPayload = null;
 let fundamentalResearchPayload = null;
 let valuationPayload = null;
+let cryptoDerivativesPayload = null;
+let cryptoDerivativesRequest = 0;
 let fundamentalBusyCount = 0;
 let reportPayload = null;
 let chartSettings = { ...DEFAULT_CHART_SETTINGS };
@@ -498,6 +500,7 @@ function marketAssetFromDescriptor(descriptor) {
     fundamentalMode: descriptor.analysis.fundamental_mode,
     hasFundamentals: descriptor.has_fundamentals,
     hasCorporateValuation: descriptor.has_corporate_valuation,
+    supportsCryptoDerivatives: descriptor.supports_crypto_derivatives === true,
     fundamentalFrequencies: descriptor.fundamental_frequencies,
     refreshKind: descriptor.refresh_kind,
     refreshLabel: `Actualizar ${descriptor.symbol}`,
@@ -512,7 +515,7 @@ function marketAssetFromDescriptor(descriptor) {
 async function loadMarketAssets() {
   const payload = await api("/api/market-assets");
   if (
-    payload.schema_version !== "market-asset-universe-v3"
+    payload.schema_version !== "market-asset-universe-v4"
     || !Array.isArray(payload.assets)
     || payload.assets.length === 0
   ) {
@@ -638,6 +641,7 @@ async function loadMarketAssets() {
     marketChartViewport = null;
     marketChartDrag = null;
     resetValuation();
+    resetCryptoDerivatives();
     applySelectedMarketAsset();
     applyChartSettings();
     const activeFundamentalLink = document.querySelector(
@@ -934,6 +938,9 @@ function applySelectedMarketAsset() {
   for (const element of document.querySelectorAll("[data-complete-analysis-only]")) {
     element.classList.toggle("hidden", presentation.refreshKind !== "complete_analysis");
   }
+  for (const element of document.querySelectorAll("[data-crypto-derivatives-only]")) {
+    element.classList.toggle("hidden", !presentation.supportsCryptoDerivatives);
+  }
   const supportedFrequencies = new Set(presentation.fundamentalFrequencies);
   if (
     presentation.hasFundamentals
@@ -973,6 +980,146 @@ function applySelectedMarketAsset() {
     ? "Ejecutar actualización"
     : presentation.refreshLabel;
   byId("market-start").value = marketStartByAsset.get(selectedMarketAsset);
+}
+
+function resetCryptoDerivatives() {
+  cryptoDerivativesPayload = null;
+  cryptoDerivativesRequest += 1;
+  byId("crypto-derivatives-panel").open = false;
+  byId("crypto-derivatives-content").setAttribute("aria-busy", "false");
+  byId("crypto-derivatives-coverage").textContent = "Sin consultar";
+  byId("crypto-derivatives-status").textContent = "Abre este panel para consultar evidencia local.";
+  byId("crypto-derivatives-context").textContent = "La consulta se carga bajo demanda con el mismo corte visible.";
+  for (const identifier of [
+    "derivatives-funding-168h",
+    "derivatives-funding-direction",
+    "derivatives-dvol-7d",
+    "derivatives-dvol-direction",
+    "derivatives-open-interest",
+    "derivatives-current-funding",
+    "derivatives-spread",
+    "derivatives-diagnostic-status",
+    "derivatives-range",
+    "derivatives-known-at",
+    "derivatives-source-ids",
+    "derivatives-traceability",
+    "derivatives-missing",
+    "derivatives-limitations",
+  ]) byId(identifier).textContent = "—";
+  byId("derivatives-evidence").textContent = "Sin evidencia cargada.";
+}
+
+function cryptoDerivativesRange(knownAt) {
+  const cutoff = new Date(knownAt);
+  if (Number.isNaN(cutoff.valueOf())) throw new Error("El corte debe ser ISO 8601 con zona.");
+  const end = cutoff.toISOString().slice(0, 10);
+  cutoff.setUTCDate(cutoff.getUTCDate() - 89);
+  return { start: cutoff.toISOString().slice(0, 10), end };
+}
+
+function formatDerivativeValue(value, unit = "") {
+  if (!value || typeof value.value !== "string") return "No disponible";
+  const numeric = numericValue(value.value);
+  if (numeric === null) return value.value;
+  const suffix = unit || value.unit || "";
+  if (suffix === "bps") return `${formatNumber(numeric, { maximumFractionDigits: 2 })} bps`;
+  if (suffix === "percent" || suffix === "%") {
+    return formatNumber(numeric, { style: "percent", maximumFractionDigits: 4 });
+  }
+  return `${formatNumber(numeric, { maximumFractionDigits: 6 })}${suffix ? ` ${suffix}` : ""}`;
+}
+
+function derivativeDirection(value) {
+  const labels = {
+    positive: "Positiva",
+    negative: "Negativa",
+    zero: "Sin variación",
+    rising: "En aumento",
+    falling: "En descenso",
+    unchanged: "Sin variación",
+    unavailable: "No disponible",
+  };
+  return labels[value] || "No disponible";
+}
+
+function renderCryptoDerivatives(payload) {
+  if (
+    payload?.schema_version !== "crypto-derivatives-query-result-v1"
+    || payload.asset_id !== selectedMarketAsset
+    || !payload.diagnostic
+    || !payload.coverage
+  ) throw new Error("La evidencia de derivados no coincide con el activo o el contrato solicitado.");
+  const diagnostic = payload.diagnostic;
+  const coverage = payload.coverage;
+  byId("derivatives-funding-168h").textContent = formatDerivativeValue(diagnostic.funding_sum_168h);
+  byId("derivatives-funding-direction").textContent = derivativeDirection(diagnostic.funding_direction);
+  byId("derivatives-dvol-7d").textContent = formatDerivativeValue(diagnostic.dvol_change_7d);
+  byId("derivatives-dvol-direction").textContent = derivativeDirection(diagnostic.dvol_direction);
+  byId("derivatives-open-interest").textContent = formatDerivativeValue(diagnostic.latest_open_interest);
+  const currentFunding = formatDerivativeValue(diagnostic.latest_current_funding);
+  const funding8h = formatDerivativeValue(diagnostic.latest_funding_8h);
+  byId("derivatives-current-funding").textContent = `${currentFunding} / ${funding8h}`;
+  byId("derivatives-spread").textContent = formatDerivativeValue(diagnostic.latest_spread_bps, "bps");
+  byId("derivatives-diagnostic-status").textContent = translated(
+    diagnostic.status,
+    STATUS_LABELS,
+    diagnostic.status,
+  );
+  byId("crypto-derivatives-coverage").textContent = translated(
+    diagnostic.status,
+    STATUS_LABELS,
+    diagnostic.status,
+  );
+  byId("derivatives-range").textContent = `${coverage.requested_start} – ${coverage.requested_end}`;
+  byId("derivatives-known-at").textContent = formatInstant(payload.known_at);
+  byId("derivatives-source-ids").textContent = payload.source_ids.join(" · ");
+  byId("derivatives-traceability").textContent = payload.traceability_verified ? "Verificada" : "No verificada";
+  byId("derivatives-missing").textContent = diagnostic.missing_requirements.length
+    ? diagnostic.missing_requirements.join(" · ")
+    : "Ninguno";
+  byId("derivatives-limitations").textContent = diagnostic.limitations.length
+    ? diagnostic.limitations.join(" · ")
+    : "No se declararon limitaciones adicionales.";
+  byId("derivatives-evidence").textContent = JSON.stringify(
+    {
+      diagnostic_id: diagnostic.diagnostic_id,
+      observation_ids: diagnostic.observation_ids,
+      metric_result_ids: diagnostic.metric_result_ids,
+      raw_record_ids: payload.raw_record_ids,
+    },
+    null,
+    2,
+  );
+  byId("crypto-derivatives-context").textContent = `${marketAssetPresentation().symbol} · Deribit · corte ${formatInstant(payload.known_at)}`;
+  byId("crypto-derivatives-status").textContent = `${formatInteger(coverage.funding_observation_count)} observaciones de financiación · ${formatInteger(coverage.dvol_observation_count)} DVOL · ${formatInteger(coverage.summary_snapshot_count)} snapshots de resumen.`;
+}
+
+async function queryCryptoDerivatives() {
+  const assetId = selectedMarketAsset;
+  const knownAt = byId("report-known-at").value.trim();
+  const presentation = marketAssets[assetId];
+  if (!presentation?.supportsCryptoDerivatives) return;
+  const request = ++cryptoDerivativesRequest;
+  const content = byId("crypto-derivatives-content");
+  content.setAttribute("aria-busy", "true");
+  byId("crypto-derivatives-status").textContent = "Consultando evidencia local de derivados…";
+  try {
+    const range = cryptoDerivativesRange(knownAt);
+    const parameters = new URLSearchParams({ asset_id: assetId, ...range, known_at: knownAt });
+    const payload = await api(`/api/v1/crypto-derivatives?${parameters.toString()}`);
+    if (request !== cryptoDerivativesRequest || assetId !== selectedMarketAsset) return;
+    cryptoDerivativesPayload = payload;
+    renderCryptoDerivatives(payload);
+  } catch (error) {
+    if (request !== cryptoDerivativesRequest || assetId !== selectedMarketAsset) return;
+    cryptoDerivativesPayload = null;
+    byId("crypto-derivatives-coverage").textContent = "No disponible";
+    byId("crypto-derivatives-status").textContent = error.message;
+  } finally {
+    if (request === cryptoDerivativesRequest && assetId === selectedMarketAsset) {
+      content.setAttribute("aria-busy", "false");
+    }
+  }
 }
 
 function applyTheme(theme) {
@@ -4811,6 +4958,17 @@ byId("candidate-inbox-panel").addEventListener("toggle", (event) => {
 
 byId("screening-rules-panel").addEventListener("toggle", (event) => {
   if (event.currentTarget.open) void loadScreeningRules();
+});
+
+byId("crypto-derivatives-panel").addEventListener("toggle", (event) => {
+  if (event.currentTarget.open && cryptoDerivativesPayload === null) void queryCryptoDerivatives();
+});
+
+byId("report-known-at").addEventListener("change", () => {
+  if (marketAssetPresentation().supportsCryptoDerivatives && byId("crypto-derivatives-panel").open) {
+    cryptoDerivativesPayload = null;
+    void queryCryptoDerivatives();
+  }
 });
 
 const yesterday = new Date();
