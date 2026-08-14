@@ -11,8 +11,11 @@ Un Work Block es una capacidad cohesiva. Sólo puede existir uno abierto con `wo
 PLAN publica deltas compactos; no copia estas reglas globales. Cada Issue declara: ID, objetivo,
 Scope/Risk/Profile, `finalize_policy`, base, expected branch, owner, alcance, invariantes,
 superficies protegidas/prohibidas, aceptación/negativos, capability delta y gates o excepciones.
-PLAN es control-plane-first: refresca primero el estado vivo y formula una hipótesis antes de
-explorar; usa progressive disclosure y exploración dirigida sólo sobre las superficies necesarias.
+PLAN es control-plane-first: sigue la cadena control plane → estrategia en
+`docs/product_roadmap.md` → ruta táctica en `docs/basic_functional_release_plan.md` →
+reconciliación con main/GitHub vivos → exploración dirigida → Work Block. Formula una hipótesis
+antes de explorar, usa progressive disclosure y conserva autoridad para desviarse cuando deje una
+razón y evidencia viva; la ruta nunca autoriza implementación ni contradice el estado integrado.
 Los threads persistentes pueden conservar contexto, pero no son autoridad: repo, Issue, PR y
 GitHub siempre prevalecen. PLAN, BUILD, UI_WORKER y AUDIT se definen por permisos, responsabilidad,
 entradas, salidas y gates; el modelo o cliente sólo puede registrarse como metadata de evidencia y

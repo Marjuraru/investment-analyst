@@ -155,6 +155,10 @@ results, and pending risks.
 
 - Read and follow `docs/development_protocol.md` for Work Blocks, profiles, target resolution,
   evidence, handoff, and concise outputs.
+- PLAN sigue esta cadena explícita: control plane → estrategia en `docs/product_roadmap.md` → ruta
+  táctica en `docs/basic_functional_release_plan.md` → reconciliación con main/GitHub vivos →
+  exploración dirigida → un Work Block. Los documentos orientan; main, worktree y GitHub conservan
+  autoridad y cualquier desviación material se explica con evidencia viva.
 - Explicit `$plan` authorizes creating or updating only the uniquely resolved Work Block Issue and
   its workflow metadata. It does not authorize product implementation, commits, push, PR, or merge.
 - Explicit `$build` authorizes implementation, intended staging, commit, push, and one draft PR only

@@ -7,8 +7,8 @@ funcional debe permitir que un analista:
 
 - seleccione una watchlist, actualice sus fuentes y conozca cobertura, frescura y fallos;
 - consulte mercado y fundamentales por activo con evidencia point-in-time;
-
-La interfaz puede consultar comparaciones diarias de 2–5 activos con evidencia PIT común. La salida es de solo lectura y no altera el plan de actualización ni los artefactos históricos.
+- consulte comparaciones diarias de 2–5 activos con evidencia PIT común, de solo lectura y sin
+  alterar el plan de actualización ni los artefactos históricos;
 - reciba candidatos deterministas para revisión sin una puntuación agregada ni recomendación;
 - reciba una notificación deduplicada cuando exista evidencia nueva;
 - consulte actividad declarada de insiders, propietarios relevantes e instituciones en una sección
@@ -28,14 +28,15 @@ Las restricciones permanentes son transparencia, auditabilidad, reproducibilidad
 `Decimal`, identidades deterministas, historia append-only, independencia de proveedores en
 analytics y separación entre evidencia, análisis, señal, recomendación, decisión y ejecución.
 
-## Referencia factual actual
+## Referencia factual histórica
 
 La planificación parte de `main` en `00188caf34e045cfb5ed79d62f0289a15e6bb265` (9 de agosto de
 2026). El corte de julio, la rama `codex/fred-alfred-vintage-integration` y el PR #14 son contexto
 histórico de la consolidación inicial; no se usan como estado vivo, evidencia operativa ni gate.
 
-Desde entonces quedaron integrados el runtime por capacidades, las preferencias persistentes de
-watchlist/favoritos/actualización programada, la valoración corporativa point-in-time v1 para
+Este snapshot no es estado vivo. Desde entonces quedaron integrados el runtime por capacidades,
+las preferencias persistentes de watchlist/favoritos/actualización programada, la valoración
+corporativa point-in-time v1 para
 empresas elegibles y el mercado spot diario Coinbase para BTC-USD y ETH-USD. El intradía sigue
 siendo un contrato separado de BTC-USD. La valoración v1 mantiene sus estados `not_evaluable` o
 `not_applicable` cuando faltan inputs compatibles y no cubre ETF, cripto, valoración histórica ni
@@ -50,6 +51,26 @@ La interfaz local entrega ese replay solamente para los activos que el catálogo
 el panel lazy conserva el corte visible, consulta 90 días UTC de evidencia persistida y muestra
 cobertura, fuentes, ausencias, limitaciones e identidades sin ejecutar refresh ni usar Deribit desde
 el navegador.
+
+## Ruta táctica vigente
+
+La ruta orienta priorización, no autorización. `ACTIVE` se deriva exclusivamente del único Issue
+abierto con `workflow:active`; main no lo fija. `DONE` requiere evidencia integrada, `NEXT` es único
+salvo que todo esté bloqueado o diferido, y una desviación material se registra en el Work Block con
+razón y evidencia viva. Los IDs pueden relacionarse con varios Work Blocks y viceversa.
+
+| ID | Estado | Dependencia o condición | Evidencia integrada o límite |
+| --- | --- | --- | --- |
+| `DELIVERY-GOVERNANCE` | `NEXT` | Reconciliar esta ruta y estrategia contra main/GitHub antes de seleccionar producto. | DEV-8 / #60; el estado activo se lee de GitHub. |
+| `FOUNDATIONS-RUNTIME` | `DONE` | Runtime, watchlist, health y scheduler por capacidades. | BASE-18/#29, BASE-19/#31 y OPS-1/#37. |
+| `MARKET-COMPARISON` | `DONE` | Muestra diaria UTC común, sin FX ni benchmarks sectoriales. | MKT-3/#56/#57: normalización, retorno, volatilidad, drawdown, correlación y beta v1. |
+| `ANALYST-READINESS` | `PLANNED` | Backup/restauración temporal verificable y soak silencioso antes de ampliar producto. | Sin evidencia integrada; no bloquea el uso actual. |
+| `VALUATION-HISTORY` | `PLANNED` | Historia y reglas posteriores compatibles con valoración PIT v1. | Valoración v1 integrada; cobertura histórica pendiente. |
+| `INDICATORS-AND-OUTBOX` | `PLANNED` | Justificar leverage de indicadores restantes y notificaciones reanudables. | RSI/MACD/ATR, outbox y canales externos no integrados. |
+| `SEC-CORPUS` | `PLANNED` | Corpus oficial y contratos independientes antes de Cazatiburones. | Forms 3/4/5, 13D/13G y 13F no integrados. |
+| `RELEASE-ACCEPTANCE` | `PLANNED` | CI, recuperación y soak observados. | Requiere evidencia operativa futura. |
+| `BVL-MARKET` | `BLOCKED` | Contrato de uso y fuente oficial autorizada. | No se infiere autorización para automatizar boletines. |
+| `PREDICTIVE-RESEARCH` | `DEFERRED` | Carril explícito con PIT, label, baselines, validación temporal, holdout, shadow y rollback. | Universo survivorship-aware es condicional; on-chain, stablecoins/DeFi, multi-venue y derivados extra dependen del target. |
 
 ## Diagnóstico de la estructura actual
 
@@ -102,7 +123,7 @@ el navegador.
 
 - la valoración corporativa PIT v1 está disponible para empresas elegibles; faltan valoración
   histórica, reglas posteriores y cobertura adicional compatible;
-- faltan RSI, MACD, ATR, beta y comparación multi-activo; EMA MKT-2 y Bollinger ya son métricas
+- faltan RSI, MACD y ATR; EMA MKT-2, Bollinger y la comparación diaria MKT-3 ya son capacidades
   descriptivas independientes y trazables;
 - la watchlist, los favoritos y la actualización programada ya son preferencias persistentes
   versionadas; faltan ampliaciones de experiencia, plantillas y operación observada a largo plazo;
@@ -389,7 +410,7 @@ crecientes.
 1. ampliar la experiencia de watchlist/favoritos persistentes y sus plantillas;
 2. añadir indicadores técnicos mínimos y extender valoración PIT v1 con historia y reglas
    posteriores compatibles;
-3. comparación contra benchmark;
+3. comparaciones ampliadas sólo si justifican una muestra y benchmark distintos de MKT-3;
 4. catálogo pequeño de reglas útiles por dominio;
 5. outbox reanudable, notificación local y un canal externo opcional;
 6. resumen diario de frescura, fallos y candidatos.
