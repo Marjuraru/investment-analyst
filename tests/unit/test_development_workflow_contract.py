@@ -57,6 +57,9 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "snapshot batched de guards vivos" in protocol
     assert "segundo snapshot/revalidación crítica" in protocol
     assert "squash merge con --match-head-commit" in protocol
+    assert "FINALIZE es estrictamente live-only" in protocol
+    assert "las páginas de `reviewThreads` resueltas" in protocol
+    assert "Después de ready se descarta el primer snapshot" in protocol
     assert "threads persistentes" in protocol
     assert "sesión fresca e independiente" in protocol
     assert "chat Gemini nuevo" not in protocol
@@ -88,6 +91,9 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "scripts/check_workflow_guards.py" in skills["audit"]
     assert "scripts/check_workflow_guards.py" in skills["build"]
     assert "scripts/check_workflow_guards.py" in skills["investment-block-flow"]
+    assert "--live --phase finalize" in skills["build"]
+    assert "--live --phase finalize" in skills["audit"]
+    assert "--live --phase finalize" in skills["investment-block-flow"]
     assert "intenta refutar" in skills["audit"]
     assert "comandos mutantes" in skills["audit"]
     assert (
@@ -119,6 +125,7 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "read-only" in core_rule
     assert "Formatter, fixer" in core_rule
     assert "snapshot antes y" in core_rule
+    assert "--live --phase finalize" in core_rule
     assert "control-plane-first" in skills["plan"]
     assert "exploración dirigida" in skills["plan"]
     assert "id: writer_role" in template

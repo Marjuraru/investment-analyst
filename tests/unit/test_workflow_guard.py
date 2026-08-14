@@ -4,6 +4,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,11 @@ def _snapshot(
         smoke=SmokeSnapshot(smoke, "smoke evidence"),
         requested_changes=requested_changes,
         open_threads=open_threads,
+        source="live",
+        mergeable=True,
+        mergeability_state="clean",
+        viewer_permission="WRITE",
+        base_protected=True,
     )
 
 
@@ -184,6 +190,105 @@ def test_finalization_requires_literal_gate_and_live_evidence() -> None:
     assert "Python 3.12 quality" in result.reasons[0]
 
 
+def test_finalization_rejects_manual_snapshot_and_non_terminal_mergeability() -> None:
+    manual = replace(_snapshot(), source="json")
+    assert evaluate(manual).decision == "GUARD FAILURE"
+    assert "live acquisition" in evaluate(manual).reasons[0]
+
+    mergeability_unknown = replace(_snapshot(), mergeable=None)
+    assert evaluate(mergeability_unknown).decision == "GUARD FAILURE"
+    assert "mergeability" in evaluate(mergeability_unknown).reasons[0]
+
+
+def test_latest_review_uses_only_the_current_reviewer_state() -> None:
+    changes_requested = {
+        "id": "review-1",
+        "state": "CHANGES_REQUESTED",
+        "submittedAt": "2026-08-14T12:00:00Z",
+        "author": {"login": "reviewer"},
+    }
+    approved = {
+        "id": "review-2",
+        "state": "APPROVED",
+        "submittedAt": "2026-08-14T12:01:00Z",
+        "author": {"login": "reviewer"},
+    }
+    dismissed = {
+        "id": "review-3",
+        "state": "DISMISSED",
+        "submittedAt": "2026-08-14T12:02:00Z",
+        "author": {"login": "reviewer"},
+    }
+
+    assert _MODULE._latest_reviews_requested_changes((changes_requested,))
+    assert not _MODULE._latest_reviews_requested_changes((changes_requested, approved))
+    assert not _MODULE._latest_reviews_requested_changes((changes_requested, dismissed))
+    with pytest.raises(ValueError, match="unknown"):
+        _MODULE._latest_reviews_requested_changes(({**changes_requested, "state": "UNRECOGNIZED"},))
+
+
+def test_review_thread_count_requires_explicit_resolution() -> None:
+    assert _MODULE._open_review_threads(({"isResolved": True}, {"isResolved": False})) == 1
+    with pytest.raises(ValueError, match="resolution"):
+        _MODULE._open_review_threads(({},))
+
+
+def test_graphql_connection_reads_all_pages_and_rejects_truncated_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = iter(
+        (
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [{"isResolved": True}],
+                                "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [{"isResolved": False}],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            }
+                        }
+                    }
+                }
+            },
+        )
+    )
+    monkeypatch.setattr(_MODULE, "_gh_graphql", lambda *_: next(pages))
+
+    threads = _MODULE._graphql_connection("owner/repository", 12, "reviewThreads", "isResolved")
+    assert threads == ({"isResolved": True}, {"isResolved": False})
+
+    monkeypatch.setattr(
+        _MODULE,
+        "_gh_graphql",
+        lambda *_: {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": True, "endCursor": None},
+                        }
+                    }
+                }
+            }
+        },
+    )
+    with pytest.raises(ValueError, match="end_cursor"):
+        _MODULE._graphql_connection("owner/repository", 12, "reviewThreads", "isResolved")
+
+
 def test_build_and_audit_phases_share_target_and_marker_guard() -> None:
     build_result = evaluate(_snapshot(comments=()), phase="build")
     assert build_result.decision == "BUILD GUARD PASS"
@@ -191,7 +296,7 @@ def test_build_and_audit_phases_share_target_and_marker_guard() -> None:
     assert audit_result.decision == "AUDIT GUARD PASS"
 
 
-def test_json_cli_is_read_only_and_emits_compact_decision(tmp_path: Path) -> None:
+def test_json_cli_is_read_only_and_cannot_authorize_finalize(tmp_path: Path) -> None:
     snapshot_path = tmp_path / "snapshot.json"
     snapshot_path.write_text(
         json.dumps(
@@ -224,12 +329,36 @@ def test_json_cli_is_read_only_and_emits_compact_decision(tmp_path: Path) -> Non
     )
     before = snapshot_path.read_bytes()
     completed = subprocess.run(
-        [sys.executable, "scripts/check_workflow_guards.py", "--json", str(snapshot_path)],
+        [
+            sys.executable,
+            "scripts/check_workflow_guards.py",
+            "--json",
+            str(snapshot_path),
+            "--phase",
+            "build",
+        ],
         cwd=ROOT,
         check=False,
         capture_output=True,
         text=True,
     )
     assert completed.returncode == 0
-    assert json.loads(completed.stdout)["decision"] == "AWAITING HUMAN APPROVAL"
+    assert json.loads(completed.stdout)["decision"] == "BUILD GUARD PASS"
     assert snapshot_path.read_bytes() == before
+
+    finalized = subprocess.run(
+        [
+            sys.executable,
+            "scripts/check_workflow_guards.py",
+            "--json",
+            str(snapshot_path),
+            "--phase",
+            "finalize",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert finalized.returncode == 1
+    assert json.loads(finalized.stdout)["reasons"] == ["finalize phase is live-only"]
