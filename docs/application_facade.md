@@ -132,3 +132,6 @@ La fachada expone `query_corporate_valuation(...)` para reconstrucción local re
 el contrato de unidad desde catálogo/runtime. Los refresh de mercado y SEC llaman la misma capa tras
 su analítica independiente; no hacen una segunda consulta de proveedor y reportan creados,
 reutilizados y no evaluables por separado.
+
+`query_corporate_valuation_history(...)` abre storage `READ_ONLY` para consultar la historia ya
+materializada al corte solicitado; no llama proveedores, no reconstruye ausencias y no escribe datos.

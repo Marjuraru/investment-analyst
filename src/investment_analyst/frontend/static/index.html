@@ -724,6 +724,11 @@
                 <button id="query-valuation" class="button primary" type="button">
                   Cargar valoración
                 </button>
+                <label class="field"><span>Historia desde</span><input id="valuation-history-start" type="date"></label>
+                <label class="field"><span>Historia hasta</span><input id="valuation-history-end" type="date"></label>
+                <label class="field"><span>Métrica histórica</span><select id="valuation-history-metric" disabled><option value="">Todas</option></select></label>
+                <button id="query-valuation-history" class="button secondary" type="button">Cargar historia</button>
+                <button id="export-valuation-history-json" class="data-export-button" type="button" disabled>Exportar historia</button>
               </div>
             </div>
 
@@ -753,6 +758,12 @@
                 Selecciona una fecha o abre esta sección para consultar.
               </p>
               <div id="valuation-metrics" class="valuation-metrics"></div>
+              <section class="valuation-history" aria-labelledby="valuation-history-title">
+                <h4 id="valuation-history-title">Historia materializada</h4>
+                <p id="valuation-history-status" role="status" aria-live="polite">No cargada.</p>
+                <div id="valuation-history-summary"></div>
+                <div id="valuation-history-series"></div>
+              </section>
 
               <dl class="valuation-audit-summary">
                 <div><dt>Precio</dt><dd id="valuation-price-context">—</dd></div>

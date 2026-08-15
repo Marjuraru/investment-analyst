@@ -83,6 +83,8 @@ from investment_analyst.analytics.market.comparison_models import (
 )
 from investment_analyst.analytics.valuation import (
     CorporateValuationError,
+    CorporateValuationHistory,
+    CorporateValuationHistoryRequest,
     CorporateValuationRequest,
     CorporateValuationSnapshot,
 )
@@ -328,6 +330,13 @@ class _ApplicationOperations(Protocol):
     ) -> CorporateValuationSnapshot:
         """Return a read-only point-in-time corporate valuation."""
         ...
+
+    def query_corporate_valuation_history(
+        self,
+        request: CorporateValuationHistoryRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationHistory: ...
 
     def query_aapl_diagnostics(
         self,
@@ -804,6 +813,16 @@ class AaplLocalController:
                 self._corporate_valuation_cache.pop(next(iter(self._corporate_valuation_cache)))
             self._corporate_valuation_cache[request] = snapshot
         return snapshot
+
+    def corporate_valuation_history_request(
+        self,
+        request: CorporateValuationHistoryRequest,
+    ) -> CorporateValuationHistory:
+        """Read materialized history without providers or writer acquisition."""
+        return self._application.query_corporate_valuation_history(
+            request,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
 
     def market_chart_request(self, request: AaplMarketChartRequest) -> AaplMarketChart:
         """Query persisted market bars and indicators without providers or writes."""
@@ -1594,6 +1613,23 @@ class AaplLocalWebApplication:
         )
         return self._controller.corporate_valuation_request(request).to_json_dict()
 
+    def valuation_history(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Validate the bounded read-only materialized valuation history query."""
+        allowed = {"asset_id", "known_at", "start_date", "end_date", "basis", "limit"}
+        if set(parameters) - allowed:
+            raise ValueError("valuation history query contains unsupported parameters")
+        asset_id = _one_parameter(parameters, "asset_id", required=True)
+        self._market_asset(asset_id)
+        request = CorporateValuationHistoryRequest(
+            asset_id=asset_id,
+            known_at=_aware_datetime(_one_parameter(parameters, "known_at", required=True)),
+            start_date=date.fromisoformat(_one_parameter(parameters, "start_date", required=True)),
+            end_date=date.fromisoformat(_one_parameter(parameters, "end_date", required=True)),
+            basis=_one_parameter(parameters, "basis", required=False) or "latest_annual",
+            limit=int(_one_parameter(parameters, "limit", required=False) or "250"),
+        )
+        return self._controller.corporate_valuation_history_request(request).model_dump(mode="json")
+
     def market_intraday(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate and return the fixed 24-hour BTC-USD intraday chart."""
         allowed = {"asset_id", "known_at", "interval"}
@@ -1912,6 +1948,11 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(HTTPStatus.OK, server.application.valuation(parameters))
+                return
+            if parsed.path == "/api/v1/valuation-history":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=7)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(HTTPStatus.OK, server.application.valuation_history(parameters))
                 return
             if parsed.path == "/api/market-intraday":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)

@@ -65,3 +65,14 @@ unidad, inputs con raw/source/observation IDs, definiciones versionadas, resulta
 Cada resultado evaluado conserva `result_id`, `available_at` e inputs específicos; una ausencia usa
 un reason code y nunca un cero. Véase
 [`corporate_valuation_point_in_time.md`](corporate_valuation_point_in_time.md).
+
+## Historia materializada de valoración corporativa
+
+`corporate-valuation-history-request-v1` fija `asset_id`, `known_at` UTC, rango inclusivo de
+`valuation_date`, `basis=latest_annual` y un límite acotado. La respuesta
+`corporate-valuation-history-v1` lee sólo `MetricResult` de categoría `valuation` ya persistidos:
+agrupa series homogéneas y selecciona por cada semántica la revisión elegible de mayor `known_at`.
+Un empate máximo semánticamente distinto es un error, no un desempate por UUID. Cada punto conserva
+resultado, inputs, algoritmo, período y cortes; las estadísticas usan `Decimal` y las fechas sin
+artefacto no se imputan. La consulta no crea resultados, no usa `computed_at` como disponibilidad y
+no declara backfill.

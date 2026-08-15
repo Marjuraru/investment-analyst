@@ -18,6 +18,7 @@ from investment_analyst.analytics.market.chart_models import (
 )
 from investment_analyst.analytics.market.intraday_models import IntradayInterval
 from investment_analyst.analytics.valuation import (
+    CorporateValuationHistoryRequest,
     CorporateValuationRequest,
     ValuationReasonCode,
     ValuationSnapshotStatus,
@@ -172,6 +173,28 @@ def test_valuation_query_is_read_only_provider_free_and_capability_driven(
         ValuationReasonCode.SHARE_BASIS_UNAVAILABLE
     }
     assert etf.status is bitcoin.status is ValuationSnapshotStatus.NOT_APPLICABLE
+    assert storage_paths.database_path.read_bytes() == database_before
+
+
+def test_valuation_history_query_is_empty_and_read_only(tmp_path: Path) -> None:
+    root = tmp_path / "valuation-history"
+    storage_paths = StoragePaths.from_root(root)
+    with LocalStorage(storage_paths):
+        pass
+    database_before = storage_paths.database_path.read_bytes()
+
+    history = _application(tmp_path).query_corporate_valuation_history(
+        CorporateValuationHistoryRequest(
+            asset_id="equity:us:aapl",
+            known_at=datetime(2026, 7, 14, 4, 41, 55, tzinfo=UTC),
+            start_date=date(2026, 7, 1),
+            end_date=date(2026, 7, 13),
+        ),
+        location=StorageLocationRequest(legacy_root=root),
+    )
+
+    assert history.series == ()
+    assert history.coverage.returned_points == 0
     assert storage_paths.database_path.read_bytes() == database_before
 
 

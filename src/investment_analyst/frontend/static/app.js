@@ -448,6 +448,7 @@ let screeningRuleSnapshot = null;
 let fundamentalTrendPayload = null;
 let fundamentalResearchPayload = null;
 let valuationPayload = null;
+let valuationHistoryPayload = null;
 let cryptoDerivativesPayload = null;
 let cryptoDerivativesRequest = 0;
 let fundamentalBusyCount = 0;
@@ -3637,6 +3638,108 @@ function resetValuation() {
   byId("valuation-unit-context").textContent = "—";
   byId("valuation-evidence").textContent = "Sin evidencia cargada.";
   setExportAvailable("export-valuation-json", false);
+  valuationHistoryPayload = null;
+  const historySelector = byId("valuation-history-metric");
+  historySelector.replaceChildren(createElement("option", "", "Todas"));
+  historySelector.disabled = true;
+  byId("valuation-history-summary").replaceChildren();
+  byId("valuation-history-series").replaceChildren();
+  byId("valuation-history-status").textContent = "No cargada.";
+  setExportAvailable("export-valuation-history-json", false);
+}
+
+function valuationHistorySeriesKey(series) {
+  return [series.metric_key, series.algorithm_version, series.unit, series.security_basis_version].join("|");
+}
+
+function selectedValuationHistorySeries(payload) {
+  const selected = byId("valuation-history-metric").value;
+  return (payload.series || []).filter(
+    (series) => !selected || valuationHistorySeriesKey(series) === selected,
+  );
+}
+
+function renderValuationHistory(payload, { preserveSelection = false } = {}) {
+  valuationHistoryPayload = payload;
+  const selector = byId("valuation-history-metric");
+  const priorSelection = preserveSelection ? selector.value : "";
+  selector.replaceChildren(createElement("option", "", "Todas"));
+  for (const series of payload.series || []) {
+    const option = createElement("option", "", `${series.metric_key} · ${series.unit}`);
+    option.value = valuationHistorySeriesKey(series);
+    option.selected = option.value === priorSelection;
+    selector.append(option);
+  }
+  selector.disabled = !payload.series?.length;
+  const summary = byId("valuation-history-summary");
+  summary.replaceChildren();
+  const target = byId("valuation-history-series");
+  target.replaceChildren();
+  for (const series of selectedValuationHistorySeries(payload)) {
+    const statistics = series.statistics;
+    const description = createElement("dl", "valuation-history-statistics");
+    for (const [label, value] of [
+      ["Puntos", formatInteger(statistics.count)],
+      ["Primero / último", `${statistics.first_value} / ${statistics.last_value}`],
+      ["Mínimo / máximo", `${statistics.minimum} / ${statistics.maximum}`],
+      ["Media Decimal", statistics.arithmetic_mean],
+      ["Cambio previo", statistics.previous_change ?? "No definido"],
+      ["Cambio horizonte", statistics.horizon_change ?? "No definido"],
+    ]) {
+      const entry = document.createElement("div");
+      entry.append(createElement("dt", "", label), createElement("dd", "", value));
+      description.append(entry);
+    }
+    summary.append(description);
+    const table = createElement("table", "valuation-history-table");
+    const caption = createElement("caption", "", `${series.metric_key} · ${series.unit}`);
+    const header = document.createElement("thead");
+    header.innerHTML = "<tr><th>Fecha</th><th>Valor exacto</th><th>Resultado</th></tr>";
+    const body = document.createElement("tbody");
+    for (const point of series.points) {
+      const row = document.createElement("tr");
+      row.append(
+        createElement("td", "", point.valuation_date),
+        createElement("td", "", point.value),
+        createElement("td", "", point.result_id),
+      );
+      body.append(row);
+    }
+    table.append(caption, header, body);
+    target.append(table);
+  }
+  byId("valuation-history-status").textContent = `${formatInteger(payload.coverage.returned_points)} puntos materializados; lectura local sin backfill.`;
+  setExportAvailable("export-valuation-history-json", Boolean(payload.series?.length));
+}
+
+async function queryValuationHistory() {
+  if (!marketAssetPresentation().hasCorporateValuation) return;
+  const button = byId("query-valuation-history");
+  setButtonBusy(button, true, "Consultando…", "Cargar historia");
+  try {
+    const parameters = new URLSearchParams({
+      asset_id: selectedMarketAsset,
+      known_at: byId("report-known-at").value.trim(),
+      start_date: byId("valuation-history-start").value,
+      end_date: byId("valuation-history-end").value,
+      basis: "latest_annual",
+      limit: "250",
+    });
+    renderValuationHistory(await api(`/api/v1/valuation-history?${parameters.toString()}`));
+  } catch (error) {
+    byId("valuation-history-status").textContent = error.message;
+  } finally {
+    setButtonBusy(button, false, "Consultando…", "Cargar historia");
+  }
+}
+
+function exportValuationHistoryJson() {
+  if (!valuationHistoryPayload) return;
+  downloadText(
+    `${safeFilePart(marketAssetPresentation().symbol)}-historia-valoracion-${safeFilePart(valuationHistoryPayload.request.end_date)}.json`,
+    `${JSON.stringify(valuationHistoryPayload, null, 2)}\n`,
+    "application/json",
+  );
 }
 
 function renderValuation(payload) {
@@ -4826,7 +4929,12 @@ byId("export-fundamental-research-csv").addEventListener(
   exportFundamentalResearchCsv,
 );
 byId("query-valuation").addEventListener("click", queryValuation);
+byId("query-valuation-history").addEventListener("click", queryValuationHistory);
 byId("export-valuation-json").addEventListener("click", exportValuationJson);
+byId("export-valuation-history-json").addEventListener("click", exportValuationHistoryJson);
+byId("valuation-history-metric").addEventListener("change", () => {
+  if (valuationHistoryPayload) renderValuationHistory(valuationHistoryPayload, { preserveSelection: true });
+});
 byId("export-report-json").addEventListener("click", exportReportJson);
 byId("chart-data-disclosure").addEventListener("toggle", (event) => {
   if (event.currentTarget.open && marketChartPayload?.points) {
@@ -5114,6 +5222,8 @@ const yesterday = new Date();
 yesterday.setUTCDate(yesterday.getUTCDate() - 1);
 byId("market-end").value = yesterday.toISOString().slice(0, 10);
 byId("valuation-date").value = yesterday.toISOString().slice(0, 10);
+byId("valuation-history-start").value = `${yesterday.getUTCFullYear() - 3}-01-01`;
+byId("valuation-history-end").value = yesterday.toISOString().slice(0, 10);
 byId("report-known-at").value = new Date().toISOString();
 byId("comparison-end").value = yesterday.toISOString().slice(0, 10);
 const comparisonStart = new Date(yesterday);

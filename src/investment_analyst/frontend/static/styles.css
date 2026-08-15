@@ -3442,6 +3442,61 @@ footer p:last-child {
   white-space: pre-wrap;
 }
 
+.valuation-history {
+  padding: 1rem 1.1rem;
+  border-top: 1px solid var(--line-soft);
+}
+
+.valuation-history h4,
+#valuation-history-status {
+  margin: 0 0 0.65rem;
+}
+
+.valuation-history-statistics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0 0 0.8rem;
+  border: 1px solid var(--line-soft);
+}
+
+.valuation-history-statistics > div {
+  min-width: 0;
+  padding: 0.55rem 0.7rem;
+  border-right: 1px solid var(--line-soft);
+}
+
+.valuation-history-statistics dt {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.valuation-history-statistics dd {
+  margin: 0.25rem 0 0;
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+}
+
+.valuation-history-table {
+  width: 100%;
+  margin: 0 0 1rem;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.valuation-history-table caption {
+  padding: 0.45rem 0;
+  text-align: left;
+  font-weight: 650;
+}
+
+.valuation-history-table th,
+.valuation-history-table td {
+  padding: 0.45rem;
+  border: 1px solid var(--line-soft);
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
 @media (max-width: 1080px) {
   :root {
     --sidebar-width: 190px;
@@ -3771,7 +3826,8 @@ footer p:last-child {
     border-right: 0;
   }
   .valuation-metrics,
-  .valuation-audit-summary {
+  .valuation-audit-summary,
+  .valuation-history-statistics {
     grid-template-columns: 1fr;
   }
 
