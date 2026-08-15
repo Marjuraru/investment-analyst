@@ -1081,7 +1081,7 @@ class InvestmentAnalystApplication:
         self._runtime.catalog.get(request.asset_id)
         with self._runtime.open_storage(
             location,
-            access_mode=WorkspaceAccessMode.READ_ONLY,
+            access_mode=WorkspaceAccessMode("read_only"),
         ) as storage:
             return CorporateValuationHistoryService(storage).query(request)
 
