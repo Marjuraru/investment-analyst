@@ -113,7 +113,8 @@ def test_route_is_compact_non_authorizing_and_reconciles_mkt3() -> None:
     assert "`ANALYST-READINESS` | `BLOCKED`" in release_plan
     assert "OPS-2/#66" in release_plan
     assert "insufficient_local_dates" in release_plan
-    assert "`VALUATION-HISTORY` | `NEXT`" in release_plan
+    assert "`VALUATION-HISTORY` | `DONE`" in release_plan
+    assert "`INDICATORS-AND-OUTBOX` | `NEXT`" in release_plan
     assert "comparación normalizada de varios activos" not in roadmap
     assert "beta y correlación frente a un benchmark identificado" not in roadmap
     _validate(_route_items(release_plan))
