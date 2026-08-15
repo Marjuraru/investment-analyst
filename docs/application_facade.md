@@ -135,3 +135,5 @@ reutilizados y no evaluables por separado.
 
 `query_corporate_valuation_history(...)` abre storage `READ_ONLY` para consultar la historia ya
 materializada al corte solicitado; no llama proveedores, no reconstruye ausencias y no escribe datos.
+`query_corporate_valuation_history_rule(...)` usa esa misma historia y el mismo acceso read-only
+para evaluar una regla explícita sin persistir regla, evaluación, candidato ni estado.

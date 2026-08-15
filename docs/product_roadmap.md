@@ -226,7 +226,8 @@ La valoración corporativa point-in-time v1 ya reconstruye market cap, enterpris
 anuales para empresas elegibles. La historia materializada local muestra únicamente resultados ya
 persistidos hasta un corte explícito, con revisión, cobertura sparse y estadísticas descriptivas
 Decimal; no aplica a ETF o cripto, no infiere una base de acciones ausente ni reemplaza reglas
-posteriores de esta fase.
+posteriores de esta fase. Las reglas relativas versionadas cierran la lectura descriptiva de esa
+historia sin crear señales, recomendaciones ni candidatos.
 
 Ampliar progresivamente:
 

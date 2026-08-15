@@ -22,6 +22,16 @@ from investment_analyst.analytics.valuation.pipeline import (
     CorporateValuationPersistencePipeline,
     ValuationPersistenceSummary,
 )
+from investment_analyst.analytics.valuation.rule_models import (
+    CorporateValuationHistoryRule,
+    CorporateValuationHistoryRuleCoverage,
+    CorporateValuationHistoryRuleEvaluation,
+    CorporateValuationHistoryRuleRequest,
+)
+from investment_analyst.analytics.valuation.rule_service import (
+    CorporateValuationHistoryRuleError,
+    CorporateValuationHistoryRuleService,
+)
 from investment_analyst.analytics.valuation.service import (
     AmbiguousValuationEvidenceError,
     CorporateValuationError,
@@ -37,6 +47,12 @@ __all__ = [
     "CorporateValuationHistoryCoverage",
     "CorporateValuationHistoryRequest",
     "CorporateValuationHistoryService",
+    "CorporateValuationHistoryRule",
+    "CorporateValuationHistoryRuleCoverage",
+    "CorporateValuationHistoryRuleError",
+    "CorporateValuationHistoryRuleEvaluation",
+    "CorporateValuationHistoryRuleRequest",
+    "CorporateValuationHistoryRuleService",
     "CorporateValuationRequest",
     "CorporateValuationService",
     "CorporateValuationPersistencePipeline",

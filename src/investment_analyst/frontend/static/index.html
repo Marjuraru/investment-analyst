@@ -729,6 +729,12 @@
                 <label class="field"><span>Métrica histórica</span><select id="valuation-history-metric" disabled><option value="">Todas</option></select></label>
                 <button id="query-valuation-history" class="button secondary" type="button">Cargar historia</button>
                 <button id="export-valuation-history-json" class="data-export-button" type="button" disabled>Exportar historia</button>
+                <label class="field"><span>Métrica de regla</span><input id="valuation-rule-metric" value="valuation.corporate.price_to_book"></label>
+                <label class="field"><span>Operador</span><select id="valuation-rule-operator"><option value="at_or_below_empirical_percentile">Percentil igual o inferior</option><option value="at_or_above_empirical_percentile">Percentil igual o superior</option></select></label>
+                <label class="field"><span>Umbral Decimal (0 a 1)</span><input id="valuation-rule-threshold" value="0.50" inputmode="decimal"></label>
+                <label class="field"><span>Mínimo previo</span><input id="valuation-rule-minimum" type="number" min="3" max="250" value="3"></label>
+                <button id="query-valuation-history-rule" class="button secondary" type="button">Evaluar regla</button>
+                <button id="export-valuation-history-rule-json" class="data-export-button" type="button" disabled>Exportar regla</button>
               </div>
             </div>
 
@@ -763,6 +769,12 @@
                 <p id="valuation-history-status" role="status" aria-live="polite">No cargada.</p>
                 <div id="valuation-history-summary"></div>
                 <div id="valuation-history-series"></div>
+                <section class="valuation-history" aria-labelledby="valuation-rule-title">
+                  <h4 id="valuation-rule-title">Regla histórica explícita</h4>
+                  <p id="valuation-rule-status" role="status" aria-live="polite">No evaluada.</p>
+                  <div id="valuation-rule-result"></div>
+                  <details><summary>Fórmula, cobertura y evidencia exacta</summary><pre id="valuation-rule-evidence" tabindex="0">Sin evaluación cargada.</pre></details>
+                </section>
               </section>
 
               <dl class="valuation-audit-summary">

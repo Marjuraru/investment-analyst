@@ -76,3 +76,9 @@ Un empate máximo semánticamente distinto es un error, no un desempate por UUID
 resultado, inputs, algoritmo, período y cortes; las estadísticas usan `Decimal` y las fechas sin
 artefacto no se imputan. La consulta no crea resultados, no usa `computed_at` como disponibilidad y
 no declara backfill.
+
+`corporate-valuation-history-rule-request-v1` incorpora una regla frozen/versionada, operador
+explícito, umbral `Decimal` entre 0 y 1 y mínimo previo acotado. La evaluación v1 selecciona sólo
+una serie homogénea, excluye el punto actual de la referencia y publica percentil empírico Decimal34,
+conteos, IDs y cobertura; una serie ambigua falla cerrado y una historia insuficiente es
+`not_evaluable` sin imputación ni reducción del mínimo.

@@ -88,6 +88,14 @@ un corte UTC, rango inclusivo, `basis=latest_annual` y límite acotado. Seleccio
 mayor `parameters.known_at` elegible sin desempatar por UUID; conserva series sparse, IDs e inputs y
 publica únicamente estadísticas descriptivas Decimal. No es backfill, TTM, forward, ranking ni regla.
 
+## Regla relativa explícita
+
+`GET /api/v1/valuation-history-rule` evalúa bajo demanda una regla immutable y versionada sobre una
+única serie homogénea ya seleccionada por la historia materializada. Usa sólo puntos estrictamente
+anteriores al punto actual y el percentil empírico Decimal34 de rango medio `(menores + 0.5 × iguales) / N`.
+La salida `met`, `not_met` o `not_evaluable` conserva IDs, cobertura, fórmula y limitaciones; no
+persiste evaluaciones, no llama proveedores y no expresa barato/caro, señal o recomendación.
+
 ## Limitación de mercado
 
 El precio de las acciones configuradas procede de Alpaca Market Data, feed IEX, barras diarias y

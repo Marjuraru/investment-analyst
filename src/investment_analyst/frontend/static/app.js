@@ -449,6 +449,7 @@ let fundamentalTrendPayload = null;
 let fundamentalResearchPayload = null;
 let valuationPayload = null;
 let valuationHistoryPayload = null;
+let valuationRulePayload = null;
 let cryptoDerivativesPayload = null;
 let cryptoDerivativesRequest = 0;
 let fundamentalBusyCount = 0;
@@ -3646,6 +3647,11 @@ function resetValuation() {
   byId("valuation-history-series").replaceChildren();
   byId("valuation-history-status").textContent = "No cargada.";
   setExportAvailable("export-valuation-history-json", false);
+  valuationRulePayload = null;
+  byId("valuation-rule-status").textContent = "No evaluada.";
+  byId("valuation-rule-result").replaceChildren();
+  byId("valuation-rule-evidence").textContent = "Sin evaluación cargada.";
+  setExportAvailable("export-valuation-history-rule-json", false);
 }
 
 function valuationHistorySeriesKey(series) {
@@ -3740,6 +3746,56 @@ function exportValuationHistoryJson() {
     `${JSON.stringify(valuationHistoryPayload, null, 2)}\n`,
     "application/json",
   );
+}
+
+function renderValuationHistoryRule(payload) {
+  valuationRulePayload = payload;
+  const result = byId("valuation-rule-result");
+  result.replaceChildren();
+  const label = payload.status === "met" ? "Cumple la regla configurada" : payload.status === "not_met" ? "No cumple la regla configurada" : "No evaluable con la cobertura disponible";
+  result.append(createElement("p", "", label));
+  const entries = [
+    ["Fórmula", "(menores + 0.5 × iguales) / N; Decimal34"],
+    ["Percentil", payload.empirical_percentile ?? "No definido"],
+    ["Puntos previos", `${payload.coverage.prior_points} / ${payload.coverage.required_prior_points}`],
+    ["Conteos", `${payload.lower_count} menores, ${payload.equal_count} iguales, ${payload.greater_count} mayores`],
+  ];
+  const list = createElement("dl", "valuation-history-statistics");
+  for (const [name, value] of entries) {
+    const entry = document.createElement("div");
+    entry.append(createElement("dt", "", name), createElement("dd", "", value));
+    list.append(entry);
+  }
+  result.append(list);
+  byId("valuation-rule-status").textContent = "Lectura local de evidencia materializada; no es señal ni recomendación.";
+  byId("valuation-rule-evidence").textContent = JSON.stringify(payload, null, 2);
+  setExportAvailable("export-valuation-history-rule-json", true);
+}
+
+async function queryValuationHistoryRule() {
+  if (!marketAssetPresentation().hasCorporateValuation) return;
+  const button = byId("query-valuation-history-rule");
+  setButtonBusy(button, true, "Evaluando…", "Evaluar regla");
+  try {
+    const parameters = new URLSearchParams({
+      asset_id: selectedMarketAsset, known_at: byId("report-known-at").value.trim(),
+      start_date: byId("valuation-history-start").value, end_date: byId("valuation-history-end").value,
+      basis: "latest_annual", rule_id: "valuation.history.user-threshold", rule_version: "v1",
+      name: "Regla histórica configurada", limitations: "Describe evidencia materializada; no predice retornos.",
+      metric_key: byId("valuation-rule-metric").value.trim(), operator: byId("valuation-rule-operator").value,
+      threshold: byId("valuation-rule-threshold").value.trim(), minimum_prior_points: byId("valuation-rule-minimum").value,
+    });
+    renderValuationHistoryRule(await api(`/api/v1/valuation-history-rule?${parameters.toString()}`));
+  } catch (error) {
+    byId("valuation-rule-status").textContent = error.message;
+  } finally {
+    setButtonBusy(button, false, "Evaluando…", "Evaluar regla");
+  }
+}
+
+function exportValuationHistoryRuleJson() {
+  if (!valuationRulePayload) return;
+  downloadText(`${safeFilePart(marketAssetPresentation().symbol)}-regla-valoracion-${safeFilePart(valuationRulePayload.request.end_date)}.json`, `${JSON.stringify(valuationRulePayload, null, 2)}\n`, "application/json");
 }
 
 function renderValuation(payload) {
@@ -4930,8 +4986,10 @@ byId("export-fundamental-research-csv").addEventListener(
 );
 byId("query-valuation").addEventListener("click", queryValuation);
 byId("query-valuation-history").addEventListener("click", queryValuationHistory);
+byId("query-valuation-history-rule").addEventListener("click", queryValuationHistoryRule);
 byId("export-valuation-json").addEventListener("click", exportValuationJson);
 byId("export-valuation-history-json").addEventListener("click", exportValuationHistoryJson);
+byId("export-valuation-history-rule-json").addEventListener("click", exportValuationHistoryRuleJson);
 byId("valuation-history-metric").addEventListener("change", () => {
   if (valuationHistoryPayload) renderValuationHistory(valuationHistoryPayload, { preserveSelection: true });
 });
