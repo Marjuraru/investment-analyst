@@ -65,6 +65,9 @@ from investment_analyst.analytics.valuation import (
     CorporateValuationHistory,
     CorporateValuationHistoryCoverage,
     CorporateValuationHistoryRequest,
+    CorporateValuationHistoryRuleCoverage,
+    CorporateValuationHistoryRuleEvaluation,
+    CorporateValuationHistoryRuleRequest,
     CorporateValuationRequest,
     CorporateValuationSnapshot,
 )
@@ -296,6 +299,30 @@ class _FakeApplication:
                 returned_series=0,
                 truncated=False,
             ),
+        )
+
+    def query_corporate_valuation_history_rule(
+        self,
+        request: CorporateValuationHistoryRuleRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationHistoryRuleEvaluation:
+        return CorporateValuationHistoryRuleEvaluation(
+            request=request,
+            status="not_evaluable",
+            result_id=UUID(int=123),
+            current_point=None,
+            empirical_percentile=None,
+            lower_count=0,
+            equal_count=0,
+            greater_count=0,
+            coverage=CorporateValuationHistoryRuleCoverage(
+                candidate_results=0,
+                superseded_revisions=0,
+                prior_points=0,
+                required_prior_points=request.rule.minimum_prior_points,
+            ),
+            limitations=request.rule.limitations,
         )
 
     def query_aapl_market_chart(
@@ -866,6 +893,46 @@ def test_valuation_history_api_is_bounded_versioned_and_read_only(tmp_path: Path
     assert invalid["error"]["code"] == inverted["error"]["code"] == "invalid_request"
     assert application.valuation_history_requests[0].start_date == date(2026, 7, 1)
     assert application.valuation_history_locations == [StorageLocationRequest(workspace=workspace)]
+
+
+def test_valuation_history_rule_api_is_bounded_and_provider_free(tmp_path: Path) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    with _server(AaplLocalWebApplication(controller, None)) as (_, root):
+        parameters = {
+            "asset_id": "equity:us:aapl",
+            "known_at": "2026-07-16T15:46:09Z",
+            "start_date": "2026-07-01",
+            "end_date": "2026-07-15",
+            "basis": "latest_annual",
+            "rule_id": "r",
+            "rule_version": "v1",
+            "name": "Regla",
+            "limitations": "Contexto.",
+            "metric_key": "valuation.corporate.price_to_book",
+            "operator": "at_or_below_empirical_percentile",
+            "threshold": "0.50",
+            "minimum_prior_points": "3",
+        }
+        status, payload, _ = _json_request(
+            Request(f"{root}/api/v1/valuation-history-rule?{urlencode(parameters)}")
+        )
+        invalid_status, invalid, _ = _json_request(
+            Request(
+                f"{root}/api/v1/valuation-history-rule?{urlencode({**parameters, 'unknown': 'x'})}"
+            )
+        )
+    assert status == 200
+    assert payload["schema_version"] == "corporate-valuation-history-rule-evaluation-v1"
+    assert payload["status"] == "not_evaluable"
+    assert invalid_status == 400
+    assert invalid["error"]["code"] == "invalid_request"
 
 
 def test_valuation_api_redacts_unexpected_storage_details(tmp_path: Path) -> None:

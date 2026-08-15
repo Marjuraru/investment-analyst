@@ -86,6 +86,9 @@ from investment_analyst.analytics.market.statistics_pipeline import MarketStatis
 from investment_analyst.analytics.valuation import (
     CorporateValuationHistory,
     CorporateValuationHistoryRequest,
+    CorporateValuationHistoryRuleEvaluation,
+    CorporateValuationHistoryRuleRequest,
+    CorporateValuationHistoryRuleService,
     CorporateValuationHistoryService,
     CorporateValuationPersistencePipeline,
     CorporateValuationRequest,
@@ -1084,6 +1087,22 @@ class InvestmentAnalystApplication:
             access_mode=WorkspaceAccessMode("read_only"),
         ) as storage:
             return CorporateValuationHistoryService(storage).query(request)
+
+    def query_corporate_valuation_history_rule(
+        self,
+        request: CorporateValuationHistoryRuleRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationHistoryRuleEvaluation:
+        """Evaluate a descriptive rule over persisted history without writes."""
+        self._runtime.catalog.get(request.asset_id)
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode("read_only"),
+        ) as storage:
+            return CorporateValuationHistoryRuleService(
+                CorporateValuationHistoryService(storage)
+            ).query(request)
 
     def persist_corporate_valuation(
         self,

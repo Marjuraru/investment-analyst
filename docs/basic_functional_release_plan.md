@@ -68,8 +68,8 @@ viceversa.
 | `FOUNDATIONS-RUNTIME` | `DONE` | Runtime, watchlist, health y scheduler por capacidades. | BASE-18/#29, BASE-19/#31 y OPS-1/#37. |
 | `MARKET-COMPARISON` | `DONE` | Muestra diaria UTC común, sin FX ni benchmarks sectoriales. | MKT-3/#56/#57: normalización, retorno, volatilidad, drawdown, correlación y beta v1. |
 | `ANALYST-READINESS` | `BLOCKED` | Evidencia operacional multicíclo, restart/recovery y rehearsal seguro sigue pendiente. | OPS-2/#66 fue supersedido administrativamente: `insufficient_local_dates`; no hubo completion ni rehearsal. |
-| `VALUATION-HISTORY` | `NEXT` | Historia y reglas posteriores compatibles con valoración PIT v1. | VAL-1/#70 aporta historia materializada local y descriptiva; reglas posteriores pendientes. |
-| `INDICATORS-AND-OUTBOX` | `PLANNED` | Justificar leverage de indicadores restantes y notificaciones reanudables. | RSI/MACD/ATR, outbox y canales externos no integrados. |
+| `VALUATION-HISTORY` | `DONE` | Historia materializada y reglas relativas explícitas compatibles con valoración PIT v1. | VAL-1/#70 aporta historia descriptiva; VAL-2/#72 propone percentil Decimal34 PIT sin señal ni recomendación. |
+| `INDICATORS-AND-OUTBOX` | `NEXT` | Justificar leverage de indicadores restantes y notificaciones reanudables. | RSI/MACD/ATR, outbox y canales externos no integrados. |
 | `SEC-CORPUS` | `PLANNED` | Corpus oficial y contratos independientes antes de Cazatiburones. | Forms 3/4/5, 13D/13G y 13F no integrados. |
 | `RELEASE-ACCEPTANCE` | `PLANNED` | CI, recuperación y soak observados. | Requiere evidencia operativa futura. |
 | `BVL-MARKET` | `BLOCKED` | Contrato de uso y fuente oficial autorizada. | No se infiere autorización para automatizar boletines. |
@@ -124,8 +124,8 @@ viceversa.
 
 #### P1 — cobertura funcional del analista
 
-- la valoración corporativa PIT v1 y su historia materializada local están disponibles para empresas
-  elegibles; faltan reglas posteriores y cobertura adicional compatible;
+- la valoración corporativa PIT v1, su historia materializada local y reglas relativas explícitas
+  están disponibles para empresas elegibles; falta cobertura adicional compatible;
 - faltan RSI, MACD y ATR; EMA MKT-2, Bollinger y la comparación diaria MKT-3 ya son capacidades
   descriptivas independientes y trazables;
 - la watchlist, los favoritos y la actualización programada ya son preferencias persistentes

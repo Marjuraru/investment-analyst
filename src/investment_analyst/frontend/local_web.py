@@ -85,6 +85,9 @@ from investment_analyst.analytics.valuation import (
     CorporateValuationError,
     CorporateValuationHistory,
     CorporateValuationHistoryRequest,
+    CorporateValuationHistoryRule,
+    CorporateValuationHistoryRuleEvaluation,
+    CorporateValuationHistoryRuleRequest,
     CorporateValuationRequest,
     CorporateValuationSnapshot,
 )
@@ -337,6 +340,13 @@ class _ApplicationOperations(Protocol):
         *,
         location: StorageLocationRequest,
     ) -> CorporateValuationHistory: ...
+
+    def query_corporate_valuation_history_rule(
+        self,
+        request: CorporateValuationHistoryRuleRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationHistoryRuleEvaluation: ...
 
     def query_aapl_diagnostics(
         self,
@@ -820,6 +830,15 @@ class AaplLocalController:
     ) -> CorporateValuationHistory:
         """Read materialized history without providers or writer acquisition."""
         return self._application.query_corporate_valuation_history(
+            request,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+
+    def corporate_valuation_history_rule_request(
+        self, request: CorporateValuationHistoryRuleRequest
+    ) -> CorporateValuationHistoryRuleEvaluation:
+        """Evaluate an explicit rule from local materialized evidence only."""
+        return self._application.query_corporate_valuation_history_rule(
             request,
             location=StorageLocationRequest(workspace=self._workspace),
         )
@@ -1630,6 +1649,53 @@ class AaplLocalWebApplication:
         )
         return self._controller.corporate_valuation_history_request(request).model_dump(mode="json")
 
+    def valuation_history_rule(
+        self, parameters: Mapping[str, tuple[str, ...]]
+    ) -> dict[str, object]:
+        """Validate an explicit provider-free rule over valuation history."""
+        allowed = {
+            "asset_id",
+            "known_at",
+            "start_date",
+            "end_date",
+            "basis",
+            "rule_id",
+            "rule_version",
+            "name",
+            "limitations",
+            "metric_key",
+            "operator",
+            "threshold",
+            "minimum_prior_points",
+        }
+        if set(parameters) - allowed:
+            raise ValueError("valuation history rule query contains unsupported parameters")
+        asset_id = _one_parameter(parameters, "asset_id", required=True)
+        self._market_asset(asset_id)
+        limitations = parameters.get("limitations", ())
+        request = CorporateValuationHistoryRuleRequest(
+            asset_id=asset_id,
+            known_at=_aware_datetime(_one_parameter(parameters, "known_at", required=True)),
+            start_date=date.fromisoformat(_one_parameter(parameters, "start_date", required=True)),
+            end_date=date.fromisoformat(_one_parameter(parameters, "end_date", required=True)),
+            basis=_one_parameter(parameters, "basis", required=False) or "latest_annual",
+            rule=CorporateValuationHistoryRule(
+                rule_id=_one_parameter(parameters, "rule_id", required=True),
+                rule_version=_one_parameter(parameters, "rule_version", required=True),
+                name=_one_parameter(parameters, "name", required=True),
+                limitations=tuple(limitations),
+                metric_key=_one_parameter(parameters, "metric_key", required=True),
+                operator=_one_parameter(parameters, "operator", required=True),
+                threshold=_one_parameter(parameters, "threshold", required=True),
+                minimum_prior_points=int(
+                    _one_parameter(parameters, "minimum_prior_points", required=True)
+                ),
+            ),
+        )
+        return self._controller.corporate_valuation_history_rule_request(request).model_dump(
+            mode="json"
+        )
+
     def market_intraday(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate and return the fixed 24-hour BTC-USD intraday chart."""
         allowed = {"asset_id", "known_at", "interval"}
@@ -1953,6 +2019,13 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=7)
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(HTTPStatus.OK, server.application.valuation_history(parameters))
+                return
+            if parsed.path == "/api/v1/valuation-history-rule":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=14)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK, server.application.valuation_history_rule(parameters)
+                )
                 return
             if parsed.path == "/api/market-intraday":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)

@@ -587,3 +587,8 @@ inclusivo, base `latest_annual` y límite explícito. Sólo se solicita al pulsa
 el panel ofrece selector de serie, resumen Decimal, tabla accesible y exportación del JSON exacto.
 No amplía `/api/overview`, no llama proveedores, no toma writer y no convierte fechas sin artefacto
 persistido en cero o backfill.
+
+La regla histórica se solicita también bajo demanda. El usuario define métrica, operador, umbral
+Decimal y mínimo previo; el panel muestra estado trivaluado, fórmula de rango medio, cobertura,
+conteos, evidencia expandible y exportación JSON exacta. Describe contexto configurado y nunca
+"barato", "caro", compra, venta o recomendación.
