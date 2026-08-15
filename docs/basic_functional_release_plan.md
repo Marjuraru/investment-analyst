@@ -55,16 +55,19 @@ el navegador.
 ## Ruta táctica vigente
 
 La ruta orienta priorización, no autorización. `ACTIVE` se deriva exclusivamente del único Issue
-abierto con `workflow:active`; main no lo fija. `DONE` requiere evidencia integrada, `NEXT` es único
-salvo que todo esté bloqueado o diferido, y una desviación material se registra en el Work Block con
-razón y evidencia viva. Los IDs pueden relacionarse con varios Work Blocks y viceversa.
+abierto con `workflow:active`; main no lo fija. Sólo main expresa el estado integrado: un candidato
+puede proponer su transición post-merge mediante `route_effect` (`NONE`, `ADVANCES` o `COMPLETES`),
+pero no vuelve verdadera la fila antes de fusionarse. En main, `DONE` requiere evidencia integrada;
+`NEXT` es único salvo que todo esté bloqueado o diferido, y una desviación material se registra en
+el Work Block con razón y evidencia viva. Los IDs pueden relacionarse con varios Work Blocks y
+viceversa.
 
 | ID | Estado | Dependencia o condición | Evidencia integrada o límite |
 | --- | --- | --- | --- |
-| `DELIVERY-GOVERNANCE` | `NEXT` | Reconciliar esta ruta y estrategia contra main/GitHub antes de seleccionar producto. | DEV-8 / #60; el estado activo se lee de GitHub. |
+| `DELIVERY-GOVERNANCE` | `DONE` | Propuesta post-merge de DEV-10 (`COMPLETES`): la ruta se vuelve integrada sólo al fusionar este PR. | DEV-8/#60, DEV-9/#62 y DEV-10/#64; el candidato no cambia main antes del merge. |
 | `FOUNDATIONS-RUNTIME` | `DONE` | Runtime, watchlist, health y scheduler por capacidades. | BASE-18/#29, BASE-19/#31 y OPS-1/#37. |
 | `MARKET-COMPARISON` | `DONE` | Muestra diaria UTC común, sin FX ni benchmarks sectoriales. | MKT-3/#56/#57: normalización, retorno, volatilidad, drawdown, correlación y beta v1. |
-| `ANALYST-READINESS` | `PLANNED` | Backup/restauración temporal verificable y soak silencioso antes de ampliar producto. | Sin evidencia integrada; no bloquea el uso actual. |
+| `ANALYST-READINESS` | `NEXT` | Evidencia operacional multicíclo, restart/recovery y rehearsal seguro antes de ampliar producto. | Backup/restauración: BASE-15/#16/PR #17; failure/backoff/health: OPS-1/#36/PR #37; soak pendiente. |
 | `VALUATION-HISTORY` | `PLANNED` | Historia y reglas posteriores compatibles con valoración PIT v1. | Valoración v1 integrada; cobertura histórica pendiente. |
 | `INDICATORS-AND-OUTBOX` | `PLANNED` | Justificar leverage de indicadores restantes y notificaciones reanudables. | RSI/MACD/ATR, outbox y canales externos no integrados. |
 | `SEC-CORPUS` | `PLANNED` | Corpus oficial y contratos independientes antes de Cazatiburones. | Forms 3/4/5, 13D/13G y 13F no integrados. |

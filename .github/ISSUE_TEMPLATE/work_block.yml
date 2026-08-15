@@ -52,7 +52,7 @@ body:
     id: delivery_route_context
     attributes:
       label: Delivery route context
-      description: "Horizonte estratégico, route item(s), avance que cierra, siguiente esperado y desviación (ninguna o razón/evidencia)."
+      description: "Horizonte, item(s), route_effect (NONE/ADVANCES/COMPLETES), transición propuesta, siguiente esperado y desviación. Sólo main es integrado; COMPLETES propone DONE/NEXT en el mismo diff."
     validations: {required: true}
   - type: textarea
     id: acceptance
