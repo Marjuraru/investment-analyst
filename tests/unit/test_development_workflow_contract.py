@@ -74,6 +74,8 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
         "salvo la publicación/reconciliación estrecha de su propio marker machine-owned" in protocol
     )
     assert "AWAITING HUMAN APPROVAL" in protocol
+    assert "route_effect" in protocol
+    assert "Sólo `main` representa estado integrado de la ruta" in protocol
 
     for name, text in skills.items():
         assert _frontmatter_value(text, "name") == name
@@ -128,7 +130,9 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "--live --phase finalize" in core_rule
     assert "control-plane-first" in skills["plan"]
     assert "exploración dirigida" in skills["plan"]
+    assert "route_effect" in skills["plan"]
     assert "id: writer_role" in template
+    assert "route_effect (NONE/ADVANCES/COMPLETES)" in template
     assert "options: [BUILD, UI_WORKER]" in template
     assert "id: owner" not in template
 

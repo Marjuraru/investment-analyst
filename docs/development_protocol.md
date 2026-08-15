@@ -21,6 +21,15 @@ GitHub siempre prevalecen. PLAN, BUILD, UI_WORKER y AUDIT se definen por permiso
 entradas, salidas y gates; el modelo o cliente sólo puede registrarse como metadata de evidencia y
 nunca altera autoridad. Cada AUDIT de un Work Block comienza en una sesión fresca e independiente.
 
+Sólo `main` representa estado integrado de la ruta. El contexto de ruta de cada Work Block declara
+`route_effect` (`NONE`, `ADVANCES` o `COMPLETES`), ítem actual, transición propuesta y siguiente
+esperado: es metadata de planificación, no permiso ni otra máquina de estados. `NONE` no cambia la
+ruta; `ADVANCES` puede actualizar evidencia del mismo ítem sin cerrarlo; `COMPLETES` exige que el
+mismo diff candidato proponga ese ítem como `DONE` y exactamente un candidato elegible como `NEXT`.
+La propuesta sólo se vuelve cierta cuando ese PR se integra en main. PLAN falla cerrado si un `NEXT`
+permanece tras un `COMPLETES` cuyo Issue está cerrado, PR fusionado y merge contenido en main; no
+repara ni infiere silenciosamente una transición ambigua.
+
 `finalize_policy` sólo admite `AUTO` o `HUMAN`: FAST usa AUTO por defecto; STANDARD usa AUTO tras
 AUDIT PASS; CRITICAL usa HUMAN. Un override HUMAN de FAST/STANDARD requiere justificación en PLAN.
 AUTO en CRITICAL exige instrucción humana explícita y justificación en PLAN. DEV-3 conserva HUMAN.
