@@ -103,7 +103,8 @@ candidato.
 `analytics/market/` conserva la separación entre barras normalizadas, cálculos de métricas y
 diagnósticos. Las EMA diarias MKT-2 se siembran dentro de la consulta point-in-time y cada paso
 posterior referencia la observación de cierre actual más el UUID del EMA previo en
-`input_metric_result_ids`. La identidad UUID5 añade esas dependencias solo cuando existen, por lo
+`input_metric_result_ids`. RSI Wilder, ATR y MACD conservan estados y dependencias explícitas del
+mismo corte; MACD reutiliza las EMA existentes. La identidad UUID5 añade esas dependencias solo cuando existen, por lo
 que las métricas históricas sin linaje derivado mantienen su preimagen e identidad. La verificación
 de pipeline y backup exige que toda dependencia derivada exista y sea compatible con activo, fuente,
 ventana, algoritmo y corte temporal.

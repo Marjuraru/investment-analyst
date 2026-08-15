@@ -45,6 +45,11 @@ class MarketStatisticsRequest(ContractModel):
     bollinger_window: int = 20
     bollinger_multiplier: FinancialDecimal = Decimal("2")
     ema_windows: tuple[int, ...] = (20,)
+    rsi_window: int = 14
+    macd_fast_window: int = 12
+    macd_slow_window: int = 26
+    macd_signal_window: int = 9
+    atr_window: int = 14
 
     @field_validator("sma_windows", mode="before")
     @classmethod
@@ -107,6 +112,25 @@ class MarketStatisticsRequest(ContractModel):
         if any(item > 400 for item in windows):
             raise ValueError("EMA window must not exceed 400")
         return tuple(sorted(windows))
+
+    @field_validator("rsi_window", "atr_window", mode="before")
+    @classmethod
+    def validate_wilder_window(cls, value: object, info) -> int:
+        return _validate_window(value, minimum=2, name=info.field_name)
+
+    @field_validator("macd_fast_window", "macd_slow_window", "macd_signal_window", mode="before")
+    @classmethod
+    def validate_macd_window(cls, value: object, info) -> int:
+        value = _validate_window(value, minimum=2, name=info.field_name)
+        if value > 400:
+            raise ValueError(f"{info.field_name} must not exceed 400")
+        return value
+
+    @model_validator(mode="after")
+    def validate_macd_order(self) -> "MarketStatisticsRequest":
+        if self.macd_fast_window >= self.macd_slow_window:
+            raise ValueError("macd_fast_window must be less than macd_slow_window")
+        return self
 
 
 class MetricCalculation(ContractModel):

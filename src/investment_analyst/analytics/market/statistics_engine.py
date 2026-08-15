@@ -8,14 +8,22 @@ from uuid import UUID
 from investment_analyst.analytics.market.bar_models import MarketBar, MarketBarSeries
 from investment_analyst.analytics.market.bar_schemas import get_market_bar_schema
 from investment_analyst.analytics.market.statistics_definitions import (
+    ATR_KEY,
     BOLLINGER_BANDWIDTH_KEY,
     BOLLINGER_LOWER_KEY,
     BOLLINGER_PERCENT_B_KEY,
     BOLLINGER_UPPER_KEY,
     EMA_KEY,
+    MACD_HISTOGRAM_KEY,
+    MACD_LINE_KEY,
+    MACD_SIGNAL_KEY,
     RELATIVE_VOLUME_KEY,
+    RSI_AVERAGE_GAIN_KEY,
+    RSI_AVERAGE_LOSS_KEY,
+    RSI_KEY,
     SIMPLE_RETURN_KEY,
     SMA_KEY,
+    TRUE_RANGE_KEY,
     VOLATILITY_KEY,
 )
 from investment_analyst.analytics.market.statistics_identity import metric_result_id
@@ -32,6 +40,9 @@ _VOLATILITY_ALGORITHM = "market-rolling-daily-volatility-v1-decimal34"
 _RELATIVE_VOLUME_ALGORITHM = "market-relative-volume-v1-decimal34"
 _BOLLINGER_ALGORITHM = "market-bollinger-bands-v1-decimal34"
 _EMA_ALGORITHM = "market-ema-v1-decimal34"
+_RSI_ALGORITHM = "market-rsi-wilder-v1-decimal34"
+_MACD_ALGORITHM = "market-macd-v1-decimal34"
+_ATR_ALGORITHM = "market-atr-wilder-v1-decimal34"
 
 
 class MarketStatisticsError(RuntimeError):
@@ -121,6 +132,9 @@ class MarketStatisticsEngine:
             )
             for window in request.ema_windows:
                 calculations.extend(self._ema(series, window, warmups))
+            calculations.extend(self._rsi(series, request.rsi_window, warmups))
+            calculations.extend(self._true_range_and_atr(series, request.atr_window, warmups))
+            calculations.extend(self._macd(series, request, warmups))
 
         calculations.sort(
             key=lambda item: (item.as_of, item.metric_key, _parameter_sort_key(item.parameters))
@@ -459,4 +473,303 @@ class MarketStatisticsEngine:
             )
             output.append(calculation)
             previous = calculation
+        return output
+
+    @staticmethod
+    def _rsi(
+        series: MarketBarSeries, window: int, warmups: dict[str, int]
+    ) -> list[MetricCalculation]:
+        bars = series.bars
+        for key in (RSI_AVERAGE_GAIN_KEY, RSI_AVERAGE_LOSS_KEY, RSI_KEY):
+            warmups[_detail_key(key, window)] = min(len(bars), window)
+        if len(bars) <= window:
+            return []
+        parameters = {
+            "window": window,
+            "seed_method": "wilder_first_n_changes",
+            "seed_start": bars[0].timestamp.isoformat(),
+            "price_field": "close",
+            **_common_parameters(series),
+        }
+        output: list[MetricCalculation] = []
+        changes = tuple(bars[index].close - bars[index - 1].close for index in range(1, len(bars)))
+        gain = sum(
+            (max(change, Decimal("0")) for change in changes[:window]), Decimal("0")
+        ) / Decimal(window)
+        loss = sum(
+            (max(-change, Decimal("0")) for change in changes[:window]), Decimal("0")
+        ) / Decimal(window)
+        previous_gain: MetricCalculation | None = None
+        previous_loss: MetricCalculation | None = None
+        for index in range(window, len(bars)):
+            current = bars[index]
+            if index > window:
+                change = current.close - bars[index - 1].close
+                gain = ((Decimal(window - 1) * gain) + max(change, Decimal("0"))) / Decimal(window)
+                loss = ((Decimal(window - 1) * loss) + max(-change, Decimal("0"))) / Decimal(window)
+            inputs = bars[: index + 1] if index == window else (current,)
+            dependency_ids = (
+                ()
+                if previous_gain is None
+                else (metric_result_id(previous_gain, series.query.known_at),)
+            )
+            gain_result = MetricCalculation(
+                asset_id=current.asset_id,
+                source_id=current.source_id,
+                metric_key=RSI_AVERAGE_GAIN_KEY,
+                value=gain,
+                unit="USD",
+                as_of=current.timestamp,
+                available_at=max(bar.available_at for bar in inputs)
+                if previous_gain is None
+                else max(current.available_at, previous_gain.available_at),
+                parameters=parameters,
+                input_observation_ids=_ids(inputs, "close"),
+                input_metric_result_ids=dependency_ids,
+                algorithm_version=_RSI_ALGORITHM,
+                quality=_quality(
+                    tuple(bar.quality for bar in inputs)
+                    if previous_gain is None
+                    else (current.quality, previous_gain.quality)
+                ),
+            )
+            loss_result = MetricCalculation(
+                asset_id=current.asset_id,
+                source_id=current.source_id,
+                metric_key=RSI_AVERAGE_LOSS_KEY,
+                value=loss,
+                unit="USD",
+                as_of=current.timestamp,
+                available_at=max(bar.available_at for bar in inputs)
+                if previous_loss is None
+                else max(current.available_at, previous_loss.available_at),
+                parameters=parameters,
+                input_observation_ids=_ids(inputs, "close"),
+                input_metric_result_ids=()
+                if previous_loss is None
+                else (metric_result_id(previous_loss, series.query.known_at),),
+                algorithm_version=_RSI_ALGORITHM,
+                quality=_quality(
+                    tuple(bar.quality for bar in inputs)
+                    if previous_loss is None
+                    else (current.quality, previous_loss.quality)
+                ),
+            )
+            rsi = (
+                Decimal("50")
+                if gain == 0 and loss == 0
+                else Decimal("100")
+                if loss == 0
+                else Decimal("0")
+                if gain == 0
+                else Decimal("100") - Decimal("100") / (Decimal("1") + gain / loss)
+            )
+            output.extend(
+                (
+                    gain_result,
+                    loss_result,
+                    MetricCalculation(
+                        asset_id=current.asset_id,
+                        source_id=current.source_id,
+                        metric_key=RSI_KEY,
+                        value=rsi,
+                        unit="index",
+                        as_of=current.timestamp,
+                        available_at=max(gain_result.available_at, loss_result.available_at),
+                        parameters=parameters,
+                        input_observation_ids=_ids((current,), "close"),
+                        input_metric_result_ids=(
+                            metric_result_id(gain_result, series.query.known_at),
+                            metric_result_id(loss_result, series.query.known_at),
+                        ),
+                        algorithm_version=_RSI_ALGORITHM,
+                        quality=_quality((gain_result.quality, loss_result.quality)),
+                    ),
+                )
+            )
+            previous_gain, previous_loss = gain_result, loss_result
+        return output
+
+    @staticmethod
+    def _true_range_and_atr(
+        series: MarketBarSeries, window: int, warmups: dict[str, int]
+    ) -> list[MetricCalculation]:
+        bars = series.bars
+        warmups[TRUE_RANGE_KEY] = 0
+        warmups[_detail_key(ATR_KEY, window)] = min(len(bars), window - 1)
+        parameters = {
+            "window": window,
+            "seed_method": "mean_first_n_true_ranges",
+            "seed_start": bars[0].timestamp.isoformat() if bars else None,
+            **_common_parameters(series),
+        }
+        ranges: list[MetricCalculation] = []
+        for index, current in enumerate(bars):
+            previous = bars[index - 1] if index else None
+            value = (
+                current.high - current.low
+                if previous is None
+                else max(
+                    current.high - current.low,
+                    abs(current.high - previous.close),
+                    abs(current.low - previous.close),
+                )
+            )
+            inputs = (current,) if previous is None else (previous, current)
+            ranges.append(
+                MetricCalculation(
+                    asset_id=current.asset_id,
+                    source_id=current.source_id,
+                    metric_key=TRUE_RANGE_KEY,
+                    value=value,
+                    unit="USD",
+                    as_of=current.timestamp,
+                    available_at=max(bar.available_at for bar in inputs),
+                    parameters={"first_bar_method": "high_low_only", **parameters},
+                    input_observation_ids=_ids(inputs, "high")
+                    + _ids(inputs, "low")
+                    + (() if previous is None else _ids((previous,), "close")),
+                    algorithm_version=_ATR_ALGORITHM,
+                    quality=_quality(tuple(bar.quality for bar in inputs)),
+                )
+            )
+        output = list(ranges)
+        if len(ranges) < window:
+            return output
+        atr = sum((item.value for item in ranges[:window]), Decimal("0")) / Decimal(window)
+        previous_atr: MetricCalculation | None = None
+        for index in range(window - 1, len(ranges)):
+            current_range = ranges[index]
+            if previous_atr is not None:
+                atr = ((Decimal(window - 1) * atr) + current_range.value) / Decimal(window)
+            observations = bars[:window] if previous_atr is None else (bars[index],)
+            output.append(
+                MetricCalculation(
+                    asset_id=current_range.asset_id,
+                    source_id=current_range.source_id,
+                    metric_key=ATR_KEY,
+                    value=atr,
+                    unit="USD",
+                    as_of=current_range.as_of,
+                    available_at=max(current_range.available_at, previous_atr.available_at)
+                    if previous_atr
+                    else max(item.available_at for item in ranges[:window]),
+                    parameters=parameters,
+                    input_observation_ids=_ids(observations, "close"),
+                    input_metric_result_ids=(
+                        metric_result_id(current_range, series.query.known_at),
+                    )
+                    + (
+                        ()
+                        if previous_atr is None
+                        else (metric_result_id(previous_atr, series.query.known_at),)
+                    ),
+                    algorithm_version=_ATR_ALGORITHM,
+                    quality=_quality(
+                        (current_range.quality,)
+                        if previous_atr is None
+                        else (current_range.quality, previous_atr.quality)
+                    ),
+                )
+            )
+            previous_atr = output[-1]
+        return output
+
+    @staticmethod
+    def _macd(
+        series: MarketBarSeries, request: MarketStatisticsRequest, warmups: dict[str, int]
+    ) -> list[MetricCalculation]:
+        fast = MarketStatisticsEngine._ema(series, request.macd_fast_window, warmups)
+        slow = MarketStatisticsEngine._ema(series, request.macd_slow_window, warmups)
+        fast_by_time = {item.as_of: item for item in fast}
+        slow_by_time = {item.as_of: item for item in slow}
+        parameters = {
+            "fast_window": request.macd_fast_window,
+            "slow_window": request.macd_slow_window,
+            "signal_window": request.macd_signal_window,
+            "seed_method": "sma_first_signal_lines",
+            "seed_start": series.bars[0].timestamp.isoformat() if series.bars else None,
+            **_common_parameters(series),
+        }
+        lines: list[MetricCalculation] = []
+        for timestamp in sorted(set(fast_by_time) & set(slow_by_time)):
+            fast_item, slow_item = fast_by_time[timestamp], slow_by_time[timestamp]
+            lines.append(
+                MetricCalculation(
+                    asset_id=fast_item.asset_id,
+                    source_id=fast_item.source_id,
+                    metric_key=MACD_LINE_KEY,
+                    value=fast_item.value - slow_item.value,
+                    unit="USD",
+                    as_of=timestamp,
+                    available_at=max(fast_item.available_at, slow_item.available_at),
+                    parameters=parameters,
+                    input_observation_ids=fast_item.input_observation_ids,
+                    input_metric_result_ids=(
+                        metric_result_id(fast_item, series.query.known_at),
+                        metric_result_id(slow_item, series.query.known_at),
+                    ),
+                    algorithm_version=_MACD_ALGORITHM,
+                    quality=_quality((fast_item.quality, slow_item.quality)),
+                )
+            )
+        warmups[MACD_LINE_KEY] = min(len(series.bars), request.macd_slow_window - 1)
+        warmups[MACD_SIGNAL_KEY] = min(len(lines), request.macd_signal_window - 1)
+        warmups[MACD_HISTOGRAM_KEY] = min(len(lines), request.macd_signal_window - 1)
+        output: list[MetricCalculation] = [*fast, *slow, *lines]
+        if len(lines) < request.macd_signal_window:
+            return output
+        alpha = Decimal("2") / Decimal(request.macd_signal_window + 1)
+        signal = sum(
+            (item.value for item in lines[: request.macd_signal_window]), Decimal("0")
+        ) / Decimal(request.macd_signal_window)
+        previous: MetricCalculation | None = None
+        for index in range(request.macd_signal_window - 1, len(lines)):
+            line = lines[index]
+            if previous is not None:
+                signal = alpha * line.value + (Decimal("1") - alpha) * signal
+            signal_item = MetricCalculation(
+                asset_id=line.asset_id,
+                source_id=line.source_id,
+                metric_key=MACD_SIGNAL_KEY,
+                value=signal,
+                unit="USD",
+                as_of=line.as_of,
+                available_at=max(line.available_at, previous.available_at)
+                if previous
+                else max(item.available_at for item in lines[: request.macd_signal_window]),
+                parameters={**parameters, "alpha": str(alpha)},
+                input_observation_ids=line.input_observation_ids,
+                input_metric_result_ids=(metric_result_id(line, series.query.known_at),)
+                + (
+                    () if previous is None else (metric_result_id(previous, series.query.known_at),)
+                ),
+                algorithm_version=_MACD_ALGORITHM,
+                quality=_quality(
+                    (line.quality,) if previous is None else (line.quality, previous.quality)
+                ),
+            )
+            output.extend(
+                (
+                    signal_item,
+                    MetricCalculation(
+                        asset_id=line.asset_id,
+                        source_id=line.source_id,
+                        metric_key=MACD_HISTOGRAM_KEY,
+                        value=line.value - signal,
+                        unit="USD",
+                        as_of=line.as_of,
+                        available_at=max(line.available_at, signal_item.available_at),
+                        parameters=parameters,
+                        input_observation_ids=line.input_observation_ids,
+                        input_metric_result_ids=(
+                            metric_result_id(line, series.query.known_at),
+                            metric_result_id(signal_item, series.query.known_at),
+                        ),
+                        algorithm_version=_MACD_ALGORITHM,
+                        quality=_quality((line.quality, signal_item.quality)),
+                    ),
+                )
+            )
+            previous = signal_item
         return output

@@ -32,7 +32,13 @@ EMA MKT-2 is `market.technical.ema` version `1.0.0`, with the exact Decimal recu
 uses sorted, unique windows from 2 through 400 (default 20). Its first result is the SMA of the
 first in-query window; later results reference only the current close observation and the immediately
 previous EMA result. Therefore the stored lineage is linear, point-in-time, and does not repeatedly
-embed the whole historical prefix. RSI and MACD remain pending.
+embed the whole historical prefix.
+
+RSI Wilder, MACD and ATR use Decimal34 and only the bars selected by the point-in-time query. RSI
+uses first-N gain/loss seeds and explicit 50/100/0 denominator cases; true range uses high-low on
+the first available bar and then the previous available close; ATR uses a first-N true-range seed.
+MACD reuses the existing EMA v1 evidence for its fast and slow legs, then persists its line, signal
+and histogram dependencies. They are descriptive metrics, not signals or recommendations.
 
 ## Warmup, quality, and source scope
 
