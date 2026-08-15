@@ -275,6 +275,9 @@ Ya disponibles por contratos pequeños y probados: EMA configurables con linaje 
 Bandas de Bollinger y MKT-3: comparación diaria multi-activo PIT con normalización base 100,
 retorno, volatilidad, drawdown, correlación y beta v1 sobre una muestra común. Pendientes:
 
+RSI Wilder, MACD y ATR PIT ya están disponibles como métricas descriptivas y alimentan únicamente
+candidatos técnicos SILENT. La outbox durable y cualquier canal de entrega permanecen pendientes.
+
 - RSI;
 - MACD;
 - ATR y volatilidad histórica;

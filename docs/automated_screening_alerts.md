@@ -187,7 +187,8 @@ Estas serán las primeras alertas activas porque no interpretan una oportunidad 
 - volatilidad;
 - máximos o mínimos;
 - divergencia frente a benchmark;
-- RSI, MACD, Bollinger o ATR cuando existan sus contratos.
+- RSI Wilder, MACD, Bollinger o ATR mediante contratos independientes; RSI y MACD pueden alimentar
+  únicamente reglas SILENT descriptivas, sin entrega, señal ni recomendación.
 
 Una alerta diaria solo puede activarse después de actualizar barras diarias. “Inmediata” significa
 inmediatamente después de ingerir evidencia nueva, no tiempo real.

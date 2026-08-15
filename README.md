@@ -89,8 +89,8 @@ propia. No se añadirán nuevas rutas o modelos específicos de Apple.
   beneficio, liquidez y balance, deuda y solvencia, caja y reinversión o asignación de capital, sin
   producir un score o recomendación;
 - métricas y diagnósticos deterministas, point-in-time y trazables;
-- estadísticas de mercado diarias con retorno, SMA, volatilidad, volumen relativo, Bollinger y EMA
-  MKT-2 con linaje derivado lineal auditable; RSI y MACD siguen pendientes;
+- estadísticas de mercado diarias con retorno, SMA, volatilidad, volumen relativo, Bollinger, EMA,
+  RSI Wilder, MACD y ATR Decimal-exact con linaje point-in-time auditable;
 - bootstrap incremental e idempotente del workspace permanente;
 - consulta diaria de diagnósticos de mercado y fundamentales, presentados por separado en JSON
   compacto, JSON versionado o texto legible;

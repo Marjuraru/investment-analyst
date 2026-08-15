@@ -48,6 +48,14 @@ _METRIC_KEYS = {
     "market.technical.bollinger.bandwidth",
     "market.technical.bollinger.percent_b",
     "market.technical.ema",
+    "market.technical.rsi.average_gain",
+    "market.technical.rsi.average_loss",
+    "market.technical.rsi",
+    "market.technical.macd.line",
+    "market.technical.macd.signal",
+    "market.technical.macd.histogram",
+    "market.technical.true_range",
+    "market.technical.atr",
 }
 
 
@@ -117,6 +125,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--bollinger-window", type=_volatility_window, default=20)
     parser.add_argument("--bollinger-multiplier", type=_positive_decimal, default=Decimal("2"))
     parser.add_argument("--ema-window", action="append", type=_ema_window)
+    parser.add_argument("--rsi-window", type=_ema_window, default=14)
+    parser.add_argument("--macd-fast-window", type=_ema_window, default=12)
+    parser.add_argument("--macd-slow-window", type=_ema_window, default=26)
+    parser.add_argument("--macd-signal-window", type=_ema_window, default=9)
+    parser.add_argument("--atr-window", type=_ema_window, default=14)
     parser.add_argument("--output-limit", type=_positive_int, default=20)
     return parser
 
@@ -144,6 +157,16 @@ def _matches_request(result, request: MarketStatisticsRequest) -> bool:
         )
     if result.metric_key == "market.technical.ema":
         return result.parameters.get("window") in request.ema_windows
+    if result.metric_key.startswith("market.technical.rsi"):
+        return result.parameters.get("window") == request.rsi_window
+    if result.metric_key.startswith("market.technical.macd"):
+        return (
+            result.parameters.get("fast_window") == request.macd_fast_window
+            and result.parameters.get("slow_window") == request.macd_slow_window
+            and result.parameters.get("signal_window") == request.macd_signal_window
+        )
+    if result.metric_key == "market.technical.atr":
+        return result.parameters.get("window") == request.atr_window
     return True
 
 
@@ -167,6 +190,11 @@ def main() -> int:
             bollinger_window=args.bollinger_window,
             bollinger_multiplier=args.bollinger_multiplier,
             ema_windows=tuple(args.ema_window or (20,)),
+            rsi_window=args.rsi_window,
+            macd_fast_window=args.macd_fast_window,
+            macd_slow_window=args.macd_slow_window,
+            macd_signal_window=args.macd_signal_window,
+            atr_window=args.atr_window,
         )
         runtime = ApplicationRuntime.create_default()
         with runtime.open_storage(

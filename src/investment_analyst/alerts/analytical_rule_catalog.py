@@ -45,6 +45,72 @@ INITIAL_MARKET_ACTIVITY_RULE = AnalyticalScreeningRule(
     ),
 )
 
+RSI_LOW_REVIEW_RULE = AnalyticalScreeningRule(
+    rule_id="market.technical.rsi-low-review",
+    rule_version="1.0",
+    name_es="RSI bajo para revisión",
+    description_es=(
+        "Describe un RSI Wilder diario bajo el umbral configurable para revisión humana."
+    ),
+    state=AnalyticalRuleState.SILENT,
+    domain=AnalyticalScreeningDomain.MARKET,
+    asset_classes=(AssetClass.CRYPTO, AssetClass.EQUITY, AssetClass.ETF),
+    conditions=(
+        AnalyticalScreeningCondition(
+            condition_id="rsi_lte_30",
+            label_es="RSI Wilder",
+            domain=AnalyticalScreeningDomain.MARKET,
+            metric_key="market.technical.rsi",
+            algorithm_version="market-rsi-wilder-v1-decimal34",
+            unit="index",
+            operator=AnalyticalConditionOperator.LESS_THAN_OR_EQUAL,
+            threshold=Decimal("30"),
+            exit_threshold=Decimal("35"),
+            parameter_filters={"window": 14},
+            accepted_qualities=(DataQuality.PARTIAL, DataQuality.VALID),
+            limitations=(
+                "El umbral es configurable y descriptivo; no demuestra oportunidad, retorno "
+                "futuro ni acción recomendada.",
+            ),
+        ),
+    ),
+    confirmations_required=2,
+    cooldown_seconds=86_400,
+    limitations=("No representa una instrucción operativa de sobrecompra o sobreventa.",),
+)
+
+MACD_POSITIVE_HISTOGRAM_REVIEW_RULE = AnalyticalScreeningRule(
+    rule_id="market.technical.macd-positive-histogram-review",
+    rule_version="1.0",
+    name_es="Histograma MACD positivo para revisión",
+    description_es="Describe un histograma MACD diario positivo bajo parámetros configurables.",
+    state=AnalyticalRuleState.SILENT,
+    domain=AnalyticalScreeningDomain.MARKET,
+    asset_classes=(AssetClass.CRYPTO, AssetClass.EQUITY, AssetClass.ETF),
+    conditions=(
+        AnalyticalScreeningCondition(
+            condition_id="macd_histogram_gt_0",
+            label_es="Histograma MACD",
+            domain=AnalyticalScreeningDomain.MARKET,
+            metric_key="market.technical.macd.histogram",
+            algorithm_version="market-macd-v1-decimal34",
+            unit="USD",
+            operator=AnalyticalConditionOperator.GREATER_THAN,
+            threshold=Decimal("0"),
+            exit_threshold=Decimal("0"),
+            parameter_filters={"fast_window": 12, "slow_window": 26, "signal_window": 9},
+            accepted_qualities=(DataQuality.PARTIAL, DataQuality.VALID),
+            limitations=(
+                "El umbral es configurable y descriptivo; no demuestra oportunidad, retorno "
+                "futuro ni acción recomendada.",
+            ),
+        ),
+    ),
+    confirmations_required=2,
+    cooldown_seconds=86_400,
+    limitations=("No es una señal predictiva ni una recomendación.",),
+)
+
 INITIAL_QUARTERLY_FUNDAMENTAL_RULE = AnalyticalScreeningRule(
     rule_id="fundamentals.quarterly-balance-growth-review",
     rule_version="1.0",
@@ -102,10 +168,14 @@ INITIAL_QUARTERLY_FUNDAMENTAL_RULE = AnalyticalScreeningRule(
 INITIAL_ANALYTICAL_RULES = (
     INITIAL_QUARTERLY_FUNDAMENTAL_RULE,
     INITIAL_MARKET_ACTIVITY_RULE,
+    RSI_LOW_REVIEW_RULE,
+    MACD_POSITIVE_HISTOGRAM_REVIEW_RULE,
 )
 
 __all__ = [
     "INITIAL_ANALYTICAL_RULES",
     "INITIAL_MARKET_ACTIVITY_RULE",
     "INITIAL_QUARTERLY_FUNDAMENTAL_RULE",
+    "RSI_LOW_REVIEW_RULE",
+    "MACD_POSITIVE_HISTOGRAM_REVIEW_RULE",
 ]

@@ -1,5 +1,10 @@
 # Data contracts
 
+Las métricas técnicas de mercado `market.technical.rsi.*`, `market.technical.macd.*`,
+`market.technical.true_range` y `market.technical.atr` son resultados derivados Decimal-exact con
+`source_id`, `known_at`, parámetros y linaje explícito. Sólo consumen barras diarias disponibles en
+el corte solicitado; no constituyen una señal, recomendación ni instrucción operativa.
+
 The project separates each processing stage so that later calculations can be inspected and
 reconstructed without hiding transformations.
 

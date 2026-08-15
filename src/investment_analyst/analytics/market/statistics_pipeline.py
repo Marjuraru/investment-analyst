@@ -6,7 +6,14 @@ from uuid import UUID
 
 from investment_analyst.analytics.market.history_service import HistoricalMarketDataService
 from investment_analyst.analytics.market.statistics_definitions import (
+    ATR_KEY,
     EMA_KEY,
+    MACD_HISTOGRAM_KEY,
+    MACD_LINE_KEY,
+    MACD_SIGNAL_KEY,
+    RSI_AVERAGE_GAIN_KEY,
+    RSI_AVERAGE_LOSS_KEY,
+    RSI_KEY,
     get_market_statistics_definitions,
 )
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
@@ -315,29 +322,55 @@ class MarketStatisticsPipeline:
             raise MarketStatisticsPipelineError("metric result cannot depend on itself")
         if not dependencies:
             return
-        if result.metric_key != EMA_KEY or len(dependencies) != 1:
-            raise MarketStatisticsPipelineError("only EMA supports one derived metric dependency")
+        allowed = {
+            EMA_KEY,
+            RSI_AVERAGE_GAIN_KEY,
+            RSI_AVERAGE_LOSS_KEY,
+            RSI_KEY,
+            MACD_LINE_KEY,
+            MACD_SIGNAL_KEY,
+            MACD_HISTOGRAM_KEY,
+            ATR_KEY,
+        }
+        if result.metric_key not in allowed:
+            raise MarketStatisticsPipelineError("metric does not support derived dependencies")
+        if result.metric_key == EMA_KEY and len(dependencies) != 1:
+            raise MarketStatisticsPipelineError("EMA requires one prior dependency")
         dependency = dependencies[0]
         if dependency.asset_id != result.asset_id or dependency.asset_id != request.query.asset_id:
             raise MarketStatisticsPipelineError("derived metric dependency mixes assets")
-        if dependency.metric_key != EMA_KEY:
-            raise MarketStatisticsPipelineError("derived metric dependency has a different metric")
-        if dependency.algorithm_version != result.algorithm_version:
-            raise MarketStatisticsPipelineError(
-                "derived metric dependency has a different algorithm"
-            )
-        for parameter in ("source_id", "known_at", "window", "alpha", "seed_method", "seed_start"):
-            if dependency.parameters.get(parameter) != result.parameters.get(parameter):
-                raise MarketStatisticsPipelineError(
-                    "derived metric dependency has incompatible parameters"
-                )
+        if result.metric_key == EMA_KEY:
+            if (
+                dependency.metric_key != EMA_KEY
+                or dependency.algorithm_version != result.algorithm_version
+            ):
+                raise MarketStatisticsPipelineError("EMA derived dependency is incompatible")
+            for parameter in (
+                "source_id",
+                "known_at",
+                "window",
+                "alpha",
+                "seed_method",
+                "seed_start",
+            ):
+                if dependency.parameters.get(parameter) != result.parameters.get(parameter):
+                    raise MarketStatisticsPipelineError(
+                        "derived metric dependency has incompatible parameters"
+                    )
         if dependency.parameters.get("source_id") != request.query.source_id:
             raise MarketStatisticsPipelineError("derived metric dependency mixes sources")
         if dependency.parameters.get("known_at") != request.query.known_at.isoformat():
             raise MarketStatisticsPipelineError(
                 "derived metric dependency uses a different known_at"
             )
-        if dependency.as_of >= result.as_of:
+        same_time = {
+            ATR_KEY,
+            RSI_KEY,
+            MACD_LINE_KEY,
+            MACD_SIGNAL_KEY,
+            MACD_HISTOGRAM_KEY,
+        }
+        if result.metric_key not in same_time and dependency.as_of >= result.as_of:
             raise MarketStatisticsPipelineError("derived metric dependency is not strictly prior")
         self._verify_derived_graph(result.result_id, set(), set())
 

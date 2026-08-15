@@ -252,6 +252,32 @@ def test_ema_uses_in_query_sma_seed_and_linear_derived_lineage() -> None:
     assert result.warmup_counts[f"{EMA_KEY}:3"] == 2
 
 
+def test_rsi_macd_and_atr_are_decimal_traceable_after_their_warmups() -> None:
+    series = _series(tuple(str(100 + index) for index in range(40)))
+    result = MarketStatisticsEngine().compute(
+        series,
+        MarketStatisticsRequest(
+            query=series.query,
+            sma_windows=(1,),
+            volatility_window=2,
+            relative_volume_window=2,
+            bollinger_window=2,
+            ema_windows=(2,),
+        ),
+    )
+
+    rsi = _items(result, "market.technical.rsi")
+    atr = _items(result, "market.technical.atr")
+    histogram = _items(result, "market.technical.macd.histogram")
+
+    assert rsi[0].value == Decimal("100")
+    assert rsi[0].as_of == series.bars[14].timestamp
+    assert atr[0].as_of == series.bars[13].timestamp
+    assert histogram
+    assert all(item.input_metric_result_ids for item in histogram)
+    assert result.warmup_counts["market.technical.rsi:14"] == 14
+
+
 @pytest.mark.parametrize(
     ("qualities", "expected"),
     [

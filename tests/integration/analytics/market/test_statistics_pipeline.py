@@ -6,7 +6,12 @@ from decimal import Decimal
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
 from investment_analyst.analytics.market.bar_schemas import ALPACA_SOURCE_ID, COINBASE_SOURCE_ID
 from investment_analyst.analytics.market.history_service import HistoricalMarketDataService
-from investment_analyst.analytics.market.statistics_definitions import EMA_KEY
+from investment_analyst.analytics.market.statistics_definitions import (
+    ATR_KEY,
+    EMA_KEY,
+    MACD_HISTOGRAM_KEY,
+    RSI_KEY,
+)
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
 from investment_analyst.analytics.market.statistics_models import MarketStatisticsRequest
 from investment_analyst.analytics.market.statistics_pipeline import MarketStatisticsPipeline
@@ -161,8 +166,8 @@ def test_btc_and_aapl_statistics_are_persisted_with_quality_and_idempotency(tmp_
             for item in storage.metric_results.list(asset_id="crypto:btc-usd")
         )
         assert all(item.quality is DataQuality.PARTIAL for item in aapl_results)
-        assert aapl_summary.definitions_upserted == 9
-        assert len(storage.metric_definitions.list_all()) == 9
+        assert aapl_summary.definitions_upserted == 17
+        assert len(storage.metric_definitions.list_all()) == 17
         assert len(storage.raw_records.list()) == raw_count
         assert len(storage.observations.list()) == observation_count
         assert storage.diagnostics.list() == []
@@ -194,6 +199,28 @@ def test_ema_lineage_is_linear_and_is_reused_without_rewriting_history(tmp_path)
         ]
         assert [item.result_id for item in reused] == first_ids
         assert second.results_created == 0
+
+
+def test_technical_indicator_lineage_is_persisted_and_reused(tmp_path) -> None:
+    fixed_clock = datetime(2026, 3, 1, tzinfo=UTC)
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        start, end = _store_coinbase(storage, count=40)
+        pipeline = MarketStatisticsPipeline(
+            storage,
+            HistoricalMarketDataService(storage),
+            MarketStatisticsEngine(),
+            clock=lambda: fixed_clock,
+        )
+        request = _request("crypto:btc-usd", COINBASE_SOURCE_ID, start, end, fixed_clock)
+
+        first = pipeline.run(request)
+        second = pipeline.run(request)
+
+        assert first.result_counts[RSI_KEY] == 26
+        assert first.result_counts[ATR_KEY] == 27
+        assert first.result_counts[MACD_HISTOGRAM_KEY] == 7
+        assert second.results_created == 0
+        assert second.results_reused == second.results_generated
 
 
 def test_known_at_is_part_of_result_identity_and_computed_at_is_preserved(tmp_path) -> None:
