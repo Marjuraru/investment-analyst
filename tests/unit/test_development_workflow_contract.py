@@ -76,6 +76,9 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "AWAITING HUMAN APPROVAL" in protocol
     assert "route_effect" in protocol
     assert "Sólo `main` representa estado integrado de la ruta" in protocol
+    assert "Supersesión temporal por PLAN" in protocol
+    assert "checkpoint compacto y verificable" in protocol
+    assert "no reabre ni hereda PASS" in protocol
 
     for name, text in skills.items():
         assert _frontmatter_value(text, "name") == name
@@ -131,6 +134,7 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "control-plane-first" in skills["plan"]
     assert "exploración dirigida" in skills["plan"]
     assert "route_effect" in skills["plan"]
+    assert "superseder un bloqueo puramente temporal" in skills["plan"]
     assert "id: writer_role" in template
     assert "route_effect (NONE/ADVANCES/COMPLETES)" in template
     assert "options: [BUILD, UI_WORKER]" in template
@@ -275,6 +279,113 @@ class BuildSnapshot:
     focused_tests: str = "pass"
     ci: str = "pass"
     smoke: str = "pass"
+
+
+@dataclass(frozen=True, slots=True)
+class TemporalSupersessionSnapshot:
+    only_passive_time_missing: bool = True
+    checkpoint_complete: bool = True
+    mutation_and_reread_succeed: bool = True
+    active_blocks_after: int = 1
+    correctable_defect: bool = False
+    ci_or_review_pending: bool = False
+    authority_missing: bool = False
+    criterion_changed: bool = False
+
+
+def _temporal_supersession_decision(snapshot: TemporalSupersessionSnapshot) -> str:
+    if any(
+        (
+            snapshot.correctable_defect,
+            snapshot.ci_or_review_pending,
+            snapshot.authority_missing,
+            snapshot.criterion_changed,
+        )
+    ):
+        return "REJECT"
+    if not snapshot.only_passive_time_missing or not snapshot.checkpoint_complete:
+        return "REJECT"
+    if not snapshot.mutation_and_reread_succeed or snapshot.active_blocks_after != 1:
+        return "GUARD FAILURE"
+    return "SUPERSEDE"
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    (
+        TemporalSupersessionSnapshot(correctable_defect=True),
+        TemporalSupersessionSnapshot(ci_or_review_pending=True),
+        TemporalSupersessionSnapshot(authority_missing=True),
+        TemporalSupersessionSnapshot(criterion_changed=True),
+        TemporalSupersessionSnapshot(checkpoint_complete=False),
+        TemporalSupersessionSnapshot(only_passive_time_missing=False),
+    ),
+)
+def test_temporal_supersession_rejects_non_passive_or_incomplete_checkpoint(
+    snapshot: TemporalSupersessionSnapshot,
+) -> None:
+    assert _temporal_supersession_decision(snapshot) == "REJECT"
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    (
+        TemporalSupersessionSnapshot(mutation_and_reread_succeed=False),
+        TemporalSupersessionSnapshot(active_blocks_after=2),
+    ),
+)
+def test_temporal_supersession_fails_closed_on_mutation_or_reread(
+    snapshot: TemporalSupersessionSnapshot,
+) -> None:
+    assert _temporal_supersession_decision(snapshot) == "GUARD FAILURE"
+
+
+@dataclass(frozen=True, slots=True)
+class ReplanSnapshot:
+    fresh_base: bool = True
+    fresh_metadata: bool = True
+    fresh_hashes: bool = True
+    probe_runs_first: bool = True
+    inherited_pass: bool = False
+    inherited_route_effect: bool = False
+    inherited_acceptance: bool = False
+
+
+def _replan_decision(snapshot: ReplanSnapshot) -> str:
+    if any(
+        (
+            snapshot.inherited_pass,
+            snapshot.inherited_route_effect,
+            snapshot.inherited_acceptance,
+        )
+    ):
+        return "REJECT"
+    if not all(
+        (
+            snapshot.fresh_base,
+            snapshot.fresh_metadata,
+            snapshot.fresh_hashes,
+            snapshot.probe_runs_first,
+        )
+    ):
+        return "GUARD FAILURE"
+    return "REPLAN"
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    (
+        ReplanSnapshot(inherited_pass=True),
+        ReplanSnapshot(inherited_route_effect=True),
+        ReplanSnapshot(inherited_acceptance=True),
+        ReplanSnapshot(fresh_base=False),
+        ReplanSnapshot(fresh_metadata=False),
+        ReplanSnapshot(fresh_hashes=False),
+        ReplanSnapshot(probe_runs_first=False),
+    ),
+)
+def test_replan_requires_fresh_evidence_and_rejects_inheritance(snapshot: ReplanSnapshot) -> None:
+    assert _replan_decision(snapshot) in {"REJECT", "GUARD FAILURE"}
 
 
 def _build_transition(snapshot: BuildSnapshot) -> tuple[str, str]:

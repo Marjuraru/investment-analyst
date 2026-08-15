@@ -71,6 +71,12 @@ def _validate_candidate_transition(
     if transition.effect == "ADVANCES":
         assert main_status != "DONE"
         assert candidate_status != "DONE"
+        if candidate_status != main_status:
+            assert main_status == "NEXT"
+            assert candidate_status == "BLOCKED"
+            assert transition.proposed_status == "BLOCKED"
+            assert transition.next_item is not None
+            assert _route_status(candidate_items, transition.next_item) == "NEXT"
         return
     assert main_status != "DONE"
     assert transition.proposed_status == "DONE"
@@ -104,9 +110,10 @@ def test_route_is_compact_non_authorizing_and_reconciles_mkt3() -> None:
     assert "PREDICTIVE-RESEARCH` | `DEFERRED`" in release_plan
     assert "Sólo main expresa el estado integrado" in release_plan
     assert "`DELIVERY-GOVERNANCE` | `DONE`" in release_plan
-    assert "`ANALYST-READINESS` | `NEXT`" in release_plan
-    assert "BASE-15/#16/PR #17" in release_plan
-    assert "OPS-1/#36/PR #37" in release_plan
+    assert "`ANALYST-READINESS` | `BLOCKED`" in release_plan
+    assert "OPS-2/#66" in release_plan
+    assert "insufficient_local_dates" in release_plan
+    assert "`VALUATION-HISTORY` | `NEXT`" in release_plan
     assert "comparación normalizada de varios activos" not in roadmap
     assert "beta y correlación frente a un benchmark identificado" not in roadmap
     _validate(_route_items(release_plan))
@@ -162,6 +169,30 @@ def test_none_and_advances_do_not_close_or_churn_route(
 ) -> None:
     main_items = (RouteItem("A", "NEXT", "live", ("DEV-1",)),)
     _validate_candidate_transition(main_items, main_items, transition)
+
+
+def test_advances_can_block_a_noncompleted_item_and_choose_one_next() -> None:
+    main_items = (
+        RouteItem("ANALYST-READINESS", "NEXT", "pending", ("OPS-2",)),
+        RouteItem("VALUATION-HISTORY", "PLANNED", "pending", ("route",)),
+    )
+    candidate_items = (
+        RouteItem("ANALYST-READINESS", "BLOCKED", "#66 insufficient dates", ("OPS-2",)),
+        RouteItem("VALUATION-HISTORY", "NEXT", "pending", ("route",)),
+    )
+    transition = RouteTransition(
+        "ADVANCES",
+        "ANALYST-READINESS",
+        "BLOCKED",
+        "VALUATION-HISTORY",
+        None,
+        None,
+        None,
+    )
+
+    _validate_candidate_transition(main_items, candidate_items, transition)
+    assert _route_status(candidate_items, "ANALYST-READINESS") == "BLOCKED"
+    assert _route_status(candidate_items, "VALUATION-HISTORY") == "NEXT"
 
 
 def test_plan_rejects_integrated_completion_left_as_next_without_name_inference() -> None:
