@@ -24,8 +24,10 @@ nunca altera autoridad. Cada AUDIT de un Work Block comienza en una sesión fres
 Sólo `main` representa estado integrado de la ruta. El contexto de ruta de cada Work Block declara
 `route_effect` (`NONE`, `ADVANCES` o `COMPLETES`), ítem actual, transición propuesta y siguiente
 esperado: es metadata de planificación, no permiso ni otra máquina de estados. `NONE` no cambia la
-ruta; `ADVANCES` puede actualizar evidencia del mismo ítem sin cerrarlo; `COMPLETES` exige que el
-mismo diff candidato proponga ese ítem como `DONE` y exactamente un candidato elegible como `NEXT`.
+ruta; `ADVANCES` puede actualizar evidencia del mismo ítem sin cerrarlo, o proponer `NEXT → BLOCKED`
+por una condición viva sin completar el ítem, siempre con exactamente un candidato elegible como
+`NEXT`; `COMPLETES` exige que el mismo diff candidato proponga ese ítem como `DONE` y exactamente un
+candidato elegible como `NEXT`.
 La propuesta sólo se vuelve cierta cuando ese PR se integra en main. PLAN falla cerrado si un `NEXT`
 permanece tras un `COMPLETES` cuyo Issue está cerrado, PR fusionado y merge contenido en main; no
 repara ni infiere silenciosamente una transición ambigua.
@@ -58,6 +60,25 @@ existe local ni remotamente, puede crearla únicamente desde esa ref verificada.
 stash, reset, clean, checkout/switch forzado, overwrite ni sincronización destructiva. Si la rama
 ya existe, la rama actual y el único worktree writer deben ser compatibles con ella. Un mismatch de
 base, branch, PR o worktree es `BUILD GUARD FAILURE`.
+
+## Supersesión temporal por PLAN
+
+Con decisión humana explícita en `$plan`, PLAN puede liberar administrativamente el único slot
+`workflow:active` de un bloque incompleto sólo si una relectura viva demuestra que el único bloqueo
+es evidencia pasiva de calendario y que ningún BUILD, humano o recurso autorizado puede producirla
+legítimamente. Un defecto corregible, CI o review pendiente, credencial, permiso, scope, criterio
+alterado o cualquier trabajo ejecutable rechaza la elegibilidad. No es `BUILD BLOCKED`, `PASS`,
+`DONE`, completion ni FINALIZE.
+
+Antes de mutar, PLAN registra un checkpoint compacto y verificable: Issue, objetivo y criterios;
+base, HEAD, branch y PR; hashes y estado del worktree; gates realmente ejecutados; condición y probe
+exactos; ruta no completada e instrucciones de replan. La secuencia es comentar y releer, retirar
+`workflow:active` y releer cero activos, cerrar `not_planned` y releer, y sólo entonces crear o
+activar el siguiente Work Block y demostrar exactamente uno. Una mutación o relectura fallida detiene
+la secuencia; nunca se crean dos activos. Un checkpoint local no commiteado queda dormante,
+hash-protected y sin writer; el bloque nuevo usa un único worktree aislado que no lo accede ni lo
+modifica. Cuando madure la evidencia, PLAN empieza de main y metadata/hashes nuevos, ejecuta primero
+el probe declarado y crea un Work Block nuevo: no reabre ni hereda PASS, route_effect o aceptación.
 
 El trabajo protegido se comprueba calculando SHA-256 sobre los bytes leídos directamente de cada
 archivo del worktree. No se usa blob, index, tree, base, diff ni una reconstrucción del contenido.
@@ -240,8 +261,10 @@ independiente: repite todos los guards, no sólo `headRefOid`, CI/audit/evidenci
 cambio o estado no terminal falla cerrado. `--match-head-commit` protege sólo la identidad del head
 en el merge y no sustituye ningún guard.
 
-FINALIZE usa squash y nunca `--admin`, bypass ni otra estrategia. Si falla tras ready, intenta volver
-a draft sólo cuando el head siga intacto y devuelve `FINALIZATION BLOCKED`. Tras merge verifica PR
+FINALIZE AUTO usa squash y nunca `--admin`, bypass ni otra estrategia. Los bloques con policy HUMAN
+no invocan FINALIZE: la integración humana sigue la estrategia explícita del Work Block y no puede
+inferir squash, rebase ni limpieza. Si falla tras ready, intenta volver a draft sólo cuando el head
+siga intacto y devuelve `FINALIZATION BLOCKED`. Tras merge verifica PR
 `MERGED`, cierra el Issue si fuera necesario, retira `workflow:active` con remove-label —nunca borra
 el label del repositorio—, relee el Issue y confirma cero Work Blocks activos. El cleanup es
 idempotente.

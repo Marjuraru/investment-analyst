@@ -161,6 +161,11 @@ results, and pending risks.
   autoridad y cualquier desviación material se explica con evidencia viva.
 - Explicit `$plan` authorizes creating or updating only the uniquely resolved Work Block Issue and
   its workflow metadata. It does not authorize product implementation, commits, push, PR, or merge.
+- PLAN puede superseder administrativamente un único Work Block incompleto sólo con decisión humana
+  explícita, cuando la evidencia viva demuestra que falta exclusivamente tiempo pasivo y existe un
+  checkpoint completo. La supersesión no es completion, BUILD PASS ni FINALIZE: retira primero el
+  label, relee cero activos, cierra `not_planned`, relee y sólo después publica el siguiente bloque.
+  El replan posterior parte de main, metadata y hashes nuevos y vuelve a ejecutar su probe read-only.
 - Explicit `$build` authorizes implementation, intended staging, commit, push, and one draft PR only
   after the active Work Block, declared base, expected branch, and working tree resolve uniquely.
   For a FAST Work Block whose effective `finalize_policy` is AUTO, it also authorizes the narrow
@@ -192,7 +197,9 @@ results, and pending risks.
   unavailable or being diagnosed; the Work Block justifies it; or the user requests it. Use
   `bash scripts/check.sh` as the single full local gate instead of duplicating its Pytest run.
 - If the same command fails twice for the same reason, stop blind retries and diagnose the cause.
-- Allow only one writer per branch or worktree. Parallel agents that may write require isolated Git worktrees.
+- Allow only one writer per branch or worktree. Un checkpoint local puede permanecer dormante y
+  hash-protected mientras el único Work Block activo usa un worktree aislado; el writer no accede ni
+  modifica ese checkpoint. Parallel agents that may write require isolated Git worktrees.
 
 ## Development environment
 
