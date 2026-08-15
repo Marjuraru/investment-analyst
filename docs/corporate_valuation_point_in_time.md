@@ -81,6 +81,13 @@ valoración después de persistir nueva evidencia, dentro de la misma conexión 
 otra llamada de proveedor. Un fallo tardío de valoración no revierte raw records, observaciones o
 métricas ya guardadas. ETF y cripto no reciben esa etapa.
 
+## Historia materializada
+
+`GET /api/v1/valuation-history` consulta sólo `MetricResult` de valoración ya materializados. Exige
+un corte UTC, rango inclusivo, `basis=latest_annual` y límite acotado. Selecciona la revisión con el
+mayor `parameters.known_at` elegible sin desempatar por UUID; conserva series sparse, IDs e inputs y
+publica únicamente estadísticas descriptivas Decimal. No es backfill, TTM, forward, ranking ni regla.
+
 ## Limitación de mercado
 
 El precio de las acciones configuradas procede de Alpaca Market Data, feed IEX, barras diarias y

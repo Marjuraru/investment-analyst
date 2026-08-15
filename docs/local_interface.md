@@ -581,3 +581,9 @@ mercado/fundamentales y base de unidad del título. Se carga bajo demanda median
 `GET /api/v1/valuation`; muestra precio y edad, ejercicio/filing, moneda/factor, estados por métrica,
 fórmula e IDs de inputs. La exportación JSON conserva los textos Decimal exactos. ETF y cripto no
 reciben ratios corporativos; la API puede devolver `not_applicable` sin abrir writer ni proveedor.
+
+La historia materializada usa por separado `GET /api/v1/valuation-history` con corte UTC, rango
+inclusivo, base `latest_annual` y límite explícito. Sólo se solicita al pulsar «Cargar historia»:
+el panel ofrece selector de serie, resumen Decimal, tabla accesible y exportación del JSON exacto.
+No amplía `/api/overview`, no llama proveedores, no toma writer y no convierte fechas sin artefacto
+persistido en cero o backfill.

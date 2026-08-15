@@ -84,6 +84,9 @@ from investment_analyst.analytics.market.history_service import HistoricalMarket
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
 from investment_analyst.analytics.market.statistics_pipeline import MarketStatisticsPipeline
 from investment_analyst.analytics.valuation import (
+    CorporateValuationHistory,
+    CorporateValuationHistoryRequest,
+    CorporateValuationHistoryService,
     CorporateValuationPersistencePipeline,
     CorporateValuationRequest,
     CorporateValuationService,
@@ -1067,6 +1070,20 @@ class InvestmentAnalystApplication:
                 security_unit_basis_version=asset.security_unit_basis_version,
                 security_unit_market_adjustment=asset.security_unit_market_adjustment,
             ).query(request)
+
+    def query_corporate_valuation_history(
+        self,
+        request: CorporateValuationHistoryRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationHistory:
+        """Read persisted valuation history without providers or a writer."""
+        self._runtime.catalog.get(request.asset_id)
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return CorporateValuationHistoryService(storage).query(request)
 
     def persist_corporate_valuation(
         self,

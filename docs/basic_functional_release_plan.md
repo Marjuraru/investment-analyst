@@ -39,8 +39,8 @@ las preferencias persistentes de watchlist/favoritos/actualización programada, 
 corporativa point-in-time v1 para
 empresas elegibles y el mercado spot diario Coinbase para BTC-USD y ETH-USD. El intradía sigue
 siendo un contrato separado de BTC-USD. La valoración v1 mantiene sus estados `not_evaluable` o
-`not_applicable` cuando faltan inputs compatibles y no cubre ETF, cripto, valoración histórica ni
-reglas posteriores.
+`not_applicable` cuando faltan inputs compatibles y no cubre ETF ni cripto. VAL-1 añade historia
+materializada de resultados evaluados; las reglas posteriores siguen fuera de alcance.
 
 BTC y ETH incorporan además una familia productiva separada de derivados Deribit: funding horario,
 DVOL diario, snapshots prospectivos, replay PIT y scheduler. El diagnóstico es descriptivo y sin
@@ -68,7 +68,7 @@ viceversa.
 | `FOUNDATIONS-RUNTIME` | `DONE` | Runtime, watchlist, health y scheduler por capacidades. | BASE-18/#29, BASE-19/#31 y OPS-1/#37. |
 | `MARKET-COMPARISON` | `DONE` | Muestra diaria UTC común, sin FX ni benchmarks sectoriales. | MKT-3/#56/#57: normalización, retorno, volatilidad, drawdown, correlación y beta v1. |
 | `ANALYST-READINESS` | `BLOCKED` | Evidencia operacional multicíclo, restart/recovery y rehearsal seguro sigue pendiente. | OPS-2/#66 fue supersedido administrativamente: `insufficient_local_dates`; no hubo completion ni rehearsal. |
-| `VALUATION-HISTORY` | `NEXT` | Historia y reglas posteriores compatibles con valoración PIT v1. | Valoración v1 integrada; cobertura histórica pendiente. |
+| `VALUATION-HISTORY` | `NEXT` | Historia y reglas posteriores compatibles con valoración PIT v1. | VAL-1/#70 aporta historia materializada local y descriptiva; reglas posteriores pendientes. |
 | `INDICATORS-AND-OUTBOX` | `PLANNED` | Justificar leverage de indicadores restantes y notificaciones reanudables. | RSI/MACD/ATR, outbox y canales externos no integrados. |
 | `SEC-CORPUS` | `PLANNED` | Corpus oficial y contratos independientes antes de Cazatiburones. | Forms 3/4/5, 13D/13G y 13F no integrados. |
 | `RELEASE-ACCEPTANCE` | `PLANNED` | CI, recuperación y soak observados. | Requiere evidencia operativa futura. |
@@ -124,8 +124,8 @@ viceversa.
 
 #### P1 — cobertura funcional del analista
 
-- la valoración corporativa PIT v1 está disponible para empresas elegibles; faltan valoración
-  histórica, reglas posteriores y cobertura adicional compatible;
+- la valoración corporativa PIT v1 y su historia materializada local están disponibles para empresas
+  elegibles; faltan reglas posteriores y cobertura adicional compatible;
 - faltan RSI, MACD y ATR; EMA MKT-2, Bollinger y la comparación diaria MKT-3 ya son capacidades
   descriptivas independientes y trazables;
 - la watchlist, los favoritos y la actualización programada ya son preferencias persistentes

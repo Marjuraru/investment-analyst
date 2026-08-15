@@ -101,7 +101,8 @@ pero no describen por sí solos el estado operativo actual.
   de watchlist y servicio `systemd --user`;
 - preferencias versionadas y persistentes de watchlist, favoritos y actualización programada;
 - valoración corporativa point-in-time v1 para empresas elegibles, con estados explícitos cuando la
-  base del título, el precio, el filing o la moneda no permiten evaluar una métrica;
+  base del título, el precio, el filing o la moneda no permiten evaluar una métrica, e historia
+  materializada local de resultados evaluados sin backfill;
 - importación FRED/ALFRED por vintage explícito, evidencia macro append-only y reconstrucción local
   point-in-time con disponibilidad diaria conservadora;
 - catálogo de seis cotizaciones BVL, cliente HTTPS SMV, evidencia registral append-only,
@@ -222,8 +223,10 @@ columnar para fuentes de alto volumen.
 ### US-GAAP
 
 La valoración corporativa point-in-time v1 ya reconstruye market cap, enterprise value y múltiplos
-anuales para empresas elegibles. No aplica a ETF o cripto, no infiere una base de acciones ausente y
-no reemplaza las ampliaciones históricas ni las reglas posteriores de esta fase.
+anuales para empresas elegibles. La historia materializada local muestra únicamente resultados ya
+persistidos hasta un corte explícito, con revisión, cobertura sparse y estadísticas descriptivas
+Decimal; no aplica a ETF o cripto, no infiere una base de acciones ausente ni reemplaza reglas
+posteriores de esta fase.
 
 Ampliar progresivamente:
 

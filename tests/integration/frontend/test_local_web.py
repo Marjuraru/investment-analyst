@@ -62,6 +62,9 @@ from investment_analyst.analytics.market.comparison_models import (
 )
 from investment_analyst.analytics.market.intraday_models import IntradayInterval
 from investment_analyst.analytics.valuation import (
+    CorporateValuationHistory,
+    CorporateValuationHistoryCoverage,
+    CorporateValuationHistoryRequest,
     CorporateValuationRequest,
     CorporateValuationSnapshot,
 )
@@ -229,6 +232,8 @@ class _FakeApplication:
         self.fundamental_refresh_identities: list[SecEdgarIdentity] = []
         self.valuation_requests: list[CorporateValuationRequest] = []
         self.valuation_locations: list[StorageLocationRequest] = []
+        self.valuation_history_requests: list[CorporateValuationHistoryRequest] = []
+        self.valuation_history_locations: list[StorageLocationRequest] = []
         self.crypto_derivatives_requests: list[CryptoDerivativesQueryRequest] = []
         self.crypto_derivatives_locations: list[StorageLocationRequest] = []
         self.comparison_requests: list[MarketComparisonRequest] = []
@@ -270,6 +275,26 @@ class _FakeApplication:
                     ),
                     "metrics": [],
                 }
+            ),
+        )
+
+    def query_corporate_valuation_history(
+        self,
+        request: CorporateValuationHistoryRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationHistory:
+        self.valuation_history_requests.append(request)
+        self.valuation_history_locations.append(location)
+        return CorporateValuationHistory(
+            request=request,
+            series=(),
+            coverage=CorporateValuationHistoryCoverage(
+                candidate_results=0,
+                superseded_revisions=0,
+                returned_points=0,
+                returned_series=0,
+                truncated=False,
             ),
         )
 
@@ -794,6 +819,55 @@ def test_valuation_api_is_versioned_read_only_and_allows_non_applicable_assets(
     ]
 
 
+def test_valuation_history_api_is_bounded_versioned_and_read_only(tmp_path: Path) -> None:
+    application = _FakeApplication()
+    workspace = tmp_path / "workspace"
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=workspace,
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    with _server(web) as (_, root):
+        common = {
+            "asset_id": "equity:us:aapl",
+            "known_at": "2026-07-16T15:46:09Z",
+            "start_date": "2026-07-01",
+            "end_date": "2026-07-15",
+            "basis": "latest_annual",
+            "limit": "250",
+        }
+        status, payload, _ = _json_request(
+            Request(f"{root}/api/v1/valuation-history?{urlencode(common)}")
+        )
+        invalid_status, invalid, _ = _json_request(
+            Request(f"{root}/api/v1/valuation-history?{urlencode({**common, 'unknown': 'x'})}")
+        )
+        inverted_status, inverted, _ = _json_request(
+            Request(
+                f"{root}/api/v1/valuation-history?{
+                    urlencode(
+                        {
+                            **common,
+                            'start_date': '2026-07-16',
+                        }
+                    )
+                }"
+            )
+        )
+
+    assert status == 200
+    assert payload["schema_version"] == "corporate-valuation-history-v1"
+    assert payload["request"]["limit"] == 250
+    assert invalid_status == inverted_status == 400
+    assert invalid["error"]["code"] == inverted["error"]["code"] == "invalid_request"
+    assert application.valuation_history_requests[0].start_date == date(2026, 7, 1)
+    assert application.valuation_history_locations == [StorageLocationRequest(workspace=workspace)]
+
+
 def test_valuation_api_redacts_unexpected_storage_details(tmp_path: Path) -> None:
     application = _FakeApplication()
 
@@ -1126,6 +1200,8 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'id="valuation-card"' in html
     assert 'class="valuation-card" aria-busy="false"' in html
     assert 'id="valuation-evidence" tabindex="0"' in html
+    assert 'id="valuation-history-metric"' in html
+    assert 'id="export-valuation-history-json"' in html
     assert "data-valuation-only" in html
     assert 'id="crypto-derivatives-panel"' in html
     assert "data-crypto-derivatives-only" in html
@@ -1259,6 +1335,9 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "function exportReportJson()" in javascript
     assert "function renderValuation(payload)" in javascript
     assert "function exportValuationJson()" in javascript
+    assert "function renderValuationHistory(payload" in javascript
+    assert "function exportValuationHistoryJson()" in javascript
+    assert "api(`/api/v1/valuation-history?${parameters.toString()}`)" in javascript
     assert "descriptor.has_corporate_valuation" in javascript
     assert "api(`/api/v1/valuation?${parameters.toString()}`)" in javascript
     assert '"long_sma_input_observation_ids"' in javascript
@@ -1290,6 +1369,8 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert ".fundamental-research-metric-change" in stylesheet
     assert ".data-export-button" in stylesheet
     assert ".valuation-metrics" in stylesheet
+    assert ".valuation-history-statistics" in stylesheet
+    assert ".valuation-history-table" in stylesheet
     assert ".valuation-evidence-disclosure pre" in stylesheet
     assert ":focus-visible" in stylesheet
     assert "min-height: 44px" in stylesheet
