@@ -70,6 +70,13 @@ Los contratos implementados usan un estado adicional
 `state/analytical_screening_state_v1.json`. Es append-only para resultados, recibos y transiciones;
 los eventos conservan su estado proyectado y nunca modifican el almacenamiento financiero.
 
+La entrega local usa además `state/candidate_notification_outbox_state_v1.json`. Al reconciliar un
+intento ya observado, cada candidato en estado `new` crea una recepción inmutable con identidad
+UUID5 derivada del candidato. La outbox se reabre tras reinicio y no retroactúa sobre candidatos
+vistos, descartados, silenciados o resueltos. El acuse explícito del usuario es una transición
+append-only propia: no cambia el ciclo de vida del candidato ni vuelve a evaluar reglas, consultar
+proveedores o abrir un canal externo.
+
 La configuración usa `state/analytical_rule_registry_state_v1.json`. Cada cambio guarda una
 revisión completa, encadenada por fingerprint y con escritura atómica privada. El catálogo
 empaquetado continúa siendo la fuente de contratos inmutables —métrica, operador, algoritmo,
@@ -293,14 +300,15 @@ desde la bandeja.
 
 Orden recomendado:
 
-1. bandeja persistente en la aplicación;
+1. bandeja persistente y outbox local con acuse explícito;
 2. notificación local del navegador o sistema;
 3. Telegram o correo opcionales;
 4. resumen diario o semanal.
 
-Los canales externos requieren configuración local secreta. Ninguna credencial se escribe en la
-regla, workspace analítico, JSON público o logs. La outbox se persiste antes del envío y reintenta
-sin duplicar.
+Los canales externos requieren un bloque posterior y configuración local secreta. Ninguna
+credencial se escribe en la regla, workspace analítico, JSON público o logs. La outbox local actual
+no transmite contenido fuera del proceso; los adaptadores de entrega futuros deberán persistir antes
+del envío y reintentar sin duplicar.
 
 ## IA cualitativa opcional
 

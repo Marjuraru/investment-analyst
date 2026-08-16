@@ -30,6 +30,7 @@ from investment_analyst.alerts.analytical_state import (
     AnalyticalCandidateStatus,
     AnalyticalScreeningStateStore,
 )
+from investment_analyst.alerts.candidate_notifications import CandidateNotificationStore
 from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagnosticReport
 from investment_analyst.analytics.aapl_daily_report_service import AaplDailyReportError
 from investment_analyst.analytics.consolidated_diagnostic_models import (
@@ -613,6 +614,14 @@ class _WebOperations(Protocol):
         """Apply one audited analytical-candidate transition."""
         ...
 
+    def candidate_notifications(
+        self, parameters: Mapping[str, tuple[str, ...]]
+    ) -> dict[str, object]: ...
+
+    def acknowledge_candidate_notification(
+        self, payload: dict[str, object]
+    ) -> dict[str, object]: ...
+
     def screening_rules(self) -> dict[str, object]:
         """Return the current versioned analytical rule configuration."""
         ...
@@ -1193,6 +1202,7 @@ class AaplLocalWebApplication:
         analytical_store: AnalyticalScreeningStateStore | None = None,
         analytical_rule_store: AnalyticalRuleRegistryStore | None = None,
         analytical_backtest: AnalyticalBacktestService | None = None,
+        notification_store: CandidateNotificationStore | None = None,
         manual_operations: ManualOperationQueue | None = None,
         asset_preferences: AssetPreferencesService | None = None,
     ) -> None:
@@ -1202,6 +1212,7 @@ class AaplLocalWebApplication:
         self._analytical_store = analytical_store
         self._analytical_rule_store = analytical_rule_store
         self._analytical_backtest = analytical_backtest
+        self._notification_store = notification_store
         self._manual_operations = manual_operations
         self._asset_preferences = asset_preferences
 
@@ -1222,6 +1233,17 @@ class AaplLocalWebApplication:
         candidates: dict[str, object] = {"enabled": False}
         if self._analytical_store is not None:
             candidates = self._analytical_store.status().to_json_dict()
+        notifications: dict[str, object] = {"enabled": False}
+        if self._notification_store is not None:
+            state = self._notification_store.load()
+            acknowledged = {item.notification_id for item in state.transitions}
+            notifications = {
+                "enabled": True,
+                "total": len(state.items),
+                "pending_count": sum(
+                    item.notification_id not in acknowledged for item in state.items
+                ),
+            }
         preferences: dict[str, object] = {"enabled": False}
         if self._asset_preferences is not None:
             preferences = self._asset_preferences.view().to_json_dict()
@@ -1230,6 +1252,7 @@ class AaplLocalWebApplication:
             "scheduler": scheduler,
             "alerts": alerts,
             "candidates": candidates,
+            "notifications": notifications,
             "asset_preferences": preferences,
         }
 
@@ -1421,6 +1444,51 @@ class AaplLocalWebApplication:
             "schema_version": "analytical-candidate-transition-response-v1",
             "changed": changed,
             "event": event.to_json_dict(),
+        }
+
+    def candidate_notifications(
+        self, parameters: Mapping[str, tuple[str, ...]]
+    ) -> dict[str, object]:
+        if self._notification_store is None:
+            return {
+                "schema_version": "candidate-notification-inbox-v1",
+                "items": [],
+                "total": 0,
+                "pending_count": 0,
+            }
+        if parameters:
+            raise ValueError("candidate notifications do not accept parameters")
+        state = self._notification_store.load()
+        acknowledged = {item.notification_id for item in state.transitions}
+        items = [
+            {
+                "item": item.model_dump(mode="json"),
+                "status": ("acknowledged" if item.notification_id in acknowledged else "pending"),
+            }
+            for item in tuple(reversed(state.items))[:200]
+        ]
+        return {
+            "schema_version": "candidate-notification-inbox-v1",
+            "items": items,
+            "total": len(items),
+            "pending_count": sum(item.notification_id not in acknowledged for item in state.items),
+        }
+
+    def acknowledge_candidate_notification(self, payload: dict[str, object]) -> dict[str, object]:
+        if self._notification_store is None:
+            raise ValueError("candidate notification outbox is not configured")
+        if set(payload) != {"notification_id"} or not isinstance(payload["notification_id"], str):
+            raise ValueError("acknowledge requires only notification_id")
+        try:
+            item, changed = self._notification_store.acknowledge(
+                UUID(payload["notification_id"]), recorded_at=datetime.now(UTC)
+            )
+        except ValueError as error:
+            raise ValueError("notification_id is invalid or unknown") from error
+        return {
+            "schema_version": "candidate-notification-acknowledge-response-v1",
+            "changed": changed,
+            "item": item.model_dump(mode="json"),
         }
 
     def screening_rules(self) -> dict[str, object]:
@@ -1966,6 +2034,11 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                     server.application.candidates(parameters),
                 )
                 return
+            if parsed.path == "/api/v1/candidate-notifications":
+                if parsed.query:
+                    raise ValueError("candidate notifications do not accept parameters")
+                self._send_json(HTTPStatus.OK, server.application.candidate_notifications({}))
+                return
             if parsed.path == "/api/screening-rules":
                 if parsed.query:
                     raise ValueError("screening rules query does not accept parameters")
@@ -2079,6 +2152,7 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 "/api/fundamental-refresh",
                 "/api/alerts/transition",
                 "/api/candidates/transition",
+                "/api/v1/candidate-notifications/acknowledge",
                 "/api/screening-rules/update",
                 "/api/v1/manual-operations",
             }:
@@ -2095,6 +2169,8 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 response = server.application.alert_transition(payload)
             elif parsed.path == "/api/candidates/transition":
                 response = server.application.candidate_transition(payload)
+            elif parsed.path == "/api/v1/candidate-notifications/acknowledge":
+                response = server.application.acknowledge_candidate_notification(payload)
             elif parsed.path == "/api/screening-rules/update":
                 response = server.application.screening_rule_update(payload)
             elif parsed.path == "/api/market-refresh":

@@ -18,6 +18,10 @@ from investment_analyst.alerts.analytical_rule_registry import (
     AnalyticalRuleRegistryStore,
 )
 from investment_analyst.alerts.analytical_state import AnalyticalScreeningStateStore
+from investment_analyst.alerts.candidate_notifications import (
+    CandidateNotificationMonitor,
+    CandidateNotificationStore,
+)
 from investment_analyst.application.aapl_bootstrap_models import AaplRefreshMode
 from investment_analyst.application.aapl_daily_runner import AaplDailyRunner
 from investment_analyst.application.aapl_scheduler import (
@@ -76,6 +80,7 @@ from investment_analyst.workspace.service import WorkspaceError
 _SCHEDULE_STATE_FILE = "multi_asset_schedule_state_v1.json"
 _ALERT_STATE_FILE = "operational_alert_state_v1.json"
 _ANALYTICAL_STATE_FILE = "analytical_screening_state_v1.json"
+_NOTIFICATION_OUTBOX_STATE_FILE = "candidate_notification_outbox_state_v1.json"
 _ANALYTICAL_RULE_REGISTRY_FILE = "analytical_rule_registry_state_v1.json"
 _MANUAL_OPERATION_STATE_FILE = "manual_operation_state_v1.json"
 _ASSET_PREFERENCES_STATE_FILE = "asset_preferences_state_v1.json"
@@ -213,6 +218,9 @@ def _serve(
     scheduler: MultiAssetScheduler | None = None
     alert_store = OperationalAlertStateStore(paths.state_root / _ALERT_STATE_FILE)
     analytical_store = AnalyticalScreeningStateStore(paths.state_root / _ANALYTICAL_STATE_FILE)
+    notification_store = CandidateNotificationStore(
+        paths.state_root / _NOTIFICATION_OUTBOX_STATE_FILE
+    )
     analytical_rule_store = AnalyticalRuleRegistryStore(
         paths.state_root / _ANALYTICAL_RULE_REGISTRY_FILE,
         INITIAL_ANALYTICAL_RULES,
@@ -289,6 +297,8 @@ def _serve(
             analytical_rule_store.rules,
         )
         analytical_monitor.reconcile(schedule_attempts)
+        notification_monitor = CandidateNotificationMonitor(notification_store, analytical_store)
+        notification_monitor.reconcile()
         scheduler = MultiAssetScheduler(
             jobs,
             schedule_store,
@@ -296,6 +306,7 @@ def _serve(
                 (
                     alert_monitor,
                     analytical_monitor,
+                    notification_monitor,
                 )
             ),
         )
@@ -315,6 +326,7 @@ def _serve(
         analytical_store,
         analytical_rule_store,
         analytical_backtest,
+        notification_store=notification_store,
         asset_preferences=preference_service,
     )
     manual_operations = ManualOperationQueue(

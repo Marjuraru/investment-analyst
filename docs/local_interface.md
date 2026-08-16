@@ -513,6 +513,12 @@ evaluables. No consulta proveedores, no modifica resultados operativos y no esti
 precisión predictiva. Una regla modificada se utiliza automáticamente en el siguiente intento con
 evidencia nueva; los intentos ya recibidos permanecen intactos.
 
+El panel **Notificaciones locales** consulta `GET /api/v1/candidate-notifications` bajo demanda.
+Muestra sólo el identificador del candidato, regla, activo y hora de la recepción local; no carga
+condiciones completas ni evidencia financiera. `POST /api/v1/candidate-notifications/acknowledge`
+acepta exclusivamente `notification_id`, registra como máximo un acuse append-only y es idempotente.
+El acuse no cambia el estado del candidato y no envía notificaciones del navegador, sistema o red.
+
 ## Servicio persistente con systemd
 
 El instalador genera una unidad privada y revisable. No ejecuta `systemctl`, no utiliza `sudo` y no
@@ -567,6 +573,8 @@ Todos permanecen dentro del workspace seleccionado:
   bandeja local;
 - `state/analytical_screening_state_v1.json`: resultados, recibos, candidatos y transiciones
   analíticas append-only;
+- `state/candidate_notification_outbox_state_v1.json`: recepciones locales inmutables y acuses
+  append-only, independientes del ciclo de vida del candidato;
 - `state/analytical_rule_registry_state_v1.json`: revisiones locales completas de reglas con
   fingerprints encadenados.
 

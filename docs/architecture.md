@@ -96,7 +96,10 @@ después de un refresh exitoso y con evidencia nueva. Evalúa condiciones versio
 trivaluada, conserva evidencia exacta y ofrece un replay point-in-time de solo lectura; no recalcula
 datos mediante el frontend ni produce una puntuación conjunta. Los eventos analíticos y los futuros
 intentos de notificación tienen identidades separadas para poder reintentar un canal sin duplicar el
-candidato.
+candidato. La primera outbox vive en un archivo privado versionado, crea una recepción para cada
+candidato `new`, conserva su payload inmutable y registra el acuse del usuario por separado. Su
+reconciliación sólo relee candidatos persistidos: no reevalúa reglas, no adquiere writer analítico y
+no llama proveedores ni canales externos.
 
 ## Estadísticas de mercado derivadas
 
