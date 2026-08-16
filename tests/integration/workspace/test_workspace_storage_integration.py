@@ -6,6 +6,9 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
+import duckdb
+import pytest
+
 from investment_analyst.core.models import (
     DataFrequency,
     DataQuality,
@@ -171,3 +174,32 @@ def test_workspace_storage_round_trip_and_read_only_inspection(tmp_path) -> None
     assert repeated.reused
     assert repeated.manifest.workspace_id == initialization.manifest.workspace_id
     assert service.inspect(initialization.paths.root).to_json_dict() == inspection.to_json_dict()
+
+
+def test_read_only_workspace_storage_remains_available_during_a_writer_transaction(
+    tmp_path,
+) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialization = service.initialize(tmp_path / "workspace")
+    writer = service.open_storage(initialization.paths, WorkspaceAccessMode.READ_WRITE)
+    try:
+        writer.store.connection.execute("CREATE TABLE concurrent_workspace_test (value INTEGER)")
+        writer.store.connection.execute("INSERT INTO concurrent_workspace_test VALUES (1)")
+        writer.store.connection.execute("BEGIN TRANSACTION")
+        writer.store.connection.execute("INSERT INTO concurrent_workspace_test VALUES (2)")
+        before = _file_state(initialization.paths.root)
+
+        reader = service.open_storage(initialization.paths, WorkspaceAccessMode.READ_ONLY)
+        try:
+            assert reader.store.connection.execute(
+                "SELECT value FROM concurrent_workspace_test"
+            ).fetchall() == [(1,)]
+            with pytest.raises(duckdb.Error):
+                reader.store.connection.execute("INSERT INTO concurrent_workspace_test VALUES (3)")
+        finally:
+            reader.close()
+
+        assert _file_state(initialization.paths.root) == before
+        writer.store.connection.execute("ROLLBACK")
+    finally:
+        writer.close()

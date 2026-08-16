@@ -145,6 +145,7 @@ from investment_analyst.frontend.local_web import (
 )
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
+from investment_analyst.storage import DuckDBStore, StoragePaths
 
 
 class _JsonResult:
@@ -786,6 +787,78 @@ class _FakeApplication:
                 }
             ),
         )
+
+
+class _ConcurrentReadApplication(_FakeApplication):
+    """Exercise real read-only storage opening from loopback request threads."""
+
+    def __init__(self, paths: StoragePaths) -> None:
+        super().__init__()
+        self._paths = paths
+
+    def _read_committed_schema(self) -> None:
+        with DuckDBStore(self._paths, read_only=True) as store:
+            assert store.connection.execute(
+                "SELECT metadata_value FROM storage_metadata WHERE metadata_key = 'schema_version'"
+            ).fetchone() == ("1",)
+
+    def query_aapl_market_chart(
+        self,
+        request: AaplMarketChartRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> AaplMarketChart:
+        self._read_committed_schema()
+        return super().query_aapl_market_chart(request, location=location)
+
+    def query_sec_fundamental_trend(
+        self,
+        request: AaplFundamentalTrendRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> AaplFundamentalTrend:
+        self._read_committed_schema()
+        return super().query_sec_fundamental_trend(
+            request,
+            asset_id=asset_id,
+            location=location,
+        )
+
+
+def test_loopback_reads_remain_available_while_a_local_writer_is_active(tmp_path: Path) -> None:
+    paths = StoragePaths.from_root(tmp_path / "storage")
+    writer = DuckDBStore(paths).open()
+    writer.connection.execute("BEGIN TRANSACTION")
+    application = _ConcurrentReadApplication(paths)
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    try:
+        with _server(AaplLocalWebApplication(controller, None)) as (_, root):
+            chart_status, chart, _ = _json_request(
+                Request(f"{root}/api/market-chart?known_at=2026-07-16T15%3A46%3A09Z")
+            )
+            trend_status, trend, _ = _json_request(
+                Request(
+                    f"{root}/api/fundamental-trend?asset_id=equity%3Aus%3Aaapl&"
+                    "known_at=2026-07-16T15%3A46%3A09Z&frequency=quarterly"
+                )
+            )
+    finally:
+        writer.connection.execute("ROLLBACK")
+        writer.close()
+
+    assert chart_status == 200
+    assert chart["schema_version"] == "aapl-market-chart-v5"
+    assert trend_status == 200
+    assert trend["schema_version"] == "aapl-fundamental-trend-v1"
+    assert len(application.chart_requests) == 1
+    assert len(application.trend_requests) == 1
 
 
 def test_valuation_api_is_versioned_read_only_and_allows_non_applicable_assets(

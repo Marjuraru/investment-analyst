@@ -53,6 +53,15 @@ def test_store_closes_owned_connection(tmp_path) -> None:
         connection.execute("SELECT 1")
 
 
+def test_read_only_store_does_not_initialize_an_absent_database(tmp_path) -> None:
+    paths = StoragePaths.from_root(tmp_path / "absent")
+
+    with pytest.raises(StorageError, match="does not exist"):
+        DuckDBStore(paths, read_only=True).open()
+
+    assert not paths.root.exists()
+
+
 def test_store_rejects_incompatible_schema_version(tmp_path) -> None:
     paths = StoragePaths.from_root(tmp_path)
     paths.processed_dir.mkdir(parents=True)
@@ -76,3 +85,30 @@ def test_store_rejects_incompatible_schema_version(tmp_path) -> None:
 
     with pytest.raises(StorageSchemaError, match="unsupported storage schema version"):
         DuckDBStore(paths).open()
+
+
+def test_read_only_store_shares_a_process_writer_snapshot_and_rejects_mutation(tmp_path) -> None:
+    paths = StoragePaths.from_root(tmp_path)
+    with DuckDBStore(paths) as writer:
+        writer.connection.execute("CREATE TABLE concurrent_read_test (value INTEGER PRIMARY KEY)")
+        writer.connection.execute("INSERT INTO concurrent_read_test VALUES (1)")
+        writer.connection.execute("BEGIN TRANSACTION")
+        writer.connection.execute("INSERT INTO concurrent_read_test VALUES (2)")
+
+        reader = DuckDBStore(paths, read_only=True).open()
+        try:
+            assert reader.connection.execute(
+                "SELECT value FROM concurrent_read_test"
+            ).fetchall() == [(1,)]
+            with pytest.raises(duckdb.Error):
+                reader.connection.execute("INSERT INTO concurrent_read_test VALUES (3)")
+            with pytest.raises(duckdb.Error):
+                reader.connection.execute("CREATE TABLE reader_must_not_write (value INTEGER)")
+        finally:
+            reader.close()
+
+        writer.connection.execute("COMMIT")
+        with DuckDBStore(paths, read_only=True) as after_commit:
+            assert after_commit.connection.execute(
+                "SELECT value FROM concurrent_read_test ORDER BY value"
+            ).fetchall() == [(1,), (2,)]
