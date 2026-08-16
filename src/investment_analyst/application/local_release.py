@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import hashlib
 import os
 import re
@@ -25,6 +24,10 @@ from uuid import uuid4
 from pydantic import ConfigDict, field_validator
 
 from investment_analyst.application.local_service_unit import write_local_service_unit
+from investment_analyst.application.operational_state import (
+    AaplDailyRunLock,
+    AaplOperationalStateError,
+)
 from investment_analyst.core.models.base import ContractModel, UTCDateTime
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -1019,7 +1022,7 @@ class LocalReleaseService:
                 f"Port must be an integer between 1 and 65535, got {port}"
             )
 
-        # 4. Verify workspace and writer locks
+        # 4. Verify workspace and writer locks via canonical AaplDailyRunLock.is_held
         resolved_ws: Path | None = None
         if workspace_root is not None:
             resolved_ws = workspace_root.expanduser().resolve(strict=False)
@@ -1034,24 +1037,17 @@ class LocalReleaseService:
             if not resolved_ws.is_dir():
                 raise ReleaseVerificationError(f"Workspace directory not found: {resolved_ws}")
             daily_lock = resolved_ws / "state" / "aapl_daily_run.lock"
-            if daily_lock.is_file():
-                is_held = False
-                try:
-                    fd = os.open(daily_lock, os.O_RDONLY)
-                    try:
-                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        fcntl.flock(fd, fcntl.LOCK_UN)
-                    except BlockingIOError:
-                        is_held = True
-                    finally:
-                        os.close(fd)
-                except OSError:
-                    is_held = True
+            try:
+                is_held = AaplDailyRunLock.is_held(daily_lock)
+            except AaplOperationalStateError as error:
+                raise ReleaseVerificationError(
+                    f"Could not inspect workspace writer lock {daily_lock}: {error}"
+                ) from error
 
-                if is_held or daily_lock.is_file():
-                    raise ReleaseVerificationError(
-                        f"Active writer operation detected in workspace: {daily_lock}"
-                    )
+            if is_held:
+                raise ReleaseVerificationError(
+                    f"Active writer operation detected in workspace: {daily_lock}"
+                )
 
         # 5. Verify systemctl if not skipped
         if not skip_systemd:

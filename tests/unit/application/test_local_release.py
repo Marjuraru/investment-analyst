@@ -1,14 +1,13 @@
 """Unit tests for independent local release runtime, acquisition, and management."""
 
-import fcntl
 import hashlib
 import io
-import os
 import stat
 import tarfile
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -33,6 +32,7 @@ from investment_analyst.application.local_service_unit import (
     render_local_service_unit,
     write_local_service_unit,
 )
+from investment_analyst.application.operational_state import AaplDailyRunLock
 from investment_analyst.core.models import DataFrequency
 
 
@@ -442,26 +442,26 @@ def test_pre_restart_verification_and_writer_lock_rejection(tmp_path: Path) -> N
         systemd_unit_path=unit_file,
     )
 
-    # 1. Clean workspace pre-restart passes
+    # 1. Clean workspace with no lock file passes
     service.verify_pre_restart(sha=sha, unit_file=unit_file, workspace_root=workspace)
 
-    # 2. Rejection on active daily writer lock (held via flock)
-    daily_lock = state_dir / "aapl_daily_run.lock"
-    fd = os.open(daily_lock, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        with pytest.raises(ReleaseVerificationError, match="Active writer operation detected"):
-            service.verify_pre_restart(sha=sha, unit_file=unit_file, workspace_root=workspace)
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-        daily_lock.unlink(missing_ok=True)
+    # 2. Acquire AaplDailyRunLock: active writer is detected and rejected
+    daily_lock_path = state_dir / "aapl_daily_run.lock"
+    with (
+        AaplDailyRunLock(daily_lock_path, run_id=uuid4(), started_at="2026-08-16T00:00:00Z"),
+        pytest.raises(ReleaseVerificationError, match="Active writer operation detected"),
+    ):
+        service.verify_pre_restart(sha=sha, unit_file=unit_file, workspace_root=workspace)
 
-    # 3. Rejection on invalid port
+    # 3. Lock released: stable file still persists on disk, but flock is free -> PASSES!
+    assert daily_lock_path.is_file()
+    service.verify_pre_restart(sha=sha, unit_file=unit_file, workspace_root=workspace)
+
+    # 4. Rejection on invalid port
     with pytest.raises(ReleaseVerificationError, match="Port must be an integer"):
         service.verify_pre_restart(sha=sha, unit_file=unit_file, port=999999)
 
-    # 4. Rejection on unstaged SHA
+    # 5. Rejection on unstaged SHA
     with pytest.raises(ReleaseVerificationError, match="not fully staged"):
         service.verify_pre_restart(
             sha="2222222222222222222222222222222222222222", unit_file=unit_file
