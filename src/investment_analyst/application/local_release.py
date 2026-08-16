@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import os
 import re
@@ -261,11 +262,13 @@ class SimulatedSystemctlRunner:
         is_enabled_result: bool = True,
         properties: Mapping[str, str] | None = None,
         fail_restart: bool = False,
+        fail_show: bool = False,
     ) -> None:
         self.is_active_result = is_active_result
         self.is_enabled_result = is_enabled_result
         self.properties = dict(properties or {})
         self.fail_restart = fail_restart
+        self.fail_show = fail_show
         self.reloaded = False
         self.restarts: list[str] = []
 
@@ -284,6 +287,8 @@ class SimulatedSystemctlRunner:
         return self.is_enabled_result
 
     def show_properties(self, service: str, properties: Sequence[str]) -> Mapping[str, str]:
+        if self.fail_show:
+            raise ReleaseUnitError("Simulated systemctl show failure")
         return {k: self.properties.get(k, "") for k in properties}
 
 
@@ -1030,9 +1035,23 @@ class LocalReleaseService:
                 raise ReleaseVerificationError(f"Workspace directory not found: {resolved_ws}")
             daily_lock = resolved_ws / "state" / "aapl_daily_run.lock"
             if daily_lock.is_file():
-                raise ReleaseVerificationError(
-                    f"Active writer lock found in workspace: {daily_lock}"
-                )
+                is_held = False
+                try:
+                    fd = os.open(daily_lock, os.O_RDONLY)
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    except BlockingIOError:
+                        is_held = True
+                    finally:
+                        os.close(fd)
+                except OSError:
+                    is_held = True
+
+                if is_held or daily_lock.is_file():
+                    raise ReleaseVerificationError(
+                        f"Active writer operation detected in workspace: {daily_lock}"
+                    )
 
         # 5. Verify systemctl if not skipped
         if not skip_systemd:
@@ -1321,20 +1340,9 @@ class LocalReleaseService:
         service_enabled: bool | None = None
         unit_matches_current = False
 
-        if target_unit.is_file():
-            with contextlib.suppress(OSError):
-                for line in target_unit.read_text(encoding="utf-8").splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith("WorkingDirectory="):
-                        working_dir = stripped.split("=", 1)[1].strip()
-                    elif stripped.startswith("ExecStart="):
-                        exec_start = stripped.split("=", 1)[1].strip()
-                    elif stripped.startswith("EnvironmentFile="):
-                        env_file = stripped.split("=", 1)[1].strip()
-
-        # Query loaded properties from systemd if enabled
         if check_systemd:
-            with contextlib.suppress(Exception):
+            # Strictly fail-closed: query live loaded properties directly from systemd
+            try:
                 props = self.systemctl.show_properties(
                     LOCAL_SERVICE_UNIT_NAME,
                     (
@@ -1345,35 +1353,61 @@ class LocalReleaseService:
                         "UnitFileState",
                     ),
                 )
-                loaded_wd = props.get("WorkingDirectory")
-                loaded_exec = props.get("ExecStart")
-                loaded_env = props.get("EnvironmentFile")
-                active_state = props.get("ActiveState")
-                unit_file_state = props.get("UnitFileState")
+                loaded_wd = props.get("WorkingDirectory") or None
+                loaded_exec = props.get("ExecStart") or None
+                loaded_env = props.get("EnvironmentFile") or None
+                active_state = props.get("ActiveState") or None
+                unit_file_state = props.get("UnitFileState") or None
 
-                if loaded_wd:
-                    working_dir = loaded_wd
-                if loaded_exec:
-                    exec_start = loaded_exec
-                if loaded_env:
-                    env_file = loaded_env
+                working_dir = loaded_wd
+                exec_start = loaded_exec
+                env_file = loaded_env
+
                 if active_state:
                     service_active = active_state == "active"
+                else:
+                    service_active = self.systemctl.is_active(LOCAL_SERVICE_UNIT_NAME)
+
                 if unit_file_state:
                     service_enabled = unit_file_state == "enabled"
+                else:
+                    service_enabled = self.systemctl.is_enabled(LOCAL_SERVICE_UNIT_NAME)
 
-            if service_active is None:
-                service_active = self.systemctl.is_active(LOCAL_SERVICE_UNIT_NAME)
-            if service_enabled is None:
-                service_enabled = self.systemctl.is_enabled(LOCAL_SERVICE_UNIT_NAME)
+                # unit_matches_current MUST be demonstrated by loaded systemd properties
+                if (
+                    state.current is not None
+                    and loaded_wd is not None
+                    and loaded_exec is not None
+                    and f"releases/{state.current}" in loaded_wd
+                    and f"releases/{state.current}" in loaded_exec
+                ):
+                    unit_matches_current = True
+                else:
+                    unit_matches_current = False
+            except Exception:
+                # Systemd query failed -> fail closed
+                service_active = False
+                service_enabled = False
+                unit_matches_current = False
+        else:
+            # Static check from unit file on disk
+            if target_unit.is_file():
+                with contextlib.suppress(OSError):
+                    for line in target_unit.read_text(encoding="utf-8").splitlines():
+                        stripped = line.strip()
+                        if stripped.startswith("WorkingDirectory="):
+                            working_dir = stripped.split("=", 1)[1].strip()
+                        elif stripped.startswith("ExecStart="):
+                            exec_start = stripped.split("=", 1)[1].strip()
+                        elif stripped.startswith("EnvironmentFile="):
+                            env_file = stripped.split("=", 1)[1].strip()
 
-        if (
-            state.current is not None
-            and working_dir is not None
-            and f"releases/{state.current}" in working_dir
-            and (exec_start is None or f"releases/{state.current}" in exec_start)
-        ):
-            unit_matches_current = True
+                if (
+                    state.current is not None
+                    and working_dir is not None
+                    and f"releases/{state.current}" in working_dir
+                ):
+                    unit_matches_current = True
 
         manifest: ReleaseManifest | None = None
         if state.current is not None:

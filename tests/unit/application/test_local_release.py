@@ -1,7 +1,9 @@
 """Unit tests for independent local release runtime, acquisition, and management."""
 
+import fcntl
 import hashlib
 import io
+import os
 import stat
 import tarfile
 from datetime import UTC, datetime
@@ -443,12 +445,17 @@ def test_pre_restart_verification_and_writer_lock_rejection(tmp_path: Path) -> N
     # 1. Clean workspace pre-restart passes
     service.verify_pre_restart(sha=sha, unit_file=unit_file, workspace_root=workspace)
 
-    # 2. Rejection on active daily writer lock
+    # 2. Rejection on active daily writer lock (held via flock)
     daily_lock = state_dir / "aapl_daily_run.lock"
-    daily_lock.touch()
-    with pytest.raises(ReleaseVerificationError, match="Active writer lock found"):
-        service.verify_pre_restart(sha=sha, unit_file=unit_file, workspace_root=workspace)
-    daily_lock.unlink()
+    fd = os.open(daily_lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with pytest.raises(ReleaseVerificationError, match="Active writer operation detected"):
+            service.verify_pre_restart(sha=sha, unit_file=unit_file, workspace_root=workspace)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        daily_lock.unlink(missing_ok=True)
 
     # 3. Rejection on invalid port
     with pytest.raises(ReleaseVerificationError, match="Port must be an integer"):
@@ -462,7 +469,7 @@ def test_pre_restart_verification_and_writer_lock_rejection(tmp_path: Path) -> N
 
 
 def test_status_unit_matches_current_from_loaded_systemd_properties(tmp_path: Path) -> None:
-    """Verify that status and unit_matches_current are derived from loaded systemd properties."""
+    """Verify status and unit_matches_current fail closed on systemd property anomalies."""
     runtime_root = tmp_path / "runtime"
     sha1 = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
     sha2 = "2222222222222222222222222222222222222222"
@@ -497,7 +504,7 @@ def test_status_unit_matches_current_from_loaded_systemd_properties(tmp_path: Pa
         encoding="utf-8",
     )
 
-    # 1. Systemd loaded properties match current release sha1
+    # 1. Systemd loaded properties match current release sha1 -> PASS
     systemctl_matching = SimulatedSystemctlRunner(
         is_active_result=True,
         is_enabled_result=True,
@@ -518,7 +525,7 @@ def test_status_unit_matches_current_from_loaded_systemd_properties(tmp_path: Pa
     assert report_matching.service_active is True
     assert report_matching.service_enabled is True
 
-    # 2. Systemd loaded properties point to stale sha2 despite state being sha1
+    # 2. Systemd loaded properties point to stale sha2 -> unit_matches_current is False
     systemctl_stale = SimulatedSystemctlRunner(
         is_active_result=True,
         is_enabled_result=True,
@@ -536,6 +543,38 @@ def test_status_unit_matches_current_from_loaded_systemd_properties(tmp_path: Pa
     )
     report_stale = service_stale.status(check_systemd=True, check_http=False)
     assert report_stale.unit_matches_current is False
+
+    # 3. Systemctl show fails completely (fail-closed: does not fall back to unit file)
+    systemctl_failed = SimulatedSystemctlRunner(
+        is_active_result=True,
+        is_enabled_result=True,
+        fail_show=True,
+    )
+    service_failed = LocalReleaseService(
+        paths=runtime_root,
+        systemctl=systemctl_failed,
+        systemd_unit_path=unit_file,
+    )
+    report_failed = service_failed.status(check_systemd=True, check_http=False)
+    assert report_failed.unit_matches_current is False
+    assert report_failed.service_active is False
+
+    # 4. Systemctl show returns incomplete properties (e.g. missing ExecStart) -> fail closed
+    systemctl_incomplete = SimulatedSystemctlRunner(
+        is_active_result=True,
+        is_enabled_result=True,
+        properties={
+            "WorkingDirectory": str(runtime_root / "releases" / sha1),
+            "ActiveState": "active",
+        },
+    )
+    service_incomplete = LocalReleaseService(
+        paths=runtime_root,
+        systemctl=systemctl_incomplete,
+        systemd_unit_path=unit_file,
+    )
+    report_incomplete = service_incomplete.status(check_systemd=True, check_http=False)
+    assert report_incomplete.unit_matches_current is False
 
 
 def test_activation_automatic_rollback_verifies_recovery_health_and_fail_closed(
