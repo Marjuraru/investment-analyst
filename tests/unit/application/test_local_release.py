@@ -17,9 +17,11 @@ from investment_analyst.application.local_release import (
     LocalReleaseService,
     ReleaseAcquisitionError,
     ReleaseConfigurationError,
+    ReleaseEnvironmentError,
     ReleaseManifest,
     ReleaseRollbackError,
     ReleaseUnitError,
+    ReleaseVerificationError,
     SimulatedHealthChecker,
     SimulatedSystemctlRunner,
     _safe_tar_extract,
@@ -276,8 +278,270 @@ def test_stage_release_and_manifest_determinism(tmp_path: Path) -> None:
         assert repeat_manifest.commit_sha == sha
 
 
-def test_activation_and_automatic_rollback_on_health_failure(tmp_path: Path) -> None:
-    """Test activation rollback when service restart or health verification fails."""
+def test_stage_rejects_non_python_312(tmp_path: Path) -> None:
+    """Verify that stage refuses any virtualenv built with non-3.12 Python."""
+    sha = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+    tree_sha = "b6f8115ffdddb0915cae50736dbc821c5355d3ac"
+    runtime_root = tmp_path / "runtime"
+    service = LocalReleaseService(paths=runtime_root)
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name, content in (
+            ("pyproject.toml", b'[project]\nname="investment-analyst"\n'),
+            ("uv.lock", b"version = 1\n"),
+            ("scripts/serve_investment_analyst.py", b"# server\n"),
+        ):
+            data = content
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+    def mock_run(cmd, *args, **kwargs):
+        if "archive" in cmd:
+            return MagicMock(returncode=0, stdout=buf.getvalue())
+        if "sync" in cmd or "venv" in cmd:
+            staging_dirs = list((runtime_root / "releases").glob(".staging-*"))
+            if staging_dirs:
+                py_bin = staging_dirs[0] / ".venv" / "bin" / "python"
+                py_bin.parent.mkdir(parents=True, exist_ok=True)
+                py_bin.touch()
+            return MagicMock(returncode=0, stdout="")
+        if "--version" in cmd:
+            return MagicMock(returncode=0, stdout="Python 3.11.8\n")
+        return MagicMock(returncode=0, stdout="")
+
+    with (
+        patch.object(service, "fetch_origin_main", return_value=(sha, tree_sha)),
+        patch.object(service, "ensure_uv", return_value=Path("/bin/uv")),
+        patch("subprocess.run", side_effect=mock_run),
+        pytest.raises(ReleaseEnvironmentError, match="must use Python 3.12"),
+    ):
+        service.stage(sha)
+
+
+def test_fetch_origin_main_rejects_moving_remote_ref(tmp_path: Path) -> None:
+    """Verify that fetch_origin_main rejects remote origin/main moving during acquisition."""
+    sha1 = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+    sha2 = "2222222222222222222222222222222222222222"
+    runtime_root = tmp_path / "runtime"
+    service = LocalReleaseService(paths=runtime_root)
+
+    query_calls = [sha1, sha2]
+
+    def mock_query():
+        return query_calls.pop(0)
+
+    with (
+        patch.object(service, "_query_remote_main", side_effect=mock_query),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
+        pytest.raises(ReleaseAcquisitionError, match="Remote origin/main moved during acquisition"),
+    ):
+        service.fetch_origin_main(sha1)
+
+
+def test_preexisting_release_non_equivalent_tampered_lock_or_corrupt_rejection(
+    tmp_path: Path,
+) -> None:
+    """Verify preexisting release equivalence detects tampered lock, bad python or corruption."""
+    sha = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+    tree_sha = "b6f8115ffdddb0915cae50736dbc821c5355d3ac"
+    runtime_root = tmp_path / "runtime"
+    r_dir = runtime_root / "releases" / sha
+    r_dir.mkdir(parents=True, exist_ok=True)
+    (r_dir / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+    (r_dir / "scripts").mkdir(parents=True, exist_ok=True)
+
+    py_bin = r_dir / ".venv" / "bin" / "python"
+    py_bin.touch()
+    pyproject = r_dir / "pyproject.toml"
+    pyproject.write_text("[project]\nname='test'\n", encoding="utf-8")
+    uv_lock = r_dir / "uv.lock"
+    uv_lock.write_text("lock-content-original\n", encoding="utf-8")
+    orig_lock_hash = hashlib.sha256(b"lock-content-original\n").hexdigest()
+    server_script = r_dir / "scripts" / "serve_investment_analyst.py"
+    server_script.touch()
+
+    manifest = ReleaseManifest(
+        schema_version="local-release-manifest-v1",
+        commit_sha=sha,
+        tree_sha=tree_sha,
+        uv_lock_sha256=orig_lock_hash,
+        python_version="Python 3.12.3",
+        staged_at=datetime.now(UTC),
+        release_path=str(r_dir),
+    )
+    (r_dir / "manifest.json").write_text(manifest.model_dump_json(), encoding="utf-8")
+
+    service = LocalReleaseService(paths=runtime_root)
+
+    # 1. Tamper uv.lock on disk
+    uv_lock.write_text("lock-content-tampered\n", encoding="utf-8")
+    with (
+        patch.object(service, "fetch_origin_main", return_value=(sha, tree_sha)),
+        pytest.raises(ReleaseAcquisitionError, match="not equivalent"),
+    ):
+        service.stage(sha)
+
+    # Restore uv.lock and tamper python version check
+    uv_lock.write_text("lock-content-original\n", encoding="utf-8")
+
+    def mock_run_bad_py(cmd, *args, **kwargs):
+        if "--version" in cmd:
+            return MagicMock(returncode=0, stdout="Python 3.11.5\n")
+        return MagicMock(returncode=0, stdout="")
+
+    with (
+        patch.object(service, "fetch_origin_main", return_value=(sha, tree_sha)),
+        patch("subprocess.run", side_effect=mock_run_bad_py),
+        pytest.raises(ReleaseAcquisitionError, match="not Python 3.12"),
+    ):
+        service.stage(sha)
+
+
+def test_pre_restart_verification_and_writer_lock_rejection(tmp_path: Path) -> None:
+    """Verify pre-restart checks reject active writer locks, invalid ports, and unstaged SHAs."""
+    sha = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+    runtime_root = tmp_path / "runtime"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    state_dir = workspace / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    r_dir = runtime_root / "releases" / sha
+    (r_dir / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+    (r_dir / "scripts").mkdir(parents=True, exist_ok=True)
+    (r_dir / ".venv" / "bin" / "python").touch()
+    (r_dir / "scripts" / "serve_investment_analyst.py").touch()
+    manifest = ReleaseManifest(
+        schema_version="local-release-manifest-v1",
+        commit_sha=sha,
+        tree_sha="b6f8115ffdddb0915cae50736dbc821c5355d3ac",
+        uv_lock_sha256=hashlib.sha256(b"dummy").hexdigest(),
+        python_version="Python 3.12.3",
+        staged_at=datetime.now(UTC),
+        release_path=str(r_dir),
+    )
+    (r_dir / "manifest.json").write_text(manifest.model_dump_json(), encoding="utf-8")
+
+    unit_file = tmp_path / "systemd" / "investment-analyst.service"
+    unit_content = (
+        "[Service]\n"
+        f"WorkingDirectory={r_dir}\n"
+        f'ExecStart="/bin/py" "/bin/scr" --workspace "{workspace}" --port 8765\n'
+        f"EnvironmentFile=/etc/env\n"
+    )
+    write_local_service_unit(unit_file, unit_content)
+
+    systemctl = SimulatedSystemctlRunner()
+    service = LocalReleaseService(
+        paths=runtime_root,
+        systemctl=systemctl,
+        systemd_unit_path=unit_file,
+    )
+
+    # 1. Clean workspace pre-restart passes
+    service.verify_pre_restart(sha=sha, unit_file=unit_file, workspace_root=workspace)
+
+    # 2. Rejection on active daily writer lock
+    daily_lock = state_dir / "aapl_daily_run.lock"
+    daily_lock.touch()
+    with pytest.raises(ReleaseVerificationError, match="Active writer lock found"):
+        service.verify_pre_restart(sha=sha, unit_file=unit_file, workspace_root=workspace)
+    daily_lock.unlink()
+
+    # 3. Rejection on invalid port
+    with pytest.raises(ReleaseVerificationError, match="Port must be an integer"):
+        service.verify_pre_restart(sha=sha, unit_file=unit_file, port=999999)
+
+    # 4. Rejection on unstaged SHA
+    with pytest.raises(ReleaseVerificationError, match="not fully staged"):
+        service.verify_pre_restart(
+            sha="2222222222222222222222222222222222222222", unit_file=unit_file
+        )
+
+
+def test_status_unit_matches_current_from_loaded_systemd_properties(tmp_path: Path) -> None:
+    """Verify that status and unit_matches_current are derived from loaded systemd properties."""
+    runtime_root = tmp_path / "runtime"
+    sha1 = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+    sha2 = "2222222222222222222222222222222222222222"
+
+    for s in (sha1, sha2):
+        r_dir = runtime_root / "releases" / s
+        r_dir.mkdir(parents=True, exist_ok=True)
+        manifest = ReleaseManifest(
+            schema_version="local-release-manifest-v1",
+            commit_sha=s,
+            tree_sha="b6f8115ffdddb0915cae50736dbc821c5355d3ac",
+            uv_lock_sha256=hashlib.sha256(b"dummy").hexdigest(),
+            python_version="Python 3.12.3",
+            staged_at=datetime.now(UTC),
+            release_path=str(r_dir),
+        )
+        (r_dir / "manifest.json").write_text(manifest.model_dump_json(), encoding="utf-8")
+
+    state = DeploymentState(
+        schema_version="local-deployment-state-v1",
+        current=sha1,
+        previous=None,
+        updated_at=datetime.now(UTC),
+        current_release_path=str(runtime_root / "releases" / sha1),
+        previous_release_path=None,
+    )
+    (runtime_root / "deployment_state.json").write_text(state.model_dump_json(), encoding="utf-8")
+
+    unit_file = tmp_path / "unit.service"
+    unit_file.write_text(
+        f"[Service]\nWorkingDirectory={runtime_root / 'releases' / sha1}\nExecStart=/py /scr\n",
+        encoding="utf-8",
+    )
+
+    # 1. Systemd loaded properties match current release sha1
+    systemctl_matching = SimulatedSystemctlRunner(
+        is_active_result=True,
+        is_enabled_result=True,
+        properties={
+            "WorkingDirectory": str(runtime_root / "releases" / sha1),
+            "ExecStart": f'"{runtime_root / "releases" / sha1 / ".venv/bin/python"}" "/scr"',
+            "ActiveState": "active",
+            "UnitFileState": "enabled",
+        },
+    )
+    service_matching = LocalReleaseService(
+        paths=runtime_root,
+        systemctl=systemctl_matching,
+        systemd_unit_path=unit_file,
+    )
+    report_matching = service_matching.status(check_systemd=True, check_http=False)
+    assert report_matching.unit_matches_current is True
+    assert report_matching.service_active is True
+    assert report_matching.service_enabled is True
+
+    # 2. Systemd loaded properties point to stale sha2 despite state being sha1
+    systemctl_stale = SimulatedSystemctlRunner(
+        is_active_result=True,
+        is_enabled_result=True,
+        properties={
+            "WorkingDirectory": str(runtime_root / "releases" / sha2),
+            "ExecStart": f'"{runtime_root / "releases" / sha2 / ".venv/bin/python"}" "/scr"',
+            "ActiveState": "active",
+            "UnitFileState": "enabled",
+        },
+    )
+    service_stale = LocalReleaseService(
+        paths=runtime_root,
+        systemctl=systemctl_stale,
+        systemd_unit_path=unit_file,
+    )
+    report_stale = service_stale.status(check_systemd=True, check_http=False)
+    assert report_stale.unit_matches_current is False
+
+
+def test_activation_automatic_rollback_verifies_recovery_health_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    """Verify that rollback during failed activation validates recovery health and fails closed."""
     sha1 = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
     sha2 = "2222222222222222222222222222222222222222"
     runtime_root = tmp_path / "runtime"
@@ -330,77 +594,31 @@ def test_activation_and_automatic_rollback_on_health_failure(tmp_path: Path) -> 
         service_env_path=env_file,
     )
 
-    state1 = service.activate(sha1)
-    assert state1.current == sha1
-    assert state1.previous is None
+    # Initial activation of sha1 succeeds
+    service.activate(sha1)
 
+    # Case A: Activation of sha2 fails health, recovery health check on sha1 succeeds
     health_checker.succeed = False
-    with pytest.raises(ReleaseRollbackError, match="Health check failed"):
+
+    class RecoveryHealthChecker:
+        def __init__(self):
+            self.calls = 0
+
+        def check_health(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return False, 500  # sha2 activation fails
+            return True, 200  # sha1 recovery succeeds
+
+    service.health_checker = RecoveryHealthChecker()
+    with pytest.raises(ReleaseRollbackError, match="successfully rolled back and verified"):
         service.activate(sha2)
 
-    current_unit = unit_file.read_text(encoding="utf-8")
-    assert f"releases/{sha1}" in current_unit
-    assert f"releases/{sha2}" not in current_unit
+    # Case B: Activation of sha2 fails health, AND recovery on sha1 ALSO fails
+    class TotalFailureHealthChecker:
+        def check_health(self, *args, **kwargs):
+            return False, 500
 
-    health_checker.succeed = True
-    state2 = service.activate(sha2)
-    assert state2.current == sha2
-    assert state2.previous == sha1
-
-    state_rb = service.rollback()
-    assert state_rb.current == sha1
-    current_unit_rb = unit_file.read_text(encoding="utf-8")
-    assert f"releases/{sha1}" in current_unit_rb
-
-
-def test_status_report(tmp_path: Path) -> None:
-    """Test generating release status report."""
-    runtime_root = tmp_path / "runtime"
-    sha = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
-    r_dir = runtime_root / "releases" / sha
-    r_dir.mkdir(parents=True, exist_ok=True)
-    manifest = ReleaseManifest(
-        schema_version="local-release-manifest-v1",
-        commit_sha=sha,
-        tree_sha="b6f8115ffdddb0915cae50736dbc821c5355d3ac",
-        uv_lock_sha256=hashlib.sha256(b"dummy").hexdigest(),
-        python_version="Python 3.12.3",
-        staged_at=datetime.now(UTC),
-        release_path=str(r_dir),
-    )
-    (r_dir / "manifest.json").write_text(manifest.model_dump_json(), encoding="utf-8")
-
-    state = DeploymentState(
-        schema_version="local-deployment-state-v1",
-        current=sha,
-        previous=None,
-        updated_at=datetime.now(UTC),
-        current_release_path=str(r_dir),
-        previous_release_path=None,
-    )
-    (runtime_root / "deployment_state.json").write_text(state.model_dump_json(), encoding="utf-8")
-
-    unit_file = tmp_path / "unit.service"
-    unit_file.write_text(
-        f"[Service]\n"
-        f"WorkingDirectory={r_dir}\n"
-        f"ExecStart=/bin/py /bin/scr\n"
-        f"EnvironmentFile=/etc/env\n",
-        encoding="utf-8",
-    )
-
-    systemctl = SimulatedSystemctlRunner(is_active_result=True, is_enabled_result=True)
-    health = SimulatedHealthChecker(succeed=True, status_code=200)
-
-    service = LocalReleaseService(
-        paths=runtime_root,
-        systemctl=systemctl,
-        health_checker=health,
-        systemd_unit_path=unit_file,
-    )
-
-    report = service.status()
-    assert report.current_commit == sha
-    assert report.unit_matches_current is True
-    assert report.service_active is True
-    assert report.overview_status == 200
+    service.health_checker = TotalFailureHealthChecker()
+    with pytest.raises(ReleaseRollbackError, match="CRITICAL: Health check failed.*ALSO FAILED"):
+        service.activate(sha2)

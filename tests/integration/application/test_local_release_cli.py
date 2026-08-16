@@ -42,6 +42,8 @@ def test_cli_full_lifecycle_flow(tmp_path: Path, capsys: pytest.CaptureFixture[s
     config_dir = tmp_path / "config"
     env_file = config_dir / "service.env"
     unit_file = tmp_path / "systemd" / "investment-analyst.service"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
 
     # 1. Setup source env file
     source_env = tmp_path / "source.env"
@@ -57,7 +59,7 @@ def test_cli_full_lifecycle_flow(tmp_path: Path, capsys: pytest.CaptureFixture[s
     unit_config = AaplLocalServiceUnitConfig(
         repository_root=tmp_path / "old_repo",
         environment_file=tmp_path / "old_repo" / ".env",
-        workspace_root=tmp_path / "workspace",
+        workspace_root=workspace,
         port=8765,
         schedule=None,
     )
@@ -132,6 +134,8 @@ def test_cli_full_lifecycle_flow(tmp_path: Path, capsys: pytest.CaptureFixture[s
                 "activate",
                 "--sha",
                 sha1,
+                "--workspace",
+                str(workspace),
                 "--skip-systemd",
                 "--skip-health-check",
             ]
@@ -172,6 +176,8 @@ def test_cli_full_lifecycle_flow(tmp_path: Path, capsys: pytest.CaptureFixture[s
                 "update",
                 "--sha",
                 sha2,
+                "--workspace",
+                str(workspace),
                 "--skip-systemd",
                 "--skip-health-check",
             ]

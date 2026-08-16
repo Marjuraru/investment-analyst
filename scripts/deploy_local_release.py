@@ -78,6 +78,7 @@ def _parser() -> argparse.ArgumentParser:
         "activate", help="Activate a staged release with restart and health verification"
     )
     activate_parser.add_argument("--sha", required=True, help="Full 40-character commit SHA")
+    activate_parser.add_argument("--workspace", type=Path, default=None, help="Workspace root path")
     activate_parser.add_argument("--port", type=int, default=8765, help="HTTP server port")
     activate_parser.add_argument(
         "--skip-systemd", action="store_true", help="Skip systemctl reload and restart"
@@ -91,6 +92,7 @@ def _parser() -> argparse.ArgumentParser:
         "update", help="Stage and activate a release for an exact SHA"
     )
     update_parser.add_argument("--sha", required=True, help="Full 40-character commit SHA")
+    update_parser.add_argument("--workspace", type=Path, default=None, help="Workspace root path")
     update_parser.add_argument("--port", type=int, default=8765, help="HTTP server port")
     update_parser.add_argument(
         "--skip-systemd", action="store_true", help="Skip systemctl reload and restart"
@@ -134,6 +136,7 @@ def _parser() -> argparse.ArgumentParser:
     boot_parser.add_argument(
         "--env-source", type=Path, default=None, help="Path to source .env to adopt"
     )
+    boot_parser.add_argument("--workspace", type=Path, default=None, help="Workspace root path")
     boot_parser.add_argument("--port", type=int, default=8765, help="HTTP server port")
     boot_parser.add_argument(
         "--skip-systemd", action="store_true", help="Skip systemctl reload and restart"
@@ -180,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
                 sha=args.sha,
                 unit_file=args.unit_file,
                 env_file=args.env_file,
+                workspace_root=args.workspace,
                 port=args.port,
                 skip_systemd=args.skip_systemd,
                 skip_health_check=args.skip_health_check,
@@ -194,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
                 sha=args.sha,
                 unit_file=args.unit_file,
                 env_file=args.env_file,
+                workspace_root=args.workspace,
                 port=args.port,
                 skip_systemd=args.skip_systemd,
                 skip_health_check=args.skip_health_check,
@@ -247,6 +252,7 @@ def main(argv: list[str] | None = None) -> int:
                 sha=manifest.commit_sha,
                 unit_file=args.unit_file,
                 env_file=args.env_file,
+                workspace_root=args.workspace,
                 port=args.port,
                 skip_systemd=args.skip_systemd,
                 skip_health_check=args.skip_health_check,

@@ -28,6 +28,7 @@ from investment_analyst.core.models.base import ContractModel, UTCDateTime
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+PYTHON_312_PATTERN = re.compile(r"^Python 3\.12(?:\.\d+)?")
 ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 REQUIRED_ENVIRONMENT_VARS = frozenset({"ALPACA_API_KEY", "ALPACA_API_SECRET", "SEC_USER_AGENT"})
 
@@ -508,18 +509,8 @@ class LocalReleaseService:
                 f"Failed to bootstrap uv=={REQUIRED_UV_VERSION} in runtime: {error}"
             ) from error
 
-    def fetch_origin_main(self, sha: str | None = None) -> tuple[str, str]:
-        """Query origin/main, verify exact SHA equality, and acquire into mirror."""
-        self.init_runtime()
-        if sha is not None:
-            cleaned_sha = sha.strip().lower()
-            if not FULL_SHA.fullmatch(cleaned_sha):
-                raise ReleaseAcquisitionError(
-                    f"Requested SHA '{sha}' must be a full 40-character hexadecimal string"
-                )
-        else:
-            cleaned_sha = None
-
+    def _query_remote_main(self) -> str:
+        """Query origin HTTPS repository for current refs/heads/main commit SHA."""
         try:
             ls_remote = subprocess.run(
                 ["git", "ls-remote", self.repo_url, "refs/heads/main"],
@@ -543,13 +534,30 @@ class LocalReleaseService:
             raise ReleaseAcquisitionError(
                 f"Invalid remote SHA returned from ls-remote: {remote_sha}"
             )
+        return remote_sha
 
-        if cleaned_sha is not None and cleaned_sha != remote_sha:
+    def fetch_origin_main(self, sha: str | None = None) -> tuple[str, str]:
+        """Query origin/main, acquire into mirror, and reject moving ref during acquisition."""
+        self.init_runtime()
+        if sha is not None:
+            cleaned_sha = sha.strip().lower()
+            if not FULL_SHA.fullmatch(cleaned_sha):
+                raise ReleaseAcquisitionError(
+                    f"Requested SHA '{sha}' must be a full 40-character hexadecimal string"
+                )
+        else:
+            cleaned_sha = None
+
+        # 1. Initial remote query
+        initial_remote_sha = self._query_remote_main()
+        if cleaned_sha is not None and cleaned_sha != initial_remote_sha:
             raise ReleaseAcquisitionError(
-                f"Requested SHA '{cleaned_sha}' does not match live origin/main '{remote_sha}'"
+                f"Requested SHA '{cleaned_sha}' does not match live origin/main "
+                f"'{initial_remote_sha}'"
             )
-        target_sha = cleaned_sha if cleaned_sha is not None else remote_sha
+        target_sha = cleaned_sha if cleaned_sha is not None else initial_remote_sha
 
+        # 2. Mirror initialization & fetch
         if not self.paths.mirror.is_dir():
             try:
                 subprocess.run(
@@ -584,6 +592,15 @@ class LocalReleaseService:
                 f"Failed to fetch refs/heads/main into mirror: {error}"
             ) from error
 
+        # 3. Post-acquisition verification: reject moving origin/main
+        post_remote_sha = self._query_remote_main()
+        if post_remote_sha != target_sha:
+            raise ReleaseAcquisitionError(
+                f"Remote origin/main moved during acquisition: requested {target_sha}, "
+                f"now {post_remote_sha}"
+            )
+
+        # 4. Verify commit object & tree in mirror
         try:
             commit_check = subprocess.run(
                 [
@@ -638,31 +655,71 @@ class LocalReleaseService:
         release_target = self.paths.releases / verified_commit
         manifest_file = release_target / "manifest.json"
 
+        # Check existing release for equivalence & immutability
         if release_target.is_dir():
-            if manifest_file.is_file():
-                try:
-                    existing_manifest = ReleaseManifest.model_validate_json(
-                        manifest_file.read_text(encoding="utf-8")
+            if not manifest_file.is_file():
+                raise ReleaseAcquisitionError(
+                    f"Preexisting release directory {release_target} is missing manifest.json"
+                )
+            try:
+                existing_manifest = ReleaseManifest.model_validate_json(
+                    manifest_file.read_text(encoding="utf-8")
+                )
+                python_bin = release_target / ".venv" / "bin" / "python"
+                uv_lock_file = release_target / "uv.lock"
+                pyproject_file = release_target / "pyproject.toml"
+                serve_script = release_target / "scripts" / "serve_investment_analyst.py"
+
+                if (
+                    not python_bin.is_file()
+                    or not uv_lock_file.is_file()
+                    or not pyproject_file.is_file()
+                    or not serve_script.is_file()
+                ):
+                    raise ReleaseAcquisitionError(
+                        f"Preexisting release {release_target} is missing required runtime files"
                     )
-                    python_bin = release_target / ".venv" / "bin" / "python"
-                    if (
-                        existing_manifest.commit_sha == verified_commit
-                        and existing_manifest.tree_sha == verified_tree
-                        and python_bin.is_file()
-                    ):
-                        return existing_manifest
+
+                on_disk_lock_hash = hashlib.sha256(uv_lock_file.read_bytes()).hexdigest().lower()
+                if (
+                    existing_manifest.commit_sha != verified_commit
+                    or existing_manifest.tree_sha != verified_tree
+                    or existing_manifest.uv_lock_sha256 != on_disk_lock_hash
+                    or existing_manifest.uv_version != REQUIRED_UV_VERSION
+                    or not PYTHON_312_PATTERN.match(existing_manifest.python_version)
+                ):
                     raise ReleaseAcquisitionError(
                         f"Preexisting release at {release_target} is not "
                         f"equivalent to {verified_commit}"
                     )
-                except Exception as error:
+
+                # Verify python execution & package import
+                py_check = subprocess.run(
+                    [str(python_bin), "--version"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if not PYTHON_312_PATTERN.match(py_check.stdout.strip()):
                     raise ReleaseAcquisitionError(
-                        f"Preexisting release at {release_target} has corrupt "
-                        f"manifest or state: {error}"
-                    ) from error
-            raise ReleaseAcquisitionError(
-                f"Preexisting release directory {release_target} is missing manifest.json"
-            )
+                        f"Preexisting release python is not Python 3.12: {py_check.stdout.strip()}"
+                    )
+                subprocess.run(
+                    [str(python_bin), "-c", "import investment_analyst"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                return existing_manifest
+            except Exception as error:
+                if isinstance(error, ReleaseAcquisitionError):
+                    raise
+                raise ReleaseAcquisitionError(
+                    f"Preexisting release at {release_target} has corrupt "
+                    f"manifest or state: {error}"
+                ) from error
 
         staging_dir = self.paths.releases / f".staging-{verified_commit}-{uuid4().hex}"
         staging_dir.mkdir(parents=True, exist_ok=False)
@@ -733,6 +790,10 @@ class LocalReleaseService:
                 timeout=15,
             )
             python_version = py_version_check.stdout.strip()
+            if not PYTHON_312_PATTERN.match(python_version):
+                raise ReleaseEnvironmentError(
+                    f"Release virtual environment must use Python 3.12, found: '{python_version}'"
+                )
 
             subprocess.run(
                 [str(staged_python), "-c", "import investment_analyst"],
@@ -906,15 +967,81 @@ class LocalReleaseService:
         write_local_service_unit(target_unit, updated_document)
         return updated_document
 
-    def verify_pre_restart(self, workspace_root: Path | None = None) -> None:
-        """Verify no active scheduler or daily run writer locks are present."""
+    def verify_pre_restart(
+        self,
+        sha: str,
+        unit_file: Path,
+        workspace_root: Path | None = None,
+        port: int = 8765,
+        skip_systemd: bool = False,
+    ) -> None:
+        """Verify staged release, valid unit, port, workspace, and absence of active writer."""
+        cleaned_sha = sha.strip().lower()
+        if not FULL_SHA.fullmatch(cleaned_sha):
+            raise ReleaseVerificationError(f"Invalid release SHA: '{sha}'")
+
+        # 1. Verify staged release files
+        release_target = self.paths.releases / cleaned_sha
+        manifest_file = release_target / "manifest.json"
+        python_bin = release_target / ".venv" / "bin" / "python"
+        serve_script = release_target / "scripts" / "serve_investment_analyst.py"
+        if (
+            not release_target.is_dir()
+            or not manifest_file.is_file()
+            or not python_bin.is_file()
+            or not serve_script.is_file()
+        ):
+            raise ReleaseVerificationError(
+                f"Release {cleaned_sha} is not fully staged at {release_target}"
+            )
+
+        # 2. Verify unit file
+        if not unit_file.is_file():
+            raise ReleaseVerificationError(f"Unit file not found at: {unit_file}")
+        try:
+            unit_content = unit_file.read_text(encoding="utf-8")
+        except OSError as error:
+            raise ReleaseVerificationError(
+                f"Could not read unit file {unit_file}: {error}"
+            ) from error
+
+        if "[Service]" not in unit_content or "ExecStart=" not in unit_content:
+            raise ReleaseVerificationError("Unit file is missing [Service] or ExecStart")
+
+        # 3. Verify port range
+        if not isinstance(port, int) or port < 1 or port > 65535:
+            raise ReleaseVerificationError(
+                f"Port must be an integer between 1 and 65535, got {port}"
+            )
+
+        # 4. Verify workspace and writer locks
+        resolved_ws: Path | None = None
         if workspace_root is not None:
             resolved_ws = workspace_root.expanduser().resolve(strict=False)
+        else:
+            # Extract --workspace from ExecStart in unit_file
+            ws_match = re.search(r'--workspace(?:\s+"([^"]+)"|\s+([^\s]+))', unit_content)
+            if ws_match:
+                extracted = ws_match.group(1) or ws_match.group(2)
+                resolved_ws = Path(extracted).expanduser().resolve(strict=False)
+
+        if resolved_ws is not None:
+            if not resolved_ws.is_dir():
+                raise ReleaseVerificationError(f"Workspace directory not found: {resolved_ws}")
             daily_lock = resolved_ws / "state" / "aapl_daily_run.lock"
             if daily_lock.is_file():
                 raise ReleaseVerificationError(
                     f"Active writer lock found in workspace: {daily_lock}"
                 )
+
+        # 5. Verify systemctl if not skipped
+        if not skip_systemd:
+            try:
+                self.systemctl.show_properties(LOCAL_SERVICE_UNIT_NAME, ("Id",))
+            except Exception as error:
+                raise ReleaseVerificationError(
+                    f"Current systemd service verification failed: {error}"
+                ) from error
 
     def load_deployment_state(self) -> DeploymentState:
         """Load persistent deployment state or return default empty state."""
@@ -950,30 +1077,41 @@ class LocalReleaseService:
         sha: str,
         unit_file: Path | None = None,
         env_file: Path | None = None,
+        workspace_root: Path | None = None,
         port: int = 8765,
         skip_systemd: bool = False,
         skip_health_check: bool = False,
         endpoints: Sequence[str] | None = None,
     ) -> DeploymentState:
-        """Activate release with verification, health check, and automatic rollback on failure."""
+        """Activate release with pre-restart verification, health check, and verified rollback."""
         cleaned_sha = sha.strip().lower()
         if not FULL_SHA.fullmatch(cleaned_sha):
             raise ReleaseAcquisitionError(f"Invalid activation SHA: '{sha}'")
 
         release_target = self.paths.releases / cleaned_sha
-        manifest_file = release_target / "manifest.json"
-        if not manifest_file.is_file():
-            raise ReleaseAcquisitionError(
-                f"Release {cleaned_sha} is not staged at {release_target}"
-            )
-
-        current_state = self.load_deployment_state()
         target_unit = (
             unit_file.expanduser().resolve(strict=False)
             if unit_file is not None
             else self.systemd_unit_path
         )
+        target_env = (
+            env_file.expanduser().resolve(strict=False)
+            if env_file is not None
+            else self.service_env_path
+        )
 
+        # 1. Pre-restart verification (fails closed)
+        self.verify_pre_restart(
+            sha=cleaned_sha,
+            unit_file=target_unit,
+            workspace_root=workspace_root,
+            port=port,
+            skip_systemd=skip_systemd,
+        )
+
+        current_state = self.load_deployment_state()
+
+        # Idempotence check
         if current_state.current == cleaned_sha and target_unit.is_file():
             unit_text = target_unit.read_text(encoding="utf-8")
             if f"releases/{cleaned_sha}" in unit_text:
@@ -990,27 +1128,45 @@ class LocalReleaseService:
         if target_unit.is_file():
             previous_unit_text = target_unit.read_text(encoding="utf-8")
 
-        self.retarget_unit(cleaned_sha, unit_file=target_unit, env_file=env_file)
+        # 2. Retarget unit
+        self.retarget_unit(cleaned_sha, unit_file=target_unit, env_file=target_env)
 
+        # 3. Systemd restart and health check
         if not skip_systemd:
+            health_endpoints = endpoints or (
+                "/api/v1/overview",
+                "/api/v1/candidate-notifications",
+            )
             try:
                 self.systemctl.daemon_reload()
                 self.systemctl.restart(LOCAL_SERVICE_UNIT_NAME)
             except Exception as error:
+                # Automatic recovery rollback
                 if previous_unit_text is not None:
                     write_local_service_unit(target_unit, previous_unit_text)
                     with contextlib.suppress(Exception):
                         self.systemctl.daemon_reload()
                         self.systemctl.restart(LOCAL_SERVICE_UNIT_NAME)
+                    prev_ok, prev_st = self.health_checker.check_health(
+                        port=port, endpoints=health_endpoints
+                    )
+                    if prev_ok:
+                        raise ReleaseRollbackError(
+                            f"Systemd restart failed for {cleaned_sha}: {error}; "
+                            f"successfully rolled back and verified previous release "
+                            f"{current_state.previous} (health status {prev_st})"
+                        ) from error
+                    raise ReleaseRollbackError(
+                        f"CRITICAL: Systemd restart failed for {cleaned_sha}: {error} "
+                        f"and recovery rollback to {current_state.previous} ALSO FAILED "
+                        f"health verification (status {prev_st})"
+                    ) from error
                 raise ReleaseRollbackError(
-                    f"Systemd restart failed during activation of {cleaned_sha}: {error}"
+                    f"Systemd restart failed for {cleaned_sha}: {error}; "
+                    "no previous unit to restore"
                 ) from error
 
             if not skip_health_check:
-                health_endpoints = endpoints or (
-                    "/api/v1/overview",
-                    "/api/v1/candidate-notifications",
-                )
                 health_ok, status_code = self.health_checker.check_health(
                     port=port, endpoints=health_endpoints
                 )
@@ -1020,9 +1176,24 @@ class LocalReleaseService:
                         with contextlib.suppress(Exception):
                             self.systemctl.daemon_reload()
                             self.systemctl.restart(LOCAL_SERVICE_UNIT_NAME)
+                        prev_ok, prev_st = self.health_checker.check_health(
+                            port=port, endpoints=health_endpoints
+                        )
+                        if prev_ok:
+                            raise ReleaseRollbackError(
+                                f"Health check failed for {cleaned_sha} with status {status_code}; "
+                                f"successfully rolled back and verified previous release "
+                                f"{current_state.previous} (health status {prev_st})"
+                            )
+                        raise ReleaseRollbackError(
+                            f"CRITICAL: Health check failed for {cleaned_sha} "
+                            f"with status {status_code} and recovery rollback to "
+                            f"{current_state.previous} ALSO FAILED health verification "
+                            f"(status {prev_st})"
+                        )
                     raise ReleaseRollbackError(
-                        f"Health check failed for {cleaned_sha} with "
-                        f"status {status_code}; rolled back unit"
+                        f"Health check failed for {cleaned_sha} with status {status_code}; "
+                        "no previous unit to restore"
                     )
 
         new_state = DeploymentState(
@@ -1041,6 +1212,7 @@ class LocalReleaseService:
         sha: str,
         unit_file: Path | None = None,
         env_file: Path | None = None,
+        workspace_root: Path | None = None,
         port: int = 8765,
         skip_systemd: bool = False,
         skip_health_check: bool = False,
@@ -1052,6 +1224,7 @@ class LocalReleaseService:
             sha=sha,
             unit_file=unit_file,
             env_file=env_file,
+            workspace_root=workspace_root,
             port=port,
             skip_systemd=skip_systemd,
             skip_health_check=skip_health_check,
@@ -1066,7 +1239,7 @@ class LocalReleaseService:
         skip_systemd: bool = False,
         skip_health_check: bool = False,
     ) -> DeploymentState:
-        """Rollback to the verified previous deployment."""
+        """Rollback to the verified previous deployment with health check."""
         current_state = self.load_deployment_state()
         if current_state.previous is None:
             raise ReleaseRollbackError("No previous deployment recorded for rollback")
@@ -1133,7 +1306,7 @@ class LocalReleaseService:
         check_systemd: bool = True,
         check_http: bool = True,
     ) -> ReleaseStatusReport:
-        """Inspect and report the status of the local release runtime and unit."""
+        """Inspect and report the status of the local release runtime and unit from systemd."""
         state = self.load_deployment_state()
         target_unit = (
             unit_file.expanduser().resolve(strict=False)
@@ -1144,6 +1317,8 @@ class LocalReleaseService:
         working_dir: str | None = None
         exec_start: str | None = None
         env_file: str | None = None
+        service_active: bool | None = None
+        service_enabled: bool | None = None
         unit_matches_current = False
 
         if target_unit.is_file():
@@ -1156,12 +1331,49 @@ class LocalReleaseService:
                         exec_start = stripped.split("=", 1)[1].strip()
                     elif stripped.startswith("EnvironmentFile="):
                         env_file = stripped.split("=", 1)[1].strip()
-                if (
-                    state.current is not None
-                    and working_dir is not None
-                    and f"releases/{state.current}" in working_dir
-                ):
-                    unit_matches_current = True
+
+        # Query loaded properties from systemd if enabled
+        if check_systemd:
+            with contextlib.suppress(Exception):
+                props = self.systemctl.show_properties(
+                    LOCAL_SERVICE_UNIT_NAME,
+                    (
+                        "WorkingDirectory",
+                        "ExecStart",
+                        "EnvironmentFile",
+                        "ActiveState",
+                        "UnitFileState",
+                    ),
+                )
+                loaded_wd = props.get("WorkingDirectory")
+                loaded_exec = props.get("ExecStart")
+                loaded_env = props.get("EnvironmentFile")
+                active_state = props.get("ActiveState")
+                unit_file_state = props.get("UnitFileState")
+
+                if loaded_wd:
+                    working_dir = loaded_wd
+                if loaded_exec:
+                    exec_start = loaded_exec
+                if loaded_env:
+                    env_file = loaded_env
+                if active_state:
+                    service_active = active_state == "active"
+                if unit_file_state:
+                    service_enabled = unit_file_state == "enabled"
+
+            if service_active is None:
+                service_active = self.systemctl.is_active(LOCAL_SERVICE_UNIT_NAME)
+            if service_enabled is None:
+                service_enabled = self.systemctl.is_enabled(LOCAL_SERVICE_UNIT_NAME)
+
+        if (
+            state.current is not None
+            and working_dir is not None
+            and f"releases/{state.current}" in working_dir
+            and (exec_start is None or f"releases/{state.current}" in exec_start)
+        ):
+            unit_matches_current = True
 
         manifest: ReleaseManifest | None = None
         if state.current is not None:
@@ -1171,12 +1383,6 @@ class LocalReleaseService:
                     manifest = ReleaseManifest.model_validate_json(
                         manifest_path.read_text(encoding="utf-8")
                     )
-
-        service_active: bool | None = None
-        service_enabled: bool | None = None
-        if check_systemd:
-            service_active = self.systemctl.is_active(LOCAL_SERVICE_UNIT_NAME)
-            service_enabled = self.systemctl.is_enabled(LOCAL_SERVICE_UNIT_NAME)
 
         overview_status: int | None = None
         if check_http:
