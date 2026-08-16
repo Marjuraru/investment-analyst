@@ -28,6 +28,12 @@ from investment_analyst.alerts.analytical_rule_registry import (
     AnalyticalRuleRegistryStore,
 )
 from investment_analyst.alerts.analytical_state import AnalyticalScreeningStateStore
+from investment_analyst.alerts.candidate_notifications import (
+    CandidateNotification,
+    CandidateNotificationPayload,
+    CandidateNotificationStore,
+    notification_id,
+)
 from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagnosticReport
 from investment_analyst.analytics.consolidated_diagnostic_models import (
     ConsolidatedDiagnosticRequest,
@@ -1244,6 +1250,9 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "overflow-x: auto" in stylesheet
     assert 'api("/api/candidates?limit=50")' in javascript
     assert 'api("/api/candidates/transition"' in javascript
+    assert 'id="candidate-notification-panel"' in html
+    assert 'api("/api/v1/candidate-notifications")' in javascript
+    assert 'api("/api/v1/candidate-notifications/acknowledge"' in javascript
     assert 'id="screening-rules-panel"' in html
     assert 'api("/api/screening-rules")' in javascript
     assert 'api("/api/screening-rules/update"' in javascript
@@ -2170,6 +2179,95 @@ def test_local_api_exposes_empty_persistent_alert_inbox(tmp_path: Path) -> None:
     assert invalid_candidate["error"]["code"] == "invalid_request"
     assert missing_candidate_status == 400
     assert missing_candidate["error"]["code"] == "invalid_request"
+
+
+def test_local_api_lists_and_acknowledges_candidate_notifications(tmp_path: Path) -> None:
+    controller = AaplLocalController(
+        _FakeRunner(),
+        _FakeApplication(),
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    store = CandidateNotificationStore(tmp_path / "state" / "notifications.json")
+    candidate_id = UUID("00000000-0000-4000-8000-000000000001")
+    item = CandidateNotification(
+        notification_id=notification_id(candidate_id),
+        candidate_id=candidate_id,
+        activation_result_id=UUID("00000000-0000-4000-8000-000000000002"),
+        asset_id="crypto:btc-usd",
+        rule_id="market.test",
+        as_of=datetime(2026, 1, 1, tzinfo=UTC),
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+        payload=CandidateNotificationPayload(
+            rule_name_es="Regla de prueba",
+            explanation_es="Evidencia compacta de prueba.",
+            conditions=(
+                {
+                    "condition_id": "market.test",
+                    "state": "met",
+                    "metric_key": "market.test",
+                    "unit": "ratio",
+                    "explanation_es": "Condición satisfecha.",
+                },
+            ),
+        ),
+    )
+    store.enqueue(item)
+
+    with _server(AaplLocalWebApplication(controller, None, notification_store=store)) as (_, root):
+        overview_status, overview, _ = _json_request(Request(f"{root}/api/overview"))
+        listed_status, listed, _ = _json_request(Request(f"{root}/api/v1/candidate-notifications"))
+        acknowledged_status, acknowledged, _ = _json_request(
+            Request(
+                f"{root}/api/v1/candidate-notifications/acknowledge",
+                data=json.dumps({"notification_id": str(item.notification_id)}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        repeated_status, repeated, _ = _json_request(
+            Request(
+                f"{root}/api/v1/candidate-notifications/acknowledge",
+                data=json.dumps({"notification_id": str(item.notification_id)}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        reloaded_status, reloaded, _ = _json_request(
+            Request(f"{root}/api/v1/candidate-notifications")
+        )
+        invalid_status, invalid, _ = _json_request(
+            Request(f"{root}/api/v1/candidate-notifications?limit=1")
+        )
+        unknown_status, unknown, _ = _json_request(
+            Request(
+                f"{root}/api/v1/candidate-notifications/acknowledge",
+                data=json.dumps(
+                    {"notification_id": "00000000-0000-4000-8000-000000000099"}
+                ).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert overview_status == 200
+    assert overview["notifications"] == {"enabled": True, "total": 1, "pending_count": 1}
+    assert listed_status == 200
+    assert listed["schema_version"] == "candidate-notification-inbox-v1"
+    assert listed["pending_count"] == 1
+    assert listed["items"] == [{"item": item.model_dump(mode="json"), "status": "pending"}]
+    assert acknowledged_status == 200
+    assert acknowledged["changed"] is True
+    assert repeated_status == 200
+    assert repeated["changed"] is False
+    assert reloaded_status == 200
+    assert reloaded["pending_count"] == 0
+    assert reloaded["items"][0]["status"] == "acknowledged"
+    assert invalid_status == 400
+    assert invalid["error"]["code"] == "invalid_request"
+    assert unknown_status == 400
+    assert unknown["error"]["code"] == "invalid_request"
 
 
 def test_local_api_versions_rule_updates_and_rejects_stale_edits(tmp_path: Path) -> None:

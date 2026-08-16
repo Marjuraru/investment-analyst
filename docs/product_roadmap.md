@@ -114,8 +114,8 @@ pero no describen por sí solos el estado operativo actual.
 - BVL mercado: lector tipado del boletín diario, todavía sin autorización resuelta para
   persistencia automática, histórico o interfaz;
 - fundamentales BVL: requieren el futuro adaptador SMV y no reutilizan el perfil SEC del ADR;
-- screening automático y bandejas locales implementados; catálogo ampliado y notificaciones
-  externas pendientes.
+- screening automático, bandejas locales y outbox con acuse local implementados; catálogo ampliado
+  y notificaciones externas pendientes.
 
 ### Diseñado, no implementado
 
@@ -276,11 +276,9 @@ Bandas de Bollinger y MKT-3: comparación diaria multi-activo PIT con normalizac
 retorno, volatilidad, drawdown, correlación y beta v1 sobre una muestra común. Pendientes:
 
 RSI Wilder, MACD y ATR PIT ya están disponibles como métricas descriptivas y alimentan únicamente
-candidatos técnicos SILENT. La outbox durable y cualquier canal de entrega permanecen pendientes.
+candidatos técnicos SILENT. La outbox local durable registra cada candidato `new` y su acuse sin
+entrega externa; los canales de navegador, sistema o red permanecen pendientes.
 
-- RSI;
-- MACD;
-- ATR y volatilidad histórica;
 - indicadores de volumen solo cuando la cobertura lo permita;
 - benchmarks por mercado y sector;
 - acciones corporativas y eventos en la gráfica;

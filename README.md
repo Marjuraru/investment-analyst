@@ -120,7 +120,9 @@ propia. No se añadirán nuevas rutas o modelos específicos de Apple.
   histéresis, cooldown, deduplicación y transiciones auditadas, incluso tras reiniciar. Un registro
   local adicional versiona cambios de estado, umbrales, histéresis, confirmaciones y cooldown con
   locking optimista; la interfaz permite restaurar valores iniciales sin borrar el historial y
-  ejecutar un replay point-in-time de solo lectura por regla y activo;
+  ejecutar un replay point-in-time de solo lectura por regla y activo. Cada candidato `new` crea
+  además una recepción local durable, deduplicada por candidato y confirmable de forma independiente
+  desde la interfaz; no entrega datos a navegador, sistema ni servicios externos;
 - interfaz web local compacta para ejecutar el flujo, consultar el reporte, revisar la evidencia y
   seleccionar desde un catálogo central Apple, Bitcoin y una lista inicial de acciones y ETF
   estadounidenses disponible mediante Alpaca IEX gratuito. Incluye AMD, Barrick (`B`), BVN, CDE,
@@ -151,7 +153,7 @@ El MVP actual entrega alertas operativas persistentes y una primera bandeja anal
 silencioso. Las plantillas iniciales cubren actividad relativa de mercado y una condición conjunta
 trimestral de balance, margen y crecimiento; ya pueden versionarse desde la interfaz y validarse
 mediante replay histórico de frecuencia, cobertura y ruido. Todavía faltan reglas adicionales,
-observación silenciosa durante varios ciclos y canales de notificación. Tampoco existen
+observación silenciosa durante varios ciclos y canales de notificación externos. Tampoco existen
 autenticación o exposición remota, inicio automático desde Windows Task Scheduler, ejecución de
 órdenes ni recomendaciones de
 inversión. La programación continua actualiza la watchlist visible mediante los conectores ya

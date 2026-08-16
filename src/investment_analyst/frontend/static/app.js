@@ -3995,6 +3995,7 @@ function applyOverview(payload) {
   const scheduler = payload.scheduler;
   const alerts = payload.alerts || { enabled: false };
   const candidates = payload.candidates || { enabled: false };
+  const notifications = payload.notifications || { enabled: false };
 
   badge(
     byId("health-badge"),
@@ -4082,6 +4083,14 @@ function applyOverview(payload) {
     byId("candidate-status").textContent = "Desactivados";
     byId("candidate-latest").textContent = "Monitor no configurado";
     byId("candidate-inbox-summary").textContent = "Monitor no configurado";
+  }
+
+  if (notifications.enabled) {
+    byId("candidate-notification-summary").textContent = notifications.pending_count > 0
+      ? `${formatInteger(notifications.pending_count)} pendientes de ${formatInteger(notifications.total)}`
+      : `${formatInteger(notifications.total)} entregadas localmente`;
+  } else {
+    byId("candidate-notification-summary").textContent = "Outbox local no configurado";
   }
 
   if (latest?.effective_known_at) byId("report-known-at").value = latest.effective_known_at;
@@ -4589,6 +4598,70 @@ async function loadCandidateInbox() {
   } catch (error) {
     inbox.replaceChildren(
       createElement("p", "", `No se pudo consultar la bandeja: ${error.message}`),
+    );
+  } finally {
+    inbox.setAttribute("aria-busy", "false");
+  }
+}
+
+function renderCandidateNotifications(payload) {
+  const inbox = byId("candidate-notifications");
+  inbox.replaceChildren();
+  if (!Array.isArray(payload.items) || payload.items.length === 0) {
+    inbox.append(createElement("p", "", "No hay notificaciones locales pendientes."));
+    return;
+  }
+  for (const view of payload.items) {
+    const notification = view.item;
+    const item = createElement("article", "alert-inbox-item candidate-inbox-item");
+    item.append(
+      createElement("strong", "", `${notification.rule_id} · ${notification.asset_id}`),
+      createElement("p", "", `Candidato local ${notification.candidate_id}`),
+      createElement("time", "", formatInstant(notification.created_at)),
+    );
+    item.append(
+      createElement(
+        "span",
+        `alert-inbox-status ${view.status}`,
+        view.status === "acknowledged" ? "Entrega confirmada" : "Pendiente",
+      ),
+    );
+    if (view.status === "acknowledged") {
+      inbox.append(item);
+      continue;
+    }
+    const button = createElement("button", "alert-action-button", "Confirmar entrega");
+    button.type = "button";
+    button.addEventListener("click", () => acknowledgeCandidateNotification(notification.notification_id, button));
+    const actions = createElement("div", "alert-inbox-actions");
+    actions.append(button);
+    item.append(actions);
+    inbox.append(item);
+  }
+}
+
+async function acknowledgeCandidateNotification(notificationId, button) {
+  button.disabled = true;
+  try {
+    await api("/api/v1/candidate-notifications/acknowledge", {
+      method: "POST",
+      body: JSON.stringify({ notification_id: notificationId }),
+    });
+    await Promise.all([loadCandidateNotifications(), refreshOverview()]);
+  } catch (error) {
+    setMessage(`No se pudo confirmar la notificación: ${error.message}`, true);
+    button.disabled = false;
+  }
+}
+
+async function loadCandidateNotifications() {
+  const inbox = byId("candidate-notifications");
+  inbox.setAttribute("aria-busy", "true");
+  try {
+    renderCandidateNotifications(await api("/api/v1/candidate-notifications"));
+  } catch (error) {
+    inbox.replaceChildren(
+      createElement("p", "", `No se pudieron consultar las notificaciones: ${error.message}`),
     );
   } finally {
     inbox.setAttribute("aria-busy", "false");
@@ -5123,6 +5196,10 @@ byId("alert-inbox-panel").addEventListener("toggle", (event) => {
 
 byId("candidate-inbox-panel").addEventListener("toggle", (event) => {
   if (event.currentTarget.open) void loadCandidateInbox();
+});
+
+byId("candidate-notification-panel").addEventListener("toggle", (event) => {
+  if (event.currentTarget.open) void loadCandidateNotifications();
 });
 
 byId("screening-rules-panel").addEventListener("toggle", (event) => {
