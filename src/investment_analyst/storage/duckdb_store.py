@@ -33,7 +33,7 @@ class DuckDBStore:
         return self._connection
 
     def open(self) -> "DuckDBStore":
-        """Open the database in read-write or genuine DuckDB read-only mode."""
+        """Open storage with a semantic read-only transaction when requested."""
         if self._connection is not None:
             return self
         if self.read_only:
@@ -41,12 +41,13 @@ class DuckDBStore:
                 raise StorageError("read-only DuckDB database does not exist")
         else:
             self.paths.create_directories()
-        self._connection = duckdb.connect(
-            str(self.paths.database_path),
-            read_only=self.read_only,
-        )
+        # DuckDB requires every connection to one database in a process to use the same
+        # physical configuration. Keep the existing writer configuration and enforce the
+        # read-only capability through a transaction before any reader query or validation.
+        self._connection = duckdb.connect(str(self.paths.database_path), read_only=False)
         try:
             if self.read_only:
+                self.connection.execute("BEGIN TRANSACTION READ ONLY")
                 self._validate_schema()
             else:
                 self._initialize_schema()

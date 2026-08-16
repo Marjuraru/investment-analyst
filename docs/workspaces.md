@@ -61,10 +61,14 @@ Read-write mode preserves the existing behavior: directories may be created and 
 schema may be initialized. Only one process should act as the writer. DuckDB does not provide a
 multi-process writer guarantee for this application, and no custom lock file is introduced.
 
-Read-only mode opens DuckDB with its supported `read_only=True` connection option. It does not create
-the database, tables, migrations, directories, raw files, or Parquet exports. Multiple readers are
-supported when DuckDB and the host filesystem permit them. Lock and access failures are wrapped in
-application-level workspace errors while preserving their original causes.
+Read-only mode first verifies that the database already exists, then opens DuckDB with the physical
+configuration compatible with the process-local writer and begins an explicit `READ ONLY`
+transaction before schema validation or queries. It does not create the database, tables,
+migrations, directories, raw files, or Parquet exports, and SQL mutation is rejected by that
+transaction. This allows a reader to retain its committed snapshot while one writer in the same
+process is active; it neither broadens the single-writer rule nor guarantees compatible access to
+writers in other processes. Lock and access failures are wrapped in application-level workspace
+errors while preserving their original causes.
 
 ## Initialize and inspect
 
