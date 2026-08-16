@@ -556,6 +556,85 @@ En WSL, la unidad depende de que `systemd` y el administrador de usuario estén 
 reinicio completo de Windows puede ser necesario iniciar la distribución WSL para que su entorno
 de usuario vuelva a ejecutarse. Esta versión no crea una tarea en Windows Task Scheduler.
 
+## Despliegue desacoplado por releases independientes
+
+Para operar el servicio permanente de forma desacoplada de cualquier checkout de desarrollo,
+el gestor de releases (`scripts/deploy_local_release.py`) materializa releases inmutables del SHA
+integrado vivo de `origin/main` en una ubicación independiente del sistema:
+
+- Raíz de runtime: `~/.local/share/investment-analyst/runtime/`
+- Mirror/cache Git bare: `~/.local/share/investment-analyst/runtime/mirror.git`
+- Releases inmutables: `~/.local/share/investment-analyst/runtime/releases/<full-sha>/`
+- Manifest determinista: `~/.local/share/investment-analyst/runtime/releases/<full-sha>/manifest.json`
+- Estado de despliegues: `~/.local/share/investment-analyst/runtime/deployment_state.json`
+- Configuración privada: `~/.config/investment-analyst/service.env` (permisos 0600)
+
+Cada release contiene un entorno virtual no editable construido estrictamente desde `uv.lock` con
+Python 3.12 y `uv==0.11.29`, sin dependencias de desarrollo y sin referencias a ningún worktree ni
+`.venv` local.
+
+### Comandos de operación del release runtime
+
+Bootstrap inicial (adopta credenciales, materializa release, retargetea unidad y activa):
+
+```bash
+python3 scripts/deploy_local_release.py bootstrap \
+  --sha <full-sha-integrado> \
+  --env-source ~/projects/investment-analyst/.env
+```
+
+Consulta de estado operativo e inspección del SHA desplegado:
+
+```bash
+python3 scripts/deploy_local_release.py status
+# O en formato JSON estructurado:
+python3 scripts/deploy_local_release.py status --json
+```
+
+Actualización a un nuevo SHA integrado de `main` (descarga, construye venv, retargetea, reinicia y verifica health):
+
+```bash
+python3 scripts/deploy_local_release.py update --sha <nuevo-full-sha>
+```
+
+Rollback al despliegue anterior verificado (restaura unidad anterior, reinicia y verifica health):
+
+```bash
+python3 scripts/deploy_local_release.py rollback
+```
+
+Comandos paso a paso equivalentes:
+
+```bash
+# 1. Adoptar configuración privada
+python3 scripts/deploy_local_release.py adopt-env --source ~/.env
+
+# 2. Materializar y verificar release inmutable
+python3 scripts/deploy_local_release.py stage --sha <full-sha>
+
+# 3. Retargetear la unidad systemd
+python3 scripts/deploy_local_release.py retarget-unit --sha <full-sha>
+
+# 4. Activar release con reinicio y comprobación de salud
+python3 scripts/deploy_local_release.py activate --sha <full-sha>
+```
+
+### Inspección del SHA activo en systemd
+
+Para confirmar que el servicio activo ejecuta exclusivamente la release desacoplada y no el checkout:
+
+```bash
+systemctl --user show investment-analyst.service -p WorkingDirectory -p ExecStart -p EnvironmentFile
+```
+
+La salida esperada muestra el SHA completo en las rutas:
+
+```text
+WorkingDirectory=/home/marjuraru/.local/share/investment-analyst/runtime/releases/<full-sha>
+EnvironmentFile=/home/marjuraru/.config/investment-analyst/service.env
+ExecStart={ path=/home/marjuraru/.local/share/investment-analyst/runtime/releases/<full-sha>/.venv/bin/python ; argv[]=/home/marjuraru/.local/share/investment-analyst/runtime/releases/<full-sha>/.venv/bin/python ... }
+```
+
 ## Archivos operativos
 
 Todos permanecen dentro del workspace seleccionado:
