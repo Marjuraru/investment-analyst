@@ -384,15 +384,8 @@ class RealHealthChecker:
 class SimulatedHealthChecker:
     """Simulated health checker for unit and integration testing.
 
-    Supports optional ``responses`` and ``readiness_responses`` sequences for
-    deterministic tests.
-
-    ``responses`` is consumed by ``check_health`` one entry per call; when
-    exhausted the last entry is reused.
-
-    ``readiness_responses`` is consumed by ``check_health_readiness`` one entry
-    per call.  When exhausted or absent, ``check_health_readiness`` delegates to
-    a single ``check_health`` call for backward compatibility.
+    Supports probe-level sequences or callables via ``responses``, and
+    deterministic time advance via injected ``clock`` and ``sleeper``.
     """
 
     def __init__(
@@ -400,22 +393,20 @@ class SimulatedHealthChecker:
         succeed: bool = True,
         status_code: int = 200,
         fail_endpoints: Sequence[str] = (),
-        responses: Sequence[tuple[bool, int | None]] | None = None,
-        readiness_responses: Sequence[tuple[bool, int | None]] | None = None,
+        responses: Sequence[tuple[bool, int | None]]
+        | Callable[[], tuple[bool, int | None]]
+        | None = None,
+        clock: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> None:
         self.succeed = succeed
         self.status_code = status_code
         self.fail_endpoints = set(fail_endpoints)
-        self._responses: list[tuple[bool, int | None]] | None = (
-            list(responses) if responses is not None else None
-        )
+        self._responses = list(responses) if isinstance(responses, Sequence) else responses
         self._response_index: int = 0
-        self._readiness_responses: list[tuple[bool, int | None]] | None = (
-            list(readiness_responses) if readiness_responses is not None else None
-        )
-        self._readiness_index: int = 0
         self.call_count: int = 0
-        self.readiness_call_count: int = 0
+        self._clock = clock if clock is not None else time.monotonic
+        self._sleeper = sleeper if sleeper is not None else time.sleep
 
     def check_health(
         self,
@@ -424,7 +415,9 @@ class SimulatedHealthChecker:
         timeout_seconds: float = 5.0,
     ) -> tuple[bool, int | None]:
         self.call_count += 1
-        if self._responses is not None:
+        if callable(self._responses):
+            return self._responses()
+        if self._responses is not None and isinstance(self._responses, list):
             idx = min(self._response_index, len(self._responses) - 1)
             self._response_index += 1
             return self._responses[idx]
@@ -441,13 +434,22 @@ class SimulatedHealthChecker:
         interval_seconds: float = 0.25,
         timeout_seconds: float = 5.0,
     ) -> tuple[bool, int | None]:
-        """Simulated readiness polling returning pre-determined results."""
-        self.readiness_call_count += 1
-        if self._readiness_responses is not None:
-            idx = min(self._readiness_index, len(self._readiness_responses) - 1)
-            self._readiness_index += 1
-            return self._readiness_responses[idx]
-        return self.check_health(port=port, endpoints=endpoints, timeout_seconds=timeout_seconds)
+        """Poll check_health until success or deadline expires using clock/sleeper."""
+        start = self._clock()
+        last_status: int | None = None
+        while True:
+            ok, last_status = self.check_health(
+                port=port, endpoints=endpoints, timeout_seconds=timeout_seconds
+            )
+            if ok:
+                return True, last_status
+            elapsed = self._clock() - start
+            if elapsed >= deadline_seconds:
+                return False, last_status
+            remaining = deadline_seconds - elapsed
+            self._sleeper(min(interval_seconds, remaining))
+            if self._clock() - start >= deadline_seconds:
+                return False, last_status
 
 
 def _safe_tar_extract(archive_bytes: bytes, destination: Path) -> None:
