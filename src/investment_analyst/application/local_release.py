@@ -11,9 +11,10 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 import urllib.error
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
@@ -306,9 +307,26 @@ class HealthChecker(Protocol):
         timeout_seconds: float = 5.0,
     ) -> tuple[bool, int | None]: ...
 
+    def check_health_readiness(
+        self,
+        port: int,
+        endpoints: Sequence[str] = ("/api/v1/overview",),
+        deadline_seconds: float = 15.0,
+        interval_seconds: float = 0.25,
+        timeout_seconds: float = 5.0,
+    ) -> tuple[bool, int | None]: ...
+
 
 class RealHealthChecker:
     """Standard HTTP health checker using urllib to query loopback endpoints."""
+
+    def __init__(
+        self,
+        clock: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
+    ) -> None:
+        self._clock = clock if clock is not None else time.monotonic
+        self._sleeper = sleeper if sleeper is not None else time.sleep
 
     def check_health(
         self,
@@ -332,19 +350,72 @@ class RealHealthChecker:
                 return False, last_status
         return True, last_status
 
+    def check_health_readiness(
+        self,
+        port: int,
+        endpoints: Sequence[str] = ("/api/v1/overview",),
+        deadline_seconds: float = 15.0,
+        interval_seconds: float = 0.25,
+        timeout_seconds: float = 5.0,
+    ) -> tuple[bool, int | None]:
+        """Poll health endpoints until all respond 200 or deadline expires.
+
+        Retries on ConnectionRefusedError, URLError, TimeoutError, and non-200
+        status until all endpoints respond 200 or the deadline expires.
+        A real timeout still fails closed.
+        """
+        start = self._clock()
+        last_status: int | None = None
+        while True:
+            ok, last_status = self.check_health(
+                port=port, endpoints=endpoints, timeout_seconds=timeout_seconds
+            )
+            if ok:
+                return True, last_status
+            elapsed = self._clock() - start
+            if elapsed >= deadline_seconds:
+                return False, last_status
+            remaining = deadline_seconds - elapsed
+            self._sleeper(min(interval_seconds, remaining))
+            if self._clock() - start >= deadline_seconds:
+                return False, last_status
+
 
 class SimulatedHealthChecker:
-    """Simulated health checker for unit and integration testing."""
+    """Simulated health checker for unit and integration testing.
+
+    Supports optional ``responses`` and ``readiness_responses`` sequences for
+    deterministic tests.
+
+    ``responses`` is consumed by ``check_health`` one entry per call; when
+    exhausted the last entry is reused.
+
+    ``readiness_responses`` is consumed by ``check_health_readiness`` one entry
+    per call.  When exhausted or absent, ``check_health_readiness`` delegates to
+    a single ``check_health`` call for backward compatibility.
+    """
 
     def __init__(
         self,
         succeed: bool = True,
         status_code: int = 200,
         fail_endpoints: Sequence[str] = (),
+        responses: Sequence[tuple[bool, int | None]] | None = None,
+        readiness_responses: Sequence[tuple[bool, int | None]] | None = None,
     ) -> None:
         self.succeed = succeed
         self.status_code = status_code
         self.fail_endpoints = set(fail_endpoints)
+        self._responses: list[tuple[bool, int | None]] | None = (
+            list(responses) if responses is not None else None
+        )
+        self._response_index: int = 0
+        self._readiness_responses: list[tuple[bool, int | None]] | None = (
+            list(readiness_responses) if readiness_responses is not None else None
+        )
+        self._readiness_index: int = 0
+        self.call_count: int = 0
+        self.readiness_call_count: int = 0
 
     def check_health(
         self,
@@ -352,10 +423,31 @@ class SimulatedHealthChecker:
         endpoints: Sequence[str] = ("/api/v1/overview",),
         timeout_seconds: float = 5.0,
     ) -> tuple[bool, int | None]:
+        self.call_count += 1
+        if self._responses is not None:
+            idx = min(self._response_index, len(self._responses) - 1)
+            self._response_index += 1
+            return self._responses[idx]
         for ep in endpoints:
             if ep in self.fail_endpoints:
                 return False, 500
         return self.succeed, (self.status_code if self.succeed else 500)
+
+    def check_health_readiness(
+        self,
+        port: int,
+        endpoints: Sequence[str] = ("/api/v1/overview",),
+        deadline_seconds: float = 15.0,
+        interval_seconds: float = 0.25,
+        timeout_seconds: float = 5.0,
+    ) -> tuple[bool, int | None]:
+        """Simulated readiness polling returning pre-determined results."""
+        self.readiness_call_count += 1
+        if self._readiness_responses is not None:
+            idx = min(self._readiness_index, len(self._readiness_responses) - 1)
+            self._readiness_index += 1
+            return self._readiness_responses[idx]
+        return self.check_health(port=port, endpoints=endpoints, timeout_seconds=timeout_seconds)
 
 
 def _safe_tar_extract(archive_bytes: bytes, destination: Path) -> None:
@@ -415,6 +507,11 @@ def validate_environment_file_content(path: Path) -> None:
         )
 
 
+# Default readiness polling configuration
+DEFAULT_READINESS_DEADLINE: float = 15.0
+DEFAULT_READINESS_INTERVAL: float = 0.25
+
+
 class LocalReleaseService:
     """Core service for managing independent local releases and systemd units."""
 
@@ -426,6 +523,8 @@ class LocalReleaseService:
         health_checker: HealthChecker | None = None,
         systemd_unit_path: Path | None = None,
         service_env_path: Path | None = None,
+        readiness_deadline: float = DEFAULT_READINESS_DEADLINE,
+        readiness_interval: float = DEFAULT_READINESS_INTERVAL,
     ) -> None:
         if isinstance(paths, LocalReleasePaths):
             self.paths = paths
@@ -444,6 +543,8 @@ class LocalReleaseService:
             if service_env_path is not None
             else DEFAULT_SERVICE_ENV_PATH.expanduser().resolve(strict=False)
         )
+        self.readiness_deadline = readiness_deadline
+        self.readiness_interval = readiness_interval
 
     def init_runtime(self) -> None:
         """Create runtime directories with strict 0700 permissions."""
@@ -1146,7 +1247,7 @@ class LocalReleaseService:
         # 2. Retarget unit
         self.retarget_unit(cleaned_sha, unit_file=target_unit, env_file=target_env)
 
-        # 3. Systemd restart and health check
+        # 3. Systemd restart and health check with readiness polling
         if not skip_systemd:
             health_endpoints = endpoints or (
                 "/api/v1/overview",
@@ -1162,8 +1263,11 @@ class LocalReleaseService:
                     with contextlib.suppress(Exception):
                         self.systemctl.daemon_reload()
                         self.systemctl.restart(LOCAL_SERVICE_UNIT_NAME)
-                    prev_ok, prev_st = self.health_checker.check_health(
-                        port=port, endpoints=health_endpoints
+                    prev_ok, prev_st = self.health_checker.check_health_readiness(
+                        port=port,
+                        endpoints=health_endpoints,
+                        deadline_seconds=self.readiness_deadline,
+                        interval_seconds=self.readiness_interval,
                     )
                     if prev_ok:
                         raise ReleaseRollbackError(
@@ -1171,9 +1275,14 @@ class LocalReleaseService:
                             f"successfully rolled back and verified previous release "
                             f"{current_state.previous} (health status {prev_st})"
                         ) from error
+                    prev_desc = (
+                        f"previous release {current_state.previous}"
+                        if current_state.previous is not None
+                        else "original unit"
+                    )
                     raise ReleaseRollbackError(
                         f"CRITICAL: Systemd restart failed for {cleaned_sha}: {error} "
-                        f"and recovery rollback to {current_state.previous} ALSO FAILED "
+                        f"and recovery rollback to {prev_desc} ALSO FAILED "
                         f"health verification (status {prev_st})"
                     ) from error
                 raise ReleaseRollbackError(
@@ -1182,8 +1291,11 @@ class LocalReleaseService:
                 ) from error
 
             if not skip_health_check:
-                health_ok, status_code = self.health_checker.check_health(
-                    port=port, endpoints=health_endpoints
+                health_ok, status_code = self.health_checker.check_health_readiness(
+                    port=port,
+                    endpoints=health_endpoints,
+                    deadline_seconds=self.readiness_deadline,
+                    interval_seconds=self.readiness_interval,
                 )
                 if not health_ok:
                     if previous_unit_text is not None:
@@ -1191,8 +1303,11 @@ class LocalReleaseService:
                         with contextlib.suppress(Exception):
                             self.systemctl.daemon_reload()
                             self.systemctl.restart(LOCAL_SERVICE_UNIT_NAME)
-                        prev_ok, prev_st = self.health_checker.check_health(
-                            port=port, endpoints=health_endpoints
+                        prev_ok, prev_st = self.health_checker.check_health_readiness(
+                            port=port,
+                            endpoints=health_endpoints,
+                            deadline_seconds=self.readiness_deadline,
+                            interval_seconds=self.readiness_interval,
                         )
                         if prev_ok:
                             raise ReleaseRollbackError(
@@ -1200,10 +1315,15 @@ class LocalReleaseService:
                                 f"successfully rolled back and verified previous release "
                                 f"{current_state.previous} (health status {prev_st})"
                             )
+                        prev_desc = (
+                            f"previous release {current_state.previous}"
+                            if current_state.previous is not None
+                            else "original unit"
+                        )
                         raise ReleaseRollbackError(
                             f"CRITICAL: Health check failed for {cleaned_sha} "
                             f"with status {status_code} and recovery rollback to "
-                            f"{current_state.previous} ALSO FAILED health verification "
+                            f"{prev_desc} ALSO FAILED health verification "
                             f"(status {prev_st})"
                         )
                     raise ReleaseRollbackError(
@@ -1293,9 +1413,11 @@ class LocalReleaseService:
                 ) from error
 
             if not skip_health_check:
-                health_ok, status_code = self.health_checker.check_health(
+                health_ok, status_code = self.health_checker.check_health_readiness(
                     port=port,
                     endpoints=("/api/v1/overview", "/api/v1/candidate-notifications"),
+                    deadline_seconds=self.readiness_deadline,
+                    interval_seconds=self.readiness_interval,
                 )
                 if not health_ok:
                     raise ReleaseRollbackError(

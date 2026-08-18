@@ -649,6 +649,9 @@ def test_activation_automatic_rollback_verifies_recovery_health_and_fail_closed(
                 return False, 500  # sha2 activation fails
             return True, 200  # sha1 recovery succeeds
 
+        def check_health_readiness(self, *args, **kwargs):
+            return self.check_health(*args, **kwargs)
+
     service.health_checker = RecoveryHealthChecker()
     with pytest.raises(ReleaseRollbackError, match="successfully rolled back and verified"):
         service.activate(sha2)
@@ -658,6 +661,211 @@ def test_activation_automatic_rollback_verifies_recovery_health_and_fail_closed(
         def check_health(self, *args, **kwargs):
             return False, 500
 
+        def check_health_readiness(self, *args, **kwargs):
+            return self.check_health(*args, **kwargs)
+
     service.health_checker = TotalFailureHealthChecker()
     with pytest.raises(ReleaseRollbackError, match="CRITICAL: Health check failed.*ALSO FAILED"):
         service.activate(sha2)
+
+
+def _make_readiness_test_service(
+    tmp_path: Path,
+    sha_new: str,
+    sha_prev: str | None,
+    health_checker: SimulatedHealthChecker,
+) -> tuple[LocalReleaseService, Path, Path]:
+    """Set up a LocalReleaseService with two staged releases for readiness tests."""
+    runtime_root = tmp_path / "runtime"
+    shas = [sha_new]
+    if sha_prev is not None:
+        shas.append(sha_prev)
+
+    for s in shas:
+        r_dir = runtime_root / "releases" / s
+        (r_dir / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+        (r_dir / "scripts").mkdir(parents=True, exist_ok=True)
+        (r_dir / ".venv" / "bin" / "python").touch()
+        (r_dir / "scripts" / "serve_investment_analyst.py").touch()
+        manifest = ReleaseManifest(
+            schema_version="local-release-manifest-v1",
+            commit_sha=s,
+            tree_sha="b6f8115ffdddb0915cae50736dbc821c5355d3ac",
+            uv_lock_sha256=hashlib.sha256(b"dummy").hexdigest(),
+            python_version="Python 3.12.3",
+            staged_at=datetime.now(UTC),
+            release_path=str(r_dir),
+        )
+        (r_dir / "manifest.json").write_text(manifest.model_dump_json(), encoding="utf-8")
+
+    env_file = tmp_path / "config" / "service.env"
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text(
+        "ALPACA_API_KEY=k\nALPACA_API_SECRET=s\nSEC_USER_AGENT=u\n", encoding="utf-8"
+    )
+    env_file.chmod(0o600)
+
+    unit_file = tmp_path / "systemd" / "investment-analyst.service"
+    if sha_prev is not None:
+        prev_py = runtime_root / "releases" / sha_prev / ".venv" / "bin" / "python"
+        prev_scr = runtime_root / "releases" / sha_prev / "scripts" / "serve_investment_analyst.py"
+        unit_content = (
+            "[Unit]\nDescription=Test\n\n"
+            "[Service]\n"
+            f"WorkingDirectory={runtime_root / 'releases' / sha_prev}\n"
+            f"EnvironmentFile={env_file}\n"
+            f'ExecStart="{prev_py}" "{prev_scr}" --port 8765\n\n'
+            "[Install]\nWantedBy=default.target\n"
+        )
+    else:
+        unit_content = (
+            "[Unit]\nDescription=Test\n\n"
+            "[Service]\n"
+            f"WorkingDirectory={runtime_root / 'releases' / sha_new}\n"
+            f"EnvironmentFile={env_file}\n"
+            f'ExecStart="/bin/python" "/bin/script" --port 8765\n\n'
+            "[Install]\nWantedBy=default.target\n"
+        )
+    write_local_service_unit(unit_file, unit_content)
+
+    # Pre-populate deployment state for prev if applicable
+    if sha_prev is not None:
+        state = DeploymentState(
+            schema_version="local-deployment-state-v1",
+            current=sha_prev,
+            previous=None,
+            updated_at=datetime.now(UTC),
+            current_release_path=str(runtime_root / "releases" / sha_prev),
+            previous_release_path=None,
+        )
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        (runtime_root / "deployment_state.json").write_text(
+            state.model_dump_json(), encoding="utf-8"
+        )
+
+    systemctl = SimulatedSystemctlRunner()
+    service = LocalReleaseService(
+        paths=runtime_root,
+        systemctl=systemctl,
+        health_checker=health_checker,
+        systemd_unit_path=unit_file,
+        service_env_path=env_file,
+        readiness_deadline=15.0,
+        readiness_interval=0.25,
+    )
+    return service, unit_file, env_file
+
+
+def test_readiness_transient_delay_then_success(tmp_path: Path) -> None:
+    """(a) Several initial health probes fail with connection refused, then respond
+    200 within the deadline → activation succeeds via readiness polling.
+
+    Uses readiness_responses: each entry is the result of one check_health_readiness
+    call.  The first call (for the new release) returns success after simulated
+    transient delay.
+    """
+    sha_new = "3333333333333333333333333333333333333333"
+    sha_prev = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+
+    health = SimulatedHealthChecker(
+        readiness_responses=[
+            (True, 200),  # new release readiness: eventually succeeds
+        ],
+    )
+    service, _unit, _env = _make_readiness_test_service(tmp_path, sha_new, sha_prev, health)
+
+    state = service.activate(sha_new)
+    assert state.current == sha_new
+    assert state.previous == sha_prev
+    assert health.readiness_call_count == 1
+
+
+def test_readiness_new_release_timeout_triggers_recovery_rollback(tmp_path: Path) -> None:
+    """(b) The new release never becomes ready within the deadline → recovery
+    rollback fires and the previous release is restored and verified."""
+    sha_new = "4444444444444444444444444444444444444444"
+    sha_prev = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+
+    # 1st readiness call (new release): timeout.  2nd (recovery rollback): success.
+    health = SimulatedHealthChecker(
+        readiness_responses=[
+            (False, None),  # sha_new readiness: deadline expired
+            (True, 200),  # sha_prev recovery readiness: succeeds
+        ],
+    )
+    service, _unit, _env = _make_readiness_test_service(tmp_path, sha_new, sha_prev, health)
+
+    with pytest.raises(ReleaseRollbackError, match="successfully rolled back and verified"):
+        service.activate(sha_new)
+    assert health.readiness_call_count == 2
+
+
+def test_readiness_rollback_transient_delay_then_success(tmp_path: Path) -> None:
+    """(c) Recovery rollback requires several probes before responding 200 → the
+    rollback completes and is verified successfully."""
+    sha_new = "5555555555555555555555555555555555555555"
+    sha_prev = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+
+    # 1st call: new release times out.  2nd call: recovery rollback succeeds after delay.
+    health = SimulatedHealthChecker(
+        readiness_responses=[
+            (False, None),  # sha_new readiness: timeout
+            (True, 200),  # sha_prev recovery readiness: succeeds after delay
+        ],
+    )
+    service, _unit, _env = _make_readiness_test_service(tmp_path, sha_new, sha_prev, health)
+
+    with pytest.raises(ReleaseRollbackError, match="successfully rolled back and verified"):
+        service.activate(sha_new)
+    assert health.readiness_call_count == 2
+
+
+def test_readiness_double_fault_critical(tmp_path: Path) -> None:
+    """(d) Neither the new release nor the previous release respond within their
+    deadlines → fail closed with CRITICAL double fault."""
+    sha_new = "6666666666666666666666666666666666666666"
+    sha_prev = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+
+    # Both readiness calls fail
+    health = SimulatedHealthChecker(
+        readiness_responses=[
+            (False, None),  # sha_new readiness: timeout
+            (False, None),  # sha_prev recovery readiness: also timeout
+        ],
+    )
+    service, _unit, _env = _make_readiness_test_service(tmp_path, sha_new, sha_prev, health)
+
+    with pytest.raises(ReleaseRollbackError, match="CRITICAL.*ALSO FAILED"):
+        service.activate(sha_new)
+    assert health.readiness_call_count == 2
+
+
+def test_readiness_first_adoption_no_previous_message(tmp_path: Path) -> None:
+    """When previous is None, the CRITICAL double fault message says 'original unit'
+    instead of falsely reporting 'rollback to None'."""
+    sha_new = "7777777777777777777777777777777777777777"
+
+    # Both readiness calls fail: no previous release
+    health = SimulatedHealthChecker(
+        readiness_responses=[
+            (False, None),  # sha_new readiness: timeout
+            (False, None),  # recovery rollback to original unit: also timeout
+        ],
+    )
+    service, unit_file, _env = _make_readiness_test_service(tmp_path, sha_new, None, health)
+    # Write a parseable unit so retarget works
+    runtime_root = tmp_path / "runtime"
+    new_py = runtime_root / "releases" / sha_new / ".venv" / "bin" / "python"
+    new_scr = runtime_root / "releases" / sha_new / "scripts" / "serve_investment_analyst.py"
+    unit_content = (
+        "[Unit]\nDescription=Test\n\n"
+        "[Service]\n"
+        f"WorkingDirectory={runtime_root / 'releases' / sha_new}\n"
+        f"EnvironmentFile={_env}\n"
+        f'ExecStart="{new_py}" "{new_scr}" --port 8765\n\n'
+        "[Install]\nWantedBy=default.target\n"
+    )
+    write_local_service_unit(unit_file, unit_content)
+
+    with pytest.raises(ReleaseRollbackError, match="original unit.*ALSO FAILED"):
+        service.activate(sha_new)

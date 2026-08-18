@@ -573,6 +573,19 @@ Cada release contiene un entorno virtual no editable construido estrictamente de
 Python 3.12 y `uv==0.11.29`, sin dependencias de desarrollo y sin referencias a ningún worktree ni
 `.venv` local.
 
+### Sondeo de readiness acotado
+
+`activate`, `update`, `bootstrap` y `rollback` verifican la salud del servicio HTTP mediante sondeo
+de readiness acotado. El sondeo reintenta ante `ConnectionRefusedError`, `URLError`, `TimeoutError`
+y estados HTTP distintos de 200 hasta que todos los endpoints requeridos respondan 200 o expire un
+deadline configurable (15 s por defecto, con intervalo de 0,25 s). Un timeout real sigue fallando
+cerrado.
+
+El sondeo se aplica simétricamente al arranque de la nueva release y al reinicio de la release
+previa durante un recovery rollback automático. `status()` permanece como consulta puntual sin
+sondeo. Cuando no existe release previa (`previous is None`), un fallo doble de readiness reporta
+«original unit» en vez de «rollback to None».
+
 ### Comandos de operación del release runtime
 
 Bootstrap inicial (adopta credenciales, materializa release, retargetea unidad y activa):
@@ -602,6 +615,7 @@ Rollback al despliegue anterior verificado (restaura unidad anterior, reinicia y
 ```bash
 python3 scripts/deploy_local_release.py rollback
 ```
+
 
 Comandos paso a paso equivalentes:
 
