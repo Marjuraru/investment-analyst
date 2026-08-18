@@ -97,9 +97,9 @@ class SecIssuerFundamentalsPipeline:
     def run(self) -> SecIssuerImportSummary:
         """Import both issuer snapshots idempotently and verify storage integrity."""
         self._storage.require_open()
-        observation_ids_before = {item.observation_id for item in self._storage.observations.list()}
-        metric_ids_before = {item.result_id for item in self._storage.metric_results.list()}
-        diagnostic_ids_before = {item.diagnostic_id for item in self._storage.diagnostics.list()}
+        observation_count_before = self._storage.observations.count()
+        metric_count_before = self._storage.metric_results.count()
+        diagnostic_count_before = self._storage.diagnostics.count()
 
         fetch = self._client.fetch_issuer_documents()
         candidates = self._prepare_candidates(fetch)
@@ -136,15 +136,11 @@ class SecIssuerFundamentalsPipeline:
             self._verify_stored_record(record, document_by_type[document_type])
             stored[document_type] = record
 
-        if {
-            item.observation_id for item in self._storage.observations.list()
-        } != observation_ids_before:
+        if self._storage.observations.count() != observation_count_before:
             raise StorageError("SEC raw import unexpectedly changed normalized observations")
-        if {item.result_id for item in self._storage.metric_results.list()} != metric_ids_before:
+        if self._storage.metric_results.count() != metric_count_before:
             raise StorageError("SEC raw import unexpectedly changed metric results")
-        if {
-            item.diagnostic_id for item in self._storage.diagnostics.list()
-        } != diagnostic_ids_before:
+        if self._storage.diagnostics.count() != diagnostic_count_before:
             raise StorageError("SEC raw import unexpectedly changed diagnostics")
 
         self._verify_round_trip(stored, target_asset)

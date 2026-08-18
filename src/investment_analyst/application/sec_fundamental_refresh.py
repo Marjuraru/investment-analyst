@@ -293,15 +293,13 @@ class SecIssuerFundamentalRefreshPipeline:
         request: SecIssuerFundamentalRefreshRequest,
     ) -> datetime:
         transformation_version = sec_transformation_version(self._configuration)
-        available = tuple(
-            item.available_at
-            for item in self._storage.observations.list(asset_id=self._configuration.asset_id)
-            if item.source.source_id == self._configuration.companyfacts_source_id
-            and item.frequency is request.frequency
-            and item.quality is DataQuality.VALID
-            and item.transformation_version == transformation_version
+        minimum_known_at = self._storage.observations.minimum_available_at(
+            asset_id=self._configuration.asset_id,
+            source_id=self._configuration.companyfacts_source_id,
+            frequency=request.frequency,
+            quality=DataQuality.VALID,
+            transformation_version=transformation_version,
         )
-        minimum_known_at = min(available, default=None)
         effective = (
             request.requested_known_at
             if request.requested_known_at is not None
