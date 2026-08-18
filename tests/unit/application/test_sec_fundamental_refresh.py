@@ -395,10 +395,6 @@ facts_data = {{
 sub_bytes = json.dumps(submissions_data).encode()
 facts_bytes = json.dumps(facts_data).encode()
 
-rss_before_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-tracemalloc.start()
-t0 = time.perf_counter()
-
 work_dir = Path("{tmp_path}") / "sub_ws"
 with LocalStorage(StoragePaths.from_root(work_dir)) as storage:
     transport = OfflineTransport(sub_bytes, facts_bytes)
@@ -441,12 +437,15 @@ with LocalStorage(StoragePaths.from_root(work_dir)) as storage:
         frequency=DataFrequency.ANNUAL,
         requested_known_at=datetime(2026, 12, 31, 23, 59, tzinfo=UTC),
     )
-    summary = pipeline.run(req)
 
-duration_sec = time.perf_counter() - t0
-current_heap, peak_heap = tracemalloc.get_traced_memory()
-tracemalloc.stop()
-rss_after_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss_before_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    tracemalloc.start()
+    t0 = time.perf_counter()
+    summary = pipeline.run(req)
+    duration_sec = time.perf_counter() - t0
+    current_heap, peak_heap = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    rss_after_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
 delta_rss_mb = (rss_after_kb - rss_before_kb) / 1024.0
 peak_rss_mb = rss_after_kb / 1024.0
