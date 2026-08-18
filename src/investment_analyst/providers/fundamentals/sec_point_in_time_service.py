@@ -120,7 +120,15 @@ class SecIssuerFundamentalPointInTimeService:
             raise SecFundamentalQueryError(
                 "query asset_id does not match the configured SEC issuer"
             )
-        observations = self._storage.observations.list(asset_id=request.asset_id)
+        observations = self._storage.observations.list(
+            asset_id=request.asset_id,
+            field_names=_ALLOWED_FIELDS,
+            frequency=request.frequency,
+            quality=DataQuality.VALID,
+            available_to=request.known_at,
+            period_end_from=request.start_period_end,
+            period_end_to=request.end_period_end,
+        )
         candidates = self._eligible_candidates(observations, request)
         selected, superseded = self._resolve_revisions(candidates, request)
         periods = self._build_periods(selected, request)

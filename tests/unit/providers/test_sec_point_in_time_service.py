@@ -1,6 +1,7 @@
 """Tests for read-only SEC point-in-time revision selection."""
 
 import json
+from collections.abc import Collection
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -37,20 +38,76 @@ class _ObservationRepository:
     def __init__(self, observations: list[NormalizedObservation]) -> None:
         self._observations = observations
         self.calls = 0
+        self.last_kwargs: dict[str, object] = {}
 
     def list(
         self,
         *,
         asset_id: str | None = None,
+        field_name: str | None = None,
+        field_names: Collection[str] | None = None,
+        frequency: DataFrequency | None = None,
+        quality: DataQuality | None = None,
+        observed_from: datetime | None = None,
+        observed_before: datetime | None = None,
         available_from: datetime | None = None,
         available_to: datetime | None = None,
+        period_end_from: datetime | date | None = None,
+        period_end_to: datetime | date | None = None,
     ) -> list[NormalizedObservation]:
         self.calls += 1
-        assert available_from is None
-        assert available_to is None
-        return [
-            item for item in self._observations if asset_id is None or item.asset_id == asset_id
-        ]
+        self.last_kwargs = {
+            "asset_id": asset_id,
+            "field_name": field_name,
+            "field_names": field_names,
+            "frequency": frequency,
+            "quality": quality,
+            "observed_from": observed_from,
+            "observed_before": observed_before,
+            "available_from": available_from,
+            "available_to": available_to,
+            "period_end_from": period_end_from,
+            "period_end_to": period_end_to,
+        }
+        res = self._observations
+        if asset_id is not None:
+            res = [item for item in res if item.asset_id == asset_id]
+        if field_name is not None:
+            res = [item for item in res if item.field_name == field_name]
+        if field_names is not None:
+            field_set = set(field_names)
+            res = [item for item in res if item.field_name in field_set]
+        if frequency is not None:
+            res = [item for item in res if item.frequency is frequency]
+        if quality is not None:
+            res = [item for item in res if item.quality is quality]
+        if available_from is not None:
+            res = [item for item in res if item.available_at >= available_from]
+        if available_to is not None:
+            res = [item for item in res if item.available_at <= available_to]
+        if period_end_from is not None:
+            p_from = (
+                period_end_from
+                if isinstance(period_end_from, date) and not isinstance(period_end_from, datetime)
+                else period_end_from.date()
+            )
+            res = [
+                item
+                for item in res
+                if item.period_end is not None and item.period_end.date() >= p_from
+            ]
+        if period_end_to is not None:
+            p_to = (
+                period_end_to
+                if isinstance(period_end_to, date) and not isinstance(period_end_to, datetime)
+                else period_end_to.date()
+            )
+            res = [
+                item
+                for item in res
+                if item.period_end is not None and item.period_end.date() <= p_to
+            ]
+        return res
 
 
 class _ForbiddenRawRepository:
@@ -248,9 +305,31 @@ def test_market_foreign_quality_and_transformation_observations_are_ignored() ->
         _query(datetime(2026, 1, 1, tzinfo=UTC))
     )
 
-    assert result.observations_examined == 5
+    assert result.observations_examined == 3
     assert result.observations_eligible == 1
     assert result.observations_selected == 1
+
+
+def test_query_pushes_down_sql_filters() -> None:
+    storage = _Storage([_observation()])
+    service = SecAaplFundamentalPointInTimeService(storage)  # type: ignore[arg-type]
+    start = date(2025, 1, 1)
+    end = date(2025, 12, 31)
+    query_req = _query(
+        datetime(2026, 1, 1, tzinfo=UTC),
+        start=start,
+        end=end,
+        frequency=DataFrequency.ANNUAL,
+    )
+    service.query(query_req)
+
+    assert storage.observations.last_kwargs["asset_id"] == ASSET_ID
+    assert storage.observations.last_kwargs["quality"] is DataQuality.VALID
+    assert storage.observations.last_kwargs["frequency"] is DataFrequency.ANNUAL
+    assert storage.observations.last_kwargs["available_to"] == datetime(2026, 1, 1, tzinfo=UTC)
+    assert storage.observations.last_kwargs["period_end_from"] == start
+    assert storage.observations.last_kwargs["period_end_to"] == end
+    assert "fundamental.revenue" in storage.observations.last_kwargs["field_names"]
 
 
 def test_identical_duplicate_collapses_and_conflicting_tie_fails() -> None:

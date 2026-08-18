@@ -239,3 +239,105 @@ def test_observation_filters_include_frequency_and_half_open_observed_range(stor
         observations[1].observation_id,
         observations[2].observation_id,
     }
+
+
+def test_observation_pushdown_filters_field_names_quality_and_period_range(storage) -> None:
+    raw_record = make_raw_record()
+    period_1 = datetime(2025, 9, 27, tzinfo=UTC)
+    period_2 = datetime(2025, 12, 31, tzinfo=UTC)
+    period_3 = datetime(2026, 3, 31, tzinfo=UTC)
+
+    obs_rev = make_observation(
+        raw_record_id=raw_record.record_id,
+    ).model_copy(
+        update={
+            "field_name": "fundamental.revenue",
+            "period_end": period_1,
+        }
+    )
+    obs_inc = make_observation(
+        raw_record_id=raw_record.record_id,
+    ).model_copy(
+        update={
+            "field_name": "fundamental.net_income",
+            "period_end": period_2,
+        }
+    )
+    obs_assets = make_observation(
+        raw_record_id=raw_record.record_id,
+    ).model_copy(
+        update={
+            "field_name": "fundamental.assets",
+            "period_end": period_3,
+        }
+    )
+    for obs in (obs_rev, obs_inc, obs_assets):
+        storage.observations.save(obs)
+
+    # Filter by field_names
+    res_fields = storage.observations.list(
+        field_names=["fundamental.revenue", "fundamental.assets"],
+    )
+    assert {item.observation_id for item in res_fields} == {
+        obs_rev.observation_id,
+        obs_assets.observation_id,
+    }
+
+    # Filter by period_end range
+    res_period = storage.observations.list(
+        period_end_from=period_1.date(),
+        period_end_to=period_2.date(),
+    )
+    assert {item.observation_id for item in res_period} == {
+        obs_rev.observation_id,
+        obs_inc.observation_id,
+    }
+
+    # Empty field_names returns empty list
+    assert storage.observations.list(field_names=[]) == []
+
+
+def test_observation_count_and_minimum_available_at(storage) -> None:
+    raw_record = make_raw_record()
+    t1 = datetime(2026, 7, 10, 10, tzinfo=UTC)
+    t2 = datetime(2026, 7, 10, 12, tzinfo=UTC)
+
+    obs1 = make_observation(
+        raw_record_id=raw_record.record_id,
+        asset_id="asset:count_test",
+        available_at=t2,
+    )
+    obs2 = make_observation(
+        raw_record_id=raw_record.record_id,
+        asset_id="asset:count_test",
+        available_at=t1,
+    )
+    storage.observations.save(obs1)
+    storage.observations.save(obs2)
+
+    assert storage.observations.count(asset_id="asset:count_test") == 2
+    assert storage.observations.count(asset_id="asset:nonexistent") == 0
+
+    min_avail = storage.observations.minimum_available_at(asset_id="asset:count_test")
+    assert min_avail == t1
+
+    assert storage.observations.minimum_available_at(asset_id="asset:nonexistent") is None
+
+
+def test_metric_and_diagnostic_counts(storage) -> None:
+    raw_record = make_raw_record()
+    observation = make_observation(raw_record_id=raw_record.record_id)
+    metric = make_metric_result(observation_id=observation.observation_id, asset_id="asset:c")
+    diagnostic = make_diagnostic_result(
+        metric_result_id=metric.result_id,
+        asset_id="asset:c",
+        mode=DiagnosticMode.MARKET,
+    )
+
+    storage.metric_results.save(metric)
+    storage.diagnostics.save(diagnostic)
+
+    assert storage.metric_results.count(asset_id="asset:c") == 1
+    assert storage.metric_results.count(asset_id="asset:other") == 0
+    assert storage.diagnostics.count(asset_id="asset:c", mode=DiagnosticMode.MARKET) == 1
+    assert storage.diagnostics.count(asset_id="asset:c", mode=DiagnosticMode.FUNDAMENTAL) == 0

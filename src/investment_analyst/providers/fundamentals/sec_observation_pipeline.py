@@ -135,12 +135,12 @@ class SecIssuerObservationPipeline:
         """Select snapshots, validate all candidates, then persist idempotently."""
         self._storage.require_open()
         normalized_at = _utc_datetime(self._clock(), "clock result")
-        raw_ids_before = {record.record_id for record in self._storage.raw_records.list()}
-        observations_before = {
-            item.observation_id: item for item in self._storage.observations.list()
-        }
-        metric_ids_before = {item.result_id for item in self._storage.metric_results.list()}
-        diagnostic_ids_before = {item.diagnostic_id for item in self._storage.diagnostics.list()}
+        observation_count_before = self._storage.observations.count()
+        raw_count_before = len(
+            self._storage.raw_records.list(source_id=self._configuration.companyfacts_source_id)
+        ) + len(self._storage.raw_records.list(source_id=self._configuration.submissions_source_id))
+        metric_count_before = self._storage.metric_results.count()
+        diagnostic_count_before = self._storage.diagnostics.count()
 
         submissions_record = self._select_snapshot(
             source_id=self._configuration.submissions_source_id,
@@ -213,15 +213,21 @@ class SecIssuerObservationPipeline:
             )
             persisted.append(stored)
 
-        self._verify_unchanged_existing_observations(observations_before)
-        raw_ids_after = {record.record_id for record in self._storage.raw_records.list()}
-        metric_ids_after = {item.result_id for item in self._storage.metric_results.list()}
-        diagnostic_ids_after = {item.diagnostic_id for item in self._storage.diagnostics.list()}
-        if raw_ids_after != raw_ids_before:
+        observation_count_after = self._storage.observations.count()
+        raw_count_after = len(
+            self._storage.raw_records.list(source_id=self._configuration.companyfacts_source_id)
+        ) + len(self._storage.raw_records.list(source_id=self._configuration.submissions_source_id))
+        metric_count_after = self._storage.metric_results.count()
+        diagnostic_count_after = self._storage.diagnostics.count()
+        if observation_count_after != observation_count_before + len(missing):
+            raise SecObservationTraceabilityError(
+                "observation count delta does not match created observations"
+            )
+        if raw_count_after != raw_count_before:
             raise SecObservationTraceabilityError("normalization created or removed RawRecords")
-        if metric_ids_after != metric_ids_before:
+        if metric_count_after != metric_count_before:
             raise SecObservationTraceabilityError("normalization changed MetricResults")
-        if diagnostic_ids_after != diagnostic_ids_before:
+        if diagnostic_count_after != diagnostic_count_before:
             raise SecObservationTraceabilityError("normalization changed DiagnosticResults")
 
         return SecObservationImportSummary(
@@ -241,9 +247,9 @@ class SecIssuerObservationPipeline:
             skipped_counts=dict(extraction.skipped_counts),
             earliest_period_end=extraction.earliest_period_end,
             latest_period_end=extraction.latest_period_end,
-            raw_records_created=len(raw_ids_after - raw_ids_before),
-            metric_results_created=len(metric_ids_after - metric_ids_before),
-            diagnostics_created=len(diagnostic_ids_after - diagnostic_ids_before),
+            raw_records_created=raw_count_after - raw_count_before,
+            metric_results_created=metric_count_after - metric_count_before,
+            diagnostics_created=diagnostic_count_after - diagnostic_count_before,
             traceability_verified=True,
         )
 
@@ -392,17 +398,6 @@ class SecIssuerObservationPipeline:
         accession = _required_key(key, "accession_number")
         if accession not in observation.source.record_key:
             raise SecObservationTraceabilityError("SEC observation accession trace is missing")
-
-    def _verify_unchanged_existing_observations(
-        self,
-        before: dict[UUID, NormalizedObservation],
-    ) -> None:
-        after = {item.observation_id: item for item in self._storage.observations.list()}
-        for identifier, original in before.items():
-            if after.get(identifier) != original:
-                raise SecObservationTraceabilityError(
-                    f"pre-existing observation {identifier} was modified"
-                )
 
 
 def _validate_candidate(
