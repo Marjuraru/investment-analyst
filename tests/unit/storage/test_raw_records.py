@@ -1,5 +1,6 @@
 """Tests for immutable canonical raw-record files."""
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -97,3 +98,57 @@ def test_raw_save_rejects_same_id_with_different_content(storage) -> None:
 
     with pytest.raises(RecordConflictError, match="different content"):
         storage.raw_records.save(conflicting)
+
+
+def test_raw_count_and_availability_bounds_use_index_filters_without_loading_documents(
+    storage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = datetime(2026, 7, 10, 16, tzinfo=UTC)
+    first = make_raw_record().model_copy(
+        update={
+            "asset_id": "equity:us:aapl",
+            "schema_version": "receipt-v1",
+            "available_at": start,
+            "received_at": start,
+        }
+    )
+    second = make_raw_record().model_copy(
+        update={
+            "asset_id": "equity:us:aapl",
+            "schema_version": "receipt-v1",
+            "available_at": start + timedelta(hours=1),
+            "received_at": start + timedelta(hours=1),
+        }
+    )
+    foreign = make_raw_record().model_copy(
+        update={
+            "asset_id": "equity:us:amd",
+            "schema_version": "receipt-v1",
+            "available_at": start + timedelta(hours=2),
+            "received_at": start + timedelta(hours=2),
+        }
+    )
+    for record in (first, second, foreign):
+        storage.raw_records.save(record)
+
+    monkeypatch.setattr(
+        storage.raw_records,
+        "get_many",
+        lambda record_ids: pytest.fail("aggregate query materialized raw documents"),
+    )
+
+    assert (
+        storage.raw_records.count(
+            asset_id="equity:us:aapl",
+            source_id="alpaca:bars",
+            schema_version="receipt-v1",
+        )
+        == 2
+    )
+    assert storage.raw_records.count(asset_id="equity:us:missing") == 0
+    assert storage.raw_records.available_at_bounds(
+        asset_id="equity:us:aapl",
+        source_id="alpaca:bars",
+        schema_version="receipt-v1",
+    ) == (start, start + timedelta(hours=1))

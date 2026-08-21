@@ -6,6 +6,7 @@ import os
 import signal
 import sys
 import threading
+import time as time_module
 from datetime import UTC, date, datetime, time
 from pathlib import Path
 from types import FrameType
@@ -85,6 +86,7 @@ _ANALYTICAL_RULE_REGISTRY_FILE = "analytical_rule_registry_state_v1.json"
 _MANUAL_OPERATION_STATE_FILE = "manual_operation_state_v1.json"
 _ASSET_PREFERENCES_STATE_FILE = "asset_preferences_state_v1.json"
 _SERVICE_LOCK_FILE = "aapl_local_service.lock"
+_SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS = 60.0
 
 
 class _DerivativesLocalController(AaplLocalController):
@@ -384,13 +386,24 @@ def _serve(
         except KeyboardInterrupt:
             request_shutdown(signal.SIGINT, None)
         finally:
-            stop_event.set()
-            manual_operations.stop()
-            server.server_close()
-            if scheduler_thread is not None:
-                scheduler_thread.join(timeout=5)
-            signal.signal(signal.SIGTERM, previous_sigterm)
-            signal.signal(signal.SIGINT, previous_sigint)
+            shutdown_deadline = time_module.monotonic() + _SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS
+            try:
+                stop_event.set()
+                manual_operations.stop(
+                    timeout=min(5.0, max(shutdown_deadline - time_module.monotonic(), 0.0))
+                )
+                server.server_close()
+                if scheduler_thread is not None:
+                    scheduler_thread.join(
+                        timeout=max(shutdown_deadline - time_module.monotonic(), 0.0)
+                    )
+                    if scheduler_thread.is_alive():
+                        raise RuntimeError(
+                            "scheduler did not stop cooperatively before shutdown deadline"
+                        )
+            finally:
+                signal.signal(signal.SIGTERM, previous_sigterm)
+                signal.signal(signal.SIGINT, previous_sigint)
     return 0
 
 

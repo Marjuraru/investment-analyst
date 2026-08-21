@@ -19,6 +19,10 @@ from investment_analyst.application.listed_market_refresh_models import (
     ListedMarketRefreshRequest,
     ListedMarketRefreshSummary,
 )
+from investment_analyst.core.operation_control import (
+    OperationCancelledError,
+    check_operation_cancelled,
+)
 from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
 from investment_analyst.providers.market.alpaca_pipeline import (
     AlpacaHistoricalPipeline,
@@ -71,6 +75,7 @@ class ListedMarketRefreshPipeline:
         """Execute one append-only refresh over inclusive completed UTC dates."""
         if request.asset_id != self._configuration.asset_id:
             raise ListedMarketRefreshError("request asset does not match Alpaca configuration")
+        check_operation_cancelled()
         started_at = self._normalized_now()
         start, end = inclusive_utc_date_bounds(request.market_start, request.market_end)
         if end > started_at:
@@ -81,17 +86,24 @@ class ListedMarketRefreshPipeline:
                 requested_end=request.market_end,
                 refresh_mode=request.refresh_mode,
             )
+            check_operation_cancelled()
+        except OperationCancelledError:
+            raise
         except (RuntimeError, ValueError) as error:
             raise ListedMarketRefreshError(f"Alpaca refresh planning failed: {error}") from error
 
         imports: list[AlpacaImportSummary] = []
         for interval in plan.fetch_intervals:
+            check_operation_cancelled()
             interval_start, interval_end = inclusive_utc_date_bounds(
                 interval.start,
                 interval.end,
             )
             try:
                 summary = self._market_pipeline.run(interval_start, interval_end)
+                check_operation_cancelled()
+            except OperationCancelledError:
+                raise
             except (RuntimeError, ValueError) as error:
                 raise ListedMarketRefreshError(f"Alpaca market fetch failed: {error}") from error
             if (
@@ -103,6 +115,7 @@ class ListedMarketRefreshPipeline:
             imports.append(summary)
 
         effective_known_at = self._resolve_known_at(request, imports)
+        check_operation_cancelled()
         analytics_start = max(start, end - timedelta(days=_OPERATIONAL_ANALYTICS_DAYS))
         query = HistoricalBarQuery(
             asset_id=self._configuration.asset_id,
@@ -114,6 +127,9 @@ class ListedMarketRefreshPipeline:
         try:
             statistics = self._statistics_pipeline.run(MarketStatisticsRequest(query=query))
             diagnostic = self._diagnostic_pipeline.run(MarketDiagnosticRequest(query=query))
+            check_operation_cancelled()
+        except OperationCancelledError:
+            raise
         except (RuntimeError, ValueError) as error:
             raise ListedMarketRefreshError(f"listed market analytics failed: {error}") from error
         self._verify_analytics(
@@ -125,6 +141,7 @@ class ListedMarketRefreshPipeline:
             diagnostic.traceability_verified,
         )
         valuation = self._run_valuation(request, effective_known_at)
+        check_operation_cancelled()
         return ListedMarketRefreshSummary(
             asset_id=self._configuration.asset_id,
             source_id=self._configuration.source_id,
@@ -176,6 +193,8 @@ class ListedMarketRefreshPipeline:
                 )
             )
             return self._valuation_pipeline.persist(snapshot)
+        except OperationCancelledError:
+            raise
         except (RuntimeError, ValueError) as error:
             raise ListedMarketRefreshError(
                 f"corporate valuation persistence failed: {error}"

@@ -1,5 +1,7 @@
 """Offline tests for the standard-library HTTPS transport."""
 
+import threading
+import time
 from email.message import Message
 from urllib.error import HTTPError
 from urllib.parse import parse_qs
@@ -8,6 +10,11 @@ from urllib.request import Request
 import pytest
 
 import investment_analyst.providers.http as http_module
+from investment_analyst.core.operation_control import (
+    OperationCancelledError,
+    OperationControl,
+    operation_control_scope,
+)
 from investment_analyst.providers.http import (
     HttpRequestError,
     HttpRequestFailureKind,
@@ -241,3 +248,59 @@ def test_invalid_retry_after_uses_bounded_backoff(
     )
 
     assert sleeps == [0.1]
+
+
+def test_cancellation_before_retry_does_not_start_another_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    control = OperationControl()
+
+    def fake_urlopen(request: object, timeout: float) -> FakeResponse:
+        nonlocal attempts
+        attempts += 1
+        control.cancel()
+        raise _http_error(503)
+
+    monkeypatch.setattr(http_module, "urlopen", fake_urlopen)
+    with operation_control_scope(control), pytest.raises(OperationCancelledError):
+        UrlLibHttpTransport().get(
+            "https://example.test/data",
+            headers={},
+            timeout_seconds=1.0,
+        )
+
+    assert attempts == 1
+
+
+def test_cancellation_interrupts_retry_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    retry_started = threading.Event()
+    control = OperationControl()
+
+    def fake_urlopen(request: object, timeout: float) -> FakeResponse:
+        nonlocal attempts
+        attempts += 1
+        retry_started.set()
+        raise _http_error(503, "5")
+
+    def cancel_after_retry_starts() -> None:
+        assert retry_started.wait(timeout=1)
+        control.cancel()
+
+    monkeypatch.setattr(http_module, "urlopen", fake_urlopen)
+    cancellation_thread = threading.Thread(target=cancel_after_retry_starts)
+    cancellation_thread.start()
+    started = time.monotonic()
+    with operation_control_scope(control), pytest.raises(OperationCancelledError):
+        UrlLibHttpTransport().get(
+            "https://example.test/data",
+            headers={},
+            timeout_seconds=1.0,
+        )
+    cancellation_thread.join(timeout=1)
+
+    assert attempts == 1
+    assert time.monotonic() - started < 1.0

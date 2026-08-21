@@ -324,6 +324,55 @@ def test_observation_count_and_minimum_available_at(storage) -> None:
     assert storage.observations.minimum_available_at(asset_id="asset:nonexistent") is None
 
 
+def test_observation_edges_and_source_filter_are_sql_aggregates(storage) -> None:
+    raw_record = make_raw_record()
+    first_at = datetime(2026, 7, 9, 16, tzinfo=UTC)
+    last_at = datetime(2026, 7, 11, 16, tzinfo=UTC)
+    first = make_observation(
+        raw_record_id=raw_record.record_id,
+        asset_id="asset:edges",
+        observed_at=first_at,
+        available_at=first_at + timedelta(hours=1),
+    )
+    last = make_observation(
+        raw_record_id=raw_record.record_id,
+        asset_id="asset:edges",
+        observed_at=last_at,
+        available_at=datetime(2026, 7, 10, 16, 3, tzinfo=UTC),
+    )
+    foreign = make_observation(
+        raw_record_id=raw_record.record_id,
+        asset_id="asset:edges",
+        observed_at=datetime(2026, 7, 12, 16, tzinfo=UTC),
+        available_at=datetime(2026, 7, 10, 16, 3, tzinfo=UTC),
+    ).model_copy(
+        update={
+            "source": first.source.model_copy(update={"source_id": "other:source"}),
+        }
+    )
+    for observation in (first, last, foreign):
+        storage.observations.save(observation)
+
+    assert (
+        storage.observations.count(
+            asset_id="asset:edges",
+            source_id="alpaca:bars",
+            frequency=DataFrequency.DAY_1,
+        )
+        == 2
+    )
+    assert storage.observations.observed_at_bounds(
+        asset_id="asset:edges",
+        source_id="alpaca:bars",
+        frequency=DataFrequency.DAY_1,
+    ) == (first_at, last_at)
+    assert storage.observations.maximum_available_at(
+        asset_id="asset:edges",
+        source_id="alpaca:bars",
+    ) == datetime(2026, 7, 10, 16, 3, tzinfo=UTC)
+    assert storage.observations.observed_at_bounds(asset_id="asset:missing") == (None, None)
+
+
 def test_metric_and_diagnostic_counts(storage) -> None:
     raw_record = make_raw_record()
     observation = make_observation(raw_record_id=raw_record.record_id)

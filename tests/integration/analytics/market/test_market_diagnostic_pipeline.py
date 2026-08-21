@@ -9,6 +9,8 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid5
 
+import pytest
+
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
 from investment_analyst.analytics.market.diagnostic_models import MarketDiagnosticRequest
 from investment_analyst.analytics.market.diagnostic_pipeline import MarketDiagnosticPipeline
@@ -419,3 +421,43 @@ def test_script_outputs_json_and_reuses_diagnostic(tmp_path) -> None:
     assert "raw_record" not in first.stdout.lower()
     assert "traceback" not in first.stderr.lower()
     assert "api_key" not in first.stdout.lower()
+
+
+def test_diagnostic_cardinality_checks_do_not_materialize_global_lists(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        seed_snapshot(
+            storage,
+            asset_id=BTC_ASSET,
+            source_id=BTC_SOURCE,
+            quality=DataQuality.VALID,
+        )
+        original_metric_list = storage.metric_results.list
+        monkeypatch.setattr(
+            storage.raw_records,
+            "list",
+            lambda *args, **kwargs: pytest.fail("diagnostic pipeline loaded raw records"),
+        )
+        monkeypatch.setattr(
+            storage.observations,
+            "list",
+            lambda *args, **kwargs: pytest.fail("diagnostic pipeline loaded observations"),
+        )
+        monkeypatch.setattr(
+            storage.diagnostics,
+            "list",
+            lambda *args, **kwargs: pytest.fail("diagnostic pipeline loaded diagnostics"),
+        )
+
+        def scoped_metric_list(*args, **kwargs):
+            if kwargs.get("asset_id") != BTC_ASSET:
+                pytest.fail("diagnostic metric selection was not asset-scoped")
+            return original_metric_list(*args, **kwargs)
+
+        monkeypatch.setattr(storage.metric_results, "list", scoped_metric_list)
+
+        summary = run_pipeline(storage, make_request(BTC_ASSET, BTC_SOURCE))
+
+        assert summary.traceability_verified is True

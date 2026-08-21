@@ -473,6 +473,13 @@ El lock `state/aapl_local_service.lock` impide dos servicios para el mismo works
 todos los intentos se guarda atómicamente en `state/multi_asset_schedule_state_v1.json`; no
 reemplaza ni recorta el historial analítico.
 
+Al recibir `SIGTERM` o `SIGINT`, el scheduler no inicia nuevos jobs y el job activo observa un
+control cooperativo no persistido en los límites seguros de red, páginas y unidades completas de
+evidencia. El intento conserva su identidad y termina como `failed` con categoría
+`interrupted_job`; el proceso espera el cierre cooperativo del scheduler y falla explícitamente si
+el hilo sigue vivo al alcanzar el deadline de apagado. Las operaciones manuales conservan su cola
+y su estado independiente.
+
 Las operaciones manuales nuevas pueden usar `POST /api/v1/manual-operations` y consultar su estado
 con `GET /api/v1/manual-operations/<operation_id>`. La respuesta de enqueue es `202`; el worker
 durable ejecuta después la fachada síncrona compatible. Solicitudes activas equivalentes se

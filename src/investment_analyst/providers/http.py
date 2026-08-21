@@ -10,6 +10,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+from investment_analyst.core.operation_control import (
+    check_operation_cancelled,
+    current_operation_control,
+)
+
 RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 _MAX_ATTEMPTS = 3
 _MAX_RETRY_AFTER_SECONDS = 5.0
@@ -192,6 +197,7 @@ class UrlLibHttpTransport:
 
         request = Request(url, data=body, headers=dict(headers), method=method)
         for attempt in range(_MAX_ATTEMPTS):
+            check_operation_cancelled()
             try:
                 with urlopen(request, timeout=timeout_seconds) as response:
                     response_headers = MappingProxyType(
@@ -204,6 +210,7 @@ class UrlLibHttpTransport:
                         candidate = response.read(max_response_bytes + 1)
                         body = candidate[:max_response_bytes]
                         body_truncated = len(candidate) > max_response_bytes
+                    check_operation_cancelled()
                     return HttpResponse(
                         status_code=int(response.status),
                         body=body,
@@ -220,7 +227,10 @@ class UrlLibHttpTransport:
                         status_code=error.code,
                         cause=error,
                     ) from error
-                self._sleep(self._retry_delay(attempt, error.headers.get("Retry-After")))
+                check_operation_cancelled()
+                self._wait_before_retry(
+                    self._retry_delay(attempt, error.headers.get("Retry-After"))
+                )
             except (TimeoutError, URLError) as error:
                 if attempt == _MAX_ATTEMPTS - 1:
                     raise HttpRequestError(
@@ -229,7 +239,8 @@ class UrlLibHttpTransport:
                         method=method,
                         cause=error,
                     ) from error
-                self._sleep(self._retry_delay(attempt, None))
+                check_operation_cancelled()
+                self._wait_before_retry(self._retry_delay(attempt, None))
 
         raise HttpRequestError(
             url,
@@ -237,6 +248,15 @@ class UrlLibHttpTransport:
             method=method,
             failure_kind=HttpRequestFailureKind.UNEXPECTED,
         )
+
+    def _wait_before_retry(self, delay_seconds: float) -> None:
+        control = current_operation_control()
+        if control is None:
+            self._sleep(delay_seconds)
+            return
+        if control.wait(delay_seconds):
+            check_operation_cancelled()
+        check_operation_cancelled()
 
     @staticmethod
     def _retry_delay(attempt: int, retry_after: str | None) -> float:

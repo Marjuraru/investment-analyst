@@ -1,8 +1,10 @@
 """Immutable canonical JSON storage for original records."""
 
+from __future__ import annotations
+
 import re
 from collections.abc import Collection
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -151,21 +153,19 @@ class JsonRawRecordRepository:
     def list(
         self,
         *,
+        asset_id: str | None = None,
         source_id: str | None = None,
+        schema_version: str | None = None,
         received_from: datetime | None = None,
         received_to: datetime | None = None,
     ) -> list[RawRecord]:
-        clauses: list[str] = []
-        parameters: list[object] = []
-        if source_id is not None:
-            clauses.append("source_id = ?")
-            parameters.append(source_id)
-        if received_from is not None:
-            clauses.append("received_at >= ?")
-            parameters.append(received_from)
-        if received_to is not None:
-            clauses.append("received_at <= ?")
-            parameters.append(received_to)
+        clauses, parameters = self._build_filter_clauses(
+            asset_id=asset_id,
+            source_id=source_id,
+            schema_version=schema_version,
+            received_from=received_from,
+            received_to=received_to,
+        )
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self._connection.execute(
             f"SELECT record_id FROM raw_record_index{where} ORDER BY received_at, record_id",
@@ -174,6 +174,88 @@ class JsonRawRecordRepository:
         record_ids = [UUID(row[0]) for row in rows]
         records = self.get_many(record_ids)
         return [records[record_id] for record_id in record_ids]
+
+    def count(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        schema_version: str | None = None,
+        received_from: datetime | None = None,
+        received_to: datetime | None = None,
+    ) -> int:
+        """Count indexed records without loading their JSON documents."""
+        clauses, parameters = self._build_filter_clauses(
+            asset_id=asset_id,
+            source_id=source_id,
+            schema_version=schema_version,
+            received_from=received_from,
+            received_to=received_to,
+        )
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        row = self._connection.execute(
+            f"SELECT count(*) FROM raw_record_index{where}",  # noqa: S608
+            parameters,
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def available_at_bounds(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        schema_version: str | None = None,
+    ) -> tuple[datetime | None, datetime | None]:
+        """Return exact indexed availability edges without loading raw documents."""
+        clauses, parameters = self._build_filter_clauses(
+            asset_id=asset_id,
+            source_id=source_id,
+            schema_version=schema_version,
+        )
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        row = self._connection.execute(
+            "SELECT cast(MIN(available_at) AS VARCHAR), cast(MAX(available_at) AS VARCHAR) "
+            f"FROM raw_record_index{where}",  # noqa: S608
+            parameters,
+        ).fetchone()
+        if row is None:
+            return None, None
+        return self._parse_timestamp(row[0]), self._parse_timestamp(row[1])
+
+    def _build_filter_clauses(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        schema_version: str | None = None,
+        received_from: datetime | None = None,
+        received_to: datetime | None = None,
+    ) -> tuple[list[str], list[object]]:
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if asset_id is not None:
+            clauses.append("asset_id = ?")
+            parameters.append(asset_id)
+        if source_id is not None:
+            clauses.append("source_id = ?")
+            parameters.append(source_id)
+        if schema_version is not None:
+            clauses.append("schema_version = ?")
+            parameters.append(schema_version)
+        if received_from is not None:
+            clauses.append("received_at >= ?")
+            parameters.append(received_from)
+        if received_to is not None:
+            clauses.append("received_at <= ?")
+            parameters.append(received_to)
+        return clauses, parameters
+
+    @staticmethod
+    def _parse_timestamp(value: object) -> datetime | None:
+        if value is None:
+            return None
+        parsed = datetime.fromisoformat(str(value))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
     def _relative_path(self, record: RawRecord) -> Path:
         received_date = record.received_at.date().isoformat()

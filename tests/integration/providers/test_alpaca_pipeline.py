@@ -11,6 +11,11 @@ from pathlib import Path
 import pytest
 
 from investment_analyst.core.models import AssetClass
+from investment_analyst.core.operation_control import (
+    OperationCancelledError,
+    OperationControl,
+    operation_control_scope,
+)
 from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
 from investment_analyst.providers.http import HttpResponse
 from investment_analyst.providers.market.alpaca_normalizer import ASSET_ID, SOURCE_ID
@@ -143,6 +148,71 @@ def test_complete_round_trip_idempotence_and_data_separation(tmp_path: Path) -> 
             assert observation.observed_at is not None
             assert observation.observed_at.utcoffset() == timedelta(0)
             assert observation.available_at <= observation.normalized_at
+
+
+def test_alpaca_import_cardinality_checks_do_not_materialize_metric_or_diagnostic_lists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        monkeypatch.setattr(
+            storage.metric_results,
+            "list",
+            lambda *args, **kwargs: pytest.fail("Alpaca import loaded all metric results"),
+        )
+        monkeypatch.setattr(
+            storage.diagnostics,
+            "list",
+            lambda *args, **kwargs: pytest.fail("Alpaca import loaded all diagnostics"),
+        )
+
+        summary, _ = _pipeline(storage)
+
+        result = summary.run(START, END)
+        assert result.bars_received == 3
+        assert result.traceability_verified is True
+
+
+def test_cancellation_after_one_complete_bar_preserves_unit_and_retry_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = OperationControl()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        original_save = storage.observations.save
+
+        def save_and_cancel(observation):
+            stored = original_save(observation)
+            if observation.field_name == "vwap":
+                control.cancel()
+            return stored
+
+        monkeypatch.setattr(storage.observations, "save", save_and_cancel)
+        pipeline, _ = _pipeline(storage)
+        with operation_control_scope(control), pytest.raises(OperationCancelledError):
+            pipeline.run(START, END)
+
+        partial_records = storage.raw_records.list(source_id=SOURCE_ID)
+        partial_observations = storage.observations.list(asset_id=ASSET_ID)
+        assert len(partial_records) == 1
+        assert all(
+            record.schema_version != ALPACA_FETCH_RECEIPT_SCHEMA for record in partial_records
+        )
+        assert len(partial_observations) == 7
+        assert {item.raw_record_id for item in partial_observations} == {
+            partial_records[0].record_id
+        }
+
+        monkeypatch.undo()
+        retry, _ = _pipeline(storage)
+        result = retry.run(START, END)
+
+        assert result.raw_records_created == 2
+        assert result.raw_records_reused == 1
+        assert result.observations_created == 14
+        assert result.observations_reused == 7
+        assert len(storage.raw_records.list(source_id=SOURCE_ID)) == 4
+        assert len(storage.observations.list(asset_id=ASSET_ID)) == 21
 
 
 def test_catalog_asset_configuration_preserves_independent_bvn_identity(tmp_path: Path) -> None:

@@ -40,6 +40,39 @@ class ObservationRepositoryDouble:
         assert asset_id == self.expected_asset_id
         return list(self.observations)
 
+    def observed_at_bounds(
+        self,
+        *,
+        asset_id: str,
+        source_id: str,
+        frequency: DataFrequency,
+    ) -> tuple[datetime | None, datetime | None]:
+        self.calls += 1
+        assert asset_id == self.expected_asset_id
+        values = sorted(
+            item.observed_at
+            for item in self.observations
+            if item.asset_id == asset_id
+            and item.source.source_id == source_id
+            and item.frequency is frequency
+        )
+        return (values[0], values[-1]) if values else (None, None)
+
+    def maximum_available_at(
+        self,
+        *,
+        asset_id: str,
+        source_id: str,
+    ) -> datetime | None:
+        self.calls += 1
+        assert asset_id == self.expected_asset_id
+        values = [
+            getattr(item, "available_at", item.observed_at)
+            for item in self.observations
+            if item.asset_id == asset_id and item.source.source_id == source_id
+        ]
+        return max(values, default=None)
+
 
 class RawRecordRepositoryDouble:
     """Return supplied raw records without storage writes."""
@@ -48,9 +81,38 @@ class RawRecordRepositoryDouble:
         self.records = records
         self.calls = 0
 
-    def list(self):
+    def list(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        schema_version: str | None = None,
+    ):
+        if asset_id is None or source_id is None or schema_version is None:
+            raise AssertionError("planner must not materialize an unfiltered raw-record list")
         self.calls += 1
-        return list(self.records)
+        return [
+            record
+            for record in self.records
+            if (asset_id is None or record.asset_id == asset_id)
+            and (source_id is None or record.source.source_id == source_id)
+            and (schema_version is None or record.schema_version == schema_version)
+        ]
+
+    def available_at_bounds(
+        self,
+        *,
+        asset_id: str,
+        source_id: str,
+        schema_version: str,
+    ) -> tuple[datetime | None, datetime | None]:
+        records = self.list(
+            asset_id=asset_id,
+            source_id=source_id,
+            schema_version=schema_version,
+        )
+        values = [record.available_at for record in records]
+        return (min(values), max(values)) if values else (None, None)
 
 
 class StorageDouble:
