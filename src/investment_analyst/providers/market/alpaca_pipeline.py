@@ -18,6 +18,7 @@ from investment_analyst.core.models import (
     SourceReference,
 )
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
+from investment_analyst.core.operation_control import check_operation_cancelled
 from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
 from investment_analyst.providers.market.alpaca_normalizer import (
     ASSET_ID,
@@ -280,11 +281,11 @@ class AlpacaHistoricalPipeline:
     def run(self, start: datetime, end: datetime) -> AlpacaImportSummary:
         """Fetch one symbol, persist raw and normalized data, and verify traceability."""
         self._storage.require_open()
-        metric_ids_before = {result.result_id for result in self._storage.metric_results.list()}
-        diagnostic_ids_before = {
-            result.diagnostic_id for result in self._storage.diagnostics.list()
-        }
+        check_operation_cancelled()
+        metric_count_before = self._storage.metric_results.count()
+        diagnostic_count_before = self._storage.diagnostics.count()
         fetch = self._client.fetch_daily_bars(self._configuration.symbol, start, end)
+        check_operation_cancelled()
         if (
             fetch.symbol != self._configuration.symbol
             or fetch.feed != self._configuration.feed
@@ -304,6 +305,7 @@ class AlpacaHistoricalPipeline:
         request_url = fetch.request_urls[0] if fetch.request_urls else ""
 
         for bar in fetch.bars:
+            check_operation_cancelled()
             candidate = bar_to_raw_record(
                 bar,
                 retrieved_at=fetch.retrieved_at,
@@ -333,18 +335,17 @@ class AlpacaHistoricalPipeline:
                     stored_observation = self._storage.observations.get(observation.observation_id)
                     observations_created += 1
                 stored_observations.append(stored_observation)
+            check_operation_cancelled()
 
         self._verify_traceability(stored_records, stored_observations)
-        if {
-            result.result_id for result in self._storage.metric_results.list()
-        } != metric_ids_before:
+        check_operation_cancelled()
+        if self._storage.metric_results.count() != metric_count_before:
             raise StorageError("Alpaca import unexpectedly changed metric results")
-        if {
-            result.diagnostic_id for result in self._storage.diagnostics.list()
-        } != diagnostic_ids_before:
+        if self._storage.diagnostics.count() != diagnostic_count_before:
             raise StorageError("Alpaca import unexpectedly changed diagnostic results")
 
         receipt_created, receipt_reused = self._persist_fetch_receipt(fetch)
+        check_operation_cancelled()
         bar_times = tuple(bar.timestamp for bar in fetch.bars)
         return AlpacaImportSummary(
             asset_id=self._configuration.asset_id,

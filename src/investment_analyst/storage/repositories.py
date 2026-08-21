@@ -226,6 +226,7 @@ class DuckDBObservationRepository:
         self,
         *,
         asset_id: str | None = None,
+        source_id: str | None = None,
         field_name: str | None = None,
         field_names: Collection[str] | None = None,
         frequency: DataFrequency | None = None,
@@ -242,6 +243,9 @@ class DuckDBObservationRepository:
         if asset_id is not None:
             clauses.append("asset_id = ?")
             parameters.append(asset_id)
+        if source_id is not None:
+            clauses.append("json_extract_string(document_json, '$.source.source_id') = ?")
+            parameters.append(source_id)
         if field_name is not None:
             clauses.append("field_name = ?")
             parameters.append(field_name)
@@ -283,6 +287,7 @@ class DuckDBObservationRepository:
         self,
         *,
         asset_id: str | None = None,
+        source_id: str | None = None,
         field_name: str | None = None,
         field_names: Collection[str] | None = None,
         frequency: DataFrequency | None = None,
@@ -296,6 +301,7 @@ class DuckDBObservationRepository:
     ) -> list[NormalizedObservation]:
         clauses, parameters = self._build_filter_clauses(
             asset_id=asset_id,
+            source_id=source_id,
             field_name=field_name,
             field_names=field_names,
             frequency=frequency,
@@ -322,6 +328,7 @@ class DuckDBObservationRepository:
         self,
         *,
         asset_id: str | None = None,
+        source_id: str | None = None,
         field_name: str | None = None,
         field_names: Collection[str] | None = None,
         frequency: DataFrequency | None = None,
@@ -335,6 +342,7 @@ class DuckDBObservationRepository:
     ) -> int:
         clauses, parameters = self._build_filter_clauses(
             asset_id=asset_id,
+            source_id=source_id,
             field_name=field_name,
             field_names=field_names,
             frequency=frequency,
@@ -388,6 +396,91 @@ class DuckDBObservationRepository:
             return None
         parsed = datetime.fromisoformat(str(row[0]))
         return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+    def maximum_available_at(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        frequency: DataFrequency | None = None,
+        quality: DataQuality | None = None,
+        transformation_version: str | None = None,
+    ) -> datetime | None:
+        """Return the latest availability cut from indexed observation columns."""
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if asset_id is not None:
+            clauses.append("asset_id = ?")
+            parameters.append(asset_id)
+        if frequency is not None:
+            clauses.append("frequency = ?")
+            parameters.append(frequency.value)
+        if quality is not None:
+            clauses.append("quality = ?")
+            parameters.append(quality.value)
+        if source_id is not None:
+            clauses.append("json_extract_string(document_json, '$.source.source_id') = ?")
+            parameters.append(source_id)
+        if transformation_version is not None:
+            clauses.append("json_extract_string(document_json, '$.transformation_version') = ?")
+            parameters.append(transformation_version)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        row = self._connection.execute(
+            f"SELECT cast(MAX(available_at) AS VARCHAR) FROM normalized_observations{where}",  # noqa: S608
+            parameters,
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        parsed = datetime.fromisoformat(str(row[0]))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+    def observed_at_bounds(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        frequency: DataFrequency | None = None,
+        field_name: str | None = None,
+        field_names: Collection[str] | None = None,
+        quality: DataQuality | None = None,
+        observed_from: datetime | None = None,
+        observed_before: datetime | None = None,
+        available_from: datetime | None = None,
+        available_to: datetime | None = None,
+        period_end_from: datetime | date | None = None,
+        period_end_to: datetime | date | None = None,
+    ) -> tuple[datetime | None, datetime | None]:
+        """Return exact observed-time edges without materializing observation documents."""
+        clauses, parameters = self._build_filter_clauses(
+            asset_id=asset_id,
+            source_id=source_id,
+            field_name=field_name,
+            field_names=field_names,
+            frequency=frequency,
+            quality=quality,
+            observed_from=observed_from,
+            observed_before=observed_before,
+            available_from=available_from,
+            available_to=available_to,
+            period_end_from=period_end_from,
+            period_end_to=period_end_to,
+        )
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        row = self._connection.execute(
+            "SELECT cast(MIN(observed_at) AS VARCHAR), cast(MAX(observed_at) AS VARCHAR) "
+            f"FROM normalized_observations{where}",  # noqa: S608
+            parameters,
+        ).fetchone()
+        if row is None:
+            return None, None
+        values: list[datetime | None] = []
+        for value in row:
+            if value is None:
+                values.append(None)
+                continue
+            parsed = datetime.fromisoformat(str(value))
+            values.append(parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC))
+        return values[0], values[1]
 
 
 class DuckDBMetricDefinitionRepository:

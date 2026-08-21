@@ -3,6 +3,8 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
 from investment_analyst.analytics.market.bar_schemas import ALPACA_SOURCE_ID, COINBASE_SOURCE_ID
 from investment_analyst.analytics.market.history_service import HistoricalMarketDataService
@@ -254,3 +256,49 @@ def test_known_at_is_part_of_result_identity_and_computed_at_is_preserved(tmp_pa
         second_pipeline.run(later_request)
         later_results = storage.metric_results.list(asset_id="crypto:btc-usd")
         assert len(later_results) == len(first_results) * 2
+
+
+def test_statistics_cardinality_checks_do_not_materialize_global_lists(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixed_clock = datetime(2026, 3, 1, tzinfo=UTC)
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        start, end = _store_coinbase(storage)
+        originals = {
+            repository: repository.list
+            for repository in (
+                storage.raw_records,
+                storage.observations,
+                storage.metric_results,
+                storage.diagnostics,
+            )
+        }
+
+        def guarded_list(repository, *args, **kwargs):
+            if not kwargs:
+                pytest.fail("statistics pipeline loaded an unfiltered repository list")
+            return originals[repository](*args, **kwargs)
+
+        for repository in originals:
+            monkeypatch.setattr(
+                repository,
+                "list",
+                lambda *args, _repository=repository, **kwargs: guarded_list(
+                    _repository,
+                    *args,
+                    **kwargs,
+                ),
+            )
+
+        pipeline = MarketStatisticsPipeline(
+            storage,
+            HistoricalMarketDataService(storage),
+            MarketStatisticsEngine(),
+            clock=lambda: fixed_clock,
+        )
+        summary = pipeline.run(
+            _request("crypto:btc-usd", COINBASE_SOURCE_ID, start, end, fixed_clock)
+        )
+
+        assert summary.traceability_verified is True

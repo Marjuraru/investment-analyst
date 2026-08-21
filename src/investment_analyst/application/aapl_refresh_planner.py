@@ -13,6 +13,7 @@ from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID
 from investment_analyst.providers.market.alpaca_normalizer import SOURCE_ID
 from investment_analyst.providers.market.alpaca_pipeline import (
+    ALPACA_FETCH_RECEIPT_SCHEMA,
     ALPACA_INTERVAL_SEMANTICS,
     alpaca_fetch_receipt_from_raw_record,
     alpaca_receipt_covers_calendar_days,
@@ -137,38 +138,29 @@ class AaplMarketRefreshPlanner:
 
     def latest_available_at(self) -> datetime | None:
         """Return the latest availability cut for this exact asset and source."""
-        candidates = [
-            observation.available_at.astimezone(UTC)
-            for observation in self._storage.observations.list(asset_id=self._asset_id)
-            if observation.asset_id == self._asset_id
-            and observation.source.source_id == self._source_id
-        ]
-        for record in self._storage.raw_records.list(source_id=self._source_id):
-            receipt = alpaca_fetch_receipt_from_raw_record(record)
-            if (
-                receipt is not None
-                and receipt.asset_id == self._asset_id
-                and receipt.source_id == self._source_id
-            ):
-                candidates.append(receipt.retrieved_at.astimezone(UTC))
+        observation_latest = self._storage.observations.maximum_available_at(
+            asset_id=self._asset_id,
+            source_id=self._source_id,
+        )
+        _, receipt_latest = self._storage.raw_records.available_at_bounds(
+            asset_id=self._asset_id,
+            source_id=self._source_id,
+            schema_version=ALPACA_FETCH_RECEIPT_SCHEMA,
+        )
+        candidates = tuple(
+            item.astimezone(UTC)
+            for item in (observation_latest, receipt_latest)
+            if item is not None
+        )
         return max(candidates, default=None)
 
     def _persisted_timestamps(self) -> tuple[datetime, ...]:
-        observations = self._storage.observations.list(asset_id=self._asset_id)
-        return tuple(
-            sorted(
-                {
-                    observation.observed_at.astimezone(UTC)
-                    for observation in observations
-                    if observation.asset_id == self._asset_id
-                    and observation.source.source_id == self._source_id
-                    and observation.frequency is DataFrequency.DAY_1
-                    and observation.observed_at is not None
-                    and observation.observed_at.tzinfo is not None
-                    and observation.observed_at.utcoffset() is not None
-                }
-            )
+        earliest, latest = self._storage.observations.observed_at_bounds(
+            asset_id=self._asset_id,
+            source_id=self._source_id,
+            frequency=DataFrequency.DAY_1,
         )
+        return tuple(item.astimezone(UTC) for item in (earliest, latest) if item is not None)
 
     def _merged_coverage(
         self,
@@ -186,7 +178,11 @@ class AaplMarketRefreshPlanner:
                     ),
                 )
             )
-        for record in self._storage.raw_records.list():
+        for record in self._storage.raw_records.list(
+            asset_id=self._asset_id,
+            source_id=self._source_id,
+            schema_version=ALPACA_FETCH_RECEIPT_SCHEMA,
+        ):
             receipt = alpaca_fetch_receipt_from_raw_record(record)
             if receipt is None:
                 continue

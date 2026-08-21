@@ -24,6 +24,7 @@ from investment_analyst.analytics.market.statistics_models import (
     MetricCalculation,
 )
 from investment_analyst.core.models import DataQuality, MetricResult
+from investment_analyst.core.operation_control import check_operation_cancelled
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import RecordNotFoundError, StorageError
 
@@ -73,11 +74,13 @@ class MarketStatisticsPipeline:
     def run(self, request: MarketStatisticsRequest) -> MarketStatisticsRunSummary:
         """Execute one idempotent point-in-time statistics run."""
         self._storage.require_open()
-        raw_count_before = len(self._storage.raw_records.list())
-        observation_count_before = len(self._storage.observations.list())
-        diagnostic_count_before = len(self._storage.diagnostics.list())
+        check_operation_cancelled()
+        raw_count_before = self._storage.raw_records.count()
+        observation_count_before = self._storage.observations.count()
+        diagnostic_count_before = self._storage.diagnostics.count()
 
         series = self._history_service.query(request.query)
+        check_operation_cancelled()
         if series.query != request.query:
             raise MarketStatisticsPipelineError("history service returned a different query")
 
@@ -98,6 +101,7 @@ class MarketStatisticsPipeline:
             computation.calculations,
             request.query.known_at,
         ):
+            check_operation_cancelled()
             if calculation.available_at > computed_at:
                 raise MarketStatisticsPipelineError(
                     "computed_at must not be earlier than result availability"
@@ -114,7 +118,9 @@ class MarketStatisticsPipeline:
                 self._verify_identity(existing, calculation)
                 stored_results.append(existing)
                 reused += 1
+            check_operation_cancelled()
 
+        check_operation_cancelled()
         self._verify_run(
             request,
             stored_results,
@@ -302,11 +308,11 @@ class MarketStatisticsPipeline:
                     )
 
         try:
-            if len(self._storage.raw_records.list()) != raw_count_before:
+            if self._storage.raw_records.count() != raw_count_before:
                 raise MarketStatisticsPipelineError("statistics pipeline created raw records")
-            if len(self._storage.observations.list()) != observation_count_before:
+            if self._storage.observations.count() != observation_count_before:
                 raise MarketStatisticsPipelineError("statistics pipeline created observations")
-            if len(self._storage.diagnostics.list()) != diagnostic_count_before:
+            if self._storage.diagnostics.count() != diagnostic_count_before:
                 raise MarketStatisticsPipelineError("statistics pipeline created diagnostics")
         except StorageError as error:
             raise MarketStatisticsPipelineError("storage counts could not be verified") from error

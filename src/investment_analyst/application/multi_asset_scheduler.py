@@ -15,6 +15,11 @@ from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_v
 
 from investment_analyst.application.operational_state import AaplOperationalStateError
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
+from investment_analyst.core.operation_control import (
+    OperationCancelledError,
+    OperationControl,
+    operation_control_scope,
+)
 
 _MAX_ATTEMPTS_RETAINED = 100_000
 
@@ -755,12 +760,18 @@ class MultiAssetScheduler:
         with self._registry_lock:
             self._jobs = replacement
 
-    def tick(self) -> tuple[ScheduledJobAttempt, ...]:
+    def tick(
+        self,
+        *,
+        operation_control: OperationControl | None = None,
+    ) -> tuple[ScheduledJobAttempt, ...]:
         """Recover interrupted work and execute all currently due jobs once."""
         if not self._tick_lock.acquire(blocking=False):
             return ()
         completed: list[ScheduledJobAttempt] = []
         try:
+            if operation_control is not None:
+                operation_control.raise_if_cancelled()
             self._retry_notifications()
             now = self._now()
             jobs = self._jobs_snapshot()
@@ -769,6 +780,8 @@ class MultiAssetScheduler:
             due_ids = tuple(item.definition.job_id for item in status.jobs if item.due)
             registry = {item.definition.job_id: item for item in jobs}
             for job_id in due_ids:
+                if operation_control is not None:
+                    operation_control.raise_if_cancelled()
                 job = registry[job_id]
                 current = self._now()
                 refreshed = self._job_status(job.definition, current, self._store.load())
@@ -777,8 +790,14 @@ class MultiAssetScheduler:
                 if not self._claim_registered_job(job_id):
                     continue
                 try:
-                    attempt = self._run_job(job, current)
+                    attempt = self._run_job(
+                        job,
+                        current,
+                        operation_control=operation_control,
+                    )
                     completed.append(attempt)
+                    if operation_control is not None and operation_control.cancelled:
+                        break
                 finally:
                     self._release_active_job(job_id)
             return tuple(completed)
@@ -795,15 +814,22 @@ class MultiAssetScheduler:
         """Poll until stopped and retain the thread after safe scheduler errors."""
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
-        while not stop_event.is_set():
+        operation_control = OperationControl(stop_event=stop_event)
+        while not operation_control.cancelled:
             try:
-                self.tick()
+                self.tick(operation_control=operation_control)
             except Exception:  # noqa: BLE001
-                if error_handler is not None:
+                if error_handler is not None and not operation_control.cancelled:
                     error_handler("multi-asset scheduler could not evaluate persisted state")
-            stop_event.wait(poll_seconds)
+            operation_control.wait(poll_seconds)
 
-    def _run_job(self, job: RegisteredScheduledJob, now: datetime) -> ScheduledJobAttempt:
+    def _run_job(
+        self,
+        job: RegisteredScheduledJob,
+        now: datetime,
+        *,
+        operation_control: OperationControl | None = None,
+    ) -> ScheduledJobAttempt:
         definition = job.definition
         local_date = now.astimezone(ZoneInfo(definition.timezone)).date()
         attempts_today = self._attempts_for(
@@ -831,9 +857,26 @@ class MultiAssetScheduler:
                 started_at=now,
                 attempt_number=attempt_number,
             )
-            execution = job.run(invocation)
-            if execution.job_id != definition.job_id:
-                raise ValueError("scheduled execution job_id does not match its definition")
+            with operation_control_scope(operation_control):
+                if operation_control is not None:
+                    operation_control.raise_if_cancelled()
+                execution = job.run(invocation)
+                if operation_control is not None:
+                    operation_control.raise_if_cancelled()
+                if execution.job_id != definition.job_id:
+                    raise ValueError("scheduled execution job_id does not match its definition")
+        except OperationCancelledError:
+            completed = ScheduledJobAttempt(
+                **running.model_dump(
+                    exclude={"status", "completed_at", "execution", "failure", "telemetry"}
+                ),
+                status=ScheduledJobAttemptStatus.FAILED,
+                completed_at=self._now(),
+                failure=scheduled_job_failure(
+                    ScheduledJobFailureCategory.INTERRUPTED,
+                    "the scheduled job was interrupted at a safe boundary",
+                ),
+            )
         except ScheduledJobRunError as error:
             completed = ScheduledJobAttempt(
                 **running.model_dump(

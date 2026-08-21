@@ -2,6 +2,7 @@
 
 import json
 import threading
+import time as time_module
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -25,6 +26,7 @@ from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobRunError,
     scheduled_job_failure,
 )
+from investment_analyst.core.operation_control import current_operation_control
 
 
 def _definition(job_id: str, *, provider: str = "test-provider") -> ScheduledJobDefinition:
@@ -560,3 +562,57 @@ def test_registry_reconciliation_during_active_provider_preserves_identity_and_h
     assert reactivated.latest_success == completed[0][0]
     assert scheduler.tick() == ()
     assert provider_calls == 1
+
+
+def test_scheduler_cancellation_marks_active_job_interrupted_and_skips_remaining_due_jobs(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    active = _definition("a-active-cancellable")
+    queued = _definition("b-must-not-start")
+    started = threading.Event()
+    queued_calls = 0
+
+    def cancellable(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        del invocation
+        control = current_operation_control()
+        assert control is not None
+        started.set()
+        while not control.cancelled:
+            time_module.sleep(0.005)
+        control.raise_if_cancelled()
+        raise AssertionError("cancellation should have raised")
+
+    def must_not_start(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        nonlocal queued_calls
+        queued_calls += 1
+        return _execution(invocation)
+
+    store = MultiAssetScheduleStateStore(tmp_path / "cancelled.json")
+    scheduler = MultiAssetScheduler(
+        (
+            RegisteredScheduledJob(active, cancellable),
+            RegisteredScheduledJob(queued, must_not_start),
+        ),
+        store,
+        clock=lambda: now,
+    )
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=scheduler.run_forever,
+        args=(stop_event,),
+        kwargs={"poll_seconds": 0.01},
+    )
+    thread.start()
+    assert started.wait(timeout=2)
+    stop_event.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert queued_calls == 0
+    attempts = store.load().attempts
+    assert len(attempts) == 1
+    assert attempts[0].status is ScheduledJobAttemptStatus.FAILED
+    assert attempts[0].failure is not None
+    assert attempts[0].failure.category is ScheduledJobFailureCategory.INTERRUPTED
+    assert current_operation_control() is None

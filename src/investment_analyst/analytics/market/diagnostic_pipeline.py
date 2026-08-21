@@ -24,6 +24,7 @@ from investment_analyst.core.models import (
     DiagnosticVerdict,
     MetricResult,
 )
+from investment_analyst.core.operation_control import check_operation_cancelled
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import RecordNotFoundError, StorageError
 
@@ -101,8 +102,10 @@ class MarketDiagnosticPipeline:
     def run(self, request: MarketDiagnosticRequest) -> MarketDiagnosticRunSummary:
         """Execute one idempotent market-diagnostic persistence run."""
         self._storage.require_open()
+        check_operation_cancelled()
         before = self._counts()
         candidates = self._selector.candidates(request)
+        check_operation_cancelled()
         snapshot = self._selector.select_from_results(request, candidates)
         missing = () if snapshot else describe_missing_requirements(request, candidates)
         computed_at = _normalized_clock(self._clock)
@@ -112,6 +115,7 @@ class MarketDiagnosticPipeline:
             computed_at=computed_at,
             fallback_metric_results=candidates,
         )
+        check_operation_cancelled()
         expected_id = diagnostic_result_id(
             request,
             selected_metric_result_ids=snapshot.metric_result_ids() if snapshot else (),
@@ -154,6 +158,8 @@ class MarketDiagnosticPipeline:
                 )
             reused = 1
 
+        check_operation_cancelled()
+
         computation = MarketDiagnosticComputation(
             request=request,
             snapshot=snapshot,
@@ -162,6 +168,7 @@ class MarketDiagnosticPipeline:
             traceability_verified=True,
         )
         self._verify_run(request, computation, candidates, before, created)
+        check_operation_cancelled()
         selected_ids = snapshot.metric_result_ids() if snapshot else ()
         return MarketDiagnosticRunSummary(
             asset_id=request.query.asset_id,
@@ -186,10 +193,10 @@ class MarketDiagnosticPipeline:
     def _counts(self) -> tuple[int, int, int, int]:
         try:
             return (
-                len(self._storage.raw_records.list()),
-                len(self._storage.observations.list()),
-                len(self._storage.metric_results.list()),
-                len(self._storage.diagnostics.list()),
+                self._storage.raw_records.count(),
+                self._storage.observations.count(),
+                self._storage.metric_results.count(),
+                self._storage.diagnostics.count(),
             )
         except StorageError as error:
             raise MarketDiagnosticPipelineError("storage counts could not be read") from error
