@@ -31,7 +31,7 @@ from investment_analyst.providers.peru.smv_raw_records import (
     SMV_COMPANIES_SOURCE_ID,
     SMV_SECURITIES_SOURCE_ID,
 )
-from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.storage import LocalStorage, StorageError, StoragePaths
 
 LEGAL_NAME = "SOCIEDAD MINERA CERRO VERDE S.A.A."
 COMPANY_HEADERS = (
@@ -58,6 +58,11 @@ SECURITY_HEADERS = (
     "ResolucionInscripcion",
     "TipoValor",
 )
+LIVE_ANALYTICAL_COUNTS = {
+    "observations": 268_305,
+    "metric_results": 311_061,
+    "diagnostics": 431,
+}
 
 
 def _page(
@@ -181,6 +186,144 @@ class FixtureClient:
 
 def _query(storage: LocalStorage, known_at: datetime):
     return SmvPointInTimeService(storage).query(SmvPointInTimeQuery(known_at=known_at))
+
+
+def _seed_live_analytical_counts(storage: LocalStorage) -> None:
+    connection = storage.store.connection
+    connection.execute(
+        """
+        INSERT INTO normalized_observations (
+            observation_id, raw_record_id, asset_id, field_name, frequency,
+            observed_at, period_end, available_at, quality, document_json
+        )
+        SELECT
+            'foreign-observation-' || CAST(i AS VARCHAR),
+            'foreign-raw-' || CAST(i AS VARCHAR),
+            'equity:foreign:live-corpus',
+            'foreign.value',
+            'daily',
+            TIMESTAMPTZ '2026-01-01 00:00:00+00' + i * INTERVAL '1 second',
+            TIMESTAMPTZ '2026-01-01 00:00:00+00' + i * INTERVAL '1 second',
+            TIMESTAMPTZ '2026-01-01 00:00:00+00' + i * INTERVAL '1 second',
+            'complete',
+            '{}'
+        FROM range(?) AS source(i)
+        """,
+        [LIVE_ANALYTICAL_COUNTS["observations"]],
+    )
+    connection.execute(
+        """
+        INSERT INTO metric_results (
+            result_id, asset_id, metric_key, as_of, available_at,
+            computed_at, quality, document_json
+        )
+        SELECT
+            'foreign-metric-' || CAST(i AS VARCHAR),
+            'equity:foreign:live-corpus',
+            'foreign.metric',
+            TIMESTAMPTZ '2026-01-01 00:00:00+00' + i * INTERVAL '1 second',
+            TIMESTAMPTZ '2026-01-01 00:00:00+00' + i * INTERVAL '1 second',
+            TIMESTAMPTZ '2026-01-01 00:00:00+00' + i * INTERVAL '1 second',
+            'complete',
+            '{}'
+        FROM range(?) AS source(i)
+        """,
+        [LIVE_ANALYTICAL_COUNTS["metric_results"]],
+    )
+    connection.execute(
+        """
+        INSERT INTO diagnostic_results (
+            diagnostic_id, asset_id, mode, verdict, as_of, available_at,
+            computed_at, quality, document_json
+        )
+        SELECT
+            'foreign-diagnostic-' || CAST(i AS VARCHAR),
+            'equity:foreign:live-corpus',
+            'fundamental',
+            'insufficient_data',
+            TIMESTAMPTZ '2026-01-01 00:00:00+00' + i * INTERVAL '1 second',
+            TIMESTAMPTZ '2026-01-01 00:00:00+00' + i * INTERVAL '1 second',
+            TIMESTAMPTZ '2026-01-01 00:00:00+00' + i * INTERVAL '1 second',
+            'complete',
+            '{}'
+        FROM range(?) AS source(i)
+        """,
+        [LIVE_ANALYTICAL_COUNTS["diagnostics"]],
+    )
+
+
+def test_pipeline_uses_count_pushdown_without_materializing_analytics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    retrieved_at = datetime(2026, 7, 29, 12, tzinfo=UTC)
+    count_calls: dict[str, list[int]] = {
+        "observations": [],
+        "metric_results": [],
+        "diagnostics": [],
+    }
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        _seed_live_analytical_counts(storage)
+        for name in count_calls:
+            repository = getattr(storage, name)
+            original_count = repository.count
+
+            def count(
+                *args: object,
+                _name: str = name,
+                _original_count=original_count,
+                **kwargs: object,
+            ) -> int:
+                value = _original_count(*args, **kwargs)
+                count_calls[_name].append(value)
+                return value
+
+            def forbidden_list(
+                *args: object,
+                _name: str = name,
+                **kwargs: object,
+            ) -> list[object]:
+                raise AssertionError(f"SMV pipeline materialized {_name} through list()")
+
+            monkeypatch.setattr(repository, "count", count)
+            monkeypatch.setattr(repository, "list", forbidden_list)
+
+        summary = SmvRegistryPipeline(
+            storage,
+            FixtureClient(retrieved_at=retrieved_at, quote="69.40"),
+        ).run(LEGAL_NAME)
+
+        assert summary.traceability_verified is True
+        assert count_calls == {
+            name: [count, count] for name, count in LIVE_ANALYTICAL_COUNTS.items()
+        }
+
+
+def test_pipeline_rejects_analytical_cardinality_change_without_listing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    retrieved_at = datetime(2026, 7, 29, 12, tzinfo=UTC)
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        observation_counts = iter((0, 1))
+        monkeypatch.setattr(storage.observations, "count", lambda: next(observation_counts))
+        for name in ("observations", "metric_results", "diagnostics"):
+            repository = getattr(storage, name)
+
+            def forbidden_list(
+                *args: object,
+                _name: str = name,
+                **kwargs: object,
+            ) -> list[object]:
+                raise AssertionError(f"SMV pipeline materialized {_name} through list()")
+
+            monkeypatch.setattr(repository, "list", forbidden_list)
+
+        with pytest.raises(StorageError, match="must not create observations"):
+            SmvRegistryPipeline(
+                storage,
+                FixtureClient(retrieved_at=retrieved_at, quote="69.40"),
+            ).run(LEGAL_NAME)
 
 
 def test_pipeline_is_idempotent_revisioned_isolated_and_point_in_time(
