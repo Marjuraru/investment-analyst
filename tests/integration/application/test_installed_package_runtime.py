@@ -78,6 +78,11 @@ def test_installed_wheel_contains_runtime_resources_and_initializes_storage(
         "ALPACA_API_KEY",
         "ALPACA_API_SECRET",
         "SEC_USER_AGENT",
+        "COVERAGE_PROCESS_START",
+        "COVERAGE_PROCESS_CONFIG",
+        "COVERAGE_FILE",
+        "COVERAGE_RCFILE",
+        "COVERAGE_RUN",
     ):
         environment.pop(variable, None)
     environment["PYTHONNOUSERSITE"] = "1"
