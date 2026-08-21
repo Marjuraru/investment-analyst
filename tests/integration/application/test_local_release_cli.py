@@ -143,6 +143,11 @@ def test_cli_full_lifecycle_flow(tmp_path: Path, capsys: pytest.CaptureFixture[s
         assert code == 0
         current_unit = unit_file.read_text(encoding="utf-8")
         assert f"releases/{sha1}" in current_unit
+        first_adoption_state = json.loads(
+            (runtime_root / "deployment_state.json").read_text(encoding="utf-8")
+        )
+        assert first_adoption_state["current"] == sha1
+        assert first_adoption_state["previous"] is None
 
         # Step D: status (JSON)
         capsys.readouterr()
@@ -203,6 +208,11 @@ def test_cli_full_lifecycle_flow(tmp_path: Path, capsys: pytest.CaptureFixture[s
         assert code == 0
         unit_after_rb = unit_file.read_text(encoding="utf-8")
         assert f"releases/{sha1}" in unit_after_rb
+        rollback_state = json.loads(
+            (runtime_root / "deployment_state.json").read_text(encoding="utf-8")
+        )
+        assert rollback_state["current"] == sha1
+        assert rollback_state["previous"] == sha2
 
         # Step G: idempotence on repeated stage/activate
         code = main(
@@ -226,6 +236,22 @@ def test_cli_full_lifecycle_flow(tmp_path: Path, capsys: pytest.CaptureFixture[s
 def test_cli_error_handling(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Test CLI error handling and fail-closed exit codes."""
     runtime_root = tmp_path / "runtime"
+
+    with pytest.raises(SystemExit) as invalid_deadline:
+        main(
+            [
+                "--runtime-root",
+                str(runtime_root),
+                "activate",
+                "--sha",
+                "1111111111111111111111111111111111111111",
+                "--readiness-deadline-seconds",
+                "0",
+            ]
+        )
+    assert invalid_deadline.value.code == 2
+    _, err = capsys.readouterr()
+    assert "between 1 and 600" in err
 
     code = main(
         [

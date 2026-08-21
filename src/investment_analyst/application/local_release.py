@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -11,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -43,6 +45,10 @@ DEFAULT_SYSTEMD_UNIT_PATH = Path("~/.config/systemd/user/investment-analyst.serv
 DEFAULT_ORIGIN_URL = "https://github.com/Marjuraru/investment-analyst.git"
 REQUIRED_UV_VERSION = "0.11.29"
 LOCAL_SERVICE_UNIT_NAME = "investment-analyst.service"
+DEFAULT_READINESS_DEADLINE: float = 120.0
+MIN_READINESS_DEADLINE: float = 1.0
+MAX_READINESS_DEADLINE: float = 600.0
+DEFAULT_READINESS_INTERVAL: float = 0.25
 
 
 class LocalReleaseError(Exception):
@@ -179,6 +185,7 @@ class SystemctlRunner(Protocol):
 
     def daemon_reload(self) -> None: ...
     def restart(self, service: str) -> None: ...
+    def stop(self, service: str) -> None: ...
     def is_active(self, service: str) -> bool: ...
     def is_enabled(self, service: str) -> bool: ...
     def show_properties(self, service: str, properties: Sequence[str]) -> Mapping[str, str]: ...
@@ -210,6 +217,18 @@ class RealSystemctlRunner:
             )
         except (subprocess.SubprocessError, OSError) as error:
             raise ReleaseUnitError(f"systemctl restart {service} failed: {error}") from error
+
+    def stop(self, service: str) -> None:
+        try:
+            subprocess.run(
+                ["systemctl", "--user", "stop", service],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (subprocess.SubprocessError, OSError) as error:
+            raise ReleaseUnitError(f"systemctl stop {service} failed: {error}") from error
 
     def is_active(self, service: str) -> bool:
         try:
@@ -275,6 +294,7 @@ class SimulatedSystemctlRunner:
         self.fail_show = fail_show
         self.reloaded = False
         self.restarts: list[str] = []
+        self.stops: list[str] = []
 
     def daemon_reload(self) -> None:
         self.reloaded = True
@@ -283,6 +303,10 @@ class SimulatedSystemctlRunner:
         if self.fail_restart:
             raise ReleaseUnitError(f"Simulated restart failure for {service}")
         self.restarts.append(service)
+
+    def stop(self, service: str) -> None:
+        self.stops.append(service)
+        self.is_active_result = False
 
     def is_active(self, service: str) -> bool:
         return self.is_active_result
@@ -311,7 +335,7 @@ class HealthChecker(Protocol):
         self,
         port: int,
         endpoints: Sequence[str] = ("/api/v1/overview",),
-        deadline_seconds: float = 15.0,
+        deadline_seconds: float = DEFAULT_READINESS_DEADLINE,
         interval_seconds: float = 0.25,
         timeout_seconds: float = 5.0,
     ) -> tuple[bool, int | None]: ...
@@ -335,14 +359,18 @@ class RealHealthChecker:
         timeout_seconds: float = 5.0,
     ) -> tuple[bool, int | None]:
         last_status: int | None = None
+        started_at = self._clock()
         for endpoint in endpoints:
+            remaining = timeout_seconds - (self._clock() - started_at)
+            if remaining <= 0:
+                return False, last_status
             url = f"http://127.0.0.1:{port}{endpoint}"
             try:
                 request = urllib.request.Request(
                     url,
                     headers={"User-Agent": "Investment-Analyst-Deployer/1.0"},
                 )
-                with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                with urllib.request.urlopen(request, timeout=remaining) as response:
                     last_status = response.status
                     if response.status != 200:
                         return False, response.status
@@ -354,7 +382,7 @@ class RealHealthChecker:
         self,
         port: int,
         endpoints: Sequence[str] = ("/api/v1/overview",),
-        deadline_seconds: float = 15.0,
+        deadline_seconds: float = DEFAULT_READINESS_DEADLINE,
         interval_seconds: float = 0.25,
         timeout_seconds: float = 5.0,
     ) -> tuple[bool, int | None]:
@@ -367,11 +395,17 @@ class RealHealthChecker:
         start = self._clock()
         last_status: int | None = None
         while True:
+            elapsed = self._clock() - start
+            remaining = deadline_seconds - elapsed
+            if remaining <= 0:
+                return False, last_status
             ok, last_status = self.check_health(
-                port=port, endpoints=endpoints, timeout_seconds=timeout_seconds
+                port=port,
+                endpoints=endpoints,
+                timeout_seconds=min(timeout_seconds, remaining),
             )
             if ok:
-                return True, last_status
+                return self._clock() - start <= deadline_seconds, last_status
             elapsed = self._clock() - start
             if elapsed >= deadline_seconds:
                 return False, last_status
@@ -430,7 +464,7 @@ class SimulatedHealthChecker:
         self,
         port: int,
         endpoints: Sequence[str] = ("/api/v1/overview",),
-        deadline_seconds: float = 15.0,
+        deadline_seconds: float = DEFAULT_READINESS_DEADLINE,
         interval_seconds: float = 0.25,
         timeout_seconds: float = 5.0,
     ) -> tuple[bool, int | None]:
@@ -438,11 +472,17 @@ class SimulatedHealthChecker:
         start = self._clock()
         last_status: int | None = None
         while True:
+            elapsed = self._clock() - start
+            remaining = deadline_seconds - elapsed
+            if remaining <= 0:
+                return False, last_status
             ok, last_status = self.check_health(
-                port=port, endpoints=endpoints, timeout_seconds=timeout_seconds
+                port=port,
+                endpoints=endpoints,
+                timeout_seconds=min(timeout_seconds, remaining),
             )
             if ok:
-                return True, last_status
+                return self._clock() - start <= deadline_seconds, last_status
             elapsed = self._clock() - start
             if elapsed >= deadline_seconds:
                 return False, last_status
@@ -509,9 +549,64 @@ def validate_environment_file_content(path: Path) -> None:
         )
 
 
-# Default readiness polling configuration
-DEFAULT_READINESS_DEADLINE: float = 15.0
-DEFAULT_READINESS_INTERVAL: float = 0.25
+_INSTALLED_RUNTIME_PROBE = r"""
+import sys
+from importlib import resources
+from pathlib import Path
+import sysconfig
+
+release_root = Path(sys.argv[1]).resolve()
+workspace_root = Path(sys.argv[2]).resolve()
+site_root = Path(sysconfig.get_path("purelib")).resolve()
+
+import investment_analyst
+
+package_path = Path(investment_analyst.__file__ or "").resolve()
+if site_root not in package_path.parents or "site-packages" not in package_path.parts:
+    raise RuntimeError("investment_analyst was not imported from the installed site-packages")
+if (release_root / "src") in package_path.parents:
+    raise RuntimeError("investment_analyst was imported from the release source tree")
+
+def resource_exists(package_name, resource_name):
+    resource = resources.files(package_name)
+    for part in resource_name.split("/"):
+        resource = resource.joinpath(part)
+    return resource.is_file()
+
+required_resources = (
+    ("investment_analyst.catalog", "default_assets.v1.json"),
+    ("investment_analyst.storage.migrations", "001_initial.sql"),
+    ("investment_analyst.frontend", "static/index.html"),
+    ("investment_analyst.frontend", "static/app.js"),
+    ("investment_analyst.frontend", "static/styles.css"),
+)
+missing = [
+    f"{package_name}/{resource_name}"
+    for package_name, resource_name in required_resources
+    if not resource_exists(package_name, resource_name)
+]
+if missing:
+    raise RuntimeError("installed runtime resources are missing")
+
+from investment_analyst.application.runtime import (
+    ApplicationRuntime,
+    StorageLocationRequest,
+)
+from investment_analyst.catalog.service import AssetCatalogService
+from investment_analyst.workspace.models import WorkspaceAccessMode
+
+AssetCatalogService.load_default()
+runtime = ApplicationRuntime.create_default()
+initialization = runtime.workspace_service.initialize(workspace_root)
+if not initialization.storage_initialized:
+    raise RuntimeError("installed runtime workspace storage was not initialized")
+with runtime.open_storage(
+    StorageLocationRequest(workspace=workspace_root),
+    access_mode=WorkspaceAccessMode.READ_WRITE,
+) as storage:
+    if not storage.is_open:
+        raise RuntimeError("installed runtime storage did not open")
+"""
 
 
 class LocalReleaseService:
@@ -528,6 +623,12 @@ class LocalReleaseService:
         readiness_deadline: float = DEFAULT_READINESS_DEADLINE,
         readiness_interval: float = DEFAULT_READINESS_INTERVAL,
     ) -> None:
+        if (
+            not math.isfinite(readiness_deadline)
+            or readiness_deadline < MIN_READINESS_DEADLINE
+            or readiness_deadline > MAX_READINESS_DEADLINE
+        ):
+            raise ReleaseConfigurationError("Readiness deadline must be between 1 and 600 seconds")
         if isinstance(paths, LocalReleasePaths):
             self.paths = paths
         else:
@@ -547,6 +648,41 @@ class LocalReleaseService:
         )
         self.readiness_deadline = readiness_deadline
         self.readiness_interval = readiness_interval
+
+    def _validate_installed_runtime(self, python_bin: Path, release_root: Path) -> None:
+        """Validate the non-editable installed package and initialize temporary storage."""
+        environment = os.environ.copy()
+        for variable in (
+            "PYTHONHOME",
+            "PYTHONPATH",
+            "PYTHONUSERBASE",
+            "VIRTUAL_ENV",
+            "ALPACA_API_KEY",
+            "ALPACA_API_SECRET",
+            "SEC_USER_AGENT",
+        ):
+            environment.pop(variable, None)
+        environment["PYTHONNOUSERSITE"] = "1"
+        with tempfile.TemporaryDirectory(prefix="investment-analyst-installed-probe-") as scratch:
+            workspace_root = Path(scratch) / "workspace"
+            try:
+                subprocess.run(
+                    [
+                        str(python_bin),
+                        "-c",
+                        _INSTALLED_RUNTIME_PROBE,
+                        str(release_root.resolve()),
+                        str(workspace_root),
+                    ],
+                    cwd=scratch,
+                    env=environment,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            except (subprocess.SubprocessError, OSError) as error:
+                raise ReleaseAcquisitionError("Installed package runtime probe failed") from error
 
     def init_runtime(self) -> None:
         """Create runtime directories with strict 0700 permissions."""
@@ -823,6 +959,7 @@ class LocalReleaseService:
                     text=True,
                     timeout=15,
                 )
+                self._validate_installed_runtime(python_bin, release_target)
                 return existing_manifest
             except Exception as error:
                 if isinstance(error, ReleaseAcquisitionError):
@@ -913,6 +1050,7 @@ class LocalReleaseService:
                 text=True,
                 timeout=15,
             )
+            self._validate_installed_runtime(staged_python, staging_dir)
 
             manifest = ReleaseManifest(
                 schema_version="local-release-manifest-v1",
@@ -1190,6 +1328,154 @@ class LocalReleaseService:
         temp_state.write_text(state.model_dump_json(indent=2), encoding="utf-8")
         temp_state.replace(self.paths.state_file)
 
+    def _validate_current_deployment(
+        self,
+        state: DeploymentState,
+        unit_file: Path,
+    ) -> str:
+        """Validate the managed current release or classify the unit as unmanaged legacy."""
+        if state.current is None:
+            if state.previous is not None:
+                raise ReleaseRollbackError(
+                    "CRITICAL: deployment state has previous without a managed current release"
+                )
+            try:
+                return unit_file.read_text(encoding="utf-8")
+            except OSError as error:
+                raise ReleaseVerificationError(
+                    f"Could not read existing legacy unit {unit_file}: {error}"
+                ) from error
+
+        current_release = self.paths.releases / state.current
+        manifest_file = current_release / "manifest.json"
+        try:
+            manifest = ReleaseManifest.model_validate_json(
+                manifest_file.read_text(encoding="utf-8")
+            )
+            unit_text = unit_file.read_text(encoding="utf-8")
+        except (OSError, ValueError) as error:
+            raise ReleaseRollbackError(
+                f"CRITICAL: managed current release {state.current} is not verifiable"
+            ) from error
+
+        current_python = current_release / ".venv" / "bin" / "python"
+        current_script = current_release / "scripts" / "serve_investment_analyst.py"
+        working_directory = next(
+            (
+                line.strip().split("=", maxsplit=1)[1]
+                for line in unit_text.splitlines()
+                if line.strip().startswith("WorkingDirectory=")
+            ),
+            None,
+        )
+        exec_start = next(
+            (
+                line.strip()
+                for line in unit_text.splitlines()
+                if line.strip().startswith("ExecStart=")
+            ),
+            None,
+        )
+
+        if (
+            manifest.commit_sha != state.current
+            or Path(manifest.release_path).resolve() != current_release.resolve()
+            or state.current_release_path != str(current_release)
+            or not current_python.is_file()
+            or not current_script.is_file()
+            or working_directory != str(current_release)
+            or exec_start is None
+            or f'ExecStart="{current_python}" "{current_script}"' not in exec_start
+        ):
+            raise ReleaseRollbackError(
+                f"CRITICAL: deployment state, manifest, and live unit disagree for current "
+                f"release {state.current}"
+            )
+        return unit_text
+
+    def _fail_first_adoption_safely(
+        self,
+        *,
+        sha: str,
+        unit_file: Path,
+        previous_unit_text: str,
+        failure: BaseException,
+    ) -> None:
+        """Stop a failed first-adoption candidate without restarting unmanaged legacy."""
+        cleanup_errors: list[str] = []
+        try:
+            self.systemctl.stop(LOCAL_SERVICE_UNIT_NAME)
+        except Exception as error:
+            cleanup_errors.append(f"candidate stop failed: {error}")
+
+        restored = False
+        try:
+            write_local_service_unit(unit_file, previous_unit_text)
+            restored = True
+        except Exception as error:
+            cleanup_errors.append(f"legacy unit restoration failed: {error}")
+
+        if restored:
+            try:
+                self.systemctl.daemon_reload()
+            except Exception as error:
+                cleanup_errors.append(f"daemon-reload failed: {error}")
+
+        try:
+            if self.systemctl.is_active(LOCAL_SERVICE_UNIT_NAME):
+                cleanup_errors.append("service remained active after candidate stop")
+        except Exception as error:
+            cleanup_errors.append(f"service inactivity could not be confirmed: {error}")
+
+        if cleanup_errors:
+            details = "; ".join(cleanup_errors)
+            raise ReleaseRollbackError(
+                f"CRITICAL: first adoption of {sha} failed: {failure}; "
+                f"original unit is unmanaged legacy and recovery was not confirmed "
+                f"(ALSO FAILED): {details}"
+            ) from failure
+        raise ReleaseRollbackError(
+            f"First adoption of {sha} failed: {failure}; candidate stopped, "
+            "unmanaged legacy unit restored but not restarted, service inactive confirmed"
+        ) from failure
+
+    def _recover_managed_current(
+        self,
+        *,
+        current_sha: str,
+        unit_file: Path,
+        previous_unit_text: str,
+        port: int,
+        health_endpoints: Sequence[str],
+        failure_message: str,
+        failure: BaseException,
+    ) -> None:
+        """Restore and verify a previously managed current release after a failed activation."""
+        try:
+            write_local_service_unit(unit_file, previous_unit_text)
+            self.systemctl.daemon_reload()
+            self.systemctl.restart(LOCAL_SERVICE_UNIT_NAME)
+            previous_ok, previous_status = self.health_checker.check_health_readiness(
+                port=port,
+                endpoints=health_endpoints,
+                deadline_seconds=self.readiness_deadline,
+                interval_seconds=self.readiness_interval,
+            )
+        except Exception as error:
+            raise ReleaseRollbackError(
+                f"CRITICAL: {failure_message}; recovery rollback to managed current "
+                f"{current_sha} ALSO FAILED: {error}"
+            ) from failure
+        if previous_ok:
+            raise ReleaseRollbackError(
+                f"{failure_message}; successfully rolled back and verified managed current "
+                f"{current_sha} (health status {previous_status})"
+            ) from failure
+        raise ReleaseRollbackError(
+            f"CRITICAL: {failure_message}; recovery rollback to managed current "
+            f"{current_sha} ALSO FAILED health verification (status {previous_status})"
+        ) from failure
+
     def activate(
         self,
         sha: str,
@@ -1228,23 +1514,19 @@ class LocalReleaseService:
         )
 
         current_state = self.load_deployment_state()
+        previous_unit_text = self._validate_current_deployment(current_state, target_unit)
+        managed_current = current_state.current is not None
 
         # Idempotence check
-        if current_state.current == cleaned_sha and target_unit.is_file():
-            unit_text = target_unit.read_text(encoding="utf-8")
-            if f"releases/{cleaned_sha}" in unit_text:
-                if skip_health_check or skip_systemd:
-                    return current_state
-                health_ok, _ = self.health_checker.check_health(
-                    port=port,
-                    endpoints=endpoints or ("/api/v1/overview", "/api/v1/candidate-notifications"),
-                )
-                if health_ok:
-                    return current_state
-
-        previous_unit_text: str | None = None
-        if target_unit.is_file():
-            previous_unit_text = target_unit.read_text(encoding="utf-8")
+        if current_state.current == cleaned_sha:
+            if skip_health_check or skip_systemd:
+                return current_state
+            health_ok, _ = self.health_checker.check_health(
+                port=port,
+                endpoints=endpoints or ("/api/v1/overview", "/api/v1/candidate-notifications"),
+            )
+            if health_ok:
+                return current_state
 
         # 2. Retarget unit
         self.retarget_unit(cleaned_sha, unit_file=target_unit, env_file=target_env)
@@ -1259,38 +1541,23 @@ class LocalReleaseService:
                 self.systemctl.daemon_reload()
                 self.systemctl.restart(LOCAL_SERVICE_UNIT_NAME)
             except Exception as error:
-                # Automatic recovery rollback
-                if previous_unit_text is not None:
-                    write_local_service_unit(target_unit, previous_unit_text)
-                    with contextlib.suppress(Exception):
-                        self.systemctl.daemon_reload()
-                        self.systemctl.restart(LOCAL_SERVICE_UNIT_NAME)
-                    prev_ok, prev_st = self.health_checker.check_health_readiness(
+                failure_message = f"Systemd restart failed for {cleaned_sha}: {error}"
+                if managed_current:
+                    self._recover_managed_current(
+                        current_sha=current_state.current or "",
+                        unit_file=target_unit,
+                        previous_unit_text=previous_unit_text,
                         port=port,
-                        endpoints=health_endpoints,
-                        deadline_seconds=self.readiness_deadline,
-                        interval_seconds=self.readiness_interval,
+                        health_endpoints=health_endpoints,
+                        failure_message=failure_message,
+                        failure=error,
                     )
-                    if prev_ok:
-                        raise ReleaseRollbackError(
-                            f"Systemd restart failed for {cleaned_sha}: {error}; "
-                            f"successfully rolled back and verified previous release "
-                            f"{current_state.previous} (health status {prev_st})"
-                        ) from error
-                    prev_desc = (
-                        f"previous release {current_state.previous}"
-                        if current_state.previous is not None
-                        else "original unit"
-                    )
-                    raise ReleaseRollbackError(
-                        f"CRITICAL: Systemd restart failed for {cleaned_sha}: {error} "
-                        f"and recovery rollback to {prev_desc} ALSO FAILED "
-                        f"health verification (status {prev_st})"
-                    ) from error
-                raise ReleaseRollbackError(
-                    f"Systemd restart failed for {cleaned_sha}: {error}; "
-                    "no previous unit to restore"
-                ) from error
+                self._fail_first_adoption_safely(
+                    sha=cleaned_sha,
+                    unit_file=target_unit,
+                    previous_unit_text=previous_unit_text,
+                    failure=error,
+                )
 
             if not skip_health_check:
                 health_ok, status_code = self.health_checker.check_health_readiness(
@@ -1300,37 +1567,24 @@ class LocalReleaseService:
                     interval_seconds=self.readiness_interval,
                 )
                 if not health_ok:
-                    if previous_unit_text is not None:
-                        write_local_service_unit(target_unit, previous_unit_text)
-                        with contextlib.suppress(Exception):
-                            self.systemctl.daemon_reload()
-                            self.systemctl.restart(LOCAL_SERVICE_UNIT_NAME)
-                        prev_ok, prev_st = self.health_checker.check_health_readiness(
+                    failure_message = (
+                        f"Health check failed for {cleaned_sha} with status {status_code}"
+                    )
+                    if managed_current:
+                        self._recover_managed_current(
+                            current_sha=current_state.current or "",
+                            unit_file=target_unit,
+                            previous_unit_text=previous_unit_text,
                             port=port,
-                            endpoints=health_endpoints,
-                            deadline_seconds=self.readiness_deadline,
-                            interval_seconds=self.readiness_interval,
+                            health_endpoints=health_endpoints,
+                            failure_message=failure_message,
+                            failure=ReleaseVerificationError(failure_message),
                         )
-                        if prev_ok:
-                            raise ReleaseRollbackError(
-                                f"Health check failed for {cleaned_sha} with status {status_code}; "
-                                f"successfully rolled back and verified previous release "
-                                f"{current_state.previous} (health status {prev_st})"
-                            )
-                        prev_desc = (
-                            f"previous release {current_state.previous}"
-                            if current_state.previous is not None
-                            else "original unit"
-                        )
-                        raise ReleaseRollbackError(
-                            f"CRITICAL: Health check failed for {cleaned_sha} "
-                            f"with status {status_code} and recovery rollback to "
-                            f"{prev_desc} ALSO FAILED health verification "
-                            f"(status {prev_st})"
-                        )
-                    raise ReleaseRollbackError(
-                        f"Health check failed for {cleaned_sha} with status {status_code}; "
-                        "no previous unit to restore"
+                    self._fail_first_adoption_safely(
+                        sha=cleaned_sha,
+                        unit_file=target_unit,
+                        previous_unit_text=previous_unit_text,
+                        failure=ReleaseVerificationError(failure_message),
                     )
 
         new_state = DeploymentState(
@@ -1381,22 +1635,35 @@ class LocalReleaseService:
         if current_state.previous is None:
             raise ReleaseRollbackError("No previous deployment recorded for rollback")
 
-        prev_sha = current_state.previous
-        prev_release_dir = self.paths.releases / prev_sha
-        prev_manifest = prev_release_dir / "manifest.json"
-        if not prev_manifest.is_file():
-            raise ReleaseRollbackError(
-                f"Previous release {prev_sha} is missing manifest at {prev_manifest}"
-            )
-
         target_unit = (
             unit_file.expanduser().resolve(strict=False)
             if unit_file is not None
             else self.systemd_unit_path
         )
-        previous_unit_text: str | None = None
-        if target_unit.is_file():
-            previous_unit_text = target_unit.read_text(encoding="utf-8")
+        previous_unit_text = self._validate_current_deployment(current_state, target_unit)
+        if current_state.current is None:
+            raise ReleaseRollbackError("CRITICAL: rollback requires a managed current release")
+
+        prev_sha = current_state.previous
+        prev_release_dir = self.paths.releases / prev_sha
+        prev_manifest = prev_release_dir / "manifest.json"
+        try:
+            previous_manifest = ReleaseManifest.model_validate_json(
+                prev_manifest.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as error:
+            raise ReleaseRollbackError(
+                f"Previous release {prev_sha} is missing manifest at {prev_manifest}"
+            ) from error
+        if (
+            previous_manifest.commit_sha != prev_sha
+            or Path(previous_manifest.release_path).resolve() != prev_release_dir.resolve()
+            or not (prev_release_dir / ".venv" / "bin" / "python").is_file()
+            or not (prev_release_dir / "scripts" / "serve_investment_analyst.py").is_file()
+        ):
+            raise ReleaseRollbackError(
+                f"CRITICAL: previous release {prev_sha} is not a verified rollback target"
+            )
 
         self.retarget_unit(prev_sha, unit_file=target_unit, env_file=env_file)
 
@@ -1405,14 +1672,15 @@ class LocalReleaseService:
                 self.systemctl.daemon_reload()
                 self.systemctl.restart(LOCAL_SERVICE_UNIT_NAME)
             except Exception as error:
-                if previous_unit_text is not None:
-                    write_local_service_unit(target_unit, previous_unit_text)
-                    with contextlib.suppress(Exception):
-                        self.systemctl.daemon_reload()
-                        self.systemctl.restart(LOCAL_SERVICE_UNIT_NAME)
-                raise ReleaseRollbackError(
-                    f"Restart failed during rollback to {prev_sha}: {error}"
-                ) from error
+                self._recover_managed_current(
+                    current_sha=current_state.current,
+                    unit_file=target_unit,
+                    previous_unit_text=previous_unit_text,
+                    port=port,
+                    health_endpoints=("/api/v1/overview", "/api/v1/candidate-notifications"),
+                    failure_message=f"Restart failed during rollback to {prev_sha}: {error}",
+                    failure=error,
+                )
 
             if not skip_health_check:
                 health_ok, status_code = self.health_checker.check_health_readiness(
@@ -1422,9 +1690,22 @@ class LocalReleaseService:
                     interval_seconds=self.readiness_interval,
                 )
                 if not health_ok:
-                    raise ReleaseRollbackError(
-                        f"Health check failed during rollback to {prev_sha} with "
-                        f"status {status_code}"
+                    self._recover_managed_current(
+                        current_sha=current_state.current,
+                        unit_file=target_unit,
+                        previous_unit_text=previous_unit_text,
+                        port=port,
+                        health_endpoints=(
+                            "/api/v1/overview",
+                            "/api/v1/candidate-notifications",
+                        ),
+                        failure_message=(
+                            f"Health check failed during rollback to {prev_sha} with "
+                            f"status {status_code}"
+                        ),
+                        failure=ReleaseVerificationError(
+                            f"Health check failed during rollback to {prev_sha}"
+                        ),
                     )
 
         new_state = DeploymentState(

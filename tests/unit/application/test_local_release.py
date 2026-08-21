@@ -16,6 +16,7 @@ from investment_analyst.application.aapl_scheduler import AaplDailyScheduleConfi
 from investment_analyst.application.local_release import (
     DeploymentState,
     LocalReleaseService,
+    RealHealthChecker,
     ReleaseAcquisitionError,
     ReleaseConfigurationError,
     ReleaseEnvironmentError,
@@ -400,6 +401,30 @@ def test_preexisting_release_non_equivalent_tampered_lock_or_corrupt_rejection(
     ):
         service.stage(sha)
 
+    release_snapshot = {
+        path: path.read_bytes()
+        for path in (pyproject, uv_lock, server_script, r_dir / "manifest.json")
+    }
+
+    def mock_run_good_py(cmd, *args, **kwargs):
+        if "--version" in cmd:
+            return MagicMock(returncode=0, stdout="Python 3.12.3\n")
+        return MagicMock(returncode=0, stdout="")
+
+    with (
+        patch.object(service, "fetch_origin_main", return_value=(sha, tree_sha)),
+        patch.object(
+            service,
+            "_validate_installed_runtime",
+            side_effect=ReleaseAcquisitionError("installed probe failed"),
+        ),
+        patch("subprocess.run", side_effect=mock_run_good_py),
+        pytest.raises(ReleaseAcquisitionError, match="installed probe failed"),
+    ):
+        service.stage(sha)
+
+    assert {path: path.read_bytes() for path in release_snapshot} == release_snapshot
+
 
 def test_pre_restart_verification_and_writer_lock_rejection(tmp_path: Path) -> None:
     """Verify pre-restart checks reject active writer locks, invalid ports, and unstaged SHAs."""
@@ -653,8 +678,14 @@ def test_activation_automatic_rollback_verifies_recovery_health_and_fail_closed(
             return self.check_health(*args, **kwargs)
 
     service.health_checker = RecoveryHealthChecker()
-    with pytest.raises(ReleaseRollbackError, match="successfully rolled back and verified"):
+    with pytest.raises(
+        ReleaseRollbackError, match="successfully rolled back and verified"
+    ) as error:
         service.activate(sha2)
+    assert sha1 in str(error.value)
+    assert "None" not in str(error.value)
+    assert service.load_deployment_state().current == sha1
+    assert sha1 in unit_file.read_text(encoding="utf-8")
 
     # Case B: Activation of sha2 fails health, AND recovery on sha1 ALSO fails
     class TotalFailureHealthChecker:
@@ -667,6 +698,41 @@ def test_activation_automatic_rollback_verifies_recovery_health_and_fail_closed(
     service.health_checker = TotalFailureHealthChecker()
     with pytest.raises(ReleaseRollbackError, match="CRITICAL: Health check failed.*ALSO FAILED"):
         service.activate(sha2)
+
+
+def test_activation_restart_failure_recovers_managed_current_exact_sha(tmp_path: Path) -> None:
+    """A restart failure restores and verifies the managed current, not previous/null."""
+    sha_current = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+    sha_target = "2222222222222222222222222222222222222222"
+    service, unit_file, _env = _make_readiness_test_service(
+        tmp_path,
+        sha_target,
+        sha_current,
+        SimulatedHealthChecker(succeed=True),
+        readiness_deadline=1.0,
+    )
+
+    assert isinstance(service.systemctl, SimulatedSystemctlRunner)
+    original_restart = service.systemctl.restart
+    restart_attempts = 0
+
+    def fail_candidate_restart(service_name: str) -> None:
+        nonlocal restart_attempts
+        restart_attempts += 1
+        if restart_attempts == 1:
+            raise ReleaseUnitError("candidate restart failed")
+        original_restart(service_name)
+
+    service.systemctl.restart = fail_candidate_restart
+
+    with pytest.raises(ReleaseRollbackError, match="managed current") as error:
+        service.activate(sha_target)
+
+    assert sha_current in str(error.value)
+    assert "previous release" not in str(error.value)
+    assert service.load_deployment_state().current == sha_current
+    assert sha_current in unit_file.read_text(encoding="utf-8")
+    assert restart_attempts == 2
 
 
 class DeterministicClock:
@@ -682,6 +748,55 @@ class DeterministicClock:
     def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
         self.current_time += seconds
+
+
+def test_readiness_allows_cold_start_before_default_deadline() -> None:
+    """The 120-second default leaves room for the observed ~68-second cold start."""
+    clock = DeterministicClock()
+    health = SimulatedHealthChecker(
+        responses=[(False, None)] * 272 + [(True, 200)],
+        clock=clock.clock,
+        sleeper=clock.sleep,
+    )
+
+    ok, status = health.check_health_readiness(port=8765)
+
+    assert ok is True
+    assert status == 200
+    assert health.call_count == 273
+    assert clock.current_time == 68.0
+
+
+def test_real_readiness_caps_each_probe_to_remaining_deadline() -> None:
+    """Real HTTP probes never receive a timeout beyond the total readiness budget."""
+    clock = DeterministicClock()
+    observed_timeouts: list[float] = []
+
+    def fake_urlopen(_request: object, timeout: float) -> MagicMock:
+        observed_timeouts.append(timeout)
+        clock.current_time += 0.6
+        response = MagicMock()
+        response.status = 500 if len(observed_timeouts) == 1 else 200
+        response.__enter__.return_value = response
+        return response
+
+    checker = RealHealthChecker(clock=clock.clock, sleeper=clock.sleep)
+    with patch(
+        "investment_analyst.application.local_release.urllib.request.urlopen",
+        side_effect=fake_urlopen,
+    ):
+        ok, status = checker.check_health_readiness(
+            port=8765,
+            deadline_seconds=1.0,
+            interval_seconds=0.1,
+            timeout_seconds=5.0,
+        )
+
+    assert ok is False
+    assert status == 200
+    assert observed_timeouts[0] == pytest.approx(1.0)
+    assert observed_timeouts[1] == pytest.approx(0.3)
+    assert clock.current_time == pytest.approx(1.3)
 
 
 def _make_readiness_test_service(
@@ -916,8 +1031,7 @@ def test_readiness_double_fault_critical(tmp_path: Path) -> None:
 
 
 def test_readiness_first_adoption_no_previous_message(tmp_path: Path) -> None:
-    """When previous is None, the CRITICAL double fault message says 'original unit'
-    instead of falsely reporting 'rollback to None'."""
+    """A first-adoption readiness failure restores legacy without restarting it."""
     sha_new = "7777777777777777777777777777777777777777"
 
     clock = DeterministicClock()
@@ -948,9 +1062,108 @@ def test_readiness_first_adoption_no_previous_message(tmp_path: Path) -> None:
     )
     write_local_service_unit(unit_file, unit_content)
 
-    with pytest.raises(ReleaseRollbackError, match="original unit.*ALSO FAILED"):
+    legacy_before = unit_file.read_bytes()
+    with pytest.raises(
+        ReleaseRollbackError,
+        match="candidate stopped, unmanaged legacy unit restored but not restarted",
+    ):
         service.activate(sha_new)
-    try:
+    assert unit_file.read_bytes() == legacy_before
+    assert not (tmp_path / "runtime" / "deployment_state.json").exists()
+    assert isinstance(service.systemctl, SimulatedSystemctlRunner)
+    assert service.systemctl.restarts == ["investment-analyst.service"]
+    assert service.systemctl.stops == ["investment-analyst.service"]
+    assert service.systemctl.reloaded is True
+
+
+def test_first_adoption_restart_failure_does_not_restart_unmanaged_legacy(
+    tmp_path: Path,
+) -> None:
+    """A failed first-adoption restart leaves the legacy unit inactive and unstarted."""
+    sha_new = "8888888888888888888888888888888888888888"
+    service, unit_file, _env = _make_readiness_test_service(
+        tmp_path,
+        sha_new,
+        None,
+        SimulatedHealthChecker(succeed=True),
+        readiness_deadline=1.0,
+    )
+    runtime_root = tmp_path / "runtime"
+    legacy_unit = (
+        "[Unit]\nDescription=Legacy\n\n"
+        "[Service]\n"
+        f"WorkingDirectory={tmp_path / 'legacy-checkout'}\n"
+        f"EnvironmentFile={_env}\n"
+        f'ExecStart="{tmp_path / "legacy-checkout" / ".venv/bin/python"}" '
+        f'"{tmp_path / "legacy-checkout" / "scripts/serve_investment_analyst.py"}" --port 8765\n'
+    )
+    write_local_service_unit(unit_file, legacy_unit)
+    legacy_before = unit_file.read_bytes()
+    assert isinstance(service.systemctl, SimulatedSystemctlRunner)
+    service.systemctl.fail_restart = True
+
+    with pytest.raises(
+        ReleaseRollbackError,
+        match="unmanaged legacy unit restored but not restarted",
+    ):
         service.activate(sha_new)
-    except ReleaseRollbackError as e:
-        assert "to None" not in str(e)
+
+    assert unit_file.read_bytes() == legacy_before
+    assert service.systemctl.restarts == []
+    assert service.systemctl.stops == ["investment-analyst.service"]
+    assert service.systemctl.reloaded is True
+    assert not (runtime_root / "deployment_state.json").exists()
+
+
+def test_current_state_unit_mismatch_fails_before_retarget(tmp_path: Path) -> None:
+    """A managed current release must agree with its manifest and live unit before retarget."""
+    sha_current = "9999999999999999999999999999999999999999"
+    sha_target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    runtime_root = tmp_path / "runtime"
+    for sha in (sha_current, sha_target):
+        release_dir = runtime_root / "releases" / sha
+        (release_dir / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+        (release_dir / "scripts").mkdir(parents=True, exist_ok=True)
+        (release_dir / ".venv" / "bin" / "python").touch()
+        (release_dir / "scripts" / "serve_investment_analyst.py").touch()
+        manifest = ReleaseManifest(
+            commit_sha=sha,
+            tree_sha="b6f8115ffdddb0915cae50736dbc821c5355d3ac",
+            uv_lock_sha256=hashlib.sha256(b"dummy").hexdigest(),
+            python_version="Python 3.12.3",
+            staged_at=datetime.now(UTC),
+            release_path=str(release_dir),
+        )
+        (release_dir / "manifest.json").write_text(manifest.model_dump_json(), encoding="utf-8")
+
+    state = DeploymentState(
+        current=sha_current,
+        previous=None,
+        updated_at=datetime.now(UTC),
+        current_release_path=str(runtime_root / "releases" / sha_current),
+        previous_release_path=None,
+    )
+    (runtime_root / "deployment_state.json").write_text(state.model_dump_json(), encoding="utf-8")
+    unit_file = tmp_path / "systemd" / "investment-analyst.service"
+    unit_file.parent.mkdir(parents=True, exist_ok=True)
+    unit_file.write_text(
+        f"[Service]\nWorkingDirectory={runtime_root / 'releases' / sha_target}\n"
+        f'ExecStart="{runtime_root / "releases" / sha_target / ".venv/bin/python"}" '
+        f'"{runtime_root / "releases" / sha_target / "scripts/serve_investment_analyst.py"}"\n',
+        encoding="utf-8",
+    )
+    before = unit_file.read_bytes()
+    service = LocalReleaseService(paths=runtime_root, systemd_unit_path=unit_file)
+
+    with pytest.raises(ReleaseRollbackError, match="state, manifest, and live unit disagree"):
+        service.activate(sha_target, skip_systemd=True, skip_health_check=True)
+    assert unit_file.read_bytes() == before
+
+
+def test_readiness_deadline_default_and_bounds_are_fail_closed(tmp_path: Path) -> None:
+    """Readiness defaults to 120 seconds and rejects values outside the CLI contract."""
+    service = LocalReleaseService(paths=tmp_path)
+    assert service.readiness_deadline == 120.0
+    for invalid in (0.0, 600.1):
+        with pytest.raises(ReleaseConfigurationError, match="between 1 and 600"):
+            LocalReleaseService(paths=tmp_path, readiness_deadline=invalid)
