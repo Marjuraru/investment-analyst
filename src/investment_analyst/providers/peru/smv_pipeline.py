@@ -92,10 +92,10 @@ class SmvRegistryPipeline:
         self._storage.require_open()
         canonical_name = validate_legal_name(legal_name)
         assets_before = tuple(self._storage.assets.list_all())
-        observations_before = tuple(self._storage.observations.list())
+        observations_before = self._storage.observations.count()
         metric_definitions_before = tuple(self._storage.metric_definitions.list_all())
-        metric_results_before = tuple(self._storage.metric_results.list())
-        diagnostics_before = tuple(self._storage.diagnostics.list())
+        metric_results_before = self._storage.metric_results.count()
+        diagnostics_before = self._storage.diagnostics.count()
 
         company = self._persist_fetch(
             self._client.fetch_registered_company(canonical_name),
@@ -205,20 +205,20 @@ class SmvRegistryPipeline:
         self,
         *,
         assets_before: tuple[object, ...],
-        observations_before: tuple[object, ...],
+        observations_before: int,
         metric_definitions_before: tuple[object, ...],
-        metric_results_before: tuple[object, ...],
-        diagnostics_before: tuple[object, ...],
+        metric_results_before: int,
+        diagnostics_before: int,
     ) -> None:
         if tuple(self._storage.assets.list_all()) != assets_before:
             raise StorageError("SMV registry refresh must not mutate persisted assets")
-        if tuple(self._storage.observations.list()) != observations_before:
+        if self._storage.observations.count() != observations_before:
             raise StorageError("SMV registry refresh must not create observations")
         if tuple(self._storage.metric_definitions.list_all()) != metric_definitions_before:
             raise StorageError("SMV registry refresh must not create metric definitions")
-        if tuple(self._storage.metric_results.list()) != metric_results_before:
+        if self._storage.metric_results.count() != metric_results_before:
             raise StorageError("SMV registry refresh must not create metric results")
-        if tuple(self._storage.diagnostics.list()) != diagnostics_before:
+        if self._storage.diagnostics.count() != diagnostics_before:
             raise StorageError("SMV registry refresh must not create diagnostics")
 
 
