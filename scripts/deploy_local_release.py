@@ -5,18 +5,44 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
 from investment_analyst.application.local_release import (
     DEFAULT_ORIGIN_URL,
+    DEFAULT_READINESS_DEADLINE,
     DEFAULT_RUNTIME_ROOT,
     DEFAULT_SERVICE_ENV_PATH,
     DEFAULT_SYSTEMD_UNIT_PATH,
+    MAX_READINESS_DEADLINE,
+    MIN_READINESS_DEADLINE,
     LocalReleaseError,
     LocalReleasePaths,
     LocalReleaseService,
 )
+
+
+def _readiness_deadline_seconds(value: str) -> float:
+    try:
+        deadline = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("readiness deadline must be a number") from error
+    if (
+        not math.isfinite(deadline)
+        or not MIN_READINESS_DEADLINE <= deadline <= MAX_READINESS_DEADLINE
+    ):
+        raise argparse.ArgumentTypeError("readiness deadline must be between 1 and 600 seconds")
+    return deadline
+
+
+def _add_readiness_deadline(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--readiness-deadline-seconds",
+        type=_readiness_deadline_seconds,
+        default=DEFAULT_READINESS_DEADLINE,
+        help="Total readiness deadline in seconds (1-600; default: 120)",
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -86,6 +112,7 @@ def _parser() -> argparse.ArgumentParser:
     activate_parser.add_argument(
         "--skip-health-check", action="store_true", help="Skip HTTP health check"
     )
+    _add_readiness_deadline(activate_parser)
 
     # update
     update_parser = subparsers.add_parser(
@@ -100,6 +127,7 @@ def _parser() -> argparse.ArgumentParser:
     update_parser.add_argument(
         "--skip-health-check", action="store_true", help="Skip HTTP health check"
     )
+    _add_readiness_deadline(update_parser)
 
     # rollback
     rollback_parser = subparsers.add_parser(
@@ -112,6 +140,7 @@ def _parser() -> argparse.ArgumentParser:
     rollback_parser.add_argument(
         "--skip-health-check", action="store_true", help="Skip HTTP health check"
     )
+    _add_readiness_deadline(rollback_parser)
 
     # status
     status_parser = subparsers.add_parser(
@@ -144,6 +173,7 @@ def _parser() -> argparse.ArgumentParser:
     boot_parser.add_argument(
         "--skip-health-check", action="store_true", help="Skip HTTP health check"
     )
+    _add_readiness_deadline(boot_parser)
 
     return parser
 
@@ -157,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         repo_url=args.repo_url,
         systemd_unit_path=args.unit_file,
         service_env_path=args.env_file,
+        readiness_deadline=getattr(args, "readiness_deadline_seconds", DEFAULT_READINESS_DEADLINE),
     )
 
     try:

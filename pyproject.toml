@@ -28,6 +28,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "investment_analyst.frontend" = ["static/*.html", "static/*.css", "static/*.js"]
+"investment_analyst.catalog" = ["default_assets.v1.json"]
+"investment_analyst.storage.migrations" = ["001_initial.sql"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

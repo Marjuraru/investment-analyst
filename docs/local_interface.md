@@ -573,18 +573,29 @@ Cada release contiene un entorno virtual no editable construido estrictamente de
 Python 3.12 y `uv==0.11.29`, sin dependencias de desarrollo y sin referencias a ningún worktree ni
 `.venv` local.
 
+Antes de publicar una release nueva, y también al aceptar una release preexistente, `stage` ejecuta
+un sondeo hermético desde el Python instalado de esa release, con el checkout y `PYTHONPATH`
+neutralizados. El sondeo comprueba que el import proviene de `site-packages`, que están empaquetados
+el catálogo JSON, la migración SQL y los tres estáticos frontend, y que
+`AssetCatalogService.load_default()` y `ApplicationRuntime.create_default()` pueden inicializar un
+workspace/storage temporal. Si falla, la release nueva no se publica y una release preexistente no
+se repara ni se sobrescribe.
+Pasar este probe y estar integrado en `main` no equivale por sí solo a aceptación operacional:
+el cutover humano posterior debe validar el host, systemd, endpoints y estabilidad del runtime.
+
 ### Sondeo de readiness acotado
 
 `activate`, `update`, `bootstrap` y `rollback` verifican la salud del servicio HTTP mediante sondeo
 de readiness acotado. El sondeo reintenta ante `ConnectionRefusedError`, `URLError`, `TimeoutError`
 y estados HTTP distintos de 200 hasta que todos los endpoints requeridos respondan 200 o expire un
-deadline configurable (15 s por defecto, con intervalo de 0,25 s). Un timeout real sigue fallando
-cerrado.
+deadline configurable (120 s por defecto, con intervalo de 0,25 s). Cada probe limita su timeout al
+tiempo restante del deadline total. Un timeout real sigue fallando cerrado.
 
 El sondeo se aplica simétricamente al arranque de la nueva release y al reinicio de la release
 previa durante un recovery rollback automático. `status()` permanece como consulta puntual sin
 sondeo. Cuando no existe release previa (`previous is None`), un fallo doble de readiness reporta
-«original unit» en vez de «rollback to None».
+que el candidato fue detenido, la unidad legacy unmanaged se restauró sólo como configuración y el
+servicio quedó inactivo; no intenta reiniciar el legacy ni hace rollback a `None`.
 
 ### Comandos de operación del release runtime
 
@@ -593,7 +604,8 @@ Bootstrap inicial (adopta credenciales, materializa release, retargetea unidad y
 ```bash
 python3 scripts/deploy_local_release.py bootstrap \
   --sha <full-sha-integrado> \
-  --env-source ~/projects/investment-analyst/.env
+  --env-source ~/projects/investment-analyst/.env \
+  --readiness-deadline-seconds 120
 ```
 
 Consulta de estado operativo e inspección del SHA desplegado:
@@ -607,13 +619,15 @@ python3 scripts/deploy_local_release.py status --json
 Actualización a un nuevo SHA integrado de `main` (descarga, construye venv, retargetea, reinicia y verifica health):
 
 ```bash
-python3 scripts/deploy_local_release.py update --sha <nuevo-full-sha>
+python3 scripts/deploy_local_release.py update \
+  --sha <nuevo-full-sha> \
+  --readiness-deadline-seconds 120
 ```
 
 Rollback al despliegue anterior verificado (restaura unidad anterior, reinicia y verifica health):
 
 ```bash
-python3 scripts/deploy_local_release.py rollback
+python3 scripts/deploy_local_release.py rollback --readiness-deadline-seconds 120
 ```
 
 
@@ -630,8 +644,16 @@ python3 scripts/deploy_local_release.py stage --sha <full-sha>
 python3 scripts/deploy_local_release.py retarget-unit --sha <full-sha>
 
 # 4. Activar release con reinicio y comprobación de salud
-python3 scripts/deploy_local_release.py activate --sha <full-sha>
+python3 scripts/deploy_local_release.py activate \
+  --sha <full-sha> \
+  --readiness-deadline-seconds 120
 ```
+
+`activate`, `update`, `bootstrap` y `rollback` aceptan un deadline total estricto entre 1 y 600
+segundos mediante `--readiness-deadline-seconds`. Un valor inválido falla antes de retargetear o
+reiniciar. En el primer adoption, si restart o readiness fallan, el candidato se detiene, la
+unidad legacy unmanaged se restaura sólo como configuración, se ejecuta `daemon-reload` y se
+confirma que el servicio queda inactivo; nunca se reinicia, habilita ni activa esa unidad legacy.
 
 ### Inspección del SHA activo en systemd
 
