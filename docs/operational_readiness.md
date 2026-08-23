@@ -78,26 +78,41 @@ y observers coherentes. El peak global de systemd cercano a 6,2 GiB no se atribu
 convierte en un presupuesto inventado; queda como deuda separada de medición por job antes de fijar
 un límite de memoria.
 
+La verificación de trazabilidad que precede a cualquier publicación de backup y que se repite sobre
+el restore conserva el manifest v1 y su semántica. Recorre primero raw, observations, metrics y
+diagnostics mediante keyset pagination ordenada por identidad primaria, con lotes de como máximo
+256. Los raw se resuelven con `get_many()` y las otras tres capas validan cada `document_json` con
+su modelo Pydantic canónico. Sólo después se recorren, también de forma acotada, los linajes
+observation→raw, metric→observation, metric→metric y diagnostic→metric. Cada recorrido debe
+reconciliar exactamente sus conteos escalares; no se usan conjuntos globales, aproximaciones ni
+umbrales de memoria dependientes de CI.
+
 ## Rehearsal HUMAN exact-SHA
 
 BUILD y AUDIT no ejecutan este procedimiento. Una persona lo realiza antes del merge, sobre el SHA
 candidato auditado y desde su release/worktree aislado:
 
-1. Revalidar Issue/PR/SHA, BUILD y AUDIT PASS, CI, release viva, UUID, servicio
-   `active/running + disabled`, loopback 200, scheduler idle y cola manual idle.
+1. Revalidar Issue/PR/SHA, BUILD y AUDIT PASS, CI, release viva, UUID, scheduler idle y cola manual
+   idle. El servicio sólo puede estar `active/running + disabled`, con loopback 200, o en el estado
+   residual documentado `inactive/dead + disabled`; cualquier tercer estado aborta.
 2. Ejecutar la sonda sobre el workspace permanente con el corte y mínimo de #89. Registrar sólo
    fingerprint, conteos agregados, fechas y reason codes; debe devolver `PASS`.
 3. Crear una raíz única con `mktemp -d` bajo scratch; `backup` no debe existir y `restored` debe ser
    nuevo. Nunca usar el checkout OPS-2 ni una ruta bajo el workspace fuente.
-4. Detener una sola vez `investment-analyst.service`, releer `inactive` y abortar sin backup si no
-   queda detenido.
-5. Ejecutar los scripts protegidos `backup_workspace.py` y `restore_workspace.py`. El origen
-   detenido es sólo lectura; el restore publica únicamente el destino nuevo en scratch.
+4. Si el servicio estaba activo, detenerlo una sola vez, releer `inactive` y abortar sin backup si
+   no queda detenido. Si ya estaba en el estado residual permitido, no arrancarlo sólo para volver
+   a detenerlo y exigir que no exista proceso, lock holder ni trabajo durable activo.
+5. Ejecutar los scripts protegidos `backup_workspace.py` y `restore_workspace.py` bajo
+   `/usr/bin/time -v`, separando la medición del JSON stdout dentro de scratch. El origen detenido
+   es sólo lectura; el restore publica únicamente el destino nuevo en scratch. Exit 0, ausencia de
+   señal y publicación atómica son obligatorios; elapsed y maximum resident set size forman el
+   primer baseline real, sin inventar un límite numérico.
 6. Comparar workspace UUID, backup ID, manifest/inventario ordenado `path,size,sha256`, versiones,
    cuatro conteos y `traceability_verified=true`. La sonda sobre el restore debe producir el mismo
    fingerprint semántico que el origen.
-7. En una ruta `finally`, arrancar exactamente una vez, releer `active/running` y comprobar overview,
-   candidate-notifications, market y fundamentals 200 con UUID preservado.
+7. En una ruta `finally`, arrancar exactamente una vez después del camino detenido, releer
+   `active/running` y comprobar overview, candidate-notifications, market y fundamentals 200 con
+   UUID preservado.
 8. Sólo después de todos los gates, ejecutar `systemctl --user enable investment-analyst.service`
    sin `--now`, y releer `active/running + enabled`.
 9. Limpiar únicamente la raíz scratch explícita y confirmar que no quedan backup, restore ni

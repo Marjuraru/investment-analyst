@@ -15,10 +15,19 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+import duckdb
+from duckdb import DuckDBPyConnection
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from investment_analyst.core.models import (
+    DiagnosticResult,
+    MetricResult,
+    NormalizedObservation,
+)
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 from investment_analyst.storage import StorageError
+from investment_analyst.storage.local import LocalStorage
+from investment_analyst.storage.serialization import model_from_json
 from investment_analyst.workspace.models import (
     WORKSPACE_FORMAT_VERSION,
     WorkspaceAccessMode,
@@ -27,6 +36,34 @@ from investment_analyst.workspace.models import (
 from investment_analyst.workspace.service import WorkspaceError, WorkspaceService
 
 BACKUP_MANIFEST_NAME = "backup_manifest.json"
+_TRACEABILITY_BATCH_SIZE = 256
+
+_RAW_FIRST_PAGE = "SELECT record_id FROM raw_record_index ORDER BY record_id LIMIT ?"
+_RAW_NEXT_PAGE = (
+    "SELECT record_id FROM raw_record_index WHERE record_id > ? ORDER BY record_id LIMIT ?"
+)
+_OBSERVATION_FIRST_PAGE = (
+    "SELECT observation_id, document_json FROM normalized_observations "
+    "ORDER BY observation_id LIMIT ?"
+)
+_OBSERVATION_NEXT_PAGE = (
+    "SELECT observation_id, document_json FROM normalized_observations "
+    "WHERE observation_id > ? ORDER BY observation_id LIMIT ?"
+)
+_METRIC_FIRST_PAGE = (
+    "SELECT result_id, document_json FROM metric_results ORDER BY result_id LIMIT ?"
+)
+_METRIC_NEXT_PAGE = (
+    "SELECT result_id, document_json FROM metric_results "
+    "WHERE result_id > ? ORDER BY result_id LIMIT ?"
+)
+_DIAGNOSTIC_FIRST_PAGE = (
+    "SELECT diagnostic_id, document_json FROM diagnostic_results ORDER BY diagnostic_id LIMIT ?"
+)
+_DIAGNOSTIC_NEXT_PAGE = (
+    "SELECT diagnostic_id, document_json FROM diagnostic_results "
+    "WHERE diagnostic_id > ? ORDER BY diagnostic_id LIMIT ?"
+)
 
 
 class WorkspaceBackupError(WorkspaceError):
@@ -139,7 +176,11 @@ class WorkspaceBackupService:
                 inspection = self._workspace_service.inspect(source_root)
                 if inspection.status != "ready":
                     raise WorkspaceBackupError("source workspace must be ready for backup")
-                _verify_workspace_traceability(self._workspace_service, source_root)
+                _verify_workspace_traceability(
+                    self._workspace_service,
+                    source_root,
+                    expected_counts=_counts(inspection),
+                )
                 files = _inventory(source_root)
                 counts = _counts(inspection)
                 manifest = WorkspaceBackupManifest(
@@ -186,7 +227,11 @@ class WorkspaceBackupService:
             inspection = self._workspace_service.inspect(temporary)
             if inspection.status != "ready":
                 raise WorkspaceBackupError("restored workspace layout is incomplete")
-            _verify_workspace_traceability(self._workspace_service, temporary)
+            _verify_workspace_traceability(
+                self._workspace_service,
+                temporary,
+                expected_counts=_counts(inspection),
+            )
             if inspection.workspace_id != manifest.source_workspace_id:
                 raise WorkspaceBackupError("restored workspace identity does not match backup")
             if _counts(inspection) != manifest.counts:
@@ -363,47 +408,340 @@ def _workspace_process_guard(root: Path):
             os.close(descriptor)
 
 
-def _verify_workspace_traceability(service: WorkspaceService, root: Path) -> None:
-    """Read and connect every persisted evidence layer before backup activation."""
+def _verify_workspace_traceability(
+    service: WorkspaceService,
+    root: Path,
+    *,
+    expected_counts: WorkspaceBackupCounts,
+) -> None:
+    """Read and connect every persisted evidence layer with bounded memory."""
     paths = service.resolve(root)
     try:
         storage = service.open_storage(paths, WorkspaceAccessMode.READ_ONLY)
         try:
-            raw_records = storage.raw_records.list()
-            observations = storage.observations.list()
-            metrics = storage.metric_results.list()
-            diagnostics = storage.diagnostics.list()
+            _require_counts(storage, expected_counts)
+            _require_scan_count(
+                _scan_raw_records(storage),
+                expected_counts.raw_records,
+            )
+            _require_scan_count(
+                _scan_documents(
+                    storage.store.connection,
+                    first_query=_OBSERVATION_FIRST_PAGE,
+                    next_query=_OBSERVATION_NEXT_PAGE,
+                    model_type=NormalizedObservation,
+                ),
+                expected_counts.observations,
+            )
+            _require_scan_count(
+                _scan_documents(
+                    storage.store.connection,
+                    first_query=_METRIC_FIRST_PAGE,
+                    next_query=_METRIC_NEXT_PAGE,
+                    model_type=MetricResult,
+                ),
+                expected_counts.metric_results,
+            )
+            _require_scan_count(
+                _scan_documents(
+                    storage.store.connection,
+                    first_query=_DIAGNOSTIC_FIRST_PAGE,
+                    next_query=_DIAGNOSTIC_NEXT_PAGE,
+                    model_type=DiagnosticResult,
+                ),
+                expected_counts.diagnostic_results,
+            )
+
+            _require_scan_count(
+                _verify_observation_raw_lineage(storage.store.connection),
+                expected_counts.observations,
+            )
+            _require_scan_count(
+                _verify_metric_observation_lineage(storage.store.connection),
+                expected_counts.metric_results,
+            )
+            _require_scan_count(
+                _verify_metric_metric_lineage(storage.store.connection),
+                expected_counts.metric_results,
+            )
+            _require_scan_count(
+                _verify_diagnostic_metric_lineage(storage.store.connection),
+                expected_counts.diagnostic_results,
+            )
+            _require_counts(storage, expected_counts)
         finally:
             storage.close()
-    except (OSError, StorageError, WorkspaceError, ValueError) as error:
+    except WorkspaceBackupError:
+        raise
+    except (duckdb.Error, OSError, StorageError, WorkspaceError, ValueError) as error:
         raise WorkspaceBackupError("workspace traceability could not be verified") from error
-    raw_ids = {item.record_id for item in raw_records}
-    observation_ids = {item.observation_id for item in observations}
-    metric_ids = {item.result_id for item in metrics}
-    if any(item.raw_record_id not in raw_ids for item in observations):
-        raise WorkspaceBackupError("workspace contains an observation without its raw record")
-    if any(
-        input_id not in observation_ids
-        for metric in metrics
-        for input_id in metric.input_observation_ids
-    ):
-        raise WorkspaceBackupError("workspace contains a metric without its observations")
-    if any(
-        input_id not in metric_ids
-        for metric in metrics
-        for input_id in metric.input_metric_result_ids
-    ):
-        raise WorkspaceBackupError("workspace contains a metric without its derived metrics")
-    diagnostic_metric_ids = {
-        metric_id
-        for diagnostic in diagnostics
-        for component in diagnostic.components
-        for metric_id in component.metric_result_ids
-    } | {
-        evidence.metric_result_id for diagnostic in diagnostics for evidence in diagnostic.evidence
-    }
-    if not diagnostic_metric_ids.issubset(metric_ids):
-        raise WorkspaceBackupError("workspace contains a diagnostic without its metrics")
+
+
+def _require_counts(storage: LocalStorage, expected: WorkspaceBackupCounts) -> None:
+    actual = WorkspaceBackupCounts(
+        raw_records=storage.raw_records.count(),
+        observations=storage.observations.count(),
+        metric_results=storage.metric_results.count(),
+        diagnostic_results=storage.diagnostics.count(),
+    )
+    if actual != expected:
+        raise StorageError("workspace traceability counts changed during verification")
+
+
+def _require_scan_count(actual: int, expected: int) -> None:
+    if actual != expected:
+        raise StorageError("workspace traceability scan did not match its count")
+
+
+def _scan_raw_records(storage: LocalStorage) -> int:
+    count = 0
+    after_id: str | None = None
+    while True:
+        record_ids = _load_primary_id_page(
+            storage.store.connection,
+            first_query=_RAW_FIRST_PAGE,
+            next_query=_RAW_NEXT_PAGE,
+            after_id=after_id,
+        )
+        if not record_ids:
+            return count
+        records = storage.raw_records.get_many(tuple(UUID(value) for value in record_ids))
+        if len(records) != len(record_ids):
+            raise StorageError("raw record page did not resolve exactly")
+        count += len(records)
+        after_id = record_ids[-1]
+        del records
+
+
+def _scan_documents[ModelT: BaseModel](
+    connection: DuckDBPyConnection,
+    *,
+    first_query: str,
+    next_query: str,
+    model_type: type[ModelT],
+) -> int:
+    count = 0
+    after_id: str | None = None
+    while True:
+        page = _load_document_page(
+            connection,
+            first_query=first_query,
+            next_query=next_query,
+            after_id=after_id,
+            model_type=model_type,
+        )
+        if not page:
+            return count
+        count += len(page)
+        after_id = page[-1][0]
+        del page
+
+
+def _verify_observation_raw_lineage(connection: DuckDBPyConnection) -> int:
+    count = 0
+    after_id: str | None = None
+    while True:
+        page = _load_document_page(
+            connection,
+            first_query=_OBSERVATION_FIRST_PAGE,
+            next_query=_OBSERVATION_NEXT_PAGE,
+            after_id=after_id,
+            model_type=NormalizedObservation,
+        )
+        if not page:
+            return count
+        for _, observation in page:
+            if not _references_exist(
+                connection,
+                table="raw_record_index",
+                primary_id="record_id",
+                references=(observation.raw_record_id,),
+            ):
+                raise WorkspaceBackupError(
+                    "workspace contains an observation without its raw record"
+                )
+        count += len(page)
+        after_id = page[-1][0]
+        del page
+
+
+def _verify_metric_observation_lineage(connection: DuckDBPyConnection) -> int:
+    count = 0
+    after_id: str | None = None
+    while True:
+        page = _load_document_page(
+            connection,
+            first_query=_METRIC_FIRST_PAGE,
+            next_query=_METRIC_NEXT_PAGE,
+            after_id=after_id,
+            model_type=MetricResult,
+        )
+        if not page:
+            return count
+        for _, metric in page:
+            if not _references_exist(
+                connection,
+                table="normalized_observations",
+                primary_id="observation_id",
+                references=metric.input_observation_ids,
+            ):
+                raise WorkspaceBackupError("workspace contains a metric without its observations")
+        count += len(page)
+        after_id = page[-1][0]
+        del page
+
+
+def _verify_metric_metric_lineage(connection: DuckDBPyConnection) -> int:
+    count = 0
+    after_id: str | None = None
+    while True:
+        page = _load_document_page(
+            connection,
+            first_query=_METRIC_FIRST_PAGE,
+            next_query=_METRIC_NEXT_PAGE,
+            after_id=after_id,
+            model_type=MetricResult,
+        )
+        if not page:
+            return count
+        for _, metric in page:
+            if not _references_exist(
+                connection,
+                table="metric_results",
+                primary_id="result_id",
+                references=metric.input_metric_result_ids,
+            ):
+                raise WorkspaceBackupError(
+                    "workspace contains a metric without its derived metrics"
+                )
+        count += len(page)
+        after_id = page[-1][0]
+        del page
+
+
+def _verify_diagnostic_metric_lineage(connection: DuckDBPyConnection) -> int:
+    count = 0
+    after_id: str | None = None
+    while True:
+        page = _load_document_page(
+            connection,
+            first_query=_DIAGNOSTIC_FIRST_PAGE,
+            next_query=_DIAGNOSTIC_NEXT_PAGE,
+            after_id=after_id,
+            model_type=DiagnosticResult,
+        )
+        if not page:
+            return count
+        for _, diagnostic in page:
+            references = tuple(
+                metric_id
+                for component in diagnostic.components
+                for metric_id in component.metric_result_ids
+            ) + tuple(evidence.metric_result_id for evidence in diagnostic.evidence)
+            if not _references_exist(
+                connection,
+                table="metric_results",
+                primary_id="result_id",
+                references=references,
+            ):
+                raise WorkspaceBackupError("workspace contains a diagnostic without its metrics")
+        count += len(page)
+        after_id = page[-1][0]
+        del page
+
+
+def _load_primary_id_page(
+    connection: DuckDBPyConnection,
+    *,
+    first_query: str,
+    next_query: str,
+    after_id: str | None,
+) -> tuple[str, ...]:
+    if after_id is None:
+        rows = connection.execute(first_query, [_TRACEABILITY_BATCH_SIZE]).fetchall()
+    else:
+        rows = connection.execute(
+            next_query,
+            [after_id, _TRACEABILITY_BATCH_SIZE],
+        ).fetchall()
+    identifiers = tuple(str(row[0]) for row in rows)
+    _validate_page(identifiers, after_id=after_id)
+    return identifiers
+
+
+def _load_document_page[ModelT: BaseModel](
+    connection: DuckDBPyConnection,
+    *,
+    first_query: str,
+    next_query: str,
+    after_id: str | None,
+    model_type: type[ModelT],
+) -> tuple[tuple[str, ModelT], ...]:
+    if after_id is None:
+        rows = connection.execute(first_query, [_TRACEABILITY_BATCH_SIZE]).fetchall()
+    else:
+        rows = connection.execute(
+            next_query,
+            [after_id, _TRACEABILITY_BATCH_SIZE],
+        ).fetchall()
+    identifiers = tuple(str(row[0]) for row in rows)
+    _validate_page(identifiers, after_id=after_id)
+    return tuple(
+        (identifier, model_from_json(model_type, row[1]))
+        for identifier, row in zip(identifiers, rows, strict=True)
+    )
+
+
+def _validate_page(identifiers: tuple[str, ...], *, after_id: str | None) -> None:
+    if len(identifiers) > _TRACEABILITY_BATCH_SIZE:
+        raise StorageError("workspace traceability page exceeded its bound")
+    if identifiers != tuple(sorted(identifiers)) or len(identifiers) != len(set(identifiers)):
+        raise StorageError("workspace traceability page is not strictly ordered")
+    if after_id is not None and identifiers and identifiers[0] <= after_id:
+        raise StorageError("workspace traceability keyset did not advance")
+
+
+def _references_exist(
+    connection: DuckDBPyConnection,
+    *,
+    table: Literal["raw_record_index", "normalized_observations", "metric_results"],
+    primary_id: Literal["record_id", "observation_id", "result_id"],
+    references: tuple[UUID, ...] | list[UUID],
+) -> bool:
+    ordered = tuple(sorted(set(references), key=str))
+    for offset in range(0, len(ordered), _TRACEABILITY_BATCH_SIZE):
+        chunk = ordered[offset : offset + _TRACEABILITY_BATCH_SIZE]
+        if _fetch_existing_ids(
+            connection,
+            table=table,
+            primary_id=primary_id,
+            references=chunk,
+        ) != set(chunk):
+            return False
+    return True
+
+
+def _fetch_existing_ids(
+    connection: DuckDBPyConnection,
+    *,
+    table: Literal["raw_record_index", "normalized_observations", "metric_results"],
+    primary_id: Literal["record_id", "observation_id", "result_id"],
+    references: tuple[UUID, ...],
+) -> set[UUID]:
+    if not references:
+        return set()
+    if len(references) > _TRACEABILITY_BATCH_SIZE:
+        raise StorageError("workspace traceability reference chunk exceeded its bound")
+    placeholders = ", ".join("?" for _ in references)
+    rows = connection.execute(
+        f"SELECT {primary_id} FROM {table} "
+        f"WHERE {primary_id} IN ({placeholders}) "
+        f"ORDER BY {primary_id} LIMIT ?",  # noqa: S608
+        [*(str(reference) for reference in references), _TRACEABILITY_BATCH_SIZE],
+    ).fetchall()
+    if len(rows) > _TRACEABILITY_BATCH_SIZE:
+        raise StorageError("workspace traceability reference query exceeded its bound")
+    return {UUID(str(row[0])) for row in rows}
 
 
 __all__ = [
