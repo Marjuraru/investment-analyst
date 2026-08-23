@@ -18,6 +18,7 @@ from investment_analyst.alerts.analytical_rule_catalog import INITIAL_MARKET_ACT
 from investment_analyst.alerts.analytical_state import (
     AnalyticalMonitorReceipt,
     AnalyticalMonitorReceiptStatus,
+    AnalyticalScreeningState,
     AnalyticalScreeningStateStore,
 )
 from investment_analyst.application.manual_operations import (
@@ -89,6 +90,7 @@ def _attempt(
     category: ScheduledJobFailureCategory = ScheduledJobFailureCategory.TRANSPORT,
     evidence_changed: bool = False,
     started_offset_seconds: int = 60,
+    effective_known_at_offset_seconds: int = 0,
 ) -> ScheduledJobAttempt:
     scheduled_for = definition.scheduled_for(local_date)
     started_at = scheduled_for + timedelta(seconds=started_offset_seconds)
@@ -116,7 +118,7 @@ def _attempt(
     if status is ScheduledJobAttemptStatus.SUCCEEDED:
         values["execution"] = ScheduledJobExecution(
             job_id=definition.job_id,
-            effective_known_at=completed_at,
+            effective_known_at=completed_at + timedelta(seconds=effective_known_at_offset_seconds),
             evidence_changed=evidence_changed,
             source_ids=(_SOURCE_ID,),
             created_count=1 if evidence_changed else 0,
@@ -178,6 +180,7 @@ def _persist_workspace(
     attempts: tuple[ScheduledJobAttempt, ...],
     *,
     active_manual: bool = False,
+    screened_processed_offset_seconds: int = 1,
 ) -> Path:
     root = tmp_path / "workspace"
     service = WorkspaceService(environ={}, home=tmp_path / "home")
@@ -200,7 +203,9 @@ def _persist_workspace(
             and attempt.execution is not None
             and attempt.execution.evidence_changed
         ):
-            processed_at = attempt.completed_at + timedelta(seconds=1)
+            processed_at = attempt.completed_at + timedelta(
+                seconds=screened_processed_offset_seconds
+            )
             result = AnalyticalScreeningEngine().evaluate(
                 AnalyticalScreeningRequest(
                     rule=INITIAL_MARKET_ACTIVITY_RULE,
@@ -297,6 +302,143 @@ def test_pass_is_strict_deterministic_and_accepts_screened_and_skipped_receipts(
     assert first.summary.manual_operation_state_present is False
     assert len(first.semantic_fingerprint) == 64
     assert len(first.summary.evidence_fingerprint) == 64
+
+
+def test_screened_receipt_may_predate_completion_when_semantic_join_is_exact(
+    tmp_path: Path,
+) -> None:
+    definition = _definition("clock-inversion")
+    attempts = tuple(
+        _attempt(
+            definition,
+            date(2026, 8, day),
+            identifier=day,
+            evidence_changed=day == 1,
+            effective_known_at_offset_seconds=-5 if day == 1 else 0,
+        )
+        for day in (1, 2, 3)
+    )
+    root = _persist_workspace(
+        tmp_path,
+        attempts,
+        screened_processed_offset_seconds=-1,
+    )
+    state = AnalyticalScreeningStateStore(root / "state" / _ANALYTICAL).load()
+    receipt = next(
+        item for item in state.receipts if item.status is AnalyticalMonitorReceiptStatus.SCREENED
+    )
+    screened_attempt = attempts[0]
+    assert screened_attempt.completed_at is not None
+    assert screened_attempt.execution is not None
+    assert receipt.processed_at < screened_attempt.completed_at
+    assert receipt.processed_at >= screened_attempt.execution.effective_known_at
+
+    report = _check(root)
+
+    assert report.decision is OperationalReadinessDecision.PASS
+    assert report.reason_codes == ()
+
+
+def _screened_join_fixture():
+    attempt = _attempt(
+        _definition("screened-join"),
+        date(2026, 8, 1),
+        identifier=1,
+        evidence_changed=True,
+        effective_known_at_offset_seconds=-5,
+    )
+    assert attempt.completed_at is not None
+    assert attempt.execution is not None
+    processed_at = attempt.completed_at - timedelta(seconds=1)
+    result = AnalyticalScreeningEngine().evaluate(
+        AnalyticalScreeningRequest(
+            rule=INITIAL_MARKET_ACTIVITY_RULE,
+            asset_id=attempt.definition.asset_id,
+            asset_class=AssetClass.EQUITY,
+            source_id=_SOURCE_ID,
+            known_at=attempt.execution.effective_known_at,
+            computed_at=processed_at,
+            metrics=(),
+        )
+    )
+    receipt = AnalyticalMonitorReceipt(
+        attempt_id=attempt.attempt_id,
+        job_id=attempt.definition.job_id,
+        asset_id=attempt.definition.asset_id,
+        status=AnalyticalMonitorReceiptStatus.SCREENED,
+        reason="new_compatible_evidence",
+        processed_at=processed_at,
+        result_ids=(result.result_id,),
+    )
+    return attempt, receipt, AnalyticalScreeningState(results=(result,), receipts=(receipt,))
+
+
+@pytest.mark.parametrize("offset_seconds", [-1, 1])
+def test_skipped_receipt_requires_exact_completion_timestamp(offset_seconds: int) -> None:
+    attempt = _attempt(_definition("skipped-join"), date(2026, 8, 1), identifier=1)
+    assert attempt.completed_at is not None
+    receipt = AnalyticalMonitorReceipt(
+        attempt_id=attempt.attempt_id,
+        job_id=attempt.definition.job_id,
+        asset_id=attempt.definition.asset_id,
+        status=AnalyticalMonitorReceiptStatus.SKIPPED,
+        reason="unchanged_evidence",
+        processed_at=attempt.completed_at + timedelta(seconds=offset_seconds),
+    )
+    reasons: set[OperationalReadinessReasonCode] = set()
+
+    OperationalReadinessService._check_analytical_join(
+        attempt,
+        receipt,
+        AnalyticalScreeningState(receipts=(receipt,)),
+        reasons,
+    )
+
+    assert reasons == {OperationalReadinessReasonCode.ANALYTICAL_RECEIPT_JOIN_INCOMPLETE}
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("job", OperationalReadinessReasonCode.ANALYTICAL_RECEIPT_JOIN_INCOMPLETE),
+        ("asset", OperationalReadinessReasonCode.ANALYTICAL_RECEIPT_JOIN_INCOMPLETE),
+        ("result", OperationalReadinessReasonCode.ANALYTICAL_RESULT_JOIN_INCOMPLETE),
+        ("source", OperationalReadinessReasonCode.ANALYTICAL_RESULT_JOIN_INCOMPLETE),
+        ("known_at", OperationalReadinessReasonCode.ANALYTICAL_RESULT_JOIN_INCOMPLETE),
+        ("computed_at", OperationalReadinessReasonCode.ANALYTICAL_RESULT_JOIN_INCOMPLETE),
+        ("traceability", OperationalReadinessReasonCode.ANALYTICAL_RESULT_JOIN_INCOMPLETE),
+    ],
+)
+def test_screened_receipt_semantic_join_corruption_remains_fail_closed(
+    mode: str,
+    expected: OperationalReadinessReasonCode,
+) -> None:
+    attempt, receipt, state = _screened_join_fixture()
+    result = state.results[0]
+    if mode == "job":
+        receipt = receipt.model_copy(update={"job_id": "other-job"})
+    elif mode == "asset":
+        receipt = receipt.model_copy(update={"asset_id": "equity:us:other"})
+    elif mode == "result":
+        receipt = receipt.model_copy(
+            update={"result_ids": (UUID("20000000-0000-4000-8000-000000000001"),)}
+        )
+    elif mode == "source":
+        result = result.model_copy(update={"source_id": "other-source"})
+    elif mode == "known_at":
+        result = result.model_copy(update={"known_at": result.known_at + timedelta(seconds=1)})
+    elif mode == "computed_at":
+        result = result.model_copy(
+            update={"computed_at": result.computed_at + timedelta(seconds=1)}
+        )
+    else:
+        result = result.model_copy(update={"traceability_verified": False})
+    state = state.model_copy(update={"results": (result,)})
+    reasons: set[OperationalReadinessReasonCode] = set()
+
+    OperationalReadinessService._check_analytical_join(attempt, receipt, state, reasons)
+
+    assert reasons == {expected}
 
 
 def test_parameters_reject_naive_non_utc_bool_and_invalid_minimum() -> None:

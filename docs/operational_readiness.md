@@ -43,6 +43,12 @@ La sonda exige:
   `skipped` con razón explícita y cero resultados;
 - ausencia de screenings, receipts o resultados huérfanos/duplicados.
 
+En un receipt `screened`, `processed_at` se une a `computed_at` de cada resultado y la evidencia
+conserva su `known_at` efectivo, pero no se compara por orden con `attempt.completed_at`: son
+lecturas independientes de wall clock, no un reloj monotónico. En un receipt `skipped`, que no
+produce resultados, `processed_at` debe coincidir exactamente con `attempt.completed_at`. No se
+aplica tolerancia ni ventana temporal en ninguno de los dos casos.
+
 Un fallo terminal conocido puede coexistir con `PASS` cuando queda explícitamente clasificado,
 respeta su policy y tiene ambos observadores completos. No se convierte en éxito ni se excluye.
 Una categoría legacy, retry no permitido, presupuesto excedido, join incompleto o trabajo activo

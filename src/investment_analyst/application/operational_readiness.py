@@ -590,13 +590,12 @@ class OperationalReadinessService:
             receipt.job_id != attempt.definition.job_id
             or receipt.asset_id != attempt.definition.asset_id
             or attempt.completed_at is None
-            or receipt.processed_at < attempt.completed_at
         ):
             reasons.add(OperationalReadinessReasonCode.ANALYTICAL_RECEIPT_JOIN_INCOMPLETE)
             return
         results_by_id = {item.result_id: item for item in state.results}
         if receipt.status is AnalyticalMonitorReceiptStatus.SKIPPED:
-            if receipt.result_ids:
+            if receipt.processed_at != attempt.completed_at or receipt.result_ids:
                 reasons.add(OperationalReadinessReasonCode.ANALYTICAL_RECEIPT_JOIN_INCOMPLETE)
             if attempt.status is not ScheduledJobAttemptStatus.SUCCEEDED and (
                 receipt.reason != f"attempt_{attempt.status.value}"
