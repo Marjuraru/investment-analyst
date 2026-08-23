@@ -67,7 +67,7 @@ viceversa.
 | `DELIVERY-GOVERNANCE` | `DONE` | Propuesta post-merge de DEV-10 (`COMPLETES`): la ruta se vuelve integrada sólo al fusionar este PR. | DEV-8/#60, DEV-9/#62 y DEV-10/#64; el candidato no cambia main antes del merge. |
 | `FOUNDATIONS-RUNTIME` | `DONE` | Runtime, watchlist, health y scheduler por capacidades. | BASE-18/#29, BASE-19/#31 y OPS-1/#37. |
 | `MARKET-COMPARISON` | `DONE` | Muestra diaria UTC común, sin FX ni benchmarks sectoriales. | MKT-3/#56/#57: normalización, retorno, volatilidad, drawdown, correlación y beta v1. |
-| `ANALYST-READINESS` | `BLOCKED` | Evidencia operacional multicíclo, restart/recovery y rehearsal seguro sigue pendiente. | OPS-2/#66 fue supersedido administrativamente: `insufficient_local_dates`; no hubo completion ni rehearsal. |
+| `ANALYST-READINESS` | `DONE` | Propuesta post-merge de OPS-8 (`COMPLETES`): sólo se vuelve integrada tras BUILD, CI, AUDIT, rehearsal HUMAN exact-SHA y merge. | OPS-8/#89 añade la sonda fail-closed y el runbook; reutiliza #85 y exige backup/restore detenido antes del merge. |
 | `VALUATION-HISTORY` | `DONE` | Historia materializada y reglas relativas explícitas compatibles con valoración PIT v1. | VAL-1/#70 aporta historia descriptiva; VAL-2/#72 propone percentil Decimal34 PIT sin señal ni recomendación. |
 | `INDICATORS-AND-OUTBOX` | `DONE` | Propuesta post-merge de ALERT-1 (`COMPLETES`): la ruta se vuelve integrada sólo al fusionar este PR. | RSI/MACD/ATR, reglas silenciosas y outbox local con acuse durable; los canales externos siguen pendientes. |
 | `SEC-CORPUS` | `NEXT` | Corpus oficial y contratos independientes antes de Cazatiburones. | Forms 3/4/5, 13D/13G y 13F no integrados. |
@@ -97,11 +97,11 @@ viceversa.
 
 #### P0 — estabilidad operativa
 
-- Validar health, clasificación de errores y presupuestos de reintentos mediante ejecuciones reales
-  antes de declarar operación desatendida; un fallo permanente no debe consumir el presupuesto
-  diario como si fuera transitorio.
-- Aún no existe una prueba documentada de backup y restauración del workspace permanente.
-- El screening todavía no ha completado una observación silenciosa de varios días y ciclos reales.
+- OPS-8 propone cerrar este P0 con una sonda reproducible sobre evidencia multidiaria y un rehearsal
+  HUMAN detenido de backup/restore. La fila `DONE` no es efectiva hasta que el exact SHA pase AUDIT,
+  recuperación real, enablement, aprobación humana y merge.
+- Los fallos permanentes permanecen visibles y no consumen retries; categorías legacy, joins
+  incompletos, presupuesto excedido o trabajo pendiente fallan cerrado.
 
 #### P1 — eficiencia y mantenibilidad
 
@@ -116,6 +116,8 @@ viceversa.
 - scheduler, alertas y screening cargan, validan y reescriben documentos JSON completos. Los tamaños
   actuales son pequeños, pero los límites configurados de 100.000 o 250.000 registros harían
   costoso cada cambio en una operación 24/7.
+- el peak global systemd cercano a 6,2 GiB no está atribuido a un job y sigue como deuda de medición
+  por job; no constituye un presupuesto ni invalida el delta SMV acotado aceptado en #85.
 - persisten nombres, valores predeterminados y adaptadores heredados de Apple junto a rutas
   genéricas. `AAPL` no es solo un ejemplo en el código actual: conserva bootstrap, runner, estados,
   controlador y contratos privilegiados que deben migrar sin romper compatibilidad;
@@ -401,7 +403,8 @@ Salida: cero fallos críticos sin explicar y rama principal reproducible.
 4. separar adaptadores web y caché por dominio;
 5. convertir refresh manual en trabajo no bloqueante;
 6. instrumentar latencia, volumen y presupuesto por proveedor;
-7. implementar y probar backup/restauración;
+7. conservar los contratos integrados de backup/restore y completar el rehearsal HUMAN exact-SHA
+   de OPS-8 antes de considerar integrada la transición de readiness;
 8. diseñar y migrar estados operativos solo después del smoke temporal.
 
 Salida: AAPL usa el mismo núcleo que los demás emisores, la interfaz sigue respondiendo durante un
@@ -448,7 +451,8 @@ sigue funcionando con IA apagada.
 
 1. CI, cobertura, auditoría y smokes reales por familia de activo;
 2. prueba de 72 horas en modo silencioso;
-3. corte, restauración y comparación del backup;
+3. revalidar la evidencia de recuperación de OPS-8 y repetirla sólo si el workspace o sus contratos
+   relevantes cambiaron;
 4. reinicio de proceso y laptop;
 5. benchmark p50/p95 y presupuesto de memoria;
 6. revisión de accesibilidad, responsive y navegación por teclado;

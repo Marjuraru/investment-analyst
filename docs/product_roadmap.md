@@ -473,7 +473,8 @@ recomendación futura seguirá siendo un artefacto separado y trazable.
 
 Después de estabilizar el scheduler multi-fuente:
 
-- backup y restauración probados;
+- readiness operacional reproducible y backup/restauración detenidos, propuestos por OPS-8 y sólo
+  efectivos después de AUDIT, rehearsal HUMAN exact-SHA y merge;
 - logs acotados y métricas de latencia, errores y frescura;
 - watchdog y recuperación;
 - inicio automático de WSL o despliegue ARM64;
@@ -549,7 +550,8 @@ La ruta crítica vigente se mantiene en
 
 1. estabilizar el runtime por capacidades y observar los jobs de la watchlist persistente;
 2. eliminar el centralismo heredado de AAPL mediante contratos genéricos y adaptadores compatibles;
-3. eliminar fallos operativos recurrentes y validar backup, restauración y soak silencioso;
+3. integrar OPS-8 tras su aceptación HUMAN, conservar los fallos clasificados visibles y medir por
+   job el peak global no atribuido antes de fijar un presupuesto de memoria;
 4. desacoplar lecturas de refresh largos, compactar la API operativa y medir presupuestos;
 5. ampliar la valoración v1 hacia historia y reglas posteriores, e incorporar indicadores
    restantes, reglas y notificaciones reanudables;
