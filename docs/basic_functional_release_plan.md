@@ -62,6 +62,11 @@ pero no vuelve verdadera la fila antes de fusionarse. En main, `DONE` requiere e
 el Work Block con razón y evidencia viva. Los IDs pueden relacionarse con varios Work Blocks y
 viceversa.
 
+Hasta que esa secuencia termine y el candidato se fusione, el estado vivo integrado continúa como
+`ANALYST-READINESS` | `BLOCKED`; la fila candidata sólo propone el estado post-merge. El antecedente
+administrativo sigue siendo OPS-2/#66, supersedido con `insufficient_local_dates` sin completion ni
+rehearsal.
+
 | ID | Estado | Dependencia o condición | Evidencia integrada o límite |
 | --- | --- | --- | --- |
 | `DELIVERY-GOVERNANCE` | `DONE` | Propuesta post-merge de DEV-10 (`COMPLETES`): la ruta se vuelve integrada sólo al fusionar este PR. | DEV-8/#60, DEV-9/#62 y DEV-10/#64; el candidato no cambia main antes del merge. |
