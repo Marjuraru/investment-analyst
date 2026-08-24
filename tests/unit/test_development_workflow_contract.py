@@ -54,6 +54,16 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert protocol.count("<!-- development-workflow:build-v1") == 1
     assert protocol.count("<!-- development-workflow:audit-v1") == 1
     assert "development-workflow:superseded-v1" in protocol
+    assert "phase=build` y `phase=audit` reconoce un único marker AUDIT" in protocol
+    assert "current+stale" in protocol
+    assert "stale no" in protocol
+    assert "no equivalente" in protocol
+    assert "head-advanced" in protocol
+    assert "archive-first" in protocol
+    assert "BUILD jamás lo muta ni lo usa como PASS" in protocol
+    assert "cero marker AUDIT current" in protocol
+    assert "head == BUILD.sha == AUDIT.sha == CI.sha" in protocol
+    assert "nunca payload histórico sensible" in protocol
     assert "snapshot batched de guards vivos" in protocol
     assert "segundo snapshot/revalidación crítica" in protocol
     assert "squash merge con --match-head-commit" in protocol

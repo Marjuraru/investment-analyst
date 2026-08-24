@@ -95,11 +95,15 @@ fase `audit`, y cualquier transición mecánica lo ejecuta en fase `finalize`.
 
 El guard exige metadata estructural única del Work Block, target/base/head literales, markers HTML
 estructuralmente válidos, el gate literal `Python 3.12 quality` y evidencia reconocida. Rechaza
-tokens reservados fuera de bloques válidos, duplicados no equivalentes, SHA stale, metadata
-contradictoria y estados no terminales. Devuelve un plan read-only de supersedes sólo para
-duplicados equivalentes; la skill muta, relee y vuelve a ejecutar el guard. `CRITICAL` o cualquier
-policy `HUMAN` sólo puede terminar en `AWAITING HUMAN APPROVAL`; nunca autoriza ready, merge o
-cleanup automático.
+tokens reservados fuera de bloques válidos, duplicados no equivalentes, metadata contradictoria y
+estados no terminales. En `phase=build` y `phase=audit` reconoce un único marker AUDIT bien formado
+de un SHA anterior como histórico stale, lo expone sólo como referencia segura y plan read-only de
+owner AUDIT, y nunca lo cuenta como PASS/FAIL del head. BUILD no puede archivarlo. `phase=finalize`
+rechaza cualquier stale y sólo acepta el marker AUDIT actual. Marker current+stale, stale no
+equivalentes o cualquier uso de `head-advanced` fuera de AUDIT siguen fail-closed. La skill owner
+relee y ejecuta de nuevo el guard después de cada reconciliación; `CRITICAL` o cualquier policy
+`HUMAN` sólo puede terminar en `AWAITING HUMAN APPROVAL`; nunca autoriza ready, merge o cleanup
+automático.
 
 ## Capability envelope y preflight BUILD
 
@@ -198,9 +202,40 @@ Antes de confiar o escribir un role, se leen todos los comentarios:
    nombre del marker activo a `development-workflow:superseded-v1`, se añaden `role=<build|audit>`,
    `canonical_comment_id=<ID>` y `reason=equivalent-duplicate`, y se preserva el resto del payload.
    Después se relee hasta demostrar exactamente un marker activo.
-5. Marker malformado, diferencia de role/block/SHA/status/payload, fallo de edición o relectura es
-   `GUARD FAILURE`; no se escoge, fusiona ni neutraliza evidencia. Los markers superseded nunca
-   cuentan como activos ni autorizan AUDIT/FINALIZE.
+5. Un marker AUDIT activo con SHA anterior al head puede clasificarse como histórico stale sólo en
+   `phase=build` o `phase=audit`, siempre que sea único o equivalente a los demás stale, conserve el
+   mismo block/status/reviewer/payload y no coexista con un marker AUDIT current. Se expone sin
+   payload en JSON y como plan `head-advanced` para AUDIT; BUILD jamás lo muta ni lo usa como PASS.
+   Un marker BUILD stale no recibe esta tolerancia.
+6. Marker malformado, diferencia de role/block/SHA/status/payload, current+stale, stale no
+   equivalente, fallo de edición o relectura es `GUARD FAILURE`; no se escoge, fusiona ni neutraliza
+   evidencia. Los markers superseded nunca cuentan como activos ni autorizan AUDIT/FINALIZE.
+
+### Lifecycle de AUDIT histórico y archive-first
+
+Sólo AUDIT, después de revisar legítimamente el head nuevo y decidir `PASS` o `FAIL`, puede archivar
+el marker AUDIT histórico. La forma `head-advanced` es exclusiva de `role=audit` y conserva el
+marker terminal anterior y su payload original, añadiendo el head que lo reemplaza:
+
+```html
+<!-- development-workflow:superseded-v1
+block=<WORK-BLOCK>
+sha=<OLD-FULL-SHA>
+status=PASS|FAIL
+role=audit
+reviewer=<EVIDENCE-METADATA>
+reason=head-advanced
+superseded_by_sha=<CURRENT-FULL-SHA>
+-->
+```
+
+`superseded_by_sha` debe ser completo y distinto del SHA archivado. `head-advanced` no admite
+`role=build`, `PENDING`, campos extra ni equivalencia implícita. La secuencia es archive-first:
+primero se archiva el histórico, después se publica exactamente un marker AUDIT terminal del head
+actual. Si la segunda publicación falla, queda cero marker AUDIT current; ese estado es recuperable
+por AUDIT pero nunca autoriza PASS, FINALIZE ni HUMAN. `reason=equivalent-duplicate` conserva su
+semántica previa y no puede archivar un cambio de head. El plan y JSON del guard sólo exponen IDs,
+SHA y status; nunca payload histórico sensible.
 
 El comentario BUILD current registra de forma compacta: block/SHA/status; entorno o capacidad
 relevante; gates con resultado y timestamp o referencia viva equivalente; enlace a CI/logs;
@@ -228,17 +263,25 @@ AUDIT no infiere PASS de BUILD PASS, CI PASS, smoke PASS ni filenames. Para el S
    smoke, requested changes y threads para el mismo SHA. Un estado no reconocido, una acción
    obligatoria pendiente o cualquier identificador no leído literalmente falla cerrado. AUDIT sólo
    ejecuta validación read-only; formatter, fixer u otro comando mutante están prohibidos.
-5. Publica rango, contabilidad de cobertura, matriz de acceptance/invariantes/negativos, probes,
-   hallazgos con evidencia concreta y riesgo residual en el comentario AUDIT exact-SHA.
+5. Si existe un AUDIT stale permitido, no lo trata como resultado actual. Tras decidir legítimamente
+   `PASS` o `FAIL`, archiva primero ese marker con `reason=head-advanced`, relee el estado parcial y
+   publica después exactamente un marker terminal del head actual. Un `FAIL` actual registra
+   `status=FAIL` y termina `CHANGES REQUIRED`; una publicación parcial sin marker current es
+   recuperable, pero no es PASS.
+6. Publica rango, contabilidad de cobertura, matriz de acceptance/invariantes/negativos, probes,
+   hallazgos con evidencia concreta y riesgo residual en el comentario AUDIT exact-SHA. Después
+   relee GitHub y ejecuta nuevamente `scripts/check_workflow_guards.py --phase audit`.
 
 `PASS` es imposible con BLOCKER, MAJOR, bug semántico, scope creep, acceptance o invariante crítica
 no demostrada, negativo crítico omitido, contradicción sin resolver, test eliminado/debilitado sin
 equivalencia, probe material de FIX no verificado, evidencia crítica ausente, BUILD no-PASS/ambiguo,
-SHA stale, smoke insuficiente, requested changes o thread pendiente. Sólo un happy path con diff
-material completo revisado puede producir AUDIT PASS. AUDIT sigue read-only respecto del candidato,
-salvo la publicación/reconciliación estrecha de su propio marker machine-owned; después lo relee y
-ejecuta otra vez el guard. HUMAN no bloquea esa evidencia: tras un marker PASS exact-SHA termina en
-`AWAITING HUMAN APPROVAL` sin ready, merge, cleanup, cierre del Issue ni cambios de label.
+SHA stale del resultado actual, smoke insuficiente, requested changes o thread pendiente. Sólo un
+happy path con diff material completo revisado puede producir AUDIT PASS. AUDIT sigue read-only
+respecto del candidato, salvo la publicación/reconciliación estrecha de su propio marker machine-owned
+y el archive-first de su histórico; después lo relee y ejecuta otra vez el guard. HUMAN no bloquea
+esa evidencia: tras un marker PASS exact-SHA actual termina en `AWAITING HUMAN APPROVAL` sin ready,
+merge, cleanup, cierre del Issue ni cambios de label. FINALIZE/HUMAN exige estrictamente
+`head == BUILD.sha == AUDIT.sha == CI.sha`; ningún histórico superseded satisface esa igualdad.
 
 ## FINALIZE determinista
 

@@ -33,6 +33,7 @@ from check_workflow_guards import (  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 FULL_SHA = "a" * 40
 BASE_SHA = "b" * 40
+HISTORICAL_SHA = "c" * 40
 
 
 def _issue(body: str) -> IssueSnapshot:
@@ -63,12 +64,35 @@ def _pr() -> PullRequestSnapshot:
     )
 
 
-def _marker(role: str, status: str = "PASS", *, payload: str = "evidence=pass") -> CommentSnapshot:
+def _marker(
+    role: str,
+    status: str = "PASS",
+    *,
+    payload: str = "evidence=pass",
+    sha: str = FULL_SHA,
+    comment_id: int | None = None,
+) -> CommentSnapshot:
     reviewer = "reviewer=gemini-fresh\n" if role == "audit" else ""
     return CommentSnapshot(
-        10 if role == "build" else 11,
+        comment_id if comment_id is not None else (10 if role == "build" else 11),
         f"<!-- development-workflow:{role}-v1\n"
-        f"block=DEV-7\nsha={FULL_SHA}\nstatus={status}\n{reviewer}-->\n{payload}\n",
+        f"block=DEV-7\nsha={sha}\nstatus={status}\n{reviewer}-->\n{payload}\n",
+    )
+
+
+def _head_advanced_archive(
+    *,
+    sha: str = HISTORICAL_SHA,
+    superseded_by_sha: str = FULL_SHA,
+    role: str = "audit",
+    payload: str = "historical-secret-payload",
+) -> CommentSnapshot:
+    return CommentSnapshot(
+        20,
+        "<!-- development-workflow:superseded-v1\n"
+        f"block=DEV-7\nsha={sha}\nstatus=PASS\nrole={role}\n"
+        "reviewer=gemini-fresh\nreason=head-advanced\n"
+        f"superseded_by_sha={superseded_by_sha}\n-->\n{payload}\n",
     )
 
 
@@ -156,6 +180,152 @@ def test_non_equivalent_duplicates_fail_without_mutation_plan() -> None:
     assert result.decision == "GUARD FAILURE"
     assert "non-equivalent" in result.reasons[0]
     assert result.mutation_plan == ()
+
+
+def test_build_accepts_one_stale_audit_without_transferring_pass() -> None:
+    result = evaluate(
+        _snapshot(
+            comments=(
+                _marker("build", status="PENDING"),
+                _marker("audit", sha=HISTORICAL_SHA),
+            )
+        ),
+        phase="build",
+    )
+
+    assert result.decision == "BUILD GUARD PASS"
+    assert result.build.marker is not None
+    assert result.build.marker.status == "PENDING"
+    assert result.audit.marker is None
+    assert [marker.sha for marker in result.audit.historical_stale] == [HISTORICAL_SHA]
+    assert result.mutation_plan == ("audit-owner archive audit comment 11 as head-advanced",)
+
+
+def test_audit_preflight_accepts_stale_history_after_build_pass() -> None:
+    result = evaluate(
+        _snapshot(
+            comments=(
+                _marker("build"),
+                _marker("audit", sha=HISTORICAL_SHA),
+            )
+        ),
+        phase="audit",
+    )
+
+    assert result.decision == "AUDIT GUARD PASS"
+    assert result.build.marker is not None
+    assert result.build.marker.status == "PASS"
+    assert result.audit.marker is None
+    assert result.audit.historical_stale[0].sha == HISTORICAL_SHA
+
+
+@pytest.mark.parametrize("status", ["PASS", "FAIL"])
+def test_current_audit_result_is_the_only_current_result(status: str) -> None:
+    result = evaluate(
+        _snapshot(comments=(_marker("build"), _marker("audit", status=status))),
+        phase="audit",
+    )
+
+    assert result.decision == "AUDIT GUARD PASS"
+    assert result.audit.marker is not None
+    assert result.audit.marker.status == status
+    assert result.audit.historical_stale == ()
+
+
+def test_finalize_rejects_stale_audit_and_never_transfers_pass() -> None:
+    result = evaluate(
+        _snapshot(comments=(_marker("build"), _marker("audit", sha=HISTORICAL_SHA))),
+        phase="finalize",
+    )
+
+    assert result.decision == "GUARD FAILURE"
+    assert result.reasons == ("audit marker SHA differs from live PR head",)
+
+
+def test_current_and_stale_audit_markers_are_contradictory() -> None:
+    comments = (
+        _marker("build"),
+        _marker("audit"),
+        _marker("audit", sha=HISTORICAL_SHA, comment_id=12),
+    )
+
+    for phase in ("build", "audit"):
+        result = evaluate(_snapshot(comments=comments), phase=phase)
+        assert result.decision == "GUARD FAILURE"
+        assert result.reasons == ("current and historical stale audit markers coexist",)
+
+
+def test_non_equivalent_stale_audit_markers_fail_closed() -> None:
+    comments = (
+        _marker("build"),
+        _marker("audit", sha=HISTORICAL_SHA, comment_id=11),
+        _marker("audit", sha=HISTORICAL_SHA, status="FAIL", comment_id=12),
+    )
+    result = evaluate(_snapshot(comments=comments), phase="audit")
+
+    assert result.decision == "GUARD FAILURE"
+    assert result.reasons == ("non-equivalent stale audit markers",)
+
+
+@pytest.mark.parametrize(
+    "comment",
+    (
+        _head_advanced_archive(role="build"),
+        _head_advanced_archive(superseded_by_sha=HISTORICAL_SHA),
+        CommentSnapshot(
+            21,
+            "<!-- development-workflow:superseded-v1\n"
+            f"block=DEV-7\nsha={HISTORICAL_SHA}\nstatus=PASS\nrole=audit\n"
+            "reviewer=gemini-fresh\nreason=head-advanced\n-->\nhistory\n",
+        ),
+    ),
+)
+def test_invalid_head_advanced_archives_fail_closed(comment: CommentSnapshot) -> None:
+    with pytest.raises(ValueError):
+        parse_marker(comment)
+
+
+def test_equivalent_audit_duplicates_keep_existing_reconciliation() -> None:
+    duplicate = CommentSnapshot(12, _marker("audit").body)
+    result = evaluate(
+        _snapshot(comments=(_marker("build"), _marker("audit"), duplicate)),
+        phase="audit",
+    )
+
+    assert result.decision == "AUDIT GUARD PASS"
+    assert result.mutation_plan == ("supersede audit comment 12",)
+
+
+def test_archive_first_without_current_audit_never_authorizes_finalize() -> None:
+    comments = (_marker("build"), _head_advanced_archive())
+    audit_preflight = evaluate(_snapshot(comments=comments), phase="audit")
+    finalize = evaluate(_snapshot(comments=comments), phase="finalize")
+
+    assert audit_preflight.decision == "AUDIT GUARD PASS"
+    assert audit_preflight.audit.marker is None
+    assert finalize.decision == "GUARD FAILURE"
+    assert finalize.reasons == ("AUDIT PASS marker is absent or not PASS",)
+
+
+def test_stale_json_and_action_plan_never_expose_historical_payload() -> None:
+    result = evaluate(
+        _snapshot(
+            comments=(
+                _marker("build"),
+                _marker(
+                    "audit",
+                    sha=HISTORICAL_SHA,
+                    payload="historical-secret-payload",
+                ),
+            )
+        ),
+        phase="build",
+    )
+    rendered = json.dumps(result.as_json(), sort_keys=True)
+
+    assert "historical-secret-payload" not in rendered
+    assert "audit-owner archive audit comment 11 as head-advanced" in rendered
+    assert "historical_stale" in rendered
 
 
 @pytest.mark.parametrize(
