@@ -50,7 +50,10 @@ class RawRecordRepository(Protocol):
     def list(
         self,
         *,
+        asset_id: str | None = None,
         source_id: str | None = None,
+        schema_version: str | None = None,
+        available_to: datetime | None = None,
         received_from: datetime | None = None,
         received_to: datetime | None = None,
     ) -> list[RawRecord]: ...

@@ -20,6 +20,11 @@ Each initialized workspace contains:
 processed, DuckDB, and Parquet-export layout is not migrated or renamed. `exports/` and `state/` are
 reserved workspace-level directories for future application services.
 
+The optional `storage/data/documents/sha256/` directory is an additive immutable content store for
+SEC primary filing bytes. Workspaces created before the corpus remain valid without it. Backup and
+restore inventory its regular files when present and verify documentary lineage during the existing
+paginated RawRecord scan.
+
 `state/asset_preferences_state_v1.json`, cuando existe, conserva la watchlist, favoritos y refresh
 programado como revisiones auditables. Al aproximarse a 1 000 revisiones o 4 MiB, los segmentos
 históricos hash-bound viven en `state/asset_preferences_state_v1_archives/`; forman parte del mismo

@@ -1,5 +1,6 @@
 """Public local storage API."""
 
+from investment_analyst.storage.document_content import DocumentContentStore
 from investment_analyst.storage.duckdb_store import DuckDBStore
 from investment_analyst.storage.errors import (
     RecordConflictError,
@@ -28,6 +29,7 @@ __all__ = [
     "DuckDBObservationRepository",
     "DuckDBSourceDefinitionRepository",
     "DuckDBStore",
+    "DocumentContentStore",
     "JsonRawRecordRepository",
     "LocalStorage",
     "ParquetExporter",
