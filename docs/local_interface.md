@@ -719,11 +719,12 @@ operativas y receipts analíticos ausentes fallan cerrado. Véase el
 
 ### Observación exact-SHA de aceptación
 
-El observer de `release-acceptance-observation-v1` es una ejecución one-shot acotada y read-only. Sólo
+El observer de `release-acceptance-observation-v1` es una ejecución one-shot finita y read-only. Sólo
 consulta los cinco GET loopback allowlisted, `systemctl --user show` y
 `/proc/<MainPID>/status`; no abre el workspace, no lee `EnvironmentFile`, no ejecuta providers,
 scheduler o reconcile, no hace POST y no reinicia el servicio. Exige SHA/tree completos, duración e
-intervalo explícitos y dos destinos nuevos fuera del workspace:
+intervalo explícitos y dos destinos nuevos fuera del workspace. La duración es una cota técnica de
+la captura elegida, sin duración mínima ni número mínimo de muestras, sesiones o ciclos como gate:
 
 ```bash
 .venv/bin/python scripts/observe_release_acceptance.py \
@@ -731,7 +732,7 @@ intervalo explícitos y dos destinos nuevos fuera del workspace:
   --workspace-root <workspace-permanente> \
   --jsonl /ruta/scratch/release-acceptance.jsonl \
   --summary /ruta/scratch/release-acceptance-summary.json \
-  --duration-seconds 259200 --interval-seconds 60
+  --duration-seconds 30 --interval-seconds 1
 ```
 
 El JSONL se crea con exclusión y se va sincronizando en modo append-only; el summary se publica una

@@ -42,7 +42,6 @@ SYSTEMCTL_PROPERTIES: tuple[str, ...] = (
     "WorkingDirectory",
     "ExecStart",
 )
-MAX_DURATION_SECONDS = 72 * 60 * 60
 MIN_INTERVAL_SECONDS = 0.05
 MAX_INTERVAL_SECONDS = 60 * 60
 MIN_TIMEOUT_SECONDS = 0.05
@@ -243,10 +242,7 @@ class ReleaseAcceptanceConfig:
             raise ReleaseAcceptanceInputError("expected_sha_and_tree_must_be_full")
         if not SERVICE_NAME_PATTERN.fullmatch(self.service):
             raise ReleaseAcceptanceInputError("invalid_service_name")
-        if (
-            not math.isfinite(self.duration_seconds)
-            or not 0 <= self.duration_seconds <= MAX_DURATION_SECONDS
-        ):
+        if not math.isfinite(self.duration_seconds) or self.duration_seconds < 0:
             raise ReleaseAcceptanceInputError("invalid_duration")
         if (
             not math.isfinite(self.interval_seconds)

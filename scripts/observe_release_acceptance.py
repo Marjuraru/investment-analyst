@@ -10,7 +10,6 @@ import sys
 from pathlib import Path
 
 from investment_analyst.application.release_acceptance import (
-    MAX_DURATION_SECONDS,
     MAX_INTERVAL_SECONDS,
     MAX_TIMEOUT_SECONDS,
     MIN_INTERVAL_SECONDS,
@@ -26,7 +25,7 @@ def _bounded_float(
     value: str,
     *,
     minimum: float,
-    maximum: float,
+    maximum: float | None,
     allow_zero: bool = False,
     label: str,
 ) -> float:
@@ -34,7 +33,7 @@ def _bounded_float(
         parsed = float(value)
     except ValueError as error:
         raise argparse.ArgumentTypeError(f"{label} must be numeric") from error
-    if not math.isfinite(parsed) or parsed < minimum or parsed > maximum:
+    if not math.isfinite(parsed) or parsed < minimum or (maximum is not None and parsed > maximum):
         raise argparse.ArgumentTypeError(f"{label} is outside its allowed bounds")
     if not allow_zero and parsed == 0:
         raise argparse.ArgumentTypeError(f"{label} must be positive")
@@ -45,7 +44,7 @@ def _duration(value: str) -> float:
     return _bounded_float(
         value,
         minimum=0.0,
-        maximum=MAX_DURATION_SECONDS,
+        maximum=None,
         allow_zero=True,
         label="duration",
     )

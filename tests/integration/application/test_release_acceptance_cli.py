@@ -55,13 +55,20 @@ def test_cli_reports_pass_without_exposing_paths_or_payloads(
     assert str(tmp_path) not in output
 
 
-def test_cli_rejects_unbounded_or_invalid_input(tmp_path: Path) -> None:
-    """CLI parsing fails closed before any observer adapter can run."""
-    invalid_duration_args = _arguments(tmp_path)
-    invalid_duration_args[invalid_duration_args.index("--duration-seconds") + 1] = "999999"
-    with pytest.raises(SystemExit) as invalid_duration:
-        main(invalid_duration_args)
-    assert invalid_duration.value.code == 2
+def test_cli_accepts_finite_duration_and_rejects_invalid_interval(tmp_path: Path) -> None:
+    """Duration is operator-selected; technical interval bounds remain fail-closed."""
+    duration_args = _arguments(tmp_path)
+    duration_args[duration_args.index("--duration-seconds") + 1] = "999999"
+    summary = {
+        "schema_version": "release-acceptance-observation-v1",
+        "status": "PASS",
+        "sample_count": 1,
+        "failures": [],
+    }
+    with patch(
+        "scripts.observe_release_acceptance.observe_release_acceptance", return_value=summary
+    ):
+        assert main(duration_args) == 0
 
     invalid_interval_args = _arguments(tmp_path)
     invalid_interval_args[invalid_interval_args.index("--interval-seconds") + 1] = "0"

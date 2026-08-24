@@ -15,8 +15,9 @@ pueden conceder permisos. El flujo es:
 2. BUILD trabaja en un worktree aislado, modifica sólo la allowlist, publica un draft PR y espera CI.
 3. AUDIT revisa el diff completo y publica evidencia PASS/FAIL exact-SHA. Para `CRITICAL/HUMAN`, un
    PASS termina en `AWAITING HUMAN APPROVAL`.
-4. HUMAN congela el candidate y ejecuta A–D en orden. Sólo E puede marcar ready y fusionar después de
-   una matriz completa PASS.
+4. HUMAN congela el candidate y ejecuta las fases aplicables A–C en orden. La fase D es futura y no
+   pertenece a esta aceptación; sólo E puede marcar ready y fusionar después de una matriz completa
+   PASS.
 
 El checkout OPS-2 permanece dormante. BUILD/AUDIT sólo pueden comprobar mecánicamente branch, HEAD,
 tree, status digest y hashes autorizados; no abren, ejecutan, importan, copian, diffean, sincronizan
@@ -63,7 +64,9 @@ refresh, scheduler, reconcile o backup; no hace POST, no toma locks y no reinici
 es el binding exacto obtenido durante candidate acquisition y se exige como entrada de la observación;
 la sonda no reabre el runtime ni fabrica una verificación de filesystem fuera de sus tres fuentes.
 
-Cada ejecución requiere duración e intervalo explícitos y dos destinos nuevos fuera del workspace:
+Cada ejecución requiere una duración finita e intervalo explícitos y dos destinos nuevos fuera del
+workspace. La duración sólo acota técnicamente la captura solicitada: no existe una duración mínima
+ni un número mínimo de muestras, sesiones o ciclos como gate de aceptación.
 
 ```bash
 .venv/bin/python scripts/observe_release_acceptance.py \
@@ -71,13 +74,13 @@ Cada ejecución requiere duración e intervalo explícitos y dos destinos nuevos
   --workspace-root <workspace-permanente> \
   --jsonl /ruta/scratch/release-acceptance.jsonl \
   --summary /ruta/scratch/release-acceptance-summary.json \
-  --duration-seconds 259200 --interval-seconds 60
+  --duration-seconds 30 --interval-seconds 1
 ```
 
-La herramienta rechaza symlink, destino existente, destino dentro del workspace, duración o
-intervalo fuera de límites y dos salidas iguales. El JSONL se abre con creación exclusiva y cada
-registro se sincroniza antes del siguiente. El summary se escribe a un temporal del mismo directorio
-y se enlaza una sola vez sin sobreescribir un archivo competidor.
+La herramienta rechaza symlink, destino existente, destino dentro del workspace, una duración no
+finita o negativa, un intervalo fuera de límites y dos salidas iguales. El JSONL se abre con creación
+exclusiva y cada registro se sincroniza antes del siguiente. El summary se escribe a un temporal del
+mismo directorio y se enlaza una sola vez sin sobreescribir un archivo competidor.
 
 La evidencia contiene UTC/monotonic, sample y elapsed, SHA/tree/service esperados, estado systemd,
 PID, `NRestarts`, RSS/HWM/swap, status/tamaño/validez JSON/latencia por GET y eventos compactos.
@@ -108,21 +111,21 @@ SEC-CORPUS/#91 cuando sus contracts y tree sigan siendo exactos. Si el workspace
 aplicables, registrar ausencia válida; no importar datos para fabricar cobertura. El benchmark
 read-only existente y la revisión UI HUMAN se ejecutan una sola vez en desktop y móvil.
 
-### C. Restart de laptop
+### C. Captura finita y benchmark read-only
 
-Sólo HUMAN puede apagar/reiniciar. Tras volver a WSL se exige el mismo SHA/tree, servicio
-active/running+enabled, `NRestarts` coherente, UUID/deployment state preservados, readiness PASS y
-GET 200. No se hace refresh manual. Cualquier intervención no documentada o drift invalida el
-candidate.
+HUMAN ejecuta una captura read-only finita alrededor de la verificación representativa y declara su
+duración sólo para acotar el archivo y el proceso. PASS depende de cubrir los endpoints y eventos
+requeridos, no de una duración, número de sesiones o ciclos mínimos. Se exige el mismo SHA/tree,
+servicio active/running+enabled, cero crash/OOM/SIGKILL/restart inesperado, cero gaps/503, RSS/HWM
+registrados, swap 0 y ausencia de deriva material no explicada. La memoria permanece marcada como
+observacional y no se atribuye a jobs o providers solapados.
 
-### D. Soak silencioso único de 72 horas
+### D. EXTENDED-SOAK / DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE (futuro)
 
-Se inicia sólo tras A–C PASS. Se congela SHA/tree, start UTC/monotonic y end exacto; no hay commit,
-force-push, configuración, deploy, restart manual ni mutación del PR durante el período. Una única
-instancia del observer muestrea estados, endpoints y memoria. PASS exige duración completa, mismo
-SHA/tree, cero crash/OOM/SIGKILL/restart inesperado, cero gaps/503/operaciones colgadas, observers y
-outbox sin pérdidas/huérfanos, readiness final PASS y errores permanentes clasificados. RSS/HWM/swap
-se reportan por intervalo; el peak global permanece no atribuido si hay solape.
+Esta fase queda diferida a un Work Block independiente cuando exista un host destinado a operación
+continua. Podrá evaluar Linux dedicado, VPS/cloud económico u otro host persistente, pero no autoriza
+ahora containers, Kubernetes, PostgreSQL, migración cloud, exposición pública ni infraestructura
+adicional.
 
 ### E. Merge y smoke posterior
 
@@ -133,16 +136,17 @@ de status/readiness/GET. Si el tree difiere o falla el deploy, se hace rollback 
 abierto.
 
 Sólo después del smoke post-merge se retira `workflow:active`, se cierra el Issue como `completed` y
-se reconoce la transición propuesta `RELEASE-ACCEPTANCE: PLANNED → DONE`. `SEC-CORPUS` permanece como
-único `NEXT`; tag, release externa, SEC-CORPUS-2, UI redesign y cualquier recomendación o ejecución
-financiera quedan fuera.
+se reconoce la transición propuesta `RELEASE-ACCEPTANCE: PLANNED → DONE`; `EQUITY-UNIVERSE` pasa a ser
+el único `NEXT` y `SEC-CORPUS` queda `PLANNED`. Tag, release externa, SEC-CORPUS-2, UI redesign y
+cualquier recomendación o ejecución financiera quedan fuera.
 
 ## Reconciliación de ruta
 
 - **OPS-2:** no se reutiliza ni se reabre; su checkout y sus hashes siguen protegidos y dormantes.
 - **OPS-8 / ANALYST-READINESS:** sus gates HUMAN integrados son evidencia reusable sólo para la
   misma superficie; la aceptación actual repite únicamente una costura invalidada por candidate.
-- **SEC-CORPUS:** #91 integrado y su corpus exact-tree se reutiliza cuando corresponde; continúa como
-  siguiente bloque, sin abrir SEC-CORPUS-2 dentro de esta aceptación.
+- **SEC-CORPUS:** #91 integrado y su corpus exact-tree se reutiliza cuando corresponde; queda
+  `PLANNED` y no se abre SEC-CORPUS-2 dentro de esta aceptación.
+- **Ruta post-merge propuesta:** `RELEASE-ACCEPTANCE DONE → EQUITY-UNIVERSE NEXT → SEC-CORPUS PLANNED`.
 - **RELEASE-ACCEPTANCE:** permanece `PLANNED` hasta AUDIT, aprobación HUMAN, merge y smoke
   post-merge; BUILD/AUDIT no pueden publicarla como `DONE`.

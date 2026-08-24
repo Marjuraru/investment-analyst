@@ -139,6 +139,12 @@ def test_observer_passes_with_fake_clock_and_atomic_outputs(tmp_path: Path) -> N
     assert proc.calls == [321, 321, 321]
 
 
+def test_config_accepts_any_finite_nonnegative_duration(tmp_path: Path) -> None:
+    config = _config(tmp_path, duration=999999.0).validate()
+
+    assert config.duration_seconds == 999999.0
+
+
 def test_observer_exposes_503_and_invalid_output_without_persisting_body(tmp_path: Path) -> None:
     """HTTP failures and malformed JSON remain visible as bounded reason codes."""
     http = _healthy_http()

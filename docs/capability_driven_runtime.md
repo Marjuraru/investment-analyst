@@ -61,6 +61,12 @@ latencia p50/p95, status/tamaño/JSON válido, PID/NRestarts y RSS/HWM/swap. JSO
 summary es atómico; gaps, 503, restart, SHA drift y salida inválida impiden PASS. La memoria queda
 como correlación observacional, sin afirmación causal.
 
+La duración de cada captura se declara explícitamente, debe ser finita y no negativa, y sólo acota
+técnicamente la ejecución solicitada; no existe una duración mínima ni un número mínimo de muestras,
+sesiones o ciclos como gate de aceptación. `EXTENDED-SOAK / DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE`
+queda diferido a un Work Block independiente para un host persistente y no autoriza infraestructura
+adicional en esta entrega.
+
 ## Operaciones manuales
 
 Las rutas síncronas anteriores continúan válidas. La API versionada permite encolar las mismas

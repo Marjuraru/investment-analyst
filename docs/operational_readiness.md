@@ -126,6 +126,7 @@ workspace, se repite un restart independiente ni se usa `enable --now`.
 ## Frontera de readiness y release
 
 `ANALYST-READINESS` sólo pasa a `DONE` cuando BUILD, CI, AUDIT, rehearsal HUMAN exact-SHA y merge
-terminan PASS. OPS-8 no completa `RELEASE-ACCEPTANCE`: el soak de 72 horas, restart de laptop,
-benchmarks, accesibilidad y aceptación integral permanecen en la ruta futura. `SEC-CORPUS` sólo se
-vuelve elegible después de integrar la transición de OPS-8 en `main`.
+terminan PASS. OPS-8 no completa `RELEASE-ACCEPTANCE`: la captura finita, benchmarks, accesibilidad
+y aceptación integral pertenecen a ese bloque. `EXTENDED-SOAK / DEDICATED-RUNTIME ALWAYS-ON
+ACCEPTANCE` queda diferido a un Work Block independiente. Tras integrar RELEASE-ACCEPTANCE,
+`EQUITY-UNIVERSE` será el siguiente bloque y `SEC-CORPUS` permanecerá `PLANNED`.
