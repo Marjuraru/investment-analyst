@@ -3,12 +3,14 @@
 import io
 import json
 import tarfile
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from scripts.deploy_local_release import main
 
+from investment_analyst.application.local_release import DeploymentState
 from investment_analyst.application.local_service_unit import (
     AaplLocalServiceUnitConfig,
     render_local_service_unit,
@@ -278,3 +280,81 @@ def test_cli_error_handling(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
     assert code == 1
     _, err = capsys.readouterr()
     assert "No previous deployment" in err
+
+
+def test_cli_candidate_stage_and_update_are_explicit_commands(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The CLI exposes candidate operations separately from main-only commands."""
+    sha = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+    tree = "b6f8115ffdddb0915cae50736dbc821c5355d3ac"
+    manifest = MagicMock(
+        commit_sha=sha, tree_sha=tree, uv_lock_sha256="lock", python_version="Python 3.12.3"
+    )
+    state = DeploymentState(
+        current=sha,
+        previous=None,
+        updated_at=datetime.now(UTC),
+        current_release_path=str(tmp_path / "release"),
+        previous_release_path=None,
+    )
+    with (
+        patch(
+            "investment_analyst.application.local_release.LocalReleaseService.stage_candidate",
+            return_value=manifest,
+        ) as stage_candidate,
+        patch(
+            "investment_analyst.application.local_release.LocalReleaseService.candidate_update",
+            return_value=state,
+        ) as candidate_update,
+    ):
+        assert (
+            main(
+                [
+                    "--runtime-root",
+                    str(tmp_path / "runtime"),
+                    "candidate-stage",
+                    "--pr-number",
+                    "59",
+                    "--sha",
+                    sha,
+                ]
+            )
+            == 0
+        )
+        assert (
+            main(
+                [
+                    "--runtime-root",
+                    str(tmp_path / "runtime"),
+                    "candidate-update",
+                    "--pr-number",
+                    "59",
+                    "--sha",
+                    sha,
+                    "--skip-systemd",
+                    "--skip-health-check",
+                ]
+            )
+            == 0
+        )
+
+    assert stage_candidate.call_args.args == ("59", sha)
+    assert candidate_update.call_args.kwargs["pr_number"] == "59"
+    out, _ = capsys.readouterr()
+    assert "candidate PR #59" in out
+
+    with pytest.raises(SystemExit) as invalid_pr:
+        main(
+            [
+                "--runtime-root",
+                str(tmp_path / "runtime"),
+                "candidate-stage",
+                "--pr-number",
+                "0",
+                "--sha",
+                sha,
+            ]
+        )
+    assert invalid_pr.value.code == 2

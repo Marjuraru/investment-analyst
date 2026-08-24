@@ -46,6 +46,21 @@ El benchmark repetible se ejecuta con el servicio activo:
 Mide p50, p95 y bytes para overview compacto, catálogo, capacidades y estado compatible. No ejecuta
 proveedores ni escribe en el workspace.
 
+## Aceptación operacional exact-SHA
+
+La aceptación de una release candidata permanece fuera del runtime cuantitativo. El gestor de
+releases expone `candidate-stage` y `candidate-update` sólo para el ref exacto
+`refs/pull/<pr-number>/head`; exige PR positivo y SHA completo, verifica la carrera del ref, commit y
+tree, y conserva el rollback de la release previa. `stage` y `update` siguen siendo main-only.
+
+`scripts/observe_release_acceptance.py` implementa `release-acceptance-observation-v1` como CLI
+one-shot read-only. Sus únicas fuentes son GET loopback allowlisted, `systemctl --user show` y
+`/proc/<MainPID>/status`. No abre workspace, EnvironmentFile, storage, providers, scheduler ni
+reconcile; no hace POST ni restart. La evidencia compacta enlaza SHA/tree/service, UTC y monotonic,
+latencia p50/p95, status/tamaño/JSON válido, PID/NRestarts y RSS/HWM/swap. JSONL es append-only y el
+summary es atómico; gaps, 503, restart, SHA drift y salida inválida impiden PASS. La memoria queda
+como correlación observacional, sin afirmación causal.
+
 ## Operaciones manuales
 
 Las rutas síncronas anteriores continúan válidas. La API versionada permite encolar las mismas

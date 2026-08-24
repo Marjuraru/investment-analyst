@@ -102,9 +102,9 @@ rehearsal.
 
 #### P0 — estabilidad operativa
 
-- OPS-8 propone cerrar este P0 con una sonda reproducible sobre evidencia multidiaria y un rehearsal
-  HUMAN detenido de backup/restore. La fila `DONE` no es efectiva hasta que el exact SHA pase AUDIT,
-  recuperación real, enablement, aprobación humana y merge.
+- OPS-8 ya cerró readiness, recuperación detenida y enablement en su propio bloque integrado. La
+  aceptación de release restante conserva esas evidencias y sólo repite la costura que cambie en el
+  candidate exacto; no convierte una lectura histórica en evidencia de otro SHA.
 - Los fallos permanentes permanecen visibles y no consumen retries; categorías legacy, joins
   incompletos, presupuesto excedido o trabajo pendiente fallan cerrado.
 
@@ -454,15 +454,17 @@ sigue funcionando con IA apagada.
 
 ### Bloque 5 — aceptación de la versión
 
-1. CI, cobertura, auditoría y smokes reales por familia de activo;
-2. prueba de 72 horas en modo silencioso;
-3. revalidar la evidencia de recuperación de OPS-8 y repetirla sólo si el workspace o sus contratos
-   relevantes cambiaron;
-4. reinicio de proceso y laptop;
-5. benchmark p50/p95 y presupuesto de memoria;
-6. revisión de accesibilidad, responsive y navegación por teclado;
-7. manual de instalación, uso, recuperación y limitaciones;
-8. tag de versión solo después del smoke posterior a la fusión.
+1. congelar candidate PR/head/tree con `candidate-stage`/`candidate-update` sólo después de BUILD,
+   AUDIT y CI exact-SHA;
+2. ejecutar la aceptación HUMAN de mercado, recovery, laptop, accesibilidad y un único observer de
+   72 horas;
+3. reutilizar OPS-8 y la evidencia integrada de corpus sólo cuando el SHA/tree y la superficie no
+   hayan cambiado; repetir únicamente la costura invalidada;
+4. verificar benchmark p50/p95, PID/NRestarts, RSS/HWM/swap, gaps, 503, restart y SHA drift sin
+   atribuir causalidad de memoria;
+5. mantener `RELEASE-ACCEPTANCE` en `PLANNED` hasta el comentario HUMAN exact-SHA y el merge; sólo
+   entonces proponer `PLANNED → DONE` y conservar `SEC-CORPUS` como único `NEXT`;
+6. crear tag sólo después del smoke post-merge con el tree idéntico.
 
 Salida: versión básica funcional, reproducible y utilizable diariamente.
 

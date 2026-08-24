@@ -561,6 +561,13 @@ La ruta crítica vigente se mantiene en
 8. añadir IA cualitativa opcional con citas y presupuesto sobre evidencia ya calculada;
 9. cerrar la versión mediante CI, smokes, 72 horas de operación y recuperación probada.
 
+La aceptación operacional se implementa con un carril pre-merge acotado: `candidate-stage` y
+`candidate-update` sólo adquieren `refs/pull/<pr-number>/head` con SHA/tree exactos, mientras que el
+observer read-only registra GET loopback, `systemctl show` y `/proc/<MainPID>/status` en scratch. No
+son nuevas capacidades de análisis, no acceden al workspace ni ejecutan providers o scheduler, y no
+atribuyen causalidad de memoria. `RELEASE-ACCEPTANCE` permanece `PLANNED` durante BUILD/AUDIT/HUMAN;
+la transición propuesta a `DONE` sólo existe post-merge. `SEC-CORPUS` continúa como siguiente ruta.
+
 Mercado BVL, macro diario columnar, extensiones Cazatiburones para BVL/cripto e investigación
 predictiva conservan sus fases de esta hoja de ruta, pero no desplazan la estabilización de la
 versión básica ni se implementan sin resolver previamente sus fuentes, licencias y contratos.
