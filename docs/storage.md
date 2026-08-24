@@ -4,6 +4,10 @@ The local storage layer separates three responsibilities:
 
 - **Raw files** contain one canonical JSON representation of each `RawRecord` received by the
   application. They are immutable and indexed in DuckDB.
+- **Primary SEC documents** use an additive content-addressed store under
+  `data/documents/sha256/`. RawRecords retain only revision metadata and lineage; document bytes
+  are written atomically once, verified by SHA-256 on read, and never duplicated in DuckDB or raw
+  JSON. The optional directory does not change the DuckDB schema or workspace format.
 - **DuckDB** is the operational local catalog for assets, sources, observations, metric definitions,
   metric results, diagnostics, and raw-record metadata.
 - **Parquet** is an export and analytical archive format. It is not the operational source of truth.

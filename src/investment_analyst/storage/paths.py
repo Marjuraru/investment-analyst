@@ -12,6 +12,7 @@ class StoragePaths:
     raw_dir: Path
     processed_dir: Path
     exports_dir: Path
+    documents_dir: Path
     database_path: Path
 
     @classmethod
@@ -24,6 +25,7 @@ class StoragePaths:
             raw_dir=normalized_root / "data" / "raw",
             processed_dir=processed_dir,
             exports_dir=normalized_root / "data" / "exports",
+            documents_dir=normalized_root / "data" / "documents",
             database_path=processed_dir / "investment_analyst.duckdb",
         )
 

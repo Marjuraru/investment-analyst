@@ -156,6 +156,7 @@ class JsonRawRecordRepository:
         asset_id: str | None = None,
         source_id: str | None = None,
         schema_version: str | None = None,
+        available_to: datetime | None = None,
         received_from: datetime | None = None,
         received_to: datetime | None = None,
     ) -> list[RawRecord]:
@@ -163,6 +164,7 @@ class JsonRawRecordRepository:
             asset_id=asset_id,
             source_id=source_id,
             schema_version=schema_version,
+            available_to=available_to,
             received_from=received_from,
             received_to=received_to,
         )
@@ -181,6 +183,7 @@ class JsonRawRecordRepository:
         asset_id: str | None = None,
         source_id: str | None = None,
         schema_version: str | None = None,
+        available_to: datetime | None = None,
         received_from: datetime | None = None,
         received_to: datetime | None = None,
     ) -> int:
@@ -189,6 +192,7 @@ class JsonRawRecordRepository:
             asset_id=asset_id,
             source_id=source_id,
             schema_version=schema_version,
+            available_to=available_to,
             received_from=received_from,
             received_to=received_to,
         )
@@ -228,6 +232,7 @@ class JsonRawRecordRepository:
         asset_id: str | None = None,
         source_id: str | None = None,
         schema_version: str | None = None,
+        available_to: datetime | None = None,
         received_from: datetime | None = None,
         received_to: datetime | None = None,
     ) -> tuple[list[str], list[object]]:
@@ -242,6 +247,9 @@ class JsonRawRecordRepository:
         if schema_version is not None:
             clauses.append("schema_version = ?")
             parameters.append(schema_version)
+        if available_to is not None:
+            clauses.append("available_at <= ?")
+            parameters.append(available_to)
         if received_from is not None:
             clauses.append("received_at >= ?")
             parameters.append(received_from)

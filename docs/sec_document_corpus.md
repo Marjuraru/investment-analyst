@@ -1,0 +1,31 @@
+# Corpus documental SEC primario
+
+El corpus conserva evidencia documental oficial, no analytics, señales, recomendaciones, decisiones
+ni ejecución. Cada filing, documento lógico y revisión tiene una identidad UUID5 distinta. La revisión
+referencia bytes completos por SHA-256 en `storage/data/documents/sha256/`; su RawRecord sólo contiene
+metadata, URL oficial y lineage al snapshot Submissions que demostró CIK, accession, form y path.
+
+`available_at` es siempre la primera recuperación oficial demostrada por este sistema y coincide con
+`retrieved_at` de la primera revisión. No se usa ni se retrofecha a filing, report o acceptance date.
+Los replays filtran `available_at <= known_at` en el índice RawRecord antes de materializar metadata.
+Una ausencia devuelve `missing`, nunca cero ni contenido inventado.
+
+La familia v1 se limita a `10-K`, `10-K/A`, `10-Q`, `10-Q/A`, `20-F`, `20-F/A`, `40-F` y `40-F/A`.
+El único provider es SEC EDGAR oficial: Submissions ya persistido descubre filing/path y
+`www.sec.gov/Archives` entrega el documento primario con HTTPS, host, redirect, tamaño y hash
+verificados. No hay fallback ni extracción de hechos, fragments, XBRL, métricas o diagnósticos.
+
+## Operación temporal
+
+Configura una identidad SEC no secreta sólo en el proceso y usa un workspace temporal:
+
+```bash
+export SEC_USER_AGENT="Investment Analyst contact@example.com"
+python scripts/import_sec_document_corpus.py --workspace /tmp/sec-corpus --asset-id equity:us:aapl --form 10-K
+python scripts/query_sec_document_corpus.py --workspace /tmp/sec-corpus --asset-id equity:us:aapl --known-at 2026-01-01T00:00:00Z --form 10-K
+```
+
+La consulta abre almacenamiento de solo lectura, no crea directorios, no abre writer y no llama a
+SEC. `--read-content` verifica y lee explícitamente los bytes, pero nunca los imprime. Backup/restore
+conserva IDs, blobs y replay sin una segunda pasada completa: la validación documental se integra en
+el escaneo RawRecord paginado existente.

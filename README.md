@@ -197,6 +197,8 @@ información de la que realmente contienen.
   perpetuos para BTC/ETH, consultar replay PIT y entender receipts, scheduler y limitaciones.
 - [Refresh fundamental SEC por emisor](docs/sec_issuer_refresh.md): actualizar snapshots,
   observaciones, métricas y diagnóstico de una empresa configurada sin acoplarla a su mercado.
+- [Corpus documental SEC](docs/sec_document_corpus.md): importar y reconstruir documentos primarios
+  oficiales sin convertirlos en métricas, señales o recomendaciones.
 - [Valoración corporativa point-in-time](docs/corporate_valuation_point_in_time.md): alinear precio
   y último ejercicio anual, persistir múltiplos/yields descriptivos y explicar ausencias sin score,
   recomendación, TTM ni FX.

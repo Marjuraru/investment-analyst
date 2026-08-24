@@ -2,6 +2,7 @@
 
 from types import TracebackType
 
+from investment_analyst.storage.document_content import DocumentContentStore
 from investment_analyst.storage.duckdb_store import DuckDBStore
 from investment_analyst.storage.errors import StorageError
 from investment_analyst.storage.parquet import ParquetExporter
@@ -32,6 +33,7 @@ class LocalStorage:
         self.metric_results: DuckDBMetricResultRepository
         self.diagnostics: DuckDBDiagnosticResultRepository
         self.parquet: ParquetExporter
+        self.documents: DocumentContentStore
         self._is_open = False
 
     @property
@@ -61,6 +63,7 @@ class LocalStorage:
             connection,
             read_only=self.read_only,
         )
+        self.documents = DocumentContentStore(self.paths, read_only=self.read_only)
         self._is_open = True
         return self
 

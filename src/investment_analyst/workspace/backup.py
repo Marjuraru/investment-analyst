@@ -25,6 +25,10 @@ from investment_analyst.core.models import (
     NormalizedObservation,
 )
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
+from investment_analyst.evidence.sec_documents.repository import (
+    SecDocumentRepository,
+    verify_document_records,
+)
 from investment_analyst.storage import StorageError
 from investment_analyst.storage.local import LocalStorage
 from investment_analyst.storage.serialization import model_from_json
@@ -508,6 +512,10 @@ def _scan_raw_records(storage: LocalStorage) -> int:
         records = storage.raw_records.get_many(tuple(UUID(value) for value in record_ids))
         if len(records) != len(record_ids):
             raise StorageError("raw record page did not resolve exactly")
+        verify_document_records(
+            records.values(),
+            SecDocumentRepository(storage.raw_records, storage.documents),
+        )
         count += len(records)
         after_id = record_ids[-1]
         del records

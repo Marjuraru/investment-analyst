@@ -20,6 +20,7 @@ class SourceType(StrEnum):
     MACRO = "macro"
     ONCHAIN = "onchain"
     NEWS = "news"
+    DOCUMENTS = "documents"
 
 
 class DataFrequency(StrEnum):
