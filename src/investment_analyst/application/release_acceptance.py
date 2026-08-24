@@ -29,9 +29,9 @@ OBSERVATION_SCHEMA = "release-acceptance-observation-v1"
 ALLOWED_ENDPOINTS: tuple[str, ...] = (
     "/api/v1/overview",
     "/api/v1/capabilities",
-    "/api/v1/market-assets",
     "/api/v1/candidate-notifications",
     "/api/overview",
+    "/api/market-assets",
 )
 SYSTEMCTL_PROPERTIES: tuple[str, ...] = (
     "ActiveState",

@@ -643,13 +643,16 @@ python3 scripts/deploy_local_release.py candidate-stage \
 
 python3 scripts/deploy_local_release.py candidate-update \
   --pr-number <pr-number> --sha <full-candidate-sha> \
-  --readiness-deadline-seconds 120
+  --readiness-deadline-seconds 300
 ```
 
 Un ref ausente, movido o contradictorio falla cerrado antes de publicar o activar. Un fallo de
 materialización, restart o readiness conserva la release previa o ejecuta el rollback verificado de
 `activate`; nunca deja el candidate fallido como `current`. El CLI no decide si un PR está auditado:
 esa comprobación pertenece al gate HUMAN exact-SHA.
+
+El valor 300 s es el margen técnico recomendado para el próximo retry HUMAN de startup/restart; no
+introduce duración de aceptación, soak, uptime mínimo ni mínimo de observación.
 
 Rollback al despliegue anterior verificado (restaura unidad anterior, reinicia y verifica health):
 
@@ -725,6 +728,11 @@ consulta los cinco GET loopback allowlisted, `systemctl --user show` y
 scheduler o reconcile, no hace POST y no reinicia el servicio. Exige SHA/tree completos, duración e
 intervalo explícitos y dos destinos nuevos fuera del workspace. La duración es una cota técnica de
 la captura elegida, sin duración mínima ni número mínimo de muestras, sesiones o ciclos como gate:
+
+Las rutas GET representativas son `/api/v1/overview`, `/api/v1/capabilities`,
+`/api/v1/candidate-notifications`, `/api/overview` y `/api/market-assets`. La ruta
+`/api/v1/market-assets` no existe y no se incluye; cualquier ruta inexistente o respuesta non-200
+mantiene el resultado FAIL.
 
 ```bash
 .venv/bin/python scripts/observe_release_acceptance.py \

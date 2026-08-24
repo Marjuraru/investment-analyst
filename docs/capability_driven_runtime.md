@@ -61,6 +61,12 @@ latencia p50/p95, status/tamaño/JSON válido, PID/NRestarts y RSS/HWM/swap. JSO
 summary es atómico; gaps, 503, restart, SHA drift y salida inválida impiden PASS. La memoria queda
 como correlación observacional, sin afirmación causal.
 
+Sus GET representativos son `/api/v1/overview`, `/api/v1/capabilities`,
+`/api/v1/candidate-notifications`, `/api/overview` y `/api/market-assets`; la ruta stale
+`/api/v1/market-assets` queda fuera. Para el próximo retry HUMAN de `candidate-update`,
+`--readiness-deadline-seconds 300` es sólo margen técnico de startup/restart y no un gate temporal de
+aceptación.
+
 La duración de cada captura se declara explícitamente, debe ser finita y no negativa, y sólo acota
 técnicamente la ejecución solicitada; no existe una duración mínima ni un número mínimo de muestras,
 sesiones o ciclos como gate de aceptación. `EXTENDED-SOAK / DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE`

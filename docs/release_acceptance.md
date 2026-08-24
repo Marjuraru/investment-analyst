@@ -34,7 +34,7 @@ python3 scripts/deploy_local_release.py candidate-stage \
 
 python3 scripts/deploy_local_release.py candidate-update \
   --pr-number <positive-pr-number> --sha <full-candidate-sha> \
-  --readiness-deadline-seconds 120
+  --readiness-deadline-seconds 300
 ```
 
 La adquisición sólo usa `refs/pull/<pr-number>/head`. El número debe ser positivo y el SHA debe
@@ -53,8 +53,8 @@ rol HUMAN.
 
 El módulo `release-acceptance-observation-v1` sólo consulta:
 
-- GET loopback de `/api/v1/overview`, `/api/v1/capabilities`, `/api/v1/market-assets`,
-  `/api/v1/candidate-notifications` y `/api/overview`;
+- GET loopback de `/api/v1/overview`, `/api/v1/capabilities`,
+  `/api/v1/candidate-notifications`, `/api/overview` y `/api/market-assets`;
 - `systemctl --user show` para `ActiveState`, `SubState`, `UnitFileState`, `MainPID`, `NRestarts`,
   `WorkingDirectory` y `ExecStart`;
 - `/proc/<MainPID>/status` para `VmRSS`, `VmHWM` y `VmSwap`.
@@ -63,6 +63,11 @@ No abre workspace, storage, manifest, `EnvironmentFile` o logs privados; no ejec
 refresh, scheduler, reconcile o backup; no hace POST, no toma locks y no reinicia nada. La tree SHA
 es el binding exacto obtenido durante candidate acquisition y se exige como entrada de la observación;
 la sonda no reabre el runtime ni fabrica una verificación de filesystem fuera de sus tres fuentes.
+
+El próximo retry HUMAN de `candidate-update` debe usar `--readiness-deadline-seconds 300` como margen
+técnico para startup/restart. Es sólo un timeout de readiness: no es soak, duración de aceptación,
+uptime mínimo ni mínimo de observación. Un non-200, JSON inválido o error de transporte sigue siendo
+FAIL; `/api/v1/market-assets` no es una ruta contratada.
 
 Cada ejecución requiere una duración finita e intervalo explícitos y dos destinos nuevos fuera del
 workspace. La duración sólo acota técnicamente la captura solicitada: no existe una duración mínima

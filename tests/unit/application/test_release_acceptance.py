@@ -1,6 +1,7 @@
 """Hermetic tests for exact-SHA release acceptance observation."""
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -11,15 +12,24 @@ import pytest
 from investment_analyst.application.release_acceptance import (
     ALLOWED_ENDPOINTS,
     HttpResponse,
+    LoopbackHttpGetter,
     ProcMemory,
     ReleaseAcceptanceConfig,
     ReleaseAcceptanceInputError,
+    ReleaseAcceptanceRuntimeError,
     observe_release_acceptance,
 )
 
 SHA = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
 TREE = "b6f8115ffdddb0915cae50736dbc821c5355d3ac"
 OTHER_SHA = "2222222222222222222222222222222222222222"
+EXPECTED_ENDPOINTS = (
+    "/api/v1/overview",
+    "/api/v1/capabilities",
+    "/api/v1/candidate-notifications",
+    "/api/overview",
+    "/api/market-assets",
+)
 
 
 class FakeClock:
@@ -62,13 +72,23 @@ class FakeSystemctl:
 
 
 class FakeHttp:
-    def __init__(self, responses: Mapping[str, HttpResponse]) -> None:
+    def __init__(
+        self,
+        responses: Mapping[str, HttpResponse],
+        errors: Mapping[str, str] | None = None,
+    ) -> None:
         self.responses = dict(responses)
+        self.errors = dict(errors or {})
         self.calls: list[str] = []
 
     def get(self, endpoint: str, timeout_seconds: float) -> HttpResponse:
         self.calls.append(endpoint)
-        return self.responses[endpoint]
+        if endpoint in self.errors:
+            raise ReleaseAcceptanceRuntimeError(self.errors[endpoint])
+        return self.responses.get(
+            endpoint,
+            HttpResponse(404, b'{"error":"not_found"}', "application/json"),
+        )
 
 
 class FakeProc:
@@ -100,9 +120,34 @@ def _healthy_http() -> FakeHttp:
     return FakeHttp(
         {
             endpoint: HttpResponse(200, b'{"status":"ok"}', "application/json")
-            for endpoint in ALLOWED_ENDPOINTS
+            for endpoint in EXPECTED_ENDPOINTS
         }
     )
+
+
+def _router_get_paths() -> set[str]:
+    router = (
+        Path(__file__).resolve().parents[3]
+        / "src"
+        / "investment_analyst"
+        / "frontend"
+        / "local_web.py"
+    )
+    source = router.read_text(encoding="utf-8")
+    return set(re.findall(r'if parsed\.path == "([^"]+)":', source))
+
+
+def test_allowlist_matches_real_router_and_excludes_stale_route() -> None:
+    assert ALLOWED_ENDPOINTS == EXPECTED_ENDPOINTS
+    assert set(ALLOWED_ENDPOINTS).issubset(_router_get_paths())
+    assert "/api/v1/market-assets" not in ALLOWED_ENDPOINTS
+
+
+def test_stale_route_is_rejected_before_transport() -> None:
+    getter = LoopbackHttpGetter(8765)
+
+    with pytest.raises(ReleaseAcceptanceRuntimeError, match="endpoint_not_allowlisted"):
+        getter.get("/api/v1/market-assets", timeout_seconds=0.1)
 
 
 def test_observer_passes_with_fake_clock_and_atomic_outputs(tmp_path: Path) -> None:
@@ -135,6 +180,7 @@ def test_observer_passes_with_fake_clock_and_atomic_outputs(tmp_path: Path) -> N
     )
     assert 'status":"ok' not in (tmp_path / "scratch" / "observations.jsonl").read_text()
     assert (tmp_path / "scratch" / "summary.json").is_file()
+    assert not (tmp_path / "workspace").exists()
     assert len(systemctl.calls) == 3
     assert proc.calls == [321, 321, 321]
 
@@ -164,6 +210,25 @@ def test_observer_exposes_503_and_invalid_output_without_persisting_body(tmp_pat
     assert "invalid_output" in summary["failures"]
     output = (tmp_path / "scratch" / "observations.jsonl").read_text()
     assert "provider-secret-payload" not in output
+
+
+def test_observer_exposes_transport_error_without_passing(tmp_path: Path) -> None:
+    summary = observe_release_acceptance(
+        _config(tmp_path, duration=0.0),
+        http=FakeHttp(
+            {
+                endpoint: HttpResponse(200, b'{"status":"ok"}', "application/json")
+                for endpoint in EXPECTED_ENDPOINTS
+            },
+            errors={"/api/v1/overview": "http_transport_error"},
+        ),
+        systemctl=FakeSystemctl([_properties()]),
+        proc=FakeProc(ProcMemory(rss_bytes=1, hwm_bytes=1, swap_bytes=0)),
+        clock=FakeClock(),
+    )
+
+    assert summary["status"] == "FAIL"
+    assert "http_transport_error" in summary["failures"]
 
 
 def test_observer_detects_gap_restart_and_sha_drift(tmp_path: Path) -> None:
