@@ -148,6 +148,10 @@ propia. No se añadirán nuevas rutas o modelos específicos de Apple.
   `systemd` generada de forma segura;
 - entorno reproducible mediante un lock versionado, pruebas unitarias e integraciones locales,
   cobertura de líneas y ramas, auditoría de dependencias y validación continua con GitHub Actions.
+- sonda operacional read-only, versionada y fail-closed: une intentos terminales con las cuatro
+  reglas operativas y un receipt analítico, verifica cohortes multidiarias, retries, backoff,
+  presupuesto y ausencia de trabajo activo, y devuelve `PASS`/`NOT_READY` con fingerprint estable
+  sin ejecutar providers ni modificar el workspace.
 
 El MVP actual entrega alertas operativas persistentes y una primera bandeja analítica local en modo
 silencioso. Las plantillas iniciales cubren actividad relativa de mercado y una condición conjunta
@@ -183,6 +187,8 @@ información de la que realmente contienen.
   mantener el servicio local mediante `systemd --user`.
 - [Runtime por capacidades](docs/capability_driven_runtime.md): consultar dispatch tipado, overview
   no bloqueante, cola manual durable, telemetría y backup/restore verificados.
+- [Readiness operacional](docs/operational_readiness.md): ejecutar la sonda zero-write, interpretar
+  reason codes y realizar por separado el rehearsal HUMAN exact-SHA de backup/restore.
 - [Preferencias de activos](docs/asset_preferences.md): persistir watchlist, favoritos y selección
   automática con precedencia CLI documentada y reconciliación sin reinicio.
 - [Base intradía de Coinbase](docs/coinbase_intraday.md): importar ventanas acotadas de un minuto y

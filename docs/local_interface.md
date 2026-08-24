@@ -678,6 +678,25 @@ EnvironmentFile=/home/marjuraru/.config/investment-analyst/service.env
 ExecStart={ path=/home/marjuraru/.local/share/investment-analyst/runtime/releases/<full-sha>/.venv/bin/python ; argv[]=/home/marjuraru/.local/share/investment-analyst/runtime/releases/<full-sha>/.venv/bin/python ... }
 ```
 
+## Sonda de readiness operacional
+
+La sonda operacional es una consulta local independiente del health HTTP. No inicia el scheduler,
+no ejecuta providers o refresh, no reconcilia observers y no crea archivos, locks ni timestamps:
+
+```bash
+.venv/bin/python scripts/check_operational_readiness.py \
+  --workspace <workspace-inicializado> \
+  --since 2026-08-01T00:00:00Z \
+  --min-local-dates 3
+```
+
+Devuelve exit `0` con `PASS`, `3` con un `NOT_READY` válido y reason codes acotados, o `2` cuando
+el input/estado es inválido, falta evidencia requerida o el snapshot cambia durante la lectura.
+El reporte no imprime rutas del workspace, payloads, secretos ni mensajes de proveedor. El archivo
+opcional de operaciones manuales ausente se representa como `present=false`; scheduler, alertas
+operativas y receipts analíticos ausentes fallan cerrado. Véase el
+[runbook de readiness y recuperación](operational_readiness.md).
+
 ## Archivos operativos
 
 Todos permanecen dentro del workspace seleccionado:
