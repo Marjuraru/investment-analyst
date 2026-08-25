@@ -449,9 +449,10 @@ class InvestmentAnalystApplication:
         descriptor = self._listed_company_descriptor(request.asset_id)
         if request.fundamental_frequency not in descriptor.fundamental_frequencies:
             raise ValueError("fundamental frequency is not available for asset_id")
+        read_only = WorkspaceAccessMode.READ_ONLY
         with self._runtime.open_storage(
             location,
-            access_mode=WorkspaceAccessMode.READ_ONLY,
+            access_mode=read_only,
         ) as storage:
             return ListedCompanyReportService(storage).query(
                 request,

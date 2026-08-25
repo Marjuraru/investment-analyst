@@ -81,6 +81,9 @@ rehearsal.
 | `BVL-MARKET` | `BLOCKED` | Contrato de uso y fuente oficial autorizada. | No se infiere autorización para automatizar boletines. |
 | `PREDICTIVE-RESEARCH` | `DEFERRED` | Carril explícito con PIT, label, baselines, validación temporal, holdout, shadow y rollback. | Universo survivorship-aware es condicional; on-chain, stablecoins/DeFi, multi-venue y derivados extra dependen del target. |
 
+La transición propuesta por el candidate es literalmente `EQUITY-UNIVERSE` | `DONE` y
+`SEC-CORPUS` | `NEXT`; ambas permanecen no integradas hasta su merge exacto en `main`.
+
 ## Diagnóstico de la estructura actual
 
 ### Base que debe conservarse
