@@ -631,6 +631,29 @@ python3 scripts/deploy_local_release.py update \
   --readiness-deadline-seconds 120
 ```
 
+La aceptación pre-merge usa comandos separados y no relaja el camino de `main`. Sólo aceptan un
+número positivo de PR, el SHA completo auditado y el ref remoto exacto
+`refs/pull/<pr-number>/head`; consultan el ref antes y después del fetch y verifican commit y tree
+en un namespace interno del mirror:
+
+```bash
+# BUILD sólo los prueba con dobles herméticos; HUMAN los ejecuta tras congelar PR, CI y AUDIT.
+python3 scripts/deploy_local_release.py candidate-stage \
+  --pr-number <pr-number> --sha <full-candidate-sha>
+
+python3 scripts/deploy_local_release.py candidate-update \
+  --pr-number <pr-number> --sha <full-candidate-sha> \
+  --readiness-deadline-seconds 300
+```
+
+Un ref ausente, movido o contradictorio falla cerrado antes de publicar o activar. Un fallo de
+materialización, restart o readiness conserva la release previa o ejecuta el rollback verificado de
+`activate`; nunca deja el candidate fallido como `current`. El CLI no decide si un PR está auditado:
+esa comprobación pertenece al gate HUMAN exact-SHA.
+
+El valor 300 s es el margen técnico recomendado para el próximo retry HUMAN de startup/restart; no
+introduce duración de aceptación, soak, uptime mínimo ni mínimo de observación.
+
 Rollback al despliegue anterior verificado (restaura unidad anterior, reinicia y verifica health):
 
 ```bash
@@ -696,6 +719,36 @@ El reporte no imprime rutas del workspace, payloads, secretos ni mensajes de pro
 opcional de operaciones manuales ausente se representa como `present=false`; scheduler, alertas
 operativas y receipts analíticos ausentes fallan cerrado. Véase el
 [runbook de readiness y recuperación](operational_readiness.md).
+
+### Observación exact-SHA de aceptación
+
+El observer de `release-acceptance-observation-v1` es una ejecución one-shot finita y read-only. Sólo
+consulta los cinco GET loopback allowlisted, `systemctl --user show` y
+`/proc/<MainPID>/status`; no abre el workspace, no lee `EnvironmentFile`, no ejecuta providers,
+scheduler o reconcile, no hace POST y no reinicia el servicio. Exige SHA/tree completos, duración e
+intervalo explícitos y dos destinos nuevos fuera del workspace. La duración es una cota técnica de
+la captura elegida, sin duración mínima ni número mínimo de muestras, sesiones o ciclos como gate:
+
+Las rutas GET representativas son `/api/v1/overview`, `/api/v1/capabilities`,
+`/api/v1/candidate-notifications`, `/api/overview` y `/api/market-assets`. La ruta
+`/api/v1/market-assets` no existe y no se incluye; cualquier ruta inexistente o respuesta non-200
+mantiene el resultado FAIL.
+
+```bash
+.venv/bin/python scripts/observe_release_acceptance.py \
+  --sha <candidate-sha> --tree <candidate-tree> \
+  --workspace-root <workspace-permanente> \
+  --jsonl /ruta/scratch/release-acceptance.jsonl \
+  --summary /ruta/scratch/release-acceptance-summary.json \
+  --duration-seconds 30 --interval-seconds 1
+```
+
+El JSONL se crea con exclusión y se va sincronizando en modo append-only; el summary se publica una
+sola vez de forma atómica. Registra estado systemd, PID, `NRestarts`, RSS/HWM/swap y status, tamaño,
+validez JSON, latencia, p50 y p95 de cada GET. Gaps, 503, salida inválida, pérdida/cambio de PID,
+`NRestarts` o SHA quedan como fallos visibles. La memoria se resume como observación temporal y no
+atribuye causalidad a jobs ni proveedores; la costura de jobs/attempts sólo puede añadirse desde la
+evidencia autorizada del writer, nunca leyendo el workspace desde este observer.
 
 ## Archivos operativos
 

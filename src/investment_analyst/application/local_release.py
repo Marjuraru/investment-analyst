@@ -783,6 +783,198 @@ class LocalReleaseService:
             )
         return remote_sha
 
+    @staticmethod
+    def _candidate_ref(pr_number: int | str) -> tuple[int, str]:
+        """Return the only permitted remote ref for a positive pull request number."""
+        raw_number = str(pr_number).strip()
+        if not re.fullmatch(r"[1-9][0-9]*", raw_number):
+            raise ReleaseAcquisitionError("Candidate PR number must be a positive integer")
+        normalized_number = int(raw_number)
+        return normalized_number, f"refs/pull/{normalized_number}/head"
+
+    def _query_remote_ref(self, remote_ref: str) -> str:
+        """Query one exact remote ref and reject absent or ambiguous output."""
+        if not re.fullmatch(r"refs/pull/[1-9][0-9]*/head", remote_ref):
+            raise ReleaseAcquisitionError("Only refs/pull/<pr-number>/head may be acquired")
+        try:
+            ls_remote = subprocess.run(
+                ["git", "ls-remote", self.repo_url, remote_ref],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (subprocess.SubprocessError, OSError) as error:
+            raise ReleaseAcquisitionError("Failed to query candidate pull-request ref") from error
+
+        rows = [line.split() for line in ls_remote.stdout.splitlines() if line.strip()]
+        if len(rows) != 1 or len(rows[0]) < 2 or rows[0][1] != remote_ref:
+            raise ReleaseAcquisitionError("Candidate pull-request ref is absent or ambiguous")
+        remote_sha = rows[0][0].strip().lower()
+        if not FULL_SHA.fullmatch(remote_sha):
+            raise ReleaseAcquisitionError("Candidate pull-request ref returned an invalid SHA")
+        return remote_sha
+
+    def _read_mirror_ref(self, mirror_ref: str) -> str | None:
+        """Read a bounded internal mirror ref without treating failure as a valid SHA."""
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "--git-dir",
+                    str(self.paths.mirror),
+                    "show-ref",
+                    "--verify",
+                    "--hash",
+                    mirror_ref,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (subprocess.SubprocessError, OSError) as error:
+            raise ReleaseAcquisitionError("Could not inspect the candidate mirror ref") from error
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        mirror_sha = result.stdout.strip().splitlines()[0].lower()
+        if not FULL_SHA.fullmatch(mirror_sha):
+            raise ReleaseAcquisitionError("Candidate mirror ref contains an invalid SHA")
+        return mirror_sha
+
+    def _restore_mirror_ref(self, mirror_ref: str, previous_sha: str | None) -> None:
+        """Restore or remove the internal candidate ref after a failed acquisition."""
+        try:
+            if previous_sha is None:
+                subprocess.run(
+                    [
+                        "git",
+                        "--git-dir",
+                        str(self.paths.mirror),
+                        "update-ref",
+                        "-d",
+                        mirror_ref,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+            else:
+                subprocess.run(
+                    [
+                        "git",
+                        "--git-dir",
+                        str(self.paths.mirror),
+                        "update-ref",
+                        mirror_ref,
+                        previous_sha,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+        except (subprocess.SubprocessError, OSError) as error:
+            raise ReleaseAcquisitionError("Candidate mirror rollback failed") from error
+
+    def fetch_origin_candidate(self, pr_number: int | str, sha: str) -> tuple[str, str]:
+        """Acquire one exact PR head with a race-safe remote-ref guard."""
+        self.init_runtime()
+        normalized_pr, remote_ref = self._candidate_ref(pr_number)
+        cleaned_sha = sha.strip().lower()
+        if not FULL_SHA.fullmatch(cleaned_sha):
+            raise ReleaseAcquisitionError(
+                f"Requested SHA '{sha}' must be a full 40-character hexadecimal string"
+            )
+
+        initial_remote_sha = self._query_remote_ref(remote_ref)
+        if initial_remote_sha != cleaned_sha:
+            raise ReleaseAcquisitionError(
+                f"Requested SHA '{cleaned_sha}' does not match candidate PR #{normalized_pr}"
+            )
+
+        if not self.paths.mirror.is_dir():
+            try:
+                subprocess.run(
+                    ["git", "init", "--bare", str(self.paths.mirror)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except (subprocess.SubprocessError, OSError) as error:
+                raise ReleaseAcquisitionError("Failed to initialize the release mirror") from error
+
+        mirror_ref = f"refs/investment-analyst/candidates/{normalized_pr}/head"
+        previous_mirror_sha = self._read_mirror_ref(mirror_ref)
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "--git-dir",
+                    str(self.paths.mirror),
+                    "fetch",
+                    "--no-tags",
+                    "--atomic",
+                    self.repo_url,
+                    f"+{remote_ref}:{mirror_ref}",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            post_remote_sha = self._query_remote_ref(remote_ref)
+            if post_remote_sha != initial_remote_sha or post_remote_sha != cleaned_sha:
+                raise ReleaseAcquisitionError(
+                    f"Candidate PR #{normalized_pr} moved during acquisition"
+                )
+
+            commit_check = subprocess.run(
+                [
+                    "git",
+                    "--git-dir",
+                    str(self.paths.mirror),
+                    "rev-parse",
+                    f"{mirror_ref}^{{commit}}",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            verified_commit = commit_check.stdout.strip().lower()
+            if verified_commit != cleaned_sha:
+                raise ReleaseAcquisitionError(
+                    "Candidate mirror commit does not match requested SHA"
+                )
+            tree_check = subprocess.run(
+                [
+                    "git",
+                    "--git-dir",
+                    str(self.paths.mirror),
+                    "rev-parse",
+                    f"{mirror_ref}^{{tree}}",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            verified_tree = tree_check.stdout.strip().lower()
+            if not FULL_SHA.fullmatch(verified_tree):
+                raise ReleaseAcquisitionError("Candidate mirror tree is invalid")
+            return verified_commit, verified_tree
+        except ReleaseAcquisitionError:
+            self._restore_mirror_ref(mirror_ref, previous_mirror_sha)
+            raise
+        except (subprocess.SubprocessError, OSError) as error:
+            try:
+                self._restore_mirror_ref(mirror_ref, previous_mirror_sha)
+            except ReleaseAcquisitionError as rollback_error:
+                raise rollback_error from error
+            raise ReleaseAcquisitionError("Failed to acquire candidate pull-request ref") from error
+
     def fetch_origin_main(self, sha: str | None = None) -> tuple[str, str]:
         """Query origin/main, acquire into mirror, and reject moving ref during acquisition."""
         self.init_runtime()
@@ -890,15 +1082,19 @@ class LocalReleaseService:
 
         return verified_commit, verified_tree
 
-    def stage(self, sha: str) -> ReleaseManifest:
-        """Materialize an immutable release for the exact SHA with locked virtualenv."""
+    def _stage_with_fetch(
+        self,
+        sha: str,
+        fetcher: Callable[[str], tuple[str, str]],
+    ) -> ReleaseManifest:
+        """Materialize an immutable release using an already-authorized acquisition path."""
         cleaned_sha = sha.strip().lower()
         if not FULL_SHA.fullmatch(cleaned_sha):
             raise ReleaseAcquisitionError(
                 f"Commit SHA must be 40 lowercase hexadecimal characters, got: '{sha}'"
             )
 
-        verified_commit, verified_tree = self.fetch_origin_main(cleaned_sha)
+        verified_commit, verified_tree = fetcher(cleaned_sha)
         release_target = self.paths.releases / verified_commit
         manifest_file = release_target / "manifest.json"
 
@@ -1071,6 +1267,17 @@ class LocalReleaseService:
         except Exception:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise
+
+    def stage(self, sha: str) -> ReleaseManifest:
+        """Materialize an immutable release from the exact live origin/main SHA."""
+        return self._stage_with_fetch(sha, self.fetch_origin_main)
+
+    def stage_candidate(self, pr_number: int | str, sha: str) -> ReleaseManifest:
+        """Materialize an immutable release from one exact pull-request head."""
+        return self._stage_with_fetch(
+            sha,
+            lambda candidate_sha: self.fetch_origin_candidate(pr_number, candidate_sha),
+        )
 
     def adopt_env(self, source: Path, destination: Path | None = None) -> Path:
         """Privately adopt an environment file with 0600 permissions without leaking values."""
@@ -1613,6 +1820,31 @@ class LocalReleaseService:
         self.stage(sha)
         return self.activate(
             sha=sha,
+            unit_file=unit_file,
+            env_file=env_file,
+            workspace_root=workspace_root,
+            port=port,
+            skip_systemd=skip_systemd,
+            skip_health_check=skip_health_check,
+            endpoints=endpoints,
+        )
+
+    def candidate_update(
+        self,
+        pr_number: int | str,
+        sha: str,
+        unit_file: Path | None = None,
+        env_file: Path | None = None,
+        workspace_root: Path | None = None,
+        port: int = 8765,
+        skip_systemd: bool = False,
+        skip_health_check: bool = False,
+        endpoints: Sequence[str] | None = None,
+    ) -> DeploymentState:
+        """Stage and activate one exact PR head without weakening main-only update."""
+        manifest = self.stage_candidate(pr_number, sha)
+        return self.activate(
+            sha=manifest.commit_sha,
             unit_file=unit_file,
             env_file=env_file,
             workspace_root=workspace_root,

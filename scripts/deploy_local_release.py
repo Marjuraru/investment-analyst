@@ -36,6 +36,13 @@ def _readiness_deadline_seconds(value: str) -> float:
     return deadline
 
 
+def _positive_pr_number(value: str) -> str:
+    """Parse a positive decimal pull-request number without accepting ref syntax."""
+    if not value.isdecimal() or int(value) <= 0:
+        raise argparse.ArgumentTypeError("PR number must be a positive integer")
+    return value
+
+
 def _add_readiness_deadline(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--readiness-deadline-seconds",
@@ -81,6 +88,17 @@ def _parser() -> argparse.ArgumentParser:
         "stage", help="Stage an immutable release for an exact SHA"
     )
     stage_parser.add_argument("--sha", required=True, help="Full 40-character commit SHA")
+
+    # candidate-stage
+    candidate_stage_parser = subparsers.add_parser(
+        "candidate-stage", help="Stage an exact pull-request head for HUMAN acceptance"
+    )
+    candidate_stage_parser.add_argument(
+        "--pr-number", required=True, type=_positive_pr_number, help="Positive pull-request number"
+    )
+    candidate_stage_parser.add_argument(
+        "--sha", required=True, help="Full 40-character candidate commit SHA"
+    )
 
     # adopt-env
     adopt_parser = subparsers.add_parser(
@@ -128,6 +146,28 @@ def _parser() -> argparse.ArgumentParser:
         "--skip-health-check", action="store_true", help="Skip HTTP health check"
     )
     _add_readiness_deadline(update_parser)
+
+    # candidate-update
+    candidate_update_parser = subparsers.add_parser(
+        "candidate-update", help="Stage and activate an exact pull-request head"
+    )
+    candidate_update_parser.add_argument(
+        "--pr-number", required=True, type=_positive_pr_number, help="Positive pull-request number"
+    )
+    candidate_update_parser.add_argument(
+        "--sha", required=True, help="Full 40-character candidate commit SHA"
+    )
+    candidate_update_parser.add_argument(
+        "--workspace", type=Path, default=None, help="Workspace root path"
+    )
+    candidate_update_parser.add_argument("--port", type=int, default=8765, help="HTTP server port")
+    candidate_update_parser.add_argument(
+        "--skip-systemd", action="store_true", help="Skip systemctl reload and restart"
+    )
+    candidate_update_parser.add_argument(
+        "--skip-health-check", action="store_true", help="Skip HTTP health check"
+    )
+    _add_readiness_deadline(candidate_update_parser)
 
     # rollback
     rollback_parser = subparsers.add_parser(
@@ -199,6 +239,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  Python version: {manifest.python_version}")
             return 0
 
+        elif args.command == "candidate-stage":
+            manifest = service.stage_candidate(args.pr_number, args.sha)
+            print(f"Staged candidate PR #{args.pr_number} release {manifest.commit_sha}")
+            print(f"  Tree SHA: {manifest.tree_sha}")
+            print(f"  uv.lock SHA256: {manifest.uv_lock_sha256}")
+            print(f"  Python version: {manifest.python_version}")
+            return 0
+
         elif args.command == "adopt-env":
             adopted = service.adopt_env(args.source, destination=args.destination)
             print(f"Adopted environment file at {adopted}")
@@ -235,6 +283,22 @@ def main(argv: list[str] | None = None) -> int:
                 skip_health_check=args.skip_health_check,
             )
             print(f"Updated and activated release {state.current}")
+            if state.previous:
+                print(f"  Previous release: {state.previous}")
+            return 0
+
+        elif args.command == "candidate-update":
+            state = service.candidate_update(
+                pr_number=args.pr_number,
+                sha=args.sha,
+                unit_file=args.unit_file,
+                env_file=args.env_file,
+                workspace_root=args.workspace,
+                port=args.port,
+                skip_systemd=args.skip_systemd,
+                skip_health_check=args.skip_health_check,
+            )
+            print(f"Updated and activated candidate PR #{args.pr_number} release {state.current}")
             if state.previous:
                 print(f"  Previous release: {state.previous}")
             return 0

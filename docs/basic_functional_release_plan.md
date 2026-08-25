@@ -76,7 +76,7 @@ rehearsal.
 | `VALUATION-HISTORY` | `DONE` | Historia materializada y reglas relativas explícitas compatibles con valoración PIT v1. | VAL-1/#70 aporta historia descriptiva; VAL-2/#72 propone percentil Decimal34 PIT sin señal ni recomendación. |
 | `INDICATORS-AND-OUTBOX` | `DONE` | Propuesta post-merge de ALERT-1 (`COMPLETES`): la ruta se vuelve integrada sólo al fusionar este PR. | RSI/MACD/ATR, reglas silenciosas y outbox local con acuse durable; los canales externos siguen pendientes. |
 | `SEC-CORPUS` | `NEXT` | Corpus oficial y contratos independientes antes de Cazatiburones. | Forms 3/4/5, 13D/13G y 13F no integrados. |
-| `RELEASE-ACCEPTANCE` | `PLANNED` | CI, recuperación y soak observados. | Requiere evidencia operativa futura. |
+| `RELEASE-ACCEPTANCE` | `PLANNED` | CI, recuperación y captura finita read-only observados. | Requiere evidencia operativa futura. |
 | `BVL-MARKET` | `BLOCKED` | Contrato de uso y fuente oficial autorizada. | No se infiere autorización para automatizar boletines. |
 | `PREDICTIVE-RESEARCH` | `DEFERRED` | Carril explícito con PIT, label, baselines, validación temporal, holdout, shadow y rollback. | Universo survivorship-aware es condicional; on-chain, stablecoins/DeFi, multi-venue y derivados extra dependen del target. |
 
@@ -102,9 +102,9 @@ rehearsal.
 
 #### P0 — estabilidad operativa
 
-- OPS-8 propone cerrar este P0 con una sonda reproducible sobre evidencia multidiaria y un rehearsal
-  HUMAN detenido de backup/restore. La fila `DONE` no es efectiva hasta que el exact SHA pase AUDIT,
-  recuperación real, enablement, aprobación humana y merge.
+- OPS-8 ya cerró readiness, recuperación detenida y enablement en su propio bloque integrado. La
+  aceptación de release restante conserva esas evidencias y sólo repite la costura que cambie en el
+  candidate exacto; no convierte una lectura histórica en evidencia de otro SHA.
 - Los fallos permanentes permanecen visibles y no consumen retries; categorías legacy, joins
   incompletos, presupuesto excedido o trabajo pendiente fallan cerrado.
 
@@ -454,15 +454,17 @@ sigue funcionando con IA apagada.
 
 ### Bloque 5 — aceptación de la versión
 
-1. CI, cobertura, auditoría y smokes reales por familia de activo;
-2. prueba de 72 horas en modo silencioso;
-3. revalidar la evidencia de recuperación de OPS-8 y repetirla sólo si el workspace o sus contratos
-   relevantes cambiaron;
-4. reinicio de proceso y laptop;
-5. benchmark p50/p95 y presupuesto de memoria;
-6. revisión de accesibilidad, responsive y navegación por teclado;
-7. manual de instalación, uso, recuperación y limitaciones;
-8. tag de versión solo después del smoke posterior a la fusión.
+1. congelar candidate PR/head/tree con `candidate-stage`/`candidate-update` sólo después de BUILD,
+   AUDIT y CI exact-SHA;
+2. ejecutar la aceptación HUMAN de mercado, recovery, accesibilidad y una captura finita explícita
+   del observer;
+3. reutilizar OPS-8 y la evidencia integrada de corpus sólo cuando el SHA/tree y la superficie no
+   hayan cambiado; repetir únicamente la costura invalidada;
+4. verificar benchmark p50/p95, PID/NRestarts, RSS/HWM/swap, gaps, 503, restart y SHA drift sin
+   atribuir causalidad de memoria;
+5. mantener `RELEASE-ACCEPTANCE` en `PLANNED` hasta el comentario HUMAN exact-SHA y el merge; sólo
+   entonces proponer `RELEASE-ACCEPTANCE DONE`, `EQUITY-UNIVERSE NEXT` y `SEC-CORPUS PLANNED`;
+6. crear tag sólo después del smoke post-merge con el tree idéntico.
 
 Salida: versión básica funcional, reproducible y utilizable diariamente.
 
@@ -481,11 +483,11 @@ Se validarán mediante un script repetible, no con una sola medición:
 - inferencia y SHAP locales por lote y solo sobre evidencia nueva;
 - límite configurable de tokens de entrada, salida y coste diario, con objetivo inicial de 800
   tokens de evidencia por evento;
-- memoria estable durante un soak de 72 horas;
+- memoria registrada y revisada mediante una captura finita read-only;
 - estados y logs con retención acotada y compacción verificable;
 - un fallo de canal o IA nunca pierde el candidato ni bloquea el scheduler.
 
-Estos valores son objetivos iniciales para la laptop actual. Antes de elegir un SBC se repetirán en
+Estos valores son objetivos iniciales para el entorno local actual. Antes de elegir un SBC se repetirán en
 ARM64 y se fijarán límites de memoria, temperatura y almacenamiento.
 
 ## Validación estadística obligatoria
@@ -524,11 +526,14 @@ La versión básica estará lista únicamente cuando:
   el producto cuantitativo;
 - cualquier modelo local habilitado conserve manifest, validación temporal, baseline, calibración,
   SHAP, shadow mode y rollback; si no existe un modelo aceptable, la versión sigue operativa sin él;
-- backup, restauración, reinicio y operación de 72 horas hayan sido probados;
+- backup, restauración, reinicio y observación operacional finita hayan sido probados;
 - Ruff, formato, Pytest, cobertura, auditoría, CI y smokes reales pasen;
 - la documentación describa exactamente el comportamiento y las limitaciones observadas.
 
 ## Decisiones explícitamente diferidas
+
+- `EXTENDED-SOAK / DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` requiere un Work Block independiente y un
+  host persistente; no se autoriza infraestructura adicional en esta aceptación.
 
 - No se compra una fuente BVL ni se automatiza un endpoint sin autorización.
 - No se añade una base vectorial hasta que la búsqueda local del corpus demuestre que es necesaria.

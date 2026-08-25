@@ -559,7 +559,17 @@ La ruta crítica vigente se mantiene en
 7. abrir el carril predictivo local con matriz PIT, baselines y validación temporal, sin promoverlo
    a diagnóstico operativo;
 8. añadir IA cualitativa opcional con citas y presupuesto sobre evidencia ya calculada;
-9. cerrar la versión mediante CI, smokes, 72 horas de operación y recuperación probada.
+9. cerrar la versión mediante CI, smokes, una captura operacional finita y recuperación probada.
+
+La aceptación operacional se implementa con un carril pre-merge acotado: `candidate-stage` y
+`candidate-update` sólo adquieren `refs/pull/<pr-number>/head` con SHA/tree exactos, mientras que el
+observer read-only registra GET loopback, `systemctl show` y `/proc/<MainPID>/status` en scratch. No
+son nuevas capacidades de análisis, no acceden al workspace ni ejecutan providers o scheduler, y no
+atribuyen causalidad de memoria. La duración de la captura es finita y explícita, sin duración mínima
+ni número mínimo de muestras, sesiones o ciclos como gate. `RELEASE-ACCEPTANCE` permanece `PLANNED`
+durante BUILD/AUDIT/HUMAN; post-merge se propone `RELEASE-ACCEPTANCE DONE → EQUITY-UNIVERSE NEXT →
+SEC-CORPUS PLANNED`. `EXTENDED-SOAK / DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un
+Work Block independiente.
 
 Mercado BVL, macro diario columnar, extensiones Cazatiburones para BVL/cripto e investigación
 predictiva conservan sus fases de esta hoja de ruta, pero no desplazan la estabilización de la

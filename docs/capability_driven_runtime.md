@@ -46,6 +46,33 @@ El benchmark repetible se ejecuta con el servicio activo:
 Mide p50, p95 y bytes para overview compacto, catálogo, capacidades y estado compatible. No ejecuta
 proveedores ni escribe en el workspace.
 
+## Aceptación operacional exact-SHA
+
+La aceptación de una release candidata permanece fuera del runtime cuantitativo. El gestor de
+releases expone `candidate-stage` y `candidate-update` sólo para el ref exacto
+`refs/pull/<pr-number>/head`; exige PR positivo y SHA completo, verifica la carrera del ref, commit y
+tree, y conserva el rollback de la release previa. `stage` y `update` siguen siendo main-only.
+
+`scripts/observe_release_acceptance.py` implementa `release-acceptance-observation-v1` como CLI
+one-shot read-only. Sus únicas fuentes son GET loopback allowlisted, `systemctl --user show` y
+`/proc/<MainPID>/status`. No abre workspace, EnvironmentFile, storage, providers, scheduler ni
+reconcile; no hace POST ni restart. La evidencia compacta enlaza SHA/tree/service, UTC y monotonic,
+latencia p50/p95, status/tamaño/JSON válido, PID/NRestarts y RSS/HWM/swap. JSONL es append-only y el
+summary es atómico; gaps, 503, restart, SHA drift y salida inválida impiden PASS. La memoria queda
+como correlación observacional, sin afirmación causal.
+
+Sus GET representativos son `/api/v1/overview`, `/api/v1/capabilities`,
+`/api/v1/candidate-notifications`, `/api/overview` y `/api/market-assets`; la ruta stale
+`/api/v1/market-assets` queda fuera. Para el próximo retry HUMAN de `candidate-update`,
+`--readiness-deadline-seconds 300` es sólo margen técnico de startup/restart y no un gate temporal de
+aceptación.
+
+La duración de cada captura se declara explícitamente, debe ser finita y no negativa, y sólo acota
+técnicamente la ejecución solicitada; no existe una duración mínima ni un número mínimo de muestras,
+sesiones o ciclos como gate de aceptación. `EXTENDED-SOAK / DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE`
+queda diferido a un Work Block independiente para un host persistente y no autoriza infraestructura
+adicional en esta entrega.
+
 ## Operaciones manuales
 
 Las rutas síncronas anteriores continúan válidas. La API versionada permite encolar las mismas

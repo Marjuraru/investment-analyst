@@ -105,6 +105,7 @@ class GuardSnapshot:
 class MarkerRecord:
     comment_id: int
     role: str | None
+    archived_role: str | None
     kind: str
     block: str
     sha: str
@@ -118,6 +119,7 @@ class MarkerRecord:
 class MarkerResolution:
     marker: MarkerRecord | None
     duplicates: tuple[int, ...]
+    historical_stale: tuple[MarkerRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +162,14 @@ def _resolution_json(resolution: MarkerResolution) -> dict[str, object]:
         ),
         "duplicate_comment_ids": list(resolution.duplicates),
         "status": resolution.marker.status if resolution.marker is not None else None,
+        "historical_stale": [
+            {
+                "comment_id": marker.comment_id,
+                "sha": marker.sha,
+                "status": marker.status,
+            }
+            for marker in resolution.historical_stale
+        ],
     }
 
 
@@ -431,15 +441,29 @@ def parse_marker(comment: CommentSnapshot) -> MarkerRecord | None:
         role = fields.get("role", "")
         if role not in {"build", "audit"}:
             raise GuardFailure(f"comment {comment.comment_id} has invalid superseded role")
-        expected_keys = {"block", "sha", "status", "role", "canonical_comment_id", "reason"}
-        if role == "audit":
-            expected_keys.add("reviewer")
         reviewer = fields.get("reviewer")
-        allowed_statuses = {"PENDING", "PASS", "FAIL"} if role == "build" else {"PASS", "FAIL"}
-        if fields.get("reason") != "equivalent-duplicate":
+        reason = fields.get("reason")
+        if reason == "equivalent-duplicate":
+            expected_keys = {"block", "sha", "status", "role", "canonical_comment_id", "reason"}
+            if role == "audit":
+                expected_keys.add("reviewer")
+            if not fields.get("canonical_comment_id", "").isdigit():
+                raise GuardFailure(f"comment {comment.comment_id} has invalid canonical ID")
+        elif reason == "head-advanced":
+            if role != "audit":
+                raise GuardFailure("head-advanced superseded marker must have role=audit")
+            expected_keys = {
+                "block",
+                "sha",
+                "status",
+                "role",
+                "reviewer",
+                "reason",
+                "superseded_by_sha",
+            }
+        else:
             raise GuardFailure(f"comment {comment.comment_id} has invalid superseded reason")
-        if not fields.get("canonical_comment_id", "").isdigit():
-            raise GuardFailure(f"comment {comment.comment_id} has invalid canonical ID")
+        allowed_statuses = {"PENDING", "PASS", "FAIL"} if role == "build" else {"PASS", "FAIL"}
 
     if set(fields) != expected_keys:
         raise GuardFailure(f"comment {comment.comment_id} has unknown or missing marker keys")
@@ -450,9 +474,14 @@ def parse_marker(comment: CommentSnapshot) -> MarkerRecord | None:
         raise GuardFailure(f"comment {comment.comment_id} has invalid marker values")
     if role == "audit" and not reviewer:
         raise GuardFailure(f"comment {comment.comment_id} has missing reviewer")
+    if kind == "superseded-v1" and fields.get("reason") == "head-advanced":
+        superseded_by_sha = fields.get("superseded_by_sha", "")
+        if FULL_SHA.fullmatch(superseded_by_sha) is None or superseded_by_sha == sha:
+            raise GuardFailure(f"comment {comment.comment_id} has invalid superseded_by_sha")
     return MarkerRecord(
         comment_id=comment.comment_id,
         role=None if kind == "superseded-v1" else role,
+        archived_role=role if kind == "superseded-v1" else None,
         kind=kind,
         block=block,
         sha=sha,
@@ -477,13 +506,45 @@ def _resolve_markers(
     role: str,
     metadata: WorkBlockMetadata,
     head_sha: str,
+    phase: str = "finalize",
 ) -> MarkerResolution:
     active = tuple(marker for marker in markers if marker.role == role)
     for marker in active:
         if marker.block != metadata.block:
             raise GuardFailure(f"{role} marker block differs from live Work Block")
-        if marker.sha != head_sha:
-            raise GuardFailure(f"{role} marker SHA differs from live PR head")
+
+    if role == "audit":
+        current = tuple(marker for marker in active if marker.sha == head_sha)
+        stale = tuple(marker for marker in active if marker.sha != head_sha)
+        if stale:
+            if phase == "finalize":
+                raise GuardFailure("audit marker SHA differs from live PR head")
+            if current:
+                raise GuardFailure("current and historical stale audit markers coexist")
+            signatures = {
+                (
+                    marker.kind,
+                    marker.block,
+                    marker.sha,
+                    marker.status,
+                    marker.reviewer,
+                    marker.payload,
+                )
+                for marker in stale
+            }
+            if len(signatures) != 1:
+                raise GuardFailure("non-equivalent stale audit markers")
+            canonical = min(stale, key=lambda marker: marker.comment_id)
+            duplicates = tuple(
+                marker.comment_id for marker in stale if marker.comment_id != canonical.comment_id
+            )
+            return MarkerResolution(marker=None, duplicates=duplicates, historical_stale=stale)
+        active = current
+    else:
+        for marker in active:
+            if marker.sha != head_sha:
+                raise GuardFailure(f"{role} marker SHA differs from live PR head")
+
     if not active:
         return MarkerResolution(marker=None, duplicates=())
     signatures = {
@@ -497,6 +558,23 @@ def _resolve_markers(
         marker.comment_id for marker in active if marker.comment_id != canonical.comment_id
     )
     return MarkerResolution(marker=canonical, duplicates=duplicates)
+
+
+def _mutation_plan(
+    build: MarkerResolution,
+    audit: MarkerResolution,
+) -> tuple[str, ...]:
+    plans: list[str] = []
+    for role, resolution in (("build", build), ("audit", audit)):
+        plans.extend(
+            f"supersede {role} comment {comment_id}" for comment_id in resolution.duplicates
+        )
+        if resolution.historical_stale:
+            canonical = min(resolution.historical_stale, key=lambda marker: marker.comment_id)
+            plans.append(
+                f"audit-owner archive audit comment {canonical.comment_id} as head-advanced"
+            )
+    return tuple(plans)
 
 
 def _validate_target(snapshot: GuardSnapshot) -> WorkBlockMetadata:
@@ -558,13 +636,9 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
             raise GuardFailure("phase is unknown")
         metadata = _validate_target(snapshot)
         markers = _parse_all_markers(snapshot.comments)
-        build = _resolve_markers(markers, "build", metadata, snapshot.pull_request.head_sha)
-        audit = _resolve_markers(markers, "audit", metadata, snapshot.pull_request.head_sha)
-        mutation_plan = tuple(
-            f"supersede {role} comment {comment_id}"
-            for role, resolution in (("build", build), ("audit", audit))
-            for comment_id in resolution.duplicates
-        )
+        build = _resolve_markers(markers, "build", metadata, snapshot.pull_request.head_sha, phase)
+        audit = _resolve_markers(markers, "audit", metadata, snapshot.pull_request.head_sha, phase)
+        mutation_plan = _mutation_plan(build, audit)
         if phase == "build":
             return GuardResult("BUILD GUARD PASS", (), metadata, build, audit, mutation_plan)
         if build.marker is None or build.marker.status != "PASS":

@@ -1167,3 +1167,106 @@ def test_readiness_deadline_default_and_bounds_are_fail_closed(tmp_path: Path) -
     for invalid in (0.0, 600.1):
         with pytest.raises(ReleaseConfigurationError, match="between 1 and 600"):
             LocalReleaseService(paths=tmp_path, readiness_deadline=invalid)
+
+
+def test_candidate_fetch_uses_only_pull_request_ref_and_verifies_tree(tmp_path: Path) -> None:
+    """Candidate acquisition is exact, internally namespaced, and tree verified."""
+    sha = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+    tree = "b6f8115ffdddb0915cae50736dbc821c5355d3ac"
+    service = LocalReleaseService(
+        paths=tmp_path / "runtime",
+        systemd_unit_path=tmp_path / "config" / "unit",
+        service_env_path=tmp_path / "config" / "env",
+    )
+    commands: list[list[str]] = []
+
+    def run(command: list[str], *args: object, **kwargs: object) -> MagicMock:
+        commands.append(command)
+        if "show-ref" in command:
+            return MagicMock(returncode=1, stdout="")
+        if "^{commit}" in " ".join(command):
+            return MagicMock(returncode=0, stdout=f"{sha}\n")
+        if "^{tree}" in " ".join(command):
+            return MagicMock(returncode=0, stdout=f"{tree}\n")
+        return MagicMock(returncode=0, stdout="")
+
+    with (
+        patch.object(service, "_query_remote_ref", side_effect=[sha, sha]),
+        patch("subprocess.run", side_effect=run),
+    ):
+        assert service.fetch_origin_candidate("59", sha) == (sha, tree)
+
+    fetch_commands = [command for command in commands if "fetch" in command]
+    assert len(fetch_commands) == 1
+    assert "refs/pull/59/head" in " ".join(fetch_commands[0])
+    fetch_text = " ".join(fetch_commands[0])
+    assert "refs/heads/main" not in fetch_text
+    assert "refs/investment-analyst/candidates/59/head" in fetch_text
+
+
+def test_candidate_fetch_race_restores_previous_internal_ref(tmp_path: Path) -> None:
+    """A moving PR head fails closed and restores the prior candidate mirror ref."""
+    sha = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+    moved = "2222222222222222222222222222222222222222"
+    service = LocalReleaseService(
+        paths=tmp_path / "runtime",
+        systemd_unit_path=tmp_path / "config" / "unit",
+        service_env_path=tmp_path / "config" / "env",
+    )
+    commands: list[list[str]] = []
+
+    def run(command: list[str], *args: object, **kwargs: object) -> MagicMock:
+        commands.append(command)
+        if "show-ref" in command:
+            return MagicMock(returncode=0, stdout=f"{sha}\n")
+        return MagicMock(returncode=0, stdout="")
+
+    with (
+        patch.object(service, "_query_remote_ref", side_effect=[sha, moved]),
+        patch("subprocess.run", side_effect=run),
+        pytest.raises(ReleaseAcquisitionError, match="moved during acquisition"),
+    ):
+        service.fetch_origin_candidate(59, sha)
+
+    rollback_commands = [command for command in commands if "update-ref" in command]
+    assert len(rollback_commands) == 1
+    assert rollback_commands[0][-2:] == [
+        "refs/investment-analyst/candidates/59/head",
+        sha,
+    ]
+
+
+def test_candidate_input_rejects_non_positive_pr_and_short_sha(tmp_path: Path) -> None:
+    """Candidate acquisition never turns untrusted CLI text into a remote ref."""
+    service = LocalReleaseService(
+        paths=tmp_path / "runtime",
+        systemd_unit_path=tmp_path / "config" / "unit",
+        service_env_path=tmp_path / "config" / "env",
+    )
+    with pytest.raises(ReleaseAcquisitionError, match="positive integer"):
+        service.fetch_origin_candidate("0", "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb")
+    with pytest.raises(ReleaseAcquisitionError, match="full 40-character"):
+        service.fetch_origin_candidate("59", "1b0a1ab")
+
+
+def test_candidate_update_reuses_verified_activation_rollback_path(tmp_path: Path) -> None:
+    """Candidate update stages the exact PR then delegates activation recovery unchanged."""
+    sha = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+    state = DeploymentState(
+        current=sha,
+        previous="2222222222222222222222222222222222222222",
+        updated_at=datetime.now(UTC),
+        current_release_path=str(tmp_path / "runtime" / "releases" / sha),
+        previous_release_path=str(tmp_path / "runtime" / "releases" / "previous"),
+    )
+    service = LocalReleaseService(paths=tmp_path / "runtime")
+    with (
+        patch.object(service, "stage_candidate", return_value=MagicMock(commit_sha=sha)) as stage,
+        patch.object(service, "activate", return_value=state) as activate,
+    ):
+        assert service.candidate_update(59, sha, skip_systemd=True, skip_health_check=True) == state
+
+    stage.assert_called_once_with(59, sha)
+    assert activate.call_args.kwargs["sha"] == sha
+    assert activate.call_args.kwargs["skip_systemd"] is True
+    assert activate.call_args.kwargs["skip_health_check"] is True
