@@ -53,6 +53,11 @@ from investment_analyst.analytics.fundamentals.research_models import (
 from investment_analyst.analytics.fundamentals.research_service import (
     SecIssuerFundamentalResearchService,
 )
+from investment_analyst.analytics.listed_company_report_models import (
+    ListedCompanyDiagnosticReport,
+    ListedCompanyReportRequest,
+)
+from investment_analyst.analytics.listed_company_report_service import ListedCompanyReportService
 from investment_analyst.analytics.market.bar_schemas import get_market_bar_schema
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChart,
@@ -150,6 +155,7 @@ from investment_analyst.application.listed_market_refresh_models import (
     ListedMarketRefreshSummary,
 )
 from investment_analyst.application.market_universe import (
+    MarketAssetDescriptor,
     MarketAssetUniverse,
     build_market_asset_universe,
 )
@@ -289,6 +295,21 @@ class InvestmentAnalystApplication:
             self._runtime.provider_resolver,
         )
 
+    def _listed_company_descriptor(self, asset_id: str) -> MarketAssetDescriptor:
+        """Resolve one configured corporate issuer before opening read-only storage."""
+        matches = tuple(
+            item for item in self.list_market_assets().assets if item.asset_id == asset_id
+        )
+        if len(matches) != 1:
+            raise ValueError("listed-company report asset_id is not supported")
+        descriptor = matches[0]
+        if (
+            not descriptor.has_fundamentals
+            or descriptor.analysis.family is not AssetAnalysisFamily.LISTED_COMPANY
+        ):
+            raise ValueError("listed-company report is not available for asset_id")
+        return descriptor
+
     def refresh_fred_vintage(
         self,
         series_id: str,
@@ -417,6 +438,29 @@ class InvestmentAnalystApplication:
             access_mode=WorkspaceAccessMode.READ_ONLY,
         ) as storage:
             return AaplDailyReportService(storage).query(request)
+
+    def query_listed_company_diagnostics(
+        self,
+        request: ListedCompanyReportRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> ListedCompanyDiagnosticReport:
+        """Return one generic read-only company report after catalog capability validation."""
+        descriptor = self._listed_company_descriptor(request.asset_id)
+        if request.fundamental_frequency not in descriptor.fundamental_frequencies:
+            raise ValueError("fundamental frequency is not available for asset_id")
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return ListedCompanyReportService(storage).query(
+                request,
+                symbol=descriptor.symbol,
+                name=descriptor.name,
+                source_ids=tuple(
+                    sorted((descriptor.source_id, *descriptor.fundamental_source_ids))
+                ),
+            )
 
     def query_aapl_market_chart(
         self,

@@ -507,20 +507,17 @@ function marketAssetFromDescriptor(descriptor) {
     hasCorporateValuation: descriptor.has_corporate_valuation,
     supportsCryptoDerivatives: descriptor.supports_crypto_derivatives === true,
     fundamentalFrequencies: descriptor.fundamental_frequencies,
-    refreshKind: descriptor.refresh_kind,
     refreshLabel: `Actualizar ${descriptor.symbol}`,
-    refreshSource: descriptor.refresh_kind === "complete_analysis"
-      ? "SEC EDGAR + Alpaca Market Data · IEX parcial"
-      : descriptor.has_fundamentals
-        ? `${providerLabel} · ${descriptor.provider_identifier} + SEC EDGAR`
-        : `${providerLabel} · ${descriptor.provider_identifier}`,
+    refreshSource: descriptor.has_fundamentals
+      ? `${providerLabel} · ${descriptor.provider_identifier} + SEC EDGAR`
+      : `${providerLabel} · ${descriptor.provider_identifier}`,
   });
 }
 
 async function loadMarketAssets() {
   const payload = await api("/api/market-assets");
   if (
-    payload.schema_version !== "market-asset-universe-v4"
+    payload.schema_version !== "market-asset-universe-v5"
     || !Array.isArray(payload.assets)
     || payload.assets.length === 0
   ) {
@@ -935,13 +932,13 @@ function applySelectedMarketAsset() {
     element.classList.toggle("hidden", !presentation.hasCorporateValuation);
   }
   for (const element of document.querySelectorAll("[data-complete-run-only]")) {
-    element.classList.toggle("hidden", presentation.refreshKind !== "complete_analysis");
+    element.classList.toggle("hidden", !presentation.hasFundamentals);
   }
   for (const element of document.querySelectorAll("[data-fundamental-run-only]")) {
     element.classList.toggle("hidden", !presentation.hasFundamentals);
   }
   for (const element of document.querySelectorAll("[data-complete-analysis-only]")) {
-    element.classList.toggle("hidden", presentation.refreshKind !== "complete_analysis");
+    element.classList.toggle("hidden", !presentation.hasFundamentals);
   }
   for (const element of document.querySelectorAll("[data-crypto-derivatives-only]")) {
     element.classList.toggle("hidden", !presentation.supportsCryptoDerivatives);
@@ -974,13 +971,11 @@ function applySelectedMarketAsset() {
   }
   byId("operacion-titulo").textContent = presentation.refreshLabel;
   byId("run-source-label").textContent = presentation.refreshSource;
-  byId("run-note").textContent = presentation.refreshKind === "complete_analysis"
-    ? "SEC se consulta en cada ejecución, aunque el mercado ya esté actualizado."
-    : presentation.hasFundamentals
-      ? "Mercado y SEC se actualizan de forma independiente y conservan trazabilidad separada."
-      : isIntradayInterval()
-        ? "Actualiza primero el histórico diario y después las últimas 24 horas intradía."
-        : `Solo actualiza mercado ${presentation.symbol}; no simula fundamentales ni ejecuta operaciones.`;
+  byId("run-note").textContent = presentation.hasFundamentals
+    ? "Mercado y SEC se actualizan de forma serial e independiente; un fallo SEC no revierte el mercado persistido."
+    : isIntradayInterval()
+      ? "Actualiza primero el histórico diario y después las últimas 24 horas intradía."
+      : `Solo actualiza mercado ${presentation.symbol}; no simula fundamentales ni ejecuta operaciones.`;
   byId("run-button").textContent = presentation.hasFundamentals
     ? "Ejecutar actualización"
     : presentation.refreshLabel;
@@ -1645,7 +1640,7 @@ function exportFundamentalResearchCsv() {
 
 function exportReportJson() {
   if (!reportPayload) return;
-  const filename = `aapl-reporte-${safeFilePart(reportPayload.query?.known_at)}.json`;
+  const filename = `${safeFilePart(reportPayload.asset?.symbol || marketAssetPresentation().symbol)}-reporte-${safeFilePart(reportPayload.query?.known_at)}.json`;
   downloadText(filename, `${JSON.stringify(reportPayload, null, 2)}\n`, "application/json");
 }
 
@@ -4902,29 +4897,6 @@ byId("run-form").addEventListener("submit", async (event) => {
   );
   const knownAt = byId("run-known-at").value.trim();
   try {
-    if (presentation.refreshKind === "complete_analysis") {
-      const payload = {
-        asset_id: selectedMarketAsset,
-        market_start: byId("market-start").value,
-        market_end: byId("market-end").value,
-        fundamental_frequency: byId("run-frequency").value,
-        refresh_mode: byId("refresh-mode").value,
-        requested_known_at: knownAt || null,
-        require_complete: byId("require-complete").checked,
-      };
-      const state = await api("/api/run", { method: "POST", body: JSON.stringify(payload) });
-      const runStatus = translated(state.status, STATUS_LABELS, state.status);
-      const refreshMode = translated(state.refresh_mode, STATUS_LABELS, state.refresh_mode);
-      setMessage(`${runStatus}. Actualización de mercado: ${refreshMode}. Trazabilidad verificada.`);
-      if (state.effective_known_at) byId("report-known-at").value = state.effective_known_at;
-      await refreshOverview();
-      await queryReport();
-      await Promise.all([
-        queryMarketChart(),
-        queryFundamentalTrend(),
-        queryFundamentalResearch(),
-      ]);
-    } else {
       const payload = {
         asset_id: selectedMarketAsset,
         market_start: byId("market-start").value,
@@ -4989,7 +4961,6 @@ byId("run-form").addEventListener("submit", async (event) => {
           ? [queryFundamentalTrend(), queryFundamentalResearch()]
           : []),
       ]);
-    }
   } catch (error) {
     setMessage(error.message, true);
   } finally {
@@ -5013,7 +4984,8 @@ async function queryReport() {
     parameters.set("fundamental_as_of", byId("fundamental-as-of").value);
   }
   try {
-    renderReport(await api(`/api/report?${parameters.toString()}`));
+    parameters.set("asset_id", selectedMarketAsset);
+    renderReport(await api(`/api/listed-company-report?${parameters.toString()}`));
     setMessage(operationalIssues.join(" · "), operationalIssues.length > 0);
   } catch (error) {
     setMessage(error.message, true);
@@ -5171,7 +5143,7 @@ for (const button of document.querySelectorAll(".frequency-button")) {
     await Promise.all([
       queryFundamentalTrend(),
       queryFundamentalResearch(),
-      ...(marketAssetPresentation().refreshKind === "complete_analysis" ? [queryReport()] : []),
+      ...(marketAssetPresentation().hasFundamentals ? [queryReport()] : []),
     ]);
   });
 }

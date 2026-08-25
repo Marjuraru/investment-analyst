@@ -63,6 +63,10 @@ from investment_analyst.analytics.fundamentals.research_models import (
 from investment_analyst.analytics.fundamentals.research_service import (
     FundamentalResearchError,
 )
+from investment_analyst.analytics.listed_company_report_models import (
+    ListedCompanyDiagnosticReport,
+    ListedCompanyReportRequest,
+)
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChart,
     AaplMarketChartInterval,
@@ -356,6 +360,15 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> AaplDailyDiagnosticReport:
         """Query one persisted report."""
+        ...
+
+    def query_listed_company_diagnostics(
+        self,
+        request: ListedCompanyReportRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> ListedCompanyDiagnosticReport:
+        """Query one generic persisted listed-company report."""
         ...
 
     def query_aapl_market_chart(
@@ -810,6 +823,16 @@ class AaplLocalController:
     ) -> AaplDailyDiagnosticReport:
         """Query persisted evidence without providers or writes."""
         return self._application.query_aapl_diagnostics(
+            request,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+
+    def listed_company_report_request(
+        self,
+        request: ListedCompanyReportRequest,
+    ) -> ListedCompanyDiagnosticReport:
+        """Query a generic report without providers, writes, or writer acquisition."""
+        return self._application.query_listed_company_diagnostics(
             request,
             location=StorageLocationRequest(workspace=self._workspace),
         )
@@ -1561,6 +1584,36 @@ class AaplLocalWebApplication:
         )
         return self._controller.report_request(request).to_json_dict()
 
+    def listed_company_report(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Validate a generic corporate read before opening local storage."""
+        allowed = {
+            "asset_id",
+            "known_at",
+            "fundamental_frequency",
+            "market_as_of",
+            "fundamental_as_of",
+        }
+        if set(parameters) - allowed:
+            raise ValueError("listed-company report query contains unsupported parameters")
+        descriptor = self._fundamental_descriptor(
+            _one_parameter(parameters, "asset_id", required=True)
+        )
+        frequency = _frequency(_one_parameter(parameters, "fundamental_frequency", required=True))
+        self._require_fundamental_frequency(descriptor, frequency)
+        request = ListedCompanyReportRequest(
+            asset_id=descriptor.asset_id,
+            known_at=_aware_datetime(_one_parameter(parameters, "known_at", required=True)),
+            fundamental_frequency=frequency,
+            market_as_of=_optional_date(_one_parameter(parameters, "market_as_of", required=False)),
+            fundamental_as_of=_optional_date(
+                _one_parameter(parameters, "fundamental_as_of", required=False)
+            ),
+        )
+        return self._controller.listed_company_report_request(request).to_json_dict()
+
     def market_chart(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate query parameters and return the versioned market-chart contract."""
         allowed = {
@@ -1618,7 +1671,7 @@ class AaplLocalWebApplication:
             except InvalidOperation as error:
                 raise ValueError("bollinger_multiplier must be an exact decimal") from error
         descriptor = self._market_asset(asset_id)
-        if descriptor.refresh_kind == "complete_analysis":
+        if descriptor.asset_id == APPLE_ASSET_ID:
             request = AaplMarketChartRequest.model_validate(request_parameters)
             return self._controller.market_chart_request(request).to_json_dict()
         if (
@@ -1864,7 +1917,6 @@ class AaplLocalWebApplication:
         if (
             descriptor.analysis.market_mode is MarketAnalysisMode.LISTED_SECURITY
             and descriptor.provider == "alpaca"
-            and descriptor.refresh_kind == "market_only"
         ):
             request = ListedMarketRefreshRequest.model_validate(payload)
             return self._controller.listed_market_refresh_request(request).to_json_dict()
@@ -2067,6 +2119,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=8)
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(HTTPStatus.OK, server.application.report(parameters))
+                return
+            if parsed.path == "/api/listed-company-report":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=8)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.listed_company_report(parameters),
+                )
                 return
             if parsed.path == "/api/market-chart":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=9)

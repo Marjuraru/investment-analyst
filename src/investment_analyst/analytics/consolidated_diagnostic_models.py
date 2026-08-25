@@ -1,4 +1,4 @@
-"""Strict models for read-only consolidated Apple diagnostic queries."""
+"""Strict models for read-only consolidated listed-company diagnostic queries."""
 
 from datetime import date
 from enum import StrEnum
@@ -44,6 +44,28 @@ class ConsolidatedDiagnosticRequest(ContractModel):
         """Validate the fixed Apple scope and requested reference dates."""
         if self.asset_id != ASSET_ID:
             raise ValueError("asset_id must identify Apple")
+        if self.fundamental_frequency not in _ALLOWED_FREQUENCIES:
+            raise ValueError("fundamental_frequency must be annual or quarterly")
+        if self.market_as_of is not None and self.market_as_of > self.known_at.date():
+            raise ValueError("market_as_of must not be later than known_at")
+        if self.fundamental_as_of is not None and self.fundamental_as_of > self.known_at.date():
+            raise ValueError("fundamental_as_of must not be later than known_at")
+        return self
+
+
+class ListedCompanyDiagnosticRequest(ContractModel):
+    """Point-in-time request for a catalog-selected corporate issuer."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    asset_id: NonEmptyStr
+    known_at: UTCDateTime
+    fundamental_frequency: DataFrequency
+    market_as_of: date | None = None
+    fundamental_as_of: date | None = None
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "ListedCompanyDiagnosticRequest":
         if self.fundamental_frequency not in _ALLOWED_FREQUENCIES:
             raise ValueError("fundamental_frequency must be annual or quarterly")
         if self.market_as_of is not None and self.market_as_of > self.known_at.date():
@@ -165,7 +187,7 @@ class ConsolidatedDiagnosticView(ContractModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    request: ConsolidatedDiagnosticRequest
+    request: ConsolidatedDiagnosticRequest | ListedCompanyDiagnosticRequest
     status: ConsolidatedDiagnosticStatus
     market: ConsolidatedDiagnosticSection
     fundamental: ConsolidatedDiagnosticSection

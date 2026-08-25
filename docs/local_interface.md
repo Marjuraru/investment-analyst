@@ -291,7 +291,7 @@ estadísticas o diagnósticos diarios a esta fuente.
 
 ## Universo de mercado
 
-El endpoint `/api/market-assets` entrega `market-asset-universe-v4`, generado directamente desde el
+El endpoint `/api/market-assets` entrega `market-asset-universe-v5`, generado directamente desde el
 catálogo central y las configuraciones tipadas de proveedores. El navegador construye el selector
 con esa respuesta; no mantiene otra lista de símbolos. Cada descriptor declara identidad canónica,
 símbolo del proveedor, fuente, esquema de gráfico, fecha inicial soportada, unidad de volumen,
@@ -328,11 +328,10 @@ obtuvo 25 de 40 métricas en el período más reciente y 26 series históricas.
 El smoke real anual de Intel del mismo día procesó dos documentos oficiales, 687 observaciones y 19
 métricas base. MSTR, MU y PLTR produjeron respectivamente 477, 873 y 559 observaciones y 27, 39 y 28
 métricas base. Las repeticiones reutilizaron toda la evidencia sin crear duplicados. Estos emisores
-publican `has_fundamentals=true` y `refresh_kind=market_only`: la interfaz muestra su análisis
-corporativo y, al actualizar, ejecuta primero su mercado Alpaca y después SEC como dos operaciones
-independientes. No utiliza el bootstrap ni la consulta diagnóstica consolidada de Apple. Los
-conceptos ausentes permanecen visibles como faltantes; no se rellenan con cero ni con datos de otro
-emisor.
+publican `has_fundamentals=true`: la interfaz muestra su análisis corporativo y, al actualizar,
+ejecuta primero su mercado Alpaca y después SEC como dos operaciones independientes. La consulta
+consolidada genérica usa el mismo contrato PIT para cada emisor elegible. Los conceptos ausentes
+permanecen visibles como faltantes; no se rellenan con cero ni con datos de otro emisor.
 
 CDE, HYMC, MUX, NEM y SCCO produjeron en sus smokes reales 873, 633, 845, 569 y 1224 observaciones.
 La cobertura diagnóstica incompleta se muestra como tal y no impide consultar la evidencia

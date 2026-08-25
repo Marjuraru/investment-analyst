@@ -45,7 +45,8 @@ Partial and unavailable results are valid query outcomes.
 
 ## Read-only behavior and performance
 
-The consolidated selector performs one diagnostics list and one metric-results list for Apple and
+The consolidated selector performs one diagnostics list and one metric-results list for the explicit
+catalog-selected corporate issuer and
 builds in-memory indexes. Its normal path is approximately `O(D log D + M)`. Only an equally
 available revision tie activates lazy semantic resolution from metric results through normalized
 observations to raw records. That resolution verifies existing traceability; it does not recalculate

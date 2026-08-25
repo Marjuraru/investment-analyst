@@ -88,8 +88,8 @@ Intel declara ticker `INTC` y CIK `0000050863`, contrastados con el índice ofic
 SEC. MSTR, MU y PLTR declaran de la misma forma sus CIK oficiales `0001050446`, `0000723125` y
 `0001321655`. CDE, HYMC, MUX, NEM y SCCO declaran `0000215466`, `0001718405`, `0000314203`,
 `0001164727` y `0001001838`. Tras validar filings reales e idempotencia, los diez emisores US-GAAP
-declaran `has_fundamentals=true` y conservan `refresh_kind=market_only`: mercado y SEC se ejecutan
-como writers independientes. Apple es el único activo con `complete_analysis`.
+declaran `has_fundamentals=true`: mercado y SEC se ejecutan como writers independientes y seriales
+para cada emisor corporativo elegible, sin una ruta especial para Apple.
 
 El perfil IFRS anual habilita Barrick (`B`, CIK `0000756894`), BVN ADR (CIK `0001013131`) y TSM
 (CIK `0001046179`) mediante conceptos `ifrs-full` comparables y formularios 20-F/40-F. No interpreta

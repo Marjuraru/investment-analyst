@@ -33,7 +33,6 @@ _COINBASE_HISTORY_START = date(2015, 7, 20)
 _DAILY_MARKET_CAPABILITY = "market.daily_bars"
 _MINUTE_MARKET_CAPABILITY = "market.minute_bars"
 _FUNDAMENTAL_CAPABILITIES = frozenset({"fundamentals.company_facts", "fundamentals.submissions"})
-_COMPLETE_ANALYSIS_ASSET_IDS = frozenset({APPLE_ASSET_ID})
 
 
 class MarketAssetDescriptor(ContractModel):
@@ -62,7 +61,6 @@ class MarketAssetDescriptor(ContractModel):
     supports_crypto_derivatives: bool = False
     intraday_source_id: NonEmptyStr | None = None
     intraday_schema_version: NonEmptyStr | None = None
-    refresh_kind: Literal["complete_analysis", "market_only"]
 
     @model_validator(mode="after")
     def validate_capabilities(self) -> "MarketAssetDescriptor":
@@ -105,8 +103,6 @@ class MarketAssetDescriptor(ContractModel):
             raise ValueError("fundamental source IDs must be unique and sorted")
         if self.has_fundamentals != bool(self.fundamental_source_ids):
             raise ValueError("fundamental source IDs must match fundamental availability")
-        if self.refresh_kind == "complete_analysis" and not self.has_fundamentals:
-            raise ValueError("complete refresh requires fundamental capability")
         return self
 
 
@@ -115,7 +111,7 @@ class MarketAssetUniverse(ContractModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["market-asset-universe-v4"] = "market-asset-universe-v4"
+    schema_version: Literal["market-asset-universe-v5"] = "market-asset-universe-v5"
     catalog_version: int = Field(ge=1)
     assets: tuple[MarketAssetDescriptor, ...]
 
@@ -183,9 +179,6 @@ def _descriptor(
         if sec_configuration is not None
         else ()
     )
-    complete_refresh_available = (
-        asset.asset_id in _COMPLETE_ANALYSIS_ASSET_IDS and fundamental_pipeline_available
-    )
     analysis = analysis_capabilities_for(asset)
 
     if binding.provider == "alpaca":
@@ -233,7 +226,6 @@ def _descriptor(
                 else ()
             ),
             supports_intraday=False,
-            refresh_kind=("complete_analysis" if complete_refresh_available else "market_only"),
         )
 
     if binding.provider == "coinbase" and analysis.crypto_profile is not None:
@@ -271,7 +263,6 @@ def _descriptor(
             supports_crypto_derivatives=supports_crypto_derivatives,
             intraday_source_id=intraday.source_id if intraday is not None else None,
             intraday_schema_version=("btc-intraday-chart-v1" if intraday is not None else None),
-            refresh_kind="market_only",
         )
 
     raise ValueError(
