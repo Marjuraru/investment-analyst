@@ -454,6 +454,7 @@ let cryptoDerivativesPayload = null;
 let cryptoDerivativesRequest = 0;
 let fundamentalBusyCount = 0;
 let reportPayload = null;
+let listedCompanyReportRequest = 0;
 let chartSettings = { ...DEFAULT_CHART_SETTINGS };
 const chartSeriesVisibility = {
   "sma-5": true,
@@ -637,6 +638,7 @@ async function loadMarketAssets() {
     closeListbox();
     marketStartByAsset.set(selectedMarketAsset, byId("market-start").value);
     knownAtByAsset.set(selectedMarketAsset, byId("report-known-at").value.trim());
+    resetListedCompanyReport();
     selectedMarketAsset = assetId;
     byId("report-known-at").value = knownAtByAsset.get(assetId) || new Date().toISOString();
     marketChartPayload = null;
@@ -663,10 +665,11 @@ async function loadMarketAssets() {
       }
     }
 
+    const presentation = marketAssetPresentation();
     await Promise.all([
       queryMarketChart(),
-      ...(marketAssetPresentation().hasFundamentals
-        ? [queryFundamentalTrend(), queryFundamentalResearch()]
+      ...(presentation.hasFundamentals
+        ? [queryFundamentalTrend(), queryFundamentalResearch(), queryReport()]
         : []),
     ]);
   }
@@ -4878,6 +4881,21 @@ function renderReport(report) {
   byId("report-json").textContent = JSON.stringify(report, null, 2);
 }
 
+function resetListedCompanyReport() {
+  reportPayload = null;
+  listedCompanyReportRequest += 1;
+  setExportAvailable("export-report-json", false);
+  const reportArea = byId("report-area");
+  reportArea.classList.add("hidden");
+  reportArea.setAttribute("aria-busy", "false");
+  byId("report-status").replaceChildren();
+  byId("market-report").replaceChildren();
+  byId("fundamental-report").replaceChildren();
+  byId("report-traceability").textContent = "";
+  byId("report-limitations").replaceChildren();
+  byId("report-json").textContent = "";
+}
+
 byId("run-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = byId("run-button");
@@ -4971,6 +4989,13 @@ byId("run-form").addEventListener("submit", async (event) => {
 async function queryReport() {
   const button = byId("report-button");
   const reportArea = byId("report-area");
+  const assetId = selectedMarketAsset;
+  const presentation = marketAssets[assetId];
+  if (!presentation?.hasFundamentals) {
+    resetListedCompanyReport();
+    return;
+  }
+  const request = ++listedCompanyReportRequest;
   reportPayload = null;
   setExportAvailable("export-report-json", false);
   setButtonBusy(button, true, "Consultando…", "Consultar análisis");
@@ -4984,14 +5009,23 @@ async function queryReport() {
     parameters.set("fundamental_as_of", byId("fundamental-as-of").value);
   }
   try {
-    parameters.set("asset_id", selectedMarketAsset);
-    renderReport(await api(`/api/listed-company-report?${parameters.toString()}`));
+    parameters.set("asset_id", assetId);
+    const report = await api(`/api/listed-company-report?${parameters.toString()}`);
+    if (
+      request !== listedCompanyReportRequest
+      || assetId !== selectedMarketAsset
+      || report?.asset?.asset_id !== assetId
+    ) return;
+    renderReport(report);
     setMessage(operationalIssues.join(" · "), operationalIssues.length > 0);
   } catch (error) {
+    if (request !== listedCompanyReportRequest || assetId !== selectedMarketAsset) return;
     setMessage(error.message, true);
   } finally {
-    reportArea.setAttribute("aria-busy", "false");
-    setButtonBusy(button, false, "Consultando…", "Consultar análisis");
+    if (request === listedCompanyReportRequest && assetId === selectedMarketAsset) {
+      reportArea.setAttribute("aria-busy", "false");
+      setButtonBusy(button, false, "Consultando…", "Consultar análisis");
+    }
   }
 }
 

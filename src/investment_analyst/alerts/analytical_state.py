@@ -301,6 +301,30 @@ class AnalyticalRecordOutcome(ContractModel):
     candidates_resolved: int = Field(ge=0)
 
 
+class AnalyticalScreeningReconciliation:
+    """One validated analytical-state snapshot reused by one startup cycle."""
+
+    def __init__(
+        self, store: "AnalyticalScreeningStateStore", state: AnalyticalScreeningState
+    ) -> None:
+        self._store = store
+        self._state = state
+        self._attempt_ids = {item.attempt_id for item in state.receipts}
+
+    def contains_attempt(self, attempt_id: UUID) -> bool:
+        return attempt_id in self._attempt_ids
+
+    def record_attempt(
+        self,
+        receipt: AnalyticalMonitorReceipt,
+        results: tuple[AnalyticalScreeningResult, ...],
+    ) -> AnalyticalRecordOutcome:
+        with self._store._lock:
+            outcome, self._state = self._store._record_attempt(self._state, receipt, results)
+            self._attempt_ids.add(receipt.attempt_id)
+            return outcome
+
+
 class AnalyticalScreeningStateStore:
     """Atomically persist results, receipts, candidates, and transitions."""
 
@@ -326,143 +350,159 @@ class AnalyticalScreeningStateStore:
         """Return whether an observation receipt already makes replay unnecessary."""
         return any(item.attempt_id == attempt_id for item in self.load().receipts)
 
+    def reconciliation(self) -> AnalyticalScreeningReconciliation:
+        """Load and validate the document once for one ordered startup replay."""
+        return AnalyticalScreeningReconciliation(self, self.load())
+
     def record_attempt(
         self,
         receipt: AnalyticalMonitorReceipt,
         results: tuple[AnalyticalScreeningResult, ...],
     ) -> AnalyticalRecordOutcome:
         """Record one observed attempt exactly once and update candidate lifecycles."""
+        with self._lock:
+            outcome, _ = self._record_attempt(self.load(), receipt, results)
+            return outcome
+
+    def _record_attempt(
+        self,
+        state: AnalyticalScreeningState,
+        receipt: AnalyticalMonitorReceipt,
+        results: tuple[AnalyticalScreeningResult, ...],
+    ) -> tuple[AnalyticalRecordOutcome, AnalyticalScreeningState]:
         if tuple(sorted((item.result_id for item in results), key=str)) != receipt.result_ids:
             raise ValueError("analytical receipt result_ids do not match supplied results")
-        with self._lock:
-            state = self.load()
-            receipt_by_id = {item.attempt_id: item for item in state.receipts}
-            existing_receipt = receipt_by_id.get(receipt.attempt_id)
-            if existing_receipt is not None:
-                if existing_receipt.semantic_fingerprint() != receipt.semantic_fingerprint():
-                    raise AaplOperationalStateError(
-                        "analytical attempt replay changed receipt semantics"
-                    )
-                return AnalyticalRecordOutcome(
+        receipt_by_id = {item.attempt_id: item for item in state.receipts}
+        existing_receipt = receipt_by_id.get(receipt.attempt_id)
+        if existing_receipt is not None:
+            if existing_receipt.semantic_fingerprint() != receipt.semantic_fingerprint():
+                raise AaplOperationalStateError(
+                    "analytical attempt replay changed receipt semantics"
+                )
+            return (
+                AnalyticalRecordOutcome(
                     receipt_created=False,
                     results_created=0,
                     candidates_created=0,
                     candidates_resolved=0,
-                )
-
-            results_by_id = {item.result_id: item for item in state.results}
-            results_created = 0
-            for result in results:
-                existing_result = results_by_id.get(result.result_id)
-                if existing_result is not None:
-                    if existing_result.semantic_fingerprint() != result.semantic_fingerprint():
-                        raise AaplOperationalStateError(
-                            "analytical recomputation changed deterministic semantics"
-                        )
-                    continue
-                results_by_id[result.result_id] = result
-                results_created += 1
-
-            candidates_by_id = {item.candidate_id: item for item in state.candidates}
-            transitions = list(state.transitions)
-            candidates_created = 0
-            candidates_resolved = 0
-            for result in sorted(results, key=lambda item: (item.known_at, str(item.result_id))):
-                open_candidates = tuple(
-                    item
-                    for item in candidates_by_id.values()
-                    if self._same_stream(item, result)
-                    and item.status is not AnalyticalCandidateStatus.RESOLVED
-                )
-                if open_candidates:
-                    if result.retained is False:
-                        for candidate in open_candidates:
-                            transition = _candidate_transition(
-                                candidate,
-                                AnalyticalCandidateStatus.RESOLVED,
-                                recorded_at=receipt.processed_at,
-                                actor="system_evidence",
-                            )
-                            transitions.append(transition)
-                            candidates_by_id[candidate.candidate_id] = candidate.model_copy(
-                                update={"status": AnalyticalCandidateStatus.RESOLVED}
-                            )
-                            candidates_resolved += 1
-                    continue
-                if not result.activated or result.as_of is None:
-                    continue
-                confirmations = self._confirmation_count(
-                    tuple(results_by_id.values()),
-                    result,
-                )
-                if confirmations < result.rule.confirmations_required:
-                    continue
-                previous = tuple(
-                    item for item in candidates_by_id.values() if self._same_stream(item, result)
-                )
-                if previous and receipt.processed_at < max(
-                    item.cooldown_until for item in previous
-                ):
-                    continue
-                event = AnalyticalCandidateEvent(
-                    candidate_id=analytical_candidate_id(result.result_id),
-                    activation_result_id=result.result_id,
-                    rule_id=result.rule.rule_id,
-                    rule_version=result.rule.rule_version,
-                    rule_fingerprint=result.rule.semantic_fingerprint(),
-                    asset_id=result.asset_id,
-                    domain=result.rule.domain,
-                    source_id=result.source_id,
-                    as_of=result.as_of,
-                    activated_at=receipt.processed_at,
-                    cooldown_until=receipt.processed_at
-                    + timedelta(seconds=result.rule.cooldown_seconds),
-                    confirmations=confirmations,
-                )
-                existing_event = candidates_by_id.get(event.candidate_id)
-                if existing_event is not None:
-                    if existing_event.semantic_fingerprint() != event.semantic_fingerprint():
-                        raise AaplOperationalStateError(
-                            "candidate recomputation changed deterministic semantics"
-                        )
-                    continue
-                candidates_by_id[event.candidate_id] = event
-                candidates_created += 1
-
-            receipt_by_id[receipt.attempt_id] = receipt
-            snapshot = AnalyticalScreeningState(
-                results=tuple(
-                    sorted(
-                        results_by_id.values(),
-                        key=lambda item: (item.known_at, str(item.result_id)),
-                    )
                 ),
-                candidates=tuple(
-                    sorted(
-                        candidates_by_id.values(),
-                        key=lambda item: (item.activated_at, str(item.candidate_id)),
-                    )
-                ),
-                transitions=tuple(
-                    sorted(
-                        transitions,
-                        key=lambda item: (item.recorded_at, str(item.transition_id)),
-                    )
-                ),
-                receipts=tuple(
-                    sorted(
-                        receipt_by_id.values(),
-                        key=lambda item: (item.processed_at, str(item.attempt_id)),
-                    )
-                ),
+                state,
             )
-            self._write(snapshot)
-            return AnalyticalRecordOutcome(
+
+        results_by_id = {item.result_id: item for item in state.results}
+        results_created = 0
+        for result in results:
+            existing_result = results_by_id.get(result.result_id)
+            if existing_result is not None:
+                if existing_result.semantic_fingerprint() != result.semantic_fingerprint():
+                    raise AaplOperationalStateError(
+                        "analytical recomputation changed deterministic semantics"
+                    )
+                continue
+            results_by_id[result.result_id] = result
+            results_created += 1
+
+        candidates_by_id = {item.candidate_id: item for item in state.candidates}
+        transitions = list(state.transitions)
+        candidates_created = 0
+        candidates_resolved = 0
+        for result in sorted(results, key=lambda item: (item.known_at, str(item.result_id))):
+            open_candidates = tuple(
+                item
+                for item in candidates_by_id.values()
+                if self._same_stream(item, result)
+                and item.status is not AnalyticalCandidateStatus.RESOLVED
+            )
+            if open_candidates:
+                if result.retained is False:
+                    for candidate in open_candidates:
+                        transition = _candidate_transition(
+                            candidate,
+                            AnalyticalCandidateStatus.RESOLVED,
+                            recorded_at=receipt.processed_at,
+                            actor="system_evidence",
+                        )
+                        transitions.append(transition)
+                        candidates_by_id[candidate.candidate_id] = candidate.model_copy(
+                            update={"status": AnalyticalCandidateStatus.RESOLVED}
+                        )
+                        candidates_resolved += 1
+                continue
+            if not result.activated or result.as_of is None:
+                continue
+            confirmations = self._confirmation_count(
+                tuple(results_by_id.values()),
+                result,
+            )
+            if confirmations < result.rule.confirmations_required:
+                continue
+            previous = tuple(
+                item for item in candidates_by_id.values() if self._same_stream(item, result)
+            )
+            if previous and receipt.processed_at < max(item.cooldown_until for item in previous):
+                continue
+            event = AnalyticalCandidateEvent(
+                candidate_id=analytical_candidate_id(result.result_id),
+                activation_result_id=result.result_id,
+                rule_id=result.rule.rule_id,
+                rule_version=result.rule.rule_version,
+                rule_fingerprint=result.rule.semantic_fingerprint(),
+                asset_id=result.asset_id,
+                domain=result.rule.domain,
+                source_id=result.source_id,
+                as_of=result.as_of,
+                activated_at=receipt.processed_at,
+                cooldown_until=receipt.processed_at
+                + timedelta(seconds=result.rule.cooldown_seconds),
+                confirmations=confirmations,
+            )
+            existing_event = candidates_by_id.get(event.candidate_id)
+            if existing_event is not None:
+                if existing_event.semantic_fingerprint() != event.semantic_fingerprint():
+                    raise AaplOperationalStateError(
+                        "candidate recomputation changed deterministic semantics"
+                    )
+                continue
+            candidates_by_id[event.candidate_id] = event
+            candidates_created += 1
+
+        receipt_by_id[receipt.attempt_id] = receipt
+        snapshot = AnalyticalScreeningState(
+            results=tuple(
+                sorted(
+                    results_by_id.values(),
+                    key=lambda item: (item.known_at, str(item.result_id)),
+                )
+            ),
+            candidates=tuple(
+                sorted(
+                    candidates_by_id.values(),
+                    key=lambda item: (item.activated_at, str(item.candidate_id)),
+                )
+            ),
+            transitions=tuple(
+                sorted(
+                    transitions,
+                    key=lambda item: (item.recorded_at, str(item.transition_id)),
+                )
+            ),
+            receipts=tuple(
+                sorted(
+                    receipt_by_id.values(),
+                    key=lambda item: (item.processed_at, str(item.attempt_id)),
+                )
+            ),
+        )
+        self._write(snapshot)
+        return (
+            AnalyticalRecordOutcome(
                 receipt_created=True,
                 results_created=results_created,
                 candidates_created=candidates_created,
                 candidates_resolved=candidates_resolved,
-            )
+            ),
+            snapshot,
+        )
 
     def transition(
         self,

@@ -1560,6 +1560,37 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "queryValuation()" not in startup
 
 
+def test_asset_selection_invalidates_and_binds_listed_company_reports_by_asset() -> None:
+    with (
+        _server(_ExplodingApplication()) as (_, root),
+        urlopen(f"{root}/assets/app.js", timeout=5) as response,
+    ):
+        javascript = response.read().decode("utf-8")
+
+    selection = javascript[
+        javascript.index("async function selectComboboxOption(assetId)") : javascript.index(
+            'input.addEventListener("focus"',
+            javascript.index("async function selectComboboxOption(assetId)"),
+        )
+    ]
+    assert selection.index("resetListedCompanyReport();") < selection.index(
+        "selectedMarketAsset = assetId;"
+    )
+    assert "presentation.hasFundamentals" in selection
+    assert "queryReport()" in selection
+
+    query = javascript[
+        javascript.index("async function queryReport()") : javascript.index(
+            'byId("report-form").addEventListener', javascript.index("async function queryReport()")
+        )
+    ]
+    assert "if (!presentation?.hasFundamentals)" in query
+    assert "const request = ++listedCompanyReportRequest;" in query
+    assert "request !== listedCompanyReportRequest" in query
+    assert "assetId !== selectedMarketAsset" in query
+    assert "report?.asset?.asset_id !== assetId" in query
+
+
 def test_icon_button_refresh_svg_is_preserved_on_busy_state() -> None:
     """Regression: setButtonBusy must not destroy the inner SVG of icon-only buttons.
 
