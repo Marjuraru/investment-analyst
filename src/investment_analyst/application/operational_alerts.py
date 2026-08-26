@@ -295,6 +295,7 @@ class OperationalAlertStateStore:
         self._lock = threading.RLock()
         self._reconciliation_state: OperationalAlertState | None = None
         self._reconciliation_result_ids: set[UUID] | None = None
+        self._reconciling = False
 
     def load(self) -> OperationalAlertState:
         """Load valid monitor state without creating a missing file."""
@@ -317,18 +318,24 @@ class OperationalAlertStateStore:
             self._reconciliation_result_ids = {
                 item.result_id for item in self._reconciliation_state.screenings
             }
+            self._reconciling = True
 
     def end_reconciliation(self) -> None:
         """Discard the ephemeral startup index after the ordered replay."""
         with self._lock:
             self._reconciliation_state = None
             self._reconciliation_result_ids = None
+            self._reconciling = False
 
     def is_attempt_processed(self, attempt: ScheduledJobAttempt) -> bool:
         """Require all four deterministic rule results before skipping an attempt."""
         with self._lock:
-            state = self._reconciliation_state or self.load()
-            known = self._reconciliation_result_ids or {item.result_id for item in state.screenings}
+            state = self._reconciliation_state if self._reconciling else self.load()
+            known = (
+                self._reconciliation_result_ids
+                if self._reconciling
+                else {item.result_id for item in state.screenings}
+            )
             return all(
                 operational_screening_result_id(rule_id, "1.0", attempt.attempt_id) in known
                 for rule_id in OperationalRuleId
@@ -344,7 +351,7 @@ class OperationalAlertStateStore:
         ):
             return False
         with self._lock:
-            state = self._reconciliation_state or self.load()
+            state = self._reconciliation_state if self._reconciling else self.load()
             return any(
                 event.job_id == attempt.definition.job_id
                 and event.first_activated_at < attempt.completed_at
@@ -359,7 +366,7 @@ class OperationalAlertStateStore:
     ) -> tuple[int, int]:
         """Persist only new identities and reject contradictory recomputations."""
         with self._lock:
-            state = self._reconciliation_state or self.load()
+            state = self._reconciliation_state if self._reconciling else self.load()
             by_result = {item.result_id: item for item in state.screenings}
             by_alert = {item.alert_id: item for item in state.events}
             created_results = 0
@@ -408,8 +415,11 @@ class OperationalAlertStateStore:
                     transitions=state.transitions,
                 )
                 self._write(snapshot)
-                self._reconciliation_state = snapshot
-                self._reconciliation_result_ids = {item.result_id for item in snapshot.screenings}
+                if self._reconciling:
+                    self._reconciliation_state = snapshot
+                    self._reconciliation_result_ids = {
+                        item.result_id for item in snapshot.screenings
+                    }
             return created_results, created_events
 
     def transition(
@@ -427,7 +437,7 @@ class OperationalAlertStateStore:
         if to_status is OperationalAlertEventStatus.NEW:
             raise ValueError("an alert cannot transition back to new")
         with self._lock:
-            state = self._reconciliation_state or self.load()
+            state = self._reconciliation_state if self._reconciling else self.load()
             events = {item.alert_id: item for item in state.events}
             current = events.get(alert_id)
             if current is None:
@@ -491,7 +501,8 @@ class OperationalAlertStateStore:
                 transitions=transitions,
             )
             self._write(snapshot)
-            self._reconciliation_state = snapshot
+            if self._reconciling:
+                self._reconciliation_state = snapshot
             return updated, True
 
     def resolve_recovered_job(
@@ -512,7 +523,7 @@ class OperationalAlertStateStore:
         if recorded_at < recovered_at:
             raise ValueError("recorded_at must not predate recovered_at")
         with self._lock:
-            state = self._reconciliation_state or self.load()
+            state = self._reconciliation_state if self._reconciling else self.load()
             recoverable = tuple(
                 item
                 for item in state.events
@@ -566,7 +577,8 @@ class OperationalAlertStateStore:
                 ),
             )
             self._write(snapshot)
-            self._reconciliation_state = snapshot
+            if self._reconciling:
+                self._reconciliation_state = snapshot
             return len(recoverable)
 
     def status(self) -> OperationalAlertInboxStatus:
