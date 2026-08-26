@@ -84,10 +84,10 @@ class FredVintagePipeline:
         """Fetch, persist, round-trip, and isolate one vintage snapshot."""
         self._storage.require_open()
         assets_before = tuple(self._storage.assets.list_all())
-        observations_before = tuple(self._storage.observations.list())
+        observations_before = self._storage.observations.count()
         metric_definitions_before = tuple(self._storage.metric_definitions.list_all())
-        metric_results_before = tuple(self._storage.metric_results.list())
-        diagnostics_before = tuple(self._storage.diagnostics.list())
+        metric_results_before = self._storage.metric_results.count()
+        diagnostics_before = self._storage.diagnostics.count()
 
         fetch = self._client.fetch_vintage_snapshot(
             series_id,
@@ -149,10 +149,10 @@ class FredVintagePipeline:
         *,
         source_id: str,
         assets_before: tuple[object, ...],
-        observations_before: tuple[object, ...],
+        observations_before: int,
         metric_definitions_before: tuple[object, ...],
-        metric_results_before: tuple[object, ...],
-        diagnostics_before: tuple[object, ...],
+        metric_results_before: int,
+        diagnostics_before: int,
     ) -> StoredFredVintage:
         if self._storage.raw_records.get(stored.record_id) != stored:
             raise StorageError("FRED/ALFRED raw record round-trip verification failed")
@@ -163,12 +163,12 @@ class FredVintagePipeline:
             raise StorageError("FRED/ALFRED source round-trip verification failed")
         if tuple(self._storage.assets.list_all()) != assets_before:
             raise StorageError("FRED/ALFRED import must not mutate the asset catalog")
-        if tuple(self._storage.observations.list()) != observations_before:
+        if self._storage.observations.count() != observations_before:
             raise StorageError("FRED/ALFRED import must not create asset observations")
         if tuple(self._storage.metric_definitions.list_all()) != metric_definitions_before:
             raise StorageError("FRED/ALFRED import must not create metric definitions")
-        if tuple(self._storage.metric_results.list()) != metric_results_before:
+        if self._storage.metric_results.count() != metric_results_before:
             raise StorageError("FRED/ALFRED import must not create metric results")
-        if tuple(self._storage.diagnostics.list()) != diagnostics_before:
+        if self._storage.diagnostics.count() != diagnostics_before:
             raise StorageError("FRED/ALFRED import must not create diagnostics")
         return verified
