@@ -252,6 +252,20 @@ class CandidateNotificationReconciliation:
 
     def enqueue(self, item: CandidateNotification) -> tuple[CandidateNotification, bool]:
         with self._store._lock:
+            if type(self._store).enqueue is not CandidateNotificationStore.enqueue:
+                result, created = self._store.enqueue(item)
+                if created:
+                    self._state = CandidateNotificationState(
+                        items=tuple(
+                            sorted(
+                                (*self._state.items, result),
+                                key=lambda value: (value.created_at, str(value.notification_id)),
+                            )
+                        ),
+                        transitions=self._state.transitions,
+                    )
+                    self._notification_ids.add(result.notification_id)
+                return result, created
             result, self._state, created = self._store._enqueue(self._state, item)
             if created:
                 self._notification_ids.add(item.notification_id)
