@@ -23,7 +23,7 @@ from investment_analyst.core.models import AssetClass, DataFrequency
 def test_default_universe_exposes_supported_assets_and_source_contracts() -> None:
     universe = InvestmentAnalystApplication.create_default().list_market_assets()
 
-    assert universe.schema_version == "market-asset-universe-v4"
+    assert universe.schema_version == "market-asset-universe-v5"
     assert universe.catalog_version == 1
     assert len(universe.assets) == 19
     assert tuple(item.asset_id for item in universe.assets) == tuple(
@@ -53,7 +53,6 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
 
     apple = by_symbol["AAPL"]
     assert apple.provider == "alpaca"
-    assert apple.refresh_kind == "complete_analysis"
     assert apple.has_fundamentals
     assert apple.fundamental_frequencies == (
         DataFrequency.ANNUAL,
@@ -75,7 +74,6 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     )
     assert amd.has_fundamentals
     assert amd.has_corporate_valuation
-    assert amd.refresh_kind == "market_only"
     for symbol in ("B", "BVN", "TSM"):
         foreign_issuer = by_symbol[symbol]
         assert foreign_issuer.has_fundamentals
@@ -84,24 +82,20 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     intel = by_symbol["INTC"]
     assert intel.analysis.fundamental_data_configured
     assert intel.has_fundamentals
-    assert intel.refresh_kind == "market_only"
     for symbol in ("MSTR", "MU", "PLTR"):
         issuer = by_symbol[symbol]
         assert issuer.analysis.fundamental_data_configured
         assert issuer.has_fundamentals
-        assert issuer.refresh_kind == "market_only"
     for symbol in ("CDE", "HYMC", "MUX", "NEM", "SCCO"):
         issuer = by_symbol[symbol]
         assert issuer.analysis.fundamental_data_configured
         assert issuer.has_fundamentals
-        assert issuer.refresh_kind == "market_only"
     for asset in universe.assets:
         if asset.analysis.fundamental_mode is FundamentalAnalysisMode.CORPORATE:
             assert asset.has_fundamentals is asset.analysis.fundamental_data_configured
 
     bitcoin = by_symbol["BTC-USD"]
     assert bitcoin.provider == "coinbase"
-    assert bitcoin.refresh_kind == "market_only"
     assert bitcoin.supports_intraday
     assert bitcoin.supports_crypto_derivatives
     assert bitcoin.analysis.family is AssetAnalysisFamily.CRYPTOASSET
@@ -163,7 +157,6 @@ def test_market_descriptor_rejects_incomplete_intraday_contract() -> None:
             has_fundamentals=False,
             fundamental_frequencies=(),
             supports_intraday=True,
-            refresh_kind="market_only",
         )
 
 

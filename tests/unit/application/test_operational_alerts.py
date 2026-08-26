@@ -2,6 +2,7 @@
 
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from time import monotonic
 from uuid import UUID
 
 from investment_analyst.application.multi_asset_scheduler import (
@@ -17,6 +18,7 @@ from investment_analyst.application.operational_alerts import (
     OperationalAlertEngine,
     OperationalAlertEventStatus,
     OperationalAlertMonitor,
+    OperationalAlertState,
     OperationalAlertStateStore,
     OperationalRuleId,
     ScreeningConditionState,
@@ -128,6 +130,43 @@ def test_complete_success_resolves_prior_job_alerts_with_audited_system_transiti
     assert state.transitions[0].from_status is OperationalAlertEventStatus.NEW
     assert state.transitions[0].to_status is OperationalAlertEventStatus.RESOLVED
     assert store.status().new_count == 0
+
+
+def test_reconcile_recovers_after_screenings_persist_before_resolution(tmp_path: Path) -> None:
+    class NoReplayEngine(OperationalAlertEngine):
+        def evaluate(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("recovery must not replay complete screenings")
+
+    store = OperationalAlertStateStore(tmp_path / "alerts.json")
+    failure = _attempt(ScheduledJobAttemptStatus.FAILED)
+    success = _attempt(
+        ScheduledJobAttemptStatus.SUCCEEDED,
+        attempt_id=UUID("00000000-0000-4000-8000-000000000107"),
+    ).model_copy(
+        update={
+            "attempt_number": 2,
+            "started_at": datetime(2026, 7, 29, 12, 5, tzinfo=UTC),
+            "completed_at": datetime(2026, 7, 29, 12, 6, tzinfo=UTC),
+        }
+    )
+    engine = OperationalAlertEngine()
+    store.record(
+        engine.evaluate(failure, computed_at=failure.completed_at),
+        engine.events_for(engine.evaluate(failure, computed_at=failure.completed_at)),
+    )
+    success_results = engine.evaluate(success, computed_at=success.completed_at)
+    store.record(success_results, engine.events_for(success_results))
+
+    OperationalAlertMonitor(
+        store,
+        engine=NoReplayEngine(),
+        clock=lambda: datetime(2026, 7, 29, 12, 7, tzinfo=UTC),
+    ).reconcile((failure, success))
+
+    state = store.load()
+    assert len(state.screenings) == 8
+    assert len(state.transitions) == 1
+    assert state.events[0].status is OperationalAlertEventStatus.RESOLVED
 
 
 def test_incomplete_success_does_not_resolve_prior_job_failure(tmp_path: Path) -> None:
@@ -256,6 +295,58 @@ def test_monitor_reconciles_durable_attempts_idempotently(tmp_path: Path) -> Non
     assert store.load() == first
     assert len(first.screenings) == 8
     assert len(first.events) == 1
+
+
+def test_startup_reconciliation_indexes_890_attempts_without_replaying_history(
+    tmp_path: Path,
+) -> None:
+    class CountingStore(OperationalAlertStateStore):
+        def __init__(self, path: Path) -> None:
+            super().__init__(path)
+            self.loads = 0
+
+        def load(self) -> OperationalAlertState:
+            self.loads += 1
+            return super().load()
+
+    class NoReplayEngine(OperationalAlertEngine):
+        def evaluate(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("a fully indexed attempt must not be re-evaluated")
+
+    seed_store = OperationalAlertStateStore(tmp_path / "alerts.json")
+    seed_engine = OperationalAlertEngine()
+    attempts = tuple(
+        _attempt(
+            ScheduledJobAttemptStatus.SUCCEEDED,
+            attempt_id=UUID(int=0x40000000000000000000000000000000 + index),
+        )
+        for index in range(1, 891)
+    )
+    screenings = tuple(
+        result
+        for attempt in attempts
+        for result in seed_engine.evaluate(attempt, computed_at=attempt.completed_at)
+    )
+    seed_store._write(
+        OperationalAlertState(
+            screenings=tuple(
+                sorted(screenings, key=lambda value: (value.known_at, str(value.result_id)))
+            ),
+            events=(),
+            transitions=(),
+        )
+    )
+    before = (tmp_path / "alerts.json").read_bytes()
+    store = CountingStore(tmp_path / "alerts.json")
+
+    started = monotonic()
+    OperationalAlertMonitor(store, engine=NoReplayEngine()).reconcile(attempts)
+    elapsed = monotonic() - started
+
+    assert store.loads == 1
+    assert (tmp_path / "alerts.json").read_bytes() == before
+    assert len(screenings) == 3_560
+    assert elapsed <= 30
 
 
 def test_incomplete_coverage_creates_specific_alert(tmp_path: Path) -> None:

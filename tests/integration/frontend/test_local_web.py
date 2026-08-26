@@ -53,6 +53,10 @@ from investment_analyst.analytics.fundamentals.research_models import (
     AaplFundamentalResearchRequest,
     AaplFundamentalResearchResult,
 )
+from investment_analyst.analytics.listed_company_report_models import (
+    ListedCompanyDiagnosticReport,
+    ListedCompanyReportRequest,
+)
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChart,
     AaplMarketChartRequest,
@@ -207,6 +211,8 @@ class _FakeApplication:
     def __init__(self) -> None:
         self.requests: list[ConsolidatedDiagnosticRequest] = []
         self.locations: list[StorageLocationRequest] = []
+        self.listed_company_report_requests: list[ListedCompanyReportRequest] = []
+        self.listed_company_report_locations: list[StorageLocationRequest] = []
         self.chart_requests: list[AaplMarketChartRequest] = []
         self.chart_locations: list[StorageLocationRequest] = []
         self.btc_chart_requests: list[BtcMarketChartRequest] = []
@@ -263,6 +269,30 @@ class _FakeApplication:
         return cast(
             AaplDailyDiagnosticReport,
             _JsonResult({"schema_version": "aapl-daily-diagnostic-report-v1"}),
+        )
+
+    def query_listed_company_diagnostics(
+        self,
+        request: ListedCompanyReportRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> ListedCompanyDiagnosticReport:
+        self.listed_company_report_requests.append(request)
+        self.listed_company_report_locations.append(location)
+        return cast(
+            ListedCompanyDiagnosticReport,
+            _JsonResult(
+                {
+                    "schema_version": "listed-company-diagnostic-report-v1",
+                    "asset": {"asset_id": request.asset_id, "symbol": "AMD"},
+                    "query": request.model_dump(mode="json"),
+                    "status": "unavailable",
+                    "market": {"status": "not_found"},
+                    "fundamental": {"status": "not_found"},
+                    "traceability": {"verified": True},
+                    "limitations": [],
+                }
+            ),
         )
 
     def query_corporate_valuation(
@@ -1530,6 +1560,37 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "queryValuation()" not in startup
 
 
+def test_asset_selection_invalidates_and_binds_listed_company_reports_by_asset() -> None:
+    with (
+        _server(_ExplodingApplication()) as (_, root),
+        urlopen(f"{root}/assets/app.js", timeout=5) as response,
+    ):
+        javascript = response.read().decode("utf-8")
+
+    selection = javascript[
+        javascript.index("async function selectComboboxOption(assetId)") : javascript.index(
+            'input.addEventListener("focus"',
+            javascript.index("async function selectComboboxOption(assetId)"),
+        )
+    ]
+    assert selection.index("resetListedCompanyReport();") < selection.index(
+        "selectedMarketAsset = assetId;"
+    )
+    assert "presentation.hasFundamentals" in selection
+    assert "queryReport()" in selection
+
+    query = javascript[
+        javascript.index("async function queryReport()") : javascript.index(
+            'byId("report-form").addEventListener', javascript.index("async function queryReport()")
+        )
+    ]
+    assert "if (!presentation?.hasFundamentals)" in query
+    assert "const request = ++listedCompanyReportRequest;" in query
+    assert "request !== listedCompanyReportRequest" in query
+    assert "assetId !== selectedMarketAsset" in query
+    assert "report?.asset?.asset_id !== assetId" in query
+
+
 def test_icon_button_refresh_svg_is_preserved_on_busy_state() -> None:
     """Regression: setButtonBusy must not destroy the inner SVG of icon-only buttons.
 
@@ -1802,18 +1863,15 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert overview["operational"]["status"] == "ready"
     assert overview["scheduler"] == {"enabled": False}
     assert assets_status == 200
-    assert assets["schema_version"] == "market-asset-universe-v4"
+    assert assets["schema_version"] == "market-asset-universe-v5"
     assert assets["catalog_version"] == 1
     assert len(assets["assets"]) == 19
     assets_by_id = {item["asset_id"]: item for item in assets["assets"]}
     assert assets_by_id["equity:us:aapl"]["analysis"]["fundamental_mode"] == "corporate"
     assert assets_by_id["equity:us:amd"]["has_fundamentals"] is True
-    assert assets_by_id["equity:us:amd"]["refresh_kind"] == "market_only"
     assert assets_by_id["equity:us:intc"]["has_fundamentals"] is True
-    assert assets_by_id["equity:us:intc"]["refresh_kind"] == "market_only"
     for asset_id in ("equity:us:mstr", "equity:us:mu", "equity:us:pltr"):
         assert assets_by_id[asset_id]["has_fundamentals"] is True
-        assert assets_by_id[asset_id]["refresh_kind"] == "market_only"
     for asset_id in (
         "equity:us:cde",
         "equity:us:hymc",
@@ -1822,7 +1880,6 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
         "equity:us:scco",
     ):
         assert assets_by_id[asset_id]["has_fundamentals"] is True
-        assert assets_by_id[asset_id]["refresh_kind"] == "market_only"
     for asset_id in ("equity:us:b", "equity:us:bvn", "equity:us:tsm"):
         assert assets_by_id[asset_id]["has_fundamentals"] is True
         assert assets_by_id[asset_id]["fundamental_frequencies"] == ["annual"]
@@ -1956,6 +2013,53 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert len(application.analysis_requests) == 1
     assert application.analysis_asset_ids == ["equity:us:aapl"]
     assert application.analysis_locations[0].workspace == workspace.resolve()
+
+
+def test_listed_company_report_requires_corporate_asset_before_reading_storage(
+    tmp_path: Path,
+) -> None:
+    runner = _FakeRunner()
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        runner,
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    parameters = urlencode(
+        {
+            "asset_id": "equity:us:amd",
+            "known_at": "2026-07-16T15:46:09Z",
+            "fundamental_frequency": "quarterly",
+        }
+    )
+    with _server(web) as (_, root):
+        status, payload, _ = _json_request(
+            Request(f"{root}/api/listed-company-report?{parameters}")
+        )
+        unsupported_parameters = urlencode(
+            {
+                "asset_id": "etf:us:gbtc",
+                "known_at": "2026-07-16T15:46:09Z",
+                "fundamental_frequency": "quarterly",
+            }
+        )
+        unsupported_status, unsupported, _ = _json_request(
+            Request(f"{root}/api/listed-company-report?{unsupported_parameters}")
+        )
+
+    assert status == 200
+    assert payload["schema_version"] == "listed-company-diagnostic-report-v1"
+    assert application.listed_company_report_requests[0].asset_id == "equity:us:amd"
+    assert (
+        application.listed_company_report_locations[0].workspace
+        == (tmp_path / "workspace").resolve()
+    )
+    assert unsupported_status == 400
+    assert unsupported["error"]["code"] == "invalid_request"
+    assert len(application.listed_company_report_requests) == 1
 
 
 def test_asset_preferences_get_put_conflict_and_invalid_payload_are_provider_free(

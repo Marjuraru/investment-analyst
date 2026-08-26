@@ -23,6 +23,8 @@ from investment_analyst.analytics.consolidated_diagnostic_models import (
 from investment_analyst.analytics.consolidated_diagnostic_service import (
     FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION,
 )
+from investment_analyst.analytics.listed_company_report_models import ListedCompanyReportRequest
+from investment_analyst.analytics.listed_company_report_service import ListedCompanyReportService
 from investment_analyst.analytics.market.diagnostic_rules import (
     ALGORITHM_VERSION as MARKET_DIAGNOSTIC_ALGORITHM_VERSION,
 )
@@ -52,6 +54,7 @@ def _metric(
     *,
     available_at: datetime = datetime(2026, 7, 1, tzinfo=UTC),
     frequency: DataFrequency | None = None,
+    asset_id: str = "equity:us:aapl",
 ) -> MetricResult:
     definition = next(
         (item for item in SEC_FUNDAMENTAL_METRIC_DEFINITIONS if item.metric_name == key),
@@ -70,7 +73,7 @@ def _metric(
         }
         algorithm = definition.algorithm_version
     return MetricResult(
-        asset_id="equity:us:aapl",
+        asset_id=asset_id,
         metric_key=key,
         value=Decimal("0.125"),
         unit="ratio",
@@ -97,7 +100,7 @@ def _diagnostic(
         else FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION
     )
     return DiagnosticResult(
-        asset_id="equity:us:aapl",
+        asset_id=metric.asset_id,
         mode=mode,
         verdict=DiagnosticVerdict.POSITIVE,
         final_score=score,
@@ -235,6 +238,43 @@ def test_partial_and_unavailable_reports_are_valid_and_read_only(tmp_path) -> No
     assert "Reason: no eligible current-version market diagnostic" in format_aapl_daily_report(
         unavailable
     )
+
+
+def test_generic_report_selects_amd_evidence_without_cross_asset_reads(tmp_path) -> None:
+    market_metric = _metric(
+        SIMPLE_RETURN_KEY,
+        datetime(2026, 7, 10, tzinfo=UTC),
+        asset_id="equity:us:amd",
+    )
+    fundamental_metric = _metric(
+        "fundamental.net_margin",
+        datetime(2026, 6, 30, tzinfo=UTC),
+        frequency=DataFrequency.QUARTERLY,
+        asset_id="equity:us:amd",
+    )
+    request = ListedCompanyReportRequest(
+        asset_id="equity:us:amd",
+        known_at=KNOWN_AT,
+        fundamental_frequency=DataFrequency.QUARTERLY,
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.metric_results.save(market_metric)
+        storage.metric_results.save(fundamental_metric)
+        storage.diagnostics.save(_diagnostic(DiagnosticMode.MARKET, market_metric))
+        storage.diagnostics.save(_diagnostic(DiagnosticMode.FUNDAMENTAL, fundamental_metric))
+        report = ListedCompanyReportService(storage).query(
+            request,
+            symbol="AMD",
+            name="Advanced Micro Devices",
+            source_ids=("alpaca:amd", "sec:companyfacts", "sec:submissions"),
+        )
+
+    payload = report.to_json_dict()
+    assert payload["asset"]["asset_id"] == "equity:us:amd"
+    assert payload["query"]["asset_id"] == "equity:us:amd"
+    assert payload["status"] == "complete"
+    assert payload["traceability"]["verified"] is True
+    assert "combined_score" not in payload
 
 
 def test_report_rejects_selected_metric_unavailable_at_known_at(tmp_path) -> None:

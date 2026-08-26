@@ -54,6 +54,10 @@ conceptual ni el modelo especial de la herramienta. La dirección vigente es que
 usen casos de uso genéricos derivados del catálogo, mientras cripto conserva su familia analítica
 propia. No se añadirán nuevas rutas o modelos específicos de Apple.
 
+El reporte corporativo seleccionado usa `/api/listed-company-report` con `asset_id` y `known_at`
+obligatorios. Sus secciones de mercado y fundamentales son independientes, point-in-time y
+read-only; una ausencia se informa como `not_found`, nunca como cero.
+
 - workspace persistente con DuckDB, RawRecords, observaciones normalizadas, métricas, diagnósticos y
   exportación Parquet;
 - catálogo central de activos y resolución independiente de proveedores;

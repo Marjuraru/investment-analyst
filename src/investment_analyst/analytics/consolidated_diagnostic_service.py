@@ -1,4 +1,4 @@
-"""Read-only point-in-time service for separate Apple diagnostic modes."""
+"""Read-only point-in-time service for separate listed-company diagnostic modes."""
 
 import json
 from collections import defaultdict
@@ -6,12 +6,12 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from hashlib import sha256
+from typing import Protocol
 from uuid import UUID
 
 from pydantic import JsonValue
 
 from investment_analyst.analytics.consolidated_diagnostic_models import (
-    ConsolidatedDiagnosticRequest,
     ConsolidatedDiagnosticSection,
     ConsolidatedDiagnosticStatus,
     ConsolidatedDiagnosticView,
@@ -85,6 +85,14 @@ class _Candidate:
     diagnostic: DiagnosticResult
     metric_ids: tuple[UUID, ...]
     fundamental_frequency: DataFrequency | None
+
+
+class _ConsolidatedRequest(Protocol):
+    asset_id: str
+    known_at: datetime
+    fundamental_frequency: DataFrequency
+    market_as_of: date | None
+    fundamental_as_of: date | None
 
 
 def _is_utc(value: datetime) -> bool:
@@ -491,7 +499,7 @@ def _validate_diagnostic_math(diagnostic: DiagnosticResult) -> None:
 def _validate_diagnostic_common(
     diagnostic: DiagnosticResult,
     *,
-    request: ConsolidatedDiagnosticRequest,
+    request: _ConsolidatedRequest,
     metric_index: dict[UUID, MetricResult],
     storage: LocalStorage,
 ) -> _Candidate:
@@ -628,7 +636,7 @@ def _choose_period(
     *,
     exact_date: date | None,
     mode: DiagnosticMode,
-    request: ConsolidatedDiagnosticRequest,
+    request: _ConsolidatedRequest,
     examined: int,
     eligible: int,
     superseded: int,
@@ -662,14 +670,14 @@ def _choose_period(
     )
 
 
-class AaplConsolidatedDiagnosticService:
+class ListedCompanyConsolidatedDiagnosticService:
     """Select independent current-version diagnostics without recomputation or persistence."""
 
     def __init__(self, storage: LocalStorage) -> None:
         storage.require_open()
         self._storage = storage
 
-    def query(self, request: ConsolidatedDiagnosticRequest) -> ConsolidatedDiagnosticView:
+    def query(self, request: _ConsolidatedRequest) -> ConsolidatedDiagnosticView:
         """Return one compact point-in-time view from two repository reads."""
         self._storage.require_open()
         diagnostics = tuple(self._storage.diagnostics.list(asset_id=request.asset_id))
@@ -793,6 +801,10 @@ class AaplConsolidatedDiagnosticService:
                 )
 
 
+class AaplConsolidatedDiagnosticService(ListedCompanyConsolidatedDiagnosticService):
+    """Compatibility adapter for the historical Apple-named public service."""
+
+
 def _temporal_context(
     market: ConsolidatedDiagnosticSection,
     fundamental: ConsolidatedDiagnosticSection,
@@ -822,4 +834,5 @@ __all__ = [
     "MalformedStoredDiagnosticError",
     "MissingReferencedMetricResultError",
     "MixedFundamentalFrequencyError",
+    "ListedCompanyConsolidatedDiagnosticService",
 ]

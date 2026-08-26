@@ -164,29 +164,36 @@ class CandidateNotificationStore:
                     "candidate notification outbox is malformed"
                 ) from error
 
+    def reconciliation(self) -> "CandidateNotificationReconciliation":
+        """Load and validate the outbox once for one startup reconciliation."""
+        return CandidateNotificationReconciliation(self, self.load())
+
     def enqueue(self, item: CandidateNotification) -> tuple[CandidateNotification, bool]:
         with self._lock:
-            state = self.load()
-            existing = next(
-                (value for value in state.items if value.notification_id == item.notification_id),
-                None,
-            )
-            if existing is not None:
-                if existing != item:
-                    raise AaplOperationalStateError("notification identity changed semantics")
-                return existing, False
-            self._write(
-                CandidateNotificationState(
-                    items=tuple(
-                        sorted(
-                            (*state.items, item),
-                            key=lambda value: (value.created_at, str(value.notification_id)),
-                        )
-                    ),
-                    transitions=state.transitions,
+            result, _, _ = self._enqueue(self.load(), item)
+            return result
+
+    def _enqueue(
+        self, state: CandidateNotificationState, item: CandidateNotification
+    ) -> tuple[tuple[CandidateNotification, bool], CandidateNotificationState, bool]:
+        existing = next(
+            (value for value in state.items if value.notification_id == item.notification_id), None
+        )
+        if existing is not None:
+            if existing != item:
+                raise AaplOperationalStateError("notification identity changed semantics")
+            return (existing, False), state, False
+        snapshot = CandidateNotificationState(
+            items=tuple(
+                sorted(
+                    (*state.items, item),
+                    key=lambda value: (value.created_at, str(value.notification_id)),
                 )
-            )
-            return item, True
+            ),
+            transitions=state.transitions,
+        )
+        self._write(snapshot)
+        return (item, True), snapshot, True
 
     def acknowledge(
         self, identifier: UUID, *, recorded_at: datetime
@@ -230,6 +237,41 @@ class CandidateNotificationStore:
         os.replace(temporary, self._path)
 
 
+class CandidateNotificationReconciliation:
+    """In-memory identity index for one append-only outbox replay."""
+
+    def __init__(
+        self, store: CandidateNotificationStore, state: CandidateNotificationState
+    ) -> None:
+        self._store = store
+        self._state = state
+        self._notification_ids = {item.notification_id for item in state.items}
+
+    def contains(self, identifier: UUID) -> bool:
+        return identifier in self._notification_ids
+
+    def enqueue(self, item: CandidateNotification) -> tuple[CandidateNotification, bool]:
+        with self._store._lock:
+            if type(self._store).enqueue is not CandidateNotificationStore.enqueue:
+                result, created = self._store.enqueue(item)
+                if created:
+                    self._state = CandidateNotificationState(
+                        items=tuple(
+                            sorted(
+                                (*self._state.items, result),
+                                key=lambda value: (value.created_at, str(value.notification_id)),
+                            )
+                        ),
+                        transitions=self._state.transitions,
+                    )
+                    self._notification_ids.add(result.notification_id)
+                return result, created
+            result, self._state, created = self._store._enqueue(self._state, item)
+            if created:
+                self._notification_ids.add(item.notification_id)
+            return result
+
+
 class CandidateNotificationMonitor:
     """Enqueue persisted new candidates without evaluating rules or touching providers."""
 
@@ -245,21 +287,22 @@ class CandidateNotificationMonitor:
     def reconcile(self) -> None:
         state = self._analytical_store.load()
         results = {item.result_id: item for item in state.results}
+        reconciliation = self._store.reconciliation()
         for candidate in state.candidates:
             if candidate.status is not AnalyticalCandidateStatus.NEW:
                 continue
-            self._store.enqueue(
-                CandidateNotification(
-                    notification_id=notification_id(candidate.candidate_id),
-                    candidate_id=candidate.candidate_id,
-                    activation_result_id=candidate.activation_result_id,
-                    asset_id=candidate.asset_id,
-                    rule_id=candidate.rule_id,
-                    as_of=candidate.as_of,
-                    created_at=candidate.activated_at,
-                    payload=_notification_payload(results[candidate.activation_result_id]),
-                )
+            item = CandidateNotification(
+                notification_id=notification_id(candidate.candidate_id),
+                candidate_id=candidate.candidate_id,
+                activation_result_id=candidate.activation_result_id,
+                asset_id=candidate.asset_id,
+                rule_id=candidate.rule_id,
+                as_of=candidate.as_of,
+                created_at=candidate.activated_at,
+                payload=_notification_payload(results[candidate.activation_result_id]),
             )
+            if not reconciliation.contains(item.notification_id):
+                reconciliation.enqueue(item)
 
 
 def _notification_payload(result: AnalyticalScreeningResult) -> CandidateNotificationPayload:

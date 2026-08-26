@@ -74,7 +74,7 @@ AAPL fue el primer flujo vertical completo y por eso persisten nombres `Aapl*`, 
 predeterminados y contratos históricos en aplicación, operación e interfaz. Es deuda de
 compatibilidad, no una decisión de dominio: Apple debe comportarse como otra empresa del catálogo.
 
-La migración seguirá estas reglas:
+La vertical `EQUITY-UNIVERSE-1` aplica estas reglas:
 
 1. no crear nuevos casos de uso, rutas, estados ni modelos específicos de AAPL;
 2. introducir contratos genéricos por activo y dominio antes de añadir más capacidades;

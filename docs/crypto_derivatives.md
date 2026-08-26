@@ -113,7 +113,7 @@ cuando los históricos ya están cubiertos. Query no crea transporte ni escribe 
 ## Consulta local HTTP e interfaz
 
 La interfaz loopback ofrece `GET /api/v1/crypto-derivatives` exclusivamente para activos cuyo
-descriptor `market-asset-universe-v4` declara `supports_crypto_derivatives=true`. La elegibilidad
+descriptor `market-asset-universe-v5` declara `supports_crypto_derivatives=true`. La elegibilidad
 se resuelve al completar las tres capacidades Deribit del catálogo; no existe una lista HTTP o de
 navegador de símbolos permitidos. La ruta acepta exactamente `asset_id`, `start`, `end` y
 `known_at`, con límites inclusivos `YYYY-MM-DD` y un corte ISO 8601 con zona.

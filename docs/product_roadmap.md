@@ -567,9 +567,10 @@ observer read-only registra GET loopback, `systemctl show` y `/proc/<MainPID>/st
 son nuevas capacidades de análisis, no acceden al workspace ni ejecutan providers o scheduler, y no
 atribuyen causalidad de memoria. La duración de la captura es finita y explícita, sin duración mínima
 ni número mínimo de muestras, sesiones o ciclos como gate. `RELEASE-ACCEPTANCE` permanece `PLANNED`
-durante BUILD/AUDIT/HUMAN; post-merge se propone `RELEASE-ACCEPTANCE DONE → EQUITY-UNIVERSE NEXT →
-SEC-CORPUS PLANNED`. `EXTENDED-SOAK / DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un
-Work Block independiente.
+fue reconciliada HUMAN como `RELEASE-ACCEPTANCE DONE → EQUITY-UNIVERSE NEXT → SEC-CORPUS PLANNED`.
+El candidate `EQUITY-UNIVERSE-1` propone post-merge `EQUITY-UNIVERSE DONE → SEC-CORPUS NEXT`; no
+presenta ese estado como integrado antes de la fusión. `EXTENDED-SOAK / DEDICATED-RUNTIME ALWAYS-ON
+ACCEPTANCE` queda diferido a un Work Block independiente.
 
 Mercado BVL, macro diario columnar, extensiones Cazatiburones para BVL/cripto e investigación
 predictiva conservan sus fases de esta hoja de ruta, pero no desplazan la estabilización de la

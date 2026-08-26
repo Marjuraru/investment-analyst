@@ -87,6 +87,12 @@ report = application.query_aapl_diagnostics(
 )
 ```
 
+`query_listed_company_diagnostics` recibe `ListedCompanyReportRequest` con `asset_id` obligatorio,
+valida primero las capacidades corporativas y la frecuencia declarada, y abre sólo una sesión de
+storage read-only. Su respuesta versionada `listed-company-diagnostic-report-v1` mantiene mercado y
+fundamentales como secciones independientes; `query_aapl_diagnostics` continúa como adaptador de
+compatibilidad.
+
 With an empty `StorageLocationRequest`, the normal workspace precedence remains unchanged. Callers
 may instead select an initialized workspace or the compatible legacy root explicitly.
 

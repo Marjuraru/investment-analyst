@@ -16,6 +16,7 @@ from investment_analyst.alerts.analytical_models import (
 from investment_analyst.alerts.analytical_state import (
     AnalyticalMonitorReceipt,
     AnalyticalMonitorReceiptStatus,
+    AnalyticalScreeningReconciliation,
     AnalyticalScreeningStateStore,
 )
 from investment_analyst.application.multi_asset_scheduler import (
@@ -119,19 +120,28 @@ class AnalyticalScreeningMonitor:
 
     def __call__(self, attempt: ScheduledJobAttempt) -> None:
         """Persist one exactly-once receipt and any deterministic screening results."""
+        self._observe(attempt, reconciliation=None)
+
+    def _observe(
+        self,
+        attempt: ScheduledJobAttempt,
+        *,
+        reconciliation: AnalyticalScreeningReconciliation | None,
+    ) -> None:
         if attempt.status is ScheduledJobAttemptStatus.RUNNING or attempt.completed_at is None:
             return
-        if self._store.contains_attempt(attempt.attempt_id):
+        state = reconciliation or self._store
+        if state.contains_attempt(attempt.attempt_id):
             return
         reason = self._skip_reason(attempt)
         if reason is not None:
-            self._record_skipped(attempt, reason)
+            self._record_skipped(attempt, reason, reconciliation=reconciliation)
             return
         if attempt.execution is None or attempt.definition.asset_id is None:
             raise ValueError("screenable scheduled attempt is missing execution scope")
         domain = _analytical_domain(attempt.definition.domain)
         if domain is None:
-            self._record_skipped(attempt, "unsupported_domain")
+            self._record_skipped(attempt, "unsupported_domain", reconciliation=reconciliation)
             return
         asset = self._runtime.catalog.get(attempt.definition.asset_id)
         rules = tuple(
@@ -146,10 +156,10 @@ class AnalyticalScreeningMonitor:
             if item.domain is domain and asset.asset_class in item.asset_classes
         )
         if not rules:
-            self._record_skipped(attempt, "no_compatible_rules")
+            self._record_skipped(attempt, "no_compatible_rules", reconciliation=reconciliation)
             return
         if len(attempt.execution.source_ids) != 1:
-            self._record_skipped(attempt, "ambiguous_source_scope")
+            self._record_skipped(attempt, "ambiguous_source_scope", reconciliation=reconciliation)
             return
         source_id = attempt.execution.source_ids[0]
         known_at = attempt.execution.effective_known_at
@@ -189,19 +199,26 @@ class AnalyticalScreeningMonitor:
             processed_at=computed_at,
             result_ids=tuple(sorted((item.result_id for item in results), key=str)),
         )
-        self._store.record_attempt(receipt, results)
+        state.record_attempt(receipt, results)
 
     def reconcile(self, attempts: tuple[ScheduledJobAttempt, ...]) -> None:
         """Replay completed scheduler history without provider or duplicate work."""
+        reconciliation = self._store.reconciliation()
         for attempt in attempts:
             if attempt.status is not ScheduledJobAttemptStatus.RUNNING:
-                self(attempt)
+                self._observe(attempt, reconciliation=reconciliation)
 
-    def _record_skipped(self, attempt: ScheduledJobAttempt, reason: str) -> None:
+    def _record_skipped(
+        self,
+        attempt: ScheduledJobAttempt,
+        reason: str,
+        *,
+        reconciliation: AnalyticalScreeningReconciliation | None,
+    ) -> None:
         processed_at = attempt.completed_at
         if processed_at is None:
             raise ValueError("completed analytical attempt requires completed_at")
-        self._store.record_attempt(
+        (reconciliation or self._store).record_attempt(
             AnalyticalMonitorReceipt(
                 attempt_id=attempt.attempt_id,
                 job_id=attempt.definition.job_id,
