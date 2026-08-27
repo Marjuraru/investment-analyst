@@ -545,9 +545,22 @@ def _resolve_markers(
             return MarkerResolution(marker=None, duplicates=duplicates, historical_stale=stale)
         active = current
     else:
-        for marker in active:
-            if marker.sha != head_sha:
-                raise GuardFailure(f"{role} marker SHA differs from live PR head")
+        current = tuple(marker for marker in active if marker.sha == head_sha)
+        stale = tuple(marker for marker in active if marker.sha != head_sha)
+        if stale:
+            if (
+                phase == "build"
+                and not current
+                and len(stale) == 1
+                and stale[0].status == "PENDING"
+            ):
+                return MarkerResolution(
+                    marker=None,
+                    duplicates=(),
+                    historical_stale=stale,
+                )
+            raise GuardFailure(f"{role} marker SHA differs from live PR head")
+        active = current
 
     if not active:
         return MarkerResolution(marker=None, duplicates=())
@@ -575,9 +588,15 @@ def _mutation_plan(
         )
         if resolution.historical_stale:
             canonical = min(resolution.historical_stale, key=lambda marker: marker.comment_id)
-            plans.append(
-                f"audit-owner archive audit comment {canonical.comment_id} as head-advanced"
-            )
+            if role == "build":
+                plans.append(
+                    f"build-owner retarget build comment {canonical.comment_id} "
+                    "to current head as PENDING"
+                )
+            else:
+                plans.append(
+                    f"audit-owner archive audit comment {canonical.comment_id} as head-advanced"
+                )
     return tuple(plans)
 
 

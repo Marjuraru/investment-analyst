@@ -201,6 +201,74 @@ def test_build_accepts_one_stale_audit_without_transferring_pass() -> None:
     assert result.mutation_plan == ("audit-owner archive audit comment 11 as head-advanced",)
 
 
+def test_build_recovers_one_stale_pending_build_marker_without_payload_transfer() -> None:
+    result = evaluate(
+        _snapshot(
+            comments=(
+                _marker(
+                    "build",
+                    status="PENDING",
+                    sha=HISTORICAL_SHA,
+                    payload="historical-secret-payload",
+                ),
+            )
+        ),
+        phase="build",
+    )
+
+    assert result.decision == "BUILD GUARD PASS"
+    assert result.build.marker is None
+    assert [marker.sha for marker in result.build.historical_stale] == [HISTORICAL_SHA]
+    assert result.mutation_plan == (
+        "build-owner retarget build comment 10 to current head as PENDING",
+    )
+    assert "historical-secret-payload" not in json.dumps(result.as_json(), sort_keys=True)
+
+
+@pytest.mark.parametrize("phase", ("audit", "finalize"))
+def test_only_build_can_recover_a_stale_pending_build_marker(phase: str) -> None:
+    result = evaluate(
+        _snapshot(comments=(_marker("build", status="PENDING", sha=HISTORICAL_SHA),)),
+        phase=phase,
+    )
+
+    assert result.decision == "GUARD FAILURE"
+    assert result.reasons == ("build marker SHA differs from live PR head",)
+
+
+@pytest.mark.parametrize("status", ("PASS", "FAIL"))
+def test_build_rejects_stale_terminal_build_markers(status: str) -> None:
+    result = evaluate(
+        _snapshot(comments=(_marker("build", status=status, sha=HISTORICAL_SHA),)),
+        phase="build",
+    )
+
+    assert result.decision == "GUARD FAILURE"
+    assert result.reasons == ("build marker SHA differs from live PR head",)
+
+
+def test_build_rejects_multiple_or_current_and_stale_build_markers() -> None:
+    stale = _marker("build", status="PENDING", sha=HISTORICAL_SHA, comment_id=12)
+    multiple = evaluate(
+        _snapshot(
+            comments=(
+                stale,
+                _marker("build", status="PENDING", sha=HISTORICAL_SHA, comment_id=13),
+            )
+        ),
+        phase="build",
+    )
+    current_and_stale = evaluate(
+        _snapshot(comments=(_marker("build"), stale)),
+        phase="build",
+    )
+
+    assert multiple.decision == "GUARD FAILURE"
+    assert current_and_stale.decision == "GUARD FAILURE"
+    assert multiple.reasons == ("build marker SHA differs from live PR head",)
+    assert current_and_stale.reasons == ("build marker SHA differs from live PR head",)
+
+
 def test_audit_preflight_accepts_stale_history_after_build_pass() -> None:
     result = evaluate(
         _snapshot(

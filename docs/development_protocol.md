@@ -101,12 +101,16 @@ estructuralmente válidos, el gate literal `Python 3.12 quality` y evidencia rec
 tokens reservados fuera de bloques válidos, duplicados no equivalentes, metadata contradictoria y
 estados no terminales. En `phase=build` y `phase=audit` reconoce un único marker AUDIT bien formado
 de un SHA anterior como histórico stale, lo expone sólo como referencia segura y plan read-only de
-owner AUDIT, y nunca lo cuenta como PASS/FAIL del head. BUILD no puede archivarlo. `phase=finalize`
-rechaza cualquier stale y sólo acepta el marker AUDIT actual. Marker current+stale, stale no
-equivalentes o cualquier uso de `head-advanced` fuera de AUDIT siguen fail-closed. La skill owner
-relee y ejecuta de nuevo el guard después de cada reconciliación; `CRITICAL` o cualquier policy
-`HUMAN` sólo puede terminar en `AWAITING HUMAN APPROVAL`; nunca autoriza ready, merge o cleanup
-automático.
+owner AUDIT, y nunca lo cuenta como PASS/FAIL del head. BUILD no puede archivarlo. Sólo en
+`phase=build`, un único marker BUILD stale `PENDING`, del mismo block y sin marker current produce
+`BUILD GUARD PASS` con el plan obligatorio de que BUILD retargetee ese mismo comentario al head
+actual como `PENDING`; no transfiere payload, gates ni PASS. BUILD lo actualiza y relee el guard.
+Markers BUILD stale `PASS`/`FAIL`, múltiples o current+stale fallan cerrado; AUDIT y FINALIZE
+rechazan cualquier BUILD stale. `phase=finalize` rechaza cualquier AUDIT stale y sólo acepta el
+marker AUDIT actual. Stale AUDIT no equivalentes o cualquier uso de `head-advanced` fuera de AUDIT
+siguen fail-closed. La skill owner relee y ejecuta de nuevo el guard después de cada reconciliación;
+`CRITICAL` o cualquier policy `HUMAN` sólo puede terminar en `AWAITING HUMAN APPROVAL`; nunca
+autoriza ready, merge o cleanup automático.
 
 ## Capability envelope y preflight BUILD
 
@@ -189,11 +193,12 @@ reviewer=<EVIDENCE-METADATA>
 `reviewer` identifica la evidencia del revisor o cliente usado; es metadata, nunca una fuente de
 autoridad ni un sustituto de los gates del rol AUDIT.
 
-BUILD usa `PENDING` para candidato exact-SHA incompleto o gate en curso; nunca autoriza AUDIT PASS
-ni una salida terminal. Usa `PASS` sólo cuando todos los gates BUILD requeridos del SHA vivo
-terminaron correctamente. Usa `FAIL` sólo cuando un gate realmente ejecutado falló y aún no fue
-reemplazado por evidencia de un candidato corregido. Un commit posterior invalida toda evidencia,
-CI, smoke y auditoría previas.
+BUILD usa `PENDING` sólo durante una recuperación owner-only o una espera real de un gate del
+candidato exact-SHA; nunca es publicación rutinaria, handoff ni salida terminal. Nunca autoriza
+AUDIT PASS. Usa `PASS` sólo cuando todos los gates BUILD requeridos del SHA vivo terminaron
+correctamente. Usa `FAIL` sólo cuando un gate realmente ejecutado falló y aún no fue reemplazado
+por evidencia de un candidato corregido. Un commit posterior invalida toda evidencia, CI, smoke y
+auditoría previas.
 
 Antes de confiar o escribir un role, se leen todos los comentarios:
 

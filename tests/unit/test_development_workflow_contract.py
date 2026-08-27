@@ -92,6 +92,8 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "BUILD BOOTSTRAP" in protocol
     assert "cero PR para la branch esperada" in protocol
     assert "siguiente acción siga siendo de su propietario" in protocol
+    assert "nunca es publicación rutinaria, handoff ni salida terminal" in protocol
+    assert "un único marker BUILD stale `PENDING`" in protocol
 
     for name, text in skills.items():
         assert _frontmatter_value(text, "name") == name
@@ -110,6 +112,7 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "scripts/check_workflow_guards.py" in skills["build"]
     assert "cero PR es `BUILD BOOTSTRAP` no terminal" in skills["build"]
     assert "Mientras haya una acción autorizada cuyo propietario sea BUILD" in skills["build"]
+    assert "nunca es un handoff rutinario" in skills["build"]
     assert "scripts/check_workflow_guards.py" in skills["investment-block-flow"]
     assert "--live --phase finalize" in skills["build"]
     assert "--live --phase finalize" in skills["audit"]
@@ -289,6 +292,7 @@ class BuildSnapshot:
     required_action_pending: bool = False
     scope_expansion: bool = False
     external_resource_available: bool = True
+    external_owner: str | None = None
     base_acquired: bool = True
     branch_exists: bool = True
     focused_tests: str = "pass"
@@ -417,6 +421,8 @@ def _build_transition(snapshot: BuildSnapshot) -> tuple[str, str]:
     if snapshot.scope_expansion:
         return "BLOCKED", "return to PLAN for material scope expansion"
     if not snapshot.external_resource_available:
+        if snapshot.external_owner is None:
+            return "GUARD FAILURE", "blocking resource has no non-BUILD owner"
         return "BLOCKED", "request the specific missing external resource"
     if not snapshot.base_acquired:
         return "CONTINUE", "fetch and verify the declared remote base SHA"
@@ -505,8 +511,12 @@ def _build_transition(snapshot: BuildSnapshot) -> tuple[str, str]:
             ("FIX", "correct smoke failure within scope and rerun"),
         ),
         (
-            BuildSnapshot(external_resource_available=False),
+            BuildSnapshot(external_resource_available=False, external_owner="HUMAN"),
             ("BLOCKED", "request the specific missing external resource"),
+        ),
+        (
+            BuildSnapshot(external_resource_available=False),
+            ("GUARD FAILURE", "blocking resource has no non-BUILD owner"),
         ),
         (
             BuildSnapshot(scope_expansion=True),
