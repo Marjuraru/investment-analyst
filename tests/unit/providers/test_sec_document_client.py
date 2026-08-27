@@ -80,3 +80,70 @@ def test_client_rejects_redirect_or_truncated_response() -> None:
             identity,
             clock=lambda: datetime(2025, 2, 1, tzinfo=UTC),
         ).fetch(_document())
+
+
+class _ManifestTransport:
+    def __init__(self, bodies: tuple[bytes, ...]) -> None:
+        self._bodies = iter(bodies)
+        self.calls: list[str] = []
+
+    def get(self, url, *, headers, timeout_seconds, max_response_bytes=None):
+        del headers, timeout_seconds, max_response_bytes
+        self.calls.append(url)
+        return HttpResponse(status_code=200, body=next(self._bodies), headers={}, url=url)
+
+
+def test_client_resolves_only_unique_top_level_xml_from_official_manifest() -> None:
+    transport = _ManifestTransport(
+        (
+            b'{"directory":{"item":[{"name":"form4.xml"},{"name":"form4.xsd"}]}}',
+            b"<!DOCTYPE html><html/>",
+            b"<ownershipDocument/>",
+        )
+    )
+    filing = _document().filing.model_copy(
+        update={
+            "form": "4",
+            "is_amendment": False,
+            "filing_id": SecFiling.expected_id("0000320193", "0000320193-25-000001"),
+        }
+    )
+    document = SecLogicalDocument(
+        document_id=SecLogicalDocument.expected_id(filing.filing_id, "xslF345X06/form4.xml"),
+        filing=filing,
+        name="xslF345X06/form4.xml",
+    )
+    client = SecDocumentClient(
+        transport,
+        SecEdgarIdentity("Investment Analyst tests@example.com"),
+        clock=lambda: datetime(2025, 2, 1, tzinfo=UTC),
+    )
+
+    result = client.resolve_ownership_document(document)
+
+    assert result.manifest.entries == ("form4.xml", "form4.xsd")
+    assert result.locator.content == b"<!DOCTYPE html><html/>"
+    assert result.semantic.content == b"<ownershipDocument/>"
+    assert transport.calls[0].endswith("/index.json")
+    assert transport.calls[-1].endswith("/form4.xml")
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    (
+        b'{"directory":{"item":[{"name":"xslF345X06/form4.xml"}]}}',
+        b'{"directory":{"item":[{"name":"form4.xml"},{"name":"copy.xml"}]}}',
+        b'{"directory":{"item":[{"name":"../form4.xml"}]}}',
+    ),
+)
+def test_client_rejects_ambiguous_or_unsafe_manifest(manifest: bytes) -> None:
+    document = _document()
+    transport = _ManifestTransport((manifest,))
+    client = SecDocumentClient(
+        transport,
+        SecEdgarIdentity("Investment Analyst tests@example.com"),
+        clock=lambda: datetime(2025, 2, 1, tzinfo=UTC),
+    )
+
+    with pytest.raises(SecDocumentClientError):
+        client.resolve_ownership_document(document)

@@ -29,6 +29,7 @@ from investment_analyst.evidence.sec_documents.repository import (
     SecDocumentRepository,
     verify_document_records,
 )
+from investment_analyst.evidence.sec_ownership.repository import verify_ownership_records
 from investment_analyst.storage import StorageError
 from investment_analyst.storage.local import LocalStorage
 from investment_analyst.storage.serialization import model_from_json
@@ -515,6 +516,11 @@ def _scan_raw_records(storage: LocalStorage) -> int:
         verify_document_records(
             records.values(),
             SecDocumentRepository(storage.raw_records, storage.documents),
+        )
+        verify_ownership_records(
+            records.values(),
+            SecDocumentRepository(storage.raw_records, storage.documents),
+            storage.documents,
         )
         count += len(records)
         after_id = record_ids[-1]

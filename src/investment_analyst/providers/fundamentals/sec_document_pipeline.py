@@ -6,8 +6,8 @@ from dataclasses import dataclass
 
 from investment_analyst.core.models import SourceDefinition, SourceType
 from investment_analyst.evidence.sec_documents.models import (
+    FINANCIAL_SEC_FORMS,
     SEC_DOCUMENT_SOURCE_ID,
-    SUPPORTED_SEC_FORMS,
     SecDocumentRevision,
     SecFiling,
     SecLogicalDocument,
@@ -42,7 +42,7 @@ class SecDocumentImportRequest:
             self.accessions
         ):
             raise SecDocumentPipelineError("document selection contains duplicate values")
-        if any(form not in SUPPORTED_SEC_FORMS for form in self.forms):
+        if any(form not in FINANCIAL_SEC_FORMS for form in self.forms):
             raise SecDocumentPipelineError("document selection includes an unsupported SEC form")
 
 
