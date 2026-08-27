@@ -50,9 +50,12 @@ issue view <number> --json number,state,labels,title,body,url` y cuentan sólo I
 conservan el label. Cero, múltiples, metadata ausente, un Issue cerrado aún etiquetado o snapshots
 cambiantes son guard failure sin combinar lecturas.
 
-El target se resuelve como `Issue activo → expected branch → único PR abierto de esa head branch →
-SHA vivo`. BUILD/AUDIT consultan `gh pr list --state open --head <expected-branch> --limit 2 --json
-number,headRefName,headRefOid,baseRefName,isDraft,url`. Un PR stale no determina el target.
+El target candidato se resuelve como `Issue activo → expected branch → único PR abierto de esa head
+branch → SHA vivo`. BUILD/AUDIT consultan `gh pr list --state open --head <expected-branch> --limit
+2 --json number,headRefName,headRefOid,baseRefName,isDraft,url`. Un PR stale no determina el
+target. Sólo durante BUILD, cero PR para la branch esperada es `BUILD BOOTSTRAP`: es una resolución
+correcta y no terminal que autoriza crear el primer commit real y el draft PR. AUDIT y FINALIZE
+exigen un único PR; múltiples PR o un `--pr` presente que no coincida fallan cerrado.
 
 Si la base remota declarada no existe localmente, BUILD puede hacer `fetch` de esa ref remota. Debe
 comparar el SHA completo adquirido con el SHA declarado antes de usarlo. Si la expected branch no
@@ -140,7 +143,9 @@ Los estados externos se expresan `BUILD READY`, `BUILD BLOCKED` y `BUILD GUARD F
 `FIX` y `WAIT/POLL` son internos. `PENDING` y `FAIL` son estados de evidencia, no decisiones
 terminales. Antes de cualquier respuesta, BUILD repite un **pre-return terminality check**: refresca
 target/head y aplica la tabla. Si queda una acción requerida, autorizada y ejecutable, debe hacerla;
-no puede devolver un handoff de progreso.
+no puede devolver un handoff de progreso. Esta orden incluye un bootstrap válido, commits, pushes,
+actualizaciones del draft, CI parcial y aceptación pendiente: ninguno permite terminar BUILD mientras
+la siguiente acción siga siendo de su propietario.
 
 ## Roles y happy paths
 

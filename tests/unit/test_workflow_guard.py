@@ -466,6 +466,25 @@ def test_build_and_audit_phases_share_target_and_marker_guard() -> None:
     assert audit_result.decision == "AUDIT GUARD PASS"
 
 
+def test_build_bootstrap_allows_zero_prs_but_other_phases_fail_closed() -> None:
+    bootstrap = replace(
+        _snapshot(comments=()),
+        pull_request=None,
+        active_issue_count=1,
+        open_pr_count=0,
+    )
+
+    result = evaluate(bootstrap, phase="build")
+
+    assert result.decision == "BUILD BOOTSTRAP"
+    assert result.metadata is not None
+    assert result.metadata.expected_branch == "codex/dev-7-finalize-policy-guard"
+    for phase in ("audit", "finalize"):
+        failed = evaluate(bootstrap, phase=phase)
+        assert failed.decision == "GUARD FAILURE"
+        assert failed.reasons == ("target PR is absent outside BUILD bootstrap",)
+
+
 def test_json_cli_is_read_only_and_cannot_authorize_finalize(tmp_path: Path) -> None:
     snapshot_path = tmp_path / "snapshot.json"
     snapshot_path.write_text(
@@ -532,3 +551,40 @@ def test_json_cli_is_read_only_and_cannot_authorize_finalize(tmp_path: Path) -> 
     )
     assert finalized.returncode == 1
     assert json.loads(finalized.stdout)["reasons"] == ["finalize phase is live-only"]
+
+
+def test_json_cli_reports_non_terminal_build_bootstrap(tmp_path: Path) -> None:
+    snapshot_path = tmp_path / "bootstrap.json"
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "issue": {
+                    "number": 58,
+                    "state": "OPEN",
+                    "labels": ["workflow:active"],
+                    "body": _body(),
+                },
+                "active_issue_count": 1,
+                "open_pr_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/check_workflow_guards.py",
+            "--json",
+            str(snapshot_path),
+            "--phase",
+            "build",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["decision"] == "BUILD BOOTSTRAP"

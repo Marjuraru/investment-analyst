@@ -86,7 +86,7 @@ class SmokeSnapshot:
 @dataclass(frozen=True, slots=True)
 class GuardSnapshot:
     issue: IssueSnapshot
-    pull_request: PullRequestSnapshot
+    pull_request: PullRequestSnapshot | None
     comments: tuple[CommentSnapshot, ...]
     checks: tuple[CheckSnapshot, ...]
     smoke: SmokeSnapshot
@@ -386,7 +386,11 @@ def snapshot_from_json(value: object) -> GuardSnapshot:
             raise GuardFailure(f"{label} must be a non-negative integer")
     return GuardSnapshot(
         issue=_parse_issue(root.get("issue")),
-        pull_request=_parse_pull_request(root.get("pull_request")),
+        pull_request=(
+            _parse_pull_request(root["pull_request"])
+            if root.get("pull_request") is not None
+            else None
+        ),
         comments=_parse_comments(root.get("comments", ())),
         checks=_parse_checks(root.get("checks", ())),
         smoke=_parse_smoke(root.get("smoke")),
@@ -582,13 +586,17 @@ def _validate_target(snapshot: GuardSnapshot) -> WorkBlockMetadata:
     pr = snapshot.pull_request
     if snapshot.active_issue_count is not None and snapshot.active_issue_count != 1:
         raise GuardFailure("active Issue count is not exactly one")
-    if snapshot.open_pr_count is not None and snapshot.open_pr_count != 1:
-        raise GuardFailure("open PR count for expected branch is not exactly one")
     if issue.state != "OPEN" or "workflow:active" not in issue.labels:
         raise GuardFailure("active Issue is not open with workflow:active")
+    metadata = parse_work_block(issue.body)
+    if pr is None:
+        if snapshot.open_pr_count is not None and snapshot.open_pr_count != 0:
+            raise GuardFailure("open PR count contradicts BUILD bootstrap")
+        return metadata
+    if snapshot.open_pr_count is not None and snapshot.open_pr_count != 1:
+        raise GuardFailure("open PR count for expected branch is not exactly one")
     if pr.state != "OPEN":
         raise GuardFailure("target PR is not open")
-    metadata = parse_work_block(issue.body)
     if pr.head_branch != metadata.expected_branch:
         raise GuardFailure("PR head branch differs from expected branch")
     if pr.base_branch != metadata.base_ref.removeprefix("origin/"):
@@ -635,9 +643,14 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
         if phase not in {"build", "audit", "finalize"}:
             raise GuardFailure("phase is unknown")
         metadata = _validate_target(snapshot)
+        if snapshot.pull_request is None:
+            if phase != "build":
+                raise GuardFailure("target PR is absent outside BUILD bootstrap")
+            return GuardResult("BUILD BOOTSTRAP", (), metadata, build, audit, mutation_plan)
+        pull_request = snapshot.pull_request
         markers = _parse_all_markers(snapshot.comments)
-        build = _resolve_markers(markers, "build", metadata, snapshot.pull_request.head_sha, phase)
-        audit = _resolve_markers(markers, "audit", metadata, snapshot.pull_request.head_sha, phase)
+        build = _resolve_markers(markers, "build", metadata, pull_request.head_sha, phase)
+        audit = _resolve_markers(markers, "audit", metadata, pull_request.head_sha, phase)
         mutation_plan = _mutation_plan(build, audit)
         if phase == "build":
             return GuardResult("BUILD GUARD PASS", (), metadata, build, audit, mutation_plan)
@@ -849,7 +862,7 @@ def _finalize_live_evidence(
 def snapshot_from_live(
     repo: str,
     issue_number: int,
-    pr_number: int,
+    pr_number: int | None,
     smoke_status: str | None,
     phase: str,
 ) -> GuardSnapshot:
@@ -905,11 +918,28 @@ def snapshot_from_live(
         ),
         "target PRs",
     )
-    if len(pr_candidates) != 1:
+    if len(pr_candidates) > 1:
         raise GuardFailure("target PR is not unique")
+    if not pr_candidates:
+        if phase != "build":
+            raise GuardFailure("target PR is absent outside BUILD bootstrap")
+        return GuardSnapshot(
+            issue=_parse_issue(issue),
+            pull_request=None,
+            comments=(),
+            checks=(),
+            smoke=SmokeSnapshot(smoke_status, ""),
+            requested_changes=None,
+            open_threads=None,
+            active_issue_count=len(issue_candidates),
+            open_pr_count=0,
+            source="live",
+        )
     candidate_map = _mapping(pr_candidates[0], "target PR")
-    if _required_int(candidate_map, ("number",), "target PR number") != pr_number:
+    resolved_pr_number = _required_int(candidate_map, ("number",), "target PR number")
+    if pr_number is not None and resolved_pr_number != pr_number:
         raise GuardFailure("requested PR is not the expected branch target")
+    pr_number = resolved_pr_number
     pull_request_raw = _mapping(
         _gh_json(
             ["api", f"repos/{repo}/pulls/{pr_number}"],
@@ -1046,8 +1076,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _json_value(args.json_path.read_text(encoding="utf-8"), "snapshot")
             )
         else:
-            if not args.repo or args.issue is None or args.pr is None:
-                raise GuardFailure("--live requires --repo, --issue and --pr")
+            if not args.repo or args.issue is None:
+                raise GuardFailure("--live requires --repo and --issue")
             snapshot = snapshot_from_live(
                 args.repo, args.issue, args.pr, args.smoke_status, args.phase
             )

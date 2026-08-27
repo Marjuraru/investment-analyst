@@ -89,6 +89,9 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "Supersesión temporal por PLAN" in protocol
     assert "checkpoint compacto y verificable" in protocol
     assert "no reabre ni hereda PASS" in protocol
+    assert "BUILD BOOTSTRAP" in protocol
+    assert "cero PR para la branch esperada" in protocol
+    assert "siguiente acción siga siendo de su propietario" in protocol
 
     for name, text in skills.items():
         assert _frontmatter_value(text, "name") == name
@@ -105,6 +108,8 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "policy HUMAN" in skills["audit"]
     assert "scripts/check_workflow_guards.py" in skills["audit"]
     assert "scripts/check_workflow_guards.py" in skills["build"]
+    assert "cero PR es `BUILD BOOTSTRAP` no terminal" in skills["build"]
+    assert "Mientras haya una acción autorizada cuyo propietario sea BUILD" in skills["build"]
     assert "scripts/check_workflow_guards.py" in skills["investment-block-flow"]
     assert "--live --phase finalize" in skills["build"]
     assert "--live --phase finalize" in skills["audit"]
