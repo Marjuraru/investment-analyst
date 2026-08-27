@@ -61,6 +61,7 @@ from investment_analyst.application.runtime import (
     ApplicationRuntimeError,
     StorageLocationRequest,
 )
+from investment_analyst.application.runtime_lifecycle import notify_ready, wait_for_overview_ready
 from investment_analyst.application.scheduled_observers import ScheduledJobObserverChain
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.frontend.local_schedule_jobs import (
@@ -373,6 +374,15 @@ def _serve(
     with lock:
         signal.signal(signal.SIGTERM, request_shutdown)
         signal.signal(signal.SIGINT, request_shutdown)
+        server_thread = threading.Thread(
+            target=server.serve_forever,
+            kwargs={"poll_interval": 0.5},
+            name="local-interface-accept-loop",
+            daemon=True,
+        )
+        server_thread.start()
+        wait_for_overview_ready(arguments.port)
+        notify_ready()
         if scheduler_thread is not None:
             scheduler_thread.start()
         manual_operations.start()
@@ -382,7 +392,7 @@ def _serve(
         )
         print("Press Ctrl+C to stop the local service.", flush=True)
         try:
-            server.serve_forever(poll_interval=0.5)
+            server_thread.join()
         except KeyboardInterrupt:
             request_shutdown(signal.SIGINT, None)
         finally:
