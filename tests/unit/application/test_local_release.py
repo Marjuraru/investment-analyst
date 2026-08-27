@@ -17,6 +17,7 @@ from investment_analyst.application.local_release import (
     DeploymentState,
     LocalReleaseService,
     RealHealthChecker,
+    RealSystemctlRunner,
     ReleaseAcquisitionError,
     ReleaseConfigurationError,
     ReleaseEnvironmentError,
@@ -491,6 +492,15 @@ def test_pre_restart_verification_and_writer_lock_rejection(tmp_path: Path) -> N
         service.verify_pre_restart(
             sha="2222222222222222222222222222222222222222", unit_file=unit_file
         )
+
+
+def test_real_systemctl_restart_uses_the_unit_readiness_deadline() -> None:
+    """Restart must not cut off a Type=notify unit before its declared budget."""
+    runner = RealSystemctlRunner()
+    with patch("subprocess.run", return_value=MagicMock()) as run:
+        runner.restart("investment-analyst.service")
+
+    assert run.call_args.kwargs["timeout"] == 120.0
 
 
 def test_status_unit_matches_current_from_loaded_systemd_properties(tmp_path: Path) -> None:
