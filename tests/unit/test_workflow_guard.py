@@ -201,6 +201,74 @@ def test_build_accepts_one_stale_audit_without_transferring_pass() -> None:
     assert result.mutation_plan == ("audit-owner archive audit comment 11 as head-advanced",)
 
 
+def test_build_recovers_one_stale_pending_build_marker_without_payload_transfer() -> None:
+    result = evaluate(
+        _snapshot(
+            comments=(
+                _marker(
+                    "build",
+                    status="PENDING",
+                    sha=HISTORICAL_SHA,
+                    payload="historical-secret-payload",
+                ),
+            )
+        ),
+        phase="build",
+    )
+
+    assert result.decision == "BUILD GUARD PASS"
+    assert result.build.marker is None
+    assert [marker.sha for marker in result.build.historical_stale] == [HISTORICAL_SHA]
+    assert result.mutation_plan == (
+        "build-owner retarget build comment 10 to current head as PENDING",
+    )
+    assert "historical-secret-payload" not in json.dumps(result.as_json(), sort_keys=True)
+
+
+@pytest.mark.parametrize("phase", ("audit", "finalize"))
+def test_only_build_can_recover_a_stale_pending_build_marker(phase: str) -> None:
+    result = evaluate(
+        _snapshot(comments=(_marker("build", status="PENDING", sha=HISTORICAL_SHA),)),
+        phase=phase,
+    )
+
+    assert result.decision == "GUARD FAILURE"
+    assert result.reasons == ("build marker SHA differs from live PR head",)
+
+
+@pytest.mark.parametrize("status", ("PASS", "FAIL"))
+def test_build_rejects_stale_terminal_build_markers(status: str) -> None:
+    result = evaluate(
+        _snapshot(comments=(_marker("build", status=status, sha=HISTORICAL_SHA),)),
+        phase="build",
+    )
+
+    assert result.decision == "GUARD FAILURE"
+    assert result.reasons == ("build marker SHA differs from live PR head",)
+
+
+def test_build_rejects_multiple_or_current_and_stale_build_markers() -> None:
+    stale = _marker("build", status="PENDING", sha=HISTORICAL_SHA, comment_id=12)
+    multiple = evaluate(
+        _snapshot(
+            comments=(
+                stale,
+                _marker("build", status="PENDING", sha=HISTORICAL_SHA, comment_id=13),
+            )
+        ),
+        phase="build",
+    )
+    current_and_stale = evaluate(
+        _snapshot(comments=(_marker("build"), stale)),
+        phase="build",
+    )
+
+    assert multiple.decision == "GUARD FAILURE"
+    assert current_and_stale.decision == "GUARD FAILURE"
+    assert multiple.reasons == ("build marker SHA differs from live PR head",)
+    assert current_and_stale.reasons == ("build marker SHA differs from live PR head",)
+
+
 def test_audit_preflight_accepts_stale_history_after_build_pass() -> None:
     result = evaluate(
         _snapshot(
@@ -466,6 +534,25 @@ def test_build_and_audit_phases_share_target_and_marker_guard() -> None:
     assert audit_result.decision == "AUDIT GUARD PASS"
 
 
+def test_build_bootstrap_allows_zero_prs_but_other_phases_fail_closed() -> None:
+    bootstrap = replace(
+        _snapshot(comments=()),
+        pull_request=None,
+        active_issue_count=1,
+        open_pr_count=0,
+    )
+
+    result = evaluate(bootstrap, phase="build")
+
+    assert result.decision == "BUILD BOOTSTRAP"
+    assert result.metadata is not None
+    assert result.metadata.expected_branch == "codex/dev-7-finalize-policy-guard"
+    for phase in ("audit", "finalize"):
+        failed = evaluate(bootstrap, phase=phase)
+        assert failed.decision == "GUARD FAILURE"
+        assert failed.reasons == ("target PR is absent outside BUILD bootstrap",)
+
+
 def test_json_cli_is_read_only_and_cannot_authorize_finalize(tmp_path: Path) -> None:
     snapshot_path = tmp_path / "snapshot.json"
     snapshot_path.write_text(
@@ -532,3 +619,40 @@ def test_json_cli_is_read_only_and_cannot_authorize_finalize(tmp_path: Path) -> 
     )
     assert finalized.returncode == 1
     assert json.loads(finalized.stdout)["reasons"] == ["finalize phase is live-only"]
+
+
+def test_json_cli_reports_non_terminal_build_bootstrap(tmp_path: Path) -> None:
+    snapshot_path = tmp_path / "bootstrap.json"
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "issue": {
+                    "number": 58,
+                    "state": "OPEN",
+                    "labels": ["workflow:active"],
+                    "body": _body(),
+                },
+                "active_issue_count": 1,
+                "open_pr_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/check_workflow_guards.py",
+            "--json",
+            str(snapshot_path),
+            "--phase",
+            "build",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["decision"] == "BUILD BOOTSTRAP"

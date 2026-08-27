@@ -40,6 +40,9 @@ def test_service_unit_quotes_paths_and_contains_restart_and_schedule(tmp_path: P
     assert "EnvironmentFile=/" in document
     assert '"--schedule-at" "07:00"' in document
     assert '"--market-end-lag-days" "1"' in document
+    assert "Type=notify" in document
+    assert "NotifyAccess=main" in document
+    assert "TimeoutStartSec=120s" in document
     assert "Restart=on-failure" in document
     assert "UMask=0077" in document
     assert "NoNewPrivileges=true" in document

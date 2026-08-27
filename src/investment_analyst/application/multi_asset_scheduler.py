@@ -509,7 +509,20 @@ class MultiAssetScheduleStateStore:
     def write_attempt(self, attempt: ScheduledJobAttempt) -> None:
         """Append an attempt or replace its running lifecycle atomically."""
         with self._lock:
-            state = self.load()
+            self.write_attempt_from_state(self.load(), attempt)
+
+    def write_attempt_from_state(
+        self,
+        state: MultiAssetScheduleState,
+        attempt: ScheduledJobAttempt,
+    ) -> MultiAssetScheduleState:
+        """Persist one transition against the caller's validated state snapshot.
+
+        The scheduler is the sole writer during a tick.  Passing its snapshot avoids
+        reparsing the complete append-only history for each due job while retaining
+        the exact lifecycle validation and atomic replacement semantics.
+        """
+        with self._lock:
             attempts = list(state.attempts)
             matching = tuple(
                 index
@@ -525,7 +538,7 @@ class MultiAssetScheduleStateStore:
                     or existing.started_at != attempt.started_at
                 ):
                     if existing == attempt:
-                        return
+                        return state
                     raise AaplOperationalStateError(
                         "multi-asset schedule attempt lifecycle is inconsistent"
                     )
@@ -540,7 +553,9 @@ class MultiAssetScheduleStateStore:
                     str(item.attempt_id),
                 )
             )
-            self._write(MultiAssetScheduleState(attempts=tuple(attempts)))
+            updated = MultiAssetScheduleState(attempts=tuple(attempts))
+            self._write(updated)
+            return updated
 
     def _write(self, state: MultiAssetScheduleState) -> None:
         document = (
@@ -784,15 +799,16 @@ class MultiAssetScheduler:
                     operation_control.raise_if_cancelled()
                 job = registry[job_id]
                 current = self._now()
-                refreshed = self._job_status(job.definition, current, self._store.load())
+                refreshed = self._job_status(job.definition, current, state)
                 if not refreshed.due:
                     continue
                 if not self._claim_registered_job(job_id):
                     continue
                 try:
-                    attempt = self._run_job(
+                    attempt, state = self._run_job(
                         job,
                         current,
+                        state,
                         operation_control=operation_control,
                     )
                     completed.append(attempt)
@@ -827,13 +843,14 @@ class MultiAssetScheduler:
         self,
         job: RegisteredScheduledJob,
         now: datetime,
+        state: MultiAssetScheduleState,
         *,
         operation_control: OperationControl | None = None,
-    ) -> ScheduledJobAttempt:
+    ) -> tuple[ScheduledJobAttempt, MultiAssetScheduleState]:
         definition = job.definition
         local_date = now.astimezone(ZoneInfo(definition.timezone)).date()
         attempts_today = self._attempts_for(
-            self._store.load(),
+            state,
             definition.job_id,
             local_date,
         )
@@ -848,7 +865,7 @@ class MultiAssetScheduler:
             status=ScheduledJobAttemptStatus.RUNNING,
             started_at=now,
         )
-        self._store.write_attempt(running)
+        state = self._store.write_attempt_from_state(state, running)
         try:
             invocation = ScheduledJobInvocation(
                 definition=definition,
@@ -932,9 +949,9 @@ class MultiAssetScheduler:
                 execution=execution,
             )
         completed = completed.model_copy(update={"telemetry": _attempt_telemetry(completed)})
-        self._store.write_attempt(completed)
+        state = self._store.write_attempt_from_state(state, completed)
         self._notify(completed)
-        return completed
+        return completed, state
 
     def _recover_interrupted(
         self,
@@ -961,10 +978,10 @@ class MultiAssetScheduler:
                 ),
             )
             recovered = recovered.model_copy(update={"telemetry": _attempt_telemetry(recovered)})
-            self._store.write_attempt(recovered)
+            state = self._store.write_attempt_from_state(state, recovered)
             self._notify(recovered)
             completed.append(recovered)
-        return self._store.load()
+        return state
 
     def _status_at(
         self,

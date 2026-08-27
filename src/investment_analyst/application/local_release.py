@@ -213,7 +213,7 @@ class RealSystemctlRunner:
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=DEFAULT_READINESS_DEADLINE,
             )
         except (subprocess.SubprocessError, OSError) as error:
             raise ReleaseUnitError(f"systemctl restart {service} failed: {error}") from error

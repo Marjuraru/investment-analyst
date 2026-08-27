@@ -2,6 +2,7 @@
 """Serve the loopback analysis UI and its optional watchlist scheduler."""
 
 import argparse
+import contextlib
 import os
 import signal
 import sys
@@ -61,6 +62,7 @@ from investment_analyst.application.runtime import (
     ApplicationRuntimeError,
     StorageLocationRequest,
 )
+from investment_analyst.application.runtime_lifecycle import notify_ready, wait_for_overview_ready
 from investment_analyst.application.scheduled_observers import ScheduledJobObserverChain
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.frontend.local_schedule_jobs import (
@@ -204,32 +206,53 @@ def _serve(
 ) -> int:
     runtime = ApplicationRuntime.create_default()
     paths = runtime.workspace_service.resolve(arguments.workspace)
-    runtime.workspace_service.inspect(paths.root)
+    lock = AaplLocalServiceLock(
+        paths.state_root / _SERVICE_LOCK_FILE,
+        service_id=uuid4(),
+        started_at=datetime.now(UTC).isoformat(),
+    )
+    with lock:
+        runtime.workspace_service.inspect(paths.root)
+        return _serve_after_lock(
+            arguments,
+            credentials,
+            runtime,
+            workspace_root=paths.root,
+            state_root=paths.state_root,
+        )
+
+
+def _serve_after_lock(
+    arguments: argparse.Namespace,
+    credentials: tuple[AlpacaCredentials, SecEdgarIdentity, FredApiKey | None],
+    runtime: ApplicationRuntime,
+    *,
+    workspace_root: Path,
+    state_root: Path,
+) -> int:
     application = InvestmentAnalystApplication(runtime)
     runner = AaplDailyRunner(application, runtime.workspace_service)
     alpaca_credentials, sec_identity, fred_api_key = credentials
     controller = _DerivativesLocalController(
         runner,
         application,
-        workspace=paths.root,
+        workspace=workspace_root,
         alpaca_credentials=alpaca_credentials,
         sec_identity=sec_identity,
         fred_api_key=fred_api_key,
     )
 
     scheduler: MultiAssetScheduler | None = None
-    alert_store = OperationalAlertStateStore(paths.state_root / _ALERT_STATE_FILE)
-    analytical_store = AnalyticalScreeningStateStore(paths.state_root / _ANALYTICAL_STATE_FILE)
-    notification_store = CandidateNotificationStore(
-        paths.state_root / _NOTIFICATION_OUTBOX_STATE_FILE
-    )
+    alert_store = OperationalAlertStateStore(state_root / _ALERT_STATE_FILE)
+    analytical_store = AnalyticalScreeningStateStore(state_root / _ANALYTICAL_STATE_FILE)
+    notification_store = CandidateNotificationStore(state_root / _NOTIFICATION_OUTBOX_STATE_FILE)
     analytical_rule_store = AnalyticalRuleRegistryStore(
-        paths.state_root / _ANALYTICAL_RULE_REGISTRY_FILE,
+        state_root / _ANALYTICAL_RULE_REGISTRY_FILE,
         INITIAL_ANALYTICAL_RULES,
     )
     analytical_backtest = AnalyticalBacktestService(
         runtime,
-        paths.root,
+        workspace_root,
         analytical_rule_store,
     )
     selected_asset_ids = tuple(
@@ -256,7 +279,7 @@ def _serve(
         include_macro=fred_api_key is not None and not arguments.no_schedule_macro,
         crypto_derivatives_asset_ids=application.list_crypto_derivatives_assets(),
     )
-    preference_store = AssetPreferencesStore(paths.state_root / _ASSET_PREFERENCES_STATE_FILE)
+    preference_store = AssetPreferencesStore(state_root / _ASSET_PREFERENCES_STATE_FILE)
     preference_seed = cli_seed_asset_preferences(
         controller.market_assets(),
         selected_asset_ids,
@@ -288,14 +311,14 @@ def _serve(
         if not scheduled_asset_ids:
             raise ValueError("scheduler-enabled preferences require at least one scheduled asset")
         jobs = jobs_for_preferences(scheduled_asset_ids)
-        schedule_store = MultiAssetScheduleStateStore(paths.state_root / _SCHEDULE_STATE_FILE)
+        schedule_store = MultiAssetScheduleStateStore(state_root / _SCHEDULE_STATE_FILE)
         schedule_attempts = schedule_store.load().attempts
         alert_monitor = OperationalAlertMonitor(alert_store)
         alert_monitor.reconcile(schedule_attempts)
         analytical_monitor = AnalyticalScreeningMonitor(
             analytical_store,
             runtime,
-            paths.root,
+            workspace_root,
             analytical_rule_store.rules,
         )
         analytical_monitor.reconcile(schedule_attempts)
@@ -332,7 +355,7 @@ def _serve(
         asset_preferences=preference_service,
     )
     manual_operations = ManualOperationQueue(
-        ManualOperationStateStore(paths.state_root / _MANUAL_OPERATION_STATE_FILE),
+        ManualOperationStateStore(state_root / _MANUAL_OPERATION_STATE_FILE),
         web_application.execute_manual_operation,
     )
     web_application.set_manual_operations(manual_operations)
@@ -362,27 +385,30 @@ def _serve(
             daemon=True,
         ).start()
 
-    service_started_at = datetime.now(UTC).isoformat()
-    lock = AaplLocalServiceLock(
-        paths.state_root / _SERVICE_LOCK_FILE,
-        service_id=uuid4(),
-        started_at=service_started_at,
-    )
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     previous_sigint = signal.getsignal(signal.SIGINT)
-    with lock:
+    with contextlib.nullcontext():
         signal.signal(signal.SIGTERM, request_shutdown)
         signal.signal(signal.SIGINT, request_shutdown)
-        if scheduler_thread is not None:
-            scheduler_thread.start()
-        manual_operations.start()
-        print(
-            f"Investment Analyst available at http://127.0.0.1:{arguments.port}",
-            flush=True,
+        server_thread = threading.Thread(
+            target=server.serve_forever,
+            kwargs={"poll_interval": 0.5},
+            name="local-interface-accept-loop",
+            daemon=True,
         )
-        print("Press Ctrl+C to stop the local service.", flush=True)
+        server_thread.start()
         try:
-            server.serve_forever(poll_interval=0.5)
+            wait_for_overview_ready(arguments.port)
+            notify_ready()
+            if scheduler_thread is not None:
+                scheduler_thread.start()
+            manual_operations.start()
+            print(
+                f"Investment Analyst available at http://127.0.0.1:{arguments.port}",
+                flush=True,
+            )
+            print("Press Ctrl+C to stop the local service.", flush=True)
+            server_thread.join()
         except KeyboardInterrupt:
             request_shutdown(signal.SIGINT, None)
         finally:
@@ -392,7 +418,11 @@ def _serve(
                 manual_operations.stop(
                     timeout=min(5.0, max(shutdown_deadline - time_module.monotonic(), 0.0))
                 )
+                server.shutdown()
                 server.server_close()
+                server_thread.join(timeout=max(shutdown_deadline - time_module.monotonic(), 0.0))
+                if server_thread.is_alive():
+                    raise RuntimeError("local HTTP server did not stop before shutdown deadline")
                 if scheduler_thread is not None:
                     scheduler_thread.join(
                         timeout=max(shutdown_deadline - time_module.monotonic(), 0.0)

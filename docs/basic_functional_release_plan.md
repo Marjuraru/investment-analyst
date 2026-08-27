@@ -76,13 +76,13 @@ rehearsal.
 | `VALUATION-HISTORY` | `DONE` | Historia materializada y reglas relativas explícitas compatibles con valoración PIT v1. | VAL-1/#70 aporta historia descriptiva; VAL-2/#72 propone percentil Decimal34 PIT sin señal ni recomendación. |
 | `INDICATORS-AND-OUTBOX` | `DONE` | Propuesta post-merge de ALERT-1 (`COMPLETES`): la ruta se vuelve integrada sólo al fusionar este PR. | RSI/MACD/ATR, reglas silenciosas y outbox local con acuse durable; los canales externos siguen pendientes. |
 | `RELEASE-ACCEPTANCE` | `DONE` | Reconciliación HUMAN de #93/#94; integrada antes de este bloque. | La aceptación finita y la recuperación ya fueron registradas. |
-| `EQUITY-UNIVERSE` | `NEXT` | Candidate #95 propone `DONE` post-merge mediante contratos por capacidades. | AAPL mantiene adaptadores compatibles; no hay privilegio de flujo por ticker. |
-| `SEC-CORPUS` | `PLANNED` | Candidate #95 propone `NEXT` sólo después de su merge. | Forms 3/4/5, 13D/13G y 13F no integrados. |
+| `EQUITY-UNIVERSE` | `DONE` | Integrado mediante contratos por capacidades. | AAPL mantiene adaptadores compatibles; no hay privilegio de flujo por ticker. |
+| `SEC-CORPUS` | `NEXT` | Siguiente vertical documental pendiente de planificación. | Forms 3/4/5, 13D/13G y 13F no integrados. |
 | `BVL-MARKET` | `BLOCKED` | Contrato de uso y fuente oficial autorizada. | No se infiere autorización para automatizar boletines. |
 | `PREDICTIVE-RESEARCH` | `DEFERRED` | Carril explícito con PIT, label, baselines, validación temporal, holdout, shadow y rollback. | Universo survivorship-aware es condicional; on-chain, stablecoins/DeFi, multi-venue y derivados extra dependen del target. |
 
-La transición propuesta por el candidate es literalmente `EQUITY-UNIVERSE` | `DONE` y
-`SEC-CORPUS` | `NEXT`; ambas permanecen no integradas hasta su merge exacto en `main`.
+La transición integrada es literalmente `EQUITY-UNIVERSE` | `DONE` y
+`SEC-CORPUS` | `NEXT`; no implica que SEC-CORPUS esté implementado.
 
 ## Diagnóstico de la estructura actual
 

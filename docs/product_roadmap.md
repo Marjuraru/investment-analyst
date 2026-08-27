@@ -568,9 +568,9 @@ son nuevas capacidades de análisis, no acceden al workspace ni ejecutan provide
 atribuyen causalidad de memoria. La duración de la captura es finita y explícita, sin duración mínima
 ni número mínimo de muestras, sesiones o ciclos como gate. `RELEASE-ACCEPTANCE` permanece `PLANNED`
 fue reconciliada HUMAN como `RELEASE-ACCEPTANCE DONE → EQUITY-UNIVERSE NEXT → SEC-CORPUS PLANNED`.
-El candidate `EQUITY-UNIVERSE-1` propone post-merge `EQUITY-UNIVERSE DONE → SEC-CORPUS NEXT`; no
-presenta ese estado como integrado antes de la fusión. `EXTENDED-SOAK / DEDICATED-RUNTIME ALWAYS-ON
-ACCEPTANCE` queda diferido a un Work Block independiente.
+La transición integrada es `EQUITY-UNIVERSE DONE → SEC-CORPUS NEXT`; no presenta SEC-CORPUS como
+implementado. `EXTENDED-SOAK / DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
+Block independiente.
 
 Mercado BVL, macro diario columnar, extensiones Cazatiburones para BVL/cripto e investigación
 predictiva conservan sus fases de esta hoja de ruta, pero no desplazan la estabilización de la

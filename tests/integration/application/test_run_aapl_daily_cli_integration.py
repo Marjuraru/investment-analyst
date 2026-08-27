@@ -10,6 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
+from investment_analyst.application.aapl_scheduler import AaplLocalServiceLock
 from investment_analyst.application.operational_state import AaplDailyRunLock
 from investment_analyst.workspace.service import WorkspaceService
 
@@ -137,6 +138,34 @@ def test_local_service_requires_credentials_before_inspecting_workspace(tmp_path
     assert "required" in result.stderr
     assert "Traceback" not in result.stderr
     assert not workspace.exists()
+
+
+def test_local_service_acquires_lock_before_inspecting_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "missing"
+    lock = AaplLocalServiceLock(
+        workspace / "state" / "aapl_local_service.lock",
+        service_id=uuid4(),
+        started_at="2026-08-27T00:00:00+00:00",
+    )
+
+    with lock:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/serve_investment_analyst.py",
+                "--workspace",
+                str(workspace),
+                "--no-scheduler",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=_credential_environment(workspace),
+        )
+
+    assert result.returncode == 4
+    assert "already active" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_service_installer_generates_private_unit_without_starting_it(tmp_path: Path) -> None:
