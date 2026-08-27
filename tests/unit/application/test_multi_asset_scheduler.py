@@ -54,6 +54,16 @@ def _execution(invocation: ScheduledJobInvocation, *, created: int = 1) -> Sched
     )
 
 
+class _CountingScheduleStateStore(MultiAssetScheduleStateStore):
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.load_calls = 0
+
+    def load(self):  # type: ignore[no-untyped-def]
+        self.load_calls += 1
+        return super().load()
+
+
 @pytest.mark.parametrize(
     ("category", "retryable"),
     [
@@ -201,6 +211,30 @@ def test_scheduler_runs_all_due_jobs_and_preserves_success_after_later_failure(
     assert status.due_count == 0
     assert status.failed_count == 1
     assert status.next_run_at == now + timedelta(seconds=60)
+
+
+def test_scheduler_loads_history_once_per_tick_for_multiple_due_jobs(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    store = _CountingScheduleStateStore(tmp_path / "schedule.json")
+    scheduler = MultiAssetScheduler(
+        (
+            RegisteredScheduledJob(_definition("a-market"), _execution),
+            RegisteredScheduledJob(_definition("b-market"), _execution),
+        ),
+        store,
+        clock=lambda: now,
+        attempt_id_factory=iter(
+            (
+                UUID("00000000-0000-4000-8000-000000000011"),
+                UUID("00000000-0000-4000-8000-000000000012"),
+            )
+        ).__next__,
+    )
+
+    completed = scheduler.tick()
+
+    assert len(completed) == 2
+    assert store.load_calls == 1
 
 
 def test_scheduler_retries_only_failed_job_after_backoff(tmp_path: Path) -> None:
