@@ -14,12 +14,13 @@ from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCD
 SEC_DOCUMENT_SOURCE_ID = "sec-edgar:primary-documents"
 SEC_DOCUMENT_SCHEMA_VERSION = "sec-document-revision-v1"
 REVISION_SCHEMA_VERSION = "sec-document-revision-v1"
-SUPPORTED_SEC_FORMS = frozenset(
+FINANCIAL_SEC_FORMS = frozenset(
     {"10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "40-F/A"}
 )
+SUPPORTED_SEC_FORMS = FINANCIAL_SEC_FORMS | frozenset({"3", "3/A", "4", "4/A", "5", "5/A"})
 _ACCESSION = re.compile(r"^\d{10}-\d{2}-\d{6}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_DOCUMENT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
+_DOCUMENT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
 _FILING_NAMESPACE = uuid5(NAMESPACE_URL, "investment-analyst:sec-filing:v1")
 _DOCUMENT_NAMESPACE = uuid5(NAMESPACE_URL, "investment-analyst:sec-document:v1")
 _REVISION_NAMESPACE = uuid5(NAMESPACE_URL, "investment-analyst:sec-revision:v1")
@@ -87,7 +88,11 @@ class SecLogicalDocument(_FrozenContract):
     @field_validator("name")
     @classmethod
     def validate_name(cls, value: str) -> str:
-        if not _DOCUMENT_NAME.fullmatch(value) or "/" in value or "\\" in value:
+        if (
+            not _DOCUMENT_NAME.fullmatch(value)
+            or "\\" in value
+            or any(part in {"", ".", ".."} for part in value.split("/"))
+        ):
             raise ValueError("primary document name is invalid")
         return value
 
