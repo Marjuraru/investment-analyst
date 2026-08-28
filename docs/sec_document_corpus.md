@@ -5,10 +5,13 @@ ni ejecución. Cada filing, documento lógico y revisión tiene una identidad UU
 referencia bytes completos por SHA-256 en `storage/data/documents/sha256/`; su RawRecord sólo contiene
 metadata, URL oficial y lineage al snapshot Submissions que demostró CIK, accession, form y path.
 
-`available_at` es siempre la primera recuperación oficial demostrada por este sistema y coincide con
-`retrieved_at` de la primera revisión. No se usa ni se retrofecha a filing, report o acceptance date.
-Los replays filtran `available_at <= known_at` en el índice RawRecord antes de materializar metadata.
-Una ausencia devuelve `missing`, nunca cero ni contenido inventado.
+En `sec-document-revision-v1`, `available_at` conserva la semántica histórica de primera
+recuperación oficial demostrada y coincide con `retrieved_at`. En
+`sec-document-revision-v2`, `available_at` es la disponibilidad pública: deriva exactamente de
+`filing.accepted_at`; `retrieved_at` conserva por separado la recepción local. Los replays filtran
+`available_at <= known_at` en el índice RawRecord antes de materializar metadata y sólo seleccionan
+evidencia v2; el contador `legacy_records_excluded` hace explícita la historia v1 excluida. Una
+ausencia devuelve `missing`, nunca cero ni contenido inventado.
 
 La familia v1 se limita a `10-K`, `10-K/A`, `10-Q`, `10-Q/A`, `20-F`, `20-F/A`, `40-F` y `40-F/A`.
 El único provider es SEC EDGAR oficial: Submissions ya persistido descubre filing/path y

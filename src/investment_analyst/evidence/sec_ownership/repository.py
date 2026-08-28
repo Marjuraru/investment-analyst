@@ -73,7 +73,18 @@ def outcome_from_raw_record(record: RawRecord) -> OwnershipResolutionOutcome:
         raise OwnershipRepositoryError("ownership outcome is malformed") from error
     if record.schema_version != outcome.schema_version:
         raise OwnershipRepositoryError("ownership outcome RawRecord schema conflicts")
-    if record.record_id != outcome.raw_record_id or record.available_at != outcome.available_at:
+    if (
+        record.record_id != outcome.raw_record_id
+        or record.asset_id != outcome.asset_id
+        or record.event_time != outcome.filing.accepted_at
+        or record.available_at != outcome.available_at
+        or record.received_at != outcome.retrieved_at
+        or record.source.record_key
+        != json.dumps({"outcome_id": str(outcome.outcome_id)}, sort_keys=True)
+        or record.source.retrieved_at != outcome.retrieved_at
+        or record.source.raw_uri != outcome.resource_url
+        or record.source.checksum_sha256 != outcome.content_sha256
+    ):
         raise OwnershipRepositoryError("ownership outcome RawRecord conflicts")
     return outcome
 
@@ -111,7 +122,18 @@ def statement_from_raw_record(record: RawRecord) -> OwnershipStatement:
         raise OwnershipRepositoryError("ownership statement is malformed") from error
     if record.schema_version != statement.schema_version:
         raise OwnershipRepositoryError("ownership RawRecord schema conflicts with statement")
-    if record.record_id != statement.raw_record_id or record.available_at != statement.available_at:
+    if (
+        record.record_id != statement.raw_record_id
+        or record.asset_id != statement.asset_id
+        or record.event_time != statement.document_revision.document.filing.accepted_at
+        or record.available_at != statement.available_at
+        or record.received_at != statement.parsed_at
+        or record.source.record_key
+        != json.dumps({"statement_id": str(statement.statement_id)}, sort_keys=True)
+        or record.source.retrieved_at != statement.parsed_at
+        or record.source.raw_uri != statement.document_revision.source_url
+        or record.source.checksum_sha256 != statement.document_revision.content_sha256
+    ):
         raise OwnershipRepositoryError("ownership RawRecord conflicts with statement")
     return statement
 

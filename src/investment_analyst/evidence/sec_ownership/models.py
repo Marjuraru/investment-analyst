@@ -124,6 +124,8 @@ class OwnershipStatement(_Strict):
 
     @model_validator(mode="after")
     def identity_and_lineage(self) -> OwnershipStatement:
+        if self.asset_id != self.document_revision.asset_id:
+            raise ValueError("statement asset conflicts with document revision")
         if self.form != self.document_revision.document.filing.form:
             raise ValueError("statement form conflicts with document")
         if self.issuer_cik != self.document_revision.document.filing.filer_cik:

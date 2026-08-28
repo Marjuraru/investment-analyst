@@ -152,6 +152,16 @@ def test_statement_schema_cannot_be_mixed_with_a_mismatched_revision() -> None:
         )
 
 
+def test_statement_asset_cannot_differ_from_its_document_revision() -> None:
+    revision = _revision(schema_version="sec-document-revision-v2", available_at=_ACCEPTED_AT)
+    statement = _statement(
+        schema_version="sec-ownership-statement-v2", revision=revision, parsed_at=_RETRIEVED_AT
+    )
+
+    with pytest.raises(ValueError, match="statement asset conflicts with document revision"):
+        OwnershipStatement(**{**statement.model_dump(), "asset_id": "equity:us:msft"})
+
+
 def test_v1_outcome_still_requires_availability_equal_retrieval() -> None:
     with pytest.raises(ValueError, match="outcome availability must equal retrieval"):
         _outcome(resolver_version="sec-ownership-resolver-v1", available_at=_ACCEPTED_AT)

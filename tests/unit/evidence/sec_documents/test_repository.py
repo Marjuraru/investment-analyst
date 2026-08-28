@@ -53,10 +53,12 @@ def _revision(*, checksum: str, retrieved_at: datetime, discovery_id) -> SecDocu
     )
 
 
-def _submissions(record_id, available_at: datetime) -> RawRecord:
+def _submissions(
+    record_id, available_at: datetime, *, asset_id: str = "equity:us:aapl"
+) -> RawRecord:
     return RawRecord(
         record_id=record_id,
-        asset_id="equity:us:aapl",
+        asset_id=asset_id,
         source=SourceReference(
             source_id="sec-edgar:aapl:submissions",
             retrieved_at=available_at,
@@ -111,6 +113,29 @@ def _raw_path(storage: LocalStorage, record_id) -> Path:
     ).fetchone()
     assert row is not None
     return storage.paths.raw_dir / row[0]
+
+
+def test_v2_document_lineage_rejects_a_discovery_from_another_asset(tmp_path: Path) -> None:
+    accepted_at = datetime(2025, 2, 1, tzinfo=UTC)
+    discovery_id = uuid4()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(
+            _submissions(
+                discovery_id,
+                accepted_at + timedelta(days=1),
+                asset_id="equity:us:msft",
+            )
+        )
+        blob = storage.documents.put(b"one!")
+        revision = _v2_revision(
+            checksum=blob.sha256,
+            accepted_at=accepted_at,
+            retrieved_at=accepted_at + timedelta(days=2),
+            discovery_id=discovery_id,
+        )
+
+        with pytest.raises(StorageError, match="lineage asset does not match"):
+            SecDocumentRepository(storage.raw_records, storage.documents).verify_revision(revision)
 
 
 def test_replay_uses_sql_pit_filter_before_future_corrupt_record(tmp_path: Path) -> None:

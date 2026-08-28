@@ -203,7 +203,9 @@ class SecDocumentRepository:
             raise SecDocumentRepositoryError(
                 "document lineage was received after the revision was retrieved"
             )
-        if discovery.asset_id is None or not discovery.source.source_id.endswith(":submissions"):
+        if discovery.asset_id != revision.asset_id:
+            raise SecDocumentRepositoryError("document lineage asset does not match the revision")
+        if not discovery.source.source_id.endswith(":submissions"):
             raise SecDocumentRepositoryError("document lineage is not a submissions RawRecord")
         if not isinstance(discovery.payload, dict):
             raise SecDocumentRepositoryError("document submissions lineage payload is malformed")

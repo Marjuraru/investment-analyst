@@ -330,3 +330,49 @@ def test_outcome_decode_rejects_a_relabeled_schema(tmp_path: Path) -> None:
         outcome_from_raw_record(
             RawRecord(**{**record.model_dump(), "schema_version": "sec-ownership-outcome-v1"})
         )
+
+
+def test_ownership_raw_records_reject_outer_asset_mismatches(tmp_path: Path) -> None:
+    accepted_at = datetime(2025, 1, 31, 18, tzinfo=UTC)
+    discovery_id = uuid4()
+    filing = _filing(accession="0000320193-25-000001", accepted_at=accepted_at)
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(discovery_id, accepted_at + timedelta(hours=6)))
+        blob = storage.documents.put(b"one!")
+        revision = _revision(
+            accession="0000320193-25-000001",
+            accepted_at=accepted_at,
+            retrieved_at=accepted_at + timedelta(days=2),
+            checksum=blob.sha256,
+            discovery_id=discovery_id,
+        )
+        statement = _statement(
+            revision=revision,
+            schema_version="sec-ownership-statement-v2",
+            parsed_at=accepted_at + timedelta(days=2),
+        )
+        outcome = _outcome(
+            filing=filing,
+            resolver_version="sec-ownership-resolver-v2",
+            checksum="e" * 64,
+            discovery_id=discovery_id,
+        )
+
+        with pytest.raises(StorageError, match="conflicts"):
+            statement_from_raw_record(
+                RawRecord(
+                    **{
+                        **statement_to_raw_record(statement).model_dump(),
+                        "asset_id": "equity:us:msft",
+                    }
+                )
+            )
+        with pytest.raises(StorageError, match="conflicts"):
+            outcome_from_raw_record(
+                RawRecord(
+                    **{
+                        **outcome_to_raw_record(outcome).model_dump(),
+                        "asset_id": "equity:us:msft",
+                    }
+                )
+            )
