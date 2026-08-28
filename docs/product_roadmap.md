@@ -566,8 +566,8 @@ La aceptación operacional se implementa con un carril pre-merge acotado: `candi
 observer read-only registra GET loopback, `systemctl show` y `/proc/<MainPID>/status` en scratch. No
 son nuevas capacidades de análisis, no acceden al workspace ni ejecutan providers o scheduler, y no
 atribuyen causalidad de memoria. La duración de la captura es finita y explícita, sin duración mínima
-ni número mínimo de muestras, sesiones o ciclos como gate. `RELEASE-ACCEPTANCE` permanece `PLANNED`
-fue reconciliada HUMAN como `RELEASE-ACCEPTANCE DONE → EQUITY-UNIVERSE NEXT → SEC-CORPUS PLANNED`.
+ni número mínimo de muestras, sesiones o ciclos como gate. `RELEASE-ACCEPTANCE` fue reconciliada
+HUMAN como `RELEASE-ACCEPTANCE DONE → EQUITY-UNIVERSE NEXT → SEC-CORPUS PLANNED`.
 La transición integrada es `EQUITY-UNIVERSE DONE → SEC-CORPUS NEXT`; no presenta SEC-CORPUS como
 implementado. `EXTENDED-SOAK / DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
 Block independiente.

@@ -90,11 +90,26 @@ Hash correcto continúa; hash ausente o distinto falla cerrado sin restaurar ni 
 ## Guard estructural común
 
 `scripts/check_workflow_guards.py` es el único parser/guard ejecutable compartido por BUILD, AUDIT
-y FINALIZE. Es read-only, tipado, determinista, no imprime bodies ni secretos y acepta un snapshot
-JSON temporal para BUILD/AUDIT o lecturas vivas mediante `gh`; FINALIZE es estrictamente live-only y
-rechaza `--json` antes de evaluar. Nunca edita Issue, PR, comentarios, branch, workspace ni el
-snapshot. BUILD lo ejecuta en fase `build`, AUDIT antes y después de reconciliar su marker en
+y FINALIZE. Es read-only, tipado, determinista, no imprime bodies ni secretos y adquiere el estado
+autoritativo mediante `gh`; `--json` es diagnóstico offline explícitamente no autoritativo y nunca
+produce una decisión `PASS`. FINALIZE es estrictamente live-only y rechaza `--json` antes de evaluar.
+Nunca edita Issue, PR, comentarios, branch, workspace ni el snapshot. BUILD lo ejecuta en fase `build`, AUDIT antes y después de reconciliar su marker en
 fase `audit`, y cualquier transición mecánica lo ejecuta en fase `finalize`.
+
+Con PR resuelto, el guard adquiere paginadamente las rutas cambiadas entre la base declarada y el
+head vivo. El conjunto de gobernanza es versionado en el módulo: `AGENTS.md`,
+`docs/development_protocol.md`, `.agents/rules/**`, `.agents/skills/**`,
+`scripts/check_workflow_guards.py`, `.github/workflows/**`, `.github/CODEOWNERS` y
+`.github/ISSUE_TEMPLATE/**`. Una intersección con policy `AUTO` falla cerrado: requiere `HUMAN`.
+Para `R3`, la declaración `## Strict delta allowlist` es obligatoria y sus rutas existentes llevan
+SHA-256 de base; las creables usan `nuevo`. Las rutas no modificables y los globs prohibidos niegan
+siempre, aun si aparecen en allowlist. El formato y sus tres secciones son parser-owned; skills,
+reglas y tests no lo reimplementan.
+
+Los hashes del checkpoint dormante se calculan sobre bytes del primary worktree; los de superficies
+inmutables, sobre bytes de la base declarada. Son categorías distintas: el checkpoint no participa
+en el deny por ruta cambiada. Hash ausente o diferente falla cerrado y nunca restaura ni modifica el
+archivo. La salida expone sólo conteos, rutas y digests verificados, nunca contenido.
 
 El guard exige metadata estructural única del Work Block, target/base/head literales, markers HTML
 estructuralmente válidos, el gate literal `Python 3.12 quality` y evidencia reconocida. Rechaza

@@ -46,7 +46,7 @@ body:
     id: scope_delta
     attributes:
       label: Semantic scope or strict allowlist
-      description: "R3/superficie sensible: strict allowlist. Otro caso: semantic scope, superficies protegidas/prohibidas e invariantes."
+      description: "R3/superficie sensible: incluya ## Strict delta allowlist, ## Superficies protegidas y ## Superficies prohibidas con rutas en código y SHA-256/nuevo/deny según el protocolo."
     validations: {required: true}
   - type: textarea
     id: delivery_route_context

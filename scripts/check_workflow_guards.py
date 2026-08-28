@@ -8,6 +8,7 @@ It never edits GitHub, the worktree, or a supplied snapshot.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import cast
 
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
+SHA256 = re.compile(r"[0-9a-f]{64}")
 RESERVED_TOKEN = re.compile(r"development-workflow:(?:build-v1|audit-v1|superseded-v1)")
 MARKER_BLOCK = re.compile(
     r"\A<!-- development-workflow:(?P<kind>build-v1|audit-v1|superseded-v1)\n"
@@ -28,6 +30,30 @@ METADATA_FIELD = re.compile(
     r"^\s*-\s+\*\*(?P<key>[^*]+):\*\*\s*(?P<value>.*?)\s*$",
     flags=re.MULTILINE,
 )
+DECLARATION_HEADINGS = (
+    "## Strict delta allowlist",
+    "## Superficies protegidas",
+    "## Superficies prohibidas",
+)
+_DECLARATION_ENTRY = re.compile(
+    r"^\s*-\s+`(?P<path>[^`]+)`\s+—\s+`(?P<value>[a-z0-9]{64}|nuevo|deny)`\.?(?:\s.*)?$"
+)
+GOVERNANCE_PATHS = frozenset(
+    {
+        "AGENTS.md",
+        "docs/development_protocol.md",
+        "scripts/check_workflow_guards.py",
+        ".github/CODEOWNERS",
+    }
+)
+GOVERNANCE_PREFIXES = (
+    ".agents/rules/",
+    ".agents/skills/",
+    ".github/workflows/",
+    ".github/ISSUE_TEMPLATE/",
+)
+_CHECKPOINT_HEADING = "### Checkpoint dormante — verificación de hash en el primary worktree"
+_IMMUTABLE_HEADING = "### Superficies del repositorio no modificables — deny por ruta cambiada"
 
 
 class GuardFailure(ValueError):
@@ -35,8 +61,39 @@ class GuardFailure(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class DeclaredScope:
+    allowlist: dict[str, str]
+    checkpoint_hashes: dict[str, str]
+    immutable_hashes: dict[str, str]
+    prohibited: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class ChangedPath:
+    path: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeEvidence:
+    changed_paths: tuple[ChangedPath, ...]
+    checkpoint_digests: Mapping[str, str]
+    immutable_digests: Mapping[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeEvaluation:
+    changed_path_count: int
+    governance_paths: tuple[str, ...]
+    consumed_allowlist_paths: tuple[str, ...]
+    checkpoint_hashes: tuple[str, ...]
+    immutable_hashes: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class WorkBlockMetadata:
     block: str
+    risk: str
     profile: str
     policy: str
     base_ref: str
@@ -99,6 +156,7 @@ class GuardSnapshot:
     mergeability_state: str | None = None
     viewer_permission: str | None = None
     base_protected: bool | None = None
+    scope_evidence: ScopeEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,12 +188,14 @@ class GuardResult:
     build: MarkerResolution
     audit: MarkerResolution
     mutation_plan: tuple[str, ...]
+    scope: ScopeEvaluation | None = None
 
     def as_json(self) -> dict[str, object]:
         metadata: dict[str, object] | None = None
         if self.metadata is not None:
             metadata = {
                 "block": self.metadata.block,
+                "risk": self.metadata.risk,
                 "profile": self.metadata.profile,
                 "policy": self.metadata.policy,
                 "base_ref": self.metadata.base_ref,
@@ -152,6 +212,18 @@ class GuardResult:
                 "audit": _resolution_json(self.audit),
             },
             "mutation_plan": list(self.mutation_plan),
+            "scope": (
+                {
+                    "changed_path_count": self.scope.changed_path_count,
+                    "governance_paths": list(self.scope.governance_paths),
+                    "consumed_allowlist_paths": list(self.scope.consumed_allowlist_paths),
+                    "checkpoint_hashes": list(self.scope.checkpoint_hashes),
+                    "immutable_hashes": list(self.scope.immutable_hashes),
+                }
+                if self.scope is not None
+                else None
+            ),
+            "authoritative": self.decision not in {"NON_AUTHORITATIVE", "GUARD FAILURE"},
         }
 
 
@@ -232,9 +304,74 @@ def _clean_value(value: str) -> str:
     return value.strip().rstrip(".;")
 
 
+def parse_declared_scope(body: str) -> DeclaredScope:
+    """Parse the three literal, machine-readable Work Block path declarations."""
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    protected_kind: str | None = None
+    for line in body.splitlines():
+        if line in DECLARATION_HEADINGS:
+            if line in sections:
+                raise GuardFailure(f"duplicate scope heading: {line}")
+            current = line
+            sections[current] = []
+            protected_kind = None
+        elif current == "## Superficies protegidas" and line == _CHECKPOINT_HEADING:
+            protected_kind = "checkpoint"
+        elif current == "## Superficies protegidas" and line == _IMMUTABLE_HEADING:
+            protected_kind = "immutable"
+        elif current is not None:
+            if line.startswith("## "):
+                current = None
+                protected_kind = None
+            else:
+                if current == "## Superficies protegidas":
+                    if protected_kind is not None:
+                        sections[current].append(f"{protected_kind}\0{line}")
+                else:
+                    sections[current].append(line)
+
+    def entries(heading: str, kind: str | None = None) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for line in sections.get(heading, []):
+            if kind is not None:
+                stored_kind, separator, line = line.partition("\0")
+                if separator != "\0" or stored_kind != kind:
+                    continue
+            if not line.strip().startswith("-"):
+                continue
+            match = _DECLARATION_ENTRY.fullmatch(line)
+            if match is None:
+                raise GuardFailure(f"malformed scope declaration in {heading}")
+            path, value = match.group("path"), match.group("value")
+            if path.startswith("/") or ".." in path.split("/") or not path:
+                raise GuardFailure(f"invalid scope path in {heading}: {path!r}")
+            if path in result and result[path] != value:
+                raise GuardFailure(f"duplicate scope declaration with distinct digest: {path}")
+            result[path] = value
+        return result
+
+    allow = entries("## Strict delta allowlist")
+    checkpoint = entries("## Superficies protegidas", "checkpoint")
+    immutable = entries("## Superficies protegidas", "immutable")
+    prohibited = entries("## Superficies prohibidas")
+    if any(value not in {"nuevo"} and SHA256.fullmatch(value) is None for value in allow.values()):
+        raise GuardFailure("allowlist accepts only a digest or nuevo")
+    if any(SHA256.fullmatch(value) is None for value in checkpoint.values()):
+        raise GuardFailure("checkpoint accepts only a SHA-256 digest")
+    if any(SHA256.fullmatch(value) is None for value in immutable.values()):
+        raise GuardFailure("immutable surface accepts only a SHA-256 digest")
+    if any(value != "deny" for value in prohibited.values()):
+        raise GuardFailure("prohibited surfaces accept only deny")
+    if any(path.endswith("/**") for path in (*allow, *checkpoint, *immutable)):
+        raise GuardFailure("only prohibited surfaces may use a /** glob")
+    return DeclaredScope(allow, checkpoint, immutable, prohibited)
+
+
 def parse_work_block(body: str) -> WorkBlockMetadata:
     aliases = {
         "work block id": "block",
+        "risk": "risk",
         "profile": "profile",
         "finalize_policy": "policy",
         "base remota exacta": "base",
@@ -251,7 +388,7 @@ def parse_work_block(body: str) -> WorkBlockMetadata:
             raise GuardFailure(f"duplicate Work Block field: {target}")
         values[target] = _clean_value(match.group("value"))
 
-    required = ("block", "profile", "policy", "base", "expected_branch", "writer_role")
+    required = ("block", "risk", "profile", "policy", "base", "expected_branch", "writer_role")
     missing = [key for key in required if not values.get(key)]
     if missing:
         raise GuardFailure(f"missing Work Block fields: {','.join(missing)}")
@@ -260,10 +397,13 @@ def parse_work_block(body: str) -> WorkBlockMetadata:
     if base_match is None:
         raise GuardFailure("base must be a remote ref and full SHA")
     profile = values["profile"].upper()
+    risk = values["risk"].upper()
     policy = values["policy"].upper()
     writer_role = values["writer_role"].upper().replace("-", "_")
     if profile not in {"FAST", "STANDARD", "CRITICAL"}:
         raise GuardFailure("profile is unknown")
+    if risk not in {"R0", "R1", "R2", "R3"}:
+        raise GuardFailure("risk is unknown")
     if policy not in {"AUTO", "HUMAN"}:
         raise GuardFailure("finalize_policy is unknown")
     if profile == "CRITICAL" and policy != "HUMAN":
@@ -276,12 +416,89 @@ def parse_work_block(body: str) -> WorkBlockMetadata:
         raise GuardFailure("expected branch is invalid")
     return WorkBlockMetadata(
         block=values["block"],
+        risk=risk,
         profile=profile,
         policy=policy,
         base_ref=base_match.group("ref"),
         base_sha=base_match.group("sha"),
         expected_branch=values["expected_branch"],
         writer_role=writer_role,
+    )
+
+
+def _matches_path(pattern: str, path: str) -> bool:
+    return path.startswith(pattern[:-2]) if pattern.endswith("/**") else path == pattern
+
+
+def _is_governance_path(path: str) -> bool:
+    return path in GOVERNANCE_PATHS or path.startswith(GOVERNANCE_PREFIXES)
+
+
+def _validate_scope(
+    metadata: WorkBlockMetadata,
+    body: str,
+    evidence: ScopeEvidence,
+) -> ScopeEvaluation:
+    """Evaluate the declared R3 scope against live path and hash evidence."""
+    scope = parse_declared_scope(body)
+    if metadata.risk == "R3" and not scope.allowlist:
+        raise GuardFailure("strict delta allowlist is absent for Risk R3")
+    for path in scope.allowlist:
+        if any(_matches_path(pattern, path) for pattern in scope.prohibited):
+            raise GuardFailure(f"allowlist overlaps prohibited surface: {path}")
+        if path in scope.immutable_hashes:
+            raise GuardFailure(f"allowlist overlaps immutable surface: {path}")
+
+    checkpoint_verified: list[str] = []
+    for path, expected in scope.checkpoint_hashes.items():
+        actual = evidence.checkpoint_digests.get(path)
+        if actual is None:
+            raise GuardFailure(f"checkpoint hash is absent or unreadable: {path}")
+        if actual != expected:
+            raise GuardFailure(f"checkpoint hash differs: {path}")
+        checkpoint_verified.append(path)
+
+    immutable_verified: list[str] = []
+    for path, expected in scope.immutable_hashes.items():
+        actual = evidence.immutable_digests.get(path)
+        if actual is None:
+            raise GuardFailure(f"immutable base hash is absent or unreadable: {path}")
+        if actual != expected:
+            raise GuardFailure(f"immutable base hash differs: {path}")
+        immutable_verified.append(path)
+
+    changed = evidence.changed_paths
+    paths = tuple(item.path for item in changed)
+    if len(set(paths)) != len(paths):
+        raise GuardFailure("changed path list contains duplicates")
+    governance = tuple(path for path in paths if _is_governance_path(path))
+    if governance and metadata.policy == "AUTO":
+        raise GuardFailure(f"governance path requires HUMAN policy: {governance[0]}")
+
+    consumed: list[str] = []
+    for item in changed:
+        if item.status not in {"added", "modified", "removed", "renamed"}:
+            raise GuardFailure(f"changed path has unknown status: {item.path}")
+        allow_value = scope.allowlist.get(item.path)
+        if any(_matches_path(pattern, item.path) for pattern in scope.prohibited):
+            raise GuardFailure(f"changed path matches prohibited surface: {item.path}")
+        if item.path in scope.immutable_hashes:
+            raise GuardFailure(f"changed path matches immutable surface: {item.path}")
+        if metadata.risk == "R3" and allow_value is None:
+            raise GuardFailure(f"changed path is absent from strict allowlist: {item.path}")
+        if allow_value is not None:
+            if allow_value == "nuevo" and item.status != "added":
+                raise GuardFailure(f"new allowlist path is not added: {item.path}")
+            if allow_value != "nuevo" and item.status == "added":
+                raise GuardFailure(f"existing allowlist path is added: {item.path}")
+            consumed.append(item.path)
+
+    return ScopeEvaluation(
+        changed_path_count=len(changed),
+        governance_paths=governance,
+        consumed_allowlist_paths=tuple(consumed),
+        checkpoint_hashes=tuple(checkpoint_verified),
+        immutable_hashes=tuple(immutable_verified),
     )
 
 
@@ -364,6 +581,40 @@ def _parse_smoke(value: object) -> SmokeSnapshot:
     return SmokeSnapshot(status=status.upper() if status is not None else None, evidence=evidence)
 
 
+def _parse_digest_map(value: object, label: str) -> Mapping[str, str]:
+    mapping = _mapping(value, label)
+    result: dict[str, str] = {}
+    for path, digest in mapping.items():
+        if (
+            not isinstance(path, str)
+            or not isinstance(digest, str)
+            or SHA256.fullmatch(digest) is None
+        ):
+            raise GuardFailure(f"{label} must map paths to SHA-256 digests")
+        result[path] = digest
+    return result
+
+
+def _parse_scope_evidence(value: object) -> ScopeEvidence | None:
+    if value is None:
+        return None
+    mapping = _mapping(value, "scope_evidence")
+    paths: list[ChangedPath] = []
+    for item in _sequence(mapping.get("changed_paths", ()), "scope_evidence.changed_paths"):
+        entry = _mapping(item, "scope_evidence.changed_path")
+        paths.append(
+            ChangedPath(
+                _required_str(entry, ("path",), "scope_evidence.path"),
+                _required_str(entry, ("status",), "scope_evidence.status").lower(),
+            )
+        )
+    return ScopeEvidence(
+        tuple(paths),
+        _parse_digest_map(mapping.get("checkpoint_digests", {}), "checkpoint_digests"),
+        _parse_digest_map(mapping.get("immutable_digests", {}), "immutable_digests"),
+    )
+
+
 def snapshot_from_json(value: object) -> GuardSnapshot:
     root = _mapping(value, "snapshot")
     requested_changes = root.get("requested_changes")
@@ -403,6 +654,7 @@ def snapshot_from_json(value: object) -> GuardSnapshot:
         mergeability_state=_optional_str(root, ("mergeability_state",)),
         viewer_permission=_optional_str(root, ("viewer_permission",)),
         base_protected=_optional_bool(root, ("base_protected",)),
+        scope_evidence=_parse_scope_evidence(root.get("scope_evidence")),
     )
 
 
@@ -658,28 +910,37 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
     build = empty
     audit = empty
     mutation_plan: tuple[str, ...] = ()
+    scope: ScopeEvaluation | None = None
     try:
         if phase not in {"build", "audit", "finalize"}:
             raise GuardFailure("phase is unknown")
         metadata = _validate_target(snapshot)
+        if snapshot.source == "live":
+            if snapshot.scope_evidence is None:
+                raise GuardFailure("live scope evidence is absent")
+            scope = _validate_scope(metadata, snapshot.issue.body, snapshot.scope_evidence)
+        elif snapshot.source == "json":
+            return GuardResult(
+                "NON_AUTHORITATIVE", (), metadata, build, audit, mutation_plan, scope
+            )
         if snapshot.pull_request is None:
             if phase != "build":
                 raise GuardFailure("target PR is absent outside BUILD bootstrap")
-            return GuardResult("BUILD BOOTSTRAP", (), metadata, build, audit, mutation_plan)
+            return GuardResult("BUILD BOOTSTRAP", (), metadata, build, audit, mutation_plan, scope)
         pull_request = snapshot.pull_request
         markers = _parse_all_markers(snapshot.comments)
         build = _resolve_markers(markers, "build", metadata, pull_request.head_sha, phase)
         audit = _resolve_markers(markers, "audit", metadata, pull_request.head_sha, phase)
         mutation_plan = _mutation_plan(build, audit)
         if phase == "build":
-            return GuardResult("BUILD GUARD PASS", (), metadata, build, audit, mutation_plan)
+            return GuardResult("BUILD GUARD PASS", (), metadata, build, audit, mutation_plan, scope)
         if build.marker is None or build.marker.status != "PASS":
             raise GuardFailure("BUILD PASS marker is absent or not PASS")
         if phase == "audit":
             _validate_checks(snapshot)
             if snapshot.smoke.status not in {"PASS"}:
                 raise GuardFailure("smoke evidence is absent or not PASS")
-            return GuardResult("AUDIT GUARD PASS", (), metadata, build, audit, mutation_plan)
+            return GuardResult("AUDIT GUARD PASS", (), metadata, build, audit, mutation_plan, scope)
         if audit.marker is None or audit.marker.status != "PASS":
             raise GuardFailure("AUDIT PASS marker is absent or not PASS")
         if build.duplicates or audit.duplicates:
@@ -699,7 +960,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
         decision = (
             "AWAITING HUMAN APPROVAL" if metadata.policy == "HUMAN" else "AUTO_FINALIZE_AUTHORIZED"
         )
-        return GuardResult(decision, (), metadata, build, audit, mutation_plan)
+        return GuardResult(decision, (), metadata, build, audit, mutation_plan, scope)
     except GuardFailure as error:
         return GuardResult(
             "GUARD FAILURE",
@@ -708,6 +969,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
             build,
             audit,
             mutation_plan,
+            scope,
         )
 
 
@@ -748,6 +1010,79 @@ def _gh_json_lines(arguments: Sequence[str], label: str) -> tuple[object, ...]:
         if line.strip():
             values.append(_json_value(line, label))
     return tuple(values)
+
+
+def _gh_paginated_array(arguments: Sequence[str], label: str) -> tuple[object, ...]:
+    return _gh_json_lines(
+        ("api", "--paginate", "--jq", ".[] | @json", *arguments),
+        label,
+    )
+
+
+def _git_bytes(arguments: Sequence[str], label: str) -> bytes:
+    try:
+        return subprocess.run(
+            ["git", *arguments],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as error:
+        raise GuardFailure(f"{label} could not be read") from error
+
+
+def _primary_worktree(base_ref: str) -> Path:
+    branch = base_ref.removeprefix("origin/")
+    listing = _git_bytes(("worktree", "list", "--porcelain"), "worktree list").decode("utf-8")
+    records = [record for record in listing.strip().split("\n\n") if record]
+    candidates: list[Path] = []
+    for record in records:
+        fields = dict(line.split(" ", maxsplit=1) for line in record.splitlines() if " " in line)
+        if fields.get("branch") == f"refs/heads/{branch}" and "worktree" in fields:
+            candidates.append(Path(fields["worktree"]))
+    if len(candidates) != 1:
+        raise GuardFailure("primary worktree for declared base is not unique")
+    return candidates[0]
+
+
+def _digest_file(path: Path, label: str) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise GuardFailure(f"{label} is absent or unreadable: {path.as_posix()}") from error
+
+
+def _live_scope_evidence(
+    metadata: WorkBlockMetadata,
+    body: str,
+    repo: str,
+    pr_number: int | None,
+) -> ScopeEvidence:
+    scope = parse_declared_scope(body)
+    primary = _primary_worktree(metadata.base_ref)
+    checkpoint = {
+        path: _digest_file(primary / path, "checkpoint file") for path in scope.checkpoint_hashes
+    }
+    immutable = {
+        path: hashlib.sha256(
+            _git_bytes(("show", f"{metadata.base_sha}:{path}"), "immutable base file")
+        ).hexdigest()
+        for path in scope.immutable_hashes
+    }
+    if pr_number is None:
+        return ScopeEvidence((), checkpoint, immutable)
+    changed: list[ChangedPath] = []
+    for item in _gh_paginated_array(
+        (f"repos/{repo}/pulls/{pr_number}/files?per_page=100",), "changed paths"
+    ):
+        mapping = _mapping(item, "changed path")
+        changed.append(
+            ChangedPath(
+                _required_str(mapping, ("filename",), "changed path filename"),
+                _required_str(mapping, ("status",), "changed path status").lower(),
+            )
+        )
+    return ScopeEvidence(tuple(changed), checkpoint, immutable)
 
 
 def _repo_parts(repo: str) -> tuple[str, str]:
@@ -914,9 +1249,9 @@ def snapshot_from_live(
         _required_int(issue_map, ("number",), "issue.number") != issue_number
     ):
         raise GuardFailure("active Issue target is not unique")
-    expected_branch = parse_work_block(
-        _required_str(issue_map, ("body",), "issue.body")
-    ).expected_branch
+    issue_body = _required_str(issue_map, ("body",), "issue.body")
+    metadata = parse_work_block(issue_body)
+    expected_branch = metadata.expected_branch
     pr_candidates = _sequence(
         _gh_json(
             [
@@ -953,6 +1288,7 @@ def snapshot_from_live(
             active_issue_count=len(issue_candidates),
             open_pr_count=0,
             source="live",
+            scope_evidence=_live_scope_evidence(metadata, issue_body, repo, None),
         )
     candidate_map = _mapping(pr_candidates[0], "target PR")
     resolved_pr_number = _required_int(candidate_map, ("number",), "target PR number")
@@ -1048,6 +1384,7 @@ def snapshot_from_live(
             pull_request_raw,
         )
         base_protected = True
+    scope_evidence = _live_scope_evidence(metadata, issue_body, repo, pr_number)
     snapshot = snapshot_from_json(
         {
             "issue": issue,
@@ -1063,6 +1400,14 @@ def snapshot_from_live(
             "mergeability_state": mergeability_state,
             "viewer_permission": viewer_permission,
             "base_protected": base_protected,
+            "scope_evidence": {
+                "changed_paths": [
+                    {"path": item.path, "status": item.status}
+                    for item in scope_evidence.changed_paths
+                ],
+                "checkpoint_digests": dict(scope_evidence.checkpoint_digests),
+                "immutable_digests": dict(scope_evidence.immutable_digests),
+            },
         }
     )
     return replace(snapshot, source="live")

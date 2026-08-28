@@ -1,0 +1,9 @@
+# Governance control-plane paths. Branch protection must require this owner separately.
+/AGENTS.md @Marjuraru
+/docs/development_protocol.md @Marjuraru
+/.agents/rules/** @Marjuraru
+/.agents/skills/** @Marjuraru
+/scripts/check_workflow_guards.py @Marjuraru
+/.github/workflows/** @Marjuraru
+/.github/CODEOWNERS @Marjuraru
+/.github/ISSUE_TEMPLATE/** @Marjuraru
