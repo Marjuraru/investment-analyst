@@ -171,9 +171,11 @@ results, and pending risks.
   For a FAST Work Block whose effective `finalize_policy` is AUTO, it also authorizes the narrow
   FINALIZE procedure after all live guards pass; otherwise it never authorizes merge,
   ready-for-review, scope expansion, or protected local work.
-- BUILD y AUDIT deben ejecutar `scripts/check_workflow_guards.py` con el snapshot vivo o temporal
-  autorizado. El CLI es read-only, estructural y fail-closed; ninguna skill duplica su parser ni
-  infiere Profile, policy, SHA, markers o permisos desde narrativa, modelo o cliente.
+- BUILD y AUDIT deben ejecutar `scripts/check_workflow_guards.py` con adquisición viva autoritativa.
+  `--json` sólo sirve para diagnóstico offline y nunca es un gate ni una resolución de target. El
+  CLI es read-only, estructural y fail-closed; materializa las rutas del diff, aplica policy de
+  gobernanza, allowlist/deny y hashes declarados. Ninguna skill duplica su parser ni infiere
+  Profile, policy, SHA, markers o permisos desde narrativa, modelo o cliente.
 - Explicit `/ui` in a supported client authorizes the same BUILD phase only for the UI Worker scope
   declared by the active Work Block. The UI Worker is the sole writer, uses no parallel writer or
   intra-block handoff, and returns to PLAN for any scope or capability expansion.

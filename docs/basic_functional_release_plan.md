@@ -62,19 +62,17 @@ pero no vuelve verdadera la fila antes de fusionarse. En main, `DONE` requiere e
 el Work Block con razón y evidencia viva. Los IDs pueden relacionarse con varios Work Blocks y
 viceversa.
 
-Hasta que esa secuencia termine y el candidato se fusione, el estado vivo integrado continúa como
-`ANALYST-READINESS` | `BLOCKED`; la fila candidata sólo propone el estado post-merge. El antecedente
-administrativo sigue siendo OPS-2/#66, supersedido con `insufficient_local_dates` sin completion ni
-rehearsal.
+`ANALYST-READINESS` ya está integrado como `DONE` por OPS-8/#90. El antecedente administrativo sigue
+siendo OPS-2/#66, supersedido con `insufficient_local_dates` sin completion ni rehearsal.
 
 | ID | Estado | Dependencia o condición | Evidencia integrada o límite |
 | --- | --- | --- | --- |
-| `DELIVERY-GOVERNANCE` | `DONE` | Propuesta post-merge de DEV-10 (`COMPLETES`): la ruta se vuelve integrada sólo al fusionar este PR. | DEV-8/#60, DEV-9/#62 y DEV-10/#64; el candidato no cambia main antes del merge. |
+| `DELIVERY-GOVERNANCE` | `DONE` | Integrado por DEV-10 (`COMPLETES`). | DEV-8/#60, DEV-9/#62 y DEV-10/#64. |
 | `FOUNDATIONS-RUNTIME` | `DONE` | Runtime, watchlist, health y scheduler por capacidades. | BASE-18/#29, BASE-19/#31 y OPS-1/#37. |
 | `MARKET-COMPARISON` | `DONE` | Muestra diaria UTC común, sin FX ni benchmarks sectoriales. | MKT-3/#56/#57: normalización, retorno, volatilidad, drawdown, correlación y beta v1. |
-| `ANALYST-READINESS` | `DONE` | Propuesta post-merge de OPS-8 (`COMPLETES`): sólo se vuelve integrada tras BUILD, CI, AUDIT, rehearsal HUMAN exact-SHA y merge. | OPS-8/#89 añade la sonda fail-closed y el runbook; reutiliza #85 y exige backup/restore detenido antes del merge. |
+| `ANALYST-READINESS` | `DONE` | Integrado por OPS-8 tras BUILD, CI, AUDIT, rehearsal HUMAN exact-SHA y merge. | OPS-8/#89 añade la sonda fail-closed y el runbook; reutiliza #85 y exige backup/restore detenido antes del merge. |
 | `VALUATION-HISTORY` | `DONE` | Historia materializada y reglas relativas explícitas compatibles con valoración PIT v1. | VAL-1/#70 aporta historia descriptiva; VAL-2/#72 propone percentil Decimal34 PIT sin señal ni recomendación. |
-| `INDICATORS-AND-OUTBOX` | `DONE` | Propuesta post-merge de ALERT-1 (`COMPLETES`): la ruta se vuelve integrada sólo al fusionar este PR. | RSI/MACD/ATR, reglas silenciosas y outbox local con acuse durable; los canales externos siguen pendientes. |
+| `INDICATORS-AND-OUTBOX` | `DONE` | Integrado por ALERT-1 (`COMPLETES`). | RSI/MACD/ATR, reglas silenciosas y outbox local con acuse durable; los canales externos siguen pendientes. |
 | `RELEASE-ACCEPTANCE` | `DONE` | Reconciliación HUMAN de #93/#94; integrada antes de este bloque. | La aceptación finita y la recuperación ya fueron registradas. |
 | `EQUITY-UNIVERSE` | `DONE` | Integrado mediante contratos por capacidades. | AAPL mantiene adaptadores compatibles; no hay privilegio de flujo por ticker. |
 | `SEC-CORPUS` | `NEXT` | Siguiente vertical documental pendiente de planificación. | Forms 3/4/5, 13D/13G y 13F no integrados. |

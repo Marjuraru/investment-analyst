@@ -19,13 +19,18 @@ sys.modules["check_workflow_guards"] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 
 from check_workflow_guards import (  # noqa: E402
+    GOVERNANCE_PATHS,
+    GOVERNANCE_PREFIXES,
+    ChangedPath,
     CheckSnapshot,
     CommentSnapshot,
     GuardSnapshot,
     IssueSnapshot,
     PullRequestSnapshot,
+    ScopeEvidence,
     SmokeSnapshot,
     evaluate,
+    parse_declared_scope,
     parse_marker,
     parse_work_block,
 )
@@ -34,6 +39,26 @@ ROOT = Path(__file__).resolve().parents[2]
 FULL_SHA = "a" * 40
 BASE_SHA = "b" * 40
 HISTORICAL_SHA = "c" * 40
+DECLARED_DIGEST = "d" * 64
+
+
+def _scope_body() -> str:
+    return f"""
+## Strict delta allowlist
+
+- `scripts/check_workflow_guards.py` — `{DECLARED_DIGEST}`.
+- `.github/CODEOWNERS` — `nuevo`.
+
+## Superficies protegidas
+
+### Checkpoint dormante — verificación de hash en el primary worktree
+
+### Superficies del repositorio no modificables — deny por ruta cambiada
+
+## Superficies prohibidas
+
+- `src/**` — `deny`.
+"""
 
 
 def _issue(body: str) -> IssueSnapshot:
@@ -44,12 +69,13 @@ def _body(profile: str = "CRITICAL", policy: str = "HUMAN") -> str:
     return f"""<!-- development-workflow:work-block-v1 -->
 
 - **Work Block ID:** `DEV-7`.
+- **Risk:** `R3`.
 - **Profile:** `{profile}`.
 - **finalize_policy:** `{policy}`.
 - **Base remota exacta:** `origin/main@{BASE_SHA}`.
 - **Expected branch:** `codex/dev-7-finalize-policy-guard`.
 - **Writer role:** `BUILD`.
-"""
+""" + _scope_body()
 
 
 def _pr() -> PullRequestSnapshot:
@@ -103,6 +129,7 @@ def _snapshot(
     smoke: str | None = "PASS",
     requested_changes: bool | None = False,
     open_threads: int | None = 0,
+    changed_paths: tuple[ChangedPath, ...] = (),
 ) -> GuardSnapshot:
     return GuardSnapshot(
         issue=_issue(body or _body()),
@@ -117,6 +144,7 @@ def _snapshot(
         mergeability_state="clean",
         viewer_permission="WRITE",
         base_protected=True,
+        scope_evidence=ScopeEvidence(changed_paths, {}, {}),
     )
 
 
@@ -128,6 +156,167 @@ def test_metadata_requires_unique_structural_fields_and_human_critical() -> None
         parse_work_block(_body(policy="AUTO"))
     with pytest.raises(ValueError, match="missing Work Block fields"):
         parse_work_block(_body().replace("- **Writer role:** `BUILD`.\n", ""))
+
+
+def test_declared_scope_distinguishes_checkpoint_from_immutable_and_accepts_exact_deny() -> None:
+    body = (
+        _body()
+        .replace(
+            "### Checkpoint dormante — verificación de hash en el primary worktree\n",
+            "### Checkpoint dormante — verificación de hash en el primary worktree\n\n"
+            f"- `checkpoint.txt` — `{DECLARED_DIGEST}`.\n",
+        )
+        .replace(
+            "### Superficies del repositorio no modificables — deny por ruta cambiada\n",
+            "### Superficies del repositorio no modificables — deny por ruta cambiada\n\n"
+            f"- `immutable.txt` — `{DECLARED_DIGEST}`.\n",
+        )
+        .replace("- `src/**` — `deny`.", "- `src/**` — `deny`.\n- `CLAUDE.md` — `deny`.")
+    )
+
+    scope = parse_declared_scope(body)
+
+    assert scope.checkpoint_hashes == {"checkpoint.txt": DECLARED_DIGEST}
+    assert scope.immutable_hashes == {"immutable.txt": DECLARED_DIGEST}
+    assert scope.prohibited["CLAUDE.md"] == "deny"
+
+
+def test_scope_fails_closed_for_governance_auto_and_path_contracts() -> None:
+    auto = _body(profile="FAST", policy="AUTO")
+    governance = evaluate(
+        _snapshot(
+            body=auto,
+            changed_paths=(ChangedPath("scripts/check_workflow_guards.py", "modified"),),
+        ),
+        phase="build",
+    )
+    assert governance.decision == "GUARD FAILURE"
+    assert governance.reasons == (
+        "governance path requires HUMAN policy: scripts/check_workflow_guards.py",
+    )
+
+    outside = evaluate(
+        _snapshot(changed_paths=(ChangedPath("src/new.py", "added"),)), phase="build"
+    )
+    assert outside.decision == "GUARD FAILURE"
+    assert outside.reasons == ("changed path matches prohibited surface: src/new.py",)
+
+    wrong_creation = evaluate(
+        _snapshot(changed_paths=(ChangedPath("scripts/check_workflow_guards.py", "added"),)),
+        phase="build",
+    )
+    assert wrong_creation.decision == "GUARD FAILURE"
+    assert wrong_creation.reasons == (
+        "existing allowlist path is added: scripts/check_workflow_guards.py",
+    )
+
+    allowed_new = evaluate(
+        _snapshot(changed_paths=(ChangedPath(".github/CODEOWNERS", "added"),)), phase="build"
+    )
+    assert allowed_new.decision == "BUILD GUARD PASS"
+    assert allowed_new.scope is not None
+    assert allowed_new.scope.consumed_allowlist_paths == (".github/CODEOWNERS",)
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "AGENTS.md",
+        "docs/development_protocol.md",
+        ".agents/rules/example.md",
+        ".agents/skills/example/SKILL.md",
+        "scripts/check_workflow_guards.py",
+        ".github/workflows/ci.yml",
+        ".github/CODEOWNERS",
+        ".github/ISSUE_TEMPLATE/work_block.yml",
+    ),
+)
+def test_every_declared_governance_path_requires_human_policy(path: str) -> None:
+    result = evaluate(
+        _snapshot(
+            body=_body(profile="FAST", policy="AUTO"),
+            changed_paths=(ChangedPath(path, "modified"),),
+        ),
+        phase="build",
+    )
+
+    assert result.decision == "GUARD FAILURE"
+    assert result.reasons == (f"governance path requires HUMAN policy: {path}",)
+
+
+def test_scope_hash_categories_and_deny_precede_allowlist() -> None:
+    body = (
+        _body()
+        .replace(
+            "### Checkpoint dormante — verificación de hash en el primary worktree\n",
+            "### Checkpoint dormante — verificación de hash en el primary worktree\n\n"
+            f"- `checkpoint.txt` — `{DECLARED_DIGEST}`.\n",
+        )
+        .replace(
+            "### Superficies del repositorio no modificables — deny por ruta cambiada\n",
+            "### Superficies del repositorio no modificables — deny por ruta cambiada\n\n"
+            f"- `immutable.txt` — `{DECLARED_DIGEST}`.\n",
+        )
+    )
+    valid = ScopeEvidence(
+        (), {"checkpoint.txt": DECLARED_DIGEST}, {"immutable.txt": DECLARED_DIGEST}
+    )
+
+    checkpoint_failure = evaluate(
+        replace(_snapshot(body=body), scope_evidence=replace(valid, checkpoint_digests={})),
+        phase="build",
+    )
+    assert checkpoint_failure.reasons == (
+        "checkpoint hash is absent or unreadable: checkpoint.txt",
+    )
+
+    overlap_body = body.replace(
+        f"- `scripts/check_workflow_guards.py` — `{DECLARED_DIGEST}`.",
+        "- `scripts/check_workflow_guards.py` — `"
+        f"{DECLARED_DIGEST}`.\n- `immutable.txt` — `{DECLARED_DIGEST}`.",
+    )
+    immutable_failure = evaluate(
+        replace(
+            _snapshot(
+                body=overlap_body,
+                changed_paths=(ChangedPath("immutable.txt", "modified"),),
+            ),
+            scope_evidence=valid,
+        ),
+        phase="build",
+    )
+    assert immutable_failure.reasons == ("allowlist overlaps immutable surface: immutable.txt",)
+
+
+def test_codeowners_covers_the_single_governance_constant() -> None:
+    lines = {
+        line.split()[0]
+        for line in (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    }
+
+    assert lines == {
+        "/AGENTS.md",
+        "/docs/development_protocol.md",
+        "/.agents/rules/**",
+        "/.agents/skills/**",
+        "/scripts/check_workflow_guards.py",
+        "/.github/workflows/**",
+        "/.github/CODEOWNERS",
+        "/.github/ISSUE_TEMPLATE/**",
+    }
+    assert {
+        "AGENTS.md",
+        "docs/development_protocol.md",
+        "scripts/check_workflow_guards.py",
+        ".github/CODEOWNERS",
+    } == GOVERNANCE_PATHS
+    assert GOVERNANCE_PREFIXES == (
+        ".agents/rules/",
+        ".agents/skills/",
+        ".github/workflows/",
+        ".github/ISSUE_TEMPLATE/",
+    )
 
 
 @pytest.mark.parametrize(
@@ -430,8 +619,8 @@ def test_finalization_requires_literal_gate_and_live_evidence() -> None:
 
 def test_finalization_rejects_manual_snapshot_and_non_terminal_mergeability() -> None:
     manual = replace(_snapshot(), source="json")
-    assert evaluate(manual).decision == "GUARD FAILURE"
-    assert "live acquisition" in evaluate(manual).reasons[0]
+    assert evaluate(manual).decision == "NON_AUTHORITATIVE"
+    assert evaluate(manual).as_json()["authoritative"] is False
 
     mergeability_unknown = replace(_snapshot(), mergeable=None)
     assert evaluate(mergeability_unknown).decision == "GUARD FAILURE"
@@ -600,7 +789,9 @@ def test_json_cli_is_read_only_and_cannot_authorize_finalize(tmp_path: Path) -> 
         text=True,
     )
     assert completed.returncode == 0
-    assert json.loads(completed.stdout)["decision"] == "BUILD GUARD PASS"
+    rendered = json.loads(completed.stdout)
+    assert rendered["decision"] == "NON_AUTHORITATIVE"
+    assert rendered["authoritative"] is False
     assert snapshot_path.read_bytes() == before
 
     finalized = subprocess.run(
@@ -655,4 +846,6 @@ def test_json_cli_reports_non_terminal_build_bootstrap(tmp_path: Path) -> None:
     )
 
     assert completed.returncode == 0
-    assert json.loads(completed.stdout)["decision"] == "BUILD BOOTSTRAP"
+    rendered = json.loads(completed.stdout)
+    assert rendered["decision"] == "NON_AUTHORITATIVE"
+    assert rendered["authoritative"] is False
