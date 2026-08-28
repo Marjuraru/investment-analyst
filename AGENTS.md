@@ -159,14 +159,14 @@ results, and pending risks.
   táctica en `docs/basic_functional_release_plan.md` → reconciliación con main/GitHub vivos →
   exploración dirigida → un Work Block. Los documentos orientan; main, worktree y GitHub conservan
   autoridad y cualquier desviación material se explica con evidencia viva.
-- Explicit `$plan` authorizes creating or updating only the uniquely resolved Work Block Issue and
+- Explicit `PLAN role` authorizes creating or updating only the uniquely resolved Work Block Issue and
   its workflow metadata. It does not authorize product implementation, commits, push, PR, or merge.
 - PLAN puede superseder administrativamente un único Work Block incompleto sólo con decisión humana
   explícita, cuando la evidencia viva demuestra que falta exclusivamente tiempo pasivo y existe un
   checkpoint completo. La supersesión no es completion, BUILD PASS ni FINALIZE: retira primero el
   label, relee cero activos, cierra `not_planned`, relee y sólo después publica el siguiente bloque.
   El replan posterior parte de main, metadata y hashes nuevos y vuelve a ejecutar su probe read-only.
-- Explicit `$build` authorizes implementation, intended staging, commit, push, and one draft PR only
+- Explicit `BUILD role` authorizes implementation, intended staging, commit, push, and one draft PR only
   after the active Work Block, declared base, expected branch, and working tree resolve uniquely.
   For a FAST Work Block whose effective `finalize_policy` is AUTO, it also authorizes the narrow
   FINALIZE procedure after all live guards pass; otherwise it never authorizes merge,
@@ -176,12 +176,12 @@ results, and pending risks.
   CLI es read-only, estructural y fail-closed; materializa las rutas del diff, aplica policy de
   gobernanza, allowlist/deny y hashes declarados. Ninguna skill duplica su parser ni infiere
   Profile, policy, SHA, markers o permisos desde narrativa, modelo o cliente.
-- Explicit `/ui` in a supported client authorizes the same BUILD phase only for the UI Worker scope
+- Explicit `UI_WORKER role` in a supported client authorizes the same BUILD phase only for the UI Worker scope
   declared by the active Work Block. The UI Worker is the sole writer, uses no parallel writer or
   intra-block handoff, and returns to PLAN for any scope or capability expansion.
 - PLAN, BUILD, UI_WORKER and AUDIT are roles defined by their permissions, inputs, outputs and
   gates. The selected model or client is evidence metadata only and never changes authority.
-- Explicit `/audit` in Antigravity or `$audit` in compatible clients authorizes the read-only
+- Explicit `AUDIT role` invocation authorizes the read-only
   AUDIT phase and one structured PR comment bound to the exact SHA. When the resolved Work Block
   has `finalize_policy: AUTO`, an AUDIT PASS in that same invocation may continue to the narrow
   FINALIZE procedure in `docs/development_protocol.md`; it still never authorizes source edits,

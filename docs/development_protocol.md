@@ -66,7 +66,7 @@ base, branch, PR o worktree es `BUILD GUARD FAILURE`.
 
 ## Supersesión temporal por PLAN
 
-Con decisión humana explícita en `$plan`, PLAN puede liberar administrativamente el único slot
+Con decisión humana explícita durante PLAN, PLAN puede liberar administrativamente el único slot
 `workflow:active` de un bloque incompleto sólo si una relectura viva demuestra que el único bloqueo
 es evidencia pasiva de calendario y que ningún BUILD, humano o recurso autorizado puede producirla
 legítimamente. Un defecto corregible, CI o review pendiente, credencial, permiso, scope, criterio
@@ -171,13 +171,14 @@ la siguiente acción siga siendo de su propietario.
 PLAN sólo crea o actualiza el Work Block. BUILD es el único writer, implementa el mínimo cohesivo,
 ejecuta checks focalizados, preserva trabajo protegido y publica un PR draft. AUDIT fija un SHA y
 permanece read-only respecto de source, branch, candidato y workspace permanente.
-`/ui` es una autorización explícita para que el UI Worker ejecute exactamente BUILD dentro de la
-frontera UI declarada; conserva un único writer, no permite handoff dentro del bloque y vuelve a
-PLAN ante lógica financiera, contratos, APIs, storage, providers o cualquier expansión de scope.
+`UI_WORKER` es el rol autorizado para que el UI Worker ejecute exactamente BUILD dentro de la
+frontera UI declarada. El alias `/ui` puede activar este rol en clientes compatibles; conserva un
+único writer, no permite handoff dentro del bloque y vuelve a PLAN ante lógica financiera,
+contratos, APIs, storage, providers o cualquier expansión de scope.
 
-- FAST: `$plan → $build → gates → FINALIZE → COMPLETE` cuando policy es AUTO.
-- STANDARD: `$plan → $build → /audit → PASS → FINALIZE → COMPLETE` cuando policy es AUTO.
-- CRITICAL: `$plan → $build → /audit → PASS → AWAITING HUMAN APPROVAL → HUMAN MERGE`.
+- FAST: `PLAN → BUILD → gates → FINALIZE → COMPLETE` cuando policy es AUTO.
+- STANDARD: `PLAN → BUILD → AUDIT → PASS → FINALIZE → COMPLETE` cuando policy es AUTO.
+- CRITICAL: `PLAN → BUILD → AUDIT → PASS → AWAITING HUMAN APPROVAL → HUMAN MERGE`.
 
 No se crean comandos `$merge` ni `$finalize`. Un cambio material de objetivo, scope, arquitectura o
 aceptación vuelve a PLAN; un mismatch de base o rama falla cerrado.
@@ -343,9 +344,9 @@ Cambios de skills, aliases o descubrimiento requieren un smoke real separado en 
 soportado. Los cambios de FINALIZE además demuestran una adquisición live read-only de reviews y
 `reviewThreads` mediante GraphQL, sin reutilizar un snapshot. `/skills` o equivalente debe listar
 `plan`, `build`, `audit` e
-`investment-block-flow`; `/audit` debe resolverse sin iniciar auditoría ni mutar producto. El smoke
+`investment-block-flow`; `AUDIT` debe resolverse sin iniciar auditoría ni mutar producto. El smoke
 demuestra además al menos un caso de terminality, rechazo de auditoría superficial y guard de
-finalización. Para un Work Block UI, `/ui` debe resolver una única skill canónica, recargar el
+finalización. Para un Work Block UI, `UI_WORKER` debe resolver una única skill canónica, recargar el
 workspace y demostrar el preflight read-only sin target antes de cualquier branch, archivo o PR.
 El AUDIT se ejecuta en la sesión fresca e independiente declarada por el bloque. Un unit test o
 fixture simulado no sustituye este gate.
