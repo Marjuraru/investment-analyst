@@ -52,11 +52,7 @@ def outcome_to_raw_record(outcome: OwnershipResolutionOutcome) -> RawRecord:
         available_at=outcome.available_at,
         received_at=outcome.retrieved_at,
         payload={"kind": "sec_ownership_outcome", "outcome": outcome.model_dump(mode="json")},
-        schema_version=(
-            OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2
-            if outcome.resolver_version == "sec-ownership-resolver-v2"
-            else OWNERSHIP_OUTCOME_SCHEMA_VERSION
-        ),
+        schema_version=outcome.schema_version,
     )
 
 
@@ -75,6 +71,8 @@ def outcome_from_raw_record(record: RawRecord) -> OwnershipResolutionOutcome:
         )
     except (KeyError, ValueError) as error:
         raise OwnershipRepositoryError("ownership outcome is malformed") from error
+    if record.schema_version != outcome.schema_version:
+        raise OwnershipRepositoryError("ownership outcome RawRecord schema conflicts")
     if record.record_id != outcome.raw_record_id or record.available_at != outcome.available_at:
         raise OwnershipRepositoryError("ownership outcome RawRecord conflicts")
     return outcome
@@ -111,6 +109,8 @@ def statement_from_raw_record(record: RawRecord) -> OwnershipStatement:
         statement = OwnershipStatement.model_validate_json(json.dumps(record.payload["statement"]))
     except (KeyError, ValueError) as error:
         raise OwnershipRepositoryError("ownership statement is malformed") from error
+    if record.schema_version != statement.schema_version:
+        raise OwnershipRepositoryError("ownership RawRecord schema conflicts with statement")
     if record.record_id != statement.raw_record_id or record.available_at != statement.available_at:
         raise OwnershipRepositoryError("ownership RawRecord conflicts with statement")
     return statement

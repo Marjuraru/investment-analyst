@@ -18,6 +18,7 @@ from investment_analyst.evidence.sec_documents.repository import (
 )
 from investment_analyst.evidence.sec_ownership.models import (
     OWNERSHIP_FORMS,
+    OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2,
     OWNERSHIP_SCHEMA_VERSION_V2,
     OWNERSHIP_SOURCE_ID,
     OwnershipResolutionOutcome,
@@ -220,7 +221,7 @@ class SecOwnershipPipeline:
             resource_name,
             response.sha256,
             outcome_status,
-            "sec-ownership-resolver-v2",
+            OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2,
         )
         existing = repository.get_outcome(outcome_id)
         if existing is not None:
@@ -244,5 +245,6 @@ class SecOwnershipPipeline:
             status=outcome_status,
             reason_code=outcome_reason,
             resolver_version="sec-ownership-resolver-v2",
+            schema_version=OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2,
         )
         return repository.save_outcome(outcome)

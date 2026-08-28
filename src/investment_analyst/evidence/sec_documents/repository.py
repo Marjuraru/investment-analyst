@@ -191,8 +191,18 @@ class SecDocumentRepository:
             raise SecDocumentRepositoryError(
                 "document revision has no submissions lineage"
             ) from error
-        if discovery.available_at > revision.available_at:
-            raise SecDocumentRepositoryError("document lineage became available after its revision")
+        if revision.revision_schema_version == SEC_DOCUMENT_SCHEMA_VERSION:
+            if discovery.available_at > revision.available_at:
+                raise SecDocumentRepositoryError(
+                    "document lineage became available after its revision"
+                )
+        elif discovery.received_at > revision.retrieved_at:
+            # EDGAR acceptance (v2 available_at) can predate the Submissions capture by years
+            # without invalidating the filing; only acquisition causality is checked here:
+            # the submissions listing must have been received before the document itself.
+            raise SecDocumentRepositoryError(
+                "document lineage was received after the revision was retrieved"
+            )
         if discovery.asset_id is None or not discovery.source.source_id.endswith(":submissions"):
             raise SecDocumentRepositoryError("document lineage is not a submissions RawRecord")
         if not isinstance(discovery.payload, dict):

@@ -15,6 +15,8 @@ from investment_analyst.evidence.sec_documents.repository import (
     revision_to_raw_record,
 )
 from investment_analyst.evidence.sec_ownership.models import (
+    OWNERSHIP_OUTCOME_SCHEMA_VERSION,
+    OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2,
     OwnershipResolutionOutcome,
     OwnershipStatement,
 )
@@ -106,10 +108,13 @@ def _statement(*, revision: SecDocumentRevision, schema_version: str, parsed_at:
 
 def _outcome(*, filing: SecFiling, resolver_version: str, checksum: str, discovery_id):
     is_v2 = resolver_version == "sec-ownership-resolver-v2"
+    schema_version = (
+        OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2 if is_v2 else OWNERSHIP_OUTCOME_SCHEMA_VERSION
+    )
     available_at = filing.accepted_at if is_v2 else filing.accepted_at + timedelta(days=1)
     retrieved_at = filing.accepted_at + timedelta(days=1)
     outcome_id = OwnershipResolutionOutcome.expected_id(
-        filing.accession, "form4.xml", checksum, "accepted", resolver_version
+        filing.accession, "form4.xml", checksum, "accepted", schema_version
     )
     return OwnershipResolutionOutcome(
         outcome_id=outcome_id,
@@ -129,6 +134,7 @@ def _outcome(*, filing: SecFiling, resolver_version: str, checksum: str, discove
         status="accepted",
         reason_code="ok",
         resolver_version=resolver_version,
+        schema_version=schema_version,
     )
 
 
@@ -136,7 +142,9 @@ def test_statement_v1_and_v2_round_trip_and_reject_cross_schema_records(tmp_path
     accepted_at = datetime(2025, 1, 31, 18, tzinfo=UTC)
     discovery_id = uuid4()
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
-        storage.raw_records.save(_submissions(discovery_id, accepted_at - timedelta(days=1)))
+        # Discovery (Submissions capture) happens after acceptance and before the document
+        # download, the realistic PIT ordering that used to raise before the lineage fix.
+        storage.raw_records.save(_submissions(discovery_id, accepted_at + timedelta(hours=6)))
         blob = storage.documents.put(b"one!")
         revision = _revision(
             accession="0000320193-25-000001",
@@ -212,7 +220,9 @@ def test_verify_ownership_records_checks_v2_and_fails_closed_on_corruption(tmp_p
     accepted_at = datetime(2025, 1, 31, 18, tzinfo=UTC)
     discovery_id = uuid4()
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
-        storage.raw_records.save(_submissions(discovery_id, accepted_at - timedelta(days=1)))
+        # Discovery (Submissions capture) happens after acceptance and before the document
+        # download, the realistic PIT ordering that used to raise before the lineage fix.
+        storage.raw_records.save(_submissions(discovery_id, accepted_at + timedelta(hours=6)))
         blob = storage.documents.put(b"one!")
         revision = _revision(
             accession="0000320193-25-000001",
@@ -274,3 +284,49 @@ def test_outcome_v1_and_v2_coexist_without_identity_conflict(tmp_path: Path) -> 
         assert repository.get_outcome(v1_outcome.outcome_id) == v1_outcome
         assert repository.get_outcome(v2_outcome.outcome_id) == v2_outcome
         assert outcome_from_raw_record(outcome_to_raw_record(v2_outcome)) == v2_outcome
+
+
+def test_statement_decode_rejects_a_v1_payload_relabeled_as_v2(tmp_path: Path) -> None:
+    """A genuinely v1 statement cannot be promoted to v2 by relabeling its outer RawRecord."""
+    accepted_at = datetime(2025, 1, 31, 18, tzinfo=UTC)
+    discovery_id = uuid4()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(discovery_id, accepted_at + timedelta(hours=6)))
+        blob = storage.documents.put(b"one!")
+        revision = _revision(
+            accession="0000320193-25-000001",
+            accepted_at=accepted_at,
+            retrieved_at=accepted_at + timedelta(days=2),
+            checksum=blob.sha256,
+            discovery_id=discovery_id,
+        )
+        storage.raw_records.save(revision_to_raw_record(revision))
+        statement = _statement(
+            revision=revision,
+            schema_version="sec-ownership-statement-v2",
+            parsed_at=accepted_at + timedelta(days=2),
+        )
+        record = statement_to_raw_record(statement)
+
+        with pytest.raises(StorageError, match="schema conflicts"):
+            statement_from_raw_record(
+                RawRecord(**{**record.model_dump(), "schema_version": "sec-ownership-statement-v1"})
+            )
+
+
+def test_outcome_decode_rejects_a_relabeled_schema(tmp_path: Path) -> None:
+    accepted_at = datetime(2025, 1, 31, 18, tzinfo=UTC)
+    discovery_id = uuid4()
+    filing = _filing(accession="0000320193-25-000001", accepted_at=accepted_at)
+    v2_outcome = _outcome(
+        filing=filing,
+        resolver_version="sec-ownership-resolver-v2",
+        checksum="e" * 64,
+        discovery_id=discovery_id,
+    )
+    record = outcome_to_raw_record(v2_outcome)
+
+    with pytest.raises(StorageError, match="schema conflicts"):
+        outcome_from_raw_record(
+            RawRecord(**{**record.model_dump(), "schema_version": "sec-ownership-outcome-v1"})
+        )

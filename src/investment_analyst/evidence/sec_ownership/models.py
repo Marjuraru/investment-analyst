@@ -12,6 +12,7 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 from investment_analyst.evidence.sec_documents.models import (
+    REVISION_SCHEMA_VERSION_V2,
     SecDocumentRevision,
     SecFiling,
     normalize_cik,
@@ -129,6 +130,11 @@ class OwnershipStatement(_Strict):
             raise ValueError("statement issuer conflicts with document")
         if self.available_at != self.document_revision.available_at:
             raise ValueError("statement availability must inherit document")
+        revision_schema = self.document_revision.revision_schema_version
+        statement_is_v2 = self.schema_version == OWNERSHIP_SCHEMA_VERSION_V2
+        revision_is_v2 = revision_schema == REVISION_SCHEMA_VERSION_V2
+        if statement_is_v2 != revision_is_v2:
+            raise ValueError("statement schema_version must match its document revision schema")
         if self.statement_id != self.expected_id(
             self.document_revision.revision_id, self.schema_version
         ):
@@ -176,6 +182,9 @@ class OwnershipResolutionOutcome(_Strict):
     resolver_version: Literal["sec-ownership-resolver-v1", "sec-ownership-resolver-v2"] = (
         "sec-ownership-resolver-v1"
     )
+    schema_version: Literal["sec-ownership-outcome-v1", "sec-ownership-outcome-v2"] = (
+        OWNERSHIP_OUTCOME_SCHEMA_VERSION
+    )
 
     @field_validator("content_sha256", "manifest_sha256")
     @classmethod
@@ -186,22 +195,19 @@ class OwnershipResolutionOutcome(_Strict):
 
     @model_validator(mode="after")
     def validate_identity_and_time(self) -> OwnershipResolutionOutcome:
-        if (
-            self.resolver_version == "sec-ownership-resolver-v1"
-            and self.available_at != self.retrieved_at
-        ):
+        is_v2 = self.resolver_version == "sec-ownership-resolver-v2"
+        if is_v2 != (self.schema_version == OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2):
+            raise ValueError("outcome schema_version must match resolver_version")
+        if not is_v2 and self.available_at != self.retrieved_at:
             raise ValueError("outcome availability must equal retrieval")
-        if (
-            self.resolver_version == "sec-ownership-resolver-v2"
-            and self.available_at != self.filing.accepted_at
-        ):
+        if is_v2 and self.available_at != self.filing.accepted_at:
             raise ValueError("v2 outcome availability must equal SEC filing acceptance")
         if self.outcome_id != self.expected_id(
             self.filing.accession,
             self.resource_name,
             self.content_sha256,
             self.status,
-            self.resolver_version,
+            self.schema_version,
         ):
             raise ValueError("outcome identity is invalid")
         if self.raw_record_id != self.expected_raw_record_id(self.outcome_id):
@@ -214,9 +220,13 @@ class OwnershipResolutionOutcome(_Strict):
         name: str,
         content_sha256: str,
         status: str,
-        resolver_version: str = "sec-ownership-resolver-v1",
+        schema_version: str = OWNERSHIP_OUTCOME_SCHEMA_VERSION,
     ) -> UUID:
-        return uuid5(_OUTCOMES, f"{accession}|{name}|{content_sha256}|{status}|{resolver_version}")
+        # The v1 identity is byte-exact to the historical formula integrated in main: it embeds
+        # the literal "v1" marker regardless of any newer field, so already-persisted v1 outcomes
+        # keep decoding, verifying, and coexisting without rewriting their identity.
+        marker = "v1" if schema_version == OWNERSHIP_OUTCOME_SCHEMA_VERSION else schema_version
+        return uuid5(_OUTCOMES, f"{accession}|{name}|{content_sha256}|{status}|{marker}")
 
     @staticmethod
     def expected_raw_record_id(outcome_id: UUID) -> UUID:

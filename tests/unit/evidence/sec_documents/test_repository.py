@@ -69,6 +69,42 @@ def _submissions(record_id, available_at: datetime) -> RawRecord:
     )
 
 
+def _v2_revision(
+    *, checksum: str, accepted_at: datetime, retrieved_at: datetime, discovery_id
+) -> SecDocumentRevision:
+    filing = SecFiling(
+        filing_id=SecFiling.expected_id("0000320193", "0000320193-25-000001"),
+        filer_cik="0000320193",
+        accession="0000320193-25-000001",
+        form="10-K",
+        filing_date=accepted_at.date(),
+        report_date=date(2024, 12, 31),
+        accepted_at=accepted_at,
+        is_amendment=False,
+    )
+    document = SecLogicalDocument(
+        document_id=SecLogicalDocument.expected_id(filing.filing_id, "annual.htm"),
+        filing=filing,
+        name="annual.htm",
+    )
+    revision_id = SecDocumentRevision.expected_id(
+        document.document_id, checksum, "sec-document-revision-v2"
+    )
+    return SecDocumentRevision(
+        revision_id=revision_id,
+        asset_id="equity:us:aapl",
+        document=document,
+        raw_record_id=SecDocumentRevision.expected_raw_record_id(revision_id),
+        discovery_raw_record_id=discovery_id,
+        content_sha256=checksum,
+        content_size_bytes=4,
+        available_at=accepted_at,
+        retrieved_at=retrieved_at,
+        source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/annual.htm",
+        revision_schema_version="sec-document-revision-v2",
+    )
+
+
 def _raw_path(storage: LocalStorage, record_id) -> Path:
     row = storage.store.connection.execute(
         "SELECT relative_path FROM raw_record_index WHERE record_id = ?", [str(record_id)]
@@ -155,3 +191,51 @@ def test_replay_excludes_v1_legacy_records_and_reports_their_count(tmp_path: Pat
         assert found.state == "found"
         assert found.revision == current
         assert found.legacy_records_excluded == 1
+
+
+def test_v2_lineage_survives_discovery_captured_years_after_historical_acceptance(
+    tmp_path: Path,
+) -> None:
+    """Real imports: EDGAR acceptance is old, the Submissions snapshot is captured at import
+    time, and the document is downloaded right after. Availability (acceptance) must not be
+    compared against the discovery timestamp; only acquisition causality is checked."""
+    accepted_at = datetime(2020, 3, 1, tzinfo=UTC)
+    discovered_at = datetime(2026, 8, 1, tzinfo=UTC)
+    retrieved_at = datetime(2026, 8, 1, minute=5, tzinfo=UTC)
+    discovery_id = uuid4()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(discovery_id, discovered_at))
+        blob = storage.documents.put(b"one!")
+        revision = _v2_revision(
+            checksum=blob.sha256,
+            accepted_at=accepted_at,
+            retrieved_at=retrieved_at,
+            discovery_id=discovery_id,
+        )
+        storage.raw_records.save(revision_to_raw_record(revision))
+
+        repository = SecDocumentRepository(storage.raw_records, storage.documents)
+        repository.verify_revision(revision)
+
+
+def test_v2_lineage_rejects_discovery_received_after_document_retrieval(tmp_path: Path) -> None:
+    """Acquisition causality still fails closed: discovering the filing after the document was
+    already downloaded is not a valid lineage, even under v2 availability semantics."""
+    accepted_at = datetime(2020, 3, 1, tzinfo=UTC)
+    retrieved_at = datetime(2026, 8, 1, tzinfo=UTC)
+    discovered_at = datetime(2026, 8, 2, tzinfo=UTC)
+    discovery_id = uuid4()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(discovery_id, discovered_at))
+        blob = storage.documents.put(b"one!")
+        revision = _v2_revision(
+            checksum=blob.sha256,
+            accepted_at=accepted_at,
+            retrieved_at=retrieved_at,
+            discovery_id=discovery_id,
+        )
+        storage.raw_records.save(revision_to_raw_record(revision))
+
+        repository = SecDocumentRepository(storage.raw_records, storage.documents)
+        with pytest.raises(StorageError, match="received after the revision was retrieved"):
+            repository.verify_revision(revision)

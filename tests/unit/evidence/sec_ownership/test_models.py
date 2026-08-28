@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
@@ -8,6 +9,8 @@ from investment_analyst.evidence.sec_documents.models import (
     SecLogicalDocument,
 )
 from investment_analyst.evidence.sec_ownership.models import (
+    OWNERSHIP_OUTCOME_SCHEMA_VERSION,
+    OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2,
     OwnershipQueryResult,
     OwnershipResolutionOutcome,
     OwnershipStatement,
@@ -74,8 +77,13 @@ def _statement(*, schema_version: str, revision: SecDocumentRevision, parsed_at:
 
 def _outcome(*, resolver_version: str, available_at: datetime) -> OwnershipResolutionOutcome:
     filing = _filing()
+    schema_version = (
+        OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2
+        if resolver_version == "sec-ownership-resolver-v2"
+        else OWNERSHIP_OUTCOME_SCHEMA_VERSION
+    )
     outcome_id = OwnershipResolutionOutcome.expected_id(
-        filing.accession, "form4.xml", "c" * 64, "accepted", resolver_version
+        filing.accession, "form4.xml", "c" * 64, "accepted", schema_version
     )
     return OwnershipResolutionOutcome(
         outcome_id=outcome_id,
@@ -95,6 +103,7 @@ def _outcome(*, resolver_version: str, available_at: datetime) -> OwnershipResol
         status="accepted",
         reason_code="ok",
         resolver_version=resolver_version,
+        schema_version=schema_version,
     )
 
 
@@ -125,6 +134,24 @@ def test_v2_statement_availability_cannot_be_parsed_at() -> None:
         OwnershipStatement(**{**valid.model_dump(), "available_at": _RETRIEVED_AT})
 
 
+def test_statement_schema_cannot_be_mixed_with_a_mismatched_revision() -> None:
+    v1_revision = _revision(schema_version="sec-document-revision-v1", available_at=_RETRIEVED_AT)
+    v2_revision = _revision(schema_version="sec-document-revision-v2", available_at=_ACCEPTED_AT)
+
+    with pytest.raises(ValueError, match="schema_version must match its document revision schema"):
+        _statement(
+            schema_version="sec-ownership-statement-v2",
+            revision=v1_revision,
+            parsed_at=_RETRIEVED_AT,
+        )
+    with pytest.raises(ValueError, match="schema_version must match its document revision schema"):
+        _statement(
+            schema_version="sec-ownership-statement-v1",
+            revision=v2_revision,
+            parsed_at=_RETRIEVED_AT,
+        )
+
+
 def test_v1_outcome_still_requires_availability_equal_retrieval() -> None:
     with pytest.raises(ValueError, match="outcome availability must equal retrieval"):
         _outcome(resolver_version="sec-ownership-resolver-v1", available_at=_ACCEPTED_AT)
@@ -144,6 +171,48 @@ def test_v2_outcome_availability_cannot_be_retrieved_at() -> None:
         ValueError, match="v2 outcome availability must equal SEC filing acceptance"
     ):
         _outcome(resolver_version="sec-ownership-resolver-v2", available_at=_RETRIEVED_AT)
+
+
+def test_outcome_schema_version_cannot_diverge_from_resolver_version() -> None:
+    filing = _filing()
+    outcome_id = OwnershipResolutionOutcome.expected_id(
+        filing.accession, "form4.xml", "c" * 64, "accepted", OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2
+    )
+    with pytest.raises(ValueError, match="schema_version must match resolver_version"):
+        OwnershipResolutionOutcome(
+            outcome_id=outcome_id,
+            raw_record_id=OwnershipResolutionOutcome.expected_raw_record_id(outcome_id),
+            asset_id="equity:us:aapl",
+            filing=filing,
+            discovery_raw_record_id=filing.filing_id,
+            declared_locator="form4.xml",
+            resource_name="form4.xml",
+            resource_url="https://www.sec.gov/Archives/form4.xml",
+            content_sha256="c" * 64,
+            content_size_bytes=1,
+            manifest_url="https://www.sec.gov/Archives/index.json",
+            manifest_sha256="d" * 64,
+            available_at=_ACCEPTED_AT,
+            retrieved_at=_RETRIEVED_AT,
+            status="accepted",
+            reason_code="ok",
+            resolver_version="sec-ownership-resolver-v1",
+            schema_version=OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2,
+        )
+
+
+def test_v1_outcome_identity_is_byte_exact_to_the_integrated_main_algorithm() -> None:
+    """No new field may perturb the v1 identity already persisted by main."""
+    filing = _filing()
+    outcomes_namespace = uuid5(NAMESPACE_URL, "investment-analyst:sec-ownership-outcome:v1")
+    expected_main_uuid = uuid5(
+        outcomes_namespace, f"{filing.accession}|form4.xml|{'c' * 64}|accepted|v1"
+    )
+
+    assert (
+        OwnershipResolutionOutcome.expected_id(filing.accession, "form4.xml", "c" * 64, "accepted")
+        == expected_main_uuid
+    )
 
 
 def test_query_result_truncation_cannot_be_misreported() -> None:
