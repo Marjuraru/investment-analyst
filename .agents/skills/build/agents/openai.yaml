@@ -1,6 +1,6 @@
 interface:
   display_name: "Build Work Block"
   short_description: "Implementa y publica el Work Block activo"
-  default_prompt: "Usa $build para implementar y publicar el Work Block activo."
+  default_prompt: "Ejecuta el rol BUILD para implementar y publicar el Work Block activo."
 policy:
   allow_implicit_invocation: false

@@ -1,6 +1,6 @@
 ---
 name: audit
-description: Audita el único PR activo y publica evidencia exact-SHA. Requiere /audit o $audit; AUDIT es read-only y sólo una policy AUTO puede habilitar FINALIZE mecánico posterior.
+description: Audita el único PR activo y publica evidencia exact-SHA. Requiere una invocación explícita del rol AUDIT; AUDIT es read-only y sólo una policy AUTO puede habilitar FINALIZE mecánico posterior.
 ---
 
 # Audit Work Block
