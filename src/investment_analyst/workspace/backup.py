@@ -25,6 +25,9 @@ from investment_analyst.core.models import (
     NormalizedObservation,
 )
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
+from investment_analyst.evidence.sec_beneficial_ownership.repository import (
+    verify_beneficial_ownership_records,
+)
 from investment_analyst.evidence.sec_documents.repository import (
     SecDocumentRepository,
     verify_document_records,
@@ -518,6 +521,11 @@ def _scan_raw_records(storage: LocalStorage) -> int:
             SecDocumentRepository(storage.raw_records, storage.documents),
         )
         verify_ownership_records(
+            records.values(),
+            SecDocumentRepository(storage.raw_records, storage.documents),
+            storage.documents,
+        )
+        verify_beneficial_ownership_records(
             records.values(),
             SecDocumentRepository(storage.raw_records, storage.documents),
             storage.documents,

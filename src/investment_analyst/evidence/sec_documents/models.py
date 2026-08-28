@@ -19,7 +19,12 @@ REVISION_SCHEMA_VERSION_V2 = "sec-document-revision-v2"
 FINANCIAL_SEC_FORMS = frozenset(
     {"10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "40-F/A"}
 )
-SUPPORTED_SEC_FORMS = FINANCIAL_SEC_FORMS | frozenset({"3", "3/A", "4", "4/A", "5", "5/A"})
+BENEFICIAL_OWNERSHIP_FORMS = frozenset({"SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A"})
+SUPPORTED_SEC_FORMS = (
+    FINANCIAL_SEC_FORMS
+    | frozenset({"3", "3/A", "4", "4/A", "5", "5/A"})
+    | BENEFICIAL_OWNERSHIP_FORMS
+)
 _ACCESSION = re.compile(r"^\d{10}-\d{2}-\d{6}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DOCUMENT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
@@ -45,7 +50,7 @@ class SecFiling(_FrozenContract):
     accession: NonEmptyStr
     form: NonEmptyStr
     filing_date: date
-    report_date: date
+    report_date: date | None
     accepted_at: UTCDateTime
     is_amendment: bool
 
@@ -67,6 +72,15 @@ class SecFiling(_FrozenContract):
         if value not in SUPPORTED_SEC_FORMS:
             raise ValueError("form is outside the SEC corpus v1 family")
         return value
+
+    @model_validator(mode="after")
+    def require_report_date_for_existing_families(self) -> SecFiling:
+        if (
+            self.form in FINANCIAL_SEC_FORMS | frozenset({"3", "3/A", "4", "4/A", "5", "5/A"})
+            and self.report_date is None
+        ):
+            raise ValueError("report_date is required for financial and Section 16 forms")
+        return self
 
     @model_validator(mode="after")
     def validate_identity(self) -> SecFiling:
