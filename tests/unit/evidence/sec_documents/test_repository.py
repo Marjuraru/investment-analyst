@@ -6,6 +6,8 @@ import pytest
 
 from investment_analyst.core.models import RawRecord, SourceReference
 from investment_analyst.evidence.sec_documents.models import (
+    SEC_DOCUMENT_SCHEMA_VERSION,
+    SEC_DOCUMENT_SOURCE_ID,
     SecDocumentRevision,
     SecFiling,
     SecLogicalDocument,
@@ -111,3 +113,45 @@ def test_replay_uses_sql_pit_filter_before_future_corrupt_record(tmp_path: Path)
                 known_at=first_time + timedelta(days=2),
                 accession="0000320193-25-000001",
             )
+
+
+def test_replay_excludes_v1_legacy_records_and_reports_their_count(tmp_path: Path) -> None:
+    known_at = datetime(2025, 3, 1, tzinfo=UTC)
+    discovery_id = uuid4()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(discovery_id, known_at - timedelta(days=60)))
+
+        legacy_retrieved_at = known_at - timedelta(days=30)
+        storage.raw_records.save(
+            RawRecord(
+                asset_id="equity:us:aapl",
+                source=SourceReference(
+                    source_id=SEC_DOCUMENT_SOURCE_ID,
+                    retrieved_at=legacy_retrieved_at,
+                ),
+                event_time=legacy_retrieved_at,
+                available_at=legacy_retrieved_at,
+                received_at=legacy_retrieved_at,
+                payload={"kind": "sec_document_revision", "revision": {}},
+                schema_version=SEC_DOCUMENT_SCHEMA_VERSION,
+            )
+        )
+
+        repository = SecDocumentRepository(storage.raw_records, storage.documents)
+
+        missing = repository.replay(asset_id="equity:us:aapl", known_at=known_at)
+        assert missing.state == "missing"
+        assert missing.legacy_records_excluded == 1
+
+        blob = storage.documents.put(b"nine!")
+        current = _revision(
+            checksum=blob.sha256,
+            retrieved_at=known_at - timedelta(days=1),
+            discovery_id=discovery_id,
+        )
+        storage.raw_records.save(revision_to_raw_record(current))
+
+        found = repository.replay(asset_id="equity:us:aapl", known_at=known_at)
+        assert found.state == "found"
+        assert found.revision == current
+        assert found.legacy_records_excluded == 1

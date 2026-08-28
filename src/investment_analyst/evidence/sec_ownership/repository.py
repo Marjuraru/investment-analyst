@@ -26,10 +26,13 @@ class OwnershipRepositoryError(StorageError):
 def verify_ownership_records(records, document_repository, content_store) -> None:
     """Verify ownership outcomes and statements inside the existing paginated scan."""
     for record in records:
-        if record.schema_version == OWNERSHIP_OUTCOME_SCHEMA_VERSION:
+        if record.schema_version in {
+            OWNERSHIP_OUTCOME_SCHEMA_VERSION,
+            OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2,
+        }:
             outcome = outcome_from_raw_record(record)
             content_store.verify(outcome.content_sha256, size_bytes=outcome.content_size_bytes)
-        elif record.schema_version == OWNERSHIP_SCHEMA_VERSION:
+        elif record.schema_version in {OWNERSHIP_SCHEMA_VERSION, OWNERSHIP_SCHEMA_VERSION_V2}:
             statement = statement_from_raw_record(record)
             document_repository.verify_revision(statement.document_revision)
 

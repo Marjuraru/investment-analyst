@@ -156,8 +156,13 @@ class SecDocumentRepository:
             accession=accession,
             revision_id=revision_id,
         )
+        legacy_excluded = self._raw_records.count(
+            asset_id=asset_id,
+            source_id=SEC_DOCUMENT_SOURCE_ID,
+            schema_version=SEC_DOCUMENT_SCHEMA_VERSION,
+        )
         if not candidates:
-            return SecDocumentReplay(state="missing")
+            return SecDocumentReplay(state="missing", legacy_records_excluded=legacy_excluded)
         latest_at = candidates[-1].available_at
         latest = [item for item in candidates if item.available_at == latest_at]
         if len({item.revision_id for item in latest}) != 1:
@@ -167,7 +172,12 @@ class SecDocumentRepository:
         content = self._content.read(selected.content_sha256) if include_content else None
         if content is not None and len(content) != selected.content_size_bytes:
             raise SecDocumentRepositoryError("document content size does not match revision")
-        return SecDocumentReplay(state="found", revision=selected, content=content)
+        return SecDocumentReplay(
+            state="found",
+            revision=selected,
+            content=content,
+            legacy_records_excluded=legacy_excluded,
+        )
 
     def verify_revision(self, revision: SecDocumentRevision) -> None:
         """Verify blob and discovery lineage without materializing the blob."""

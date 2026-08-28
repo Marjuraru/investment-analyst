@@ -188,6 +188,7 @@ class SecDocumentReplay(_FrozenContract):
     state: Literal["found", "missing"]
     revision: SecDocumentRevision | None = None
     content: bytes | None = None
+    legacy_records_excluded: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_state(self) -> SecDocumentReplay:
