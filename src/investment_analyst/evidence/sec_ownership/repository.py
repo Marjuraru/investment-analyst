@@ -9,7 +9,9 @@ from uuid import UUID
 from investment_analyst.core.models import RawRecord, SourceReference
 from investment_analyst.evidence.sec_ownership.models import (
     OWNERSHIP_OUTCOME_SCHEMA_VERSION,
+    OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2,
     OWNERSHIP_SCHEMA_VERSION,
+    OWNERSHIP_SCHEMA_VERSION_V2,
     OWNERSHIP_SOURCE_ID,
     OwnershipResolutionOutcome,
     OwnershipStatement,
@@ -47,14 +49,19 @@ def outcome_to_raw_record(outcome: OwnershipResolutionOutcome) -> RawRecord:
         available_at=outcome.available_at,
         received_at=outcome.retrieved_at,
         payload={"kind": "sec_ownership_outcome", "outcome": outcome.model_dump(mode="json")},
-        schema_version=OWNERSHIP_OUTCOME_SCHEMA_VERSION,
+        schema_version=(
+            OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2
+            if outcome.resolver_version == "sec-ownership-resolver-v2"
+            else OWNERSHIP_OUTCOME_SCHEMA_VERSION
+        ),
     )
 
 
 def outcome_from_raw_record(record: RawRecord) -> OwnershipResolutionOutcome:
     if (
         record.source.source_id != OWNERSHIP_SOURCE_ID
-        or record.schema_version != OWNERSHIP_OUTCOME_SCHEMA_VERSION
+        or record.schema_version
+        not in {OWNERSHIP_OUTCOME_SCHEMA_VERSION, OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2}
         or not isinstance(record.payload, dict)
         or record.payload.get("kind") != "sec_ownership_outcome"
     ):
@@ -85,14 +92,14 @@ def statement_to_raw_record(statement: OwnershipStatement) -> RawRecord:
         available_at=statement.available_at,
         received_at=statement.parsed_at,
         payload={"kind": "sec_ownership_statement", "statement": statement.model_dump(mode="json")},
-        schema_version=OWNERSHIP_SCHEMA_VERSION,
+        schema_version=statement.schema_version,
     )
 
 
 def statement_from_raw_record(record: RawRecord) -> OwnershipStatement:
     if (
         record.source.source_id != OWNERSHIP_SOURCE_ID
-        or record.schema_version != OWNERSHIP_SCHEMA_VERSION
+        or record.schema_version not in {OWNERSHIP_SCHEMA_VERSION, OWNERSHIP_SCHEMA_VERSION_V2}
         or not isinstance(record.payload, dict)
         or record.payload.get("kind") != "sec_ownership_statement"
     ):
@@ -147,7 +154,7 @@ class OwnershipRepository:
                 for record in self._raw_records.list(
                     asset_id=asset_id,
                     source_id=OWNERSHIP_SOURCE_ID,
-                    schema_version=OWNERSHIP_SCHEMA_VERSION,
+                    schema_version=OWNERSHIP_SCHEMA_VERSION_V2,
                     available_to=known_at,
                 )
             ),

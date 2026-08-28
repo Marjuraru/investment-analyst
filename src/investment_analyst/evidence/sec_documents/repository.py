@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from investment_analyst.core.models import RawRecord, SourceReference
 from investment_analyst.evidence.sec_documents.models import (
     SEC_DOCUMENT_SCHEMA_VERSION,
+    SEC_DOCUMENT_SCHEMA_VERSION_V2,
     SEC_DOCUMENT_SOURCE_ID,
     SecDocumentReplay,
     SecDocumentRevision,
@@ -46,7 +47,7 @@ def revision_to_raw_record(revision: SecDocumentRevision) -> RawRecord:
             "kind": "sec_document_revision",
             "revision": revision.model_dump(mode="json"),
         },
-        schema_version=SEC_DOCUMENT_SCHEMA_VERSION,
+        schema_version=revision.revision_schema_version,
     )
 
 
@@ -54,7 +55,7 @@ def revision_from_raw_record(record: RawRecord) -> SecDocumentRevision:
     """Decode strict metadata and reject body-bearing or inconsistent RawRecords."""
     if record.record_id is None or record.source.source_id != SEC_DOCUMENT_SOURCE_ID:
         raise SecDocumentRepositoryError("document RawRecord source is invalid")
-    if record.schema_version != SEC_DOCUMENT_SCHEMA_VERSION:
+    if record.schema_version not in {SEC_DOCUMENT_SCHEMA_VERSION, SEC_DOCUMENT_SCHEMA_VERSION_V2}:
         raise SecDocumentRepositoryError("document RawRecord schema is invalid")
     if not isinstance(record.payload, dict) or set(record.payload) != {"kind", "revision"}:
         raise SecDocumentRepositoryError("document RawRecord payload is malformed")
@@ -68,6 +69,8 @@ def revision_from_raw_record(record: RawRecord) -> SecDocumentRevision:
         raise SecDocumentRepositoryError("document RawRecord revision is malformed") from error
     if record.record_id != revision.raw_record_id:
         raise SecDocumentRepositoryError("document RawRecord identifier does not match revision")
+    if record.schema_version != revision.revision_schema_version:
+        raise SecDocumentRepositoryError("document RawRecord schema conflicts with revision")
     if record.asset_id != revision.asset_id:
         raise SecDocumentRepositoryError("document RawRecord asset does not match revision")
     if (
@@ -115,7 +118,7 @@ class SecDocumentRepository:
         records = self._raw_records.list(
             asset_id=asset_id,
             source_id=SEC_DOCUMENT_SOURCE_ID,
-            schema_version=SEC_DOCUMENT_SCHEMA_VERSION,
+            schema_version=SEC_DOCUMENT_SCHEMA_VERSION_V2,
             available_to=known_at,
         )
         revisions: list[SecDocumentRevision] = []
@@ -198,5 +201,5 @@ def verify_document_records(
 ) -> None:
     """Verify documentary records encountered in an existing paginated scan."""
     for record in records:
-        if record.schema_version == SEC_DOCUMENT_SCHEMA_VERSION:
+        if record.schema_version in {SEC_DOCUMENT_SCHEMA_VERSION, SEC_DOCUMENT_SCHEMA_VERSION_V2}:
             repository.verify_revision(revision_from_raw_record(record))

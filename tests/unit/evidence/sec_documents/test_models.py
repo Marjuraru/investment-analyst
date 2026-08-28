@@ -80,3 +80,28 @@ def test_revision_rejects_backdated_availability_and_invalid_primary_path() -> N
             filing=document.filing,
             name="../annual.htm",
         )
+
+
+def test_v2_revision_uses_filing_acceptance_independently_of_retrieval() -> None:
+    document = _document()
+    revision_id = SecDocumentRevision.expected_id(
+        document.document_id, "c" * 64, "sec-document-revision-v2"
+    )
+    revision = SecDocumentRevision(
+        revision_id=revision_id,
+        asset_id="equity:us:aapl",
+        document=document,
+        raw_record_id=SecDocumentRevision.expected_raw_record_id(revision_id),
+        discovery_raw_record_id=document.filing.filing_id,
+        content_sha256="c" * 64,
+        content_size_bytes=1,
+        available_at=document.filing.accepted_at,
+        retrieved_at=datetime(2025, 2, 2, tzinfo=UTC),
+        source_url="https://www.sec.gov/Archives/x",
+        revision_schema_version="sec-document-revision-v2",
+    )
+
+    assert revision.available_at != revision.retrieved_at
+
+    with pytest.raises(ValueError, match="SEC filing acceptance"):
+        SecDocumentRevision(**{**revision.model_dump(), "available_at": revision.retrieved_at})

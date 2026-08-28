@@ -6,7 +6,9 @@ from uuid import uuid4
 from investment_analyst.core.models import AssetClass, RawRecord, SourceReference
 from investment_analyst.evidence.sec_ownership.models import (
     OWNERSHIP_OUTCOME_SCHEMA_VERSION,
+    OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2,
     OWNERSHIP_SCHEMA_VERSION,
+    OWNERSHIP_SCHEMA_VERSION_V2,
 )
 from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_document_client import (
@@ -108,6 +110,8 @@ def test_pipeline_preserves_rejected_locator_then_parses_manifest_xml(tmp_path: 
         second = pipeline.run(SecOwnershipImportRequest(forms=("4",)))
 
         assert len(first) == len(second) == 1
-        assert storage.raw_records.count(schema_version=OWNERSHIP_OUTCOME_SCHEMA_VERSION) == 2
-        assert storage.raw_records.count(schema_version="sec-document-revision-v1") == 1
-        assert storage.raw_records.count(schema_version=OWNERSHIP_SCHEMA_VERSION) == 1
+        assert storage.raw_records.count(schema_version=OWNERSHIP_OUTCOME_SCHEMA_VERSION) == 0
+        assert storage.raw_records.count(schema_version=OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2) == 2
+        assert storage.raw_records.count(schema_version="sec-document-revision-v2") == 1
+        assert storage.raw_records.count(schema_version=OWNERSHIP_SCHEMA_VERSION) == 0
+        assert storage.raw_records.count(schema_version=OWNERSHIP_SCHEMA_VERSION_V2) == 1

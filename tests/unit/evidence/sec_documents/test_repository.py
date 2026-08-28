@@ -25,7 +25,7 @@ def _revision(*, checksum: str, retrieved_at: datetime, discovery_id) -> SecDocu
         form="10-K",
         filing_date=date(2025, 1, 31),
         report_date=date(2024, 12, 31),
-        accepted_at=datetime(2025, 1, 31, tzinfo=UTC),
+        accepted_at=retrieved_at,
         is_amendment=False,
     )
     document = SecLogicalDocument(
@@ -34,7 +34,7 @@ def _revision(*, checksum: str, retrieved_at: datetime, discovery_id) -> SecDocu
         name="annual.htm",
     )
     revision_id = SecDocumentRevision.expected_id(
-        document.document_id, checksum, "sec-document-revision-v1"
+        document.document_id, checksum, "sec-document-revision-v2"
     )
     return SecDocumentRevision(
         revision_id=revision_id,
@@ -47,6 +47,7 @@ def _revision(*, checksum: str, retrieved_at: datetime, discovery_id) -> SecDocu
         available_at=retrieved_at,
         retrieved_at=retrieved_at,
         source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/annual.htm",
+        revision_schema_version="sec-document-revision-v2",
     )
 
 

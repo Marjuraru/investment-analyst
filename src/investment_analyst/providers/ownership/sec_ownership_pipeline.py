@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from investment_analyst.core.models import SourceDefinition, SourceType
 from investment_analyst.evidence.sec_documents.models import (
+    REVISION_SCHEMA_VERSION_V2,
     SecDocumentRevision,
     SecFiling,
     SecLogicalDocument,
@@ -17,6 +18,7 @@ from investment_analyst.evidence.sec_documents.repository import (
 )
 from investment_analyst.evidence.sec_ownership.models import (
     OWNERSHIP_FORMS,
+    OWNERSHIP_SCHEMA_VERSION_V2,
     OWNERSHIP_SOURCE_ID,
     OwnershipResolutionOutcome,
     OwnershipStatement,
@@ -129,7 +131,7 @@ class SecOwnershipPipeline:
             revision_id = SecDocumentRevision.expected_id(
                 semantic_document.document_id,
                 resolved.semantic.sha256,
-                "sec-document-revision-v1",
+                REVISION_SCHEMA_VERSION_V2,
             )
             revision = documents.get_revision(revision_id)
             if revision is None:
@@ -142,12 +144,15 @@ class SecOwnershipPipeline:
                     discovery_raw_record_id=submissions.record_id,
                     content_sha256=receipt.sha256,
                     content_size_bytes=receipt.size_bytes,
-                    available_at=resolved.semantic.retrieved_at,
+                    available_at=filing.accepted_at,
                     retrieved_at=resolved.semantic.retrieved_at,
                     source_url=resolved.semantic.url,
+                    revision_schema_version=REVISION_SCHEMA_VERSION_V2,
                 )
                 self._storage.raw_records.save(revision_to_raw_record(revision))
-            statement_id = OwnershipStatement.expected_id(revision.revision_id)
+            statement_id = OwnershipStatement.expected_id(
+                revision.revision_id, OWNERSHIP_SCHEMA_VERSION_V2
+            )
             statement = ownership.get(statement_id)
             if statement is None:
                 statement = parse_ownership_statement(
@@ -211,7 +216,11 @@ class SecOwnershipPipeline:
         outcome_status = status or classification.status
         outcome_reason = reason_code or classification.reason_code
         outcome_id = OwnershipResolutionOutcome.expected_id(
-            filing.accession, resource_name, response.sha256, outcome_status
+            filing.accession,
+            resource_name,
+            response.sha256,
+            outcome_status,
+            "sec-ownership-resolver-v2",
         )
         existing = repository.get_outcome(outcome_id)
         if existing is not None:
@@ -230,9 +239,10 @@ class SecOwnershipPipeline:
             content_size_bytes=receipt.size_bytes,
             manifest_url=manifest.url,
             manifest_sha256=manifest.sha256,
-            available_at=response.retrieved_at,
+            available_at=filing.accepted_at,
             retrieved_at=response.retrieved_at,
             status=outcome_status,
             reason_code=outcome_reason,
+            resolver_version="sec-ownership-resolver-v2",
         )
         return repository.save_outcome(outcome)
