@@ -14,5 +14,7 @@ Sólo el XML crudo clasificado como aceptado puede crear una revisión documenta
 outcome conserva accession, locator, manifest, hash, URL y disponibilidad; los datos permanecen
 append-only y se consultan por `known_at`. La ausencia se informa como `missing`, no como cero.
 
-Esta entrega no incluye Forms 13D/13G o 13F, búsqueda textual, UI/API, analytics ni normalización de
-direcciones, firmas, CUSIP o instrumentos.
+Esta entrega no incluye 13F, búsqueda textual, UI/API, analytics ni normalización de direcciones,
+firmas, CUSIP o instrumentos. Los Schedules 13D/13G viven en la vertical independiente
+[`sec_beneficial_ownership.md`](sec_beneficial_ownership.md), sin reinterpretar los contratos de
+Sección 16.
