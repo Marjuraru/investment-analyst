@@ -62,7 +62,8 @@ pero no vuelve verdadera la fila antes de fusionarse. En main, `DONE` requiere e
 el Work Block con razón y evidencia viva. Los IDs pueden relacionarse con varios Work Blocks y
 viceversa.
 
-`ANALYST-READINESS` ya está integrado como `DONE` por OPS-8/#90. El antecedente administrativo sigue
+`ANALYST-READINESS` ya está integrado como `DONE` por OPS-8/#90; la frase histórica
+`ANALYST-READINESS` | `BLOCKED` ya no describe el estado vivo. El antecedente administrativo sigue
 siendo OPS-2/#66, supersedido con `insufficient_local_dates` sin completion ni rehearsal.
 
 | ID | Estado | Dependencia o condición | Evidencia integrada o límite |
