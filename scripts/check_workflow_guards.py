@@ -1013,21 +1013,10 @@ def _gh_json_lines(arguments: Sequence[str], label: str) -> tuple[object, ...]:
 
 
 def _gh_paginated_array(arguments: Sequence[str], label: str) -> tuple[object, ...]:
-    try:
-        result = subprocess.run(
-            ["gh", "api", "--paginate", "--slurp", *arguments],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        raise GuardFailure(f"{label} could not be read") from error
-    pages = _sequence(_json_value(result.stdout, label), label)
-    values: list[object] = []
-    for page in pages:
-        values.extend(_sequence(page, f"{label} page"))
-    return tuple(values)
+    return _gh_json_lines(
+        ("api", "--paginate", "--jq", ".[] | @json", *arguments),
+        label,
+    )
 
 
 def _git_bytes(arguments: Sequence[str], label: str) -> bytes:
