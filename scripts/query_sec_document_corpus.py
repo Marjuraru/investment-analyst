@@ -59,7 +59,10 @@ def main() -> int:
             ),
             location=storage_location_from_namespace(arguments),
         )
-        output: dict[str, object] = {"state": result.state}
+        output: dict[str, object] = {
+            "state": result.state,
+            "legacy_records_excluded": result.legacy_records_excluded,
+        }
         if result.revision is not None:
             output["revision"] = {
                 "revision_id": str(result.revision.revision_id),

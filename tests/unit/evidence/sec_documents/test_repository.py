@@ -6,6 +6,8 @@ import pytest
 
 from investment_analyst.core.models import RawRecord, SourceReference
 from investment_analyst.evidence.sec_documents.models import (
+    SEC_DOCUMENT_SCHEMA_VERSION,
+    SEC_DOCUMENT_SOURCE_ID,
     SecDocumentRevision,
     SecFiling,
     SecLogicalDocument,
@@ -25,7 +27,7 @@ def _revision(*, checksum: str, retrieved_at: datetime, discovery_id) -> SecDocu
         form="10-K",
         filing_date=date(2025, 1, 31),
         report_date=date(2024, 12, 31),
-        accepted_at=datetime(2025, 1, 31, tzinfo=UTC),
+        accepted_at=retrieved_at,
         is_amendment=False,
     )
     document = SecLogicalDocument(
@@ -34,7 +36,7 @@ def _revision(*, checksum: str, retrieved_at: datetime, discovery_id) -> SecDocu
         name="annual.htm",
     )
     revision_id = SecDocumentRevision.expected_id(
-        document.document_id, checksum, "sec-document-revision-v1"
+        document.document_id, checksum, "sec-document-revision-v2"
     )
     return SecDocumentRevision(
         revision_id=revision_id,
@@ -47,13 +49,16 @@ def _revision(*, checksum: str, retrieved_at: datetime, discovery_id) -> SecDocu
         available_at=retrieved_at,
         retrieved_at=retrieved_at,
         source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/annual.htm",
+        revision_schema_version="sec-document-revision-v2",
     )
 
 
-def _submissions(record_id, available_at: datetime) -> RawRecord:
+def _submissions(
+    record_id, available_at: datetime, *, asset_id: str = "equity:us:aapl"
+) -> RawRecord:
     return RawRecord(
         record_id=record_id,
-        asset_id="equity:us:aapl",
+        asset_id=asset_id,
         source=SourceReference(
             source_id="sec-edgar:aapl:submissions",
             retrieved_at=available_at,
@@ -66,12 +71,71 @@ def _submissions(record_id, available_at: datetime) -> RawRecord:
     )
 
 
+def _v2_revision(
+    *, checksum: str, accepted_at: datetime, retrieved_at: datetime, discovery_id
+) -> SecDocumentRevision:
+    filing = SecFiling(
+        filing_id=SecFiling.expected_id("0000320193", "0000320193-25-000001"),
+        filer_cik="0000320193",
+        accession="0000320193-25-000001",
+        form="10-K",
+        filing_date=accepted_at.date(),
+        report_date=date(2024, 12, 31),
+        accepted_at=accepted_at,
+        is_amendment=False,
+    )
+    document = SecLogicalDocument(
+        document_id=SecLogicalDocument.expected_id(filing.filing_id, "annual.htm"),
+        filing=filing,
+        name="annual.htm",
+    )
+    revision_id = SecDocumentRevision.expected_id(
+        document.document_id, checksum, "sec-document-revision-v2"
+    )
+    return SecDocumentRevision(
+        revision_id=revision_id,
+        asset_id="equity:us:aapl",
+        document=document,
+        raw_record_id=SecDocumentRevision.expected_raw_record_id(revision_id),
+        discovery_raw_record_id=discovery_id,
+        content_sha256=checksum,
+        content_size_bytes=4,
+        available_at=accepted_at,
+        retrieved_at=retrieved_at,
+        source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/annual.htm",
+        revision_schema_version="sec-document-revision-v2",
+    )
+
+
 def _raw_path(storage: LocalStorage, record_id) -> Path:
     row = storage.store.connection.execute(
         "SELECT relative_path FROM raw_record_index WHERE record_id = ?", [str(record_id)]
     ).fetchone()
     assert row is not None
     return storage.paths.raw_dir / row[0]
+
+
+def test_v2_document_lineage_rejects_a_discovery_from_another_asset(tmp_path: Path) -> None:
+    accepted_at = datetime(2025, 2, 1, tzinfo=UTC)
+    discovery_id = uuid4()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(
+            _submissions(
+                discovery_id,
+                accepted_at + timedelta(days=1),
+                asset_id="equity:us:msft",
+            )
+        )
+        blob = storage.documents.put(b"one!")
+        revision = _v2_revision(
+            checksum=blob.sha256,
+            accepted_at=accepted_at,
+            retrieved_at=accepted_at + timedelta(days=2),
+            discovery_id=discovery_id,
+        )
+
+        with pytest.raises(StorageError, match="lineage asset does not match"):
+            SecDocumentRepository(storage.raw_records, storage.documents).verify_revision(revision)
 
 
 def test_replay_uses_sql_pit_filter_before_future_corrupt_record(tmp_path: Path) -> None:
@@ -110,3 +174,93 @@ def test_replay_uses_sql_pit_filter_before_future_corrupt_record(tmp_path: Path)
                 known_at=first_time + timedelta(days=2),
                 accession="0000320193-25-000001",
             )
+
+
+def test_replay_excludes_v1_legacy_records_and_reports_their_count(tmp_path: Path) -> None:
+    known_at = datetime(2025, 3, 1, tzinfo=UTC)
+    discovery_id = uuid4()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(discovery_id, known_at - timedelta(days=60)))
+
+        legacy_retrieved_at = known_at - timedelta(days=30)
+        storage.raw_records.save(
+            RawRecord(
+                asset_id="equity:us:aapl",
+                source=SourceReference(
+                    source_id=SEC_DOCUMENT_SOURCE_ID,
+                    retrieved_at=legacy_retrieved_at,
+                ),
+                event_time=legacy_retrieved_at,
+                available_at=legacy_retrieved_at,
+                received_at=legacy_retrieved_at,
+                payload={"kind": "sec_document_revision", "revision": {}},
+                schema_version=SEC_DOCUMENT_SCHEMA_VERSION,
+            )
+        )
+
+        repository = SecDocumentRepository(storage.raw_records, storage.documents)
+
+        missing = repository.replay(asset_id="equity:us:aapl", known_at=known_at)
+        assert missing.state == "missing"
+        assert missing.legacy_records_excluded == 1
+
+        blob = storage.documents.put(b"nine!")
+        current = _revision(
+            checksum=blob.sha256,
+            retrieved_at=known_at - timedelta(days=1),
+            discovery_id=discovery_id,
+        )
+        storage.raw_records.save(revision_to_raw_record(current))
+
+        found = repository.replay(asset_id="equity:us:aapl", known_at=known_at)
+        assert found.state == "found"
+        assert found.revision == current
+        assert found.legacy_records_excluded == 1
+
+
+def test_v2_lineage_survives_discovery_captured_years_after_historical_acceptance(
+    tmp_path: Path,
+) -> None:
+    """Real imports: EDGAR acceptance is old, the Submissions snapshot is captured at import
+    time, and the document is downloaded right after. Availability (acceptance) must not be
+    compared against the discovery timestamp; only acquisition causality is checked."""
+    accepted_at = datetime(2020, 3, 1, tzinfo=UTC)
+    discovered_at = datetime(2026, 8, 1, tzinfo=UTC)
+    retrieved_at = datetime(2026, 8, 1, minute=5, tzinfo=UTC)
+    discovery_id = uuid4()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(discovery_id, discovered_at))
+        blob = storage.documents.put(b"one!")
+        revision = _v2_revision(
+            checksum=blob.sha256,
+            accepted_at=accepted_at,
+            retrieved_at=retrieved_at,
+            discovery_id=discovery_id,
+        )
+        storage.raw_records.save(revision_to_raw_record(revision))
+
+        repository = SecDocumentRepository(storage.raw_records, storage.documents)
+        repository.verify_revision(revision)
+
+
+def test_v2_lineage_rejects_discovery_received_after_document_retrieval(tmp_path: Path) -> None:
+    """Acquisition causality still fails closed: discovering the filing after the document was
+    already downloaded is not a valid lineage, even under v2 availability semantics."""
+    accepted_at = datetime(2020, 3, 1, tzinfo=UTC)
+    retrieved_at = datetime(2026, 8, 1, tzinfo=UTC)
+    discovered_at = datetime(2026, 8, 2, tzinfo=UTC)
+    discovery_id = uuid4()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(discovery_id, discovered_at))
+        blob = storage.documents.put(b"one!")
+        revision = _v2_revision(
+            checksum=blob.sha256,
+            accepted_at=accepted_at,
+            retrieved_at=retrieved_at,
+            discovery_id=discovery_id,
+        )
+        storage.raw_records.save(revision_to_raw_record(revision))
+
+        repository = SecDocumentRepository(storage.raw_records, storage.documents)
+        with pytest.raises(StorageError, match="received after the revision was retrieved"):
+            repository.verify_revision(revision)

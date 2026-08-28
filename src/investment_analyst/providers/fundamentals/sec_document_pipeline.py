@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from investment_analyst.core.models import SourceDefinition, SourceType
 from investment_analyst.evidence.sec_documents.models import (
     FINANCIAL_SEC_FORMS,
+    REVISION_SCHEMA_VERSION_V2,
     SEC_DOCUMENT_SOURCE_ID,
     SecDocumentRevision,
     SecFiling,
@@ -133,7 +134,7 @@ class SecDocumentPipeline:
             )
             response = self._client.fetch(document)
             revision_id = SecDocumentRevision.expected_id(
-                document.document_id, response.sha256, "sec-document-revision-v1"
+                document.document_id, response.sha256, REVISION_SCHEMA_VERSION_V2
             )
             existing = repository.get_revision(revision_id)
             if existing is not None:
@@ -157,9 +158,10 @@ class SecDocumentPipeline:
                 discovery_raw_record_id=submissions.record_id,
                 content_sha256=receipt.sha256,
                 content_size_bytes=receipt.size_bytes,
-                available_at=response.retrieved_at,
+                available_at=filing.accepted_at,
                 retrieved_at=response.retrieved_at,
                 source_url=response.url,
+                revision_schema_version=REVISION_SCHEMA_VERSION_V2,
             )
             self._storage.raw_records.save(revision_to_raw_record(revision))
             repository.verify_revision(revision)

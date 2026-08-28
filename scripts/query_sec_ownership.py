@@ -36,7 +36,7 @@ def main():
     parser.add_argument("--limit", type=int, default=100)
     arguments = parser.parse_args()
     try:
-        statements = SecOwnershipApplication.create_default().query_ownership(
+        result = SecOwnershipApplication.create_default().query_ownership(
             query=OwnershipQuery(
                 asset_id=arguments.asset_id,
                 known_at=arguments.known_at,
@@ -51,7 +51,10 @@ def main():
         print(
             json.dumps(
                 {
-                    "state": "found" if statements else "missing",
+                    "state": "found" if result.statements else "missing",
+                    "total_matching": result.total_matching,
+                    "truncated": result.truncated,
+                    "legacy_records_excluded": result.legacy_records_excluded,
                     "statements": [
                         {
                             "statement_id": str(item.statement_id),
@@ -61,7 +64,7 @@ def main():
                             "entry_count": len(item.entries),
                             "available_at": item.available_at.isoformat(),
                         }
-                        for item in statements
+                        for item in result.statements
                     ],
                 },
                 sort_keys=True,

@@ -13,7 +13,9 @@ from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCD
 
 SEC_DOCUMENT_SOURCE_ID = "sec-edgar:primary-documents"
 SEC_DOCUMENT_SCHEMA_VERSION = "sec-document-revision-v1"
+SEC_DOCUMENT_SCHEMA_VERSION_V2 = "sec-document-revision-v2"
 REVISION_SCHEMA_VERSION = "sec-document-revision-v1"
+REVISION_SCHEMA_VERSION_V2 = "sec-document-revision-v2"
 FINANCIAL_SEC_FORMS = frozenset(
     {"10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "40-F/A"}
 )
@@ -118,7 +120,9 @@ class SecDocumentRevision(_FrozenContract):
     available_at: UTCDateTime
     retrieved_at: UTCDateTime
     source_url: NonEmptyStr
-    revision_schema_version: Literal["sec-document-revision-v1"] = REVISION_SCHEMA_VERSION
+    revision_schema_version: Literal["sec-document-revision-v1", "sec-document-revision-v2"] = (
+        REVISION_SCHEMA_VERSION
+    )
 
     @field_validator("content_sha256")
     @classmethod
@@ -136,8 +140,16 @@ class SecDocumentRevision(_FrozenContract):
             raise ValueError("revision_id does not match the canonical revision identity")
         if self.raw_record_id != self.expected_raw_record_id(self.revision_id):
             raise ValueError("raw_record_id does not match the revision lineage identity")
-        if self.available_at != self.retrieved_at:
+        if (
+            self.revision_schema_version == REVISION_SCHEMA_VERSION
+            and self.available_at != self.retrieved_at
+        ):
             raise ValueError("available_at must equal the first demonstrated retrieval time")
+        if (
+            self.revision_schema_version == REVISION_SCHEMA_VERSION_V2
+            and self.available_at != self.document.filing.accepted_at
+        ):
+            raise ValueError("v2 available_at must equal SEC filing acceptance")
         return self
 
     @staticmethod
@@ -176,6 +188,7 @@ class SecDocumentReplay(_FrozenContract):
     state: Literal["found", "missing"]
     revision: SecDocumentRevision | None = None
     content: bytes | None = None
+    legacy_records_excluded: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_state(self) -> SecDocumentReplay:

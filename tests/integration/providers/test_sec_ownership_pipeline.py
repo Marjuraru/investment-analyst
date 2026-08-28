@@ -6,8 +6,11 @@ from uuid import uuid4
 from investment_analyst.core.models import AssetClass, RawRecord, SourceReference
 from investment_analyst.evidence.sec_ownership.models import (
     OWNERSHIP_OUTCOME_SCHEMA_VERSION,
+    OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2,
     OWNERSHIP_SCHEMA_VERSION,
+    OWNERSHIP_SCHEMA_VERSION_V2,
 )
+from investment_analyst.evidence.sec_ownership.repository import OwnershipRepository
 from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_document_client import (
     SecAccessionManifest,
@@ -64,8 +67,11 @@ def _submissions() -> RawRecord:
 
 
 class _Client:
+    def __init__(self, retrieved_at: datetime = datetime(2025, 2, 2, tzinfo=UTC)) -> None:
+        self._retrieved_at = retrieved_at
+
     def resolve_ownership_document(self, document):
-        timestamp = datetime(2025, 2, 2, tzinfo=UTC)
+        timestamp = self._retrieved_at
         locator = b"<!DOCTYPE html><html/>"
         semantic = b"""<ownershipDocument>
 <documentType>4</documentType><periodOfReport>2025-01-30</periodOfReport>
@@ -108,6 +114,53 @@ def test_pipeline_preserves_rejected_locator_then_parses_manifest_xml(tmp_path: 
         second = pipeline.run(SecOwnershipImportRequest(forms=("4",)))
 
         assert len(first) == len(second) == 1
-        assert storage.raw_records.count(schema_version=OWNERSHIP_OUTCOME_SCHEMA_VERSION) == 2
-        assert storage.raw_records.count(schema_version="sec-document-revision-v1") == 1
-        assert storage.raw_records.count(schema_version=OWNERSHIP_SCHEMA_VERSION) == 1
+        assert storage.raw_records.count(schema_version=OWNERSHIP_OUTCOME_SCHEMA_VERSION) == 0
+        assert storage.raw_records.count(schema_version=OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2) == 2
+        assert storage.raw_records.count(schema_version="sec-document-revision-v2") == 1
+        assert storage.raw_records.count(schema_version=OWNERSHIP_SCHEMA_VERSION) == 0
+        assert storage.raw_records.count(schema_version=OWNERSHIP_SCHEMA_VERSION_V2) == 1
+
+
+def test_pipeline_transports_availability_from_acceptance_not_parsing(tmp_path: Path) -> None:
+    """The parser must transport available_at from the revision, never recompute it."""
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions())
+        pipeline = SecOwnershipPipeline(storage, _Client(), configuration=_configuration())
+
+        (statement,) = pipeline.run(SecOwnershipImportRequest(forms=("4",)))
+
+        accepted_at = datetime(2025, 1, 31, 18, tzinfo=UTC)
+        assert statement.available_at == accepted_at
+        assert statement.available_at == statement.document_revision.available_at
+        assert statement.parsed_at != statement.available_at
+
+
+def test_replay_across_two_import_environments_matches_by_known_at(tmp_path: Path) -> None:
+    """Same corpus, two different local retrieval instants, identical known_at result."""
+    known_at = datetime(2027, 1, 1, tzinfo=UTC)
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "env-a")) as storage_a:
+        storage_a.raw_records.save(_submissions())
+        SecOwnershipPipeline(
+            storage_a, _Client(datetime(2025, 2, 2, tzinfo=UTC)), configuration=_configuration()
+        ).run(SecOwnershipImportRequest(forms=("4",)))
+        statements_a = OwnershipRepository(storage_a.raw_records).list(
+            asset_id="equity:us:aapl", known_at=known_at
+        )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "env-b")) as storage_b:
+        storage_b.raw_records.save(_submissions())
+        SecOwnershipPipeline(
+            storage_b, _Client(datetime(2026, 3, 10, tzinfo=UTC)), configuration=_configuration()
+        ).run(SecOwnershipImportRequest(forms=("4",)))
+        statements_b = OwnershipRepository(storage_b.raw_records).list(
+            asset_id="equity:us:aapl", known_at=known_at
+        )
+
+    assert [item.statement_id for item in statements_a] == [
+        item.statement_id for item in statements_b
+    ]
+    assert [item.available_at for item in statements_a] == [
+        item.available_at for item in statements_b
+    ]
+    assert statements_a[0].parsed_at != statements_b[0].parsed_at

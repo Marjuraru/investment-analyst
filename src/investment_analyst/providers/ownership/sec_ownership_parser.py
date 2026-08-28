@@ -10,6 +10,7 @@ from xml.etree import ElementTree
 
 from investment_analyst.evidence.sec_documents.models import SecDocumentRevision, normalize_cik
 from investment_analyst.evidence.sec_ownership.models import (
+    OWNERSHIP_SCHEMA_VERSION_V2,
     OwnershipEntry,
     OwnershipStatement,
     ReportingOwner,
@@ -69,7 +70,7 @@ def parse_ownership_statement(
         for node in root.iter()
         if _name(node) == "footnote" and node.attrib.get("id")
     }
-    statement_id = OwnershipStatement.expected_id(revision.revision_id)
+    statement_id = OwnershipStatement.expected_id(revision.revision_id, OWNERSHIP_SCHEMA_VERSION_V2)
     entries = []
     ordinal = 0
     for table_name, table in (
@@ -148,6 +149,7 @@ def parse_ownership_statement(
         footnotes=footnotes,
         available_at=revision.available_at,
         parsed_at=parsed_at.astimezone(UTC),
+        schema_version=OWNERSHIP_SCHEMA_VERSION_V2,
     )
 
 

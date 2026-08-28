@@ -94,7 +94,7 @@ def test_second_provider_failure_keeps_first_document_persisted(tmp_path: Path) 
         with pytest.raises(RuntimeError, match="second fetch"):
             pipeline.run(SecDocumentImportRequest(forms=("10-K", "10-Q")))
 
-        assert storage.raw_records.count(schema_version="sec-document-revision-v1") == 1
+        assert storage.raw_records.count(schema_version="sec-document-revision-v2") == 1
         assert storage.observations.count() == 0
         assert storage.metric_results.count() == 0
         assert storage.diagnostics.count() == 0

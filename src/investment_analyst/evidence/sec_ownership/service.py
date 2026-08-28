@@ -1,6 +1,6 @@
 """Read-only ownership queries."""
 
-from investment_analyst.evidence.sec_ownership.models import OwnershipQuery
+from investment_analyst.evidence.sec_ownership.models import OwnershipQuery, OwnershipQueryResult
 from investment_analyst.evidence.sec_ownership.repository import OwnershipRepository
 from investment_analyst.storage import StorageError
 
@@ -10,7 +10,7 @@ class OwnershipService:
         self._storage = storage
         self._configuration = configuration
 
-    def query(self, query: OwnershipQuery):
+    def query(self, query: OwnershipQuery) -> OwnershipQueryResult:
         if not self._storage.read_only:
             raise StorageError("ownership query requires read-only storage")
         if query.asset_id != self._configuration.asset_id:
@@ -33,4 +33,14 @@ class OwnershipService:
             }:
                 continue
             result.append(statement)
-        return tuple(result[: query.limit])
+        newest_first = tuple(reversed(result))
+        return OwnershipQueryResult(
+            statements=newest_first[: query.limit],
+            total_matching=len(newest_first),
+            truncated=len(newest_first) > query.limit,
+            legacy_records_excluded=self._storage.raw_records.count(
+                asset_id=query.asset_id,
+                source_id="sec-edgar:section16-ownership",
+                schema_version="sec-ownership-statement-v1",
+            ),
+        )

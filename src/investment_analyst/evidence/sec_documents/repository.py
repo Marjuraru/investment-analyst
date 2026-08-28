@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from investment_analyst.core.models import RawRecord, SourceReference
 from investment_analyst.evidence.sec_documents.models import (
     SEC_DOCUMENT_SCHEMA_VERSION,
+    SEC_DOCUMENT_SCHEMA_VERSION_V2,
     SEC_DOCUMENT_SOURCE_ID,
     SecDocumentReplay,
     SecDocumentRevision,
@@ -46,7 +47,7 @@ def revision_to_raw_record(revision: SecDocumentRevision) -> RawRecord:
             "kind": "sec_document_revision",
             "revision": revision.model_dump(mode="json"),
         },
-        schema_version=SEC_DOCUMENT_SCHEMA_VERSION,
+        schema_version=revision.revision_schema_version,
     )
 
 
@@ -54,7 +55,7 @@ def revision_from_raw_record(record: RawRecord) -> SecDocumentRevision:
     """Decode strict metadata and reject body-bearing or inconsistent RawRecords."""
     if record.record_id is None or record.source.source_id != SEC_DOCUMENT_SOURCE_ID:
         raise SecDocumentRepositoryError("document RawRecord source is invalid")
-    if record.schema_version != SEC_DOCUMENT_SCHEMA_VERSION:
+    if record.schema_version not in {SEC_DOCUMENT_SCHEMA_VERSION, SEC_DOCUMENT_SCHEMA_VERSION_V2}:
         raise SecDocumentRepositoryError("document RawRecord schema is invalid")
     if not isinstance(record.payload, dict) or set(record.payload) != {"kind", "revision"}:
         raise SecDocumentRepositoryError("document RawRecord payload is malformed")
@@ -68,6 +69,8 @@ def revision_from_raw_record(record: RawRecord) -> SecDocumentRevision:
         raise SecDocumentRepositoryError("document RawRecord revision is malformed") from error
     if record.record_id != revision.raw_record_id:
         raise SecDocumentRepositoryError("document RawRecord identifier does not match revision")
+    if record.schema_version != revision.revision_schema_version:
+        raise SecDocumentRepositoryError("document RawRecord schema conflicts with revision")
     if record.asset_id != revision.asset_id:
         raise SecDocumentRepositoryError("document RawRecord asset does not match revision")
     if (
@@ -115,7 +118,7 @@ class SecDocumentRepository:
         records = self._raw_records.list(
             asset_id=asset_id,
             source_id=SEC_DOCUMENT_SOURCE_ID,
-            schema_version=SEC_DOCUMENT_SCHEMA_VERSION,
+            schema_version=SEC_DOCUMENT_SCHEMA_VERSION_V2,
             available_to=known_at,
         )
         revisions: list[SecDocumentRevision] = []
@@ -153,8 +156,13 @@ class SecDocumentRepository:
             accession=accession,
             revision_id=revision_id,
         )
+        legacy_excluded = self._raw_records.count(
+            asset_id=asset_id,
+            source_id=SEC_DOCUMENT_SOURCE_ID,
+            schema_version=SEC_DOCUMENT_SCHEMA_VERSION,
+        )
         if not candidates:
-            return SecDocumentReplay(state="missing")
+            return SecDocumentReplay(state="missing", legacy_records_excluded=legacy_excluded)
         latest_at = candidates[-1].available_at
         latest = [item for item in candidates if item.available_at == latest_at]
         if len({item.revision_id for item in latest}) != 1:
@@ -164,7 +172,12 @@ class SecDocumentRepository:
         content = self._content.read(selected.content_sha256) if include_content else None
         if content is not None and len(content) != selected.content_size_bytes:
             raise SecDocumentRepositoryError("document content size does not match revision")
-        return SecDocumentReplay(state="found", revision=selected, content=content)
+        return SecDocumentReplay(
+            state="found",
+            revision=selected,
+            content=content,
+            legacy_records_excluded=legacy_excluded,
+        )
 
     def verify_revision(self, revision: SecDocumentRevision) -> None:
         """Verify blob and discovery lineage without materializing the blob."""
@@ -178,9 +191,21 @@ class SecDocumentRepository:
             raise SecDocumentRepositoryError(
                 "document revision has no submissions lineage"
             ) from error
-        if discovery.available_at > revision.available_at:
-            raise SecDocumentRepositoryError("document lineage became available after its revision")
-        if discovery.asset_id is None or not discovery.source.source_id.endswith(":submissions"):
+        if revision.revision_schema_version == SEC_DOCUMENT_SCHEMA_VERSION:
+            if discovery.available_at > revision.available_at:
+                raise SecDocumentRepositoryError(
+                    "document lineage became available after its revision"
+                )
+        elif discovery.received_at > revision.retrieved_at:
+            # EDGAR acceptance (v2 available_at) can predate the Submissions capture by years
+            # without invalidating the filing; only acquisition causality is checked here:
+            # the submissions listing must have been received before the document itself.
+            raise SecDocumentRepositoryError(
+                "document lineage was received after the revision was retrieved"
+            )
+        if discovery.asset_id != revision.asset_id:
+            raise SecDocumentRepositoryError("document lineage asset does not match the revision")
+        if not discovery.source.source_id.endswith(":submissions"):
             raise SecDocumentRepositoryError("document lineage is not a submissions RawRecord")
         if not isinstance(discovery.payload, dict):
             raise SecDocumentRepositoryError("document submissions lineage payload is malformed")
@@ -198,5 +223,5 @@ def verify_document_records(
 ) -> None:
     """Verify documentary records encountered in an existing paginated scan."""
     for record in records:
-        if record.schema_version == SEC_DOCUMENT_SCHEMA_VERSION:
+        if record.schema_version in {SEC_DOCUMENT_SCHEMA_VERSION, SEC_DOCUMENT_SCHEMA_VERSION_V2}:
             repository.verify_revision(revision_from_raw_record(record))
