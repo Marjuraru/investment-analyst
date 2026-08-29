@@ -57,6 +57,9 @@ presenta como ISIN. Los ISIN completos superan checksum ISO 6166 y se corroboran
 `smv/legal_name` declara `is_unique: false`: una razón social identifica al emisor y puede
 corresponder a varias clases o cotizaciones. Los identificadores de cotización conservan unicidad;
 una resolución inversa no única falla explícitamente en vez de elegir un activo.
+
+`equity:us:aapl` declara `sec/cusip = 037833100` para validar declaraciones de correspondencia;
+esa declaración no altera ni reescribe las posiciones 13F persistidas.
 `equity:pe:bvl:bvn` y `equity:pe:bvl:scco` son distintos de `equity:us:bvn` y
 `equity:us:scco`; la resolución exacta por proveedor y namespace no es ambigua. Los aliases
 humanos de las cotizaciones peruanas incluyen el mercado para no cambiar el significado histórico
@@ -167,6 +170,10 @@ afirman que un pipeline todavía inexistente esté activo. `has_fundamentals` se
 de que la aplicación actual puede servir el análisis fundamental completo.
 
 ## Ampliación del catálogo
+
+El binding SEC `cusip` con capacidad `evidence.instrument_correspondence` valida una declaración
+explícita de correspondencia para el activo. No es una regla de resolución retrospectiva: las
+consultas de Form 13F leen solamente la evidencia declarada persistida y el corte `known_at`.
 
 Para añadir un activo ya implementado, se edita el siguiente recurso JSON versionado con sus campos
 `Asset`, alias únicos y vinculaciones de proveedor ordenadas. Cada capacidad usa un nombre

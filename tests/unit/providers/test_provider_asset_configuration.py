@@ -16,6 +16,7 @@ from investment_analyst.catalog.provider_configuration import (
     resolve_coinbase_intraday_configuration,
     resolve_deribit_configuration,
     resolve_sec_configuration,
+    resolve_sec_cusip_binding,
 )
 from investment_analyst.catalog.provider_context import (
     ProviderAssetContextResolver,
@@ -117,6 +118,7 @@ def test_factories_preserve_current_provider_and_persisted_identities() -> None:
         exchange="NASDAQ",
     )
     assert len(sec.cik) == 10
+    assert resolve_sec_cusip_binding(_resolver()) == "037833100"
 
 
 def test_alpaca_configuration_scales_from_catalog_without_changing_apple_identity() -> None:

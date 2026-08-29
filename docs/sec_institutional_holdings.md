@@ -46,3 +46,10 @@ La consulta es local y de solo lectura. Esta etapa no resuelve CUSIP a `asset_id
 instrumento; tampoco calcula variaciones, entradas, salidas, concentración, score, señal, candidato
 ni recomendación. El backfill fuera de `filings.recent`, los formularios `13F-NT` y la agregación
 entre gestores quedan fuera del contrato.
+
+## Proyección por activo mediante evidencia declarada
+
+`scripts/query_institutional_holdings_by_asset.py` expone una proyección local de sólo lectura que
+conecta posiciones Form 13F con correspondencia CUSIP explícitamente declarada. Conserva el
+`manager_cik` y `known_at` requeridos por el corpus, no modifica reportes ni posiciones y informa
+sin enlace los períodos faltantes o las correspondencias ambiguas.
