@@ -171,6 +171,13 @@ la siguiente acción siga siendo de su propietario.
 PLAN sólo crea o actualiza el Work Block. BUILD es el único writer, implementa el mínimo cohesivo,
 ejecuta checks focalizados, preserva trabajo protegido y publica un PR draft. AUDIT fija un SHA y
 permanece read-only respecto de source, branch, candidato y workspace permanente.
+
+Cuando un Work Block introduce una nueva capacidad, PLAN debe incluir una Capability Boundary
+Declaration: contrato reutilizado, extensión de contrato, contrato aislado nuevo o bloqueado por
+falta de representación autorizada, identidad del dominio, invariantes afectados y shortcuts
+prohibidos. La ausencia de esta declaración impide publicar un Work Block materialmente listo
+para BUILD porque una nueva frontera de representación del dominio no puede decidirse durante
+implementación.
 `UI_WORKER` es el rol autorizado para que el UI Worker ejecute exactamente BUILD dentro de la
 frontera UI declarada. El alias `/ui` puede activar este rol en clientes compatibles; conserva un
 único writer, no permite handoff dentro del bloque y vuelve a PLAN ante lógica financiera,
