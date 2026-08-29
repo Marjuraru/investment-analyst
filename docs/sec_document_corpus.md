@@ -13,7 +13,17 @@ recuperación oficial demostrada y coincide con `retrieved_at`. En
 evidencia v2; el contador `legacy_records_excluded` hace explícita la historia v1 excluida. Una
 ausencia devuelve `missing`, nunca cero ni contenido inventado.
 
-La familia v1 se limita a `10-K`, `10-K/A`, `10-Q`, `10-Q/A`, `20-F`, `20-F/A`, `40-F` y `40-F/A`.
+Los documentos presentados por un declarante que no es un activo del catálogo usan la revisión
+hermana `sec-filer-document-revision-v1`. Conservan el mismo `SecFiling` y
+`SecLogicalDocument`, pero sustituyen el vínculo `asset_id` por el `filer_cik` ya declarado en el
+filing. Sus namespaces UUID5 y su codec son disjuntos: una revisión de declarante no se convierte en
+`sec-document-revision-v1/v2`, y esas revisiones históricas permanecen sin cambios. La familia de
+declarante nace directamente con `available_at == filing.accepted_at` y no tiene una variante de
+disponibilidad basada en recuperación.
+
+La familia financiera v1 se limita a `10-K`, `10-K/A`, `10-Q`, `10-Q/A`, `20-F`, `20-F/A`, `40-F`
+y `40-F/A`. El corpus compartido también reconoce las familias documentales de Sección 16,
+13D/13G y `13F-HR`/`13F-HR/A`; cada vertical mantiene contratos derivados y source IDs separados.
 El único provider es SEC EDGAR oficial: Submissions ya persistido descubre filing/path y
 `www.sec.gov/Archives` entrega el documento primario con HTTPS, host, redirect, tamaño y hash
 verificados. No hay fallback ni extracción de hechos, fragments, XBRL, métricas o diagnósticos.

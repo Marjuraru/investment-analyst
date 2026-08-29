@@ -76,7 +76,7 @@ siendo OPS-2/#66, supersedido con `insufficient_local_dates` sin completion ni r
 | `INDICATORS-AND-OUTBOX` | `DONE` | Integrado por ALERT-1 (`COMPLETES`). | RSI/MACD/ATR, reglas silenciosas y outbox local con acuse durable; los canales externos siguen pendientes. |
 | `RELEASE-ACCEPTANCE` | `DONE` | Reconciliación HUMAN de #93/#94; integrada antes de este bloque. | La aceptación finita y la recuperación ya fueron registradas. |
 | `EQUITY-UNIVERSE` | `DONE` | Integrado mediante contratos por capacidades. | AAPL mantiene adaptadores compatibles; no hay privilegio de flujo por ticker. |
-| `SEC-CORPUS` | `NEXT` | Vertical documental vigente; falta completar 13F. | Forms 3/4/5 y 13D/13G XML estructurado integrados con semántica PIT; 13F no integrado. |
+| `SEC-CORPUS` | `NEXT` | Vertical documental vigente; falta vincular 13F con instrumentos verificados y añadir métricas descriptivas. | Forms 3/4/5, 13D/13G y 13F XML estructurado integrados con semántica PIT; las posiciones 13F conservan CUSIP y clase declarados sin `asset_id`. |
 | `BVL-MARKET` | `BLOCKED` | Contrato de uso y fuente oficial autorizada. | No se infiere autorización para automatizar boletines. |
 | `PREDICTIVE-RESEARCH` | `DEFERRED` | Carril explícito con PIT, label, baselines, validación temporal, holdout, shadow y rollback. | Universo survivorship-aware es condicional; on-chain, stablecoins/DeFi, multi-venue y derivados extra dependen del target. |
 
