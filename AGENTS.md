@@ -181,6 +181,11 @@ results, and pending risks.
   intra-block handoff, and returns to PLAN for any scope or capability expansion.
 - PLAN, BUILD, UI_WORKER and AUDIT are roles defined by their permissions, inputs, outputs and
   gates. The selected model or client is evidence metadata only and never changes authority.
+- Before publishing a Work Block that introduces a new capability, PLAN must publish a Capability
+  Boundary Declaration covering contract reuse, contract extension, isolated contract creation or
+  blocked due to missing authorized representation, domain identity, affected invariants and
+  forbidden shortcuts. BUILD must not introduce or decide new domain representation boundaries
+  during implementation.
 - Explicit `AUDIT role` invocation authorizes the read-only
   AUDIT phase and one structured PR comment bound to the exact SHA. When the resolved Work Block
   has `finalize_policy: AUTO`, an AUDIT PASS in that same invocation may continue to the narrow
