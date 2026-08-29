@@ -32,6 +32,14 @@ from investment_analyst.evidence.sec_documents.repository import (
     SecDocumentRepository,
     verify_document_records,
 )
+from investment_analyst.evidence.sec_institutional_holdings.document_repository import (
+    SecFilerDocumentRepository,
+    verify_filer_document_records,
+)
+from investment_analyst.evidence.sec_institutional_holdings.repository import (
+    InstitutionalHoldingsRepository,
+    verify_institutional_holding_records,
+)
 from investment_analyst.evidence.sec_ownership.repository import verify_ownership_records
 from investment_analyst.storage import StorageError
 from investment_analyst.storage.local import LocalStorage
@@ -528,6 +536,14 @@ def _scan_raw_records(storage: LocalStorage) -> int:
         verify_beneficial_ownership_records(
             records.values(),
             SecDocumentRepository(storage.raw_records, storage.documents),
+            storage.documents,
+        )
+        filer_documents = SecFilerDocumentRepository(storage.raw_records, storage.documents)
+        verify_filer_document_records(records.values(), filer_documents)
+        verify_institutional_holding_records(
+            records.values(),
+            InstitutionalHoldingsRepository(storage.raw_records),
+            filer_documents,
             storage.documents,
         )
         count += len(records)

@@ -20,10 +20,12 @@ FINANCIAL_SEC_FORMS = frozenset(
     {"10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "40-F/A"}
 )
 BENEFICIAL_OWNERSHIP_FORMS = frozenset({"SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A"})
+INSTITUTIONAL_HOLDINGS_FORMS = frozenset({"13F-HR", "13F-HR/A"})
 SUPPORTED_SEC_FORMS = (
     FINANCIAL_SEC_FORMS
     | frozenset({"3", "3/A", "4", "4/A", "5", "5/A"})
     | BENEFICIAL_OWNERSHIP_FORMS
+    | INSTITUTIONAL_HOLDINGS_FORMS
 )
 _ACCESSION = re.compile(r"^\d{10}-\d{2}-\d{6}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -32,6 +34,11 @@ _FILING_NAMESPACE = uuid5(NAMESPACE_URL, "investment-analyst:sec-filing:v1")
 _DOCUMENT_NAMESPACE = uuid5(NAMESPACE_URL, "investment-analyst:sec-document:v1")
 _REVISION_NAMESPACE = uuid5(NAMESPACE_URL, "investment-analyst:sec-revision:v1")
 _RAW_NAMESPACE = uuid5(NAMESPACE_URL, "investment-analyst:sec-document-raw:v1")
+FILER_REVISION_SCHEMA_VERSION = "sec-filer-document-revision-v1"
+_FILER_REVISION_NAMESPACE = uuid5(
+    NAMESPACE_URL, "investment-analyst:sec-filer-document-revision:v1"
+)
+_FILER_RAW_NAMESPACE = uuid5(NAMESPACE_URL, "investment-analyst:sec-filer-document-raw:v1")
 
 
 class _FrozenContract(ContractModel):
@@ -173,6 +180,60 @@ class SecDocumentRevision(_FrozenContract):
     @staticmethod
     def expected_raw_record_id(revision_id: UUID) -> UUID:
         return uuid5(_RAW_NAMESPACE, f"{revision_id}|raw-record")
+
+
+class SecFilerDocumentRevision(_FrozenContract):
+    """Document revision linked to a filer rather than a catalog asset."""
+
+    revision_id: UUID
+    filer_cik: NonEmptyStr
+    document: SecLogicalDocument
+    raw_record_id: UUID
+    discovery_raw_record_id: UUID
+    content_sha256: NonEmptyStr
+    content_size_bytes: int = Field(gt=0, le=50 * 1024 * 1024)
+    available_at: UTCDateTime
+    retrieved_at: UTCDateTime
+    source_url: NonEmptyStr
+    revision_schema_version: Literal["sec-filer-document-revision-v1"] = (
+        FILER_REVISION_SCHEMA_VERSION
+    )
+
+    @field_validator("filer_cik")
+    @classmethod
+    def validate_cik(cls, value: str) -> str:
+        return normalize_cik(value)
+
+    @field_validator("content_sha256")
+    @classmethod
+    def validate_checksum(cls, value: str) -> str:
+        if not _SHA256.fullmatch(value):
+            raise ValueError("content_sha256 must be a lowercase SHA-256 digest")
+        return value
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> SecFilerDocumentRevision:
+        expected_revision = self.expected_id(self.document.document_id, self.content_sha256)
+        if self.revision_id != expected_revision:
+            raise ValueError("filer revision identity is invalid")
+        if self.raw_record_id != self.expected_raw_record_id(self.revision_id):
+            raise ValueError("filer revision raw identity is invalid")
+        if self.filer_cik != self.document.filing.filer_cik:
+            raise ValueError("filer revision CIK conflicts with its filing")
+        if self.available_at != self.document.filing.accepted_at:
+            raise ValueError("filer revision availability must equal SEC filing acceptance")
+        return self
+
+    @staticmethod
+    def expected_id(document_id: UUID, content_sha256: str) -> UUID:
+        return uuid5(
+            _FILER_REVISION_NAMESPACE,
+            f"{document_id}|{content_sha256}|{FILER_REVISION_SCHEMA_VERSION}",
+        )
+
+    @staticmethod
+    def expected_raw_record_id(revision_id: UUID) -> UUID:
+        return uuid5(_FILER_RAW_NAMESPACE, f"{revision_id}|raw-record")
 
 
 class SecDocumentQuery(_FrozenContract):

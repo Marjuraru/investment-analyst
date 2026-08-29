@@ -137,17 +137,20 @@ Esta etapa es la primera vertical porque está ligada al emisor analizado, suele
 - porcentaje y cantidad declarados;
 - naturaleza activa o pasiva según el formulario, sin reinterpretarla;
 - aparición, modificación y salida de umbrales reportados;
-- evidencia local point-in-time integrada sólo para XML estructurado de `filings.recent`; 13F,
-  CUSIP, instrumentos y clases permanecen fuera de esta etapa.
+- evidencia local point-in-time integrada sólo para XML estructurado de `filings.recent`; la
+  vinculación de CUSIP, instrumentos y clases permanece fuera de esta etapa.
 - diferencia entre fecha del evento y fecha de disponibilidad.
 
 ### Etapa T3 — posiciones institucionales
 
 - Form 13F y sus enmiendas;
-- catálogo verificable de gestores y declarantes;
-- posiciones por trimestre, clase, CUSIP y valor reportado;
-- entradas, salidas y variaciones entre dos cierres;
-- concentración descriptiva por posición y cartera;
+- importación por CIK de gestor explícitamente declarado, sin incorporarlo al catálogo de activos;
+- evidencia point-in-time integrada para `13F-HR` y `13F-HR/A` de `filings.recent`, limitada a
+  portada e information table XML estructuradas;
+- posiciones por trimestre, clase, CUSIP y valor reportado, conservadas sin correspondencia a
+  `asset_id`;
+- entradas, salidas y variaciones entre dos cierres, pendientes de una correspondencia verificada;
+- concentración descriptiva por posición y cartera, pendiente de la misma correspondencia;
 - demora del reporte claramente visible.
 
 Una variación trimestral no se presenta como operación fechada ni se compara con precio sin alinear
