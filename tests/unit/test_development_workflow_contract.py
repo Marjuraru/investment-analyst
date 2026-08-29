@@ -94,6 +94,10 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "siguiente acción siga siendo de su propietario" in protocol
     assert "nunca es publicación rutinaria, handoff ni salida terminal" in protocol
     assert "un único marker BUILD stale `PENDING`" in protocol
+    assert "cada gate, smoke y criterio de aceptación es satisfacible" in protocol
+    assert "defecto de PLAN corregible por enmienda, nunca un `BUILD BLOCKED`" in protocol
+    assert "En `BUILD BOOTSTRAP`, por ausencia de PR" in protocol
+    assert "guard `--phase build` no puede materializar rutas" in protocol
 
     for name, text in skills.items():
         assert _frontmatter_value(text, "name") == name
@@ -113,6 +117,16 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "cero PR es `BUILD BOOTSTRAP` no terminal" in skills["build"]
     assert "Mientras haya una acción autorizada cuyo propietario sea BUILD" in skills["build"]
     assert "nunca es un handoff rutinario" in skills["build"]
+    assert "nunca usar el último Issue, PR o rama como target" in skills["build"]
+    assert "duración, cantidad de pasos y trabajo restante nunca bloquean" in skills["build"]
+    assert "CI, smoke, validación interna o cierre previos a PR/AUDIT pendientes" in skills["build"]
+    assert "Antes de la primera mutación de archivo" in skills["build"]
+    assert (
+        "checkout primario de la base permanece limpio y no es destino de escritura"
+        in skills["build"]
+    )
+    assert "sin stash, reset, clean, checkout ni switch forzado" in skills["build"]
+    assert "reubicación o descarte a decisión humana explícita" in skills["build"]
     assert "scripts/check_workflow_guards.py" in skills["investment-block-flow"]
     assert "--live --phase finalize" in skills["build"]
     assert "--live --phase finalize" in skills["audit"]
@@ -153,6 +167,12 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "exploración dirigida" in skills["plan"]
     assert "route_effect" in skills["plan"]
     assert "superseder un bloqueo puramente temporal" in skills["plan"]
+    assert "Cada gate, smoke y criterio de aceptación debe ser satisfacible" in skills["plan"]
+    assert "defecto de PLAN corregible por enmienda, nunca un `BUILD BLOCKED`" in skills["plan"]
+    agents = _read("AGENTS.md")
+    assert "archive-first, may" in agents
+    assert "archive its historical marker then publish or reconcile exactly one" in agents
+    assert "source, branch, candidate, head, workspace, labels, Issue" in agents
     assert "id: writer_role" in template
     assert "route_effect (NONE/ADVANCES/COMPLETES)" in template
     assert "options: [BUILD, UI_WORKER]" in template

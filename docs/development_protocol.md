@@ -64,6 +64,10 @@ stash, reset, clean, checkout/switch forzado, overwrite ni sincronización destr
 ya existe, la rama actual y el único worktree writer deben ser compatibles con ella. Un mismatch de
 base, branch, PR o worktree es `BUILD GUARD FAILURE`.
 
+En `BUILD BOOTSTRAP`, por ausencia de PR, el guard `--phase build` no puede materializar rutas; hasta
+que exista un gate ejecutable propio, la verificación topológica previa a la primera escritura es
+responsabilidad ineludible de BUILD.
+
 ## Supersesión temporal por PLAN
 
 Con decisión humana explícita durante PLAN, PLAN puede liberar administrativamente el único slot
@@ -133,6 +137,10 @@ PLAN declara sólo capacidades no triviales que podrían interrumpir BUILD: prov
 credencial por nombre, CLI/browser/servicio externo, escritura en workspace permanente, cambios de
 dependencias y policy de finalización. Git/GitHub normal, repo-scoped writes, lectura CI y estado
 efímero son defaults.
+
+PLAN declara que cada gate, smoke y criterio de aceptación es satisfacible dentro de la strict
+allowlist y capability delta del propio bloque. Si uno exige una capacidad o superficie de otra
+frontera, es un defecto de PLAN corregible por enmienda, nunca un `BUILD BLOCKED`.
 
 Antes de implementación material, BUILD deriva las necesidades del scope, acceptance, capabilities
 y smoke; comprueba ejecutables, configuración sin mostrar valores, permisos GitHub y accesos
