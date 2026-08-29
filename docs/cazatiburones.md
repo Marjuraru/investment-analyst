@@ -170,6 +170,10 @@ posiciones institucionales existentes hacia un activo ya catalogado, pero no cam
 13F, no crea identidad de emisor por inferencia y no alimenta un score, diagnóstico, recomendación
 ni instrucción de ejecución.
 
+Los cambios institucionales descriptivos comparan cierres 13F del mismo gestor sin persistir
+resultados. Exponen deltas y concentración con `Decimal`, pero no umbrales, anomalías, eventos ni
+candidatos.
+
 Cazatiburones tendrá una sección propia en la ficha del activo y una línea temporal. Sus reglas
 podrán crear candidatos por hechos explícitos —por ejemplo, un nuevo Schedule 13D o una transacción
 insider declarada—, pero no se combinarán con mercado o fundamentales en un score.
