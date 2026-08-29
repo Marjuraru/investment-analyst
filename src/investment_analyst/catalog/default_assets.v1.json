@@ -434,6 +434,15 @@
             "fundamentals.company_facts",
             "fundamentals.submissions"
           ],
+          "identifier": "037833100",
+          "namespace": "cusip",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
           "identifier": "us-gaap",
           "is_unique": false,
           "namespace": "taxonomy",

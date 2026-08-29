@@ -190,6 +190,17 @@ def resolve_sec_configuration(
     )
 
 
+def resolve_sec_cusip_binding(
+    resolver: ProviderAssetContextResolver, *, asset_id: str = APPLE_ASSET_ID
+) -> str:
+    context = resolver.resolve(
+        asset_id,
+        provider="sec",
+        required_namespaces=("cusip",),
+    )
+    return context.require_identifier("cusip")
+
+
 def resolve_smv_bvl_configuration(
     resolver: ProviderAssetContextResolver,
     *,

@@ -165,6 +165,11 @@ el corte point-in-time.
 
 ## Integración con screening, interfaz e IA
 
+La correspondencia CUSIP declarada es evidencia separada y point-in-time. Puede proyectar
+posiciones institucionales existentes hacia un activo ya catalogado, pero no cambia la evidencia
+13F, no crea identidad de emisor por inferencia y no alimenta un score, diagnóstico, recomendación
+ni instrucción de ejecución.
+
 Cazatiburones tendrá una sección propia en la ficha del activo y una línea temporal. Sus reglas
 podrán crear candidatos por hechos explícitos —por ejemplo, un nuevo Schedule 13D o una transacción
 insider declarada—, pero no se combinarán con mercado o fundamentales en un score.
