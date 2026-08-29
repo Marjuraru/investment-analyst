@@ -171,9 +171,9 @@ de que la aplicación actual puede servir el análisis fundamental completo.
 
 ## Ampliación del catálogo
 
-El binding SEC `cusip` con capacidad `evidence.instrument_correspondence` valida una declaración
-explícita de correspondencia para el activo. No es una regla de resolución retrospectiva: las
-consultas de Form 13F leen solamente la evidencia declarada persistida y el corte `known_at`.
+El binding SEC `cusip` valida una declaración explícita de correspondencia para el activo. No es
+una regla de resolución retrospectiva: las consultas de Form 13F leen solamente la evidencia
+declarada persistida y el corte `known_at`.
 
 Para añadir un activo ya implementado, se edita el siguiente recurso JSON versionado con sus campos
 `Asset`, alias únicos y vinculaciones de proveedor ordenadas. Cada capacidad usa un nombre

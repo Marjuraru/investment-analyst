@@ -431,7 +431,8 @@
         },
         {
           "capabilities": [
-            "evidence.instrument_correspondence"
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
           ],
           "identifier": "037833100",
           "namespace": "cusip",

@@ -197,7 +197,6 @@ def resolve_sec_cusip_binding(
         asset_id,
         provider="sec",
         required_namespaces=("cusip",),
-        required_capabilities=("evidence.instrument_correspondence",),
     )
     return context.require_identifier("cusip")
 
