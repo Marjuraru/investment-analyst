@@ -12,8 +12,7 @@ Ejecutar el guard común `scripts/check_workflow_guards.py --phase audit` antes 
 reconciliación con adquisición viva autoritativa; `--json` es diagnóstico y no puede ser gate. No
 reimplementar su parser de scope, hashes o markers en la skill, regla o tests.
 Buscar contradicciones, tests debilitados y probes de BUILD/FIX no verificados. Gates o filenames no
-demuestran corrección semántica. No repetir una suite verde sin riesgo concreto. Sólo `/audit` o
-`$audit` puede reconciliar y publicar el marker AUDIT único.
+demuestran corrección semántica. No repetir una suite verde sin riesgo concreto. Sólo AUDIT puede reconciliar y publicar el marker AUDIT único.
 
 Con policy HUMAN, AUDIT nunca hace merge. Con AUTO, sólo el FINALIZE posterior a PASS de la misma
 invocación puede realizar las mutaciones GitHub estrechas del protocolo, con dos adquisiciones
