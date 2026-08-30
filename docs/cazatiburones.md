@@ -68,7 +68,7 @@ Las capas previstas permanecen separadas:
    el delta de tenencia declarada de insiders y el delta de propiedad beneficiaria 13D/13G, sobre la
    capa 2 ya integrada; Form 13F y las features sin respaldo en capa 2 permanecen fuera de esta capa;
    ver `docs/cazatiburones_activity_metrics.md`;
-4. evento o diagnóstico del dominio Cazatiburones — la capa 4 (evento o candidato persistido y
+4. evento descriptivo del dominio Cazatiburones — la capa 4 persistida conserva candidatos
    trazable, con deduplicación y cooldown) permanece pendiente;
 5. regla de screening opcional que referencia evidencia exacta.
 
