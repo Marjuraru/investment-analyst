@@ -26,7 +26,10 @@ class ActivityEventRepository:
         try:
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
-            if self._load(path) != snapshot:
+            existing = self._load(path)
+            if existing.model_dump(exclude={"recorded_at"}) != snapshot.model_dump(
+                exclude={"recorded_at"}
+            ):
                 raise ActivityEventRepositoryError(
                     "snapshot identity conflicts with existing content"
                 ) from None
