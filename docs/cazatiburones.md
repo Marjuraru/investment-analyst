@@ -2,11 +2,13 @@
 
 `Cazatiburones` es el dominio previsto para describir actividad declarada de participantes
 relevantes. No es un sinónimo de volumen alto ni una señal automática de compra o venta.
-Actualmente calcula features descriptivas read-only de 13F, Forms 3/4/5 y Schedules 13D/13G, y
-persiste la capa 2 —observación normalizada point-in-time— para Forms 3/4/5 y Schedules 13D/13G;
-ver `docs/cazatiburones_activity_observations.md`. Form 13F permanece sin normalizar mientras sus
-posiciones carezcan de `asset_id` verificado. El dominio no calcula diagnósticos, señales ni
-recomendaciones.
+Actualmente calcula features descriptivas read-only de 13F, Forms 3/4/5 y Schedules 13D/13G,
+persiste la capa 2 —observación normalizada point-in-time— para Forms 3/4/5 y Schedules 13D/13G
+(ver `docs/cazatiburones_activity_observations.md`), y persiste la capa 3 —métrica descriptiva
+versionada— para el delta de tenencia declarada de insiders y el delta de propiedad beneficiaria
+13D/13G, calculada exclusivamente sobre esa capa 2; ver `docs/cazatiburones_activity_metrics.md`.
+Form 13F permanece sin normalizar mientras sus posiciones carezcan de `asset_id` verificado, y por
+tanto sin métrica persistida. El dominio no calcula diagnósticos, señales ni recomendaciones.
 
 ## Evidencia admisible
 
@@ -62,8 +64,12 @@ Las capas previstas permanecen separadas:
 2. observación normalizada de tenencia, propiedad o transacción — integrada para Forms 3/4/5 e
    insiders y Schedules 13D/13G de propiedad beneficiaria; Form 13F queda bloqueado hasta que exista
    correspondencia de instrumento generalizada;
-3. métrica descriptiva versionada;
-4. evento o diagnóstico del dominio Cazatiburones;
+3. métrica descriptiva versionada — integrada como `MetricResult` de categoría `cazatiburones` para
+   el delta de tenencia declarada de insiders y el delta de propiedad beneficiaria 13D/13G, sobre la
+   capa 2 ya integrada; Form 13F y las features sin respaldo en capa 2 permanecen fuera de esta capa;
+   ver `docs/cazatiburones_activity_metrics.md`;
+4. evento o diagnóstico del dominio Cazatiburones — la capa 4 (evento o candidato persistido y
+   trazable, con deduplicación y cooldown) permanece pendiente;
 5. regla de screening opcional que referencia evidencia exacta.
 
 ## Pipeline híbrido local
