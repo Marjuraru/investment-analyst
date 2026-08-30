@@ -110,6 +110,12 @@ un clasificador fue calibrado fuera de muestra. El umbral de activación se vers
 precision/recall, falsos positivos y presupuesto; `P > 0,85` puede ser una configuración inicial
 evaluada, pero no una constante arquitectónica.
 
+El paso 1 —umbrales descriptivos y reglas por formulario— queda integrado por SEC-CORPUS-8: un
+catálogo versionado (`cazatiburones-activity-rules-v1`) evalúa insiders, propiedad beneficiaria y
+13F de forma read-only y point-in-time, sin persistencia, deduplicación, agregación ni score. Ver
+`docs/cazatiburones_activity_rules.md`. Los pasos 2 a 6 permanecen `DEFERRED` bajo
+`PREDICTIVE-RESEARCH`.
+
 ## Ruta de implementación
 
 ### Etapa T0 — corpus común SEC
