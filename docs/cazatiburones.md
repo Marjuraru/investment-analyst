@@ -2,8 +2,11 @@
 
 `Cazatiburones` es el dominio previsto para describir actividad declarada de participantes
 relevantes. No es un sinónimo de volumen alto ni una señal automática de compra o venta.
-Actualmente calcula features descriptivas read-only de 13F, Forms 3/4/5 y Schedules 13D/13G; no
-calcula diagnósticos, señales ni recomendaciones.
+Actualmente calcula features descriptivas read-only de 13F, Forms 3/4/5 y Schedules 13D/13G, y
+persiste la capa 2 —observación normalizada point-in-time— para Forms 3/4/5 y Schedules 13D/13G;
+ver `docs/cazatiburones_activity_observations.md`. Form 13F permanece sin normalizar mientras sus
+posiciones carezcan de `asset_id` verificado. El dominio no calcula diagnósticos, señales ni
+recomendaciones.
 
 ## Evidencia admisible
 
@@ -56,7 +59,9 @@ atribuirá al mercado información antes de que el filing estuviera disponible.
 Las capas previstas permanecen separadas:
 
 1. documento y revisión SEC como `RawRecord`;
-2. observación normalizada de tenencia, propiedad o transacción;
+2. observación normalizada de tenencia, propiedad o transacción — integrada para Forms 3/4/5 e
+   insiders y Schedules 13D/13G de propiedad beneficiaria; Form 13F queda bloqueado hasta que exista
+   correspondencia de instrumento generalizada;
 3. métrica descriptiva versionada;
 4. evento o diagnóstico del dominio Cazatiburones;
 5. regla de screening opcional que referencia evidencia exacta.
