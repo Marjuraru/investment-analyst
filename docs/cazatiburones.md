@@ -2,7 +2,8 @@
 
 `Cazatiburones` es el dominio previsto para describir actividad declarada de participantes
 relevantes. No es un sinónimo de volumen alto ni una señal automática de compra o venta.
-Actualmente solo existe el espacio arquitectónico; todavía no calcula métricas ni diagnósticos.
+Actualmente calcula features descriptivas read-only de 13F, Forms 3/4/5 y Schedules 13D/13G; no
+calcula diagnósticos, señales ni recomendaciones.
 
 ## Evidencia admisible
 
