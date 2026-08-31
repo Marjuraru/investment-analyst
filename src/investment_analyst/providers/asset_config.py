@@ -126,6 +126,7 @@ class CoinbaseAssetConfiguration(ContractModel):
     asset_class: AssetClass
     quote_currency: NonEmptyStr
     exchange: NonEmptyStr
+    history_start: date | None = None
 
     @field_validator("granularity_seconds")
     @classmethod
@@ -133,6 +134,22 @@ class CoinbaseAssetConfiguration(ContractModel):
         """Require a positive strict integer granularity."""
         if value <= 0:
             raise ValueError("granularity_seconds must be positive")
+        return value
+
+    @field_validator("history_start", mode="before")
+    @classmethod
+    def validate_history_start(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            raise ValueError("Coinbase history_start must be a date")
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value)
+            except ValueError as error:
+                raise ValueError("Coinbase history_start must use YYYY-MM-DD") from error
+        if not isinstance(value, date):
+            raise ValueError("Coinbase history_start must be a date")
         return value
 
     @model_validator(mode="after")

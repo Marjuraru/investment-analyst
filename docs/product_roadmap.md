@@ -2,6 +2,9 @@
 
 ## Propósito y definición de producto completo
 
+UNIVERSE-COVERAGE-1 amplía el catálogo y entrega una consulta local de cobertura; no añade
+recomendaciones, ejecución, paneles ni proveedores nuevos.
+
 Esta hoja de ruta ordena las ampliaciones necesarias para convertir el MVP local actual en una
 herramienta profesional completa de apoyo al análisis. Mercado, fundamentales, macro, noticias y
 actividad de participantes conservan significado, evidencia y diagnósticos independientes. La

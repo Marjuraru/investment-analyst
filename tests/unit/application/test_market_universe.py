@@ -25,29 +25,40 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
 
     assert universe.schema_version == "market-asset-universe-v5"
     assert universe.catalog_version == 1
-    assert len(universe.assets) == 19
+    assert len(universe.assets) == 31
     assert tuple(item.asset_id for item in universe.assets) == tuple(
         sorted(item.asset_id for item in universe.assets)
     )
     by_symbol = {item.symbol: item for item in universe.assets}
     assert {
         "BTC-USD",
+        "ADA-USD",
+        "AMZN",
         "ETH-USD",
         "AAPL",
         "AMD",
         "B",
         "BVN",
         "CDE",
+        "CAT",
+        "CVX",
         "GBTC",
         "HYMC",
         "IBIT",
         "INTC",
+        "JNJ",
         "MSTR",
+        "MSFT",
         "MU",
         "MUX",
         "NEM",
+        "NVDA",
         "PLTR",
+        "QQQ",
         "SCCO",
+        "SOL-USD",
+        "SPY",
+        "TLT",
         "TSM",
     }.issubset(by_symbol)
 
@@ -113,6 +124,12 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     assert ethereum.chart_schema_version == "crypto-spot-daily-market-chart-v1"
     assert not ethereum.supports_intraday
     assert ethereum.supports_crypto_derivatives
+
+    for symbol in ("ADA-USD", "LINK-USD", "SOL-USD"):
+        altcoin = by_symbol[symbol]
+        assert altcoin.default_market_start == date(2025, 1, 1)
+        assert not altcoin.supports_intraday
+        assert not altcoin.supports_crypto_derivatives
 
     assert not apple.supports_crypto_derivatives
     assert not by_symbol["IBIT"].supports_crypto_derivatives

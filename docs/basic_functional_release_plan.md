@@ -2,6 +2,9 @@
 
 ## Objetivo
 
+La cobertura multi-activo se consulta mediante una matriz backend read-only con workspace explícito;
+evidencia local y capacidad de catálogo siguen siendo conceptos separados.
+
 Este documento convierte la hoja de ruta amplia en una ruta crítica verificable. La versión básica
 funcional debe permitir que un analista:
 

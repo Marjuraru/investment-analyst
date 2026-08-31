@@ -76,6 +76,17 @@ def resolve_coinbase_configuration(
         required_capabilities=("market.daily_bars",),
     )
     product_id = context.require_identifier("product_id")
+    starts = tuple(
+        binding.identifier for binding in context.bindings if binding.namespace == "history_start"
+    )
+    if len(starts) > 1:
+        raise ValueError("Coinbase history_start binding is ambiguous")
+    history_start: date | None = None
+    if starts:
+        try:
+            history_start = date.fromisoformat(starts[0])
+        except ValueError as error:
+            raise ValueError("Coinbase history_start binding must use YYYY-MM-DD") from error
     base_unit, quote_unit = product_id.split("-", maxsplit=1)
     return CoinbaseAssetConfiguration(
         asset_id=context.asset.asset_id,
@@ -89,6 +100,7 @@ def resolve_coinbase_configuration(
         asset_class=context.asset.asset_class,
         quote_currency=context.asset.quote_currency,
         exchange=context.asset.exchange or "UNKNOWN",
+        history_start=history_start,
     )
 
 

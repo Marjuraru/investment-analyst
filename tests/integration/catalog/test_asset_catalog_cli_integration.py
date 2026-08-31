@@ -48,16 +48,19 @@ def test_list_assets_filters_and_is_cwd_independent(tmp_path) -> None:
     assert all_asset_ids == sorted(all_asset_ids)
     assert {
         "crypto:btc-usd",
+        "crypto:ada-usd",
         "crypto:eth-usd",
+        "crypto:sol-usd",
         "equity:us:aapl",
         "equity:us:b",
         "equity:us:bvn",
         "equity:us:tsm",
         "etf:us:gbtc",
         "etf:us:ibit",
+        "etf:us:spy",
     }.issubset(all_asset_ids)
-    assert json.loads(equities.stdout)["count"] == 20
-    assert json.loads(market.stdout)["count"] == 19
+    assert json.loads(equities.stdout)["count"] == 26
+    assert json.loads(market.stdout)["count"] == 31
 
 
 def test_resolve_by_id_alias_and_binding(tmp_path) -> None:

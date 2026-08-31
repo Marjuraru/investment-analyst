@@ -1,6 +1,6 @@
 """Unit coverage for typed configurations built from the central catalog."""
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -163,6 +163,32 @@ def test_coinbase_daily_configuration_resolves_inactive_ethereum_without_intrada
     )
     with pytest.raises(ProviderCapabilityMissingError):
         resolve_coinbase_intraday_configuration(resolver, asset_id="crypto:eth-usd")
+
+
+def test_coinbase_altcoin_history_start_is_explicit_and_btc_is_unchanged() -> None:
+    resolver = _resolver()
+
+    solana = resolve_coinbase_configuration(resolver, asset_id="crypto:sol-usd")
+    bitcoin = resolve_coinbase_configuration(resolver)
+
+    assert solana.history_start == date(2025, 1, 1)
+    assert solana.source_id == "coinbase-exchange:sol-usd:daily-candles"
+    assert bitcoin.history_start is None
+    with pytest.raises(ValidationError, match="must be a date"):
+        CoinbaseAssetConfiguration(
+            asset_id="crypto:sol-usd",
+            product_id="SOL-USD",
+            source_id="coinbase-exchange:sol-usd:daily-candles",
+            granularity_seconds=DAILY_GRANULARITY_SECONDS,
+            base_unit="SOL",
+            quote_unit="USD",
+            symbol="SOL",
+            name="Solana",
+            asset_class=AssetClass.CRYPTO,
+            quote_currency="USD",
+            exchange="COINBASE",
+            history_start=datetime(2025, 1, 1),
+        )
 
 
 def test_alpaca_configuration_requires_explicit_asset_metadata() -> None:
