@@ -253,7 +253,10 @@ def _descriptor(
                 else "crypto-spot-daily-market-chart-v1"
             ),
             volume_unit=daily.base_unit,
-            default_market_start=_COINBASE_HISTORY_START,
+            default_market_start=max(
+                _COINBASE_HISTORY_START,
+                daily.history_start or _COINBASE_HISTORY_START,
+            ),
             analysis=analysis,
             has_fundamentals=False,
             has_corporate_valuation=False,

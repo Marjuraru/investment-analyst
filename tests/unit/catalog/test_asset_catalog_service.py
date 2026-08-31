@@ -24,8 +24,11 @@ from investment_analyst.catalog.service import (
 from investment_analyst.core.models import AssetClass
 
 _DEFAULT_ASSET_IDS = [
+    "crypto:ada-usd",
     "crypto:btc-usd",
     "crypto:eth-usd",
+    "crypto:link-usd",
+    "crypto:sol-usd",
     "equity:pe:bvl:bvn",
     "equity:pe:bvl:cverdec1",
     "equity:pe:bvl:minsuri1",
@@ -34,21 +37,30 @@ _DEFAULT_ASSET_IDS = [
     "equity:pe:bvl:volcabc1",
     "equity:us:aapl",
     "equity:us:amd",
+    "equity:us:amzn",
     "equity:us:b",
     "equity:us:bvn",
+    "equity:us:cat",
     "equity:us:cde",
+    "equity:us:cvx",
     "equity:us:hymc",
     "equity:us:intc",
+    "equity:us:jnj",
+    "equity:us:msft",
     "equity:us:mstr",
     "equity:us:mu",
     "equity:us:mux",
     "equity:us:nem",
+    "equity:us:nvda",
     "equity:us:pltr",
     "equity:us:scco",
     "equity:us:tsm",
     "etf:us:gbtc",
     "etf:us:gld",
     "etf:us:ibit",
+    "etf:us:qqq",
+    "etf:us:spy",
+    "etf:us:tlt",
 ]
 
 

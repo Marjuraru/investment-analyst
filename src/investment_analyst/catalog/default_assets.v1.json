@@ -2,6 +2,43 @@
   "assets": [
     {
       "aliases": [
+        "ADA",
+        "ADA-USD",
+        "Cardano"
+      ],
+      "asset_class": "crypto",
+      "asset_id": "crypto:ada-usd",
+      "crypto_profile": "altcoin",
+      "exchange": "COINBASE",
+      "is_active": true,
+      "name": "Cardano",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "2025-01-01",
+          "is_unique": false,
+          "namespace": "history_start",
+          "provider": "coinbase"
+        },
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "ADA-USD",
+          "namespace": "product_id",
+          "provider": "coinbase"
+        }
+      ],
+      "provider_symbols": {
+        "coinbase_exchange": "ADA-USD"
+      },
+      "quote_currency": "USD",
+      "symbol": "ADA"
+    },
+    {
+      "aliases": [
         "BTC",
         "BTC-USD",
         "Bitcoin"
@@ -90,6 +127,80 @@
       },
       "quote_currency": "USD",
       "symbol": "ETH"
+    },
+    {
+      "aliases": [
+        "LINK",
+        "LINK-USD",
+        "Chainlink"
+      ],
+      "asset_class": "crypto",
+      "asset_id": "crypto:link-usd",
+      "crypto_profile": "altcoin",
+      "exchange": "COINBASE",
+      "is_active": true,
+      "name": "Chainlink",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "2025-01-01",
+          "is_unique": false,
+          "namespace": "history_start",
+          "provider": "coinbase"
+        },
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "LINK-USD",
+          "namespace": "product_id",
+          "provider": "coinbase"
+        }
+      ],
+      "provider_symbols": {
+        "coinbase_exchange": "LINK-USD"
+      },
+      "quote_currency": "USD",
+      "symbol": "LINK"
+    },
+    {
+      "aliases": [
+        "SOL",
+        "SOL-USD",
+        "Solana"
+      ],
+      "asset_class": "crypto",
+      "asset_id": "crypto:sol-usd",
+      "crypto_profile": "altcoin",
+      "exchange": "COINBASE",
+      "is_active": true,
+      "name": "Solana",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "2025-01-01",
+          "is_unique": false,
+          "namespace": "history_start",
+          "provider": "coinbase"
+        },
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "SOL-USD",
+          "namespace": "product_id",
+          "provider": "coinbase"
+        }
+      ],
+      "provider_symbols": {
+        "coinbase_exchange": "SOL-USD"
+      },
+      "quote_currency": "USD",
+      "symbol": "SOL"
     },
     {
       "aliases": [
@@ -530,6 +641,61 @@
     },
     {
       "aliases": [
+        "AMZN",
+        "Amazon"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:amzn",
+      "exchange": "NASDAQ",
+      "is_active": true,
+      "name": "Amazon.com, Inc.",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "AMZN",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0001018724",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "AMZN",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "AMZN",
+        "sec_cik": "0001018724"
+      },
+      "quote_currency": "USD",
+      "symbol": "AMZN"
+    },
+    {
+      "aliases": [
         "B",
         "Barrick",
         "Barrick Mining"
@@ -650,6 +816,61 @@
     },
     {
       "aliases": [
+        "CAT",
+        "Caterpillar"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:cat",
+      "exchange": "NYSE",
+      "is_active": true,
+      "name": "Caterpillar Inc.",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "CAT",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0000018230",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "CAT",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "CAT",
+        "sec_cik": "0000018230"
+      },
+      "quote_currency": "USD",
+      "symbol": "CAT"
+    },
+    {
+      "aliases": [
         "CDE",
         "Coeur Mining"
       ],
@@ -702,6 +923,61 @@
       },
       "quote_currency": "USD",
       "symbol": "CDE"
+    },
+    {
+      "aliases": [
+        "CVX",
+        "Chevron"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:cvx",
+      "exchange": "NYSE",
+      "is_active": true,
+      "name": "Chevron Corporation",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "CVX",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0000093410",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "CVX",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "CVX",
+        "sec_cik": "0000093410"
+      },
+      "quote_currency": "USD",
+      "symbol": "CVX"
     },
     {
       "aliases": [
@@ -812,6 +1088,116 @@
       },
       "quote_currency": "USD",
       "symbol": "INTC"
+    },
+    {
+      "aliases": [
+        "JNJ",
+        "Johnson & Johnson"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:jnj",
+      "exchange": "NYSE",
+      "is_active": true,
+      "name": "Johnson & Johnson",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "JNJ",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0000200406",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "JNJ",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "JNJ",
+        "sec_cik": "0000200406"
+      },
+      "quote_currency": "USD",
+      "symbol": "JNJ"
+    },
+    {
+      "aliases": [
+        "MSFT",
+        "Microsoft"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:msft",
+      "exchange": "NASDAQ",
+      "is_active": true,
+      "name": "Microsoft Corporation",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "MSFT",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0000789019",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "MSFT",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "MSFT",
+        "sec_cik": "0000789019"
+      },
+      "quote_currency": "USD",
+      "symbol": "MSFT"
     },
     {
       "aliases": [
@@ -1035,6 +1421,61 @@
       },
       "quote_currency": "USD",
       "symbol": "NEM"
+    },
+    {
+      "aliases": [
+        "NVDA",
+        "NVIDIA"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:nvda",
+      "exchange": "NASDAQ",
+      "is_active": true,
+      "name": "NVIDIA Corporation",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "NVDA",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0001045810",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "NVDA",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "NVDA",
+        "sec_cik": "0001045810"
+      },
+      "quote_currency": "USD",
+      "symbol": "NVDA"
     },
     {
       "aliases": [
@@ -1280,6 +1721,84 @@
       },
       "quote_currency": "USD",
       "symbol": "IBIT"
+    },
+    {
+      "aliases": [
+        "QQQ",
+        "Invesco QQQ ETF"
+      ],
+      "asset_class": "etf",
+      "asset_id": "etf:us:qqq",
+      "exchange": "NASDAQ",
+      "is_active": true,
+      "name": "Invesco QQQ Trust",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "QQQ",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "QQQ"
+      },
+      "quote_currency": "USD",
+      "symbol": "QQQ"
+    },
+    {
+      "aliases": [
+        "SPY",
+        "SPDR S&P 500 ETF"
+      ],
+      "asset_class": "etf",
+      "asset_id": "etf:us:spy",
+      "exchange": "NYSE ARCA",
+      "is_active": true,
+      "name": "State Street SPDR S&P 500 ETF Trust",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "SPY",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "SPY"
+      },
+      "quote_currency": "USD",
+      "symbol": "SPY"
+    },
+    {
+      "aliases": [
+        "TLT",
+        "iShares 20+ Year Treasury Bond ETF"
+      ],
+      "asset_class": "etf",
+      "asset_id": "etf:us:tlt",
+      "exchange": "NASDAQ",
+      "is_active": true,
+      "name": "iShares 20+ Year Treasury Bond ETF",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "TLT",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "TLT"
+      },
+      "quote_currency": "USD",
+      "symbol": "TLT"
     }
   ],
   "catalog_version": 1

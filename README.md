@@ -2,6 +2,9 @@
 
 ## Propósito
 
+La consulta local de cobertura multi-activo está documentada en
+[docs/universe_coverage.md](docs/universe_coverage.md).
+
 Herramienta personal para recolectar, procesar, relacionar, visualizar y explicar información útil para el análisis de inversiones. Está diseñada para apoyar el criterio de un analista humano.
 
 ## Alcance
