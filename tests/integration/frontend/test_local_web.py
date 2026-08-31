@@ -1865,7 +1865,7 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert assets_status == 200
     assert assets["schema_version"] == "market-asset-universe-v5"
     assert assets["catalog_version"] == 1
-    assert len(assets["assets"]) == 19
+    assert len(assets["assets"]) == 31
     assets_by_id = {item["asset_id"]: item for item in assets["assets"]}
     assert assets_by_id["equity:us:aapl"]["analysis"]["fundamental_mode"] == "corporate"
     assert assets_by_id["equity:us:amd"]["has_fundamentals"] is True
