@@ -34,6 +34,11 @@ def test_request_is_bounded_and_deterministic() -> None:
         {"asset_ids": ("equity:us:msft", "crypto:sol-usd")},
         {"frequency": "monthly"},
         {"market_end": date(2026, 8, 30)},
+        {
+            "known_at": datetime(2026, 8, 28, 12, tzinfo=UTC),
+            "market_start": date(2026, 8, 28),
+            "market_end": date(2026, 8, 28),
+        },
     ],
 )
 def test_request_rejects_invalid_selection_and_ranges(changes: dict[str, object]) -> None:
