@@ -117,7 +117,7 @@ def parse_institutional_holdings(
         raw_record_id=InstitutionalHoldingsReport.expected_raw_record_id(report_id),
         manager_cik=filing.filer_cik,
         manager_name=manager_name,
-        file_number=_text(cover, "form13FFileNumber"),
+        file_number=_declarant_file_number(cover),
         report_period=filing.report_date,
         cover_revision=cover_revision,
         information_table_revision=information_table_revision,
@@ -156,6 +156,23 @@ def _descendant(
         raise SecInstitutionalHoldingsParserError(f"ambiguous XML {name}")
     if not found and required:
         raise SecInstitutionalHoldingsParserError(f"missing XML {name}")
+    return found[0] if found else None
+
+
+def _declarant_file_number(cover: ElementTree.Element) -> str | None:
+    """Read only the declarant cover-page field, never an other-manager field."""
+    form_data = _direct_child(cover, "formData")
+    cover_page = _direct_child(form_data, "coverPage")
+    field = _direct_child(cover_page, "form13FFileNumber")
+    return None if field is None else (field.text or "").strip() or None
+
+
+def _direct_child(node: ElementTree.Element | None, name: str) -> ElementTree.Element | None:
+    if node is None:
+        return None
+    found = tuple(child for child in node if _name(child) == name)
+    if len(found) > 1:
+        raise SecInstitutionalHoldingsParserError(f"ambiguous XML {name}")
     return found[0] if found else None
 
 

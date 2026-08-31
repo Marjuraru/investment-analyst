@@ -47,6 +47,12 @@ instrumento; tampoco calcula variaciones, entradas, salidas, concentración, sco
 ni recomendación. El backfill fuera de `filings.recent`, los formularios `13F-NT` y la agregación
 entre gestores quedan fuera del contrato.
 
+## Enriquecimiento semántico v2
+
+El paso explícito posterior conserva el XML 13F as-filed sin fusionar filas ni interpretar una
+enmienda como cartera efectiva. Véase [Semántica institucional 13F as-filed](sec_institutional_semantics.md)
+para el contrato de identidad, PIT, unidades no resueltas, consulta paginada y verificación de backup.
+
 ## Proyección por activo mediante evidencia declarada
 
 `scripts/query_institutional_holdings_by_asset.py` expone una proyección local de sólo lectura que

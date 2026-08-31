@@ -7,6 +7,10 @@ La consulta local de cobertura multi-activo está documentada en
 Incluye las 37 identidades del catálogo y mantiene separadas la configuración, la evidencia PIT,
 la valoración corporativa y el registro BVL; no es una recomendación ni un ranking.
 
+La evidencia institucional 13F puede enriquecerse localmente como presentación as-filed, con filas,
+dimensiones, revisiones y corte PIT preservados; no resuelve instrumentos ni calcula métricas. Véase
+[docs/sec_institutional_semantics.md](docs/sec_institutional_semantics.md).
+
 Herramienta personal para recolectar, procesar, relacionar, visualizar y explicar información útil para el análisis de inversiones. Está diseñada para apoyar el criterio de un analista humano.
 
 ## Alcance
