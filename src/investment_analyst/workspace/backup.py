@@ -19,6 +19,9 @@ import duckdb
 from duckdb import DuckDBPyConnection
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from investment_analyst.analytics.cazatiburones.activity_event_repository import (
+    ActivityEventRepository,
+)
 from investment_analyst.core.models import (
     DiagnosticResult,
     MetricResult,
@@ -439,6 +442,7 @@ def _verify_workspace_traceability(
         storage = service.open_storage(paths, WorkspaceAccessMode.READ_ONLY)
         try:
             _require_counts(storage, expected_counts)
+            ActivityEventRepository(storage.paths.processed_dir, read_only=True).verify()
             _require_scan_count(
                 _scan_raw_records(storage),
                 expected_counts.raw_records,
