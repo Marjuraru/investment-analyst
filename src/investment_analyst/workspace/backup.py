@@ -47,7 +47,6 @@ from investment_analyst.evidence.sec_institutional_holdings.repository import (
     verify_institutional_holding_records,
 )
 from investment_analyst.evidence.sec_institutional_semantics.repository import (
-    InstitutionalSemanticsRepository,
     verify_institutional_semantics_records,
 )
 from investment_analyst.evidence.sec_ownership.repository import verify_ownership_records
@@ -563,7 +562,6 @@ def _scan_raw_records(storage: LocalStorage) -> int:
         )
         verify_institutional_semantics_records(
             records.values(),
-            semantics_repository=InstitutionalSemanticsRepository(storage.raw_records),
             holdings_repository=InstitutionalHoldingsRepository(storage.raw_records),
             filer_documents=filer_documents,
             content_store=storage.documents,

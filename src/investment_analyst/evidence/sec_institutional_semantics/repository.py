@@ -114,7 +114,6 @@ class InstitutionalSemanticsRepository:
 def verify_institutional_semantics_records(
     records: Iterable[RawRecord],
     *,
-    semantics_repository,
     holdings_repository,
     filer_documents,
     content_store,

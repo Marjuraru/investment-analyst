@@ -137,3 +137,22 @@ def test_enrichment_reuses_complete_bundle_and_query_never_aggregates_rows(tmp_p
     assert queried.matching_rows == 2
     assert queried.truncated is True
     assert len(queried.rows) == 1
+
+    with LocalStorage(root, read_only=True) as storage:
+        final_page = (
+            InstitutionalHoldingsSemanticsService(storage)
+            .query(
+                InstitutionalHoldingsSemanticsQuery(
+                    manager_cik="1067983",
+                    report_ids=(report.report_id,),
+                    known_at=datetime(2025, 2, 16, tzinfo=UTC),
+                    cusip="037833100",
+                    offset=1,
+                    limit=1,
+                )
+            )
+            .reports[0]
+        )
+
+    assert final_page.truncated is False
+    assert tuple(row.row_number for row in final_page.rows) == (2,)

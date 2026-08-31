@@ -50,6 +50,12 @@ def parse_institutional_semantics(
     artifact_id = InstitutionalHoldingsSemantics.expected_id(
         parent_report_id, cover_revision.revision_id, information_table_revision.revision_id
     )
+    other_managers_included = _other_managers(cover)
+    declared_sequences = {
+        value.sequence_number
+        for value in other_managers_included
+        if value.sequence_number is not None
+    }
     rows: list[InstitutionalSemanticsRow] = []
     for number, element in enumerate(_descendants(table, "infoTable"), start=1):
         if number > _MAX_ROWS:
@@ -63,11 +69,6 @@ def parse_institutional_semantics(
         if quantity_type is not None and quantity_type not in {"SH", "PRN"}:
             limitations.append("unsupported_code")
         refs = _references(manager_reference)
-        declared_sequences = {
-            value.sequence_number
-            for value in _other_managers(cover)
-            if value.sequence_number is not None
-        }
         if refs and any(reference not in declared_sequences for reference in refs):
             limitations.append("unresolved_manager_reference")
         row_id = InstitutionalHoldingsSemantics.expected_row_id(artifact_id, number)
@@ -114,7 +115,7 @@ def parse_institutional_semantics(
         confidential_omitted=_boolean(_text(cover, "confidentialOmitted")),
         declared_entry_total=_integer(_text(cover, "tableEntryTotal")),
         declared_value_total=_decimal(_text(cover, "tableValueTotal")),
-        other_managers_included=_other_managers(cover),
+        other_managers_included=other_managers_included,
         reporting_managers=_reporting_managers(cover, manager_name, filing.filer_cik),
         rows=tuple(rows),
         available_at=filing.accepted_at,

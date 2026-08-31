@@ -87,7 +87,7 @@ class InstitutionalSemanticsQueryReport(_Strict):
             raise ValueError("found semantic query requires a header")
         if self.matching_rows < len(self.rows) or self.total_rows < self.matching_rows:
             raise ValueError("semantic query counts are invalid")
-        if self.truncated != (self.matching_rows > len(self.rows)):
+        if self.truncated and self.matching_rows <= len(self.rows):
             raise ValueError("semantic query truncation is invalid")
         return self
 
