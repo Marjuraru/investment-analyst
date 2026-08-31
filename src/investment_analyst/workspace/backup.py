@@ -46,7 +46,13 @@ from investment_analyst.evidence.sec_institutional_holdings.repository import (
     InstitutionalHoldingsRepository,
     verify_institutional_holding_records,
 )
+from investment_analyst.evidence.sec_institutional_semantics.repository import (
+    verify_institutional_semantics_records,
+)
 from investment_analyst.evidence.sec_ownership.repository import verify_ownership_records
+from investment_analyst.providers.institutional_holdings.sec_institutional_semantics_parser import (
+    parse_institutional_semantics,
+)
 from investment_analyst.storage import StorageError
 from investment_analyst.storage.local import LocalStorage
 from investment_analyst.storage.serialization import model_from_json
@@ -553,6 +559,13 @@ def _scan_raw_records(storage: LocalStorage) -> int:
             InstitutionalHoldingsRepository(storage.raw_records),
             filer_documents,
             storage.documents,
+        )
+        verify_institutional_semantics_records(
+            records.values(),
+            holdings_repository=InstitutionalHoldingsRepository(storage.raw_records),
+            filer_documents=filer_documents,
+            content_store=storage.documents,
+            parser=parse_institutional_semantics,
         )
         count += len(records)
         after_id = record_ids[-1]
