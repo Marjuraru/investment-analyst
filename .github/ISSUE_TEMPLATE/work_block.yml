@@ -40,7 +40,7 @@ body:
     validations: {required: true}
   - type: dropdown
     id: writer_role
-    attributes: {label: Writer role, description: "Rol único que puede escribir; el modelo/cliente no cambia autoridad.", options: [BUILD, UI_WORKER]}
+    attributes: {label: Writer role, description: "Rol único que puede escribir; BUILD_PRODUCT no toca governance, BUILD_GOVERNANCE exige R3/CRITICAL/HUMAN/NONE y snapshot de base, UI_WORKER es producto restringido.", options: [BUILD_PRODUCT, BUILD_GOVERNANCE, UI_WORKER]}
     validations: {required: true}
   - type: textarea
     id: scope_delta
@@ -56,7 +56,17 @@ body:
     validations: {required: true}
   - type: textarea
     id: acceptance
-    attributes: {label: Acceptance and negative cases}
+    attributes: {label: Acceptance and negative cases, description: "Explique el contrato; el bloque JSON parser-owned siguiente es la fuente ejecutable."}
+    validations: {required: true}
+  - type: textarea
+    id: acceptance_manifest
+    attributes:
+      label: Acceptance manifest JSON
+      description: "Un único JSON canónico workflow-acceptance-manifest-v1 con schema_version, route_effect e items; cada item tiene id, kind y requirements tipados (changed_path, present_path, focused_test, ci, smoke, live_probe, route_transition)."
+      value: |
+        ```json
+        {"schema_version":"workflow-acceptance-manifest-v1","route_effect":"NONE","items":[{"id":"A1","kind":"acceptance","requirements":["changed_path:README.md"]}]}
+        ```
     validations: {required: true}
   - type: textarea
     id: capability_delta

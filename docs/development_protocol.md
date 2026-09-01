@@ -384,3 +384,47 @@ se añade sólo qué falló, por qué importa y la acción concreta requerida. B
 No se añaden Actions, bots, servicios, helpers/scanners persistentes de comentarios, estado
 persistente, comandos nuevos, auto-merge nativo, branch deletion, worktrees automáticos, parallel
 authoring ni sincronización destructiva de `main`.
+
+## Writers estables, manifest y receipt HUMAN
+
+Después del rollout de governance sólo existen `BUILD_PRODUCT`, `BUILD_GOVERNANCE` y `UI_WORKER` como
+writer roles; `$build` es el dispatcher y `BUILD` genérico es inválido. `BUILD_PRODUCT` y
+`UI_WORKER` rechazan cualquier ruta de governance. `BUILD_GOVERNANCE` sólo puede tocar las rutas de
+governance enumeradas, exige `R3`/`CRITICAL`/`HUMAN`/`route_effect: NONE` y valida un authority
+snapshot de la base declarada. El snapshot contiene el SHA base y los digests de AGENTS, protocolo,
+skills y guard; los bytes candidatos nunca se usan como autoridad antes del merge.
+
+Cada Work Block declara exactamente un JSON canónico `workflow-acceptance-manifest-v1` con
+`schema_version`, `route_effect` e items de ID único. Cada item tiene `kind` (`acceptance`,
+`invariant` o `negative`) y requirements tipados `changed_path`, `present_path`, `focused_test`,
+`ci`, `smoke`, `live_probe` o `route_transition`. BUILD y AUDIT publican markers v2 exact-SHA con
+el digest SHA-256 del manifest y evidencia no vacía por cada requirement; unknown, duplicado,
+ausente, stale o no observable falla cerrado. El guard verifica paths contra base...head, CI, smoke
+y transición de ruta; filenames, CI o payload narrativo no son evidencia suficiente. Para
+`ADVANCES`/`COMPLETES`, `route_transition` y el diff del documento de ruta son obligatorios; para
+`NONE`, modificar la ruta falla.
+
+```html
+<!-- development-workflow:build-v2
+block=<WORK-BLOCK>
+sha=<FULL-SHA>
+status=PENDING|PASS|FAIL
+manifest_sha256=<SHA-256>
+-->{"items":[{"id":"A1","verdict":"PASS","evidence":{"changed_path:README.md":"base...head"}}]}
+```
+
+`audit-v2` añade `reviewer=<EVIDENCE-METADATA>` y mantiene el mismo payload completo. Estos
+markers no sustituyen la inspección semántica del AUDIT.
+
+La clasificación BUILD expone `CONTINUE`, `FIX`, `WAIT/POLL`, `READY`, `BLOCKED` o `GUARD FAILURE`
+con `terminal`, `owner` y `next_action`. Sólo `READY`, un bloqueo externo demostrado de owner no
+BUILD y `GUARD FAILURE` son terminales. `HARNESS_INTERRUPTED` describe timeout, cancelación o fin
+de turno: no es estado de workflow, no crea marker y la siguiente ejecución se reanuda desde el
+estado vivo.
+
+Con policy HUMAN, BUILD y AUDIT no pueden producir aprobación ni auto-review. Tras AUDIT PASS el
+guard permanece `AWAITING HUMAN APPROVAL` hasta un único receipt
+`development-workflow:human-v1` posterior a AUDIT, con Work Block, SHA, digest del manifest y
+`decision=APPROVE|REJECT`. Un receipt stale, duplicado, ambiguo o pre-AUDIT falla cerrado; APPROVE
+habilita sólo el camino HUMAN exact-SHA y REJECT exige una nueva decisión humana, nunca `BUILD
+BLOCKED`.

@@ -98,6 +98,12 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "defecto de PLAN corregible por enmienda, nunca un `BUILD BLOCKED`" in protocol
     assert "En `BUILD BOOTSTRAP`, por ausencia de PR" in protocol
     assert "guard `--phase build` no puede materializar rutas" in protocol
+    assert "BUILD_PRODUCT" in protocol
+    assert "BUILD_GOVERNANCE" in protocol
+    assert "workflow-acceptance-manifest-v1" in protocol
+    assert "HARNESS_INTERRUPTED" in protocol
+    assert "development-workflow:human-v1" in protocol
+    assert "authority\nsnapshot" in protocol
 
     for name, text in skills.items():
         assert _frontmatter_value(text, "name") == name
@@ -153,6 +159,10 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     ):
         assert forbidden_action in skills["audit"]
     assert "writer role válido" in skills["plan"]
+    assert "workflow-acceptance-manifest-v1" in skills["plan"]
+    assert "BUILD_GOVERNANCE" in skills["build"]
+    assert "terminal" in skills["build"]
+    assert "human-v1" in skills["audit"]
     assert "exactamente BUILD" in skills["ui"]
     assert "único writer" in skills["ui"]
     assert "local_web.py" in skills["ui"]
@@ -167,7 +177,7 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "exploración dirigida" in skills["plan"]
     assert "route_effect" in skills["plan"]
     assert "superseder un bloqueo puramente temporal" in skills["plan"]
-    assert "Cada gate, smoke y criterio de aceptación debe ser satisfacible" in skills["plan"]
+    assert "Cada requisito tipado del manifest debe ser satisfacible y observable" in skills["plan"]
     assert "defecto de PLAN corregible por enmienda, nunca un `BUILD BLOCKED`" in skills["plan"]
     agents = _read("AGENTS.md")
     assert "archive-first, may" in agents
@@ -175,7 +185,9 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "source, branch, candidate, head, workspace, labels, Issue" in agents
     assert "id: writer_role" in template
     assert "route_effect (NONE/ADVANCES/COMPLETES)" in template
-    assert "options: [BUILD, UI_WORKER]" in template
+    assert "options: [BUILD_PRODUCT, BUILD_GOVERNANCE, UI_WORKER]" in template
+    assert "id: acceptance_manifest" in template
+    assert "workflow-acceptance-manifest-v1" in template
     assert "id: owner" not in template
 
 
@@ -677,7 +689,8 @@ def _role_permissions(model_metadata: str) -> dict[str, str]:
     del model_metadata
     return {
         "PLAN": "control-plane",
-        "BUILD": "single-writer",
+        "BUILD_PRODUCT": "product-writer",
+        "BUILD_GOVERNANCE": "governance-writer",
         "UI_WORKER": "ui-only-writer",
         "AUDIT": "read-only",
     }
@@ -686,7 +699,8 @@ def _role_permissions(model_metadata: str) -> dict[str, str]:
 def test_role_permissions_are_explicit_and_complete() -> None:
     permissions = {
         "PLAN": "control-plane",
-        "BUILD": "single-writer",
+        "BUILD_PRODUCT": "product-writer",
+        "BUILD_GOVERNANCE": "governance-writer",
         "UI_WORKER": "ui-only-writer",
         "AUDIT": "read-only",
     }

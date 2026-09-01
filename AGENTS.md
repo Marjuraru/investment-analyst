@@ -166,8 +166,12 @@ results, and pending risks.
   checkpoint completo. La supersesión no es completion, BUILD PASS ni FINALIZE: retira primero el
   label, relee cero activos, cierra `not_planned`, relee y sólo después publica el siguiente bloque.
   El replan posterior parte de main, metadata y hashes nuevos y vuelve a ejecutar su probe read-only.
-- Explicit `BUILD role` authorizes implementation, intended staging, commit, push, and one draft PR only
-  after the active Work Block, declared base, expected branch, and working tree resolve uniquely.
+- Explicit `$build` dispatches only the stable Work Block writer role (`BUILD_PRODUCT`,
+  `BUILD_GOVERNANCE` or `UI_WORKER`) and authorizes implementation, intended staging, commit, push,
+  and one draft PR only after the active Work Block, declared base, expected branch, acceptance
+  manifest and working tree resolve uniquely. Generic `BUILD` is not a valid post-rollout writer
+  role. `BUILD_GOVERNANCE` requires an authority snapshot verified against its declared base and
+  never uses candidate governance bytes as authority before merge.
   For a FAST Work Block whose effective `finalize_policy` is AUTO, it also authorizes the narrow
   FINALIZE procedure after all live guards pass; otherwise it never authorizes merge,
   ready-for-review, scope expansion, or protected local work.
@@ -176,7 +180,7 @@ results, and pending risks.
   CLI es read-only, estructural y fail-closed; materializa las rutas del diff, aplica policy de
   gobernanza, allowlist/deny y hashes declarados. Ninguna skill duplica su parser ni infiere
   Profile, policy, SHA, markers o permisos desde narrativa, modelo o cliente.
-- Explicit `UI_WORKER role` in a supported client authorizes the same BUILD phase only for the UI Worker scope
+- Explicit `UI_WORKER role` in a supported client authorizes the same BUILD_PRODUCT phase only for the UI Worker scope
   declared by the active Work Block. The UI Worker is the sole writer, uses no parallel writer or
   intra-block handoff, and returns to PLAN for any scope or capability expansion.
 - PLAN, BUILD, UI_WORKER and AUDIT are roles defined by their permissions, inputs, outputs and
