@@ -571,9 +571,11 @@ son nuevas capacidades de análisis, no acceden al workspace ni ejecutan provide
 atribuyen causalidad de memoria. La duración de la captura es finita y explícita, sin duración mínima
 ni número mínimo de muestras, sesiones o ciclos como gate. `RELEASE-ACCEPTANCE` fue reconciliada
 HUMAN como `RELEASE-ACCEPTANCE DONE → EQUITY-UNIVERSE NEXT → SEC-CORPUS PLANNED`.
-La transición integrada es `EQUITY-UNIVERSE DONE → SEC-CORPUS NEXT`; la evidencia institucional
-as-filed por sí sola no presenta SEC-CORPUS como completado: correspondencia, unidades, observaciones,
-métricas, eventos y automatización continúan siendo fronteras separadas. `EXTENDED-SOAK /
+La transición integrada es `EQUITY-UNIVERSE DONE → SEC-CORPUS NEXT`; #134/#135 integraron el
+sustrato institucional 13F: filas as-filed separadas, binding exacto CUSIP+clase visible PIT y
+observaciones append-only con unidades explícitas. Esto no presenta SEC-CORPUS como completado ni
+como cartera efectiva: métricas, composición de enmiendas/completitud, eventos, reglas/automatización,
+búsqueda y UI continúan siendo fronteras separadas. `EXTENDED-SOAK /
 DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
 Block independiente.
 

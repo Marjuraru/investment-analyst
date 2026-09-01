@@ -79,7 +79,7 @@ siendo OPS-2/#66, supersedido con `insufficient_local_dates` sin completion ni r
 | `INDICATORS-AND-OUTBOX` | `DONE` | Integrado por ALERT-1 (`COMPLETES`). | RSI/MACD/ATR, reglas silenciosas y outbox local con acuse durable; los canales externos siguen pendientes. |
 | `RELEASE-ACCEPTANCE` | `DONE` | Reconciliación HUMAN de #93/#94; integrada antes de este bloque. | La aceptación finita y la recuperación ya fueron registradas. |
 | `EQUITY-UNIVERSE` | `DONE` | Integrado mediante contratos por capacidades. | AAPL mantiene adaptadores compatibles; no hay privilegio de flujo por ticker. |
-| `SEC-CORPUS` | `NEXT` | La evidencia 13F as-filed enriquecida conserva filas, dimensiones y revisiones sin normalización monetaria; siguen pendientes correspondencia PIT, observaciones/métricas y reglas descriptivas. | Las posiciones 13F conservan CUSIP y clase declarados sin `asset_id`; no hay cartera efectiva, percentil robusto ni capa 4 mientras no exista una representación verificable de instrumento/unidades. |
+| `SEC-CORPUS` | `NEXT` | #134/#135 integraron correspondencia exacta CUSIP+clase visible PIT, política monetaria 13F versionada y observaciones institucionales append-only con consulta read-only; siguen pendientes métricas descriptivas y política de composición/completitud, luego eventos, reglas/automatización, búsqueda y UI por bloques propios. | Las observaciones 13F son filas as-filed separadas, no cartera efectiva; no hay composición de enmiendas, cambios de cartera, concentración, percentil robusto ni capa 4. |
 | `BVL-MARKET` | `BLOCKED` | Contrato de uso y fuente oficial autorizada. | No se infiere autorización para automatizar boletines. |
 | `PREDICTIVE-RESEARCH` | `DEFERRED` | Carril explícito con PIT, label, baselines, validación temporal, holdout, shadow y rollback. | Universo survivorship-aware es condicional; on-chain, stablecoins/DeFi, multi-venue y derivados extra dependen del target. |
 
@@ -147,7 +147,7 @@ La transición integrada es literalmente `EQUITY-UNIVERSE` | `DONE` y
 - existe una outbox local con acuse; no existe canal de notificación externo;
 - no existe todavía un corpus local de filings, comunicados y noticias;
 - sin corpus no es posible implementar una IA auditable con citas;
-- Cazatiburones está diseñado, pero aún no ingiere Forms 3/4/5, Schedules 13D/13G o 13F;
+- Cazatiburones ya conserva evidencia 13F as-filed de #134/#135 con enlace PIT y unidades explícitas; las métricas institucionales descriptivas, la composición/completitud, eventos, reglas/automatización, búsqueda y UI permanecen pendientes;
 - BVL tiene identidad registral, pero mercado y fundamentales siguen bloqueados por fuente,
   autorización o adaptador.
 
