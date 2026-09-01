@@ -30,7 +30,8 @@ def normalize_row(
     ):
         raise ValueError("normalized_at must be UTC and not precede available evidence")
     available_at = max(item.available_at, correspondence.available_at)
-    value, quality = monetary_value(row.value_as_reported, available_at=item.available_at)
+    accepted_at = item.cover_revision.document.filing.accepted_at
+    value, quality = monetary_value(row.value_as_reported, accepted_at=accepted_at)
     option = row.put_call.upper() if row.put_call is not None else None
     if option not in {None, "PUT", "CALL"}:
         return ()
@@ -64,15 +65,21 @@ def normalize_row(
     period_end = datetime.combine(item.report_period, time.min, tzinfo=UTC)
     key_base = {
         "artifact_id": str(item.artifact_id),
+        "report_id": str(item.parent_report_id),
+        "manager_cik": item.manager_cik,
         "row_id": str(row.row_id),
         "correspondence_id": str(correspondence.correspondence_id),
         "cover_revision_id": str(item.cover_revision.revision_id),
+        "cover_content_sha256": item.cover_revision.content_sha256,
         "information_table_revision_id": str(item.information_table_revision.revision_id),
+        "information_table_content_sha256": item.information_table_revision.content_sha256,
         "cusip": row.cusip,
         "title_of_class": row.title_of_class,
         "put_call": row.put_call,
         "quantity_type": row.quantity_type,
         "transformation_version": TRANSFORMATION_VERSION,
+        "monetary_policy_version": "sec-13f-monetary-policy-v1",
+        "filing_accepted_at": accepted_at.isoformat(),
     }
     return tuple(
         NormalizedObservation(

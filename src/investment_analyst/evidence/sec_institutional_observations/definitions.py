@@ -9,6 +9,6 @@ MONETARY_POLICY_VERSION = "sec-13f-monetary-policy-v1"
 USD_FROM = datetime(2023, 1, 3, tzinfo=UTC)
 
 
-def monetary_value(value: Decimal, *, available_at: datetime) -> tuple[Decimal, str]:
+def monetary_value(value: Decimal, *, accepted_at: datetime) -> tuple[Decimal, str]:
     """Return official USD value and its disclosed precision quality."""
-    return (value, "valid") if available_at >= USD_FROM else (value * Decimal("1000"), "partial")
+    return (value, "valid") if accepted_at >= USD_FROM else (value * Decimal("1000"), "partial")

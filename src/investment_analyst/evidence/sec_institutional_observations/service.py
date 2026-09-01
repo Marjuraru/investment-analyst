@@ -1,5 +1,6 @@
 """PIT persistence for linked institutional observations."""
 
+import json
 from collections import Counter
 from datetime import UTC, datetime
 
@@ -15,7 +16,12 @@ from investment_analyst.evidence.sec_institutional_semantics.repository import (
 from investment_analyst.storage import RecordNotFoundError, StorageError
 
 from .definitions import SOURCE_ID
-from .models import InstitutionalObservationRequest, InstitutionalObservationSummary
+from .models import (
+    InstitutionalObservationQuery,
+    InstitutionalObservationQueryResult,
+    InstitutionalObservationRequest,
+    InstitutionalObservationSummary,
+)
 from .normalizer import normalize_row
 
 
@@ -52,6 +58,10 @@ class InstitutionalObservationService:
                 continue
             for row in item.rows:
                 rows += 1
+                if item.report_period is None:
+                    skips["missing_report_period"] += 1
+                    continue
+                same_cusip = [c for c in correspondences if c.cusip == row.cusip]
                 exact = [
                     c
                     for c in correspondences
@@ -60,9 +70,15 @@ class InstitutionalObservationService:
                     and c.is_effective_on(item.report_period)
                 ]
                 if len(exact) != 1:
-                    skips[
-                        "ambiguous_correspondence" if len(exact) > 1 else "missing_correspondence"
-                    ] += 1
+                    if len(exact) > 1:
+                        reason = "ambiguous_correspondence"
+                    elif any(c.is_effective_on(item.report_period) for c in same_cusip):
+                        reason = "class_mismatch"
+                    elif same_cusip:
+                        reason = "outside_effective_period"
+                    else:
+                        reason = "missing_correspondence"
+                    skips[reason] += 1
                     continue
                 candidates = normalize_row(item, row, exact[0], normalized_at=now)
                 if not candidates:
@@ -93,11 +109,30 @@ class InstitutionalObservationService:
             skipped_by_reason=dict(skips),
         )
 
-    def query(self, *, asset_id: str, known_at: datetime):
+    def query(self, query: InstitutionalObservationQuery) -> InstitutionalObservationQueryResult:
         if not self._storage.read_only:
             raise StorageError("institutional observation query requires read-only storage")
-        return tuple(
+        rows = tuple(
             self._storage.observations.list(
-                asset_id=asset_id, source_id=SOURCE_ID, available_to=known_at
+                asset_id=query.asset_id,
+                source_id=SOURCE_ID,
+                field_name=query.field_name,
+                available_to=query.known_at,
             )
+        )
+
+        def matches(row) -> bool:
+            key = json.loads(row.source.record_key)
+            if query.report_id is not None and key["report_id"] != str(query.report_id):
+                return False
+            if query.manager_cik is not None and key["manager_cik"] != query.manager_cik:
+                return False
+            return query.cusip is None or key["cusip"] == query.cusip
+
+        matching = tuple(row for row in rows if matches(row))
+        page = matching[query.offset : query.offset + query.limit]
+        return InstitutionalObservationQueryResult(
+            observations=page,
+            total_matching=len(matching),
+            truncated=query.offset + len(page) < len(matching),
         )

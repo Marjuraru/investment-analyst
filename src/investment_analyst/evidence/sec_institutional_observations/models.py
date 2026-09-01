@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
+from investment_analyst.core.models.observation import NormalizedObservation
 from investment_analyst.evidence.sec_documents.models import normalize_cik
 
 
@@ -49,4 +50,32 @@ class InstitutionalObservationSummary(_Strict):
     def counts(self) -> "InstitutionalObservationSummary":
         if self.observations_created + self.observations_reused != self.observations_generated:
             raise ValueError("observation counts are inconsistent")
+        return self
+
+
+class InstitutionalObservationQuery(_Strict):
+    asset_id: NonEmptyStr
+    known_at: UTCDateTime
+    manager_cik: NonEmptyStr | None = None
+    report_id: UUID | None = None
+    cusip: NonEmptyStr | None = None
+    field_name: NonEmptyStr | None = None
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=1000, ge=1, le=10_000)
+
+    @field_validator("manager_cik")
+    @classmethod
+    def query_cik(cls, value: str | None) -> str | None:
+        return normalize_cik(value) if value is not None else None
+
+
+class InstitutionalObservationQueryResult(_Strict):
+    observations: tuple[NormalizedObservation, ...]
+    total_matching: int = Field(ge=0)
+    truncated: bool
+
+    @model_validator(mode="after")
+    def page(self) -> "InstitutionalObservationQueryResult":
+        if self.total_matching < len(self.observations):
+            raise ValueError("query counts are invalid")
         return self

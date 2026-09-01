@@ -27,10 +27,8 @@ class CazatiburonesInstitutionalObservationsApplication:
         ) as storage:
             return InstitutionalObservationService(storage).normalize(request)
 
-    def query(self, *, asset_id: str, known_at, location: StorageLocationRequest):
+    def query(self, query, *, location: StorageLocationRequest):
         with self._runtime.open_storage(
             location, access_mode=WorkspaceAccessMode.READ_ONLY
         ) as storage:
-            return InstitutionalObservationService(storage).query(
-                asset_id=asset_id, known_at=known_at
-            )
+            return InstitutionalObservationService(storage).query(query)
