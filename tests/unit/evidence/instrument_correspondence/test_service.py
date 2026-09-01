@@ -63,7 +63,12 @@ def _revision(
     )
 
 
-def _seed(root: Path, *, missing_report_period: bool = False) -> None:
+def _seed(
+    root: Path,
+    *,
+    missing_report_period: bool = False,
+    correspondence_title: str = "COM",
+) -> None:
     cover = (
         _COVER
         if not missing_report_period
@@ -87,7 +92,7 @@ def _seed(root: Path, *, missing_report_period: bool = False) -> None:
     correspondence = InstrumentCorrespondence.declare(
         asset_id="equity:us:aapl",
         cusip="037833100",
-        title_of_class="COM",
+        title_of_class=correspondence_title,
         effective_from=date(2020, 1, 1),
         effective_to=None,
         available_at=datetime(2025, 2, 14, 18, tzinfo=UTC),
@@ -141,3 +146,18 @@ def test_projection_keeps_missing_report_period_unlinked(tmp_path: Path) -> None
 
     assert result.linked_positions == ()
     assert result.unlinked_positions[0].reason == "missing_report_period"
+
+
+def test_projection_rejects_effective_cusip_with_a_different_class(tmp_path: Path) -> None:
+    _seed(tmp_path, correspondence_title="PREF")
+    with LocalStorage(StoragePaths.from_root(tmp_path), read_only=True) as storage:
+        result = InstrumentCorrespondenceService(storage).query(
+            InstrumentCorrespondenceQuery(
+                asset_id="equity:us:aapl",
+                manager_cik="1067983",
+                known_at=datetime(2025, 2, 15, tzinfo=UTC),
+            )
+        )
+
+    assert result.linked_positions == ()
+    assert result.unlinked_positions[0].reason == "class_mismatch"
