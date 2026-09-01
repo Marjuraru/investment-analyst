@@ -62,6 +62,7 @@ class UnlinkedInstitutionalHolding(_Strict):
         "missing_report_period",
         "outside_effective_period",
         "ambiguous_correspondence",
+        "class_mismatch",
     ]
 
 
@@ -122,10 +123,12 @@ class InstrumentCorrespondenceService:
         linked: list[LinkedInstitutionalHolding] = []
         unlinked: list[UnlinkedInstitutionalHolding] = []
         for position in positions:
+            same_cusip = [c for c in candidates if c.cusip == position.cusip]
             effective = [
                 c
-                for c in candidates
-                if c.cusip == position.cusip and c.is_effective_on(periods[position.report_id])
+                for c in same_cusip
+                if c.title_of_class == position.title_of_class
+                and c.is_effective_on(periods[position.report_id])
             ]
             if periods[position.report_id] is None:
                 unlinked.append(
@@ -141,8 +144,10 @@ class InstrumentCorrespondenceService:
                         position=position,
                         reason="ambiguous_correspondence"
                         if len(effective) > 1
+                        else "class_mismatch"
+                        if any(c.is_effective_on(periods[position.report_id]) for c in same_cusip)
                         else "outside_effective_period"
-                        if any(c.cusip == position.cusip for c in candidates)
+                        if same_cusip
                         else "missing_correspondence",
                     )
                 )
