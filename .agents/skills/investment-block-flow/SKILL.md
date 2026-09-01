@@ -8,12 +8,14 @@ description: Orquesta la selección de roles del workflow de investment-analyst.
 Leer completos `AGENTS.md` y `docs/development_protocol.md`. El repositorio, árbol de trabajo,
 GitHub Issue, PR y estado vivo son autoritativos.
 
-Elegir sólo el rol autorizado explícitamente: PLAN, BUILD, UI_WORKER, AUDIT o Corrección concreta de un PR.
+Elegir sólo el rol autorizado explícitamente: PLAN, `$build` despachado como `BUILD_PRODUCT`,
+`BUILD_GOVERNANCE` o UI_WORKER, AUDIT o Corrección concreta de un PR. `BUILD` genérico no es un
+writer role estable.
 El mecanismo de invocación pertenece al harness y no define autoridad ni permisos. Los permisos dependen del rol;
 el modelo/cliente sólo es metadata de evidencia. Resolver siempre el target fail-closed; conservar
 trabajo local, secretos e historia; no ampliar scope ni admitir dos writers.
 
-PLAN crea un delta compacto. BUILD sigue la tabla canónica hasta terminalidad, publica un draft y
+PLAN crea un delta compacto y su manifest parser-owned. BUILD sigue la tabla canónica hasta terminalidad, publica un draft y
 mantiene un único marker exact-SHA y ejecuta el guard común vivo `scripts/check_workflow_guards.py`; los snapshots JSON son sólo diagnóstico y nunca gates. FAST/AUTO puede seguir a FINALIZE tras gates vivos. AUDIT revisa
 semánticamente el diff material completo, permanece read-only para source/branch/candidato y
 mantiene su marker único. Un PASS con policy AUTO puede continuar sólo a dos guards completos

@@ -30,6 +30,7 @@ from check_workflow_guards import (  # noqa: E402
     ScopeEvidence,
     SmokeSnapshot,
     evaluate,
+    parse_acceptance_manifest,
     parse_declared_scope,
     parse_marker,
     parse_work_block,
@@ -65,17 +66,34 @@ def _issue(body: str) -> IssueSnapshot:
     return IssueSnapshot(58, "OPEN", frozenset({"workflow:active"}), body)
 
 
-def _body(profile: str = "CRITICAL", policy: str = "HUMAN") -> str:
-    return f"""<!-- development-workflow:work-block-v1 -->
+def _manifest() -> str:
+    return """
+```json
+{"schema_version":"workflow-acceptance-manifest-v1","route_effect":"NONE","items":[{"id":"A1","kind":"acceptance","requirements":["live_probe:unit"]}]}
+```
+"""
+
+
+def _body(
+    profile: str = "CRITICAL",
+    policy: str = "HUMAN",
+    writer_role: str = "BUILD_PRODUCT",
+) -> str:
+    return (
+        f"""<!-- development-workflow:work-block-v1 -->
 
 - **Work Block ID:** `DEV-7`.
 - **Risk:** `R3`.
 - **Profile:** `{profile}`.
 - **finalize_policy:** `{policy}`.
+- **route_effect:** `NONE`.
 - **Base remota exacta:** `origin/main@{BASE_SHA}`.
 - **Expected branch:** `codex/dev-7-finalize-policy-guard`.
-- **Writer role:** `BUILD`.
-""" + _scope_body()
+- **Writer role:** `{writer_role}`.
+"""
+        + _manifest()
+        + _scope_body()
+    )
 
 
 def _pr() -> PullRequestSnapshot:
@@ -98,11 +116,58 @@ def _marker(
     sha: str = FULL_SHA,
     comment_id: int | None = None,
 ) -> CommentSnapshot:
+    manifest = parse_acceptance_manifest(_body())
+    evidence = json.dumps(
+        {"items": [{"id": "A1", "verdict": "PASS", "evidence": {"live_probe:unit": "unit"}}]},
+        separators=(",", ":"),
+    )
     reviewer = "reviewer=gemini-fresh\n" if role == "audit" else ""
     return CommentSnapshot(
         comment_id if comment_id is not None else (10 if role == "build" else 11),
-        f"<!-- development-workflow:{role}-v1\n"
-        f"block=DEV-7\nsha={sha}\nstatus={status}\n{reviewer}-->\n{payload}\n",
+        f"<!-- development-workflow:{role}-v2\n"
+        f"block=DEV-7\nsha={sha}\nstatus={status}\n"
+        f"manifest_sha256={manifest.digest}\n{reviewer}-->\n"
+        f"{evidence if payload == 'evidence=pass' else payload}\n",
+    )
+
+
+def _body_for_manifest(
+    manifest: dict[str, object],
+    *,
+    writer_role: str = "BUILD_PRODUCT",
+    route_effect: str = "NONE",
+) -> str:
+    encoded = json.dumps(manifest, separators=(",", ":"))
+    return (
+        _body(writer_role=writer_role)
+        .replace(_manifest(), f"\n```json\n{encoded}\n```\n")
+        .replace("- **route_effect:** `NONE`.", f"- **route_effect:** `{route_effect}`.")
+    )
+
+
+def _structured_marker(
+    role: str,
+    body: str,
+    *,
+    status: str = "PASS",
+    comment_id: int | None = None,
+    sha: str = FULL_SHA,
+) -> CommentSnapshot:
+    manifest = parse_acceptance_manifest(body)
+    items = [
+        {
+            "id": item.item_id,
+            "verdict": "PASS",
+            "evidence": {requirement: "verified" for requirement in item.requirements},
+        }
+        for item in manifest.items
+    ]
+    reviewer = "reviewer=fresh-auditor\n" if role == "audit" else ""
+    return CommentSnapshot(
+        comment_id if comment_id is not None else (100 if role == "build" else 101),
+        f"<!-- development-workflow:{role}-v2\nblock=DEV-7\nsha={sha}\nstatus={status}\n"
+        f"manifest_sha256={manifest.digest}\n{reviewer}-->\n"
+        f"{json.dumps({'items': items}, separators=(',', ':'))}\n",
     )
 
 
@@ -155,7 +220,7 @@ def test_metadata_requires_unique_structural_fields_and_human_critical() -> None
     with pytest.raises(ValueError, match="CRITICAL requires"):
         parse_work_block(_body(policy="AUTO"))
     with pytest.raises(ValueError, match="missing Work Block fields"):
-        parse_work_block(_body().replace("- **Writer role:** `BUILD`.\n", ""))
+        parse_work_block(_body().replace("- **Writer role:** `BUILD_PRODUCT`.\n", ""))
 
 
 def test_declared_scope_distinguishes_checkpoint_from_immutable_and_accepts_exact_deny() -> None:
@@ -213,9 +278,10 @@ def test_scope_fails_closed_for_governance_auto_and_path_contracts() -> None:
     allowed_new = evaluate(
         _snapshot(changed_paths=(ChangedPath(".github/CODEOWNERS", "added"),)), phase="build"
     )
-    assert allowed_new.decision == "BUILD GUARD PASS"
-    assert allowed_new.scope is not None
-    assert allowed_new.scope.consumed_allowlist_paths == (".github/CODEOWNERS",)
+    assert allowed_new.decision == "GUARD FAILURE"
+    assert allowed_new.reasons == (
+        "product writer cannot modify governance path: .github/CODEOWNERS",
+    )
 
 
 @pytest.mark.parametrize(
@@ -382,7 +448,9 @@ def test_build_accepts_one_stale_audit_without_transferring_pass() -> None:
         phase="build",
     )
 
-    assert result.decision == "BUILD GUARD PASS"
+    assert result.decision == "CONTINUE"
+    assert result.classification is not None
+    assert result.classification.terminal is False
     assert result.build.marker is not None
     assert result.build.marker.status == "PENDING"
     assert result.audit.marker is None
@@ -405,7 +473,7 @@ def test_build_recovers_one_stale_pending_build_marker_without_payload_transfer(
         phase="build",
     )
 
-    assert result.decision == "BUILD GUARD PASS"
+    assert result.decision == "CONTINUE"
     assert result.build.marker is None
     assert [marker.sha for marker in result.build.historical_stale] == [HISTORICAL_SHA]
     assert result.mutation_plan == (
@@ -611,6 +679,8 @@ def test_finalization_requires_literal_gate_and_live_evidence() -> None:
         missing_gate.smoke,
         missing_gate.requested_changes,
         missing_gate.open_threads,
+        source="live",
+        scope_evidence=missing_gate.scope_evidence,
     )
     result = evaluate(missing_gate)
     assert result.decision == "GUARD FAILURE"
@@ -718,7 +788,7 @@ def test_graphql_connection_reads_all_pages_and_rejects_truncated_pages(
 
 def test_build_and_audit_phases_share_target_and_marker_guard() -> None:
     build_result = evaluate(_snapshot(comments=()), phase="build")
-    assert build_result.decision == "BUILD GUARD PASS"
+    assert build_result.decision == "CONTINUE"
     audit_result = evaluate(_snapshot(comments=(_marker("build"),)), phase="audit")
     assert audit_result.decision == "AUDIT GUARD PASS"
 
@@ -733,7 +803,9 @@ def test_build_bootstrap_allows_zero_prs_but_other_phases_fail_closed() -> None:
 
     result = evaluate(bootstrap, phase="build")
 
-    assert result.decision == "BUILD BOOTSTRAP"
+    assert result.decision == "CONTINUE"
+    assert result.classification is not None
+    assert result.classification.terminal is False
     assert result.metadata is not None
     assert result.metadata.expected_branch == "codex/dev-7-finalize-policy-guard"
     for phase in ("audit", "finalize"):
@@ -849,3 +921,115 @@ def test_json_cli_reports_non_terminal_build_bootstrap(tmp_path: Path) -> None:
     rendered = json.loads(completed.stdout)
     assert rendered["decision"] == "NON_AUTHORITATIVE"
     assert rendered["authoritative"] is False
+
+
+def test_manifest_rejects_unknown_duplicate_and_missing_requirements() -> None:
+    valid = {
+        "schema_version": "workflow-acceptance-manifest-v1",
+        "route_effect": "NONE",
+        "items": [{"id": "A1", "kind": "acceptance", "requirements": ["live_probe:x"]}],
+    }
+    assert parse_acceptance_manifest(_body_for_manifest(valid)).items[0].item_id == "A1"
+    for broken in (
+        {**valid, "unexpected": True},
+        {**valid, "items": [valid["items"][0], valid["items"][0]]},
+        {
+            **valid,
+            "items": [{"id": "A1", "kind": "acceptance", "requirements": ["unknown:x"]}],
+        },
+    ):
+        with pytest.raises(ValueError):
+            parse_acceptance_manifest(_body_for_manifest(broken))
+
+
+def test_missing_required_artifacts_prevent_audit_pass_regression_135() -> None:
+    manifest = {
+        "schema_version": "workflow-acceptance-manifest-v1",
+        "route_effect": "NONE",
+        "items": [
+            {
+                "id": "A1",
+                "kind": "acceptance",
+                "requirements": [
+                    "present_path:tests/unit/evidence/sec_institutional_observations/test_summary.py",
+                    "present_path:scripts/smoke_sec_institutional_observations.py",
+                    "focused_test:sec-institutional-observations",
+                    "smoke:real-sec-institutional-observations",
+                ],
+            }
+        ],
+    }
+    body = _body_for_manifest(manifest)
+    snapshot = _snapshot(
+        body=body,
+        comments=(_structured_marker("build", body),),
+    )
+    result = evaluate(snapshot, phase="audit")
+    assert result.decision == "GUARD FAILURE"
+    assert "required present path is absent" in result.reasons[0]
+
+
+def test_route_effect_without_route_diff_cannot_reach_build_ready() -> None:
+    manifest = {
+        "schema_version": "workflow-acceptance-manifest-v1",
+        "route_effect": "ADVANCES",
+        "items": [
+            {
+                "id": "A1",
+                "kind": "acceptance",
+                "requirements": ["route_transition:SEC-CORPUS:ADVANCES"],
+            }
+        ],
+    }
+    body = _body_for_manifest(manifest, route_effect="ADVANCES")
+    result = evaluate(
+        _snapshot(body=body, comments=(_structured_marker("build", body),)), phase="build"
+    )
+    assert result.decision == "GUARD FAILURE"
+    assert result.reasons == ("route transition document is absent from diff",)
+
+
+def test_human_receipt_is_exact_sha_fresh_and_needs_no_self_review() -> None:
+    body = _body()
+    manifest = parse_acceptance_manifest(body)
+    comments = (
+        _structured_marker("build", body, comment_id=100),
+        _structured_marker("audit", body, comment_id=101),
+    )
+    awaiting = evaluate(_snapshot(body=body, comments=comments))
+    assert awaiting.decision == "AWAITING HUMAN APPROVAL"
+    receipt = CommentSnapshot(
+        102,
+        "<!-- development-workflow:human-v1\n"
+        f"block=DEV-7\nsha={FULL_SHA}\ndecision=APPROVE\n"
+        f"manifest_sha256={manifest.digest}\n-->\n",
+    )
+    approved = evaluate(_snapshot(body=body, comments=(*comments, receipt)))
+    assert approved.decision == "HUMAN_FINALIZE_AUTHORIZED"
+    stale = CommentSnapshot(102, receipt.body.replace(FULL_SHA, HISTORICAL_SHA))
+    rejected = evaluate(_snapshot(body=body, comments=(*comments, stale)))
+    assert rejected.decision == "GUARD FAILURE"
+    assert "stale" in rejected.reasons[0]
+
+
+def test_product_writer_rejects_governance_and_governance_rejects_product() -> None:
+    product_body = _body().replace(
+        "## Strict delta allowlist\n",
+        "## Strict delta allowlist\n\n- `AGENTS.md` — `" + DECLARED_DIGEST + "`.\n",
+    )
+    product = evaluate(
+        _snapshot(body=product_body, changed_paths=(ChangedPath("AGENTS.md", "modified"),)),
+        phase="build",
+    )
+    assert product.decision == "GUARD FAILURE"
+    assert "product writer cannot modify governance path" in product.reasons[0]
+    governance_body = _body(writer_role="BUILD_GOVERNANCE")
+    governance = evaluate(
+        _snapshot(
+            body=governance_body,
+            changed_paths=(ChangedPath("src/investment_analyst/app.py", "modified"),),
+        ),
+        phase="build",
+    )
+    assert governance.decision == "GUARD FAILURE"
+    assert "prohibited" in governance.reasons[0]

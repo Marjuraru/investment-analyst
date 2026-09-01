@@ -8,6 +8,7 @@ It never edits GitHub, the worktree, or a supplied snapshot.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import re
@@ -20,9 +21,12 @@ from typing import cast
 
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
-RESERVED_TOKEN = re.compile(r"development-workflow:(?:build-v1|audit-v1|superseded-v1)")
+RESERVED_TOKEN = re.compile(
+    r"development-workflow:(?:build-v1|audit-v1|build-v2|audit-v2|human-v1|superseded-v1)"
+)
 MARKER_BLOCK = re.compile(
-    r"\A<!-- development-workflow:(?P<kind>build-v1|audit-v1|superseded-v1)\n"
+    r"\A<!-- development-workflow:(?P<kind>"
+    r"build-v1|audit-v1|build-v2|audit-v2|human-v1|superseded-v1)\n"
     r"(?P<fields>.*?)\n-->(?P<payload>.*)\Z",
     flags=re.DOTALL,
 )
@@ -54,6 +58,36 @@ GOVERNANCE_PREFIXES = (
 )
 _CHECKPOINT_HEADING = "### Checkpoint dormante — verificación de hash en el primary worktree"
 _IMMUTABLE_HEADING = "### Superficies del repositorio no modificables — deny por ruta cambiada"
+_MANIFEST_SCHEMA = "workflow-acceptance-manifest-v1"
+_MANIFEST_KINDS = frozenset({"acceptance", "invariant", "negative"})
+_REQUIREMENT_KINDS = frozenset(
+    {
+        "changed_path",
+        "present_path",
+        "focused_test",
+        "ci",
+        "smoke",
+        "live_probe",
+        "route_transition",
+    }
+)
+_GOVERNANCE_WRITER_PATHS = GOVERNANCE_PATHS | frozenset(
+    {
+        "tests/unit/test_workflow_guard.py",
+        "tests/unit/test_development_workflow_contract.py",
+    }
+)
+_AUTHORITY_PATHS = (
+    "AGENTS.md",
+    "docs/development_protocol.md",
+    ".agents/skills/plan/SKILL.md",
+    ".agents/skills/build/SKILL.md",
+    ".agents/skills/audit/SKILL.md",
+    ".agents/skills/investment-block-flow/SKILL.md",
+    ".agents/skills/ui/SKILL.md",
+    ".agents/rules/investment-analyst-core.md",
+    "scripts/check_workflow_guards.py",
+)
 
 
 class GuardFailure(ValueError):
@@ -79,6 +113,36 @@ class ScopeEvidence:
     changed_paths: tuple[ChangedPath, ...]
     checkpoint_digests: Mapping[str, str]
     immutable_digests: Mapping[str, str]
+    present_paths: frozenset[str] = frozenset()
+    route_document: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestItem:
+    item_id: str
+    kind: str
+    requirements: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptanceManifest:
+    digest: str
+    route_effect: str
+    items: tuple[ManifestItem, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AuthoritySnapshot:
+    base_sha: str
+    digests: Mapping[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class BuildClassification:
+    status: str
+    terminal: bool
+    owner: str | None
+    next_action: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +160,7 @@ class WorkBlockMetadata:
     risk: str
     profile: str
     policy: str
+    route_effect: str
     base_ref: str
     base_sha: str
     expected_branch: str
@@ -157,6 +222,7 @@ class GuardSnapshot:
     viewer_permission: str | None = None
     base_protected: bool | None = None
     scope_evidence: ScopeEvidence | None = None
+    authority_snapshot: AuthoritySnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +255,7 @@ class GuardResult:
     audit: MarkerResolution
     mutation_plan: tuple[str, ...]
     scope: ScopeEvaluation | None = None
+    classification: BuildClassification | None = None
 
     def as_json(self) -> dict[str, object]:
         metadata: dict[str, object] | None = None
@@ -198,6 +265,7 @@ class GuardResult:
                 "risk": self.metadata.risk,
                 "profile": self.metadata.profile,
                 "policy": self.metadata.policy,
+                "route_effect": self.metadata.route_effect,
                 "base_ref": self.metadata.base_ref,
                 "base_sha": self.metadata.base_sha,
                 "expected_branch": self.metadata.expected_branch,
@@ -224,6 +292,16 @@ class GuardResult:
                 else None
             ),
             "authoritative": self.decision not in {"NON_AUTHORITATIVE", "GUARD FAILURE"},
+            "classification": (
+                {
+                    "status": self.classification.status,
+                    "terminal": self.classification.terminal,
+                    "owner": self.classification.owner,
+                    "next_action": self.classification.next_action,
+                }
+                if self.classification is not None
+                else None
+            ),
         }
 
 
@@ -304,6 +382,70 @@ def _clean_value(value: str) -> str:
     return value.strip().rstrip(".;")
 
 
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def parse_acceptance_manifest(body: str) -> AcceptanceManifest:
+    """Parse the unique, canonical acceptance manifest owned by the Work Block."""
+    candidates: list[Mapping[str, object]] = []
+    for match in re.finditer(r"```json\s*\n(?P<payload>.*?)\n```", body, re.DOTALL):
+        try:
+            candidate = _mapping(json.loads(match.group("payload")), "acceptance manifest")
+        except json.JSONDecodeError as error:
+            raise GuardFailure("acceptance manifest is not valid JSON") from error
+        if candidate.get("schema_version") == _MANIFEST_SCHEMA:
+            candidates.append(candidate)
+    if len(candidates) != 1:
+        raise GuardFailure("acceptance manifest must appear exactly once")
+    manifest = candidates[0]
+    if set(manifest) != {"schema_version", "route_effect", "items"}:
+        raise GuardFailure("acceptance manifest has unknown or missing fields")
+    route_effect = _required_str(manifest, ("route_effect",), "manifest.route_effect").upper()
+    if route_effect not in {"NONE", "ADVANCES", "COMPLETES"}:
+        raise GuardFailure("manifest route_effect is unknown")
+    raw_items = _sequence(manifest.get("items"), "manifest.items")
+    if not raw_items:
+        raise GuardFailure("acceptance manifest items are absent")
+    items: list[ManifestItem] = []
+    seen_ids: set[str] = set()
+    for raw_item in raw_items:
+        item = _mapping(raw_item, "manifest.item")
+        if set(item) != {"id", "kind", "requirements"}:
+            raise GuardFailure("acceptance manifest item has unknown or missing fields")
+        item_id = _required_str(item, ("id",), "manifest.item.id")
+        kind = _required_str(item, ("kind",), "manifest.item.kind")
+        if not re.fullmatch(r"[A-Z][A-Z0-9_-]*", item_id) or item_id in seen_ids:
+            raise GuardFailure("acceptance manifest item ID is invalid or duplicate")
+        if kind not in _MANIFEST_KINDS:
+            raise GuardFailure("acceptance manifest item kind is unknown")
+        requirements: list[str] = []
+        for requirement in _sequence(item.get("requirements"), "manifest.item.requirements"):
+            if not isinstance(requirement, str) or not requirement:
+                raise GuardFailure("acceptance manifest requirement is invalid")
+            requirement_kind, separator, value = requirement.partition(":")
+            if not separator or not value or requirement_kind not in _REQUIREMENT_KINDS:
+                raise GuardFailure("acceptance manifest requirement kind is unknown")
+            requirements.append(requirement)
+        if not requirements or len(set(requirements)) != len(requirements):
+            raise GuardFailure("acceptance manifest requirements are missing or duplicate")
+        seen_ids.add(item_id)
+        items.append(ManifestItem(item_id, kind, tuple(requirements)))
+    canonical = {
+        "schema_version": _MANIFEST_SCHEMA,
+        "route_effect": route_effect,
+        "items": [
+            {"id": item.item_id, "kind": item.kind, "requirements": list(item.requirements)}
+            for item in items
+        ],
+    }
+    return AcceptanceManifest(
+        hashlib.sha256(_canonical_json(canonical).encode("utf-8")).hexdigest(),
+        route_effect,
+        tuple(items),
+    )
+
+
 def parse_declared_scope(body: str) -> DeclaredScope:
     """Parse the three literal, machine-readable Work Block path declarations."""
     sections: dict[str, list[str]] = {}
@@ -374,6 +516,7 @@ def parse_work_block(body: str) -> WorkBlockMetadata:
         "risk": "risk",
         "profile": "profile",
         "finalize_policy": "policy",
+        "route_effect": "route_effect",
         "base remota exacta": "base",
         "expected branch": "expected_branch",
         "writer role": "writer_role",
@@ -388,7 +531,16 @@ def parse_work_block(body: str) -> WorkBlockMetadata:
             raise GuardFailure(f"duplicate Work Block field: {target}")
         values[target] = _clean_value(match.group("value"))
 
-    required = ("block", "risk", "profile", "policy", "base", "expected_branch", "writer_role")
+    required = (
+        "block",
+        "risk",
+        "profile",
+        "policy",
+        "route_effect",
+        "base",
+        "expected_branch",
+        "writer_role",
+    )
     missing = [key for key in required if not values.get(key)]
     if missing:
         raise GuardFailure(f"missing Work Block fields: {','.join(missing)}")
@@ -399,6 +551,7 @@ def parse_work_block(body: str) -> WorkBlockMetadata:
     profile = values["profile"].upper()
     risk = values["risk"].upper()
     policy = values["policy"].upper()
+    route_effect = values["route_effect"].upper()
     writer_role = values["writer_role"].upper().replace("-", "_")
     if profile not in {"FAST", "STANDARD", "CRITICAL"}:
         raise GuardFailure("profile is unknown")
@@ -406,9 +559,11 @@ def parse_work_block(body: str) -> WorkBlockMetadata:
         raise GuardFailure("risk is unknown")
     if policy not in {"AUTO", "HUMAN"}:
         raise GuardFailure("finalize_policy is unknown")
+    if route_effect not in {"NONE", "ADVANCES", "COMPLETES"}:
+        raise GuardFailure("route_effect is unknown")
     if profile == "CRITICAL" and policy != "HUMAN":
         raise GuardFailure("CRITICAL requires finalize_policy HUMAN")
-    if writer_role not in {"PLAN", "BUILD", "UI_WORKER", "AUDIT"}:
+    if writer_role not in {"BUILD_PRODUCT", "BUILD_GOVERNANCE", "UI_WORKER"}:
         raise GuardFailure("writer role is unknown")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", values["block"]):
         raise GuardFailure("Work Block ID is invalid")
@@ -419,6 +574,7 @@ def parse_work_block(body: str) -> WorkBlockMetadata:
         risk=risk,
         profile=profile,
         policy=policy,
+        route_effect=route_effect,
         base_ref=base_match.group("ref"),
         base_sha=base_match.group("sha"),
         expected_branch=values["expected_branch"],
@@ -493,6 +649,26 @@ def _validate_scope(
                 raise GuardFailure(f"existing allowlist path is added: {item.path}")
             consumed.append(item.path)
 
+    if metadata.writer_role in {"BUILD_PRODUCT", "UI_WORKER"} and governance:
+        raise GuardFailure(f"product writer cannot modify governance path: {governance[0]}")
+    if metadata.writer_role == "BUILD_GOVERNANCE":
+        if (
+            metadata.risk != "R3"
+            or metadata.profile != "CRITICAL"
+            or metadata.policy != "HUMAN"
+            or metadata.route_effect != "NONE"
+        ):
+            raise GuardFailure("governance writer requires R3/CRITICAL/HUMAN/NONE")
+        for path in paths:
+            if path not in _GOVERNANCE_WRITER_PATHS and not path.startswith(
+                (".agents/rules/", ".agents/skills/", ".github/ISSUE_TEMPLATE/")
+            ):
+                raise GuardFailure(f"governance writer cannot modify product path: {path}")
+    if metadata.route_effect == "NONE" and (
+        "docs/basic_functional_release_plan.md" in paths or "docs/product_roadmap.md" in paths
+    ):
+        raise GuardFailure("route_effect NONE cannot modify a product route document")
+
     return ScopeEvaluation(
         changed_path_count=len(changed),
         governance_paths=governance,
@@ -500,6 +676,117 @@ def _validate_scope(
         checkpoint_hashes=tuple(checkpoint_verified),
         immutable_hashes=tuple(immutable_verified),
     )
+
+
+def _requirement_value(requirement: str) -> tuple[str, str]:
+    kind, _, value = requirement.partition(":")
+    return kind, value
+
+
+def _marker_evidence(
+    marker: MarkerRecord, manifest: AcceptanceManifest
+) -> Mapping[str, Mapping[str, str]]:
+    if marker.kind not in {"build-v2", "audit-v2"}:
+        raise GuardFailure("marker does not carry structured acceptance evidence")
+    if dict(marker.fields).get("manifest_sha256") != manifest.digest:
+        raise GuardFailure("marker manifest digest differs from Work Block")
+    try:
+        payload = _mapping(json.loads(marker.payload), "marker evidence")
+    except json.JSONDecodeError as error:
+        raise GuardFailure("marker evidence is not valid JSON") from error
+    if set(payload) != {"items"}:
+        raise GuardFailure("marker evidence has unknown or missing fields")
+    entries = _sequence(payload.get("items"), "marker evidence items")
+    expected_ids = {item.item_id for item in manifest.items}
+    evidence: dict[str, Mapping[str, str]] = {}
+    for entry in entries:
+        item = _mapping(entry, "marker evidence item")
+        if set(item) != {"id", "verdict", "evidence"}:
+            raise GuardFailure("marker evidence item has unknown or missing fields")
+        item_id = _required_str(item, ("id",), "marker evidence item ID")
+        verdict = _required_str(item, ("verdict",), "marker evidence verdict")
+        raw_evidence = _mapping(item.get("evidence"), "marker evidence references")
+        if item_id not in expected_ids or item_id in evidence or verdict != "PASS":
+            raise GuardFailure("marker evidence item is unknown, duplicate, or not PASS")
+        references: dict[str, str] = {}
+        for requirement, reference in raw_evidence.items():
+            if not isinstance(requirement, str) or not isinstance(reference, str) or not reference:
+                raise GuardFailure("marker evidence reference is invalid or empty")
+            references[requirement] = reference
+        evidence[item_id] = references
+    if set(evidence) != expected_ids:
+        raise GuardFailure("marker evidence does not cover every manifest item")
+    for item in manifest.items:
+        if set(evidence[item.item_id]) != set(item.requirements):
+            raise GuardFailure("marker evidence requirements differ from manifest")
+    return evidence
+
+
+def _validate_manifest_requirements(
+    marker: MarkerRecord,
+    manifest: AcceptanceManifest,
+    snapshot: GuardSnapshot,
+    scope: ScopeEvaluation,
+) -> None:
+    evidence = _marker_evidence(marker, manifest)
+    live_scope = snapshot.scope_evidence
+    if live_scope is None:
+        raise GuardFailure("scope evidence is absent")
+    changed = {item.path for item in live_scope.changed_paths}
+    for item in manifest.items:
+        for requirement in item.requirements:
+            kind, value = _requirement_value(requirement)
+            if kind == "changed_path" and value not in changed:
+                raise GuardFailure(f"required changed path is absent: {value}")
+            if kind == "present_path" and value not in live_scope.present_paths:
+                raise GuardFailure(f"required present path is absent: {value}")
+            if kind == "ci":
+                if value != "Python 3.12 quality":
+                    raise GuardFailure("manifest CI requirement is unknown")
+                _validate_checks(snapshot)
+            if kind == "smoke" and (snapshot.smoke.status != "PASS" or not snapshot.smoke.evidence):
+                raise GuardFailure("required smoke evidence is absent or not PASS")
+            if kind == "route_transition":
+                item_id, separator, state = value.rpartition(":")
+                if (
+                    not separator
+                    or not item_id
+                    or manifest.route_effect == "NONE"
+                    or state != manifest.route_effect
+                ):
+                    raise GuardFailure("route transition differs from route_effect")
+                if "docs/basic_functional_release_plan.md" not in changed:
+                    raise GuardFailure("route transition document is absent from diff")
+                document = live_scope.route_document
+                if document is None:
+                    raise GuardFailure("route transition document is not observable")
+                row = re.compile(
+                    rf"^\|\s*`{re.escape(item_id)}`\s*\|\s*`(?P<state>[A-Z]+)`\s*\|",
+                    re.MULTILINE,
+                )
+                states = [match.group("state") for match in row.finditer(document)]
+                if len(states) != 1:
+                    raise GuardFailure("route transition item is absent or ambiguous in head")
+                if state == "COMPLETES":
+                    if states[0] != "DONE":
+                        raise GuardFailure("route completion is not DONE in head")
+                    if (
+                        len(re.findall(r"^\|\s*`[^`]+`\s*\|\s*`NEXT`\s*\|", document, re.MULTILINE))
+                        != 1
+                    ):
+                        raise GuardFailure("route completion does not leave exactly one NEXT")
+                elif states[0] == "DONE":
+                    raise GuardFailure("route advance falsely completes the item")
+            if kind == "focused_test" and not evidence[item.item_id][requirement]:
+                raise GuardFailure("focused test evidence is empty")
+            if kind == "live_probe" and not evidence[item.item_id][requirement]:
+                raise GuardFailure("live probe evidence is empty")
+    if manifest.route_effect != "NONE" and not any(
+        kind == "route_transition"
+        for item in manifest.items
+        for kind, _ in map(_requirement_value, item.requirements)
+    ):
+        raise GuardFailure("route_effect requires a route_transition manifest requirement")
 
 
 def _parse_labels(value: object) -> frozenset[str]:
@@ -608,10 +895,32 @@ def _parse_scope_evidence(value: object) -> ScopeEvidence | None:
                 _required_str(entry, ("status",), "scope_evidence.status").lower(),
             )
         )
+    present_paths = _sequence(mapping.get("present_paths", ()), "scope_evidence.present_paths")
+    if not all(isinstance(path, str) and path for path in present_paths):
+        raise GuardFailure("scope_evidence.present_paths must contain paths")
+    route_document = mapping.get("route_document")
+    if route_document is not None and not isinstance(route_document, str):
+        raise GuardFailure("scope_evidence.route_document must be a string")
     return ScopeEvidence(
         tuple(paths),
         _parse_digest_map(mapping.get("checkpoint_digests", {}), "checkpoint_digests"),
         _parse_digest_map(mapping.get("immutable_digests", {}), "immutable_digests"),
+        frozenset(cast(str, path) for path in present_paths),
+        route_document,
+    )
+
+
+def _parse_authority_snapshot(value: object) -> AuthoritySnapshot | None:
+    if value is None:
+        return None
+    mapping = _mapping(value, "authority_snapshot")
+    if set(mapping) != {"base_sha", "digests"}:
+        raise GuardFailure("authority snapshot has unknown or missing fields")
+    base_sha = _required_str(mapping, ("base_sha",), "authority_snapshot.base_sha")
+    if FULL_SHA.fullmatch(base_sha) is None:
+        raise GuardFailure("authority snapshot base SHA is invalid")
+    return AuthoritySnapshot(
+        base_sha, _parse_digest_map(mapping.get("digests"), "authority digests")
     )
 
 
@@ -655,6 +964,7 @@ def snapshot_from_json(value: object) -> GuardSnapshot:
         viewer_permission=_optional_str(root, ("viewer_permission",)),
         base_protected=_optional_bool(root, ("base_protected",)),
         scope_evidence=_parse_scope_evidence(root.get("scope_evidence")),
+        authority_snapshot=_parse_authority_snapshot(root.get("authority_snapshot")),
     )
 
 
@@ -679,10 +989,13 @@ def parse_marker(comment: CommentSnapshot) -> MarkerRecord | None:
         if not line or "=" not in line:
             raise GuardFailure(f"comment {comment.comment_id} has malformed marker fields")
         key, value = line.split("=", maxsplit=1)
-        if not re.fullmatch(r"[a-z_]+", key) or not value or key in fields:
+        if not re.fullmatch(r"[a-z0-9_]+", key) or not value or key in fields:
             raise GuardFailure(f"comment {comment.comment_id} has invalid marker fields")
         fields[key] = value
 
+    if kind == "human-v1":
+        _parse_human_receipt(comment)
+        return None
     if kind == "build-v1":
         expected_keys = {"block", "sha", "status"}
         role = "build"
@@ -690,6 +1003,16 @@ def parse_marker(comment: CommentSnapshot) -> MarkerRecord | None:
         allowed_statuses = {"PENDING", "PASS", "FAIL"}
     elif kind == "audit-v1":
         expected_keys = {"block", "sha", "status", "reviewer"}
+        role = "audit"
+        reviewer = fields.get("reviewer")
+        allowed_statuses = {"PASS", "FAIL"}
+    elif kind == "build-v2":
+        expected_keys = {"block", "sha", "status", "manifest_sha256"}
+        role = "build"
+        reviewer = None
+        allowed_statuses = {"PENDING", "PASS", "FAIL"}
+    elif kind == "audit-v2":
+        expected_keys = {"block", "sha", "status", "reviewer", "manifest_sha256"}
         role = "audit"
         reviewer = fields.get("reviewer")
         allowed_statuses = {"PASS", "FAIL"}
@@ -728,6 +1051,11 @@ def parse_marker(comment: CommentSnapshot) -> MarkerRecord | None:
     status = fields.get("status", "")
     if not block or FULL_SHA.fullmatch(sha) is None or status not in allowed_statuses:
         raise GuardFailure(f"comment {comment.comment_id} has invalid marker values")
+    if (
+        kind in {"build-v2", "audit-v2"}
+        and SHA256.fullmatch(fields.get("manifest_sha256", "")) is None
+    ):
+        raise GuardFailure(f"comment {comment.comment_id} has invalid manifest digest")
     if role == "audit" and not reviewer:
         raise GuardFailure(f"comment {comment.comment_id} has missing reviewer")
     if kind == "superseded-v1" and fields.get("reason") == "head-advanced":
@@ -746,6 +1074,74 @@ def parse_marker(comment: CommentSnapshot) -> MarkerRecord | None:
         payload=_normalize_lines(match.group("payload")),
         fields=tuple(sorted(fields.items())),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class HumanReceipt:
+    comment_id: int
+    block: str
+    sha: str
+    decision: str
+    manifest_digest: str
+
+
+def _parse_human_receipt(comment: CommentSnapshot) -> HumanReceipt | None:
+    body = comment.body.replace("\r\n", "\n").replace("\r", "\n")
+    if "development-workflow:human-v1" not in body:
+        return None
+    match = MARKER_BLOCK.fullmatch(body)
+    if match is None or match.group("kind") != "human-v1" or match.group("payload").strip():
+        raise GuardFailure(f"comment {comment.comment_id} has malformed human receipt")
+    fields: dict[str, str] = {}
+    for line in match.group("fields").split("\n"):
+        key, separator, value = line.partition("=")
+        if not separator or not re.fullmatch(r"[a-z0-9_]+", key) or not value or key in fields:
+            raise GuardFailure(f"comment {comment.comment_id} has invalid human receipt fields")
+        fields[key] = value
+    if set(fields) != {"block", "sha", "decision", "manifest_sha256"}:
+        raise GuardFailure(
+            f"comment {comment.comment_id} has unknown or missing human receipt fields"
+        )
+    if (
+        FULL_SHA.fullmatch(fields["sha"]) is None
+        or SHA256.fullmatch(fields["manifest_sha256"]) is None
+    ):
+        raise GuardFailure(f"comment {comment.comment_id} has invalid human receipt identity")
+    if fields["decision"] not in {"APPROVE", "REJECT"}:
+        raise GuardFailure(f"comment {comment.comment_id} has unknown human decision")
+    return HumanReceipt(
+        comment.comment_id,
+        fields["block"],
+        fields["sha"],
+        fields["decision"],
+        fields["manifest_sha256"],
+    )
+
+
+def _resolve_human_receipt(
+    comments: tuple[CommentSnapshot, ...],
+    metadata: WorkBlockMetadata,
+    head_sha: str,
+    manifest: AcceptanceManifest,
+    audit: MarkerResolution,
+) -> HumanReceipt | None:
+    receipts = tuple(
+        receipt for comment in comments if (receipt := _parse_human_receipt(comment)) is not None
+    )
+    if not receipts:
+        return None
+    if len(receipts) != 1:
+        raise GuardFailure("human receipt is duplicated or ambiguous")
+    receipt = receipts[0]
+    if (
+        receipt.block != metadata.block
+        or receipt.sha != head_sha
+        or receipt.manifest_digest != manifest.digest
+    ):
+        raise GuardFailure("human receipt is stale or differs from current evidence")
+    if audit.marker is None or receipt.comment_id <= audit.marker.comment_id:
+        raise GuardFailure("human receipt was emitted before fresh AUDIT PASS")
+    return receipt
 
 
 def _parse_all_markers(comments: tuple[CommentSnapshot, ...]) -> tuple[MarkerRecord, ...]:
@@ -904,6 +1300,58 @@ def _validate_finalize_live_evidence(snapshot: GuardSnapshot) -> None:
         raise GuardFailure("declared base branch protection is absent or unreadable")
 
 
+def _validate_authority_snapshot(
+    metadata: WorkBlockMetadata,
+    snapshot: GuardSnapshot,
+) -> None:
+    if metadata.writer_role != "BUILD_GOVERNANCE":
+        return
+    authority = snapshot.authority_snapshot
+    if authority is None:
+        raise GuardFailure("governance writer requires a base authority snapshot")
+    if authority.base_sha != metadata.base_sha:
+        raise GuardFailure("authority snapshot base SHA differs from Work Block")
+    if set(authority.digests) != set(_AUTHORITY_PATHS):
+        raise GuardFailure("authority snapshot paths are incomplete or expanded")
+    for path, expected in authority.digests.items():
+        actual = hashlib.sha256(
+            _git_bytes(("show", f"{metadata.base_sha}:{path}"), "authority base file")
+        ).hexdigest()
+        if actual != expected:
+            raise GuardFailure(f"authority snapshot digest differs from base: {path}")
+
+
+def _classification(
+    status: str, terminal: bool, owner: str | None, action: str
+) -> BuildClassification:
+    return BuildClassification(status, terminal, owner, action)
+
+
+def _build_result(
+    status: str,
+    metadata: WorkBlockMetadata | None,
+    build: MarkerResolution,
+    audit: MarkerResolution,
+    mutation_plan: tuple[str, ...],
+    scope: ScopeEvaluation | None,
+    *,
+    terminal: bool,
+    owner: str | None,
+    next_action: str,
+    reasons: tuple[str, ...] = (),
+) -> GuardResult:
+    return GuardResult(
+        status,
+        reasons,
+        metadata,
+        build,
+        audit,
+        mutation_plan,
+        scope,
+        _classification(status, terminal, owner, next_action),
+    )
+
+
 def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
     empty = MarkerResolution(marker=None, duplicates=())
     metadata: WorkBlockMetadata | None = None
@@ -915,10 +1363,14 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
         if phase not in {"build", "audit", "finalize"}:
             raise GuardFailure("phase is unknown")
         metadata = _validate_target(snapshot)
+        manifest = parse_acceptance_manifest(snapshot.issue.body)
+        if manifest.route_effect != metadata.route_effect:
+            raise GuardFailure("manifest route_effect differs from Work Block")
         if snapshot.source == "live":
             if snapshot.scope_evidence is None:
                 raise GuardFailure("live scope evidence is absent")
             scope = _validate_scope(metadata, snapshot.issue.body, snapshot.scope_evidence)
+            _validate_authority_snapshot(metadata, snapshot)
         elif snapshot.source == "json":
             return GuardResult(
                 "NON_AUTHORITATIVE", (), metadata, build, audit, mutation_plan, scope
@@ -926,27 +1378,77 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
         if snapshot.pull_request is None:
             if phase != "build":
                 raise GuardFailure("target PR is absent outside BUILD bootstrap")
-            return GuardResult("BUILD BOOTSTRAP", (), metadata, build, audit, mutation_plan, scope)
+            return _build_result(
+                "CONTINUE",
+                metadata,
+                build,
+                audit,
+                mutation_plan,
+                scope,
+                terminal=False,
+                owner=metadata.writer_role,
+                next_action="create the expected draft PR from the verified base",
+            )
         pull_request = snapshot.pull_request
         markers = _parse_all_markers(snapshot.comments)
         build = _resolve_markers(markers, "build", metadata, pull_request.head_sha, phase)
         audit = _resolve_markers(markers, "audit", metadata, pull_request.head_sha, phase)
         mutation_plan = _mutation_plan(build, audit)
         if phase == "build":
-            return GuardResult("BUILD GUARD PASS", (), metadata, build, audit, mutation_plan, scope)
+            if build.marker is None or build.marker.status != "PASS":
+                return _build_result(
+                    "CONTINUE",
+                    metadata,
+                    build,
+                    audit,
+                    mutation_plan,
+                    scope,
+                    terminal=False,
+                    owner=metadata.writer_role,
+                    next_action=(
+                        "complete BUILD validation and publish structured exact-SHA evidence"
+                    ),
+                )
+            _validate_manifest_requirements(build.marker, manifest, snapshot, scope)
+            _validate_checks(snapshot)
+            if snapshot.smoke.status != "PASS" or not snapshot.smoke.evidence:
+                return _build_result(
+                    "CONTINUE",
+                    metadata,
+                    build,
+                    audit,
+                    mutation_plan,
+                    scope,
+                    terminal=False,
+                    owner=metadata.writer_role,
+                    next_action="execute the required smoke and publish its evidence",
+                )
+            return _build_result(
+                "READY",
+                metadata,
+                build,
+                audit,
+                mutation_plan,
+                scope,
+                terminal=True,
+                owner="AUDIT",
+                next_action="start a fresh AUDIT for this exact SHA",
+            )
         if build.marker is None or build.marker.status != "PASS":
             raise GuardFailure("BUILD PASS marker is absent or not PASS")
+        _validate_manifest_requirements(build.marker, manifest, snapshot, scope)
         if phase == "audit":
             _validate_checks(snapshot)
-            if snapshot.smoke.status not in {"PASS"}:
+            if snapshot.smoke.status not in {"PASS"} or not snapshot.smoke.evidence:
                 raise GuardFailure("smoke evidence is absent or not PASS")
             return GuardResult("AUDIT GUARD PASS", (), metadata, build, audit, mutation_plan, scope)
         if audit.marker is None or audit.marker.status != "PASS":
             raise GuardFailure("AUDIT PASS marker is absent or not PASS")
+        _validate_manifest_requirements(audit.marker, manifest, snapshot, scope)
         if build.duplicates or audit.duplicates:
             raise GuardFailure("marker reconciliation is pending")
         _validate_checks(snapshot)
-        if snapshot.smoke.status != "PASS":
+        if snapshot.smoke.status != "PASS" or not snapshot.smoke.evidence:
             raise GuardFailure("smoke evidence is absent or not PASS")
         if snapshot.requested_changes is None:
             raise GuardFailure("requested_changes evidence is absent")
@@ -957,19 +1459,38 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
         if snapshot.open_threads != 0:
             raise GuardFailure("open review threads remain")
         _validate_finalize_live_evidence(snapshot)
-        decision = (
-            "AWAITING HUMAN APPROVAL" if metadata.policy == "HUMAN" else "AUTO_FINALIZE_AUTHORIZED"
-        )
+        if metadata.policy == "HUMAN":
+            receipt = _resolve_human_receipt(
+                snapshot.comments, metadata, pull_request.head_sha, manifest, audit
+            )
+            if receipt is None:
+                return GuardResult(
+                    "AWAITING HUMAN APPROVAL", (), metadata, build, audit, mutation_plan, scope
+                )
+            if receipt.decision == "REJECT":
+                return GuardResult(
+                    "HUMAN REJECTED", (), metadata, build, audit, mutation_plan, scope
+                )
+            decision = "HUMAN_FINALIZE_AUTHORIZED"
+        else:
+            decision = "AUTO_FINALIZE_AUTHORIZED"
         return GuardResult(decision, (), metadata, build, audit, mutation_plan, scope)
     except GuardFailure as error:
+        if phase == "build":
+            return _build_result(
+                "GUARD FAILURE",
+                metadata,
+                build,
+                audit,
+                mutation_plan,
+                scope,
+                terminal=True,
+                owner=None,
+                next_action="stop without changing protected state",
+                reasons=(str(error),),
+            )
         return GuardResult(
-            "GUARD FAILURE",
-            (str(error),),
-            metadata,
-            build,
-            audit,
-            mutation_plan,
-            scope,
+            "GUARD FAILURE", (str(error),), metadata, build, audit, mutation_plan, scope
         )
 
 
@@ -1083,6 +1604,50 @@ def _live_scope_evidence(
             )
         )
     return ScopeEvidence(tuple(changed), checkpoint, immutable)
+
+
+def _live_present_paths(
+    repo: str,
+    head_sha: str,
+    manifest: AcceptanceManifest,
+) -> frozenset[str]:
+    required = {
+        value
+        for item in manifest.items
+        for kind, value in map(_requirement_value, item.requirements)
+        if kind == "present_path"
+    }
+    present: set[str] = set()
+    for path in required:
+        try:
+            _gh_json(["api", f"repos/{repo}/contents/{path}?ref={head_sha}"], "present path")
+        except GuardFailure:
+            continue
+        present.add(path)
+    return frozenset(present)
+
+
+def _live_route_document(repo: str, head_sha: str, manifest: AcceptanceManifest) -> str | None:
+    if manifest.route_effect == "NONE":
+        return None
+    response = _mapping(
+        _gh_json(
+            [
+                "api",
+                f"repos/{repo}/contents/docs/basic_functional_release_plan.md?ref={head_sha}",
+            ],
+            "route transition document",
+        ),
+        "route transition document",
+    )
+    encoded = _required_str(response, ("content",), "route transition content")
+    encoding = _required_str(response, ("encoding",), "route transition encoding")
+    if encoding != "base64":
+        raise GuardFailure("route transition document encoding is unknown")
+    try:
+        return base64.b64decode(encoded, validate=False).decode("utf-8")
+    except (UnicodeDecodeError, ValueError) as error:
+        raise GuardFailure("route transition document is unreadable") from error
 
 
 def _repo_parts(repo: str) -> tuple[str, str]:
@@ -1218,7 +1783,9 @@ def snapshot_from_live(
     issue_number: int,
     pr_number: int | None,
     smoke_status: str | None,
+    smoke_evidence: str,
     phase: str,
+    authority_snapshot: AuthoritySnapshot | None,
 ) -> GuardSnapshot:
     issue = _gh_json(
         ["issue", "view", str(issue_number), "--repo", repo, "--json", "number,state,labels,body"],
@@ -1251,6 +1818,7 @@ def snapshot_from_live(
         raise GuardFailure("active Issue target is not unique")
     issue_body = _required_str(issue_map, ("body",), "issue.body")
     metadata = parse_work_block(issue_body)
+    manifest = parse_acceptance_manifest(issue_body)
     expected_branch = metadata.expected_branch
     pr_candidates = _sequence(
         _gh_json(
@@ -1282,13 +1850,14 @@ def snapshot_from_live(
             pull_request=None,
             comments=(),
             checks=(),
-            smoke=SmokeSnapshot(smoke_status, ""),
+            smoke=SmokeSnapshot(smoke_status, smoke_evidence),
             requested_changes=None,
             open_threads=None,
             active_issue_count=len(issue_candidates),
             open_pr_count=0,
             source="live",
             scope_evidence=_live_scope_evidence(metadata, issue_body, repo, None),
+            authority_snapshot=authority_snapshot,
         )
     candidate_map = _mapping(pr_candidates[0], "target PR")
     resolved_pr_number = _required_int(candidate_map, ("number",), "target PR number")
@@ -1385,13 +1954,30 @@ def snapshot_from_live(
         )
         base_protected = True
     scope_evidence = _live_scope_evidence(metadata, issue_body, repo, pr_number)
+    scope_evidence = replace(
+        scope_evidence,
+        present_paths=_live_present_paths(
+            repo,
+            _required_str(pull_request_map, ("headRefOid",), "head SHA"),
+            manifest,
+        ),
+        route_document=_live_route_document(
+            repo,
+            _required_str(pull_request_map, ("headRefOid",), "head SHA"),
+            manifest,
+        ),
+    )
     snapshot = snapshot_from_json(
         {
             "issue": issue,
             "pull_request": pull_request,
             "comments": comments,
             "checks": checks_root.get("check_runs", ()),
-            "smoke": {"status": smoke_status} if smoke_status is not None else None,
+            "smoke": (
+                {"status": smoke_status, "evidence": smoke_evidence}
+                if smoke_status is not None
+                else None
+            ),
             "active_issue_count": len(issue_candidates),
             "open_pr_count": len(pr_candidates),
             "requested_changes": requested_changes,
@@ -1407,7 +1993,17 @@ def snapshot_from_live(
                 ],
                 "checkpoint_digests": dict(scope_evidence.checkpoint_digests),
                 "immutable_digests": dict(scope_evidence.immutable_digests),
+                "present_paths": sorted(scope_evidence.present_paths),
+                "route_document": scope_evidence.route_document,
             },
+            "authority_snapshot": (
+                {
+                    "base_sha": authority_snapshot.base_sha,
+                    "digests": dict(authority_snapshot.digests),
+                }
+                if authority_snapshot is not None
+                else None
+            ),
         }
     )
     return replace(snapshot, source="live")
@@ -1427,23 +2023,46 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--pr", type=int, help="target PR number for --live")
     parser.add_argument("--phase", choices=("build", "audit", "finalize"), default="finalize")
     parser.add_argument("--smoke-status", choices=("PASS", "FAIL", "PENDING"))
+    parser.add_argument("--smoke-evidence", default="")
+    parser.add_argument(
+        "--authority-snapshot",
+        type=Path,
+        help="verified base-authority snapshot JSON for BUILD_GOVERNANCE",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        authority_snapshot = (
+            _parse_authority_snapshot(
+                _json_value(
+                    args.authority_snapshot.read_text(encoding="utf-8"), "authority snapshot"
+                )
+            )
+            if args.authority_snapshot is not None
+            else None
+        )
         if args.json_path is not None:
             if args.phase == "finalize":
                 raise GuardFailure("finalize phase is live-only")
             snapshot = snapshot_from_json(
                 _json_value(args.json_path.read_text(encoding="utf-8"), "snapshot")
             )
+            if authority_snapshot is not None:
+                snapshot = replace(snapshot, authority_snapshot=authority_snapshot)
         else:
             if not args.repo or args.issue is None:
                 raise GuardFailure("--live requires --repo and --issue")
             snapshot = snapshot_from_live(
-                args.repo, args.issue, args.pr, args.smoke_status, args.phase
+                args.repo,
+                args.issue,
+                args.pr,
+                args.smoke_status,
+                args.smoke_evidence,
+                args.phase,
+                authority_snapshot,
             )
         result = evaluate(snapshot, args.phase)
     except (GuardFailure, OSError) as error:
