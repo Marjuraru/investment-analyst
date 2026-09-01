@@ -2,6 +2,8 @@
 
 from investment_analyst.application.runtime import ApplicationRuntime, StorageLocationRequest
 from investment_analyst.evidence.sec_institutional_observations.models import (
+    InstitutionalObservationQuery,
+    InstitutionalObservationQueryResult,
     InstitutionalObservationRequest,
     InstitutionalObservationSummary,
 )
@@ -27,7 +29,9 @@ class CazatiburonesInstitutionalObservationsApplication:
         ) as storage:
             return InstitutionalObservationService(storage).normalize(request)
 
-    def query(self, query, *, location: StorageLocationRequest):
+    def query(
+        self, query: InstitutionalObservationQuery, *, location: StorageLocationRequest
+    ) -> InstitutionalObservationQueryResult:
         with self._runtime.open_storage(
             location, access_mode=WorkspaceAccessMode.READ_ONLY
         ) as storage:
