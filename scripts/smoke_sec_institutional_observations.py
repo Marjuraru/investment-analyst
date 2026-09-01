@@ -138,6 +138,7 @@ def main() -> int:
             asset_id=_ASSET_ID,
             known_at=now + timedelta(seconds=1),
             cusip=_CUSIP,
+            field_name="institutional_reported_fair_value",
             limit=1,
         ),
         location=location,
@@ -157,6 +158,7 @@ def main() -> int:
             asset_id=_ASSET_ID,
             known_at=now - timedelta(microseconds=1),
             cusip=_CUSIP,
+            field_name="institutional_reported_fair_value",
         ),
         location=location,
     )
