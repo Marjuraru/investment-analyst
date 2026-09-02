@@ -49,3 +49,6 @@ El workspace es explícito; la consulta no depende del directorio actual ni mues
 La disponibilidad y la fidelidad de las filas provienen de la capa semántica institucional
 existente. Esta política no migra `InstitutionalChangeService`: esa capa sigue con su selección
 histórica y no expresa los estados de completitud descritos aquí.
+
+Las métricas persistidas de capa 3 consumen esta resolución sin cambiar su motor ni su guard
+read-only; sus fórmulas y omisiones se documentan en `cazatiburones_institutional_metrics.md`.
