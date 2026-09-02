@@ -572,10 +572,10 @@ atribuyen causalidad de memoria. La duración de la captura es finita y explíci
 ni número mínimo de muestras, sesiones o ciclos como gate. `RELEASE-ACCEPTANCE` fue reconciliada
 HUMAN como `RELEASE-ACCEPTANCE DONE → EQUITY-UNIVERSE NEXT → SEC-CORPUS PLANNED`.
 La transición integrada es `EQUITY-UNIVERSE DONE → SEC-CORPUS NEXT`; #134/#135 integraron el
-sustrato institucional 13F, #140 la composición/completitud y #142 las métricas de cambio reportado.
-Este bloque añade peso declarado dentro de un cierre efectivo, sin presentar SEC-CORPUS como
-completado ni como cartera efectiva: concentración, eventos, reglas/automatización, búsqueda y UI
-continúan siendo fronteras separadas. `EXTENDED-SOAK /
+sustrato institucional 13F, #140 la composición/completitud, #142 las métricas de cambio reportado y
+#144 el peso declarado. Este bloque añade concentración declarada efímera de un cierre efectivo, sin
+presentar SEC-CORPUS como completado ni como cartera efectiva: cartera efectiva, eventos,
+reglas/automatización, búsqueda y UI continúan siendo fronteras separadas. `EXTENDED-SOAK /
 DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
 Block independiente.
 
