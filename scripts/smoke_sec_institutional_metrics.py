@@ -55,6 +55,7 @@ _ASSET_ID = "equity:us:aapl"
 _CIK = "1067983"
 _CUSIP = "037833100"
 _CLASS = "COM"
+_MAX_PERIOD_CANDIDATES = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +170,9 @@ def _select_adjacent_aapl_filings(
     submissions = SecManagerSubmissionsClient(
         UrlLibHttpTransport(), SecEdgarIdentity(user_agent)
     ).fetch(_CIK)
-    candidates = _latest_filing_by_period(institutional_holdings_filings(submissions, _CIK))
+    candidates = _latest_filing_by_period(institutional_holdings_filings(submissions, _CIK))[
+        :_MAX_PERIOD_CANDIDATES
+    ]
     if len(candidates) < 2:
         raise RuntimeError("SEC smoke requires at least two distinct report_period candidates")
     eligible, omitted = _inspect_eligible_filings(candidates=candidates, user_agent=user_agent)
@@ -178,8 +181,9 @@ def _select_adjacent_aapl_filings(
         if prior.report_period in eligible_periods and current.report_period in eligible_periods:
             return (prior, current), omitted
     raise RuntimeError(
-        "SEC smoke found no two adjacent report_period filings with exactly one "
-        "AAPL 037833100/COM position each"
+        "SEC smoke found no two adjacent eligible report_period filings among the "
+        f"{len(candidates)} deterministic recent candidates: each requires exactly one "
+        "AAPL 037833100/COM position"
     )
 
 
