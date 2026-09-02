@@ -28,7 +28,7 @@ from investment_analyst.providers.fundamentals.sec_document_client import (
 from investment_analyst.providers.institutional_holdings import (
     sec_institutional_holdings_pipeline,
 )
-from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.storage import LocalStorage, StorageError, StoragePaths
 
 _NOW = datetime(2025, 2, 16, tzinfo=UTC)
 _COVER = b"""<edgarSubmission><submissionType>13F-HR</submissionType>
@@ -144,3 +144,17 @@ def test_pipeline_persists_one_effective_close_weight_idempotently(tmp_path) -> 
     assert second.metrics_reused == 1
     assert results[0].value == 1
     assert results[0].parameters["effective_accession"] == "0000950123-25-000001"
+
+
+def test_pipeline_requires_writable_storage(tmp_path) -> None:
+    paths = StoragePaths.from_root(tmp_path)
+    with LocalStorage(paths):
+        pass
+    with LocalStorage(paths, read_only=True) as storage:
+        pipeline = InstitutionalWeightPipeline(storage)
+        try:
+            pipeline.compute(asset_id="equity:us:aapl", manager_cik="1067983", known_at=_NOW)
+        except StorageError:
+            pass
+        else:
+            raise AssertionError("read-only storage must be rejected")
