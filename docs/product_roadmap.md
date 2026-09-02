@@ -488,13 +488,45 @@ Después de estabilizar el scheduler multi-fuente:
 
 El servidor local no se expondrá directamente en `0.0.0.0`.
 
-## Horizonte posterior — recomendación y ejecución controlada
+## Horizonte por capas: de la detección a la ejecución
 
-Este horizonte no está implementado, autorizado ni calendarizado. Tras una señal validada, una
-recomendación futura requerirá política explícita, evidencia separada de mercado y fundamentales,
-limitaciones y trazabilidad completa. Sólo después de una decisión humana o de política y contratos
-de broker independientes podría evaluarse ejecución controlada; una automatización acotada sería un
-horizonte todavía posterior y nunca reescribiría evidencia, señales, recomendaciones o decisiones.
+La herramienta tiene por finalidad declarada entregar alertas accionables **no personalizadas** y
+notificación rápida. Esta meta se alcanza mediante una evolución progresiva por capas sucesivas
+gobernadas por puertas de validación obligatorias, sin saltos directos ni atajos arquitectónicos.
+
+La finalidad declarada **no incluye** asesoramiento financiero personalizado, gestión de carteras
+individuales ni ejecución de órdenes o integración operativa con brokers. El producto apoya el
+criterio de un analista humano mediante evidencia y diagnósticos descriptivos transparentes.
+
+La cadena completa de capas y sus condiciones de paso son:
+
+`evidencia PIT → análisis → detección de oportunidades → señales/predicción validada → recomendación explícita y trazable → decisión humana/política → broker y ejecución controlada futura → posible automatización acotada posterior`
+
+| Capa | Rol y alcance | Puertas de validación requeridas | Relación con la finalidad |
+| --- | --- | --- | --- |
+| **Evidencia PIT** | Conectores oficiales, raw records inmutables, normalización, `available_at`, DuckDB/Parquet y persistencia append-only. | Identidades deterministas, idempotencia, preservación de revisiones y corte temporal estricto. | Base de datos e insumo del producto. |
+| **Análisis** | Métricas deterministas, `Decimal`, diagnósticos de mercado y fundamentales con significado y linaje independientes. | Modelos tipados, reproducibilidad, sin score agregado opaco ni mezcla de dominios. | Núcleo analítico descriptivo. |
+| **Detección de oportunidades** | Screening determinista, reglas trivaluadas sobre instantáneas PIT, histéresis, cooldown y deduplicación. | Confirmación de filtros, estado auditable, evaluación sólo ante evidencia nueva y sin IA en el bucle crítico. | Detección de candidatos para revisión. |
+| **Señal validada / predicción** | Modelado estadístico de anomalías o hipótesis empíricas con explicabilidad local y notificación rápida. | Objetivo y label versionados, baselines, purged walk-forward temporal fuera de muestra, holdout cronológico intacto, calibración, SHAP local, shadow mode y rollback. | **Meta declarada del producto:** alertas accionables no personalizadas con notificación rápida. |
+| **Recomendación** | Evaluación normativa o contextual de conveniencia de inversión trazable a evidencia, señales y limitaciones. | Política explícita, artefacto versionado separado, no personalizado, trazabilidad íntegra sin reescribir capas previas. | Fuera de la finalidad declarada del producto. |
+| **Decisión humana / política** | Adopción de criterio soberano por parte del analista o comité de inversión. | Autorización explícita, registro de justificación y separación estricta de la herramienta analítica. | Criterio humano soberano; la herramienta apoya, no decide. |
+| **Broker y ejecución controlada** | Transmisión de órdenes a sistemas de negociación o brokers externos. | Contratos de broker independientes, autenticación, riesgo en tiempo real, límites operativos y decisión humana previa. | Fuera de la finalidad declarada del producto. |
+| **Automatización acotada posterior** | Ejecución desatendida o automatizada dentro de parámetros de riesgo estrictos. | Supervisión permanente, kill switches, auditoría forense y aislamiento total del núcleo analítico. | Fuera de la finalidad declarada del producto. |
+
+La capa de señal validada constituye la meta declarada del producto: alertas accionables no
+personalizadas entregadas con rapidez. Esta capa no está actualmente implementada, autorizada ni
+disponible, pero es el objetivo hacia el cual avanza la arquitectura a través de sus fases. Para ser
+promovida, una predicción o candidato debe superar todas las puertas empíricas obligatorias: contrato
+de label sin leakage, purged walk-forward temporal con embargo, comparación contra baselines simples,
+calibración cuando aplique probabilidad, explicabilidad y atribuciones SHAP locales, validación
+continua en shadow mode, límites estrictos de falsos positivos y un criterio explícito de rollback.
+Ninguna puerta de promoción se debilita, elimina ni reordena.
+
+Cualquier horizonte posterior —recomendación, decisión y ejecución— permanece estrictamente separado
+y fuera de la finalidad del producto. Una recomendación futura exigiría un artefacto independiente, no
+personalizado y trazable. La herramienta no ejecuta operaciones, no gestiona órdenes ni interactúa
+con brokers; la decisión de inversión y cualquier ejecución operativa permanecen exclusivamente bajo
+la responsabilidad soberana del analista humano.
 
 ## Puerta sistemática de calidad
 
