@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Run a finite real 13F metric smoke in a new external workspace."""
+"""Run the finite real SEC smoke for persisted institutional 13F metrics."""
 
 import argparse
 import json
 import os
 import subprocess
-import sys
-from collections import Counter
+import tempfile
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
-from uuid import UUID
 
 from investment_analyst.application.cazatiburones_institutional_metrics import (
     CazatiburonesInstitutionalMetricsApplication,
@@ -28,18 +27,11 @@ from investment_analyst.application.sec_institutional_semantics import (
     SecInstitutionalSemanticsApplication,
 )
 from investment_analyst.evidence.instrument_correspondence.models import InstrumentCorrespondence
-from investment_analyst.evidence.sec_institutional_holdings.repository import (
-    InstitutionalHoldingsRepository,
-)
 from investment_analyst.evidence.sec_institutional_observations.models import (
     InstitutionalObservationRequest,
 )
-from investment_analyst.evidence.sec_institutional_semantics.models import (
-    SEC_INSTITUTIONAL_SEMANTICS_SCHEMA_VERSION,
-    SEC_INSTITUTIONAL_SEMANTICS_SOURCE_ID,
-)
 from investment_analyst.evidence.sec_institutional_semantics.repository import (
-    semantics_from_raw_record,
+    InstitutionalSemanticsRepository,
 )
 from investment_analyst.evidence.sec_institutional_semantics.service import (
     InstitutionalSemanticsEnrichRequest,
@@ -50,6 +42,7 @@ from investment_analyst.providers.institutional_holdings import (
     sec_institutional_holdings_pipeline,
 )
 from investment_analyst.providers.institutional_holdings.sec_institutional_holdings_index import (
+    InstitutionalHoldingsFiling,
     institutional_holdings_filings,
 )
 from investment_analyst.providers.institutional_holdings.sec_manager_submissions import (
@@ -58,97 +51,199 @@ from investment_analyst.providers.institutional_holdings.sec_manager_submissions
 from investment_analyst.storage import LocalStorage, StoragePaths
 from investment_analyst.workspace.service import WorkspaceService
 
+_ASSET_ID = "equity:us:aapl"
+_CIK = "1067983"
+_CUSIP = "037833100"
+_CLASS = "COM"
+
+
+@dataclass(frozen=True, slots=True)
+class _SelectedFiling:
+    accession: str
+    report_period: date
+    accepted_at: datetime
+    revisions_for_period: int
+
+
+def _git_revision() -> tuple[str, str]:
+    repository = Path(__file__).resolve().parents[1]
+    head = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return head, tree
+
+
+def _latest_filing_by_period(
+    filings: tuple[InstitutionalHoldingsFiling, ...],
+) -> tuple[_SelectedFiling, ...]:
+    grouped: dict[date, list[InstitutionalHoldingsFiling]] = {}
+    for filing in filings:
+        if filing.report_date is None:
+            continue
+        if filing.report_date in grouped:
+            grouped[filing.report_date].append(filing)
+        else:
+            grouped[filing.report_date] = [filing]
+    selected: list[_SelectedFiling] = []
+    for period, period_filings in sorted(grouped.items(), reverse=True):
+        latest = max(period_filings, key=lambda item: (item.accepted_at, item.accession))
+        selected.append(
+            _SelectedFiling(
+                accession=latest.accession,
+                report_period=period,
+                accepted_at=latest.accepted_at,
+                revisions_for_period=len(period_filings),
+            )
+        )
+    return tuple(selected)
+
+
+def _aapl_row_count(artifact) -> int:
+    return sum(row.cusip == _CUSIP and row.title_of_class == _CLASS for row in artifact.rows)
+
+
+def _inspect_eligible_filings(
+    *,
+    candidates: tuple[_SelectedFiling, ...],
+    user_agent: str,
+) -> tuple[tuple[_SelectedFiling, ...], dict[str, str]]:
+    eligible: list[_SelectedFiling] = []
+    omitted: dict[str, str] = {}
+    with tempfile.TemporaryDirectory(prefix="investment-analyst-sec-metrics-inspection-") as root:
+        workspace = WorkspaceService().initialize(Path(root) / "workspace").paths.root
+        location = StorageLocationRequest(workspace=workspace)
+        holdings = SecInstitutionalHoldingsApplication.create_default()
+        semantics = SecInstitutionalSemanticsApplication.create_default()
+        identity = SecEdgarIdentity(user_agent)
+        for candidate in candidates:
+            reports = holdings.import_institutional_holdings(
+                request=sec_institutional_holdings_pipeline.SecInstitutionalHoldingsImportRequest(
+                    filer_cik=_CIK, accessions=(candidate.accession,)
+                ),
+                location=location,
+                sec_identity=identity,
+            )
+            if len(reports) != 1:
+                omitted[candidate.accession] = "report_not_persisted"
+                continue
+            report = reports[0]
+            inspection_known_at = datetime.now(UTC)
+            semantics.enrich(
+                request=InstitutionalSemanticsEnrichRequest(
+                    manager_cik=_CIK,
+                    report_ids=(report.report_id,),
+                    known_at=inspection_known_at,
+                ),
+                location=location,
+            )
+            paths = StoragePaths.from_root(WorkspaceService().resolve(workspace).storage_root)
+            with LocalStorage(paths, read_only=True) as storage:
+                artifact = InstitutionalSemanticsRepository(storage.raw_records).get_for_parent(
+                    report
+                )
+            if artifact is None:
+                omitted[candidate.accession] = "semantic_artifact_missing"
+            elif artifact.report_period != candidate.report_period:
+                raise RuntimeError("SEC semantic artifact report_period conflicts with Submissions")
+            else:
+                count = _aapl_row_count(artifact)
+                if count == 1:
+                    eligible.append(candidate)
+                else:
+                    omitted[candidate.accession] = f"aapl_037833100_com_rows={count}"
+    return tuple(eligible), omitted
+
+
+def _select_adjacent_aapl_filings(
+    *, user_agent: str
+) -> tuple[tuple[_SelectedFiling, _SelectedFiling], dict[str, str]]:
+    submissions = SecManagerSubmissionsClient(
+        UrlLibHttpTransport(), SecEdgarIdentity(user_agent)
+    ).fetch(_CIK)
+    candidates = _latest_filing_by_period(institutional_holdings_filings(submissions, _CIK))
+    if len(candidates) < 2:
+        raise RuntimeError("SEC smoke requires at least two distinct report_period candidates")
+    eligible, omitted = _inspect_eligible_filings(candidates=candidates, user_agent=user_agent)
+    eligible_periods = {item.report_period for item in eligible}
+    for prior, current in zip(candidates[1:], candidates, strict=True):
+        if prior.report_period in eligible_periods and current.report_period in eligible_periods:
+            return (prior, current), omitted
+    raise RuntimeError(
+        "SEC smoke found no two adjacent report_period filings with exactly one "
+        "AAPL 037833100/COM position each"
+    )
+
+
+def _artifacts_for_reports(*, workspace: Path, reports):
+    paths = StoragePaths.from_root(WorkspaceService().resolve(workspace).storage_root)
+    with LocalStorage(paths, read_only=True) as storage:
+        repository = InstitutionalSemanticsRepository(storage.raw_records)
+        artifacts = tuple(repository.get_for_parent(report) for report in reports)
+    if any(artifact is None for artifact in artifacts):
+        raise RuntimeError("SEC smoke could not resolve every selected semantic artifact")
+    return tuple(artifact for artifact in artifacts if artifact is not None)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", required=True, type=Path)
-    args = parser.parse_args()
-    if args.workspace.exists():
+    arguments = parser.parse_args()
+    if arguments.workspace.exists():
         raise RuntimeError("workspace must be a new scratch path")
-    if not os.environ.get("SEC_USER_AGENT", "").strip():
+    user_agent = os.environ.get("SEC_USER_AGENT", "").strip()
+    if not user_agent:
         raise RuntimeError("SEC_USER_AGENT is required")
-    repository = Path(__file__).resolve().parents[1]
-    observed = subprocess.run(
-        [
-            sys.executable,
-            str(repository / "scripts/smoke_sec_institutional_observations.py"),
-            "--workspace",
-            str(args.workspace),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=os.environ.copy(),
-    )
-    evidence = json.loads(observed.stdout)
-    known_at = datetime.now(UTC)
-    application = CazatiburonesInstitutionalMetricsApplication.create_default()
-    location = StorageLocationRequest(workspace=args.workspace)
-    storage_paths = StoragePaths.from_root(WorkspaceService().resolve(args.workspace).storage_root)
-    with LocalStorage(storage_paths, read_only=True) as storage:
-        reports = InstitutionalHoldingsRepository(storage.raw_records).list_reports(
-            manager_cik="1067983", known_at=known_at
-        )
-    periods = {report.report_period for report in reports}
-    submissions = SecManagerSubmissionsClient(
-        UrlLibHttpTransport(), SecEdgarIdentity(os.environ["SEC_USER_AGENT"])
-    ).fetch("1067983")
-    extra = next(
-        filing
-        for filing in institutional_holdings_filings(submissions, "1067983")
-        if filing.report_date is not None and filing.report_date not in periods
-    )
-    imported = SecInstitutionalHoldingsApplication.create_default().import_institutional_holdings(
+
+    head, tree = _git_revision()
+    selected, selection_omissions = _select_adjacent_aapl_filings(user_agent=user_agent)
+    workspace = WorkspaceService().initialize(arguments.workspace).paths.root
+    location = StorageLocationRequest(workspace=workspace)
+    identity = SecEdgarIdentity(user_agent)
+    reports = SecInstitutionalHoldingsApplication.create_default().import_institutional_holdings(
         request=sec_institutional_holdings_pipeline.SecInstitutionalHoldingsImportRequest(
-            filer_cik="1067983", accessions=(extra.accession,)
+            filer_cik=_CIK, accessions=tuple(item.accession for item in selected)
         ),
         location=location,
-        sec_identity=SecEdgarIdentity(os.environ["SEC_USER_AGENT"]),
+        sec_identity=identity,
     )
-    report_id = imported[0].report_id
-    SecInstitutionalSemanticsApplication.create_default().enrich(
+    if len(reports) != len(selected):
+        raise RuntimeError("SEC smoke could not persist both selected 13F reports")
+    known_at = datetime.now(UTC)
+    report_ids = tuple(report.report_id for report in reports)
+    semantics = SecInstitutionalSemanticsApplication.create_default()
+    semantics.enrich(
         request=InstitutionalSemanticsEnrichRequest(
-            manager_cik="1067983", report_ids=(report_id,), known_at=known_at
+            manager_cik=_CIK, report_ids=report_ids, known_at=known_at
         ),
         location=location,
     )
-    CazatiburonesInstitutionalObservationsApplication.create_default().normalize(
-        InstitutionalObservationRequest(
-            asset_id="equity:us:aapl",
-            manager_cik="1067983",
-            report_ids=(report_id,),
-            known_at=known_at,
-        ),
-        location=location,
-    )
-    with LocalStorage(storage_paths, read_only=True) as storage:
-        artifacts = tuple(
-            semantics_from_raw_record(record)
-            for record in storage.raw_records.list(
-                source_id=SEC_INSTITUTIONAL_SEMANTICS_SOURCE_ID,
-                schema_version=SEC_INSTITUTIONAL_SEMANTICS_SCHEMA_VERSION,
-                available_to=known_at,
-            )
+    artifacts = _artifacts_for_reports(workspace=workspace, reports=reports)
+    artifact_by_accession = {artifact.accession: artifact for artifact in artifacts}
+    if set(artifact_by_accession) != {item.accession for item in selected}:
+        raise RuntimeError("SEC smoke semantic artifacts do not match selected accessions")
+    aapl_rows = {
+        accession: _aapl_row_count(artifact)
+        for accession, artifact in sorted(artifact_by_accession.items())
+    }
+    if any(count != 1 for count in aapl_rows.values()):
+        raise RuntimeError(
+            "selected SEC filings must each contain exactly one AAPL 037833100/COM row"
         )
-    by_period = {}
-    for artifact in artifacts:
-        if artifact.report_period is not None:
-            by_period.setdefault(artifact.report_period, artifact)
-    first_artifact, second_artifact = tuple(
-        artifact for _period, artifact in sorted(by_period.items())[-2:]
-    )
-    first_counts = Counter((row.cusip, row.title_of_class) for row in first_artifact.rows)
-    second_counts = Counter((row.cusip, row.title_of_class) for row in second_artifact.rows)
-    cusip, title_of_class = next(
-        key
-        for key in sorted(set(first_counts) & set(second_counts))
-        if first_counts[key] == second_counts[key] == 1
-    )
+
     correspondence = InstrumentCorrespondence.declare(
-        asset_id="equity:us:aapl",
-        cusip=cusip,
-        title_of_class=title_of_class,
-        effective_from=date(1900, 1, 1),
+        asset_id=_ASSET_ID,
+        cusip=_CUSIP,
+        title_of_class=_CLASS,
+        effective_from=date(1980, 12, 12),
         effective_to=None,
         available_at=known_at,
         recorded_at=known_at,
@@ -160,31 +255,55 @@ def main() -> int:
         declared_by="smoke_sec_institutional_metrics",
         location=location,
     )
-    CazatiburonesInstitutionalObservationsApplication.create_default().normalize(
-        InstitutionalObservationRequest(
-            asset_id="equity:us:aapl",
-            manager_cik="1067983",
-            report_ids=tuple(UUID(value) for value in evidence["report_ids"]) + (report_id,),
-            known_at=known_at,
-        ),
-        location=location,
+    observations = CazatiburonesInstitutionalObservationsApplication.create_default()
+    observation_request = InstitutionalObservationRequest(
+        asset_id=_ASSET_ID,
+        manager_cik=_CIK,
+        report_ids=report_ids,
+        known_at=known_at,
     )
-    first = application.compute(
-        asset_id="equity:us:aapl", manager_cik="1067983", known_at=known_at, location=location
+    observation_first = observations.normalize(observation_request, location=location)
+    observation_second = observations.normalize(observation_request, location=location)
+    if (
+        observation_first.observations_created == 0
+        or observation_second.observations_reused != observation_first.observations_created
+    ):
+        raise RuntimeError("SEC smoke did not prove AAPL observation idempotence")
+
+    metrics = CazatiburonesInstitutionalMetricsApplication.create_default()
+    first = metrics.compute(
+        asset_id=_ASSET_ID, manager_cik=_CIK, known_at=known_at, location=location
     )
-    second = application.compute(
-        asset_id="equity:us:aapl", manager_cik="1067983", known_at=known_at, location=location
+    second = metrics.compute(
+        asset_id=_ASSET_ID, manager_cik=_CIK, known_at=known_at, location=location
     )
     if first.metrics_created == 0 or second.metrics_reused != first.metrics_created:
         raise RuntimeError("metric smoke did not prove idempotent persistence")
+
     os.environ.pop("SEC_USER_AGENT", None)
     print(
         json.dumps(
             {
+                "workspace": str(workspace),
+                "head": head,
+                "tree": tree,
                 "known_at": known_at.isoformat(),
-                "observations": evidence,
-                "first": first.model_dump(mode="json"),
-                "second": second.model_dump(mode="json"),
+                "accessions": [item.accession for item in selected],
+                "report_periods": [item.report_period.isoformat() for item in selected],
+                "selected_revision_counts": {
+                    item.accession: item.revisions_for_period for item in selected
+                },
+                "aapl_037833100_com_rows": aapl_rows,
+                "selection_omissions": selection_omissions,
+                "observations": {
+                    "first": observation_first.model_dump(mode="json"),
+                    "second": observation_second.model_dump(mode="json"),
+                },
+                "metrics": {
+                    "first": first.model_dump(mode="json"),
+                    "second": second.model_dump(mode="json"),
+                    "omissions_by_reason": dict(sorted(first.skipped_by_reason.items())),
+                },
             },
             sort_keys=True,
         )
