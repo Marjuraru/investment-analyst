@@ -2,6 +2,11 @@
 
 ## Objetivo
 
+La herramienta tiene por finalidad declarada entregar alertas accionables **no personalizadas** y
+notificación rápida, alcanzables mediante una evolución progresiva por capas gobernada por puertas
+de validación obligatorias. No incluye asesoramiento financiero personalizado, gestión de carteras
+individuales ni ejecución de órdenes o integración operativa con brokers.
+
 La cobertura multi-activo se consulta mediante una matriz backend read-only con workspace explícito;
 evidencia local y capacidad de catálogo siguen siendo conceptos separados.
 
@@ -78,12 +83,12 @@ siendo OPS-2/#66, supersedido con `insufficient_local_dates` sin completion ni r
 | `VALUATION-HISTORY` | `DONE` | Historia materializada y reglas relativas explícitas compatibles con valoración PIT v1. | VAL-1/#70 aporta historia descriptiva; VAL-2/#72 propone percentil Decimal34 PIT sin señal ni recomendación. |
 | `INDICATORS-AND-OUTBOX` | `DONE` | Integrado por ALERT-1 (`COMPLETES`). | RSI/MACD/ATR, reglas silenciosas y outbox local con acuse durable; los canales externos siguen pendientes. |
 | `RELEASE-ACCEPTANCE` | `DONE` | Reconciliación HUMAN de #93/#94; integrada antes de este bloque. | La aceptación finita y la recuperación ya fueron registradas. |
-| `EQUITY-UNIVERSE` | `DONE` | Integrado mediante contratos por capacidades. | AAPL mantiene adaptadores compatibles; no hay privilegio de flujo por ticker. |
+| `EQUITY-UNIVERSE` | `PLANNED` | Capacidad multi-activo integrada en 37 identidades del catálogo y 20 jobs de scheduler; pendiente retirar los residuos de privilegio por ticker en `RUNTIME-EFFICIENCY-1`. | Capacidad multi-activo integrada para 37 identidades. Pendiente resolver cuatro residuos de ticker: `src/investment_analyst/frontend/local_web.py:1632` (fallback a Apple si se omite `asset_id`), `src/investment_analyst/application/aapl_refresh_planner.py:39` (símbolo `"AAPL"` por defecto), `src/investment_analyst/analytics/market/chart_models.py:568` y `src/investment_analyst/application/operational_models.py:86` (`asset_id: Literal["equity:us:aapl"]` estructural), y `src/investment_analyst/providers/market/alpaca_stock.py:15` (`SUPPORTED_SYMBOL = "AAPL"` sin uso). |
 | `SEC-CORPUS` | `NEXT` | #134/#135 integraron correspondencia y observaciones 13F; #140 integró composición/completitud, #142 métricas de cambio reportado y #144 peso declarado. Este bloque añade concentración declarada efímera de un cierre efectivo, sin presentar una cartera efectiva. Pendientes: cartera efectiva, eventos, reglas/automatización, búsqueda y UI. | Las observaciones 13F son filas as-filed separadas; peso y concentración usan el universo as-filed del cierre efectivo, nunca una cartera efectiva. No hay percentil robusto ni capa 4. |
 | `BVL-MARKET` | `BLOCKED` | Contrato de uso y fuente oficial autorizada. | No se infiere autorización para automatizar boletines. |
 | `PREDICTIVE-RESEARCH` | `DEFERRED` | Carril explícito con PIT, label, baselines, validación temporal, holdout, shadow y rollback. | Universo survivorship-aware es condicional; on-chain, stablecoins/DeFi, multi-venue y derivados extra dependen del target. |
 
-La transición integrada es literalmente `EQUITY-UNIVERSE` | `DONE` y
+La transición integrada en la tabla conserva `EQUITY-UNIVERSE` | `PLANNED` y
 `SEC-CORPUS` | `NEXT`; no implica que SEC-CORPUS esté implementado.
 
 ## Diagnóstico de la estructura actual
