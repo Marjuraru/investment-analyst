@@ -30,12 +30,8 @@ from investment_analyst.core.models.metric import MetricResult
 from investment_analyst.core.models.observation import NormalizedObservation
 from investment_analyst.evidence.sec_documents.models import normalize_cik
 from investment_analyst.evidence.sec_institutional_observations.definitions import SOURCE_ID
-from investment_analyst.evidence.sec_institutional_semantics.models import (
-    SEC_INSTITUTIONAL_SEMANTICS_SCHEMA_VERSION,
-    SEC_INSTITUTIONAL_SEMANTICS_SOURCE_ID,
-)
-from investment_analyst.evidence.sec_institutional_semantics.repository import (
-    semantics_from_raw_record,
+from investment_analyst.evidence.sec_institutional_semantics.artifact_reader import (
+    InstitutionalSemanticsArtifactReader,
 )
 from investment_analyst.storage import RecordNotFoundError, StorageError
 
@@ -55,13 +51,8 @@ class InstitutionalWeightPipeline:
         computed_at = self._clock().astimezone(UTC)
         for definition in INSTITUTIONAL_WEIGHT_DEFINITIONS:
             self._storage.metric_definitions.upsert(definition)
-        artifacts = tuple(
-            semantics_from_raw_record(record)
-            for record in self._storage.raw_records.list(
-                source_id=SEC_INSTITUTIONAL_SEMANTICS_SOURCE_ID,
-                schema_version=SEC_INSTITUTIONAL_SEMANTICS_SCHEMA_VERSION,
-                available_to=known_at,
-            )
+        artifacts = InstitutionalSemanticsArtifactReader(self._storage.raw_records).list_visible(
+            known_at=known_at
         )
         artifact_by_id = {item.artifact_id: item for item in artifacts}
         observations = tuple(

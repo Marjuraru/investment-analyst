@@ -807,15 +807,16 @@ class AaplLocalController:
         """Execute a typed manual or scheduled request through one shared mutex."""
         with self._writer_lock:
             try:
-                return self._runner.run(
+                result = self._runner.run(
                     request,
                     workspace=self._workspace,
                     alpaca_credentials=self._alpaca_credentials,
                     sec_identity=self._sec_identity,
                 )
             finally:
-                self._clear_read_caches()
                 self._refresh_health_snapshot()
+            self._invalidate_aapl_refresh_caches()
+            return result
 
     def report_request(
         self,
@@ -1195,18 +1196,27 @@ class AaplLocalController:
             self._fundamental_analysis_cache[cache_key] = analysis
         return analysis
 
-    def _clear_read_caches(self) -> None:
+    def _invalidate_aapl_refresh_caches(self) -> None:
+        """Invalidate only read models refreshed by a completed Apple bootstrap."""
         with self._cache_lock:
             self._market_chart_cache.clear()
-            self._btc_market_chart_cache.clear()
-            self._crypto_spot_daily_chart_cache.clear()
-            self._listed_market_chart_cache.clear()
-            self._corporate_valuation_cache.clear()
-            self._btc_intraday_chart_cache.clear()
-            self._fundamental_trend_cache.clear()
-            self._fundamental_research_cache.clear()
-            self._fundamental_research_history_cache.clear()
-            self._fundamental_analysis_cache.clear()
+            self._drop_asset_cache_entries(self._listed_market_chart_cache, APPLE_ASSET_ID)
+            self._drop_valuation_cache_entries(APPLE_ASSET_ID)
+            self._drop_asset_cache_entries(self._fundamental_trend_cache, APPLE_ASSET_ID)
+            self._drop_asset_cache_entries(self._fundamental_research_cache, APPLE_ASSET_ID)
+            self._drop_asset_cache_entries(self._fundamental_research_history_cache, APPLE_ASSET_ID)
+            self._drop_asset_cache_entries(self._fundamental_analysis_cache, APPLE_ASSET_ID)
+
+    @staticmethod
+    def _drop_asset_cache_entries(cache: dict[tuple[str, object], object], asset_id: str) -> None:
+        for key in tuple(cache):
+            if key[0] == asset_id:
+                del cache[key]
+
+    def _drop_valuation_cache_entries(self, asset_id: str) -> None:
+        for request in tuple(self._corporate_valuation_cache):
+            if request.asset_id == asset_id:
+                del self._corporate_valuation_cache[request]
 
     def _refresh_health_snapshot(self) -> None:
         snapshot = self._runner.inspect(workspace=self._workspace)

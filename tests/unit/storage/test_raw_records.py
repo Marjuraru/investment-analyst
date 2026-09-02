@@ -78,6 +78,21 @@ def test_checksum_detects_raw_file_modification(storage) -> None:
         storage.raw_records.get_many([record.record_id])
 
 
+def test_explicit_index_integrity_verification_detects_divergent_duplicate_document(
+    storage,
+) -> None:
+    record = make_raw_record()
+    storage.raw_records.save(record)
+    storage.store.connection.execute(
+        "UPDATE raw_record_index SET document_json = ? WHERE record_id = ?",
+        ['{"different":"index-copy"}', str(record.record_id)],
+    )
+
+    assert storage.raw_records.get(record.record_id) == record
+    with pytest.raises(StorageError, match="index does not match file"):
+        storage.raw_records.verify_index_integrity([record.record_id])
+
+
 def test_raw_save_is_idempotent_for_identical_content(storage) -> None:
     record = make_raw_record()
 

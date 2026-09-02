@@ -22,6 +22,18 @@ class _RawRecords:
         return self._records
 
 
+class _Reader:
+    def __init__(self, raw_records: _RawRecords) -> None:
+        self._raw_records = raw_records
+
+    def list_visible(self, *, known_at: datetime) -> tuple[object, ...]:
+        return self._raw_records.list(
+            source_id="sec-edgar:institutional-holdings-semantics",
+            schema_version="sec-institutional-holdings-semantics-v2",
+            available_to=known_at,
+        )
+
+
 class _Storage:
     def __init__(self, *, read_only: bool, records: tuple[object, ...]) -> None:
         self.read_only = read_only
@@ -52,14 +64,13 @@ def test_service_requires_read_only_storage() -> None:
 
 
 def test_service_is_read_only_and_preserves_missing_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    record = object()
     row = SimpleNamespace(value_as_reported=Decimal("0.10"))
     semantic = _semantic(rows=(row,))
-    storage = _Storage(read_only=True, records=(record,))
+    storage = _Storage(read_only=True, records=(semantic,))
     monkeypatch.setattr(
         institutional_composition_service,
-        "semantics_from_raw_record",
-        lambda value: semantic if value is record else None,
+        "InstitutionalSemanticsArtifactReader",
+        _Reader,
     )
 
     result = InstitutionalCompositionService(storage).query(
