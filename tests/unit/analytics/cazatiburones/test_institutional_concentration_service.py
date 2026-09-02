@@ -23,6 +23,18 @@ class _RawRecords:
         return self._records
 
 
+class _Reader:
+    def __init__(self, raw_records: _RawRecords) -> None:
+        self._raw_records = raw_records
+
+    def list_visible(self, *, known_at: datetime) -> tuple[object, ...]:
+        return self._raw_records.list(
+            source_id="sec-edgar:institutional-holdings-semantics",
+            schema_version="sec-institutional-holdings-semantics-v2",
+            available_to=known_at,
+        )
+
+
 class _Storage:
     def __init__(self, *, read_only: bool, records: tuple[object, ...]) -> None:
         self.read_only = read_only
@@ -73,13 +85,12 @@ def test_service_requires_read_only_storage() -> None:
 def test_service_uses_one_visible_artifact_and_does_not_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    record = object()
     semantic = _semantic()
-    storage = _Storage(read_only=True, records=(record,))
+    storage = _Storage(read_only=True, records=(semantic,))
     monkeypatch.setattr(
         institutional_concentration_service,
-        "semantics_from_raw_record",
-        lambda value: semantic if value is record else None,
+        "InstitutionalSemanticsArtifactReader",
+        _Reader,
     )
     monkeypatch.setattr(
         institutional_concentration_service,
@@ -106,15 +117,14 @@ def test_service_uses_one_visible_artifact_and_does_not_write(
 def test_service_preserves_an_unresolved_period_as_a_typed_omission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    record = object()
     semantic = _semantic(report_period=None)
     monkeypatch.setattr(
         institutional_concentration_service,
-        "semantics_from_raw_record",
-        lambda value: semantic if value is record else None,
+        "InstitutionalSemanticsArtifactReader",
+        _Reader,
     )
 
-    result = InstitutionalConcentrationService(_Storage(read_only=True, records=(record,))).query(
+    result = InstitutionalConcentrationService(_Storage(read_only=True, records=(semantic,))).query(
         manager_cik="1067983", known_at=datetime(2025, 2, 14, tzinfo=UTC)
     )
 
@@ -126,8 +136,6 @@ def test_service_preserves_an_unresolved_period_as_a_typed_omission(
 def test_service_uses_only_the_selected_effective_artifact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original_record = object()
-    amended_record = object()
     original = _semantic()
     amendment = _semantic(
         available_at=datetime(2025, 2, 15, tzinfo=UTC),
@@ -137,8 +145,8 @@ def test_service_uses_only_the_selected_effective_artifact(
     )
     monkeypatch.setattr(
         institutional_concentration_service,
-        "semantics_from_raw_record",
-        lambda value: original if value is original_record else amendment,
+        "InstitutionalSemanticsArtifactReader",
+        _Reader,
     )
     monkeypatch.setattr(
         institutional_concentration_service,
@@ -147,7 +155,7 @@ def test_service_uses_only_the_selected_effective_artifact(
     )
 
     result = InstitutionalConcentrationService(
-        _Storage(read_only=True, records=(original_record, amended_record))
+        _Storage(read_only=True, records=(original, amendment))
     ).query(manager_cik="1067983", known_at=datetime(2025, 2, 15, tzinfo=UTC))
 
     assert [(item.effective_artifact_id, item.close_status) for item in result] == [

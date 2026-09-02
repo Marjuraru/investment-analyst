@@ -2705,13 +2705,72 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
     controller.fundamental_analysis_request(research_request)
 
     assert len(application.chart_requests) == 2
-    assert len(application.btc_chart_requests) == 2
-    assert len(application.btc_intraday_chart_requests) == 2
+    assert len(application.btc_chart_requests) == 1
+    assert len(application.btc_intraday_chart_requests) == 1
     assert len(application.trend_requests) == 2
     assert len(application.research_requests) == 2
     assert len(application.research_history_requests) == 2
     assert len(application.analysis_requests) == 2
     assert len(runner.requests) == 1
+
+
+def test_completed_aapl_run_invalidates_only_aapl_market_and_fundamental_caches(
+    tmp_path: Path,
+) -> None:
+    runner = _FakeRunner()
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        runner,
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    known_at = datetime(2026, 7, 16, tzinfo=UTC)
+    chart_request = AaplMarketChartRequest(known_at=known_at)
+    trend_request = AaplFundamentalTrendRequest(
+        known_at=known_at,
+        frequency=DataFrequency.QUARTERLY,
+        period_limit=8,
+    )
+    valuation_date = date(2026, 7, 16)
+    aapl_valuation = CorporateValuationRequest(
+        asset_id="equity:us:aapl", known_at=known_at, valuation_date=valuation_date
+    )
+    amd_valuation = CorporateValuationRequest(
+        asset_id="equity:us:amd", known_at=known_at, valuation_date=valuation_date
+    )
+    run_payload: dict[str, object] = {
+        "asset_id": "equity:us:aapl",
+        "market_start": "2025-01-01",
+        "market_end": "2026-07-15",
+        "fundamental_frequency": "quarterly",
+        "refresh_mode": "auto",
+        "requested_known_at": None,
+        "require_complete": True,
+    }
+
+    controller.listed_market_chart_request("equity:us:aapl", chart_request)
+    controller.listed_market_chart_request("equity:us:amd", chart_request)
+    controller.corporate_valuation_request(aapl_valuation)
+    controller.corporate_valuation_request(amd_valuation)
+    controller.fundamental_trend_request(trend_request, asset_id="equity:us:aapl")
+    controller.fundamental_trend_request(trend_request, asset_id="equity:us:amd")
+    controller.run_payload(run_payload)
+    controller.listed_market_chart_request("equity:us:aapl", chart_request)
+    controller.listed_market_chart_request("equity:us:amd", chart_request)
+    controller.corporate_valuation_request(aapl_valuation)
+    controller.corporate_valuation_request(amd_valuation)
+    controller.fundamental_trend_request(trend_request, asset_id="equity:us:aapl")
+    controller.fundamental_trend_request(trend_request, asset_id="equity:us:amd")
+
+    assert application.listed_chart_requests == [
+        ("equity:us:aapl", chart_request),
+        ("equity:us:amd", chart_request),
+        ("equity:us:aapl", chart_request),
+    ]
+    assert application.valuation_requests == [aapl_valuation, amd_valuation, aapl_valuation]
+    assert application.trend_asset_ids == ["equity:us:aapl", "equity:us:amd", "equity:us:aapl"]
 
 
 def test_fundamental_read_caches_are_isolated_by_sec_asset(tmp_path: Path) -> None:

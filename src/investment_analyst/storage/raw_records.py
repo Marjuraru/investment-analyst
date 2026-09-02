@@ -24,6 +24,7 @@ from investment_analyst.storage.serialization import (
 )
 
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9._-]+")
+_MAX_INDEX_INTEGRITY_RECORDS = 1_000
 
 
 def _safe_source_component(source_id: str) -> str:
@@ -66,7 +67,7 @@ class JsonRawRecordRepository:
                 raise RecordConflictError(
                     f"raw record {record.record_id} already has different content"
                 )
-            self._verify_file(existing[0], existing[1], existing[2])
+            self._verify_file(existing[0], existing[1])
             return record
 
         relative_path = self._relative_path(record)
@@ -119,7 +120,7 @@ class JsonRawRecordRepository:
         row = self._index_row(record_id)
         if row is None:
             raise RecordNotFoundError(f"raw record {record_id} was not found")
-        record = self._verify_file(row[0], row[1], row[2])
+        record = self._verify_file(row[0], row[1])
         if record.record_id != record_id:
             raise StorageError("stored raw record identifier does not match its index")
         return record
@@ -131,13 +132,13 @@ class JsonRawRecordRepository:
         placeholders = ", ".join("?" for _ in ordered_ids)
         rows = self._connection.execute(
             f"""
-            SELECT record_id, relative_path, checksum_sha256, document_json
+            SELECT record_id, relative_path, checksum_sha256
             FROM raw_record_index
             WHERE record_id IN ({placeholders})
             """,  # noqa: S608
             [str(record_id) for record_id in ordered_ids],
         ).fetchall()
-        indexed = {UUID(row[0]): (row[1], row[2], row[3]) for row in rows}
+        indexed = {UUID(row[0]): (row[1], row[2]) for row in rows}
         missing = [record_id for record_id in ordered_ids if record_id not in indexed]
         if missing:
             raise RecordNotFoundError(f"raw record {missing[0]} was not found")
@@ -160,6 +161,28 @@ class JsonRawRecordRepository:
         received_from: datetime | None = None,
         received_to: datetime | None = None,
     ) -> list[RawRecord]:
+        record_ids = self.list_record_ids(
+            asset_id=asset_id,
+            source_id=source_id,
+            schema_version=schema_version,
+            available_to=available_to,
+            received_from=received_from,
+            received_to=received_to,
+        )
+        records = self.get_many(record_ids)
+        return [records[record_id] for record_id in record_ids]
+
+    def list_record_ids(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        schema_version: str | None = None,
+        available_to: datetime | None = None,
+        received_from: datetime | None = None,
+        received_to: datetime | None = None,
+    ) -> list[UUID]:
+        """Return indexed identifiers in stable order without loading JSON documents."""
         clauses, parameters = self._build_filter_clauses(
             asset_id=asset_id,
             source_id=source_id,
@@ -173,9 +196,31 @@ class JsonRawRecordRepository:
             f"SELECT record_id FROM raw_record_index{where} ORDER BY received_at, record_id",
             parameters,
         ).fetchall()
-        record_ids = [UUID(row[0]) for row in rows]
-        records = self.get_many(record_ids)
-        return [records[record_id] for record_id in record_ids]
+        return [UUID(row[0]) for row in rows]
+
+    def verify_index_integrity(self, record_ids: Collection[UUID]) -> int:
+        """Verify a bounded index/file document equality check on demand.
+
+        The durable SHA-256 check remains part of every materialized read. This
+        deliberately more expensive comparison is for maintenance and audit
+        operations, where it can detect a divergent duplicate index document.
+        """
+        ordered_ids = tuple(sorted(set(record_ids), key=str))
+        if len(ordered_ids) > _MAX_INDEX_INTEGRITY_RECORDS:
+            raise StorageError(
+                "raw record index integrity verification exceeds the bounded record limit"
+            )
+        for record_id in ordered_ids:
+            row = self._index_row(record_id)
+            if row is None:
+                raise RecordNotFoundError(f"raw record {record_id} was not found")
+            data = self._verified_file_bytes(row[0], row[1])
+            if data.decode("utf-8") != row[2]:
+                raise StorageError(f"raw record index does not match file: {row[0]}")
+            record = model_from_json(RawRecord, data)
+            if record.record_id != record_id:
+                raise StorageError("stored raw record identifier does not match its index")
+        return len(ordered_ids)
 
     def count(
         self,
@@ -290,15 +335,14 @@ class JsonRawRecordRepository:
         self,
         relative_path: str,
         checksum: str,
-        document_json: str,
     ) -> RawRecord:
+        return model_from_json(RawRecord, self._verified_file_bytes(relative_path, checksum))
+
+    def _verified_file_bytes(self, relative_path: str, checksum: str) -> bytes:
         target = _ensure_within(self._raw_root, self._raw_root / relative_path)
         if not target.is_file():
             raise StorageError(f"indexed raw record file is missing: {relative_path}")
         data = target.read_bytes()
         if sha256_hex(data) != checksum:
             raise StorageError(f"checksum mismatch for raw record file: {relative_path}")
-        if data.decode("utf-8") != document_json:
-            raise StorageError(f"raw record index does not match file: {relative_path}")
-        record = model_from_json(RawRecord, data)
-        return record
+        return data

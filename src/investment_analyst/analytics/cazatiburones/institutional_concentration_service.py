@@ -20,13 +20,11 @@ from investment_analyst.analytics.cazatiburones.institutional_concentration_mode
     InstitutionalConcentrationResult,
 )
 from investment_analyst.evidence.sec_documents.models import normalize_cik
-from investment_analyst.evidence.sec_institutional_semantics.models import (
-    SEC_INSTITUTIONAL_SEMANTICS_SCHEMA_VERSION,
-    SEC_INSTITUTIONAL_SEMANTICS_SOURCE_ID,
-    InstitutionalHoldingsSemantics,
+from investment_analyst.evidence.sec_institutional_semantics.artifact_reader import (
+    InstitutionalSemanticsArtifactReader,
 )
-from investment_analyst.evidence.sec_institutional_semantics.repository import (
-    semantics_from_raw_record,
+from investment_analyst.evidence.sec_institutional_semantics.models import (
+    InstitutionalHoldingsSemantics,
 )
 from investment_analyst.storage import LocalStorage, StorageError
 
@@ -43,12 +41,10 @@ class InstitutionalConcentrationService:
         normalized_manager_cik = normalize_cik(manager_cik)
         artifacts = tuple(
             item
-            for record in self._storage.raw_records.list(
-                source_id=SEC_INSTITUTIONAL_SEMANTICS_SOURCE_ID,
-                schema_version=SEC_INSTITUTIONAL_SEMANTICS_SCHEMA_VERSION,
-                available_to=known_at,
-            )
-            if (item := semantics_from_raw_record(record)).manager_cik == normalized_manager_cik
+            for item in InstitutionalSemanticsArtifactReader(
+                self._storage.raw_records
+            ).list_visible(known_at=known_at)
+            if item.manager_cik == normalized_manager_cik
         )
         by_artifact_id = {item.artifact_id: item for item in artifacts}
         periods = candidates_by_period(artifacts, manager_cik=normalized_manager_cik)

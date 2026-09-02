@@ -18,6 +18,10 @@ JSON means UTF-8 JSON with sorted keys, compact separators, deterministic model 
 NaN or Infinity. The SHA-256 checksum covers those stored canonical bytes; it does not claim to cover
 the provider's original network bytes.
 
+Every materialized raw-record read verifies that SHA-256 before deserialization. The indexed canonical
+JSON copy remains an audit value; `verify_index_integrity(record_ids)` performs its full file/index
+comparison only when explicitly requested, is bounded to 1,000 records, and fails closed on divergence.
+
 Assets, source definitions, and metric definitions are explicitly updatable through `upsert`.
 Normalized observations, metric results, diagnostic results, and raw records are append-only. Repeated
 writes with an identical identifier and document are idempotent, while different content conflicts.
