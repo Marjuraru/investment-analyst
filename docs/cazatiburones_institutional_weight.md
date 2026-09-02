@@ -20,4 +20,5 @@ artefacto, accession, fila, revisiones y hashes de cover e information table y v
 sus parámetros; la identidad también incorpora el corte `known_at` y nunca `computed_at` ni el valor.
 
 Esto no calcula concentración, recuento de posiciones, mayor peso, HHI, ranking, score, señal ni
-recomendación.
+recomendación. La concentración declarada de alcance gestor se consulta separadamente mediante
+`sec-13f-concentration-policy-v1`; sigue siendo una proyección efímera, no una cartera efectiva.
