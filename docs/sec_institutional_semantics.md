@@ -39,3 +39,10 @@ La query abre el workspace en solo lectura y distingue `missing` de `not_enriche
 entrega `total_rows`, `matching_rows`, `truncated` y sólo una página: una página nunca implica una
 cartera completa. El verificador de backup vuelve a derivar cada bundle desde los XML persistidos y
 rechaza cualquier divergencia.
+## Proyección de composición posterior
+
+Los bundles semánticos as-filed conservan literalmente la metadata necesaria para una política de
+selección posterior (`is_amendment`, `amendment_number`, `amendment_type`, totales declarados,
+filas y `available_at`). La política `sec-13f-composition-policy-v1` los consume en modo
+read-only; no modifica esta evidencia ni convierte metadata ausente en cero. Véase
+`cazatiburones_institutional_composition.md` para sus estados y límites.
