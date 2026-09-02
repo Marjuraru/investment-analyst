@@ -83,7 +83,7 @@ def main() -> int:
     extra = next(
         filing
         for filing in institutional_holdings_filings(submissions, "1067983")
-        if filing.report_date not in periods
+        if filing.report_date is not None and filing.report_date not in periods
     )
     imported = SecInstitutionalHoldingsApplication.create_default().import_institutional_holdings(
         request=sec_institutional_holdings_pipeline.SecInstitutionalHoldingsImportRequest(
