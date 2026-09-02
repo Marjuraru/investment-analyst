@@ -5,7 +5,6 @@ import argparse
 import json
 import os
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -52,10 +51,9 @@ from investment_analyst.storage import LocalStorage, StoragePaths
 from investment_analyst.workspace.service import WorkspaceService
 
 _ASSET_ID = "equity:us:aapl"
-_CIK = "1067983"
+_CIK = "1350694"
 _CUSIP = "037833100"
 _CLASS = "COM"
-_MAX_PERIOD_CANDIDATES = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,79 +110,15 @@ def _aapl_row_count(artifact) -> int:
     return sum(row.cusip == _CUSIP and row.title_of_class == _CLASS for row in artifact.rows)
 
 
-def _inspect_eligible_filings(
-    *,
-    candidates: tuple[_SelectedFiling, ...],
-    user_agent: str,
-) -> tuple[tuple[_SelectedFiling, ...], dict[str, str]]:
-    eligible: list[_SelectedFiling] = []
-    omitted: dict[str, str] = {}
-    with tempfile.TemporaryDirectory(prefix="investment-analyst-sec-metrics-inspection-") as root:
-        workspace = WorkspaceService().initialize(Path(root) / "workspace").paths.root
-        location = StorageLocationRequest(workspace=workspace)
-        holdings = SecInstitutionalHoldingsApplication.create_default()
-        semantics = SecInstitutionalSemanticsApplication.create_default()
-        identity = SecEdgarIdentity(user_agent)
-        for candidate in candidates:
-            reports = holdings.import_institutional_holdings(
-                request=sec_institutional_holdings_pipeline.SecInstitutionalHoldingsImportRequest(
-                    filer_cik=_CIK, accessions=(candidate.accession,)
-                ),
-                location=location,
-                sec_identity=identity,
-            )
-            if len(reports) != 1:
-                omitted[candidate.accession] = "report_not_persisted"
-                continue
-            report = reports[0]
-            inspection_known_at = datetime.now(UTC)
-            semantics.enrich(
-                request=InstitutionalSemanticsEnrichRequest(
-                    manager_cik=_CIK,
-                    report_ids=(report.report_id,),
-                    known_at=inspection_known_at,
-                ),
-                location=location,
-            )
-            paths = StoragePaths.from_root(WorkspaceService().resolve(workspace).storage_root)
-            with LocalStorage(paths, read_only=True) as storage:
-                artifact = InstitutionalSemanticsRepository(storage.raw_records).get_for_parent(
-                    report
-                )
-            if artifact is None:
-                omitted[candidate.accession] = "semantic_artifact_missing"
-            elif artifact.report_period != candidate.report_period:
-                raise RuntimeError("SEC semantic artifact report_period conflicts with Submissions")
-            else:
-                count = _aapl_row_count(artifact)
-                if count == 1:
-                    eligible.append(candidate)
-                else:
-                    omitted[candidate.accession] = f"aapl_037833100_com_rows={count}"
-    return tuple(eligible), omitted
-
-
-def _select_adjacent_aapl_filings(
-    *, user_agent: str
-) -> tuple[tuple[_SelectedFiling, _SelectedFiling], dict[str, str]]:
+def _select_adjacent_aapl_filings(*, user_agent: str) -> tuple[_SelectedFiling, _SelectedFiling]:
     submissions = SecManagerSubmissionsClient(
         UrlLibHttpTransport(), SecEdgarIdentity(user_agent)
     ).fetch(_CIK)
-    candidates = _latest_filing_by_period(institutional_holdings_filings(submissions, _CIK))[
-        :_MAX_PERIOD_CANDIDATES
-    ]
+    candidates = _latest_filing_by_period(institutional_holdings_filings(submissions, _CIK))
     if len(candidates) < 2:
         raise RuntimeError("SEC smoke requires at least two distinct report_period candidates")
-    eligible, omitted = _inspect_eligible_filings(candidates=candidates, user_agent=user_agent)
-    eligible_periods = {item.report_period for item in eligible}
-    for prior, current in zip(candidates[1:], candidates, strict=True):
-        if prior.report_period in eligible_periods and current.report_period in eligible_periods:
-            return (prior, current), omitted
-    raise RuntimeError(
-        "SEC smoke found no two adjacent eligible report_period filings among the "
-        f"{len(candidates)} deterministic recent candidates: each requires exactly one "
-        "AAPL 037833100/COM position"
-    )
+    current, prior = candidates[:2]
+    return prior, current
 
 
 def _artifacts_for_reports(*, workspace: Path, reports):
@@ -208,7 +142,7 @@ def main() -> int:
         raise RuntimeError("SEC_USER_AGENT is required")
 
     head, tree = _git_revision()
-    selected, selection_omissions = _select_adjacent_aapl_filings(user_agent=user_agent)
+    selected = _select_adjacent_aapl_filings(user_agent=user_agent)
     workspace = WorkspaceService().initialize(arguments.workspace).paths.root
     location = StorageLocationRequest(workspace=workspace)
     identity = SecEdgarIdentity(user_agent)
@@ -234,6 +168,10 @@ def main() -> int:
     artifact_by_accession = {artifact.accession: artifact for artifact in artifacts}
     if set(artifact_by_accession) != {item.accession for item in selected}:
         raise RuntimeError("SEC smoke semantic artifacts do not match selected accessions")
+    if {artifact.report_period for artifact in artifacts} != {
+        item.report_period for item in selected
+    }:
+        raise RuntimeError("SEC smoke semantic artifacts do not match selected report_periods")
     aapl_rows = {
         accession: _aapl_row_count(artifact)
         for accession, artifact in sorted(artifact_by_accession.items())
@@ -298,7 +236,7 @@ def main() -> int:
                     item.accession: item.revisions_for_period for item in selected
                 },
                 "aapl_037833100_com_rows": aapl_rows,
-                "selection_omissions": selection_omissions,
+                "selection_omissions": {},
                 "observations": {
                     "first": observation_first.model_dump(mode="json"),
                     "second": observation_second.model_dump(mode="json"),
