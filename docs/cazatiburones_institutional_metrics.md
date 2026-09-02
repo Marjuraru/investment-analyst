@@ -10,4 +10,6 @@ cierres no resueltos y ratio con previo cero se omiten con motivo tipado. No sum
 ausencia como cero y no construye una cartera efectiva. Las observaciones monetarias parciales
 mantienen calidad `partial`; el importe principal queda excluido por unidad no comparable.
 
-No hay concentración, peso, score, señal, recomendación ni modificación de evidencia u observaciones.
+El peso declarado dentro de un cierre efectivo se documenta y persiste separadamente en
+[`cazatiburones_institutional_weight.md`](cazatiburones_institutional_weight.md). No hay
+concentración, score, señal, recomendación ni modificación de evidencia u observaciones.
