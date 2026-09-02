@@ -158,3 +158,30 @@ def test_pipeline_requires_writable_storage(tmp_path) -> None:
             pass
         else:
             raise AssertionError("read-only storage must be rejected")
+
+
+def test_pipeline_omits_asset_absent_from_a_resolved_close(tmp_path) -> None:
+    """A close with zero rows for the requested asset is a typed omission, never a zero weight."""
+    paths = StoragePaths.from_root(tmp_path)
+    with LocalStorage(paths) as storage:
+        report = sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipeline(
+            storage, _Submissions(), _Documents()
+        ).run(
+            sec_institutional_holdings_pipeline.SecInstitutionalHoldingsImportRequest(
+                filer_cik="1067983", forms=("13F-HR",)
+            )
+        )[0]
+        InstitutionalHoldingsSemanticsService(storage, clock=lambda: _NOW).enrich(
+            InstitutionalSemanticsEnrichRequest(
+                manager_cik="1067983", report_ids=(report.report_id,), known_at=_NOW
+            )
+        )
+        # No InstrumentCorrespondence and no institutional observations are normalized for
+        # this asset: the resolved close exists, but the requested asset has no row in it.
+    with LocalStorage(paths) as storage:
+        pipeline = InstitutionalWeightPipeline(storage, clock=lambda: _NOW + timedelta(seconds=1))
+        summary = pipeline.compute(asset_id="equity:us:aapl", manager_cik="1067983", known_at=_NOW)
+        results = storage.metric_results.list(asset_id="equity:us:aapl")
+    assert summary.metrics_created == 0
+    assert summary.skipped_by_reason == {"missing_position": 2}
+    assert results == []
