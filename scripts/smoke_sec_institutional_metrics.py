@@ -12,7 +12,38 @@ from pathlib import Path
 from investment_analyst.application.cazatiburones_institutional_metrics import (
     CazatiburonesInstitutionalMetricsApplication,
 )
+from investment_analyst.application.cazatiburones_institutional_observations import (
+    CazatiburonesInstitutionalObservationsApplication,
+)
 from investment_analyst.application.runtime import StorageLocationRequest
+from investment_analyst.application.sec_institutional_holdings import (
+    SecInstitutionalHoldingsApplication,
+)
+from investment_analyst.application.sec_institutional_semantics import (
+    SecInstitutionalSemanticsApplication,
+)
+from investment_analyst.evidence.sec_institutional_holdings.repository import (
+    InstitutionalHoldingsRepository,
+)
+from investment_analyst.evidence.sec_institutional_observations.models import (
+    InstitutionalObservationRequest,
+)
+from investment_analyst.evidence.sec_institutional_semantics.service import (
+    InstitutionalSemanticsEnrichRequest,
+)
+from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
+from investment_analyst.providers.http import UrlLibHttpTransport
+from investment_analyst.providers.institutional_holdings import (
+    sec_institutional_holdings_pipeline,
+)
+from investment_analyst.providers.institutional_holdings.sec_institutional_holdings_index import (
+    institutional_holdings_filings,
+)
+from investment_analyst.providers.institutional_holdings.sec_manager_submissions import (
+    SecManagerSubmissionsClient,
+)
+from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.workspace.service import WorkspaceService
 
 
 def main() -> int:
@@ -40,6 +71,43 @@ def main() -> int:
     known_at = datetime.now(UTC)
     application = CazatiburonesInstitutionalMetricsApplication.create_default()
     location = StorageLocationRequest(workspace=args.workspace)
+    storage_paths = StoragePaths.from_root(WorkspaceService().resolve(args.workspace).storage_root)
+    with LocalStorage(storage_paths, read_only=True) as storage:
+        reports = InstitutionalHoldingsRepository(storage.raw_records).list_reports(
+            manager_cik="1067983", known_at=known_at
+        )
+    periods = {report.report_period for report in reports}
+    submissions = SecManagerSubmissionsClient(
+        UrlLibHttpTransport(), SecEdgarIdentity(os.environ["SEC_USER_AGENT"])
+    ).fetch("1067983")
+    extra = next(
+        filing
+        for filing in institutional_holdings_filings(submissions, "1067983")
+        if filing.report_date not in periods
+    )
+    imported = SecInstitutionalHoldingsApplication.create_default().import_institutional_holdings(
+        request=sec_institutional_holdings_pipeline.SecInstitutionalHoldingsImportRequest(
+            filer_cik="1067983", accessions=(extra.accession,)
+        ),
+        location=location,
+        sec_identity=SecEdgarIdentity(os.environ["SEC_USER_AGENT"]),
+    )
+    report_id = imported[0].report_id
+    SecInstitutionalSemanticsApplication.create_default().enrich(
+        request=InstitutionalSemanticsEnrichRequest(
+            manager_cik="1067983", report_ids=(report_id,), known_at=known_at
+        ),
+        location=location,
+    )
+    CazatiburonesInstitutionalObservationsApplication.create_default().normalize(
+        InstitutionalObservationRequest(
+            asset_id="equity:us:aapl",
+            manager_cik="1067983",
+            report_ids=(report_id,),
+            known_at=known_at,
+        ),
+        location=location,
+    )
     first = application.compute(
         asset_id="equity:us:aapl", manager_cik="1067983", known_at=known_at, location=location
     )
