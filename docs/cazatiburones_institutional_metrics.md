@@ -11,5 +11,7 @@ ausencia como cero y no construye una cartera efectiva. Las observaciones moneta
 mantienen calidad `partial`; el importe principal queda excluido por unidad no comparable.
 
 El peso declarado dentro de un cierre efectivo se documenta y persiste separadamente en
-[`cazatiburones_institutional_weight.md`](cazatiburones_institutional_weight.md). No hay
+[`cazatiburones_institutional_weight.md`](cazatiburones_institutional_weight.md). Los eventos
+descriptivos derivados se documentan en
+[`cazatiburones_institutional_events.md`](cazatiburones_institutional_events.md). No hay
 concentración, score, señal, recomendación ni modificación de evidencia u observaciones.
