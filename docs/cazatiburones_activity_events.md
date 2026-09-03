@@ -12,3 +12,7 @@ La materialización crea un snapshot JSON append-only bajo el directorio process
 identidad depende del activo, corte, política, MetricResult y eventos, no del reloj de ejecución.
 Los candidatos aplican un cooldown descriptivo de 86400 segundos por activo, regla y participante.
 La consulta exige el `snapshot_id`; no selecciona por reloj, mtime ni UUID arbitrario.
+
+La entrega local deduplicada de los candidatos persistidos se define en
+[`cazatiburones_notifications.md`](cazatiburones_notifications.md). Es una outbox independiente y
+read-only respecto de estos snapshots.

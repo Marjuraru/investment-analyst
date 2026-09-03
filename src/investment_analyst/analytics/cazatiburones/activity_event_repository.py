@@ -50,6 +50,13 @@ class ActivityEventRepository:
         path = self._path(asset_id, known_at, snapshot_id)
         return self._load(path) if path.is_file() else None
 
+    def list_snapshots(self) -> tuple[ActivityEventSnapshot, ...]:
+        """Enumerate every persisted snapshot without creating or modifying storage."""
+        if not self._root.is_dir():
+            return ()
+        snapshots = tuple(self._load(path) for path in sorted(self._root.rglob("*.json")))
+        return tuple(sorted(snapshots, key=lambda item: (item.known_at, str(item.snapshot_id))))
+
     def verify(self) -> int:
         """Validate every stored snapshot without creating directories or touching evidence."""
         if not self._root.exists():
