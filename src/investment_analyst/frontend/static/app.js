@@ -5288,8 +5288,25 @@ byId("chart-data-disclosure").addEventListener("toggle", (event) => {
 byId("market-chart").addEventListener("wheel", handleMarketChartWheel, { passive: false });
 byId("theme-toggle").addEventListener("click", () => {
   const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  const previousDefaults = DEFAULT_SMA_COLORS;
   applyTheme(next);
   persistTheme(next);
+  captureDefaultSmaColors();
+  // Only follow the new theme's SMA colors if the user never customized
+  // them away from the previous theme's defaults; an explicit user choice
+  // is never overwritten by a theme switch.
+  const usingPreviousThemeDefaults =
+    chartSettings.shortColor === previousDefaults.shortColor &&
+    chartSettings.longColor === previousDefaults.longColor &&
+    chartSettings.thirdColor === previousDefaults.thirdColor;
+  if (usingPreviousThemeDefaults) {
+    chartSettings = { ...chartSettings, ...DEFAULT_SMA_COLORS };
+    applyChartSettings();
+    persistChartSettings();
+    if (marketChartPayload !== null) {
+      renderMarketChart(marketChartPayload, { preserveViewport: true });
+    }
+  }
 });
 
 
@@ -5504,13 +5521,16 @@ function renderMarketComparison(payload) {
     card.className = "comparison-card";
     const identity = marketAssets[series.asset_id];
     const notApplicableMark = renderAbsenceMark("not-applicable", "No aplica", "Activo de referencia").outerHTML;
+    // Every comparison figure below -- including the absence-mark branches,
+    // which style themselves -- ends up tabular/monospace/right-aligned:
+    // numeric branches are wrapped in the shared .figure utility class.
     const correlation = series.metrics.correlation_status === "not_applicable"
       ? notApplicableMark
-      : comparisonPercent(series.metrics.correlation_to_benchmark);
+      : `<span class="figure">${comparisonPercent(series.metrics.correlation_to_benchmark)}</span>`;
     const beta = series.metrics.beta_status === "not_applicable"
       ? notApplicableMark
-      : series.metrics.beta_to_benchmark ?? "No disponible";
-    card.innerHTML = `<p class="eyebrow">${identity?.symbol || series.asset_id}</p><h3>${identity?.name || series.asset_id}</h3><dl><dt>Retorno total</dt><dd>${comparisonPercent(series.metrics.total_return)}</dd><dt>Drawdown máximo</dt><dd>${comparisonPercent(series.metrics.maximum_drawdown)}</dd><dt>Volatilidad diaria</dt><dd>${comparisonPercent(series.metrics.daily_volatility)}</dd><dt>Correlación</dt><dd>${correlation}</dd><dt>Beta</dt><dd>${beta}</dd></dl>`;
+      : `<span class="figure">${series.metrics.beta_to_benchmark ?? "No disponible"}</span>`;
+    card.innerHTML = `<p class="eyebrow">${identity?.symbol || series.asset_id}</p><h3>${identity?.name || series.asset_id}</h3><dl><dt>Retorno total</dt><dd><span class="figure">${comparisonPercent(series.metrics.total_return)}</span></dd><dt>Drawdown máximo</dt><dd><span class="figure">${comparisonPercent(series.metrics.maximum_drawdown)}</span></dd><dt>Volatilidad diaria</dt><dd><span class="figure">${comparisonPercent(series.metrics.daily_volatility)}</span></dd><dt>Correlación</dt><dd>${correlation}</dd><dt>Beta</dt><dd>${beta}</dd></dl>`;
     cards.append(card);
   }
   byId("comparison-json").textContent = JSON.stringify(payload, null, 2);

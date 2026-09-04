@@ -364,6 +364,7 @@ h4 {
   line-height: 1;
   font-family: var(--figure-font);
   font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 /*
@@ -2334,9 +2335,11 @@ section {
   overflow: hidden;
   color: var(--ink-strong);
   font-family: var(--figure-font);
+  font-variant-numeric: tabular-nums;
   font-size: 0.78rem;
   font-weight: 760;
   letter-spacing: -0.015em;
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2806,6 +2809,7 @@ input::placeholder {
 .metric-value {
   color: var(--ink-strong);
   font-family: var(--figure-font);
+  font-variant-numeric: tabular-nums;
   font-size: 0.85rem;
   font-weight: 750;
   text-align: right;

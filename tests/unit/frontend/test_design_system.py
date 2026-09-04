@@ -6,6 +6,13 @@ tokens.css, declared text/surface pairs meet WCAG contrast, the five
 absence marks are mutually distinguishable, no external network reference
 is emitted, and figures are tabular/monospace/right-aligned.
 
+Each rule's check is a small `_check_*` function that both the declarative
+test AND its regression probe call: the declarative test calls it against
+the real shipped text and asserts it passes, the probe calls it against a
+corrupted copy and asserts (via `pytest.raises`) that it fails. This keeps
+every probe honest -- it exercises the exact same code path the real test
+relies on, not a hand-rolled restatement of the rule.
+
 They are static contract tests over the shipped stylesheets and scripts,
 not a browser and not visual regression: they cannot see layout, computed
 paint, or runtime DOM state. A rule that is not expressible as a static
@@ -55,8 +62,8 @@ def _theme_blocks(css_text: str) -> dict[str, dict[str, str]]:
     return blocks
 
 
-def test_every_token_defined_in_light_and_dark() -> None:
-    blocks = _theme_blocks(TOKENS_CSS)
+def _check_token_parity(tokens_css: str) -> None:
+    blocks = _theme_blocks(tokens_css)
     assert set(blocks) == {"light", "dark"}
     light_names, dark_names = set(blocks["light"]), set(blocks["dark"])
     assert light_names, "tokens.css must declare at least one token"
@@ -64,6 +71,10 @@ def test_every_token_defined_in_light_and_dark() -> None:
         f"tokens declared only in one theme: "
         f"light-only={light_names - dark_names} dark-only={dark_names - light_names}"
     )
+
+
+def test_every_token_defined_in_light_and_dark() -> None:
+    _check_token_parity(TOKENS_CSS)
 
 
 # ---------------------------------------------------------------------------
@@ -101,14 +112,17 @@ def _strip_exceptions(html: str) -> str:
     return html
 
 
+def _check_no_color_literal(text: str, *, label: str) -> None:
+    found = _COLOR_LITERAL_RE.findall(text)
+    assert not found, f"color literal(s) in {label}: {found}"
+
+
 def test_no_color_literal_in_stylesheet() -> None:
-    found = _COLOR_LITERAL_RE.findall(STYLES_CSS)
-    assert not found, f"color literal(s) outside tokens.css: {found}"
+    _check_no_color_literal(STYLES_CSS, label="styles.css")
 
 
 def test_no_color_literal_in_app_js() -> None:
-    found = _COLOR_LITERAL_RE.findall(APP_JS)
-    assert not found, f"color literal(s) in app.js: {found}"
+    _check_no_color_literal(APP_JS, label="app.js")
     # app.js must derive its runtime meta/theme-color assignment from a
     # token, never restate a literal.
     assert _THEME_COLOR_JS_RE.search(APP_JS), "theme-color must be read from --canvas"
@@ -215,16 +229,20 @@ _RAIL_TEXT_TOKENS = (
 )
 
 
-@pytest.mark.parametrize("theme", ["light", "dark"])
-def test_text_on_surface_meets_contrast_threshold(theme: str) -> None:
-    tokens = _theme_blocks(TOKENS_CSS)[theme]
+def _check_contrast_pairs(tokens: dict[str, str], pairs: tuple[tuple[str, str], ...]) -> None:
     failures = []
-    for text_name, surface_name in _THEMED_TEXT_SURFACE_PAIRS:
+    for text_name, surface_name in pairs:
         text_value, surface_value = tokens[text_name], tokens[surface_name]
         ratio = contrast_ratio(text_value, surface_value)
         if ratio < _MIN_CONTRAST:
             failures.append((text_name, surface_name, round(ratio, 2)))
-    assert not failures, f"pairs under {_MIN_CONTRAST}:1 in {theme} theme: {failures}"
+    assert not failures, f"pairs under {_MIN_CONTRAST}:1: {failures}"
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_text_on_surface_meets_contrast_threshold(theme: str) -> None:
+    tokens = _theme_blocks(TOKENS_CSS)[theme]
+    _check_contrast_pairs(tokens, _THEMED_TEXT_SURFACE_PAIRS)
 
 
 def test_on_focus_meets_contrast_against_focus_in_both_themes() -> None:
@@ -273,9 +291,9 @@ _ABSENCE_ICON_RE = re.compile(
 )
 
 
-def _absence_mark_declarations() -> dict[str, dict[str, str]]:
+def _absence_mark_declarations(styles_css: str) -> dict[str, dict[str, str]]:
     declarations: dict[str, dict[str, str]] = {}
-    for match in _ABSENCE_RULE_RE.finditer(STYLES_CSS):
+    for match in _ABSENCE_RULE_RE.finditer(styles_css):
         kind = match.group("kind")
         body = match.group("body")
         props = dict(re.findall(r"([a-z-]+)\s*:\s*([^;]+);", body))
@@ -283,22 +301,22 @@ def _absence_mark_declarations() -> dict[str, dict[str, str]]:
     return declarations
 
 
-def _absence_mark_icons() -> dict[str, str]:
+def _absence_mark_icons(styles_css: str) -> dict[str, str]:
     return {
-        match.group("kind"): match.group("glyph") for match in _ABSENCE_ICON_RE.finditer(STYLES_CSS)
+        match.group("kind"): match.group("glyph") for match in _ABSENCE_ICON_RE.finditer(styles_css)
     }
 
 
 def test_five_absence_marks_are_declared() -> None:
-    declarations = _absence_mark_declarations()
+    declarations = _absence_mark_declarations(STYLES_CSS)
     assert set(declarations) == set(_ABSENCE_KINDS), (
         f"expected exactly {_ABSENCE_KINDS}, found {sorted(declarations)}"
     )
 
 
-def test_five_absence_marks_are_mutually_distinguishable() -> None:
-    declarations = _absence_mark_declarations()
-    icons = _absence_mark_icons()
+def _check_absence_marks_distinguishable(styles_css: str) -> None:
+    declarations = _absence_mark_declarations(styles_css)
+    icons = _absence_mark_icons(styles_css)
     assert set(icons) == set(_ABSENCE_KINDS)
 
     colors = {kind: props.get("color") for kind, props in declarations.items()}
@@ -316,32 +334,44 @@ def test_five_absence_marks_are_mutually_distinguishable() -> None:
     assert len(set(signatures.values())) == len(_ABSENCE_KINDS), signatures
 
 
-def test_state_never_encoded_by_colour_alone() -> None:
+def test_five_absence_marks_are_mutually_distinguishable() -> None:
+    _check_absence_marks_distinguishable(STYLES_CSS)
+
+
+def _check_state_never_colour_alone(styles_css: str, app_js: str) -> None:
     # Every .absence-mark carries a label element in addition to its icon;
     # the CSS grammar never relies on background/color changes alone.
-    assert ".absence-mark-label" in STYLES_CSS
-    assert ".absence-mark-icon" in STYLES_CSS
+    assert ".absence-mark-label" in styles_css
+    assert ".absence-mark-icon" in styles_css
     # Also true of the pre-existing quality-chip / market-session-status
     # marks touched by this block: each pairs a text label with its tone.
-    assert "renderAbsenceMark" in APP_JS
+    assert "renderAbsenceMark" in app_js
 
 
-def test_absence_never_rendered_as_zero_or_empty() -> None:
+def test_state_never_encoded_by_colour_alone() -> None:
+    _check_state_never_colour_alone(STYLES_CSS, APP_JS)
+
+
+def _check_absence_never_zero(app_js: str) -> None:
     # Every kind literal must appear at least once, either as a direct
     # renderAbsenceMark("<kind>", ...) call site, or as the literal string
     # a dispatch function (e.g. valuationAbsenceKind) returns before it is
     # threaded into renderAbsenceMark(<dynamicKind>, ...).
     for kind in _ABSENCE_KINDS:
         direct_call = (
-            f'renderAbsenceMark("{kind}"' in APP_JS or f"renderAbsenceMark('{kind}'" in APP_JS
+            f'renderAbsenceMark("{kind}"' in app_js or f"renderAbsenceMark('{kind}'" in app_js
         )
-        literal_kind = f'"{kind}"' in APP_JS or f"'{kind}'" in APP_JS
+        literal_kind = f'"{kind}"' in app_js or f"'{kind}'" in app_js
         assert direct_call or literal_kind, f"no live reference to the '{kind}' absence mark kind"
-    assert "renderAbsenceMark(" in APP_JS
+    assert "renderAbsenceMark(" in app_js
     # The two known_at call sites that used to fall back to a bare em dash
     # now route through renderKnownAtCut instead.
-    assert 'byId("known-at-status").textContent = "—"' not in APP_JS
-    assert "renderKnownAtCut(" in APP_JS
+    assert 'byId("known-at-status").textContent = "—"' not in app_js
+    assert "renderKnownAtCut(" in app_js
+
+
+def test_absence_never_rendered_as_zero_or_empty() -> None:
+    _check_absence_never_zero(APP_JS)
 
 
 def test_blocked_source_declares_its_reason() -> None:
@@ -368,10 +398,14 @@ _EXTERNAL_REF_RE = re.compile(
 )
 
 
+def _check_no_external_reference(text: str, *, label: str) -> None:
+    found = _EXTERNAL_REF_RE.findall(text)
+    assert not found, f"external network reference in {label}: {found}"
+
+
 def test_no_external_network_reference_in_static_surface() -> None:
     for name, text in (("styles.css", STYLES_CSS), ("index.html", INDEX_HTML), ("app.js", APP_JS)):
-        found = _EXTERNAL_REF_RE.findall(text)
-        assert not found, f"external network reference in {name}: {found}"
+        _check_no_external_reference(text, label=name)
     assert "fonts.googleapis" not in INDEX_HTML
     assert "fonts.googleapis" not in STYLES_CSS
     assert "cdn." not in INDEX_HTML.lower()
@@ -382,18 +416,72 @@ def test_no_external_network_reference_in_static_surface() -> None:
 # Figures: tabular, monospace, right-aligned
 # ---------------------------------------------------------------------------
 
+# Every CSS class that renders a numeric figure directly (not merely a
+# fallback dash or a label) must resolve through this exact trio: the
+# monospaced figure family, tabular digit widths, and right alignment.
+_FIGURE_CSS_CLASSES = ("figure", "metric-value", "asset-price", "fundamental-research-metric-value")
+
+
+def _check_figure_class_is_tabular_monospace_right_aligned(css_text: str, class_name: str) -> None:
+    rule_match = re.search(rf"\.{re.escape(class_name)}\s*\{{([^}}]*)\}}", css_text, re.DOTALL)
+    assert rule_match, f".{class_name} rule must be declared"
+    rule_body = rule_match.group(1)
+    assert "var(--figure-font)" in rule_body, f".{class_name} must use var(--figure-font)"
+    assert "tabular-nums" in rule_body, f".{class_name} must set font-variant-numeric: tabular-nums"
+    assert "text-align: right" in rule_body, f".{class_name} must be text-align: right"
+
 
 def test_figures_use_tabular_monospace_right_aligned() -> None:
     assert "font-variant-numeric: tabular-nums" in STYLES_CSS
-    figure_rule_match = re.search(r"\.figure\s*\{([^}]*)\}", STYLES_CSS, re.DOTALL)
-    assert figure_rule_match, ".figure utility class must be declared"
-    figure_rule = figure_rule_match.group(1)
-    assert "var(--figure-font)" in figure_rule
-    assert "tabular-nums" in figure_rule
-    assert "text-align: right" in figure_rule
+    for class_name in _FIGURE_CSS_CLASSES:
+        _check_figure_class_is_tabular_monospace_right_aligned(STYLES_CSS, class_name)
 
-    metric_value_match = re.search(r"\.metric-value\s*\{([^}]*)\}", STYLES_CSS, re.DOTALL)
-    assert metric_value_match and "var(--figure-font)" in metric_value_match.group(1)
+
+_COMPARISON_CARD_FN_RE = re.compile(
+    r"function renderMarketComparison\(payload\) \{(.*?)\n\}", re.DOTALL
+)
+# retorno total, drawdown máximo, volatilidad diaria, correlación, beta.
+_COMPARISON_CARD_FIGURE_COUNT = 5
+
+
+def _check_comparison_card_figures_wrapped(app_js: str) -> None:
+    render_match = _COMPARISON_CARD_FN_RE.search(app_js)
+    assert render_match, "renderMarketComparison must exist"
+    count = render_match.group(1).count('class="figure"')
+    assert count >= _COMPARISON_CARD_FIGURE_COUNT, (
+        "each comparison metric (retorno, drawdown, volatilidad, correlación, "
+        f"beta) must wrap its numeric value in the .figure utility class; found {count}"
+    )
+
+
+def test_comparison_card_figures_use_the_figure_class() -> None:
+    _check_comparison_card_figures_wrapped(APP_JS)
+
+
+# ---------------------------------------------------------------------------
+# SMA default colors follow the active theme, including a runtime toggle
+# ---------------------------------------------------------------------------
+
+_THEME_TOGGLE_HANDLER_RE = re.compile(
+    r'byId\("theme-toggle"\)\.addEventListener\("click", \(\) => \{(.*?)\n\}\);', re.DOTALL
+)
+
+
+def _check_theme_toggle_refreshes_sma_defaults(app_js: str) -> None:
+    handler_match = _THEME_TOGGLE_HANDLER_RE.search(app_js)
+    assert handler_match, "theme-toggle click handler must exist"
+    body = handler_match.group(1)
+    assert "captureDefaultSmaColors()" in body, (
+        "the theme toggle must refresh DEFAULT_SMA_COLORS for the newly applied "
+        "theme, or SMA line colors keep the previous theme's values"
+    )
+    assert body.index("applyTheme(next)") < body.index("captureDefaultSmaColors()"), (
+        "SMA defaults must be captured after applyTheme(), not before"
+    )
+
+
+def test_theme_toggle_refreshes_sma_defaults() -> None:
+    _check_theme_toggle_refreshes_sma_defaults(APP_JS)
 
 
 def test_no_web_font_named_in_body_stack() -> None:
@@ -422,11 +510,11 @@ def test_known_at_cut_present_in_every_view() -> None:
     assert INDEX_HTML.count('id="known-at-cut-value"') == 1
 
 
-def test_known_at_cut_initial_placeholder_uses_absence_mark_not_em_dash() -> None:
+def _check_known_at_initial_placeholder(index_html: str) -> None:
     # Before any script runs -- and on any error path that never reaches
     # renderKnownAtCut() -- the static markup must already follow the
     # declared absence grammar (point 5), never a bare em dash.
-    topbar_match = re.search(r'<header class="topbar">(.*?)</header>', INDEX_HTML, re.DOTALL)
+    topbar_match = re.search(r'<header class="topbar">(.*?)</header>', index_html, re.DOTALL)
     assert topbar_match
     cut_match = re.search(
         r'<strong id="known-at-cut-value">(.*?)</strong>', topbar_match.group(1), re.DOTALL
@@ -441,11 +529,15 @@ def test_known_at_cut_initial_placeholder_uses_absence_mark_not_em_dash() -> Non
     assert "absence-mark-icon" in initial_markup
     assert "absence-mark-label" in initial_markup
 
-    trace_match = re.search(r'<small id="known-at-status">(.*?)</small>', INDEX_HTML, re.DOTALL)
+    trace_match = re.search(r'<small id="known-at-status">(.*?)</small>', index_html, re.DOTALL)
     assert trace_match, "known-at-status control must exist in the traceability detail"
     trace_markup = trace_match.group(1)
     assert "—" not in trace_markup
     assert 'class="absence-mark missing"' in trace_markup
+
+
+def test_known_at_cut_initial_placeholder_uses_absence_mark_not_em_dash() -> None:
+    _check_known_at_initial_placeholder(INDEX_HTML)
 
 
 # ---------------------------------------------------------------------------
@@ -533,11 +625,15 @@ _FORBIDDEN_AGGREGATE_TERMS = (
 )
 
 
+def _check_no_aggregate_terms(text: str, *, label: str) -> None:
+    lowered = text.lower()
+    found = [term for term in _FORBIDDEN_AGGREGATE_TERMS if term in lowered]
+    assert not found, f"forbidden aggregate/verdict term(s) in {label}: {found}"
+
+
 def test_no_aggregate_score_verdict_or_ranking_rendered() -> None:
     for text, name in ((APP_JS, "app.js"), (INDEX_HTML, "index.html"), (STYLES_CSS, "styles.css")):
-        lowered = text.lower()
-        found = [term for term in _FORBIDDEN_AGGREGATE_TERMS if term in lowered]
-        assert not found, f"forbidden aggregate/verdict term(s) in {name}: {found}"
+        _check_no_aggregate_terms(text, label=name)
 
 
 def test_domains_never_share_a_row_or_total() -> None:
@@ -583,71 +679,95 @@ def test_design_system_documentation_declares_its_limits() -> None:
 
 # ---------------------------------------------------------------------------
 # Regression probes: each rule above must fail on a deliberately corrupted
-# fixture, proving the checker is not vacuously true.
+# fixture, proving the checker is not vacuously true. Every probe below
+# calls the SAME `_check_*` function its declarative test calls -- against
+# the real text first (must pass) and then against a corrupted copy (must
+# raise) -- so a probe can never pass while the checker itself is broken or
+# vacuous.
 # ---------------------------------------------------------------------------
 
 
 def test_probe_token_parity_rule_catches_a_removed_dark_token() -> None:
+    _check_token_parity(TOKENS_CSS)  # baseline: real tokens.css is clean
     corrupted = TOKENS_CSS.replace("--blocked-ink: #c9a3ec;\n  --blocked-soft: #2c2140;\n\n", "", 1)
-    blocks = _theme_blocks(corrupted)
-    assert set(blocks["light"]) != set(blocks["dark"]), (
-        "probe fixture did not actually break parity"
-    )
+    assert corrupted != TOKENS_CSS, "probe fixture did not actually change tokens.css"
+    with pytest.raises(AssertionError):
+        _check_token_parity(corrupted)
 
 
 def test_probe_color_literal_rule_catches_an_injected_literal() -> None:
+    _check_no_color_literal(STYLES_CSS, label="styles.css")  # baseline: clean
     corrupted = STYLES_CSS + "\n.probe { color: #ff00ff; }\n"
-    assert _COLOR_LITERAL_RE.findall(corrupted)
-    assert not _COLOR_LITERAL_RE.findall(STYLES_CSS)
+    with pytest.raises(AssertionError):
+        _check_no_color_literal(corrupted, label="styles.css")
 
 
 def test_probe_contrast_rule_catches_a_low_contrast_pair() -> None:
-    assert contrast_ratio("#cccccc", "#ffffff") < _MIN_CONTRAST
-    assert contrast_ratio("#111111", "#ffffff") >= _MIN_CONTRAST
+    light_tokens = dict(_theme_blocks(TOKENS_CSS)["light"])
+    _check_contrast_pairs(light_tokens, _THEMED_TEXT_SURFACE_PAIRS)  # baseline: clean
+
+    # Corrupt a real, currently-passing pair (muted text on its own
+    # surface) to a near-white-on-white value, using the exact tokens dict
+    # the real test builds from TOKENS_CSS -- not an unrelated hardcoded
+    # pair -- so this exercises the real checker against a real regression.
+    assert contrast_ratio(light_tokens["muted"], light_tokens["surface"]) >= _MIN_CONTRAST
+    corrupted_tokens = {**light_tokens, "muted": "#f8f8f8"}
+    assert contrast_ratio(corrupted_tokens["muted"], corrupted_tokens["surface"]) < _MIN_CONTRAST
+    with pytest.raises(AssertionError):
+        _check_contrast_pairs(corrupted_tokens, _THEMED_TEXT_SURFACE_PAIRS)
 
 
 def test_probe_absence_mark_rule_catches_a_duplicated_icon() -> None:
+    _check_absence_marks_distinguishable(STYLES_CSS)  # baseline: clean
+    # "overdue" (▲) collides with "missing" (○) once corrupted.
     corrupted = STYLES_CSS.replace('content: "▲";', 'content: "○";')
-    icons = {
-        match.group("kind"): match.group("glyph") for match in _ABSENCE_ICON_RE.finditer(corrupted)
-    }
-    assert len(set(icons.values())) < len(_ABSENCE_KINDS), "probe fixture did not collide icons"
+    assert corrupted != STYLES_CSS, "probe fixture did not change any icon glyph"
+    with pytest.raises(AssertionError):
+        _check_absence_marks_distinguishable(corrupted)
 
 
 def test_probe_external_network_rule_catches_a_remote_url() -> None:
+    _check_no_external_reference(STYLES_CSS, label="styles.css")  # baseline: clean
     corrupted = STYLES_CSS + "\n/* @import url(https://fonts.example.com/a.css); */\n"
-    assert _EXTERNAL_REF_RE.findall(corrupted)
-    assert not _EXTERNAL_REF_RE.findall(STYLES_CSS)
+    with pytest.raises(AssertionError):
+        _check_no_external_reference(corrupted, label="styles.css")
 
 
 def test_probe_aggregate_term_rule_catches_an_injected_combined_verdict() -> None:
+    _check_no_aggregate_terms(APP_JS, label="app.js")  # baseline: clean
     corrupted = APP_JS + '\nconst x = "combined_verdict";\n'
-    lowered = corrupted.lower()
-    assert any(term in lowered for term in _FORBIDDEN_AGGREGATE_TERMS)
-    assert not any(term in APP_JS.lower() for term in _FORBIDDEN_AGGREGATE_TERMS)
+    with pytest.raises(AssertionError):
+        _check_no_aggregate_terms(corrupted, label="app.js")
 
 
 def test_probe_state_shape_rule_catches_a_removed_label_class() -> None:
     # test_state_never_encoded_by_colour_alone asserts ".absence-mark-label"
     # is declared in styles.css; dropping it would collapse every absence
     # mark to icon+color alone, violating "state never by colour alone".
-    corrupted = STYLES_CSS.replace(".absence-mark-label {", ".absence-mark-label-removed {")
-    assert ".absence-mark-label {" not in corrupted, "probe fixture did not remove the label rule"
-    assert ".absence-mark-label {" in STYLES_CSS
+    _check_state_never_colour_alone(STYLES_CSS, APP_JS)  # baseline: clean
+    # Renaming the selector to append a suffix (".absence-mark-label-x")
+    # would leave ".absence-mark-label" present as a substring and not
+    # actually corrupt the checker's input -- replace it outright instead.
+    corrupted = STYLES_CSS.replace(".absence-mark-label {", ".removed-label {")
+    assert ".absence-mark-label" not in corrupted, "probe fixture did not remove the label rule"
+    with pytest.raises(AssertionError):
+        _check_state_never_colour_alone(corrupted, APP_JS)
 
 
 def test_probe_absence_zero_rule_catches_a_reintroduced_bare_dash_fallback() -> None:
     # test_absence_never_rendered_as_zero_or_empty asserts this exact
     # fallback string is absent from app.js; reintroducing it would silently
     # collapse the known_at traceability absence back to a bare dash.
+    _check_absence_never_zero(APP_JS)  # baseline: clean
     corrupted = APP_JS + '\nbyId("known-at-status").textContent = "—";\n'
-    assert 'byId("known-at-status").textContent = "—"' in corrupted
-    assert 'byId("known-at-status").textContent = "—"' not in APP_JS
+    with pytest.raises(AssertionError):
+        _check_absence_never_zero(corrupted)
 
 
 def test_probe_known_at_initial_placeholder_rule_catches_a_reintroduced_em_dash() -> None:
     # test_known_at_cut_initial_placeholder_uses_absence_mark_not_em_dash
     # asserts the static topbar placeholder is never a bare em dash.
+    _check_known_at_initial_placeholder(INDEX_HTML)  # baseline: clean
     corrupted = re.sub(
         r'(<strong id="known-at-cut-value">).*?(</strong>)',
         r"\1—\2",
@@ -661,7 +781,43 @@ def test_probe_known_at_initial_placeholder_rule_catches_a_reintroduced_em_dash(
     assert corrupted_match and "—" in corrupted_match.group(1), (
         "probe fixture did not reintroduce a bare em dash"
     )
-    original_match = re.search(
-        r'<strong id="known-at-cut-value">(.*?)</strong>', INDEX_HTML, re.DOTALL
+    with pytest.raises(AssertionError):
+        _check_known_at_initial_placeholder(corrupted)
+
+
+def test_probe_figure_class_rule_catches_a_missing_right_align() -> None:
+    _check_figure_class_is_tabular_monospace_right_aligned(STYLES_CSS, "asset-price")  # baseline
+    corrupted = re.sub(
+        r"(\.asset-price\s*\{[^}]*?)text-align: right;\n",
+        r"\1",
+        STYLES_CSS,
+        count=1,
+        flags=re.DOTALL,
     )
-    assert original_match and "—" not in original_match.group(1)
+    assert corrupted != STYLES_CSS, "probe fixture did not remove text-align: right"
+    with pytest.raises(AssertionError):
+        _check_figure_class_is_tabular_monospace_right_aligned(corrupted, "asset-price")
+
+
+def test_probe_comparison_figures_rule_catches_an_unwrapped_value() -> None:
+    _check_comparison_card_figures_wrapped(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        '<dd><span class="figure">${comparisonPercent(series.metrics.total_return)}</span></dd>',
+        "<dd>${comparisonPercent(series.metrics.total_return)}</dd>",
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not unwrap the total-return figure"
+    with pytest.raises(AssertionError):
+        _check_comparison_card_figures_wrapped(corrupted)
+
+
+def test_probe_theme_toggle_refresh_rule_catches_a_removed_capture_call() -> None:
+    _check_theme_toggle_refreshes_sma_defaults(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        "persistTheme(next);\n  captureDefaultSmaColors();\n",
+        "persistTheme(next);\n",
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not remove the capture call"
+    with pytest.raises(AssertionError):
+        _check_theme_toggle_refreshes_sma_defaults(corrupted)
