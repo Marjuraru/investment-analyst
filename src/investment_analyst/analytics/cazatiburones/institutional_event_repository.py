@@ -84,6 +84,13 @@ class InstitutionalEventRepository:
             return None
         return self._load(file_path)
 
+    def list_snapshots(self) -> tuple[InstitutionalEventSnapshot, ...]:
+        """Enumerate every persisted snapshot without creating or modifying storage."""
+        if not self._target_dir.is_dir():
+            return ()
+        snapshots = tuple(self._load(path) for path in sorted(self._target_dir.rglob("*.json")))
+        return tuple(sorted(snapshots, key=lambda item: (item.known_at, str(item.snapshot_id))))
+
     def verify(self) -> int:
         if not self._target_dir.is_dir():
             return 0

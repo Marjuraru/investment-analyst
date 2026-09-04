@@ -31,3 +31,23 @@ def test_repository_is_append_only_and_reuses_identical_snapshot(tmp_path: Path)
         )
         == snapshot
     )
+
+
+def test_enumeration_is_additive_and_read_only(tmp_path: Path) -> None:
+    read_only = ActivityEventRepository(tmp_path, read_only=True)
+    assert read_only.list_snapshots() == ()
+    assert not (tmp_path / "cazatiburones_activity_events_v1").exists()
+
+    snapshot = ActivityEventSnapshot(
+        snapshot_id=uuid4(),
+        asset_id="equity:us:aapl",
+        known_at=datetime(2025, 1, 1, tzinfo=UTC),
+        recorded_at=datetime(2025, 1, 2, tzinfo=UTC),
+        policy_version="test",
+        evaluations=(),
+        events=(),
+        candidates=(),
+    )
+    writable = ActivityEventRepository(tmp_path, read_only=False)
+    assert writable.save(snapshot) is True
+    assert read_only.list_snapshots() == (snapshot,)

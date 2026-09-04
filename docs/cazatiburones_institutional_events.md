@@ -43,3 +43,7 @@ No existen umbrales configurables por el usuario ni heurísticas probabilística
 - NO se infieren intenciones comerciales, señales de compra/venta ni recomendaciones.
 - NO se agregan posiciones entre múltiples gestores institucionales en carteras efectivas conjuntas.
 - NO se modifican registros históricos ya persistidos.
+
+La entrega local deduplicada de los candidatos persistidos se define en
+[`cazatiburones_notifications.md`](cazatiburones_notifications.md). Conserva la procedencia 13F
+sin mezclarla con la familia de actividad declarada.

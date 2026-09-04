@@ -91,3 +91,14 @@ def test_verify_snapshots(tmp_path: Path) -> None:
     repo.save(_sample_snapshot())
     repo.save(_sample_snapshot())
     assert repo.verify() == 2
+
+
+def test_enumeration_is_additive_and_read_only(tmp_path: Path) -> None:
+    read_only = InstitutionalEventRepository(tmp_path, read_only=True)
+    assert read_only.list_snapshots() == ()
+    assert not (tmp_path / "cazatiburones_institutional_events_v1").exists()
+
+    snapshot = _sample_snapshot()
+    writable = InstitutionalEventRepository(tmp_path, read_only=False)
+    assert writable.save(snapshot) is True
+    assert read_only.list_snapshots() == (snapshot,)
