@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -12,6 +13,7 @@ from investment_analyst.core.models import RawRecord, SourceReference
 from investment_analyst.evidence.sec_documents.models import (
     FILER_REVISION_SCHEMA_VERSION,
     SecFilerDocumentRevision,
+    normalize_cik,
 )
 from investment_analyst.storage import RecordNotFoundError, StorageError
 
@@ -120,6 +122,40 @@ class SecFilerDocumentRepository:
         if discovered_cik != revision.filer_cik:
             raise SecFilerDocumentRepositoryError("filer document lineage CIK conflicts")
         self._content_store.verify(revision.content_sha256, size_bytes=revision.content_size_bytes)
+
+    def list_revisions(
+        self,
+        *,
+        available_to: datetime | None = None,
+        filer_cik: str | None = None,
+        form: str | None = None,
+        accession: str | None = None,
+        revision_id: UUID | None = None,
+    ) -> list[SecFilerDocumentRevision]:
+        """Load only RawRecords eligible at a point in time, then filter and order metadata."""
+        records = self._raw_records.list(
+            asset_id=None,
+            source_id=SEC_FILER_DOCUMENT_SOURCE_ID,
+            schema_version=FILER_REVISION_SCHEMA_VERSION,
+            available_to=available_to,
+        )
+        normalized_cik = normalize_cik(filer_cik) if filer_cik is not None else None
+        revisions: list[SecFilerDocumentRevision] = []
+        for record in records:
+            revision = filer_revision_from_raw_record(record)
+            if normalized_cik is not None and revision.filer_cik != normalized_cik:
+                continue
+            if form is not None and revision.document.filing.form != form:
+                continue
+            if accession is not None and revision.document.filing.accession != accession:
+                continue
+            if revision_id is not None and revision.revision_id != revision_id:
+                continue
+            revisions.append(revision)
+        return sorted(
+            revisions,
+            key=lambda item: (item.available_at, str(item.revision_id)),
+        )
 
 
 def verify_filer_document_records(
