@@ -11,15 +11,30 @@ const NYSE_CORE_CLOSE_MINUTES = 16 * 60;
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const THEME_STORAGE_KEY = "investment-analyst-theme-v1";
 const CHART_SETTINGS_STORAGE_KEY = "investment-analyst-chart-settings-v1";
+
+// Every rendered color, including JS-driven SVG strokes, resolves from the
+// tokens declared once in tokens.css: no color literal lives in this file.
+function designToken(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+const COMPARISON_PALETTE = Object.freeze([
+  "--compare-series-1",
+  "--compare-series-2",
+  "--compare-series-3",
+  "--compare-series-4",
+  "--compare-series-5",
+].map(designToken));
+
 const DEFAULT_CHART_SETTINGS = Object.freeze({
   shortWindow: 5,
   longWindow: 20,
   thirdWindow: 50,
   bollingerWindow: 20,
   bollingerMultiplier: "2",
-  shortColor: "#e29951",
-  longColor: "#a695df",
-  thirdColor: "#d778aa",
+  shortColor: designToken("--series-sma-5"),
+  longColor: designToken("--series-sma-20"),
+  thirdColor: designToken("--series-sma-50"),
   priceScale: "linear",
   chartType: "candlestick",
   interval: "auto",
@@ -1128,8 +1143,7 @@ async function queryCryptoDerivatives() {
 function applyTheme(theme) {
   const selected = theme === "light" ? "light" : "dark";
   document.documentElement.dataset.theme = selected;
-  document.querySelector('meta[name="theme-color"]').content =
-    selected === "dark" ? "#0b111c" : "#f3f5f7";
+  document.querySelector('meta[name="theme-color"]').content = designToken("--canvas");
   const button = byId("theme-toggle");
   button.title = selected === "dark" ? "Tema claro" : "Tema oscuro";
   button.setAttribute("aria-pressed", String(selected === "dark"));
@@ -1317,6 +1331,43 @@ function createElement(tag, className, text) {
   if (className) element.className = className;
   if (text !== undefined) element.textContent = text;
   return element;
+}
+
+// One of the five reusable absence-grammar marks: missing, not-evaluable,
+// not-applicable, overdue or blocked. Each combines a shape (border style
+// and icon glyph, see .absence-mark rules in tokens.css/styles.css) with a
+// declared label and, for a blocked source, its declared reason — never a
+// bare dash, an empty cell or a zero.
+// The known_at cut is a permanent, visually distinct global control: it is
+// updated here for both the collapsed traceability detail and the
+// always-visible topbar chip, so every view shares the same declared cut.
+function renderKnownAtCut(effectiveKnownAt) {
+  const formatted = effectiveKnownAt ? formatInstant(effectiveKnownAt) : null;
+  const detail = byId("known-at-status");
+  const header = byId("known-at-cut-value");
+  detail.replaceChildren();
+  header.replaceChildren();
+  if (formatted) {
+    detail.textContent = `Corte: ${formatted}`;
+    header.textContent = formatted;
+  } else {
+    detail.append(renderAbsenceMark("missing", "Sin evidencia", "Sin ejecución completa registrada"));
+    header.append(renderAbsenceMark("missing", "Sin evidencia"));
+  }
+}
+
+function renderAbsenceMark(kind, label, reason) {
+  const mark = createElement("span", `absence-mark ${kind}`);
+  mark.setAttribute("role", "status");
+  mark.append(createElement("span", "absence-mark-icon"));
+  mark.append(createElement("span", "absence-mark-label", label));
+  if (reason) {
+    mark.append(createElement("span", "absence-mark-reason", `· ${reason}`));
+    mark.setAttribute("aria-label", `${label}: ${reason}`);
+  } else {
+    mark.setAttribute("aria-label", label);
+  }
+  return mark;
 }
 
 function setExportAvailable(id, available) {
@@ -3605,21 +3656,39 @@ const VALUATION_REASON_LABELS = Object.freeze({
   ebitda_unavailable: "D&A anual oficial compatible no disponible",
 });
 
+// Reason codes produced when a market or fundamentals provider is not wired
+// for this asset's class. The same condition would fire for any catalog
+// asset without a configured daily-market or fundamentals source.
+const BLOCKED_VALUATION_REASON_CODES = Object.freeze(
+  new Set(["market_not_configured", "fundamentals_not_configured"]),
+);
+
+function valuationAbsenceKind(metric) {
+  if (metric.status === "not_applicable") return "not-applicable";
+  if (BLOCKED_VALUATION_REASON_CODES.has(metric.reason_code)) return "blocked";
+  return "not-evaluable";
+}
+
 function valuationDisplayValue(metric, definition) {
   if (metric.status !== "evaluated") {
-    return VALUATION_REASON_LABELS[metric.reason_code] || metric.reason_code || "No evaluable";
+    const reason = VALUATION_REASON_LABELS[metric.reason_code] || metric.reason_code || "Sin evidencia suficiente";
+    return renderAbsenceMark(valuationAbsenceKind(metric), VALUATION_STATUS_LABELS[metric.status] || metric.status, reason);
   }
   if (definition.unit === "USD") {
-    return formatNumber(metric.value, {
-      style: "currency",
-      currency: "USD",
-      currencyDisplay: "narrowSymbol",
-      notation: "compact",
-      maximumFractionDigits: 2,
-    });
+    return createElement(
+      "span",
+      "figure",
+      formatNumber(metric.value, {
+        style: "currency",
+        currency: "USD",
+        currencyDisplay: "narrowSymbol",
+        notation: "compact",
+        maximumFractionDigits: 2,
+      }),
+    );
   }
-  if (definition.unit === "percentage") return formatUnsignedPercentage(metric.value);
-  return formatMultiple(metric.value);
+  if (definition.unit === "percentage") return createElement("span", "figure", formatUnsignedPercentage(metric.value));
+  return createElement("span", "figure", formatMultiple(metric.value));
 }
 
 function resetValuation() {
@@ -3816,11 +3885,8 @@ function renderValuation(payload) {
         VALUATION_STATUS_LABELS[metric.status] || metric.status,
       ),
     );
-    const value = createElement(
-      "p",
-      `valuation-metric-value ${metric.status}`,
-      valuationDisplayValue(metric, definition),
-    );
+    const value = createElement("p", `valuation-metric-value ${metric.status}`);
+    value.append(valuationDisplayValue(metric, definition));
     if (metric.value !== null && metric.value !== undefined) {
       value.title = `Valor exacto: ${metric.value} ${definition.unit}`;
     }
@@ -3961,7 +4027,7 @@ function applyOverview(payload) {
       : "Sin registro operativo";
     byId("run-time").textContent = "Sin lectura de historial";
     byId("traceability-status").textContent = "Sin verificación reciente";
-    byId("known-at-status").textContent = "—";
+    renderKnownAtCut(null);
     if (!payload.scheduler_enabled) {
       byId("schedule-status").textContent = "Desactivada";
       byId("schedule-next").textContent = "Solo actualización manual";
@@ -4012,9 +4078,7 @@ function applyOverview(payload) {
   byId("traceability-status").textContent = latest?.traceability_verified
     ? "Verificada"
     : "Sin verificación reciente";
-  byId("known-at-status").textContent = latest?.effective_known_at
-    ? `Corte: ${formatInstant(latest.effective_known_at)}`
-    : "—";
+  renderKnownAtCut(latest?.effective_known_at);
 
   if (scheduler.enabled) {
     if (Array.isArray(scheduler.jobs)) {
@@ -4041,9 +4105,15 @@ function applyOverview(payload) {
       );
     } else {
       const config = scheduler.config;
-      byId("schedule-status").textContent = scheduler.due
-        ? "Pendiente"
-        : `Automática · ${config.run_at}`;
+      const scheduleStatus = byId("schedule-status");
+      scheduleStatus.replaceChildren();
+      if (scheduler.due) {
+        scheduleStatus.append(
+          renderAbsenceMark("overdue", "Vencida", `Próxima ejecución programada: ${formatInstant(scheduler.next_run_at, config.timezone)}`),
+        );
+      } else {
+        scheduleStatus.textContent = `Automática · ${config.run_at}`;
+      }
       byId("schedule-next").textContent = formatInstant(scheduler.next_run_at, config.timezone);
     }
   } else {
@@ -4666,6 +4736,8 @@ async function loadCandidateNotifications() {
   }
 }
 
+const NEW_YORK_WEEKDAY_ORDER = Object.freeze(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]);
+
 function newYorkRegularSessionState(now) {
   const parts = Object.fromEntries(
     NEW_YORK_SESSION_PARTS_FORMATTER.formatToParts(now)
@@ -4685,6 +4757,42 @@ function newYorkRegularSessionState(now) {
   return NYSE_SESSION_STATES.after;
 }
 
+// Minutes until the next regular-session boundary (open or close), consuming
+// only NYSE_CORE_OPEN_MINUTES/NYSE_CORE_CLOSE_MINUTES as already declared.
+// Regular session only: no holiday or early-close calendar is modeled.
+function newYorkRegularSessionRemainingMinutes(now) {
+  const parts = Object.fromEntries(
+    NEW_YORK_SESSION_PARTS_FORMATTER.formatToParts(now)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+  const minutesSinceMidnight = Number(parts.hour) * 60 + Number(parts.minute);
+  const weekdayIndex = NEW_YORK_WEEKDAY_ORDER.indexOf(parts.weekday);
+  if (parts.weekday === "Sat" || parts.weekday === "Sun") {
+    const daysToMonday = parts.weekday === "Sat" ? 2 : 1;
+    return { toward: "open", minutes: daysToMonday * 24 * 60 - minutesSinceMidnight + NYSE_CORE_OPEN_MINUTES };
+  }
+  if (minutesSinceMidnight < NYSE_CORE_OPEN_MINUTES) {
+    return { toward: "open", minutes: NYSE_CORE_OPEN_MINUTES - minutesSinceMidnight };
+  }
+  if (minutesSinceMidnight < NYSE_CORE_CLOSE_MINUTES) {
+    return { toward: "close", minutes: NYSE_CORE_CLOSE_MINUTES - minutesSinceMidnight };
+  }
+  const daysToNextOpen = weekdayIndex === 5 /* Fri */ ? 3 : 1;
+  return { toward: "open", minutes: daysToNextOpen * 24 * 60 - minutesSinceMidnight + NYSE_CORE_OPEN_MINUTES };
+}
+
+function formatSessionCountdown(totalMinutes) {
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
+  const segments = [];
+  if (days > 0) segments.push(`${days} d`);
+  if (days > 0 || hours > 0) segments.push(`${hours} h`);
+  segments.push(`${minutes} min`);
+  return segments.join(" ");
+}
+
 function renderMarketClocks(now = new Date()) {
   const instant = now.toISOString();
   for (const definition of MARKET_CLOCK_DEFINITIONS) {
@@ -4696,8 +4804,13 @@ function renderMarketClocks(now = new Date()) {
   }
   const session = newYorkRegularSessionState(now);
   const status = byId("nyse-session-status");
-  status.textContent = session.label;
+  const dot = byId("nyse-session-dot");
+  status.replaceChildren(dot, document.createTextNode(session.label));
   status.className = `market-session-status ${session.tone}`;
+  const remaining = newYorkRegularSessionRemainingMinutes(now);
+  const countdown = formatSessionCountdown(remaining.minutes);
+  byId("nyse-session-remaining").textContent =
+    remaining.toward === "open" ? `Abre en ${countdown}` : `Cierra en ${countdown}`;
 }
 
 let marketClockTimer = null;
@@ -5263,7 +5376,7 @@ function renderMarketComparison(payload) {
   const results = byId("comparison-results");
   const cards = byId("comparison-cards");
   const chart = byId("comparison-chart");
-  const palette = ["#477db3", "#c58b3d", "#8f6eb5", "#4f9a7e", "#bd6284"];
+  const palette = COMPARISON_PALETTE;
   chart.replaceChildren();
   const svg = document.createElementNS(SVG_NAMESPACE, "svg");
   svg.setAttribute("viewBox", "0 0 800 230");
@@ -5296,11 +5409,12 @@ function renderMarketComparison(payload) {
     const card = document.createElement("article");
     card.className = "comparison-card";
     const identity = marketAssets[series.asset_id];
+    const notApplicableMark = renderAbsenceMark("not-applicable", "No aplica", "Activo de referencia").outerHTML;
     const correlation = series.metrics.correlation_status === "not_applicable"
-      ? "No aplica (referencia)"
+      ? notApplicableMark
       : comparisonPercent(series.metrics.correlation_to_benchmark);
     const beta = series.metrics.beta_status === "not_applicable"
-      ? "No aplica (referencia)"
+      ? notApplicableMark
       : series.metrics.beta_to_benchmark ?? "No disponible";
     card.innerHTML = `<p class="eyebrow">${identity?.symbol || series.asset_id}</p><h3>${identity?.name || series.asset_id}</h3><dl><dt>Retorno total</dt><dd>${comparisonPercent(series.metrics.total_return)}</dd><dt>Drawdown máximo</dt><dd>${comparisonPercent(series.metrics.maximum_drawdown)}</dd><dt>Volatilidad diaria</dt><dd>${comparisonPercent(series.metrics.daily_volatility)}</dd><dt>Correlación</dt><dd>${correlation}</dd><dt>Beta</dt><dd>${beta}</dd></dl>`;
     cards.append(card);

@@ -1,0 +1,206 @@
+/*
+ * local-interface-design-system-v1
+ *
+ * Single source of color, ink-ramp and semantic-state tokens for the local
+ * interface. No other static file may declare a color literal (hex, rgb(),
+ * hsl()): every color used elsewhere resolves from a custom property
+ * declared in this file, once for the light theme (:root) and once for the
+ * dark theme (:root[data-theme="dark"]).
+ *
+ * Ink ramp (four levels, strongest to quietest): --ink-strong, --ink,
+ * --muted-strong, --muted. Every level meets 4.5:1 against --surface,
+ * --surface-subtle and --canvas in both themes.
+ *
+ * Absence grammar: five reusable states (missing, not-evaluable,
+ * not-applicable, overdue, blocked) never collapse into each other or into
+ * zero. Their tokens are grouped below; the shape/label that makes each one
+ * distinguishable without color lives in styles.css (.absence-mark rules).
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Typography: system stacks only, no web font, no binary asset, no
+     network request. Same in both themes. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --figure-font: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Ink ramp */
+  --ink: #182230;
+  --ink-strong: #0b1220;
+  --muted: #5f6b7a;
+  --muted-strong: #455466;
+
+  /* Surfaces */
+  --canvas: #f3f5f7;
+  --surface: #ffffff;
+  --surface-subtle: #f8fafb;
+  --surface-dark: #101827;
+  --surface-dark-raised: #172235;
+
+  /* Rules */
+  --line: #dce2e8;
+  --line-strong: #c8d0d9;
+  --line-soft: #e8ecef;
+
+  /* Accent */
+  --accent: #176b87;
+  --accent-dark: #0e526a;
+  --accent-soft: #e4f2f6;
+  --on-accent: #ffffff;
+
+  /* Focus */
+  --focus: #2d7ff9;
+  --on-focus: #0b1220;
+
+  /* Semantic: positive / warning / negative */
+  --positive: #167657;
+  --positive-soft: #e5f4ee;
+  --positive-ink: #0d684b;
+  --warning: #9a5c0a;
+  --warning-soft: #fff3dc;
+  --warning-ink: #885006;
+  --negative: #b33b45;
+  --negative-soft: #fcebed;
+  --negative-ink: #9e2934;
+  --neutral-soft: #edf1f4;
+  --neutral-ink: #566575;
+
+  /* Absence grammar: blocked (missing/not-evaluable/not-applicable/overdue
+     reuse the neutral, muted, line and warning tokens above with distinct
+     shapes; blocked is the one state without an existing equivalent) */
+  --blocked-ink: #6b3fa0;
+  --blocked-soft: #f1e9fb;
+
+  /* Controls */
+  --control-hover: #e9eef2;
+  --topbar: rgb(255 255 255 / 92%);
+  --shadow: 0 8px 30px rgb(16 24 39 / 6%);
+  --shadow-accent: 0 4px 12px rgb(23 107 135 / 18%);
+
+  /* Charts */
+  --chart-grid: #e5e9ed;
+  --chart-axis: #748191;
+  --chart-volume: #d8e1e7;
+  --chart-selection: #526172;
+  --series-close: #176b87;
+  --series-sma-5: #ca6d21;
+  --series-sma-20: #7567aa;
+  --series-sma-50: #b84d81;
+  --series-revenue: #2388a8;
+  --series-net-income: #d58035;
+  --compare-series-1: #477db3;
+  --compare-series-2: #c58b3d;
+  --compare-series-3: #8f6eb5;
+  --compare-series-4: #4f9a7e;
+  --compare-series-5: #bd6284;
+
+  /* Navigation rail: a permanently dark surface independent of the app
+     theme, so its ink and overlay tokens hold the same value in both
+     theme blocks below. */
+  --rail-ink-strong: #ffffff;
+  --rail-ink-base: #d5dce6;
+  --rail-ink: #aeb9c7;
+  --rail-ink-muted: #9ba9ba;
+  --rail-ink-quiet: #8190a3;
+  --rail-ink-faint: #7a92a8;
+  --rail-accent-start: #2380a0;
+  --rail-accent-end: #15566f;
+  --rail-active-bar: #4fa2bc;
+  --rail-overlay-weak: rgb(255 255 255 / 6%);
+  --rail-overlay: rgb(255 255 255 / 10%);
+  --rail-overlay-strong: rgb(255 255 255 / 18%);
+  --rail-border-overlay: rgb(255 255 255 / 22%);
+
+  /* Code/report surfaces: always rendered on --surface-dark regardless of
+     theme, so these are also theme-invariant. */
+  --code-ink: #dce6f1;
+  --code-border: #26364c;
+
+  --sidebar-width: 212px;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --figure-font: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --ink: #cbd5e1;
+  --ink-strong: #f1f5f9;
+  --muted: #91a0b3;
+  --muted-strong: #b1bdcc;
+
+  --canvas: #0b111c;
+  --surface: #111a28;
+  --surface-subtle: #162131;
+  --surface-dark: #080d16;
+  --surface-dark-raised: #172438;
+
+  --line: #273548;
+  --line-strong: #3a4a60;
+  --line-soft: #223044;
+
+  --accent: #58b2ca;
+  --accent-dark: #7cc7da;
+  --accent-soft: #173747;
+  --on-accent: #080d16;
+
+  --focus: #74aaff;
+  --on-focus: #0b1220;
+
+  --positive: #62c6a1;
+  --positive-soft: #15382f;
+  --positive-ink: #82d8b8;
+  --warning: #e1ae5b;
+  --warning-soft: #402f17;
+  --warning-ink: #efc274;
+  --negative: #e47f88;
+  --negative-soft: #45232a;
+  --negative-ink: #f09aa2;
+  --neutral-soft: #253244;
+  --neutral-ink: #c1ccda;
+
+  --blocked-ink: #c9a3ec;
+  --blocked-soft: #2c2140;
+
+  --control-hover: #223044;
+  --topbar: rgb(17 26 40 / 96%);
+  --shadow: 0 10px 34px rgb(0 0 0 / 24%);
+  --shadow-accent: 0 4px 14px rgb(88 178 202 / 22%);
+
+  --chart-grid: #263549;
+  --chart-axis: #8190a3;
+  --chart-volume: #33465a;
+  --chart-selection: #9eb0c4;
+  --series-close: #4db1cf;
+  --series-sma-5: #e29951;
+  --series-sma-20: #a695df;
+  --series-sma-50: #d778aa;
+  --series-revenue: #4db1cf;
+  --series-net-income: #e29951;
+  --compare-series-1: #477db3;
+  --compare-series-2: #c58b3d;
+  --compare-series-3: #8f6eb5;
+  --compare-series-4: #4f9a7e;
+  --compare-series-5: #bd6284;
+
+  --rail-ink-strong: #ffffff;
+  --rail-ink-base: #d5dce6;
+  --rail-ink: #aeb9c7;
+  --rail-ink-muted: #9ba9ba;
+  --rail-ink-quiet: #8190a3;
+  --rail-ink-faint: #7a92a8;
+  --rail-accent-start: #2380a0;
+  --rail-accent-end: #15566f;
+  --rail-active-bar: #4fa2bc;
+  --rail-overlay-weak: rgb(255 255 255 / 6%);
+  --rail-overlay: rgb(255 255 255 / 10%);
+  --rail-overlay-strong: rgb(255 255 255 / 18%);
+  --rail-border-overlay: rgb(255 255 255 / 22%);
+
+  --code-ink: #dce6f1;
+  --code-border: #26364c;
+
+  --sidebar-width: 212px;
+}

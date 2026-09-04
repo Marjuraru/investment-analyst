@@ -1294,6 +1294,8 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
         with urlopen(f"{root}/assets/styles.css", timeout=5) as response:
             stylesheet = response.read().decode("utf-8")
             stylesheet_content_type = response.headers["Content-Type"]
+        with urlopen(f"{root}/assets/tokens.css", timeout=5) as response:
+            tokens_stylesheet = response.read().decode("utf-8")
 
     assert '<html lang="es" data-theme="dark">' in html
     assert "Saltar al contenido principal" in html
@@ -1540,7 +1542,9 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert ".chart-inspector" in stylesheet
     assert ".market-workbench" in stylesheet
     assert ".market-snapshot" in stylesheet
-    assert ':root[data-theme="dark"]' in stylesheet
+    # Color, ink-ramp and semantic-state tokens now live in tokens.css
+    # (local-interface-design-system-v1); styles.css only consumes them.
+    assert ':root[data-theme="dark"]' in tokens_stylesheet
     assert ".fundamental-workbench" in stylesheet
     assert ".fundamental-chart-svg" in stylesheet
     assert ".fundamental-research-grid" in stylesheet

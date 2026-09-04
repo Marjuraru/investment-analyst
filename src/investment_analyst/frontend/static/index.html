@@ -7,6 +7,7 @@
     <meta name="theme-color" content="#0b111c">
     <title>Investment Analyst · Análisis local</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234db1cf'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-family='Arial,sans-serif' font-size='24' font-weight='700' fill='%230b111c'%3EIA%3C/text%3E%3C/svg%3E">
+    <link rel="stylesheet" href="/assets/tokens.css">
     <link rel="stylesheet" href="/assets/styles.css">
     <script src="/assets/app.js" defer></script>
   </head>
@@ -137,14 +138,19 @@
             <div class="market-clock-item market-clock-session">
               <span>NYSE</span>
               <strong id="nyse-session-status" class="market-session-status neutral">
+                <span id="nyse-session-dot" class="session-status-dot" aria-hidden="true"></span>
                 Calculando…
               </strong>
-              <small>09:30–16:00 ET</small>
+              <small id="nyse-session-remaining">09:30–16:00 ET</small>
             </div>
             <span id="market-clock-note" class="visually-hidden">
               El estado usa la sesión regular de lunes a viernes; no evalúa feriados ni cierres
               anticipados. Los relojes se actualizan localmente y no consultan la red.
             </span>
+          </div>
+          <div class="known-at-cut" aria-label="Corte de conocimiento vigente">
+            <span class="known-at-cut-label">Corte</span>
+            <strong id="known-at-cut-value">—</strong>
           </div>
         </header>
 
