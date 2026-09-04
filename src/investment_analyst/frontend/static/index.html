@@ -150,7 +150,12 @@
           </div>
           <div class="known-at-cut" aria-label="Corte de conocimiento vigente">
             <span class="known-at-cut-label">Corte</span>
-            <strong id="known-at-cut-value">—</strong>
+            <strong id="known-at-cut-value">
+              <span class="absence-mark missing" role="status" aria-label="Sin evidencia">
+                <span class="absence-mark-icon"></span>
+                <span class="absence-mark-label">Sin evidencia</span>
+              </span>
+            </strong>
           </div>
         </header>
 
@@ -187,7 +192,17 @@
                 <div>
                   <strong>Trazabilidad</strong>
                   <span id="traceability-status">—</span>
-                  <small id="known-at-status">—</small>
+                  <small id="known-at-status">
+                    <span
+                      class="absence-mark missing"
+                      role="status"
+                      aria-label="Sin evidencia: Sin ejecución completa registrada"
+                    >
+                      <span class="absence-mark-icon"></span>
+                      <span class="absence-mark-label">Sin evidencia</span>
+                      <span class="absence-mark-reason">· Sin ejecución completa registrada</span>
+                    </span>
+                  </small>
                 </div>
                 <div>
                   <strong>Candidatos</strong>

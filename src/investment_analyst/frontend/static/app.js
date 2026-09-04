@@ -32,13 +32,31 @@ const DEFAULT_CHART_SETTINGS = Object.freeze({
   thirdWindow: 50,
   bollingerWindow: 20,
   bollingerMultiplier: "2",
-  shortColor: designToken("--series-sma-5"),
-  longColor: designToken("--series-sma-20"),
-  thirdColor: designToken("--series-sma-50"),
   priceScale: "linear",
   chartType: "candlestick",
   interval: "auto",
 });
+
+// The three default SMA line colors resolve to whichever theme is active
+// when they are read, so they must be captured only after initializeTheme()
+// restores the persisted theme -- not at module load, when <html> still
+// carries only its static data-theme="dark" default. captureDefaultSmaColors()
+// is called from initialize() right after initializeTheme(); until then this
+// holds a throwaway pre-theme snapshot that initializeChartSettings() always
+// overwrites before anything is rendered.
+let DEFAULT_SMA_COLORS = {
+  shortColor: designToken("--series-sma-5"),
+  longColor: designToken("--series-sma-20"),
+  thirdColor: designToken("--series-sma-50"),
+};
+
+function captureDefaultSmaColors() {
+  DEFAULT_SMA_COLORS = {
+    shortColor: designToken("--series-sma-5"),
+    longColor: designToken("--series-sma-20"),
+    thirdColor: designToken("--series-sma-50"),
+  };
+}
 const CHART_WIDTH = 1000;
 const CHART_HEIGHT = 360;
 const CHART_LAYOUT = Object.freeze({
@@ -470,7 +488,7 @@ let cryptoDerivativesRequest = 0;
 let fundamentalBusyCount = 0;
 let reportPayload = null;
 let listedCompanyReportRequest = 0;
-let chartSettings = { ...DEFAULT_CHART_SETTINGS };
+let chartSettings = { ...DEFAULT_CHART_SETTINGS, ...DEFAULT_SMA_COLORS };
 const chartSeriesVisibility = {
   "sma-5": true,
   "sma-20": true,
@@ -1180,7 +1198,7 @@ function normalizeChartSettings(candidate) {
   const bollingerMultiplier = String(
     candidate.bollingerMultiplier ?? DEFAULT_CHART_SETTINGS.bollingerMultiplier,
   );
-  const thirdColor = candidate.thirdColor ?? DEFAULT_CHART_SETTINGS.thirdColor;
+  const thirdColor = candidate.thirdColor ?? DEFAULT_SMA_COLORS.thirdColor;
   const priceScale = candidate.priceScale === undefined ? "linear" : candidate.priceScale;
   const chartType =
     candidate.chartType === undefined ? DEFAULT_CHART_SETTINGS.chartType : candidate.chartType;
@@ -1293,6 +1311,10 @@ function applyChartSettings() {
 }
 
 function initializeChartSettings() {
+  // Always start from the current-theme defaults: captureDefaultSmaColors()
+  // has already run in initialize(), right after initializeTheme(), so this
+  // base is correct even when nothing is stored below.
+  chartSettings = { ...DEFAULT_CHART_SETTINGS, ...DEFAULT_SMA_COLORS };
   let stored = null;
   try {
     stored = window.localStorage.getItem(CHART_SETTINGS_STORAGE_KEY);
@@ -1303,10 +1325,11 @@ function initializeChartSettings() {
     try {
       chartSettings = normalizeChartSettings(JSON.parse(stored)) || {
         ...DEFAULT_CHART_SETTINGS,
+        ...DEFAULT_SMA_COLORS,
       };
     } catch (error) {
       if (!(error instanceof SyntaxError)) throw error;
-      chartSettings = { ...DEFAULT_CHART_SETTINGS };
+      chartSettings = { ...DEFAULT_CHART_SETTINGS, ...DEFAULT_SMA_COLORS };
     }
   }
   if (BTC_INTRADAY_INTERVAL_VALUES.has(chartSettings.interval)) {
@@ -4738,6 +4761,71 @@ async function loadCandidateNotifications() {
 
 const NEW_YORK_WEEKDAY_ORDER = Object.freeze(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]);
 
+const NEW_YORK_DATE_PARTS_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: NEW_YORK_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+function newYorkWallClockDateParts(instant) {
+  const parts = Object.fromEntries(
+    NEW_YORK_DATE_PARTS_FORMATTER.formatToParts(instant)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+  };
+}
+
+// Resolves the UTC instant (epoch ms) of a New York wall-clock date/time by
+// re-checking which offset the guess actually lands in, instead of assuming
+// a fixed UTC offset -- correct on both sides of a DST transition, where the
+// New York civil day is 23h or 25h long rather than 24h.
+function newYorkWallClockToInstant(year, month, day, hour, minute) {
+  let guessMs = Date.UTC(year, month - 1, day, hour, minute);
+  const desiredMs = Date.UTC(year, month - 1, day, hour, minute);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const observed = newYorkWallClockDateParts(guessMs);
+    const observedMs = Date.UTC(
+      observed.year,
+      observed.month - 1,
+      observed.day,
+      observed.hour,
+      observed.minute,
+    );
+    const driftMs = desiredMs - observedMs;
+    if (driftMs === 0) break;
+    guessMs += driftMs;
+  }
+  return guessMs;
+}
+
+// Real elapsed minutes from `now` to a New York wall-clock target that is
+// `daysAhead` calendar days out, at `targetMinutesSinceMidnight` local time.
+// Uses the actual UTC instant of that target (see newYorkWallClockToInstant)
+// rather than `daysAhead * 24 * 60`, so a countdown spanning a DST
+// transition does not drift by an hour.
+function minutesUntilNewYorkWallClock(now, daysAhead, targetMinutesSinceMidnight) {
+  const today = newYorkWallClockDateParts(now);
+  const targetInstantMs = newYorkWallClockToInstant(
+    today.year,
+    today.month,
+    today.day + daysAhead,
+    Math.floor(targetMinutesSinceMidnight / 60),
+    targetMinutesSinceMidnight % 60,
+  );
+  return Math.round((targetInstantMs - now.getTime()) / 60_000);
+}
+
 function newYorkRegularSessionState(now) {
   const parts = Object.fromEntries(
     NEW_YORK_SESSION_PARTS_FORMATTER.formatToParts(now)
@@ -4770,7 +4858,10 @@ function newYorkRegularSessionRemainingMinutes(now) {
   const weekdayIndex = NEW_YORK_WEEKDAY_ORDER.indexOf(parts.weekday);
   if (parts.weekday === "Sat" || parts.weekday === "Sun") {
     const daysToMonday = parts.weekday === "Sat" ? 2 : 1;
-    return { toward: "open", minutes: daysToMonday * 24 * 60 - minutesSinceMidnight + NYSE_CORE_OPEN_MINUTES };
+    return {
+      toward: "open",
+      minutes: minutesUntilNewYorkWallClock(now, daysToMonday, NYSE_CORE_OPEN_MINUTES),
+    };
   }
   if (minutesSinceMidnight < NYSE_CORE_OPEN_MINUTES) {
     return { toward: "open", minutes: NYSE_CORE_OPEN_MINUTES - minutesSinceMidnight };
@@ -4779,7 +4870,10 @@ function newYorkRegularSessionRemainingMinutes(now) {
     return { toward: "close", minutes: NYSE_CORE_CLOSE_MINUTES - minutesSinceMidnight };
   }
   const daysToNextOpen = weekdayIndex === 5 /* Fri */ ? 3 : 1;
-  return { toward: "open", minutes: daysToNextOpen * 24 * 60 - minutesSinceMidnight + NYSE_CORE_OPEN_MINUTES };
+  return {
+    toward: "open",
+    minutes: minutesUntilNewYorkWallClock(now, daysToNextOpen, NYSE_CORE_OPEN_MINUTES),
+  };
 }
 
 function formatSessionCountdown(totalMinutes) {
@@ -5275,7 +5369,7 @@ byId("chart-settings-reset").addEventListener("click", async () => {
     chartSettings.bollingerWindow !== DEFAULT_CHART_SETTINGS.bollingerWindow ||
     chartSettings.bollingerMultiplier !== DEFAULT_CHART_SETTINGS.bollingerMultiplier ||
     chartSettings.interval !== DEFAULT_CHART_SETTINGS.interval;
-  chartSettings = { ...DEFAULT_CHART_SETTINGS };
+  chartSettings = { ...DEFAULT_CHART_SETTINGS, ...DEFAULT_SMA_COLORS };
   byId("chart-settings-error").classList.add("hidden");
   applyChartSettings();
   persistChartSettings();
@@ -5500,6 +5594,7 @@ byId("sidebar-toggle").addEventListener("click", () => {
 
 async function initialize() {
   initializeTheme();
+  captureDefaultSmaColors();
   await loadMarketAssets();
   await loadAssetPreferences();
   initializeChartSettings();

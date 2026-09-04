@@ -422,6 +422,32 @@ def test_known_at_cut_present_in_every_view() -> None:
     assert INDEX_HTML.count('id="known-at-cut-value"') == 1
 
 
+def test_known_at_cut_initial_placeholder_uses_absence_mark_not_em_dash() -> None:
+    # Before any script runs -- and on any error path that never reaches
+    # renderKnownAtCut() -- the static markup must already follow the
+    # declared absence grammar (point 5), never a bare em dash.
+    topbar_match = re.search(r'<header class="topbar">(.*?)</header>', INDEX_HTML, re.DOTALL)
+    assert topbar_match
+    cut_match = re.search(
+        r'<strong id="known-at-cut-value">(.*?)</strong>', topbar_match.group(1), re.DOTALL
+    )
+    assert cut_match, "known-at-cut-value control must exist in the topbar"
+    initial_markup = cut_match.group(1)
+    assert "—" not in initial_markup, (
+        "the initial known_at cut placeholder must not be a bare em dash; "
+        "it must render the declared absence-mark grammar instead"
+    )
+    assert 'class="absence-mark missing"' in initial_markup
+    assert "absence-mark-icon" in initial_markup
+    assert "absence-mark-label" in initial_markup
+
+    trace_match = re.search(r'<small id="known-at-status">(.*?)</small>', INDEX_HTML, re.DOTALL)
+    assert trace_match, "known-at-status control must exist in the traceability detail"
+    trace_markup = trace_match.group(1)
+    assert "—" not in trace_markup
+    assert 'class="absence-mark missing"' in trace_markup
+
+
 # ---------------------------------------------------------------------------
 # Session clock consumes NYSE_SESSION_STATES as-is
 # ---------------------------------------------------------------------------
@@ -599,3 +625,43 @@ def test_probe_aggregate_term_rule_catches_an_injected_combined_verdict() -> Non
     lowered = corrupted.lower()
     assert any(term in lowered for term in _FORBIDDEN_AGGREGATE_TERMS)
     assert not any(term in APP_JS.lower() for term in _FORBIDDEN_AGGREGATE_TERMS)
+
+
+def test_probe_state_shape_rule_catches_a_removed_label_class() -> None:
+    # test_state_never_encoded_by_colour_alone asserts ".absence-mark-label"
+    # is declared in styles.css; dropping it would collapse every absence
+    # mark to icon+color alone, violating "state never by colour alone".
+    corrupted = STYLES_CSS.replace(".absence-mark-label {", ".absence-mark-label-removed {")
+    assert ".absence-mark-label {" not in corrupted, "probe fixture did not remove the label rule"
+    assert ".absence-mark-label {" in STYLES_CSS
+
+
+def test_probe_absence_zero_rule_catches_a_reintroduced_bare_dash_fallback() -> None:
+    # test_absence_never_rendered_as_zero_or_empty asserts this exact
+    # fallback string is absent from app.js; reintroducing it would silently
+    # collapse the known_at traceability absence back to a bare dash.
+    corrupted = APP_JS + '\nbyId("known-at-status").textContent = "—";\n'
+    assert 'byId("known-at-status").textContent = "—"' in corrupted
+    assert 'byId("known-at-status").textContent = "—"' not in APP_JS
+
+
+def test_probe_known_at_initial_placeholder_rule_catches_a_reintroduced_em_dash() -> None:
+    # test_known_at_cut_initial_placeholder_uses_absence_mark_not_em_dash
+    # asserts the static topbar placeholder is never a bare em dash.
+    corrupted = re.sub(
+        r'(<strong id="known-at-cut-value">).*?(</strong>)',
+        r"\1—\2",
+        INDEX_HTML,
+        count=1,
+        flags=re.DOTALL,
+    )
+    corrupted_match = re.search(
+        r'<strong id="known-at-cut-value">(.*?)</strong>', corrupted, re.DOTALL
+    )
+    assert corrupted_match and "—" in corrupted_match.group(1), (
+        "probe fixture did not reintroduce a bare em dash"
+    )
+    original_match = re.search(
+        r'<strong id="known-at-cut-value">(.*?)</strong>', INDEX_HTML, re.DOTALL
+    )
+    assert original_match and "—" not in original_match.group(1)
