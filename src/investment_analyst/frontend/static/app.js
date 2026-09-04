@@ -11,19 +11,71 @@ const NYSE_CORE_CLOSE_MINUTES = 16 * 60;
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const THEME_STORAGE_KEY = "investment-analyst-theme-v1";
 const CHART_SETTINGS_STORAGE_KEY = "investment-analyst-chart-settings-v1";
+
+// Every rendered color, including JS-driven SVG strokes, resolves from the
+// tokens declared once in tokens.css: no color literal lives in this file.
+function designToken(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+const COMPARISON_PALETTE = Object.freeze([
+  "--compare-series-1",
+  "--compare-series-2",
+  "--compare-series-3",
+  "--compare-series-4",
+  "--compare-series-5",
+].map(designToken));
+
 const DEFAULT_CHART_SETTINGS = Object.freeze({
   shortWindow: 5,
   longWindow: 20,
   thirdWindow: 50,
   bollingerWindow: 20,
   bollingerMultiplier: "2",
-  shortColor: "#e29951",
-  longColor: "#a695df",
-  thirdColor: "#d778aa",
   priceScale: "linear",
   chartType: "candlestick",
   interval: "auto",
 });
+
+// The three default SMA line colors resolve to whichever theme is active
+// when they are read, so they must be captured only after initializeTheme()
+// restores the persisted theme -- not at module load, when <html> still
+// carries only its static data-theme="dark" default. captureDefaultSmaColors()
+// is called from initialize() right after initializeTheme(); until then this
+// holds a throwaway pre-theme snapshot that initializeChartSettings() always
+// overwrites before anything is rendered.
+let DEFAULT_SMA_COLORS = {
+  shortColor: designToken("--series-sma-5"),
+  longColor: designToken("--series-sma-20"),
+  thirdColor: designToken("--series-sma-50"),
+};
+
+const SMA_COLOR_PROPERTY_NAMES = Object.freeze(["--series-sma-5", "--series-sma-20", "--series-sma-50"]);
+
+// applyChartSettings() below pins each of these three custom properties as
+// an INLINE style on <html> so the chart SVG (which reads them via
+// var(--series-sma-N)) responds immediately to a settings change. That
+// inline value has higher cascade specificity than tokens.css's
+// :root[data-theme] rule, so a naive getComputedStyle() read here would
+// see the last-applied color -- default or customized, old theme or new
+// -- instead of the active theme's own value. Temporarily clearing the
+// inline override, reading the resulting pure cascade value, then
+// restoring whatever was there is the only way to read "what this theme
+// actually declares" independently of chart-settings history.
+function captureDefaultSmaColors() {
+  const inlineStyle = document.documentElement.style;
+  const savedInlineValues = SMA_COLOR_PROPERTY_NAMES.map((name) => inlineStyle.getPropertyValue(name));
+  for (const name of SMA_COLOR_PROPERTY_NAMES) inlineStyle.removeProperty(name);
+  DEFAULT_SMA_COLORS = {
+    shortColor: designToken("--series-sma-5"),
+    longColor: designToken("--series-sma-20"),
+    thirdColor: designToken("--series-sma-50"),
+  };
+  SMA_COLOR_PROPERTY_NAMES.forEach((name, index) => {
+    if (savedInlineValues[index]) inlineStyle.setProperty(name, savedInlineValues[index]);
+  });
+}
+
 const CHART_WIDTH = 1000;
 const CHART_HEIGHT = 360;
 const CHART_LAYOUT = Object.freeze({
@@ -455,7 +507,7 @@ let cryptoDerivativesRequest = 0;
 let fundamentalBusyCount = 0;
 let reportPayload = null;
 let listedCompanyReportRequest = 0;
-let chartSettings = { ...DEFAULT_CHART_SETTINGS };
+let chartSettings = { ...DEFAULT_CHART_SETTINGS, ...DEFAULT_SMA_COLORS };
 const chartSeriesVisibility = {
   "sma-5": true,
   "sma-20": true,
@@ -1128,8 +1180,7 @@ async function queryCryptoDerivatives() {
 function applyTheme(theme) {
   const selected = theme === "light" ? "light" : "dark";
   document.documentElement.dataset.theme = selected;
-  document.querySelector('meta[name="theme-color"]').content =
-    selected === "dark" ? "#0b111c" : "#f3f5f7";
+  document.querySelector('meta[name="theme-color"]').content = designToken("--canvas");
   const button = byId("theme-toggle");
   button.title = selected === "dark" ? "Tema claro" : "Tema oscuro";
   button.setAttribute("aria-pressed", String(selected === "dark"));
@@ -1166,7 +1217,7 @@ function normalizeChartSettings(candidate) {
   const bollingerMultiplier = String(
     candidate.bollingerMultiplier ?? DEFAULT_CHART_SETTINGS.bollingerMultiplier,
   );
-  const thirdColor = candidate.thirdColor ?? DEFAULT_CHART_SETTINGS.thirdColor;
+  const thirdColor = candidate.thirdColor ?? DEFAULT_SMA_COLORS.thirdColor;
   const priceScale = candidate.priceScale === undefined ? "linear" : candidate.priceScale;
   const chartType =
     candidate.chartType === undefined ? DEFAULT_CHART_SETTINGS.chartType : candidate.chartType;
@@ -1279,6 +1330,10 @@ function applyChartSettings() {
 }
 
 function initializeChartSettings() {
+  // Always start from the current-theme defaults: captureDefaultSmaColors()
+  // has already run in initialize(), right after initializeTheme(), so this
+  // base is correct even when nothing is stored below.
+  chartSettings = { ...DEFAULT_CHART_SETTINGS, ...DEFAULT_SMA_COLORS };
   let stored = null;
   try {
     stored = window.localStorage.getItem(CHART_SETTINGS_STORAGE_KEY);
@@ -1289,10 +1344,11 @@ function initializeChartSettings() {
     try {
       chartSettings = normalizeChartSettings(JSON.parse(stored)) || {
         ...DEFAULT_CHART_SETTINGS,
+        ...DEFAULT_SMA_COLORS,
       };
     } catch (error) {
       if (!(error instanceof SyntaxError)) throw error;
-      chartSettings = { ...DEFAULT_CHART_SETTINGS };
+      chartSettings = { ...DEFAULT_CHART_SETTINGS, ...DEFAULT_SMA_COLORS };
     }
   }
   if (BTC_INTRADAY_INTERVAL_VALUES.has(chartSettings.interval)) {
@@ -1317,6 +1373,43 @@ function createElement(tag, className, text) {
   if (className) element.className = className;
   if (text !== undefined) element.textContent = text;
   return element;
+}
+
+// One of the five reusable absence-grammar marks: missing, not-evaluable,
+// not-applicable, overdue or blocked. Each combines a shape (border style
+// and icon glyph, see .absence-mark rules in tokens.css/styles.css) with a
+// declared label and, for a blocked source, its declared reason — never a
+// bare dash, an empty cell or a zero.
+// The known_at cut is a permanent, visually distinct global control: it is
+// updated here for both the collapsed traceability detail and the
+// always-visible topbar chip, so every view shares the same declared cut.
+function renderKnownAtCut(effectiveKnownAt) {
+  const formatted = effectiveKnownAt ? formatInstant(effectiveKnownAt) : null;
+  const detail = byId("known-at-status");
+  const header = byId("known-at-cut-value");
+  detail.replaceChildren();
+  header.replaceChildren();
+  if (formatted) {
+    detail.textContent = `Corte: ${formatted}`;
+    header.textContent = formatted;
+  } else {
+    detail.append(renderAbsenceMark("missing", "Sin evidencia", "Sin ejecución completa registrada"));
+    header.append(renderAbsenceMark("missing", "Sin evidencia"));
+  }
+}
+
+function renderAbsenceMark(kind, label, reason) {
+  const mark = createElement("span", `absence-mark ${kind}`);
+  mark.setAttribute("role", "status");
+  mark.append(createElement("span", "absence-mark-icon"));
+  mark.append(createElement("span", "absence-mark-label", label));
+  if (reason) {
+    mark.append(createElement("span", "absence-mark-reason", `· ${reason}`));
+    mark.setAttribute("aria-label", `${label}: ${reason}`);
+  } else {
+    mark.setAttribute("aria-label", label);
+  }
+  return mark;
 }
 
 function setExportAvailable(id, available) {
@@ -3102,7 +3195,7 @@ function fundamentalResearchAuditItem(metric, history) {
     ];
     for (const [name, value, direction] of values) {
       const row = document.createElement("div");
-      const output = createElement("dd", "", value);
+      const output = createElement("dd", "figure", value);
       if (direction) output.classList.add("fundamental-history-change", direction);
       row.append(createElement("dt", "", name), output);
       summary.appendChild(row);
@@ -3605,21 +3698,39 @@ const VALUATION_REASON_LABELS = Object.freeze({
   ebitda_unavailable: "D&A anual oficial compatible no disponible",
 });
 
+// Reason codes produced when a market or fundamentals provider is not wired
+// for this asset's class. The same condition would fire for any catalog
+// asset without a configured daily-market or fundamentals source.
+const BLOCKED_VALUATION_REASON_CODES = Object.freeze(
+  new Set(["market_not_configured", "fundamentals_not_configured"]),
+);
+
+function valuationAbsenceKind(metric) {
+  if (metric.status === "not_applicable") return "not-applicable";
+  if (BLOCKED_VALUATION_REASON_CODES.has(metric.reason_code)) return "blocked";
+  return "not-evaluable";
+}
+
 function valuationDisplayValue(metric, definition) {
   if (metric.status !== "evaluated") {
-    return VALUATION_REASON_LABELS[metric.reason_code] || metric.reason_code || "No evaluable";
+    const reason = VALUATION_REASON_LABELS[metric.reason_code] || metric.reason_code || "Sin evidencia suficiente";
+    return renderAbsenceMark(valuationAbsenceKind(metric), VALUATION_STATUS_LABELS[metric.status] || metric.status, reason);
   }
   if (definition.unit === "USD") {
-    return formatNumber(metric.value, {
-      style: "currency",
-      currency: "USD",
-      currencyDisplay: "narrowSymbol",
-      notation: "compact",
-      maximumFractionDigits: 2,
-    });
+    return createElement(
+      "span",
+      "figure",
+      formatNumber(metric.value, {
+        style: "currency",
+        currency: "USD",
+        currencyDisplay: "narrowSymbol",
+        notation: "compact",
+        maximumFractionDigits: 2,
+      }),
+    );
   }
-  if (definition.unit === "percentage") return formatUnsignedPercentage(metric.value);
-  return formatMultiple(metric.value);
+  if (definition.unit === "percentage") return createElement("span", "figure", formatUnsignedPercentage(metric.value));
+  return createElement("span", "figure", formatMultiple(metric.value));
 }
 
 function resetValuation() {
@@ -3691,7 +3802,7 @@ function renderValuationHistory(payload, { preserveSelection = false } = {}) {
       ["Cambio horizonte", statistics.horizon_change ?? "No definido"],
     ]) {
       const entry = document.createElement("div");
-      entry.append(createElement("dt", "", label), createElement("dd", "", value));
+      entry.append(createElement("dt", "", label), createElement("dd", "figure", value));
       description.append(entry);
     }
     summary.append(description);
@@ -3704,7 +3815,7 @@ function renderValuationHistory(payload, { preserveSelection = false } = {}) {
       const row = document.createElement("tr");
       row.append(
         createElement("td", "", point.valuation_date),
-        createElement("td", "", point.value),
+        createElement("td", "figure", point.value),
         createElement("td", "", point.result_id),
       );
       body.append(row);
@@ -3752,16 +3863,19 @@ function renderValuationHistoryRule(payload) {
   result.replaceChildren();
   const label = payload.status === "met" ? "Cumple la regla configurada" : payload.status === "not_met" ? "No cumple la regla configurada" : "No evaluable con la cobertura disponible";
   result.append(createElement("p", "", label));
+  // "Fórmula" and "Conteos" are prose (a formula description, a sentence
+  // summarizing three counts), not exact-Decimal figures, so they keep
+  // the plain dd; the other two are single numeric values.
   const entries = [
-    ["Fórmula", "(menores + 0.5 × iguales) / N; Decimal34"],
-    ["Percentil", payload.empirical_percentile ?? "No definido"],
-    ["Puntos previos", `${payload.coverage.prior_points} / ${payload.coverage.required_prior_points}`],
-    ["Conteos", `${payload.lower_count} menores, ${payload.equal_count} iguales, ${payload.greater_count} mayores`],
+    ["Fórmula", "(menores + 0.5 × iguales) / N; Decimal34", false],
+    ["Percentil", payload.empirical_percentile ?? "No definido", true],
+    ["Puntos previos", `${payload.coverage.prior_points} / ${payload.coverage.required_prior_points}`, true],
+    ["Conteos", `${payload.lower_count} menores, ${payload.equal_count} iguales, ${payload.greater_count} mayores`, false],
   ];
   const list = createElement("dl", "valuation-history-statistics");
-  for (const [name, value] of entries) {
+  for (const [name, value, isFigure] of entries) {
     const entry = document.createElement("div");
-    entry.append(createElement("dt", "", name), createElement("dd", "", value));
+    entry.append(createElement("dt", "", name), createElement("dd", isFigure ? "figure" : "", value));
     list.append(entry);
   }
   result.append(list);
@@ -3816,11 +3930,8 @@ function renderValuation(payload) {
         VALUATION_STATUS_LABELS[metric.status] || metric.status,
       ),
     );
-    const value = createElement(
-      "p",
-      `valuation-metric-value ${metric.status}`,
-      valuationDisplayValue(metric, definition),
-    );
+    const value = createElement("p", `valuation-metric-value ${metric.status}`);
+    value.append(valuationDisplayValue(metric, definition));
     if (metric.value !== null && metric.value !== undefined) {
       value.title = `Valor exacto: ${metric.value} ${definition.unit}`;
     }
@@ -3961,7 +4072,7 @@ function applyOverview(payload) {
       : "Sin registro operativo";
     byId("run-time").textContent = "Sin lectura de historial";
     byId("traceability-status").textContent = "Sin verificación reciente";
-    byId("known-at-status").textContent = "—";
+    renderKnownAtCut(null);
     if (!payload.scheduler_enabled) {
       byId("schedule-status").textContent = "Desactivada";
       byId("schedule-next").textContent = "Solo actualización manual";
@@ -4012,9 +4123,7 @@ function applyOverview(payload) {
   byId("traceability-status").textContent = latest?.traceability_verified
     ? "Verificada"
     : "Sin verificación reciente";
-  byId("known-at-status").textContent = latest?.effective_known_at
-    ? `Corte: ${formatInstant(latest.effective_known_at)}`
-    : "—";
+  renderKnownAtCut(latest?.effective_known_at);
 
   if (scheduler.enabled) {
     if (Array.isArray(scheduler.jobs)) {
@@ -4041,9 +4150,15 @@ function applyOverview(payload) {
       );
     } else {
       const config = scheduler.config;
-      byId("schedule-status").textContent = scheduler.due
-        ? "Pendiente"
-        : `Automática · ${config.run_at}`;
+      const scheduleStatus = byId("schedule-status");
+      scheduleStatus.replaceChildren();
+      if (scheduler.due) {
+        scheduleStatus.append(
+          renderAbsenceMark("overdue", "Vencida", `Próxima ejecución programada: ${formatInstant(scheduler.next_run_at, config.timezone)}`),
+        );
+      } else {
+        scheduleStatus.textContent = `Automática · ${config.run_at}`;
+      }
       byId("schedule-next").textContent = formatInstant(scheduler.next_run_at, config.timezone);
     }
   } else {
@@ -4666,6 +4781,73 @@ async function loadCandidateNotifications() {
   }
 }
 
+const NEW_YORK_WEEKDAY_ORDER = Object.freeze(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]);
+
+const NEW_YORK_DATE_PARTS_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: NEW_YORK_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+function newYorkWallClockDateParts(instant) {
+  const parts = Object.fromEntries(
+    NEW_YORK_DATE_PARTS_FORMATTER.formatToParts(instant)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+  };
+}
+
+// Resolves the UTC instant (epoch ms) of a New York wall-clock date/time by
+// re-checking which offset the guess actually lands in, instead of assuming
+// a fixed UTC offset -- correct on both sides of a DST transition, where the
+// New York civil day is 23h or 25h long rather than 24h.
+function newYorkWallClockToInstant(year, month, day, hour, minute) {
+  let guessMs = Date.UTC(year, month - 1, day, hour, minute);
+  const desiredMs = Date.UTC(year, month - 1, day, hour, minute);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const observed = newYorkWallClockDateParts(guessMs);
+    const observedMs = Date.UTC(
+      observed.year,
+      observed.month - 1,
+      observed.day,
+      observed.hour,
+      observed.minute,
+    );
+    const driftMs = desiredMs - observedMs;
+    if (driftMs === 0) break;
+    guessMs += driftMs;
+  }
+  return guessMs;
+}
+
+// Real elapsed minutes from `now` to a New York wall-clock target that is
+// `daysAhead` calendar days out, at `targetMinutesSinceMidnight` local time.
+// Uses the actual UTC instant of that target (see newYorkWallClockToInstant)
+// rather than `daysAhead * 24 * 60`, so a countdown spanning a DST
+// transition does not drift by an hour.
+function minutesUntilNewYorkWallClock(now, daysAhead, targetMinutesSinceMidnight) {
+  const today = newYorkWallClockDateParts(now);
+  const targetInstantMs = newYorkWallClockToInstant(
+    today.year,
+    today.month,
+    today.day + daysAhead,
+    Math.floor(targetMinutesSinceMidnight / 60),
+    targetMinutesSinceMidnight % 60,
+  );
+  return Math.round((targetInstantMs - now.getTime()) / 60_000);
+}
+
 function newYorkRegularSessionState(now) {
   const parts = Object.fromEntries(
     NEW_YORK_SESSION_PARTS_FORMATTER.formatToParts(now)
@@ -4685,6 +4867,48 @@ function newYorkRegularSessionState(now) {
   return NYSE_SESSION_STATES.after;
 }
 
+// Minutes until the next regular-session boundary (open or close), consuming
+// only NYSE_CORE_OPEN_MINUTES/NYSE_CORE_CLOSE_MINUTES as already declared.
+// Regular session only: no holiday or early-close calendar is modeled.
+function newYorkRegularSessionRemainingMinutes(now) {
+  const parts = Object.fromEntries(
+    NEW_YORK_SESSION_PARTS_FORMATTER.formatToParts(now)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+  const minutesSinceMidnight = Number(parts.hour) * 60 + Number(parts.minute);
+  const weekdayIndex = NEW_YORK_WEEKDAY_ORDER.indexOf(parts.weekday);
+  if (parts.weekday === "Sat" || parts.weekday === "Sun") {
+    const daysToMonday = parts.weekday === "Sat" ? 2 : 1;
+    return {
+      toward: "open",
+      minutes: minutesUntilNewYorkWallClock(now, daysToMonday, NYSE_CORE_OPEN_MINUTES),
+    };
+  }
+  if (minutesSinceMidnight < NYSE_CORE_OPEN_MINUTES) {
+    return { toward: "open", minutes: NYSE_CORE_OPEN_MINUTES - minutesSinceMidnight };
+  }
+  if (minutesSinceMidnight < NYSE_CORE_CLOSE_MINUTES) {
+    return { toward: "close", minutes: NYSE_CORE_CLOSE_MINUTES - minutesSinceMidnight };
+  }
+  const daysToNextOpen = weekdayIndex === 5 /* Fri */ ? 3 : 1;
+  return {
+    toward: "open",
+    minutes: minutesUntilNewYorkWallClock(now, daysToNextOpen, NYSE_CORE_OPEN_MINUTES),
+  };
+}
+
+function formatSessionCountdown(totalMinutes) {
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
+  const segments = [];
+  if (days > 0) segments.push(`${days} d`);
+  if (days > 0 || hours > 0) segments.push(`${hours} h`);
+  segments.push(`${minutes} min`);
+  return segments.join(" ");
+}
+
 function renderMarketClocks(now = new Date()) {
   const instant = now.toISOString();
   for (const definition of MARKET_CLOCK_DEFINITIONS) {
@@ -4696,8 +4920,13 @@ function renderMarketClocks(now = new Date()) {
   }
   const session = newYorkRegularSessionState(now);
   const status = byId("nyse-session-status");
-  status.textContent = session.label;
+  const dot = byId("nyse-session-dot");
+  status.replaceChildren(dot, document.createTextNode(session.label));
   status.className = `market-session-status ${session.tone}`;
+  const remaining = newYorkRegularSessionRemainingMinutes(now);
+  const countdown = formatSessionCountdown(remaining.minutes);
+  byId("nyse-session-remaining").textContent =
+    remaining.toward === "open" ? `Abre en ${countdown}` : `Cierra en ${countdown}`;
 }
 
 let marketClockTimer = null;
@@ -5081,8 +5310,25 @@ byId("chart-data-disclosure").addEventListener("toggle", (event) => {
 byId("market-chart").addEventListener("wheel", handleMarketChartWheel, { passive: false });
 byId("theme-toggle").addEventListener("click", () => {
   const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  const previousDefaults = DEFAULT_SMA_COLORS;
   applyTheme(next);
   persistTheme(next);
+  captureDefaultSmaColors();
+  // Only follow the new theme's SMA colors if the user never customized
+  // them away from the previous theme's defaults; an explicit user choice
+  // is never overwritten by a theme switch.
+  const usingPreviousThemeDefaults =
+    chartSettings.shortColor === previousDefaults.shortColor &&
+    chartSettings.longColor === previousDefaults.longColor &&
+    chartSettings.thirdColor === previousDefaults.thirdColor;
+  if (usingPreviousThemeDefaults) {
+    chartSettings = { ...chartSettings, ...DEFAULT_SMA_COLORS };
+    applyChartSettings();
+    persistChartSettings();
+    if (marketChartPayload !== null) {
+      renderMarketChart(marketChartPayload, { preserveViewport: true });
+    }
+  }
 });
 
 
@@ -5162,7 +5408,7 @@ byId("chart-settings-reset").addEventListener("click", async () => {
     chartSettings.bollingerWindow !== DEFAULT_CHART_SETTINGS.bollingerWindow ||
     chartSettings.bollingerMultiplier !== DEFAULT_CHART_SETTINGS.bollingerMultiplier ||
     chartSettings.interval !== DEFAULT_CHART_SETTINGS.interval;
-  chartSettings = { ...DEFAULT_CHART_SETTINGS };
+  chartSettings = { ...DEFAULT_CHART_SETTINGS, ...DEFAULT_SMA_COLORS };
   byId("chart-settings-error").classList.add("hidden");
   applyChartSettings();
   persistChartSettings();
@@ -5263,7 +5509,7 @@ function renderMarketComparison(payload) {
   const results = byId("comparison-results");
   const cards = byId("comparison-cards");
   const chart = byId("comparison-chart");
-  const palette = ["#477db3", "#c58b3d", "#8f6eb5", "#4f9a7e", "#bd6284"];
+  const palette = COMPARISON_PALETTE;
   chart.replaceChildren();
   const svg = document.createElementNS(SVG_NAMESPACE, "svg");
   svg.setAttribute("viewBox", "0 0 800 230");
@@ -5296,13 +5542,40 @@ function renderMarketComparison(payload) {
     const card = document.createElement("article");
     card.className = "comparison-card";
     const identity = marketAssets[series.asset_id];
-    const correlation = series.metrics.correlation_status === "not_applicable"
-      ? "No aplica (referencia)"
-      : comparisonPercent(series.metrics.correlation_to_benchmark);
-    const beta = series.metrics.beta_status === "not_applicable"
-      ? "No aplica (referencia)"
-      : series.metrics.beta_to_benchmark ?? "No disponible";
-    card.innerHTML = `<p class="eyebrow">${identity?.symbol || series.asset_id}</p><h3>${identity?.name || series.asset_id}</h3><dl><dt>Retorno total</dt><dd>${comparisonPercent(series.metrics.total_return)}</dd><dt>Drawdown máximo</dt><dd>${comparisonPercent(series.metrics.maximum_drawdown)}</dd><dt>Volatilidad diaria</dt><dd>${comparisonPercent(series.metrics.daily_volatility)}</dd><dt>Correlación</dt><dd>${correlation}</dd><dt>Beta</dt><dd>${beta}</dd></dl>`;
+    const notApplicableMark = renderAbsenceMark("not-applicable", "No aplica", "Activo de referencia").outerHTML;
+    // The backend contract declares three statuses -- available, unavailable,
+    // not_applicable (comparison_models.py) -- not just a binary
+    // applicable/not_applicable split. "unavailable" means the metric was
+    // attempted but could not be computed with the common coverage (never a
+    // structural non-fit like the benchmark itself), so it renders through
+    // the reusable "not-evaluable" absence mark rather than falling through
+    // to comparisonPercent()'s bare "—" for a null value.
+    const correlationUnavailableMark = renderAbsenceMark(
+      "not-evaluable",
+      "No evaluable",
+      "Correlación no calculable con la cobertura común disponible",
+    ).outerHTML;
+    const betaUnavailableMark = renderAbsenceMark(
+      "not-evaluable",
+      "No evaluable",
+      "Beta no calculable con la cobertura común disponible",
+    ).outerHTML;
+    // Every comparison figure below -- including the absence-mark branches,
+    // which style themselves -- ends up tabular/monospace/right-aligned:
+    // numeric branches are wrapped in the shared .figure utility class.
+    const correlation =
+      series.metrics.correlation_status === "not_applicable"
+        ? notApplicableMark
+        : series.metrics.correlation_status === "unavailable"
+          ? correlationUnavailableMark
+          : `<span class="figure">${comparisonPercent(series.metrics.correlation_to_benchmark)}</span>`;
+    const beta =
+      series.metrics.beta_status === "not_applicable"
+        ? notApplicableMark
+        : series.metrics.beta_status === "unavailable"
+          ? betaUnavailableMark
+          : `<span class="figure">${series.metrics.beta_to_benchmark ?? "No disponible"}</span>`;
+    card.innerHTML = `<p class="eyebrow">${identity?.symbol || series.asset_id}</p><h3>${identity?.name || series.asset_id}</h3><dl><dt>Retorno total</dt><dd><span class="figure">${comparisonPercent(series.metrics.total_return)}</span></dd><dt>Drawdown máximo</dt><dd><span class="figure">${comparisonPercent(series.metrics.maximum_drawdown)}</span></dd><dt>Volatilidad diaria</dt><dd><span class="figure">${comparisonPercent(series.metrics.daily_volatility)}</span></dd><dt>Correlación</dt><dd>${correlation}</dd><dt>Beta</dt><dd>${beta}</dd></dl>`;
     cards.append(card);
   }
   byId("comparison-json").textContent = JSON.stringify(payload, null, 2);
@@ -5386,6 +5659,7 @@ byId("sidebar-toggle").addEventListener("click", () => {
 
 async function initialize() {
   initializeTheme();
+  captureDefaultSmaColors();
   await loadMarketAssets();
   await loadAssetPreferences();
   initializeChartSettings();

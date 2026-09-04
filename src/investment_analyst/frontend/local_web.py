@@ -209,6 +209,7 @@ _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/assets/tokens.css": ("tokens.css", "text/css; charset=utf-8"),
     "/assets/styles.css": ("styles.css", "text/css; charset=utf-8"),
 }
 _CSP = (
