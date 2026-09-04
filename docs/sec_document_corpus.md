@@ -42,3 +42,9 @@ La consulta abre almacenamiento de solo lectura, no crea directorios, no abre wr
 SEC. `--read-content` verifica y lee explícitamente los bytes, pero nunca los imprime. Backup/restore
 conserva IDs, blobs y replay sin una segunda pasada completa: la validación documental se integra en
 el escaneo RawRecord paginado existente.
+
+## Línea temporal y búsqueda local
+
+Para la búsqueda transversal, enumeración y ordenación point-in-time de revisiones documentales
+persistidas en ambas familias (`asset_document` y `filer_document`), consulta
+[Línea temporal y búsqueda local SEC](sec_document_timeline.md).

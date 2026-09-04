@@ -607,9 +607,10 @@ La transición integrada es `EQUITY-UNIVERSE DONE → SEC-CORPUS NEXT`; #134/#13
 sustrato institucional 13F, #140 la composición/completitud, #142 las métricas de cambio reportado,
 #144 el peso declarado y #146 la concentración efímera. #151 añade eventos institucionales descriptivos persistidos
 (`cazatiburones_institutional_events_v1`), candidatos con cooldown de 24h y consulta reproducible por snapshot_id;
-#153 añade una outbox local deduplicada y reanudable para candidatos elegibles de actividad e instituciones,
-sin presentar SEC-CORPUS como completado ni como cartera efectiva: cartera efectiva, reglas complejas,
-búsqueda y UI continúan siendo fronteras separadas. `EXTENDED-SOAK /
+#153 añade una outbox local deduplicada y reanudable para candidatos elegibles de actividad e instituciones;
+#155 añade la línea temporal y búsqueda local point-in-time del corpus documental SEC (`sec-document-timeline-v1`),
+sin presentar SEC-CORPUS como completado ni como cartera efectiva: cartera efectiva, reglas complejas y UI
+continúan siendo fronteras separadas. `EXTENDED-SOAK /
 DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
 Block independiente.
 
