@@ -50,13 +50,32 @@ let DEFAULT_SMA_COLORS = {
   thirdColor: designToken("--series-sma-50"),
 };
 
+const SMA_COLOR_PROPERTY_NAMES = Object.freeze(["--series-sma-5", "--series-sma-20", "--series-sma-50"]);
+
+// applyChartSettings() below pins each of these three custom properties as
+// an INLINE style on <html> so the chart SVG (which reads them via
+// var(--series-sma-N)) responds immediately to a settings change. That
+// inline value has higher cascade specificity than tokens.css's
+// :root[data-theme] rule, so a naive getComputedStyle() read here would
+// see the last-applied color -- default or customized, old theme or new
+// -- instead of the active theme's own value. Temporarily clearing the
+// inline override, reading the resulting pure cascade value, then
+// restoring whatever was there is the only way to read "what this theme
+// actually declares" independently of chart-settings history.
 function captureDefaultSmaColors() {
+  const inlineStyle = document.documentElement.style;
+  const savedInlineValues = SMA_COLOR_PROPERTY_NAMES.map((name) => inlineStyle.getPropertyValue(name));
+  for (const name of SMA_COLOR_PROPERTY_NAMES) inlineStyle.removeProperty(name);
   DEFAULT_SMA_COLORS = {
     shortColor: designToken("--series-sma-5"),
     longColor: designToken("--series-sma-20"),
     thirdColor: designToken("--series-sma-50"),
   };
+  SMA_COLOR_PROPERTY_NAMES.forEach((name, index) => {
+    if (savedInlineValues[index]) inlineStyle.setProperty(name, savedInlineValues[index]);
+  });
 }
+
 const CHART_WIDTH = 1000;
 const CHART_HEIGHT = 360;
 const CHART_LAYOUT = Object.freeze({
@@ -5524,15 +5543,38 @@ function renderMarketComparison(payload) {
     card.className = "comparison-card";
     const identity = marketAssets[series.asset_id];
     const notApplicableMark = renderAbsenceMark("not-applicable", "No aplica", "Activo de referencia").outerHTML;
+    // The backend contract declares three statuses -- available, unavailable,
+    // not_applicable (comparison_models.py) -- not just a binary
+    // applicable/not_applicable split. "unavailable" means the metric was
+    // attempted but could not be computed with the common coverage (never a
+    // structural non-fit like the benchmark itself), so it renders through
+    // the reusable "not-evaluable" absence mark rather than falling through
+    // to comparisonPercent()'s bare "—" for a null value.
+    const correlationUnavailableMark = renderAbsenceMark(
+      "not-evaluable",
+      "No evaluable",
+      "Correlación no calculable con la cobertura común disponible",
+    ).outerHTML;
+    const betaUnavailableMark = renderAbsenceMark(
+      "not-evaluable",
+      "No evaluable",
+      "Beta no calculable con la cobertura común disponible",
+    ).outerHTML;
     // Every comparison figure below -- including the absence-mark branches,
     // which style themselves -- ends up tabular/monospace/right-aligned:
     // numeric branches are wrapped in the shared .figure utility class.
-    const correlation = series.metrics.correlation_status === "not_applicable"
-      ? notApplicableMark
-      : `<span class="figure">${comparisonPercent(series.metrics.correlation_to_benchmark)}</span>`;
-    const beta = series.metrics.beta_status === "not_applicable"
-      ? notApplicableMark
-      : `<span class="figure">${series.metrics.beta_to_benchmark ?? "No disponible"}</span>`;
+    const correlation =
+      series.metrics.correlation_status === "not_applicable"
+        ? notApplicableMark
+        : series.metrics.correlation_status === "unavailable"
+          ? correlationUnavailableMark
+          : `<span class="figure">${comparisonPercent(series.metrics.correlation_to_benchmark)}</span>`;
+    const beta =
+      series.metrics.beta_status === "not_applicable"
+        ? notApplicableMark
+        : series.metrics.beta_status === "unavailable"
+          ? betaUnavailableMark
+          : `<span class="figure">${series.metrics.beta_to_benchmark ?? "No disponible"}</span>`;
     card.innerHTML = `<p class="eyebrow">${identity?.symbol || series.asset_id}</p><h3>${identity?.name || series.asset_id}</h3><dl><dt>Retorno total</dt><dd><span class="figure">${comparisonPercent(series.metrics.total_return)}</span></dd><dt>Drawdown máximo</dt><dd><span class="figure">${comparisonPercent(series.metrics.maximum_drawdown)}</span></dd><dt>Volatilidad diaria</dt><dd><span class="figure">${comparisonPercent(series.metrics.daily_volatility)}</span></dd><dt>Correlación</dt><dd>${correlation}</dd><dt>Beta</dt><dd>${beta}</dd></dl>`;
     cards.append(card);
   }

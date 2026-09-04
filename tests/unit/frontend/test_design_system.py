@@ -490,6 +490,32 @@ def test_comparison_card_figures_use_the_figure_class() -> None:
     _check_comparison_card_figures_wrapped(APP_JS)
 
 
+def _check_comparison_unavailable_uses_absence_mark(app_js: str) -> None:
+    # The backend contract (comparison_models.py) declares three statuses --
+    # available, unavailable, not_applicable -- not a binary split. A metric
+    # that was attempted but could not be computed ("unavailable") must not
+    # fall through to comparisonPercent()'s bare "-" for a null value or to
+    # plain "No disponible" text; it needs its own absence mark, distinct
+    # from "not_applicable" (a structural non-fit, e.g. the benchmark itself).
+    render_match = _COMPARISON_CARD_FN_RE.search(app_js)
+    assert render_match, "renderMarketComparison must exist"
+    body = render_match.group(1)
+    assert 'correlation_status === "unavailable"' in body, (
+        "correlation must branch on the 'unavailable' status, not fall through to a bare em dash"
+    )
+    assert 'beta_status === "unavailable"' in body, (
+        "beta must branch on the 'unavailable' status, not fall through to plain text"
+    )
+    assert body.count('"not-evaluable"') >= 2, (
+        "both the correlation and beta 'unavailable' branches must render "
+        "through the not-evaluable absence mark"
+    )
+
+
+def test_comparison_unavailable_status_uses_absence_mark() -> None:
+    _check_comparison_unavailable_uses_absence_mark(APP_JS)
+
+
 def _check_valuation_history_table_value_column_is_figure(css_text: str) -> None:
     # A <td> is display: table-cell by default; .figure's own
     # display: inline-block would break the table's column layout if
@@ -575,6 +601,36 @@ def _check_theme_toggle_refreshes_sma_defaults(app_js: str) -> None:
 
 def test_theme_toggle_refreshes_sma_defaults() -> None:
     _check_theme_toggle_refreshes_sma_defaults(APP_JS)
+
+
+_CAPTURE_DEFAULT_SMA_COLORS_FN_RE = re.compile(
+    r"function captureDefaultSmaColors\(\) \{(.*?)\n\}", re.DOTALL
+)
+
+
+def _check_capture_default_sma_colors_bypasses_inline_override(app_js: str) -> None:
+    # applyChartSettings() pins an INLINE style for each --series-sma-N
+    # property so the chart SVG responds immediately to a settings change.
+    # That inline value outranks tokens.css's :root[data-theme] rule in the
+    # cascade, so a naive getComputedStyle() read after a theme toggle would
+    # see the last-applied color (old theme, or a user customization)
+    # instead of the newly active theme's own declared value. The capture
+    # must clear any inline override before reading, then restore it.
+    match = _CAPTURE_DEFAULT_SMA_COLORS_FN_RE.search(app_js)
+    assert match, "captureDefaultSmaColors must exist"
+    body = match.group(1)
+    assert "removeProperty" in body, (
+        "captureDefaultSmaColors must clear any inline SMA color override "
+        "before reading the theme's cascade value"
+    )
+    assert "setProperty" in body, (
+        "captureDefaultSmaColors must restore whatever inline override was "
+        "present (a genuine user customization) after reading the cascade"
+    )
+
+
+def test_capture_default_sma_colors_bypasses_inline_override() -> None:
+    _check_capture_default_sma_colors_bypasses_inline_override(APP_JS)
 
 
 def test_no_web_font_named_in_body_stack() -> None:
@@ -950,3 +1006,33 @@ def test_probe_valuation_and_research_history_figures_rule_catches_an_unwrapped_
     assert corrupted != APP_JS, "probe fixture did not unwrap the exact-value column"
     with pytest.raises(AssertionError):
         _check_valuation_and_research_history_figures_wrapped(corrupted)
+
+
+def test_probe_comparison_unavailable_rule_catches_a_removed_branch() -> None:
+    _check_comparison_unavailable_uses_absence_mark(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        'correlation_status === "unavailable"', 'correlation_status === "never"', 1
+    )
+    assert corrupted != APP_JS, "probe fixture did not remove the unavailable branch"
+    with pytest.raises(AssertionError):
+        _check_comparison_unavailable_uses_absence_mark(corrupted)
+
+
+def test_probe_capture_sma_defaults_rule_catches_a_removed_inline_bypass() -> None:
+    _check_capture_default_sma_colors_bypasses_inline_override(APP_JS)  # baseline: clean
+    corrupted = re.sub(
+        r"function captureDefaultSmaColors\(\) \{.*?\n\}",
+        "function captureDefaultSmaColors() {\n"
+        "  DEFAULT_SMA_COLORS = {\n"
+        '    shortColor: designToken("--series-sma-5"),\n'
+        '    longColor: designToken("--series-sma-20"),\n'
+        '    thirdColor: designToken("--series-sma-50"),\n'
+        "  };\n"
+        "}",
+        APP_JS,
+        count=1,
+        flags=re.DOTALL,
+    )
+    assert corrupted != APP_JS, "probe fixture did not replace the function body"
+    with pytest.raises(AssertionError):
+        _check_capture_default_sma_colors_bypasses_inline_override(corrupted)
