@@ -3176,7 +3176,7 @@ function fundamentalResearchAuditItem(metric, history) {
     ];
     for (const [name, value, direction] of values) {
       const row = document.createElement("div");
-      const output = createElement("dd", "", value);
+      const output = createElement("dd", "figure", value);
       if (direction) output.classList.add("fundamental-history-change", direction);
       row.append(createElement("dt", "", name), output);
       summary.appendChild(row);
@@ -3783,7 +3783,7 @@ function renderValuationHistory(payload, { preserveSelection = false } = {}) {
       ["Cambio horizonte", statistics.horizon_change ?? "No definido"],
     ]) {
       const entry = document.createElement("div");
-      entry.append(createElement("dt", "", label), createElement("dd", "", value));
+      entry.append(createElement("dt", "", label), createElement("dd", "figure", value));
       description.append(entry);
     }
     summary.append(description);
@@ -3796,7 +3796,7 @@ function renderValuationHistory(payload, { preserveSelection = false } = {}) {
       const row = document.createElement("tr");
       row.append(
         createElement("td", "", point.valuation_date),
-        createElement("td", "", point.value),
+        createElement("td", "figure", point.value),
         createElement("td", "", point.result_id),
       );
       body.append(row);
@@ -3844,16 +3844,19 @@ function renderValuationHistoryRule(payload) {
   result.replaceChildren();
   const label = payload.status === "met" ? "Cumple la regla configurada" : payload.status === "not_met" ? "No cumple la regla configurada" : "No evaluable con la cobertura disponible";
   result.append(createElement("p", "", label));
+  // "Fórmula" and "Conteos" are prose (a formula description, a sentence
+  // summarizing three counts), not exact-Decimal figures, so they keep
+  // the plain dd; the other two are single numeric values.
   const entries = [
-    ["Fórmula", "(menores + 0.5 × iguales) / N; Decimal34"],
-    ["Percentil", payload.empirical_percentile ?? "No definido"],
-    ["Puntos previos", `${payload.coverage.prior_points} / ${payload.coverage.required_prior_points}`],
-    ["Conteos", `${payload.lower_count} menores, ${payload.equal_count} iguales, ${payload.greater_count} mayores`],
+    ["Fórmula", "(menores + 0.5 × iguales) / N; Decimal34", false],
+    ["Percentil", payload.empirical_percentile ?? "No definido", true],
+    ["Puntos previos", `${payload.coverage.prior_points} / ${payload.coverage.required_prior_points}`, true],
+    ["Conteos", `${payload.lower_count} menores, ${payload.equal_count} iguales, ${payload.greater_count} mayores`, false],
   ];
   const list = createElement("dl", "valuation-history-statistics");
-  for (const [name, value] of entries) {
+  for (const [name, value, isFigure] of entries) {
     const entry = document.createElement("div");
-    entry.append(createElement("dt", "", name), createElement("dd", "", value));
+    entry.append(createElement("dt", "", name), createElement("dd", isFigure ? "figure" : "", value));
     list.append(entry);
   }
   result.append(list);

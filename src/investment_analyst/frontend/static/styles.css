@@ -456,8 +456,8 @@ h4 {
 
 .combobox-option:hover,
 .combobox-option.active {
-  background-color: var(--accent-alpha);
-  color: var(--accent-strong);
+  background-color: var(--accent-soft);
+  color: var(--accent-dark);
 }
 
 .combobox-option[aria-selected="true"] {
@@ -664,7 +664,7 @@ section {
 .preferences-heading {
   padding: 0.4rem 0.6rem;
   color: var(--muted);
-  background: var(--surface-strong);
+  background: var(--surface-subtle);
   font-size: 0.58rem;
   font-weight: 760;
   letter-spacing: 0.035em;
@@ -2418,6 +2418,8 @@ section {
 .fundamental-research-exact-value {
   overflow-wrap: anywhere;
   color: var(--accent);
+  font-family: var(--figure-font);
+  font-variant-numeric: tabular-nums;
   font-size: 0.63rem;
   font-weight: 740;
   text-align: right;
@@ -3226,7 +3228,7 @@ pre {
   padding: 0.25rem 0.55rem;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--surface-raised);
+  background: var(--surface-subtle);
   color: var(--muted-strong);
   font: inherit;
   font-size: 0.62rem;
@@ -3574,6 +3576,17 @@ footer p:last-child {
   border: 1px solid var(--line-soft);
   overflow-wrap: anywhere;
   text-align: left;
+}
+
+/*
+ * The exact-Decimal value column: table cells stay `display: table-cell`
+ * (the .figure utility's `display: inline-block` would break column
+ * layout here), so the figure treatment is applied directly to the cell.
+ */
+.valuation-history-table td.figure {
+  font-family: var(--figure-font);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 @media (max-width: 1080px) {

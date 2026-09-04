@@ -160,6 +160,32 @@ def test_index_html_color_literals_are_the_declared_meta_and_favicon_exceptions(
         )
 
 
+# Every var(--x) reference in styles.css, and every designToken("--x") read
+# in app.js, must resolve to a token actually declared in tokens.css. This
+# is distinct from "no color literal": a var() call to an undeclared custom
+# property is syntactically a token reference, not a literal, so the literal
+# checks above cannot catch it -- an undeclared reference silently falls
+# back to the browser's initial/inherited value instead of erroring.
+_VAR_REFERENCE_RE = re.compile(r"var\(--([a-zA-Z0-9-]+)\)")
+_DESIGN_TOKEN_CALL_RE = re.compile(r'designToken\("--([a-zA-Z0-9-]+)"\)')
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _check_every_var_reference_is_declared(styles_css: str, app_js: str, tokens_css: str) -> None:
+    declared = set(_theme_blocks(tokens_css)["light"])  # parity already enforced separately
+    # Strip comments first: prose like "resolves through var(--token)" must
+    # not be mistaken for an actual reference.
+    without_comments = _CSS_COMMENT_RE.sub("", styles_css)
+    missing_css = set(_VAR_REFERENCE_RE.findall(without_comments)) - declared
+    missing_js = set(_DESIGN_TOKEN_CALL_RE.findall(app_js)) - declared
+    assert not missing_css, f"styles.css references undeclared token(s): {sorted(missing_css)}"
+    assert not missing_js, f"app.js designToken() reads undeclared token(s): {sorted(missing_js)}"
+
+
+def test_every_var_reference_resolves_to_a_declared_token() -> None:
+    _check_every_var_reference_is_declared(STYLES_CSS, APP_JS, TOKENS_CSS)
+
+
 # ---------------------------------------------------------------------------
 # Contrast: WCAG 2.x relative luminance, reimplemented (stdlib only)
 # ---------------------------------------------------------------------------
@@ -419,7 +445,13 @@ def test_no_external_network_reference_in_static_surface() -> None:
 # Every CSS class that renders a numeric figure directly (not merely a
 # fallback dash or a label) must resolve through this exact trio: the
 # monospaced figure family, tabular digit widths, and right alignment.
-_FIGURE_CSS_CLASSES = ("figure", "metric-value", "asset-price", "fundamental-research-metric-value")
+_FIGURE_CSS_CLASSES = (
+    "figure",
+    "metric-value",
+    "asset-price",
+    "fundamental-research-metric-value",
+    "fundamental-research-exact-value",
+)
 
 
 def _check_figure_class_is_tabular_monospace_right_aligned(css_text: str, class_name: str) -> None:
@@ -456,6 +488,67 @@ def _check_comparison_card_figures_wrapped(app_js: str) -> None:
 
 def test_comparison_card_figures_use_the_figure_class() -> None:
     _check_comparison_card_figures_wrapped(APP_JS)
+
+
+def _check_valuation_history_table_value_column_is_figure(css_text: str) -> None:
+    # A <td> is display: table-cell by default; .figure's own
+    # display: inline-block would break the table's column layout if
+    # applied directly, so this column gets its own compound-selector rule
+    # instead of relying on .figure alone.
+    rule_match = re.search(
+        r"\.valuation-history-table td\.figure\s*\{([^}]*)\}", css_text, re.DOTALL
+    )
+    assert rule_match, ".valuation-history-table td.figure rule must be declared"
+    body = rule_match.group(1)
+    assert "var(--figure-font)" in body, "exact-value column must use var(--figure-font)"
+    assert "tabular-nums" in body, "exact-value column must set font-variant-numeric: tabular-nums"
+    assert "text-align: right" in body, "exact-value column must be text-align: right"
+
+
+def test_valuation_history_table_value_column_is_figure() -> None:
+    _check_valuation_history_table_value_column_is_figure(STYLES_CSS)
+
+
+_FUNDAMENTAL_RESEARCH_AUDIT_ITEM_RE = re.compile(
+    r"function fundamentalResearchAuditItem\(metric, history\) \{(.*?)\n\}", re.DOTALL
+)
+_RENDER_VALUATION_HISTORY_RE = re.compile(
+    r"function renderValuationHistory\(payload, "
+    r"\{ preserveSelection = false \} = \{\}\) \{(.*?)\n\}",
+    re.DOTALL,
+)
+_RENDER_VALUATION_HISTORY_RULE_RE = re.compile(
+    r"function renderValuationHistoryRule\(payload\) \{(.*?)\n\}", re.DOTALL
+)
+
+
+def _check_valuation_and_research_history_figures_wrapped(app_js: str) -> None:
+    audit_match = _FUNDAMENTAL_RESEARCH_AUDIT_ITEM_RE.search(app_js)
+    assert audit_match, "fundamentalResearchAuditItem must exist"
+    assert 'createElement("dd", "figure", value)' in audit_match.group(1), (
+        "fundamentalResearchAuditItem's exact-Decimal statistics must render "
+        "through the .figure utility class"
+    )
+
+    history_match = _RENDER_VALUATION_HISTORY_RE.search(app_js)
+    assert history_match, "renderValuationHistory must exist"
+    assert 'createElement("dd", "figure", value)' in history_match.group(1), (
+        "renderValuationHistory's series statistics must render through .figure"
+    )
+    assert 'createElement("td", "figure", point.value)' in history_match.group(1), (
+        "renderValuationHistory's history table exact-value column must render through .figure"
+    )
+
+    rule_match = _RENDER_VALUATION_HISTORY_RULE_RE.search(app_js)
+    assert rule_match, "renderValuationHistoryRule must exist"
+    assert 'createElement("dd", isFigure ? "figure" : "", value)' in rule_match.group(1), (
+        "renderValuationHistoryRule's numeric entries (Percentil, Puntos previos) "
+        "must render through .figure"
+    )
+
+
+def test_valuation_and_research_history_figures_use_the_figure_class() -> None:
+    _check_valuation_and_research_history_figures_wrapped(APP_JS)
 
 
 # ---------------------------------------------------------------------------
@@ -785,6 +878,16 @@ def test_probe_known_at_initial_placeholder_rule_catches_a_reintroduced_em_dash(
         _check_known_at_initial_placeholder(corrupted)
 
 
+def test_probe_var_reference_rule_catches_an_undeclared_token() -> None:
+    _check_every_var_reference_is_declared(STYLES_CSS, APP_JS, TOKENS_CSS)  # baseline: clean
+    corrupted_css = STYLES_CSS + "\n.probe { color: var(--totally-undeclared-token); }\n"
+    with pytest.raises(AssertionError):
+        _check_every_var_reference_is_declared(corrupted_css, APP_JS, TOKENS_CSS)
+    corrupted_js = APP_JS + '\ndesignToken("--also-undeclared");\n'
+    with pytest.raises(AssertionError):
+        _check_every_var_reference_is_declared(STYLES_CSS, corrupted_js, TOKENS_CSS)
+
+
 def test_probe_figure_class_rule_catches_a_missing_right_align() -> None:
     _check_figure_class_is_tabular_monospace_right_aligned(STYLES_CSS, "asset-price")  # baseline
     corrupted = re.sub(
@@ -821,3 +924,29 @@ def test_probe_theme_toggle_refresh_rule_catches_a_removed_capture_call() -> Non
     assert corrupted != APP_JS, "probe fixture did not remove the capture call"
     with pytest.raises(AssertionError):
         _check_theme_toggle_refreshes_sma_defaults(corrupted)
+
+
+def test_probe_valuation_history_table_figure_rule_catches_a_missing_right_align() -> None:
+    _check_valuation_history_table_value_column_is_figure(STYLES_CSS)  # baseline: clean
+    corrupted = re.sub(
+        r"(\.valuation-history-table td\.figure\s*\{[^}]*?)text-align: right;\n",
+        r"\1",
+        STYLES_CSS,
+        count=1,
+        flags=re.DOTALL,
+    )
+    assert corrupted != STYLES_CSS, "probe fixture did not remove text-align: right"
+    with pytest.raises(AssertionError):
+        _check_valuation_history_table_value_column_is_figure(corrupted)
+
+
+def test_probe_valuation_and_research_history_figures_rule_catches_an_unwrapped_value() -> None:
+    _check_valuation_and_research_history_figures_wrapped(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        'createElement("td", "figure", point.value)',
+        'createElement("td", "", point.value)',
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not unwrap the exact-value column"
+    with pytest.raises(AssertionError):
+        _check_valuation_and_research_history_figures_wrapped(corrupted)
