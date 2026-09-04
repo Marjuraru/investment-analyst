@@ -33,6 +33,9 @@ from investment_analyst.alerts.analytical_state import (
 from investment_analyst.alerts.candidate_notifications import CandidateNotificationStore
 from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagnosticReport
 from investment_analyst.analytics.aapl_daily_report_service import AaplDailyReportError
+from investment_analyst.analytics.cazatiburones.declared_activity_models import (
+    DeclaredActivityQueryResult,
+)
 from investment_analyst.analytics.consolidated_diagnostic_models import (
     ConsolidatedDiagnosticRequest,
 )
@@ -182,6 +185,9 @@ from investment_analyst.application.peru_registry import (
     BvlRegistryRefreshSummary,
 )
 from investment_analyst.application.runtime import ApplicationRuntimeError, StorageLocationRequest
+from investment_analyst.application.sec_document_timeline import (
+    SecDocumentTimelineApplicationError,
+)
 from investment_analyst.application.sec_fundamental_refresh import (
     SecIssuerFundamentalKnownAtTooEarlyError,
     SecIssuerFundamentalRefreshError,
@@ -191,6 +197,15 @@ from investment_analyst.application.sec_fundamental_refresh_models import (
     SecIssuerFundamentalRefreshSummary,
 )
 from investment_analyst.core.models import DataFrequency
+from investment_analyst.core.models.base import UTCDateTime
+from investment_analyst.evidence.sec_documents.timeline_models import (
+    SecDocumentTimelineQuery,
+    SecDocumentTimelineResult,
+)
+from investment_analyst.evidence.sec_institutional_observations.models import (
+    InstitutionalObservationQuery,
+    InstitutionalObservationQueryResult,
+)
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
 from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID as APPLE_ASSET_ID
 from investment_analyst.providers.macro.fred_alfred import FredApiKey
@@ -415,6 +430,34 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> CryptoDerivativesQueryResult:
         """Replay one persisted derivatives information set without writes."""
+        ...
+
+    def query_sec_document_timeline(
+        self,
+        query: SecDocumentTimelineQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> SecDocumentTimelineResult:
+        """Execute a point-in-time SEC document timeline query."""
+        ...
+
+    def query_cazatiburones_declared_activity(
+        self,
+        *,
+        asset_id: str,
+        known_at: UTCDateTime,
+        location: StorageLocationRequest,
+    ) -> DeclaredActivityQueryResult:
+        """Execute a point-in-time declared ownership activity query."""
+        ...
+
+    def query_cazatiburones_institutional_observations(
+        self,
+        query: InstitutionalObservationQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> InstitutionalObservationQueryResult:
+        """Execute a point-in-time institutional 13F observations query."""
         ...
 
     def query_listed_market_chart(
@@ -661,6 +704,22 @@ class _WebOperations(Protocol):
 
     def crypto_derivatives(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Return one bounded point-in-time Deribit derivatives query."""
+        ...
+
+    def sec_document_timeline(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return one bounded point-in-time SEC document timeline query."""
+        ...
+
+    def cazatiburones_declared_activity(
+        self, parameters: Mapping[str, tuple[str, ...]]
+    ) -> dict[str, object]:
+        """Return one bounded point-in-time declared activity query."""
+        ...
+
+    def cazatiburones_institutional_observations(
+        self, parameters: Mapping[str, tuple[str, ...]]
+    ) -> dict[str, object]:
+        """Return one bounded point-in-time institutional 13F observations query."""
         ...
 
     def valuation(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
@@ -947,6 +1006,39 @@ class AaplLocalController:
         """Query persisted derivatives evidence without providers or writer acquisition."""
         return self._application.query_crypto_derivatives(
             request,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+
+    def sec_document_timeline_request(
+        self,
+        query: SecDocumentTimelineQuery,
+    ) -> SecDocumentTimelineResult:
+        """Query persisted SEC document timeline without writes."""
+        return self._application.query_sec_document_timeline(
+            query,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+
+    def cazatiburones_declared_activity_request(
+        self,
+        *,
+        asset_id: str,
+        known_at: UTCDateTime,
+    ) -> DeclaredActivityQueryResult:
+        """Query persisted declared ownership activity without writes."""
+        return self._application.query_cazatiburones_declared_activity(
+            asset_id=asset_id,
+            known_at=known_at,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+
+    def cazatiburones_institutional_observations_request(
+        self,
+        query: InstitutionalObservationQuery,
+    ) -> InstitutionalObservationQueryResult:
+        """Query persisted institutional observations without writes."""
+        return self._application.query_cazatiburones_institutional_observations(
+            query,
             location=StorageLocationRequest(workspace=self._workspace),
         )
 
@@ -1747,6 +1839,113 @@ class AaplLocalWebApplication:
         )
         return self._controller.crypto_derivatives_request(request).to_json_dict()
 
+    def sec_document_timeline(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Validate and query the read-only point-in-time SEC document timeline."""
+        allowed = {
+            "known_at",
+            "asset_id",
+            "filer_cik",
+            "form",
+            "accession",
+            "available_from",
+            "available_to",
+            "limit",
+        }
+        if set(parameters) - allowed:
+            raise ValueError("sec document timeline query contains unsupported parameters")
+        known_at = _aware_datetime(_one_parameter(parameters, "known_at", required=True))
+        accession = _one_parameter(parameters, "accession", required=False)
+        available_from_raw = _one_parameter(parameters, "available_from", required=False)
+        available_from = (
+            date.fromisoformat(available_from_raw) if available_from_raw is not None else None
+        )
+        available_to_raw = _one_parameter(parameters, "available_to", required=False)
+        available_to = (
+            date.fromisoformat(available_to_raw) if available_to_raw is not None else None
+        )
+        limit_raw = _one_parameter(parameters, "limit", required=False)
+        limit = int(limit_raw) if limit_raw is not None else None
+        asset_ids = tuple(parameters.get("asset_id", ()))
+        for asset_id in asset_ids:
+            self._sec_asset_descriptor(asset_id)
+        filer_ciks = tuple(parameters.get("filer_cik", ()))
+        forms = tuple(parameters.get("form", ()))
+
+        query = SecDocumentTimelineQuery(
+            known_at=known_at,
+            asset_ids=asset_ids,
+            filer_ciks=filer_ciks,
+            forms=forms,
+            accession=accession,
+            available_from=available_from,
+            available_to=available_to,
+            limit=limit,
+        )
+        return self._controller.sec_document_timeline_request(query).model_dump(mode="json")
+
+    def cazatiburones_declared_activity(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Validate and query read-only point-in-time declared ownership activity."""
+        allowed = {"asset_id", "known_at"}
+        if set(parameters) - allowed:
+            raise ValueError("declared activity query contains unsupported parameters")
+        asset_id = _one_parameter(parameters, "asset_id", required=True)
+        self._sec_asset_descriptor(asset_id)
+        known_at = _aware_datetime(_one_parameter(parameters, "known_at", required=True))
+        return self._controller.cazatiburones_declared_activity_request(
+            asset_id=asset_id,
+            known_at=known_at,
+        ).model_dump(mode="json")
+
+    def cazatiburones_institutional_observations(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Validate and query read-only point-in-time institutional 13F observations."""
+        allowed = {
+            "asset_id",
+            "known_at",
+            "manager_cik",
+            "report_id",
+            "cusip",
+            "field_name",
+            "offset",
+            "limit",
+        }
+        if set(parameters) - allowed:
+            raise ValueError("institutional observations query contains unsupported parameters")
+        asset_id = _one_parameter(parameters, "asset_id", required=True)
+        self._sec_asset_descriptor(asset_id)
+        known_at = _aware_datetime(_one_parameter(parameters, "known_at", required=True))
+        manager_cik = _one_parameter(parameters, "manager_cik", required=False)
+        report_id_raw = _one_parameter(parameters, "report_id", required=False)
+        report_id = UUID(report_id_raw) if report_id_raw is not None else None
+        cusip = _one_parameter(parameters, "cusip", required=False)
+        field_name = _one_parameter(parameters, "field_name", required=False)
+        offset_raw = _one_parameter(parameters, "offset", required=False)
+        offset = int(offset_raw) if offset_raw is not None else 0
+        limit_raw = _one_parameter(parameters, "limit", required=False)
+        limit = int(limit_raw) if limit_raw is not None else 1000
+
+        query = InstitutionalObservationQuery(
+            asset_id=asset_id,
+            known_at=known_at,
+            manager_cik=manager_cik,
+            report_id=report_id,
+            cusip=cusip,
+            field_name=field_name,
+            offset=offset,
+            limit=limit,
+        )
+        return self._controller.cazatiburones_institutional_observations_request(query).model_dump(
+            mode="json"
+        )
+
     def valuation(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate and query the isolated latest-annual valuation contract."""
         allowed = {"asset_id", "known_at", "valuation_date", "basis"}
@@ -1976,6 +2175,19 @@ class AaplLocalWebApplication:
             raise ValueError("fundamental analysis is not available for asset_id")
         return descriptor
 
+    def _sec_asset_descriptor(self, asset_id: object) -> MarketAssetDescriptor:
+        """Resolve one visible corporate issuer with an enabled SEC presentation."""
+        try:
+            descriptor = self._market_asset(asset_id)
+        except ValueError as error:
+            raise ValueError(f"asset {asset_id!r} has no SEC configuration in catalog") from error
+        if (
+            not descriptor.has_fundamentals
+            or descriptor.analysis.fundamental_mode is not FundamentalAnalysisMode.CORPORATE
+        ):
+            raise ValueError(f"asset {asset_id!r} has no SEC configuration in catalog")
+        return descriptor
+
     @staticmethod
     def _require_fundamental_frequency(
         descriptor: MarketAssetDescriptor,
@@ -2153,6 +2365,30 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(HTTPStatus.OK, server.application.crypto_derivatives(parameters))
+                return
+            if parsed.path == "/api/v1/sec-document-timeline":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=50)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.sec_document_timeline(parameters),
+                )
+                return
+            if parsed.path == "/api/v1/cazatiburones/declared-activity":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.cazatiburones_declared_activity(parameters),
+                )
+                return
+            if parsed.path == "/api/v1/cazatiburones/institutional-observations":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=16)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.cazatiburones_institutional_observations(parameters),
+                )
                 return
             if parsed.path == "/api/v1/valuation":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
@@ -2407,7 +2643,7 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 "backtest_unavailable",
                 str(error)[:500],
             )
-        elif isinstance(error, ValueError):
+        elif isinstance(error, (ValueError, SecDocumentTimelineApplicationError)):
             self._send_error(HTTPStatus.BAD_REQUEST, "invalid_request", str(error)[:500])
         elif isinstance(
             error,

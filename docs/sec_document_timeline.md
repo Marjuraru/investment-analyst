@@ -43,10 +43,12 @@ sólo si `family == "asset_document"`.
 - **Ausencia explícita:** Si no existen coincidencias, el resultado reporta `state: "missing"` con cero
   entradas, evitando listas vacías ambiguas o ceros no tipados.
 
-## Operación y CLI
+## Operación, CLI y ruta HTTP local
 
 La consulta se ejecuta en modo estricto de solo lectura (`WorkspaceAccessMode.READ_ONLY`), no altera el
 almacenamiento y no requiere red ni credenciales.
+
+### CLI local
 
 Ejemplo de uso del CLI:
 
@@ -63,6 +65,25 @@ python scripts/query_sec_document_timeline.py \
   --limit 50
 ```
 
+### Ruta HTTP local
+
+La aplicación web local expone la consulta bajo demanda mediante:
+
+```text
+GET /api/v1/sec-document-timeline?known_at=2026-01-01T00:00:00Z&asset_id=equity:us:aapl&form=10-K&limit=50
+```
+
+Parámetros soportados:
+- `known_at`: corte point-in-time UTC obligatorio (ISO-8601).
+- `asset_id`: opcional múltiple; se valida que pertenezca a un activo corporativo con configuración SEC en el catálogo.
+- `filer_cik`: opcional múltiple; CIK de 10 dígitos normalizado.
+- `form`: opcional múltiple; Forms oficiales soportados en el corpus v1.
+- `accession`: opcional; formato de accession SEC `0000000000-00-000000`.
+- `available_from` y `available_to`: opcionales; fechas inclusivas `YYYY-MM-DD`.
+- `limit`: opcional; entero entre 1 y 1000.
+
+Cualquier parámetro no soportado o activo sin configuración SEC se rechaza con error acotado 400 (`invalid_request`).
+
 ## Fronteras y límites del producto
 
 Esta capa es estrictamente de lectura y evidencia. De forma explícita:
@@ -73,5 +94,5 @@ Esta capa es estrictamente de lectura y evidencia. De forma explícita:
   imprime ni lo retorna; solo expone metadatos verificables (`content_sha256`, `content_size_bytes`).
 - **No es señal ni analítica predictiva:** no calcula métricas, scores, rankings, percentiles, señales de
   inversión ni recomendaciones.
-- **No es interfaz:** no expone endpoints HTTP, ni vistas web ni interactividad con el usuario.
-- **No escribe:** no genera RawRecords, observaciones, métricas, eventos ni archivos en disco.
+- **No modifica ni escribe:** no genera RawRecords, observaciones, métricas, eventos ni archivos en disco.
+- **No altera contratos:** la ruta HTTP reutiliza exactamente `SecDocumentTimelineResult` sin añadir ni renombrar campos.

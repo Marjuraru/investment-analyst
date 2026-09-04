@@ -793,3 +793,30 @@ La regla histórica se solicita también bajo demanda. El usuario define métric
 Decimal y mínimo previo; el panel muestra estado trivaluado, fórmula de rango medio, cobertura,
 conteos, evidencia expandible y exportación JSON exacta. Describe contexto configurado y nunca
 "barato", "caro", compra, venta o recomendación.
+
+## Endpoints de lectura SEC y Cazatiburones por activo
+
+Se exponen tres rutas HTTP locales de solo lectura (`WorkspaceAccessMode.READ_ONLY`) que reutilizan
+verbatim los contratos de dominio existentes sin mutar almacenamiento, sin ejecutar refresh y sin
+agregar puntuaciones, veredictos ni rankings:
+
+1. `GET /api/v1/sec-document-timeline`:
+   - Parámetros: `known_at` (obligatorio, UTC), `asset_id` (opcional múltiple), `filer_cik` (opcional múltiple),
+     `form` (opcional múltiple), `accession` (opcional), `available_from` (opcional, fecha inclusiva `YYYY-MM-DD`),
+     `available_to` (opcional, fecha inclusiva `YYYY-MM-DD`), `limit` (opcional, entero 1..1000).
+   - Valida que cualquier `asset_id` tenga configuración SEC en el catálogo; de lo contrario falla con error acotado 400.
+   - Devuelve `SecDocumentTimelineResult` serializado como JSON estricto (`state`, `known_at`, `entries`, `matched_count`,
+     `returned_count`, `legacy_records_excluded`, `truncated`).
+2. `GET /api/v1/cazatiburones/declared-activity`:
+   - Parámetros: `asset_id` (obligatorio), `known_at` (obligatorio, UTC).
+   - Valida que `asset_id` corresponda a un emisor corporativo con configuración SEC en el catálogo.
+   - Devuelve `DeclaredActivityQueryResult` serializado como JSON estricto (`asset_id`, `known_at`, `insider_features`,
+     `beneficial_features`, `total_statements`, `truncated`).
+   - Las verticales de insiders y propiedad beneficiaria se mantienen separadas en listas disjuntas.
+   - Las métricas con valores Decimal se serializan exactamente sin pérdida de precisión ni conversión a float.
+3. `GET /api/v1/cazatiburones/institutional-observations`:
+   - Parámetros: `asset_id` (obligatorio), `known_at` (obligatorio, UTC), `manager_cik` (opcional), `report_id` (opcional UUID),
+     `cusip` (opcional), `field_name` (opcional), `offset` (opcional, por defecto 0), `limit` (opcional, por defecto 1000).
+   - Valida que `asset_id` corresponda a un emisor corporativo con configuración SEC en el catálogo.
+   - Devuelve `InstitutionalObservationQueryResult` paginado (`observations`, `total_matching`, `truncated`).
+   - Conserva la semántica as-filed de cada fila y referencia de correspondencia.
