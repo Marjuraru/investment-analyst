@@ -1321,6 +1321,26 @@ def _validate_authority_snapshot(
             raise GuardFailure(f"authority snapshot digest differs from base: {path}")
 
 
+def _validate_audit_independence(
+    build: MarkerResolution,
+    audit: MarkerResolution,
+    phase: str,
+) -> None:
+    if phase not in {"audit", "finalize"}:
+        return
+    if (
+        build.marker is None
+        or audit.marker is None
+        or build.marker.kind != "build-v2"
+        or audit.marker.kind != "audit-v2"
+    ):
+        return
+    if build.marker.block != audit.marker.block or build.marker.sha != audit.marker.sha:
+        return
+    if _normalize_lines(build.marker.payload) == _normalize_lines(audit.marker.payload):
+        raise GuardFailure("copied audit evidence payload is identical to build")
+
+
 def _classification(
     status: str, terminal: bool, owner: str | None, action: str
 ) -> BuildClassification:
@@ -1437,6 +1457,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
         if build.marker is None or build.marker.status != "PASS":
             raise GuardFailure("BUILD PASS marker is absent or not PASS")
         _validate_manifest_requirements(build.marker, manifest, snapshot, scope)
+        _validate_audit_independence(build, audit, phase)
         if phase == "audit":
             _validate_checks(snapshot)
             if snapshot.smoke.status not in {"PASS"} or not snapshot.smoke.evidence:

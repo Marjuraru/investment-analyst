@@ -26,9 +26,12 @@ from check_workflow_guards import (  # noqa: E402
     CommentSnapshot,
     GuardSnapshot,
     IssueSnapshot,
+    MarkerRecord,
+    MarkerResolution,
     PullRequestSnapshot,
     ScopeEvidence,
     SmokeSnapshot,
+    _validate_audit_independence,
     evaluate,
     parse_acceptance_manifest,
     parse_declared_scope,
@@ -115,17 +118,19 @@ def _marker(
     payload: str = "evidence=pass",
     sha: str = FULL_SHA,
     comment_id: int | None = None,
+    block: str = "DEV-7",
 ) -> CommentSnapshot:
     manifest = parse_acceptance_manifest(_body())
+    evidence_val = "unit" if role == "build" else "audit-verified"
     evidence = json.dumps(
-        {"items": [{"id": "A1", "verdict": "PASS", "evidence": {"live_probe:unit": "unit"}}]},
+        {"items": [{"id": "A1", "verdict": "PASS", "evidence": {"live_probe:unit": evidence_val}}]},
         separators=(",", ":"),
     )
     reviewer = "reviewer=gemini-fresh\n" if role == "audit" else ""
     return CommentSnapshot(
         comment_id if comment_id is not None else (10 if role == "build" else 11),
         f"<!-- development-workflow:{role}-v2\n"
-        f"block=DEV-7\nsha={sha}\nstatus={status}\n"
+        f"block={block}\nsha={sha}\nstatus={status}\n"
         f"manifest_sha256={manifest.digest}\n{reviewer}-->\n"
         f"{evidence if payload == 'evidence=pass' else payload}\n",
     )
@@ -154,11 +159,12 @@ def _structured_marker(
     sha: str = FULL_SHA,
 ) -> CommentSnapshot:
     manifest = parse_acceptance_manifest(body)
+    evidence_val = "verified" if role == "build" else "audit-verified"
     items = [
         {
             "id": item.item_id,
             "verdict": "PASS",
-            "evidence": {requirement: "verified" for requirement in item.requirements},
+            "evidence": {requirement: evidence_val for requirement in item.requirements},
         }
         for item in manifest.items
     ]
@@ -1033,3 +1039,220 @@ def test_product_writer_rejects_governance_and_governance_rejects_product() -> N
     )
     assert governance.decision == "GUARD FAILURE"
     assert "prohibited" in governance.reasons[0]
+
+
+def test_copied_audit_payload_fails_closed_in_audit_phase() -> None:
+    body = _body()
+    build_marker = _marker("build", payload="evidence=pass")
+    copied_audit = _marker("audit", payload=build_marker.body.partition("-->\n")[2])
+    snapshot = _snapshot(body=body, comments=(build_marker, copied_audit))
+    result = evaluate(snapshot, phase="audit")
+    assert result.decision == "GUARD FAILURE"
+    assert result.reasons == ("copied audit evidence payload is identical to build",)
+
+
+def test_copied_audit_payload_fails_closed_in_finalize_phase() -> None:
+    body = _body()
+    build_marker = _marker("build", payload="evidence=pass")
+    copied_audit = _marker("audit", payload=build_marker.body.partition("-->\n")[2])
+    snapshot = _snapshot(body=body, comments=(build_marker, copied_audit))
+    result = evaluate(snapshot, phase="finalize")
+    assert result.decision == "GUARD FAILURE"
+    assert result.reasons == ("copied audit evidence payload is identical to build",)
+
+
+def test_normalisation_does_not_mask_a_copied_payload() -> None:
+    body = _body()
+    raw_evidence = json.dumps(
+        {"items": [{"id": "A1", "verdict": "PASS", "evidence": {"live_probe:unit": "unit"}}]},
+        separators=(",", ":"),
+    )
+    build_payload = f"{raw_evidence}   \n"
+    audit_payload = f"{raw_evidence} \r\n\r\n"
+    build_marker = _marker("build", payload=build_payload)
+    audit_marker = _marker("audit", payload=audit_payload)
+    for phase in ("audit", "finalize"):
+        snapshot = _snapshot(body=body, comments=(build_marker, audit_marker))
+        result = evaluate(snapshot, phase=phase)
+        assert result.decision == "GUARD FAILURE"
+        assert result.reasons == ("copied audit evidence payload is identical to build",)
+    direct_build = MarkerResolution(
+        marker=MarkerRecord(
+            1, "build", None, "build-v2", "DEV-7", FULL_SHA, "PASS", None, build_payload, ()
+        ),
+        duplicates=(),
+    )
+    direct_audit = MarkerResolution(
+        marker=MarkerRecord(
+            2, "audit", None, "audit-v2", "DEV-7", FULL_SHA, "PASS", "auditor", audit_payload, ()
+        ),
+        duplicates=(),
+    )
+    with pytest.raises(ValueError, match="copied audit evidence payload is identical to build"):
+        _validate_audit_independence(direct_build, direct_audit, "audit")
+
+
+def test_independent_audit_payload_still_passes() -> None:
+    body = _body()
+    build_marker = _marker("build")
+    audit_marker = _marker("audit")
+    audit_snap = _snapshot(body=body, comments=(build_marker, audit_marker))
+    audit_result = evaluate(audit_snap, phase="audit")
+    assert audit_result.decision == "AUDIT GUARD PASS"
+    finalize_result = evaluate(audit_snap, phase="finalize")
+    assert finalize_result.decision == "AWAITING HUMAN APPROVAL"
+
+
+def test_rule_is_not_evaluated_in_build_phase() -> None:
+    body = _body()
+    build_marker = _marker("build", payload="evidence=pass")
+    copied_audit = _marker("audit", payload=build_marker.body.partition("-->\n")[2])
+    snapshot = _snapshot(body=body, comments=(build_marker, copied_audit))
+    result = evaluate(snapshot, phase="build")
+    assert result.decision == "READY"
+    assert result.classification.status == "READY"
+    assert "copied audit evidence payload is identical to build" not in result.reasons
+
+
+def test_rule_can_only_add_a_failure_never_produce_pass() -> None:
+    body = _body()
+    build_marker = _marker("build")
+    audit_marker = _marker("audit")
+    smoke_fail_snap = _snapshot(body=body, comments=(build_marker, audit_marker), smoke=None)
+    result = evaluate(smoke_fail_snap, phase="audit")
+    assert result.decision == "GUARD FAILURE"
+    assert "smoke" in result.reasons[0]
+
+    copied_audit = _marker("audit", payload=build_marker.body.partition("-->\n")[2])
+    copied_snap = _snapshot(body=body, comments=(build_marker, copied_audit))
+    copied_result = evaluate(copied_snap, phase="audit")
+    assert copied_result.decision == "GUARD FAILURE"
+    assert copied_result.reasons == ("copied audit evidence payload is identical to build",)
+
+
+def test_decision_uses_no_author_timestamp_or_similarity_heuristic() -> None:
+    body = _body()
+    manifest = parse_acceptance_manifest(body)
+    build_marker = _marker("build")
+    identical_audit = CommentSnapshot(
+        999,
+        f"<!-- development-workflow:audit-v2\nblock=DEV-7\nsha={FULL_SHA}\nstatus=PASS\n"
+        f"manifest_sha256={manifest.digest}\nreviewer=completely-different-reviewer\n-->\n"
+        f"{build_marker.body.partition('-->\n')[2]}",
+    )
+    snap_identical = _snapshot(body=body, comments=(build_marker, identical_audit))
+    assert evaluate(snap_identical, phase="audit").decision == "GUARD FAILURE"
+
+    distinct_payload = json.dumps(
+        {"items": [{"id": "A1", "verdict": "PASS", "evidence": {"live_probe:unit": "unit-audit"}}]},
+        separators=(",", ":"),
+    )
+    distinct_audit = _marker("audit", payload=distinct_payload)
+    snap_distinct = _snapshot(body=body, comments=(build_marker, distinct_audit))
+    assert evaluate(snap_distinct, phase="audit").decision == "AUDIT GUARD PASS"
+
+
+def test_failure_message_prints_no_payload() -> None:
+    body = _body()
+    secret_marker_payload = json.dumps(
+        {
+            "items": [
+                {
+                    "id": "A1",
+                    "verdict": "PASS",
+                    "evidence": {"live_probe:unit": "SUPER_SECRET_PAYLOAD_EVIDENCE_12345"},
+                }
+            ]
+        },
+        separators=(",", ":"),
+    )
+    build_marker = _marker("build", payload=secret_marker_payload)
+    copied_audit = _marker("audit", payload=secret_marker_payload)
+    snapshot = _snapshot(body=body, comments=(build_marker, copied_audit))
+    result = evaluate(snapshot, phase="audit")
+    assert result.decision == "GUARD FAILURE"
+    assert "SUPER_SECRET_PAYLOAD_EVIDENCE_12345" not in "".join(result.reasons)
+    assert result.reasons == ("copied audit evidence payload is identical to build",)
+
+
+def test_protocol_states_the_audit_independence_rule() -> None:
+    protocol = (ROOT / "docs" / "development_protocol.md").read_text(encoding="utf-8")
+    normalized = " ".join(protocol.split())
+    assert "La evidencia de AUDIT es una revisión propia e independiente" in normalized
+    assert "una copia de la de BUILD no es evidencia" in normalized
+    assert "payloads machine-owned normalizados son idénticos" in normalized
+
+
+def test_existing_workflow_guard_suite_still_passes() -> None:
+    body = _body()
+    build_marker = _marker("build")
+    audit_marker = _marker("audit")
+    snap = _snapshot(body=body, comments=(build_marker, audit_marker))
+    build_res = evaluate(snap, phase="build")
+    assert build_res.decision == "READY"
+    audit_res = evaluate(snap, phase="audit")
+    assert audit_res.decision == "AUDIT GUARD PASS"
+
+
+def test_json_mode_still_cannot_produce_pass() -> None:
+    body = _body()
+    snap = replace(_snapshot(body=body), source="json")
+    result = evaluate(snap, phase="audit")
+    assert result.decision == "NON_AUTHORITATIVE"
+    assert result.decision != "AUDIT GUARD PASS"
+    assert result.decision != "AUTO_FINALIZE_AUTHORIZED"
+    assert result.decision != "HUMAN_FINALIZE_AUTHORIZED"
+
+
+def test_sec_corpus_21_is_not_reopened_reverted_or_reaudited() -> None:
+    plan = (ROOT / "docs" / "basic_functional_release_plan.md").read_text(encoding="utf-8")
+    assert "#159" in plan
+    assert "SEC-CORPUS" in plan
+    assert "/api/v1/sec-document-timeline" in plan
+    assert "/api/v1/cazatiburones/declared-activity" in plan
+    assert "/api/v1/cazatiburones/institutional-observations" in plan
+
+    local_web = (ROOT / "src" / "investment_analyst" / "frontend" / "local_web.py").read_text(
+        encoding="utf-8"
+    )
+    assert "/api/v1/cazatiburones/declared-activity" in local_web
+    assert "/api/v1/cazatiburones/institutional-observations" in local_web
+    assert "/api/v1/sec-document-timeline" in local_web
+    assert "def sec_document_timeline(" in local_web
+    assert "def cazatiburones_declared_activity(" in local_web
+    assert "def cazatiburones_institutional_observations(" in local_web
+
+    test_web = (ROOT / "tests" / "integration" / "frontend" / "test_local_web.py").read_text(
+        encoding="utf-8"
+    )
+    assert "/api/v1/sec-document-timeline" in test_web
+    assert "/api/v1/cazatiburones/declared-activity" in test_web
+    assert "/api/v1/cazatiburones/institutional-observations" in test_web
+
+    status_proc = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "src/investment_analyst",
+            "tests/integration/frontend/test_local_web.py",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert status_proc.stdout.strip() == "", f"SEC-CORPUS files modified: {status_proc.stdout}"
+
+    revert_check = subprocess.run(
+        ["git", "log", "--grep=[Rr]evert.*SEC-CORPUS", "--oneline"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert revert_check.stdout.strip() == "", f"Unexpected revert found: {revert_check.stdout}"
+
+    sec_audit_marker = _marker("audit", block="SEC-CORPUS-21")
+    body = _body()
+    snap_sec = _snapshot(body=body, comments=(sec_audit_marker,))
+    res_sec = evaluate(snap_sec, phase="audit")
+    assert res_sec.decision == "GUARD FAILURE"

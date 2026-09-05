@@ -416,6 +416,13 @@ manifest_sha256=<SHA-256>
 `audit-v2` añade `reviewer=<EVIDENCE-METADATA>` y mantiene el mismo payload completo. Estos
 markers no sustituyen la inspección semántica del AUDIT.
 
+La evidencia de AUDIT es una revisión propia e independiente y una copia de la de BUILD no es
+evidencia. En `phase=audit` y `phase=finalize`, cuando existan un marker `build-v2` y un marker
+`audit-v2` activos para el mismo bloque y el mismo SHA completo, el guard falla cerrado si sus
+payloads machine-owned normalizados son idénticos. La igualdad se evalúa tras la misma normalización
+declarada para duplicados equivalentes y ninguna otra; sólo puede añadir un fallo, no se evalúa en
+`phase=build` y nunca utiliza autor, timestamp, modelo, cliente ni heurísticas de similitud.
+
 La clasificación BUILD expone `CONTINUE`, `FIX`, `WAIT/POLL`, `READY`, `BLOCKED` o `GUARD FAILURE`
 con `terminal`, `owner` y `next_action`. Sólo `READY`, un bloqueo externo demostrado de owner no
 BUILD y `GUARD FAILURE` son terminales. `HARNESS_INTERRUPTED` describe timeout, cancelación o fin
