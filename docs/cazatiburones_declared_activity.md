@@ -42,3 +42,23 @@ de elegir una arbitrariamente.
 
 No hay persistencia, umbrales, anomalías, eventos, candidatos, alertas, señales, recomendaciones,
 comparación con precio de mercado ni ratio contra acciones en circulación.
+
+## Ruta HTTP local
+
+La consulta se expone en la interfaz web local en modo de solo lectura mediante:
+
+```text
+GET /api/v1/cazatiburones/declared-activity?asset_id=equity:us:aapl&known_at=2026-07-16T15:47:00Z
+```
+
+Parámetros soportados:
+- `asset_id`: obligatorio; identifica un activo corporativo con configuración SEC en el catálogo.
+- `known_at`: obligatorio; corte point-in-time UTC (ISO-8601).
+
+Devuelve `DeclaredActivityQueryResult` (`asset_id`, `known_at`, `insider_features`, `beneficial_features`,
+`total_statements`, `truncated`). Las características de insiders y propiedad beneficiaria se entregan
+en listas separadas sin mezclar ni consolidar en una métrica única. Los valores de tipo Decimal se
+serializan sin conversión a float para preservar precisión exacta.
+
+Cualquier parámetro adicional, la omisión de parámetros obligatorios o activos sin configuración SEC
+se rechazan con error HTTP 400 (`invalid_request`).

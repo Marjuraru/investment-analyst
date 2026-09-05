@@ -9,6 +9,9 @@ from pydantic import ConfigDict, model_validator
 
 from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagnosticReport
 from investment_analyst.analytics.aapl_daily_report_service import AaplDailyReportService
+from investment_analyst.analytics.cazatiburones.declared_activity_models import (
+    DeclaredActivityQueryResult,
+)
 from investment_analyst.analytics.consolidated_diagnostic_models import (
     ConsolidatedDiagnosticRequest,
 )
@@ -130,6 +133,12 @@ from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshSummary,
 )
 from investment_analyst.application.btc_refresh_planner import BtcMarketRefreshPlanner
+from investment_analyst.application.cazatiburones_declared_activity import (
+    CazatiburonesDeclaredActivityApplication,
+)
+from investment_analyst.application.cazatiburones_institutional_observations import (
+    CazatiburonesInstitutionalObservationsApplication,
+)
 from investment_analyst.application.crypto_derivatives import (
     CryptoDerivativesRefreshService,
 )
@@ -168,6 +177,9 @@ from investment_analyst.application.peru_registry import (
     BvlRegistryUniverseService,
 )
 from investment_analyst.application.runtime import ApplicationRuntime, StorageLocationRequest
+from investment_analyst.application.sec_document_timeline import (
+    SecDocumentTimelineApplication,
+)
 from investment_analyst.application.sec_fundamental_refresh import (
     SecIssuerFundamentalRefreshPipeline,
 )
@@ -182,7 +194,15 @@ from investment_analyst.catalog.provider_configuration import (
     resolve_deribit_configuration,
     resolve_sec_configuration,
 )
-from investment_analyst.core.models.base import ContractModel
+from investment_analyst.core.models.base import ContractModel, UTCDateTime
+from investment_analyst.evidence.sec_documents.timeline_models import (
+    SecDocumentTimelineQuery,
+    SecDocumentTimelineResult,
+)
+from investment_analyst.evidence.sec_institutional_observations.models import (
+    InstitutionalObservationQuery,
+    InstitutionalObservationQueryResult,
+)
 from investment_analyst.providers.crypto.coinbase_exchange import CoinbaseExchangeClient
 from investment_analyst.providers.crypto.coinbase_pipeline import (
     CoinbaseHistoricalPipeline,
@@ -794,6 +814,44 @@ class InvestmentAnalystApplication:
                 end=end,
                 known_at=request.known_at,
             )
+
+    def query_sec_document_timeline(
+        self,
+        query: SecDocumentTimelineQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> SecDocumentTimelineResult:
+        """Execute a point-in-time SEC document timeline query."""
+        return SecDocumentTimelineApplication(self._runtime).query(
+            query=query,
+            location=location,
+        )
+
+    def query_cazatiburones_declared_activity(
+        self,
+        *,
+        asset_id: str,
+        known_at: UTCDateTime,
+        location: StorageLocationRequest,
+    ) -> DeclaredActivityQueryResult:
+        """Execute a point-in-time declared ownership activity query."""
+        return CazatiburonesDeclaredActivityApplication(self._runtime).query(
+            asset_id=asset_id,
+            known_at=known_at,
+            location=location,
+        )
+
+    def query_cazatiburones_institutional_observations(
+        self,
+        query: InstitutionalObservationQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> InstitutionalObservationQueryResult:
+        """Execute a point-in-time institutional 13F observations query."""
+        return CazatiburonesInstitutionalObservationsApplication(self._runtime).query(
+            query=query,
+            location=location,
+        )
 
     def refresh_listed_market(
         self,

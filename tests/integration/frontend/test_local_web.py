@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from investment_analyst.alerts.analytical_backtest import (
     AnalyticalBacktestRequest,
@@ -35,6 +36,13 @@ from investment_analyst.alerts.candidate_notifications import (
     notification_id,
 )
 from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagnosticReport
+from investment_analyst.analytics.cazatiburones.declared_activity_models import (
+    DeclaredActivityFeatureSet,
+    DeclaredActivityQueryResult,
+)
+from investment_analyst.analytics.cazatiburones.institutional_change_models import (
+    DescriptiveMetric,
+)
 from investment_analyst.analytics.consolidated_diagnostic_models import (
     ConsolidatedDiagnosticRequest,
 )
@@ -113,7 +121,9 @@ from investment_analyst.application.manual_operations import (
     ManualOperationQueue,
     ManualOperationStateStore,
 )
-from investment_analyst.application.market_universe import MarketAssetUniverse
+from investment_analyst.application.market_universe import (
+    MarketAssetUniverse,
+)
 from investment_analyst.application.multi_asset_scheduler import (
     MultiAssetScheduler,
     MultiAssetScheduleStateStore,
@@ -136,11 +146,23 @@ from investment_analyst.application.operational_models import (
     AaplOperationalHealth,
 )
 from investment_analyst.application.runtime import StorageLocationRequest
+from investment_analyst.application.sec_document_timeline import (
+    SecDocumentTimelineApplicationError,
+)
 from investment_analyst.application.sec_fundamental_refresh_models import (
     SecIssuerFundamentalRefreshRequest,
     SecIssuerFundamentalRefreshSummary,
 )
-from investment_analyst.core.models import DataFrequency
+from investment_analyst.core.models import DataFrequency, UTCDateTime
+from investment_analyst.evidence.sec_documents.timeline_models import (
+    SecDocumentTimelineEntry,
+    SecDocumentTimelineQuery,
+    SecDocumentTimelineResult,
+)
+from investment_analyst.evidence.sec_institutional_observations.models import (
+    InstitutionalObservationQuery,
+    InstitutionalObservationQueryResult,
+)
 from investment_analyst.frontend.local_web import (
     AaplLocalController,
     AaplLocalHttpServer,
@@ -254,6 +276,15 @@ class _FakeApplication:
         self.crypto_derivatives_locations: list[StorageLocationRequest] = []
         self.comparison_requests: list[MarketComparisonRequest] = []
         self.comparison_locations: list[StorageLocationRequest] = []
+        self.sec_document_timeline_queries: list[SecDocumentTimelineQuery] = []
+        self.sec_document_timeline_locations: list[StorageLocationRequest] = []
+        self.sec_document_timeline_result: SecDocumentTimelineResult | None = None
+        self.declared_activity_requests: list[tuple[str, UTCDateTime]] = []
+        self.declared_activity_locations: list[StorageLocationRequest] = []
+        self.declared_activity_result: DeclaredActivityQueryResult | None = None
+        self.institutional_observation_queries: list[InstitutionalObservationQuery] = []
+        self.institutional_observation_locations: list[StorageLocationRequest] = []
+        self.institutional_observation_result: InstitutionalObservationQueryResult | None = None
 
     def list_market_assets(self) -> MarketAssetUniverse:
         return InvestmentAnalystApplication.create_default().list_market_assets()
@@ -816,6 +847,62 @@ class _FakeApplication:
                     "traceability_verified": True,
                 }
             ),
+        )
+
+    def query_sec_document_timeline(
+        self,
+        query: SecDocumentTimelineQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> SecDocumentTimelineResult:
+        self.sec_document_timeline_queries.append(query)
+        self.sec_document_timeline_locations.append(location)
+        if self.sec_document_timeline_result is not None:
+            return self.sec_document_timeline_result
+        return SecDocumentTimelineResult(
+            state="missing",
+            known_at=query.known_at,
+            entries=(),
+            matched_count=0,
+            returned_count=0,
+            legacy_records_excluded=0,
+            truncated=False,
+        )
+
+    def query_cazatiburones_declared_activity(
+        self,
+        *,
+        asset_id: str,
+        known_at: UTCDateTime,
+        location: StorageLocationRequest,
+    ) -> DeclaredActivityQueryResult:
+        self.declared_activity_requests.append((asset_id, known_at))
+        self.declared_activity_locations.append(location)
+        if self.declared_activity_result is not None:
+            return self.declared_activity_result
+        return DeclaredActivityQueryResult(
+            asset_id=asset_id,
+            known_at=known_at,
+            insider_features=(),
+            beneficial_features=(),
+            total_statements=0,
+            truncated=False,
+        )
+
+    def query_cazatiburones_institutional_observations(
+        self,
+        query: InstitutionalObservationQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> InstitutionalObservationQueryResult:
+        self.institutional_observation_queries.append(query)
+        self.institutional_observation_locations.append(location)
+        if self.institutional_observation_result is not None:
+            return self.institutional_observation_result
+        return InstitutionalObservationQueryResult(
+            observations=(),
+            total_matching=0,
+            truncated=False,
         )
 
 
@@ -3245,3 +3332,637 @@ def test_market_comparison_api_accepts_repeated_assets_and_is_read_only(tmp_path
     assert application.comparison_locations[0].workspace == tmp_path / "workspace"
     assert invalid_status == 400
     assert invalid["error"]["code"] == "invalid_request"
+
+
+def test_sec_document_timeline_endpoint_reuses_contract_verbatim(tmp_path: Path) -> None:
+    application = _FakeApplication()
+    entry = SecDocumentTimelineEntry(
+        family="asset_document",
+        revision_id=UUID("00000000-0000-0000-0000-000000000001"),
+        asset_id="equity:us:aapl",
+        filer_cik="0000320193",
+        form="10-K",
+        accession="0000320193-23-000106",
+        document_name="aapl-20230930.htm",
+        filing_date=date(2023, 11, 3),
+        report_date=date(2023, 9, 30),
+        accepted_at=datetime(2023, 11, 3, 21, 0, 15, tzinfo=UTC),
+        available_at=datetime(2023, 11, 3, 21, 5, 0, tzinfo=UTC),
+        content_sha256="a" * 64,
+        content_size_bytes=1024,
+        source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019323000106/aapl-20230930.htm",
+        is_amendment=False,
+    )
+    application.sec_document_timeline_result = SecDocumentTimelineResult(
+        state="found",
+        known_at=datetime(2026, 7, 16, 15, 47, tzinfo=UTC),
+        entries=(entry,),
+        matched_count=1,
+        returned_count=1,
+        legacy_records_excluded=0,
+        truncated=False,
+    )
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    query = urlencode(
+        [
+            ("asset_id", "equity:us:aapl"),
+            ("known_at", "2026-07-16T15:47:00Z"),
+            ("form", "10-K"),
+            ("accession", "0000320193-23-000106"),
+            ("available_from", "2023-01-01"),
+            ("available_to", "2023-12-31"),
+            ("limit", "10"),
+        ]
+    )
+
+    with _server(web) as (_, root):
+        status, payload, _ = _json_request(Request(f"{root}/api/v1/sec-document-timeline?{query}"))
+
+    assert status == 200
+    assert payload["state"] == "found"
+    assert payload["known_at"] == "2026-07-16T15:47:00Z"
+    assert payload["matched_count"] == 1
+    assert payload["returned_count"] == 1
+    assert payload["legacy_records_excluded"] == 0
+    assert payload["truncated"] is False
+    assert len(payload["entries"]) == 1
+    assert payload["entries"][0]["accession"] == "0000320193-23-000106"
+    assert payload["entries"][0]["form"] == "10-K"
+
+    assert len(application.sec_document_timeline_queries) == 1
+    recorded = application.sec_document_timeline_queries[0]
+    assert recorded.asset_ids == ("equity:us:aapl",)
+    assert recorded.known_at == datetime(2026, 7, 16, 15, 47, tzinfo=UTC)
+    assert recorded.forms == ("10-K",)
+    assert recorded.accession == "0000320193-23-000106"
+    assert recorded.available_from == date(2023, 1, 1)
+    assert recorded.available_to == date(2023, 12, 31)
+    assert recorded.limit == 10
+    assert application.sec_document_timeline_locations[0].workspace == tmp_path / "workspace"
+
+
+def test_cazatiburones_declared_activity_endpoint_reuses_contract_verbatim_and_separates_families(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    metric = DescriptiveMetric(
+        key="holdings_delta",
+        status="available",
+        value=Decimal("12500.50"),
+    )
+    insider_feature = DeclaredActivityFeatureSet(
+        asset_id="equity:us:aapl",
+        family="insider_transaction",
+        participant_cik="0001234567",
+        form="4",
+        declared_nature="direct",
+        security_title="Common Stock",
+        table="non_derivative",
+        event_date=date(2026, 7, 10),
+        available_at=datetime(2026, 7, 11, 20, 0, tzinfo=UTC),
+        revision_ids=("rev-1",),
+        comparison_status="available",
+        metrics=(metric,),
+    )
+    beneficial_feature = DeclaredActivityFeatureSet(
+        asset_id="equity:us:aapl",
+        family="beneficial_ownership",
+        participant_cik="0009876543",
+        form="SC 13D",
+        declared_nature="beneficial",
+        security_title="Common Stock",
+        table="non_derivative",
+        event_date=date(2026, 7, 5),
+        available_at=datetime(2026, 7, 6, 20, 0, tzinfo=UTC),
+        revision_ids=("rev-2",),
+        comparison_status="available",
+        metrics=(),
+    )
+    application.declared_activity_result = DeclaredActivityQueryResult(
+        asset_id="equity:us:aapl",
+        known_at=datetime(2026, 7, 16, 15, 47, tzinfo=UTC),
+        insider_features=(insider_feature,),
+        beneficial_features=(beneficial_feature,),
+        total_statements=2,
+        truncated=False,
+    )
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    with _server(web) as (_, root):
+        status, payload, _ = _json_request(
+            Request(
+                f"{root}/api/v1/cazatiburones/declared-activity?asset_id=equity:us:aapl&known_at=2026-07-16T15:47:00Z"
+            )
+        )
+
+    assert status == 200
+    assert payload["asset_id"] == "equity:us:aapl"
+    assert payload["known_at"] == "2026-07-16T15:47:00Z"
+    assert len(payload["insider_features"]) == 1
+    assert len(payload["beneficial_features"]) == 1
+    assert payload["total_statements"] == 2
+    assert payload["truncated"] is False
+
+    # Insider and beneficial stay in separate structures
+    assert "insider_features" in payload
+    assert "beneficial_features" in payload
+    assert payload["insider_features"][0]["family"] == "insider_transaction"
+    assert payload["beneficial_features"][0]["family"] == "beneficial_ownership"
+
+    # Decimal serialized without float conversion
+    metric_val = payload["insider_features"][0]["metrics"][0]["value"]
+    assert isinstance(metric_val, str)
+    assert metric_val == "12500.50"
+
+    # No arbitrary aggregate score, verdict, or ranking
+    assert "score" not in payload
+    assert "verdict" not in payload
+    assert "ranking" not in payload
+    assert "rating" not in payload
+    assert "recommendation" not in payload
+
+    assert application.declared_activity_requests[0] == (
+        "equity:us:aapl",
+        datetime(2026, 7, 16, 15, 47, tzinfo=UTC),
+    )
+    assert application.declared_activity_locations[0].workspace == tmp_path / "workspace"
+
+
+def test_cazatiburones_institutional_observations_endpoint_is_asset_scoped_and_paginated(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    query = urlencode(
+        [
+            ("asset_id", "equity:us:aapl"),
+            ("known_at", "2026-07-16T15:47:00Z"),
+            ("manager_cik", "0001067983"),
+            ("cusip", "037833100"),
+            ("field_name", "sshPrnamt"),
+            ("offset", "10"),
+            ("limit", "50"),
+        ]
+    )
+
+    with _server(web) as (_, root):
+        status, payload, _ = _json_request(
+            Request(f"{root}/api/v1/cazatiburones/institutional-observations?{query}")
+        )
+
+    assert status == 200
+    assert payload["observations"] == []
+    assert payload["total_matching"] == 0
+    assert payload["truncated"] is False
+
+    assert len(application.institutional_observation_queries) == 1
+    recorded = application.institutional_observation_queries[0]
+    assert recorded.asset_id == "equity:us:aapl"
+    assert recorded.known_at == datetime(2026, 7, 16, 15, 47, tzinfo=UTC)
+    assert recorded.manager_cik == "0001067983"
+    assert recorded.cusip == "037833100"
+    assert recorded.field_name == "sshPrnamt"
+    assert recorded.offset == 10
+    assert recorded.limit == 50
+    assert application.institutional_observation_locations[0].workspace == tmp_path / "workspace"
+
+
+def test_cazatiburones_endpoints_reject_unsupported_parameters_and_missing_known_at(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    with _server(web) as (_, root):
+        # 1. Unsupported parameters
+        status, resp, _ = _json_request(
+            Request(
+                f"{root}/api/v1/sec-document-timeline?asset_id=equity:us:aapl&known_at=2026-07-16T15:47:00Z&extra_param=bad"
+            )
+        )
+        assert status == 400
+        assert resp["error"]["code"] == "invalid_request"
+        assert len(resp["error"]["message"]) <= 500
+
+        status, resp, _ = _json_request(
+            Request(
+                f"{root}/api/v1/cazatiburones/declared-activity?asset_id=equity:us:aapl&known_at=2026-07-16T15:47:00Z&extra=1"
+            )
+        )
+        assert status == 400
+        assert resp["error"]["code"] == "invalid_request"
+
+        status, resp, _ = _json_request(
+            Request(
+                f"{root}/api/v1/cazatiburones/institutional-observations?asset_id=equity:us:aapl&known_at=2026-07-16T15:47:00Z&unsupported=1"
+            )
+        )
+        assert status == 400
+        assert resp["error"]["code"] == "invalid_request"
+
+        # 2. Missing known_at
+        status, resp, _ = _json_request(
+            Request(f"{root}/api/v1/sec-document-timeline?asset_id=equity:us:aapl")
+        )
+        assert status == 400
+        assert resp["error"]["code"] == "invalid_request"
+
+        status, resp, _ = _json_request(
+            Request(f"{root}/api/v1/cazatiburones/declared-activity?asset_id=equity:us:aapl")
+        )
+        assert status == 400
+        assert resp["error"]["code"] == "invalid_request"
+
+        # 3. Naive datetime
+        status, resp, _ = _json_request(
+            Request(
+                f"{root}/api/v1/sec-document-timeline?asset_id=equity:us:aapl&known_at=2026-07-16T15:47:00"
+            )
+        )
+        assert status == 400
+        assert resp["error"]["code"] == "invalid_request"
+
+        # 4. SecDocumentTimelineApplicationError mapping
+        def _failing_query(*_args: object, **_kwargs: object) -> SecDocumentTimelineResult:
+            raise SecDocumentTimelineApplicationError("corrupt storage index")
+
+        application.query_sec_document_timeline = _failing_query  # type: ignore[assignment]
+        status, resp, _ = _json_request(
+            Request(
+                f"{root}/api/v1/sec-document-timeline?asset_id=equity:us:aapl&known_at=2026-07-16T15:47:00Z"
+            )
+        )
+        assert status == 400
+        assert resp["error"]["code"] == "invalid_request"
+
+
+def test_cazatiburones_endpoints_reject_asset_without_sec_configuration(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    with _server(web) as (_, root):
+        # crypto:btc-usd has no SEC configuration
+        status, resp, _ = _json_request(
+            Request(
+                f"{root}/api/v1/cazatiburones/declared-activity?asset_id=crypto:btc-usd&known_at=2026-07-16T15:47:00Z"
+            )
+        )
+        assert status == 400
+        assert resp["error"]["code"] == "invalid_request"
+        assert "has no SEC configuration in catalog" in resp["error"]["message"]
+
+        status, resp, _ = _json_request(
+            Request(
+                f"{root}/api/v1/cazatiburones/institutional-observations?asset_id=crypto:btc-usd&known_at=2026-07-16T15:47:00Z"
+            )
+        )
+        assert status == 400
+        assert resp["error"]["code"] == "invalid_request"
+        assert "has no SEC configuration in catalog" in resp["error"]["message"]
+
+        status, resp, _ = _json_request(
+            Request(
+                f"{root}/api/v1/sec-document-timeline?asset_id=crypto:btc-usd&known_at=2026-07-16T15:47:00Z"
+            )
+        )
+        assert status == 400
+        assert resp["error"]["code"] == "invalid_request"
+        assert "has no SEC configuration in catalog" in resp["error"]["message"]
+
+        # unknown asset
+        status, resp, _ = _json_request(
+            Request(
+                f"{root}/api/v1/cazatiburones/declared-activity?asset_id=equity:us:nonexistent&known_at=2026-07-16T15:47:00Z"
+            )
+        )
+        assert status == 400
+        assert resp["error"]["code"] == "invalid_request"
+
+
+def test_cazatiburones_endpoints_declare_absence_truncation_and_legacy_exclusion(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    application.sec_document_timeline_result = SecDocumentTimelineResult(
+        state="missing",
+        known_at=datetime(2026, 7, 16, 15, 47, tzinfo=UTC),
+        entries=(),
+        matched_count=0,
+        returned_count=0,
+        legacy_records_excluded=5,
+        truncated=False,
+    )
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    with _server(web) as (_, root):
+        status, payload, _ = _json_request(
+            Request(
+                f"{root}/api/v1/sec-document-timeline?asset_id=equity:us:aapl&known_at=2026-07-16T15:47:00Z"
+            )
+        )
+
+    assert status == 200
+    assert payload["state"] == "missing"
+    assert payload["matched_count"] == 0
+    assert payload["returned_count"] == 0
+    assert payload["legacy_records_excluded"] == 5
+    assert payload["truncated"] is False
+    assert payload["entries"] == []
+
+
+def test_cazatiburones_endpoints_are_strictly_read_only_and_preserve_workspace(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    with _server(web) as (_, root):
+        s1, _, _ = _json_request(
+            Request(
+                f"{root}/api/v1/sec-document-timeline?asset_id=equity:us:aapl&known_at=2026-07-16T15:47:00Z"
+            )
+        )
+        s2, _, _ = _json_request(
+            Request(
+                f"{root}/api/v1/cazatiburones/declared-activity?asset_id=equity:us:aapl&known_at=2026-07-16T15:47:00Z"
+            )
+        )
+        s3, _, _ = _json_request(
+            Request(
+                f"{root}/api/v1/cazatiburones/institutional-observations?asset_id=equity:us:aapl&known_at=2026-07-16T15:47:00Z"
+            )
+        )
+
+    assert s1 == 200
+    assert s2 == 200
+    assert s3 == 200
+
+    # No writes were triggered; only query lists populated
+    assert len(application.fundamental_refresh_requests) == 0
+    assert len(application.listed_refresh_requests) == 0
+    assert len(application.requests) == 0
+
+
+# =============================================================================
+# REGRESSION PROBES REQUIRED BY WORK BLOCK SEC-CORPUS-21
+# =============================================================================
+
+
+def test_probe_contract_modification_attempt_fails() -> None:
+    """Probe 1: Undeclared field or altered contract structure raises validation error."""
+    now = datetime.now(UTC)
+    with pytest.raises(ValidationError):
+        SecDocumentTimelineQuery(
+            known_at=now,
+            asset_ids=("equity:us:aapl",),
+            undeclared_field="illegal",  # type: ignore[call-arg]
+        )
+    with pytest.raises(ValidationError):
+        DeclaredActivityQueryResult(
+            asset_id="equity:us:aapl",
+            known_at=now,
+            insider_features=(),
+            beneficial_features=(),
+            total_statements=0,
+            truncated=False,
+            undeclared_field="illegal",  # type: ignore[call-arg]
+        )
+    with pytest.raises(ValidationError):
+        InstitutionalObservationQuery(
+            asset_id="equity:us:aapl",
+            known_at=now,
+            undeclared_field="illegal",  # type: ignore[call-arg]
+        )
+
+
+def test_probe_read_write_path_reachability_fails() -> None:
+    """Probe 2: Read-write path reachability fails; only read-only paths are reachable."""
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=Path("/tmp/fake-workspace"),
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    # Calling any of the 3 endpoints never invokes write operations or write access modes
+    web.sec_document_timeline(
+        {"asset_id": ("equity:us:aapl",), "known_at": ("2026-07-16T15:47:00Z",)}
+    )
+    web.cazatiburones_declared_activity(
+        {"asset_id": ("equity:us:aapl",), "known_at": ("2026-07-16T15:47:00Z",)}
+    )
+    web.cazatiburones_institutional_observations(
+        {"asset_id": ("equity:us:aapl",), "known_at": ("2026-07-16T15:47:00Z",)}
+    )
+
+    # All recorded queries passed through read-only controller methods
+    assert len(application.sec_document_timeline_queries) == 1
+    assert len(application.declared_activity_requests) == 1
+    assert len(application.institutional_observation_queries) == 1
+    # Verify no mutation methods on application were called
+    assert len(application.fundamental_refresh_requests) == 0
+
+
+def test_probe_date_range_converted_to_half_open_fails() -> None:
+    """Probe 3: Date range converted to half-open fails; dates remain inclusive date objects."""
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=Path("/tmp/fake-workspace"),
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    web.sec_document_timeline(
+        {
+            "asset_id": ("equity:us:aapl",),
+            "known_at": ("2026-07-16T15:47:00Z",),
+            "available_from": ("2026-01-01",),
+            "available_to": ("2026-07-10",),
+        }
+    )
+
+    query = application.sec_document_timeline_queries[0]
+    # available_from and available_to must be exact date objects,
+    # NOT converted to half-open timestamps
+    assert isinstance(query.available_from, date)
+    assert isinstance(query.available_to, date)
+    assert query.available_from == date(2026, 1, 1)
+    assert query.available_to == date(2026, 7, 10)
+    # If erroneously converted to half-open, available_to would be date(2026, 7, 11)
+    assert query.available_to != date(2026, 7, 11)
+    assert not isinstance(query.available_to, datetime)
+
+
+def test_probe_decimal_serialized_as_float_fails() -> None:
+    """Probe 4: Decimal serialized as float fails; Decimal precision is preserved."""
+    metric = DescriptiveMetric(
+        key="holdings_delta",
+        status="available",
+        value=Decimal("123456789012345.6789"),
+    )
+    dumped = metric.model_dump(mode="json")
+    serialized_json = json.dumps(dumped)
+
+    # Must be serialized as exact string representation without float conversion
+    assert isinstance(dumped["value"], str)
+    assert dumped["value"] == "123456789012345.6789"
+    # Ensure float conversion did not occur
+    assert '"123456789012345.6789"' in serialized_json
+    # Floats would lose precision or not be quoted
+    assert not isinstance(dumped["value"], float)
+
+
+def test_probe_merged_document_activity_families_fail() -> None:
+    """Probe 5: Merged document/activity families fail; families must remain separate."""
+    now = datetime.now(UTC)
+    # DeclaredActivityQueryResult requires separate insider_features and beneficial_features tuples
+    with pytest.raises(ValidationError):
+        DeclaredActivityQueryResult(
+            asset_id="equity:us:aapl",
+            known_at=now,
+            merged_features=(),  # type: ignore[call-arg]
+            total_statements=0,
+            truncated=False,
+        )
+
+    # SecDocumentTimelineEntry forbids cross-family leakage
+    with pytest.raises(ValueError, match="asset_id is required for asset_document family"):
+        SecDocumentTimelineEntry(
+            family="asset_document",
+            revision_id=UUID("00000000-0000-0000-0000-000000000001"),
+            asset_id=None,  # Invalid: asset_document requires asset_id
+            filer_cik="0000320193",
+            form="10-K",
+            accession="0000320193-23-000106",
+            document_name="doc.htm",
+            filing_date=date(2023, 11, 3),
+            accepted_at=now,
+            available_at=now,
+            content_sha256="a" * 64,
+            content_size_bytes=100,
+            source_url="https://sec.gov/doc.htm",
+            is_amendment=False,
+        )
+
+
+def test_probe_absence_emitted_as_zero_fails() -> None:
+    """Probe 6: Absence emitted as zero fails; absent evidence is declared as missing."""
+    now = datetime.now(UTC)
+    # A "found" state with 0 entries violates contract
+    with pytest.raises(ValueError, match="found result requires at least one matched entry"):
+        SecDocumentTimelineResult(
+            state="found",
+            known_at=now,
+            entries=(),
+            matched_count=0,
+            returned_count=0,
+            truncated=False,
+        )
+
+    # A "missing" state with non-zero matched entries violates contract
+    entry = SecDocumentTimelineEntry(
+        family="asset_document",
+        revision_id=UUID("00000000-0000-0000-0000-000000000001"),
+        asset_id="equity:us:aapl",
+        filer_cik="0000320193",
+        form="10-K",
+        accession="0000320193-23-000106",
+        document_name="doc.htm",
+        filing_date=date(2023, 11, 3),
+        accepted_at=now,
+        available_at=now,
+        content_sha256="a" * 64,
+        content_size_bytes=100,
+        source_url="https://sec.gov/doc.htm",
+        is_amendment=False,
+    )
+    with pytest.raises(ValueError, match="missing result cannot contain matched entries"):
+        SecDocumentTimelineResult(
+            state="missing",
+            known_at=now,
+            entries=(entry,),
+            matched_count=1,
+            returned_count=1,
+            truncated=False,
+        )
+
+
+def test_probe_extra_endpoint_outside_the_three_fails(tmp_path: Path) -> None:
+    """Probe 7: Extra endpoint outside the 3 fails; unapproved routes return 404."""
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    with _server(web) as (_, root):
+        for unapproved_path in [
+            "/api/v1/sec-document-timeline/aggregate",
+            "/api/v1/cazatiburones/aggregate",
+            "/api/v1/cazatiburones/score",
+            "/api/v1/cazatiburones/rankings",
+        ]:
+            status, resp, _ = _json_request(Request(f"{root}{unapproved_path}"))
+            assert status == 404
+            assert resp["error"]["code"] == "not_found"
