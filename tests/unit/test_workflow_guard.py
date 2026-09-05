@@ -118,6 +118,7 @@ def _marker(
     payload: str = "evidence=pass",
     sha: str = FULL_SHA,
     comment_id: int | None = None,
+    block: str = "DEV-7",
 ) -> CommentSnapshot:
     manifest = parse_acceptance_manifest(_body())
     evidence_val = "unit" if role == "build" else "audit-verified"
@@ -129,7 +130,7 @@ def _marker(
     return CommentSnapshot(
         comment_id if comment_id is not None else (10 if role == "build" else 11),
         f"<!-- development-workflow:{role}-v2\n"
-        f"block=DEV-7\nsha={sha}\nstatus={status}\n"
+        f"block={block}\nsha={sha}\nstatus={status}\n"
         f"manifest_sha256={manifest.digest}\n{reviewer}-->\n"
         f"{evidence if payload == 'evidence=pass' else payload}\n",
     )
@@ -1206,16 +1207,52 @@ def test_json_mode_still_cannot_produce_pass() -> None:
 def test_sec_corpus_21_is_not_reopened_reverted_or_reaudited() -> None:
     plan = (ROOT / "docs" / "basic_functional_release_plan.md").read_text(encoding="utf-8")
     assert "#159" in plan
+    assert "SEC-CORPUS" in plan
+    assert "/api/v1/sec-document-timeline" in plan
+    assert "/api/v1/cazatiburones/declared-activity" in plan
+    assert "/api/v1/cazatiburones/institutional-observations" in plan
+
     local_web = (ROOT / "src" / "investment_analyst" / "frontend" / "local_web.py").read_text(
         encoding="utf-8"
     )
     assert "/api/v1/cazatiburones/declared-activity" in local_web
     assert "/api/v1/cazatiburones/institutional-observations" in local_web
     assert "/api/v1/sec-document-timeline" in local_web
-    res = subprocess.run(
-        ["git", "log", "--grep=SEC-CORPUS-21", "-n", "1", "--oneline"],
+    assert "def sec_document_timeline(" in local_web
+    assert "def cazatiburones_declared_activity(" in local_web
+    assert "def cazatiburones_institutional_observations(" in local_web
+
+    test_web = (ROOT / "tests" / "integration" / "frontend" / "test_local_web.py").read_text(
+        encoding="utf-8"
+    )
+    assert "/api/v1/sec-document-timeline" in test_web
+    assert "/api/v1/cazatiburones/declared-activity" in test_web
+    assert "/api/v1/cazatiburones/institutional-observations" in test_web
+
+    status_proc = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "src/investment_analyst",
+            "tests/integration/frontend/test_local_web.py",
+        ],
         capture_output=True,
         text=True,
+        check=True,
     )
-    if res.returncode == 0 and res.stdout.strip():
-        assert "SEC-CORPUS-21" in res.stdout
+    assert status_proc.stdout.strip() == "", f"SEC-CORPUS files modified: {status_proc.stdout}"
+
+    revert_check = subprocess.run(
+        ["git", "log", "--grep=[Rr]evert.*SEC-CORPUS", "--oneline"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert revert_check.stdout.strip() == "", f"Unexpected revert found: {revert_check.stdout}"
+
+    sec_audit_marker = _marker("audit", block="SEC-CORPUS-21")
+    body = _body()
+    snap_sec = _snapshot(body=body, comments=(sec_audit_marker,))
+    res_sec = evaluate(snap_sec, phase="audit")
+    assert res_sec.decision == "GUARD FAILURE"
