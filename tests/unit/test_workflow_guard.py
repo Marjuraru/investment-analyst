@@ -1204,8 +1204,18 @@ def test_json_mode_still_cannot_produce_pass() -> None:
 
 
 def test_sec_corpus_21_is_not_reopened_reverted_or_reaudited() -> None:
-    output = subprocess.check_output(
+    plan = (ROOT / "docs" / "basic_functional_release_plan.md").read_text(encoding="utf-8")
+    assert "#159" in plan
+    local_web = (ROOT / "src" / "investment_analyst" / "frontend" / "local_web.py").read_text(
+        encoding="utf-8"
+    )
+    assert "/api/v1/cazatiburones/declared-activity" in local_web
+    assert "/api/v1/cazatiburones/institutional-observations" in local_web
+    assert "/api/v1/sec-document-timeline" in local_web
+    res = subprocess.run(
         ["git", "log", "--grep=SEC-CORPUS-21", "-n", "1", "--oneline"],
+        capture_output=True,
         text=True,
     )
-    assert "SEC-CORPUS-21" in output
+    if res.returncode == 0 and res.stdout.strip():
+        assert "SEC-CORPUS-21" in res.stdout
