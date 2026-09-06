@@ -128,28 +128,30 @@ def test_no_color_literal_in_app_js() -> None:
     assert _THEME_COLOR_JS_RE.search(APP_JS), "theme-color must be read from --canvas"
 
 
-def test_index_html_color_literals_are_the_declared_meta_and_favicon_exceptions() -> None:
-    stripped = _strip_exceptions(INDEX_HTML)
+def _check_index_html_literal_exceptions_match_the_declared_tokens(
+    index_html: str, tokens_css: str
+) -> None:
+    stripped = _strip_exceptions(index_html)
     leftover = _COLOR_LITERAL_RE.findall(stripped)
     assert not leftover, (
         f"color literal(s) in index.html outside the declared exceptions: {leftover}"
     )
 
-    blocks = _theme_blocks(TOKENS_CSS)
+    blocks = _theme_blocks(tokens_css)
     canvas_light = blocks["light"]["canvas"].lower()
     canvas_dark = blocks["dark"]["canvas"].lower()
-    meta_match = _THEME_COLOR_META_RE.search(INDEX_HTML)
+    meta_match = _THEME_COLOR_META_RE.search(index_html)
     assert meta_match, "index.html must declare an initial <meta name=theme-color>"
     assert meta_match.group(1).lower() == canvas_dark, (
         "static theme-color must equal --canvas (dark is the default data-theme)"
     )
 
-    icon_fills = {f"#{value.lower()}" for value in _ICON_FILL_RE.findall(INDEX_HTML)}
+    icon_fills = {f"#{value.lower()}" for value in _ICON_FILL_RE.findall(index_html)}
     assert canvas_dark in icon_fills, "favicon ink fill must equal dark --canvas"
     assert canvas_light != canvas_dark  # sanity: themes are genuinely distinct
 
     sma_inputs = {
-        input_name: value.lower() for input_name, value in _SMA_COLOR_INPUT_RE.findall(INDEX_HTML)
+        input_name: value.lower() for input_name, value in _SMA_COLOR_INPUT_RE.findall(index_html)
     }
     assert set(sma_inputs) == set(_SMA_TOKEN_BY_INPUT)
     for input_name, token_name in _SMA_TOKEN_BY_INPUT.items():
@@ -158,6 +160,10 @@ def test_index_html_color_literals_are_the_declared_meta_and_favicon_exceptions(
             "(dark is the default data-theme, and app.js overwrites this value "
             "from designToken() on load anyway)"
         )
+
+
+def test_index_html_color_literals_are_the_declared_meta_and_favicon_exceptions() -> None:
+    _check_index_html_literal_exceptions_match_the_declared_tokens(INDEX_HTML, TOKENS_CSS)
 
 
 # Every var(--x) reference in styles.css, and every designToken("--x") read
@@ -1483,6 +1489,238 @@ def test_shell_is_local_only_with_no_javascript_runner_or_dependency() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Canvas convergence (UI-3): the approved canvas's warm palette, its 1px-rule
+# surface grammar (no elevation, no rounded data surfaces), and its row
+# density, all expressed as tokens and verified as static contract rules --
+# same discipline as every rule above: no browser, no computed layout.
+# ---------------------------------------------------------------------------
+
+# Exempt from the warm (R >= G >= B) rule, by name, never by omission:
+# semantic-state families (color encodes direction/state, not temperature)
+# and the categorical chart/series family (colors must stay mutually
+# distinguishable from each other on the same chart, not warm relative to
+# each other). --series-close is deliberately NOT here: it is the single
+# primary price line, so it carries the warm accent language.
+_WARM_EXEMPT_TOKENS = frozenset(
+    {
+        "positive",
+        "positive-soft",
+        "positive-ink",
+        "warning",
+        "warning-soft",
+        "warning-ink",
+        "negative",
+        "negative-soft",
+        "negative-ink",
+        "blocked-ink",
+        "blocked-soft",
+        "series-sma-5",
+        "series-sma-20",
+        "series-sma-50",
+        "series-revenue",
+        "series-net-income",
+        "compare-series-1",
+        "compare-series-2",
+        "compare-series-3",
+        "compare-series-4",
+        "compare-series-5",
+    }
+)
+
+# Declared in tokens.css but not a color at all -- nothing to check.
+_NON_COLOR_TOKENS = frozenset(
+    {
+        "font-sans",
+        "figure-font",
+        "sidebar-width",
+        "canvas-gutter",
+        "canvas-row-gap",
+        "canvas-block-gap",
+        "canvas-density",
+        "row-height",
+        "row-padding-inline",
+        "row-rule-width",
+        "base-font-size",
+        "label-font-size",
+        "label-tracking",
+    }
+)
+
+_HEX_COLOR_VALUE_RE = re.compile(r"^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+_RGB_FUNC_VALUE_RE = re.compile(r"^rgba?\(\s*(\d+)\s+(\d+)\s+(\d+)(?:\s*/\s*[\d.]+%?)?\s*\)$")
+
+
+def _token_rgb(value: str) -> tuple[int, int, int] | None:
+    value = value.strip()
+    hex_match = _HEX_COLOR_VALUE_RE.match(value)
+    if hex_match:
+        digits = hex_match.group(1)
+        if len(digits) == 3:
+            digits = "".join(ch * 2 for ch in digits)
+        return tuple(int(digits[i : i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
+    rgb_match = _RGB_FUNC_VALUE_RE.match(value)
+    if rgb_match:
+        return tuple(int(part) for part in rgb_match.groups())  # type: ignore[return-value]
+    return None
+
+
+def _check_surface_ink_rule_and_accent_tokens_are_warm_in_both_themes(tokens_css: str) -> None:
+    blocks = _theme_blocks(tokens_css)
+    failures = []
+    for theme in ("light", "dark"):
+        for name, value in blocks[theme].items():
+            if name in _WARM_EXEMPT_TOKENS or name in _NON_COLOR_TOKENS:
+                continue
+            rgb = _token_rgb(value)
+            if rgb is None:
+                continue
+            r, g, b = rgb
+            if not (r >= g >= b):
+                failures.append((theme, name, value))
+    assert not failures, f"non-warm token(s), R>=G>=B violated: {failures}"
+
+
+def test_surface_ink_rule_and_accent_tokens_are_warm_in_both_themes() -> None:
+    _check_surface_ink_rule_and_accent_tokens_are_warm_in_both_themes(TOKENS_CSS)
+
+
+def _check_every_ink_level_meets_contrast_after_repalette(tokens_css: str) -> None:
+    blocks = _theme_blocks(tokens_css)
+    ink_pairs = tuple(
+        (level, surface)
+        for level in ("ink-strong", "ink", "muted-strong", "muted")
+        for surface in ("surface", "surface-subtle", "canvas")
+    )
+    for theme in ("light", "dark"):
+        _check_contrast_pairs(blocks[theme], ink_pairs)
+
+
+def test_every_ink_level_meets_contrast_after_repalette() -> None:
+    _check_every_ink_level_meets_contrast_after_repalette(TOKENS_CSS)
+
+
+# The approved canvas's box-shadow survivors: the rail brand mark's inset
+# highlight and the sidebar's active-board-bar inset indicator. A third
+# category the Work Block names -- the keyboard focus ring -- has zero live
+# instances in this file because focus is already expressed via `outline`
+# (a different property the shadow ban does not reach), not `box-shadow`.
+_SURVIVING_BOX_SHADOWS = (
+    "box-shadow: inset 0 1px var(--rail-overlay-strong);",
+    "box-shadow: inset 3px 0 var(--rail-active-bar);",
+)
+_EXPECTED_BOX_SHADOW_COUNT = len(_SURVIVING_BOX_SHADOWS)
+# Circular status/bullet points (status-dot, session-status-dot, badge
+# bullet, limitations bullet) plus native <input>/<select> form-control
+# styling (search input, interval select, SMA number/color inputs, chart
+# settings select, the global input/select base rule, and the screening
+# rule field select) -- the two categories the Work Block names as
+# border-radius survivors.
+_EXPECTED_BORDER_RADIUS_COUNT = 13
+
+
+def _check_data_surfaces_separate_with_rules_not_elevation(styles_css: str) -> None:
+    shadow_count = len(re.findall(r"box-shadow:", styles_css))
+    assert shadow_count == _EXPECTED_BOX_SHADOW_COUNT, (
+        f"expected exactly {_EXPECTED_BOX_SHADOW_COUNT} box-shadow declaration(s) "
+        f"(rail inset + active-board-bar inset), found {shadow_count}"
+    )
+    for survivor in _SURVIVING_BOX_SHADOWS:
+        assert survivor in styles_css, f"missing declared box-shadow survivor: {survivor!r}"
+    radius_count = len(re.findall(r"border-radius:", styles_css))
+    assert radius_count == _EXPECTED_BORDER_RADIUS_COUNT, (
+        f"expected exactly {_EXPECTED_BORDER_RADIUS_COUNT} border-radius declaration(s) "
+        f"(circular status points + native form controls), found {radius_count}"
+    )
+
+
+def test_data_surfaces_separate_with_rules_not_elevation() -> None:
+    _check_data_surfaces_separate_with_rules_not_elevation(STYLES_CSS)
+
+
+_ROW_DENSITY_TOKENS = (
+    "row-height",
+    "row-padding-inline",
+    "row-rule-width",
+    "base-font-size",
+    "label-font-size",
+    "label-tracking",
+)
+
+
+def _check_canvas_row_density_are_tokens_consumed_by_data_rows(
+    tokens_css: str, styles_css: str
+) -> None:
+    blocks = _theme_blocks(tokens_css)
+    for token in _ROW_DENSITY_TOKENS:
+        assert token in blocks["light"], f"--{token} must be declared in :root"
+        assert token in blocks["dark"], f'--{token} must be declared in :root[data-theme="dark"]'
+        assert blocks["light"][token] == blocks["dark"][token], (
+            f"--{token} is a layout value, theme-invariant like --sidebar-width"
+        )
+    for token in _ROW_DENSITY_TOKENS:
+        assert f"var(--{token})" in styles_css, (
+            f"--{token} must actually be consumed by a data row rule in styles.css"
+        )
+
+
+def test_canvas_row_density_are_tokens_consumed_by_data_rows() -> None:
+    _check_canvas_row_density_are_tokens_consumed_by_data_rows(TOKENS_CSS, STYLES_CSS)
+
+
+def _check_design_system_documentation_declares_the_canvas_convergence(doc_text: str) -> None:
+    normalized = re.sub(r"\s+", " ", doc_text).lower()
+    assert "r ≥ g ≥ b" in normalized or "r >= g >= b" in normalized, (
+        "the doc must state the mechanical warm-palette rule"
+    )
+    assert "series" in normalized and "distinguibles" in normalized, (
+        "the doc must name why the categorical chart/series family is exempt"
+    )
+    assert "ink4" in normalized or "ink 4" in normalized, (
+        "the doc must document the measured ink4 contrast deviation"
+    )
+    assert "4,5:1" in doc_text or "4.5:1" in doc_text
+    assert "retícula" in normalized and "4 px" in normalized, (
+        "the doc must record that the '4px grid' proposal is not what the canvas draws"
+    )
+    assert "ibm plex" in normalized, "the doc must keep declaring IBM Plex as deferred"
+
+
+def test_design_system_documentation_declares_the_canvas_convergence() -> None:
+    doc_path = (
+        Path(str(files("investment_analyst"))).parent.parent
+        / "docs"
+        / "local_interface_design_system.md"
+    )
+    _check_design_system_documentation_declares_the_canvas_convergence(
+        doc_path.read_text(encoding="utf-8")
+    )
+
+
+def _check_route_registers_canvas_convergence_and_reassigns_cazatiburones(doc_text: str) -> None:
+    assert re.search(r"\|\s*`LOCAL-INTERFACE`\s*\|\s*`PLANNED`\s*\|", doc_text), (
+        "LOCAL-INTERFACE must remain PLANNED; this block advances evidence, completes nothing"
+    )
+    assert re.search(r"\|\s*`SEC-CORPUS`\s*\|\s*`NEXT`\s*\|", doc_text), (
+        "SEC-CORPUS must remain the sole NEXT candidate"
+    )
+    normalized = re.sub(r"\s+", " ", doc_text).lower()
+    assert "cazatiburones" in normalized and "ui-4" in normalized, (
+        "the route must reassign the cazatiburones board connection to UI-4"
+    )
+
+
+def test_route_registers_canvas_convergence_and_reassigns_cazatiburones() -> None:
+    doc_path = (
+        Path(str(files("investment_analyst"))).parent.parent
+        / "docs"
+        / "basic_functional_release_plan.md"
+    )
+    _check_route_registers_canvas_convergence_and_reassigns_cazatiburones(
+        doc_path.read_text(encoding="utf-8")
+    )
+
+
+# ---------------------------------------------------------------------------
 # Regression probes: each rule above must fail on a deliberately corrupted
 # fixture, proving the checker is not vacuously true. Every probe below
 # calls the SAME `_check_*` function its declarative test calls -- against
@@ -1871,3 +2109,77 @@ def test_probe_shell_local_only_rule_catches_an_introduced_import() -> None:
     assert corrupted != APP_JS, "probe fixture did not inject an import"
     with pytest.raises(AssertionError):
         _check_shell_is_local_only_with_no_javascript_runner_or_dependency(corrupted)
+
+
+# ---------------------------------------------------------------------------
+# Canvas convergence (UI-3) probes
+# ---------------------------------------------------------------------------
+
+
+def test_probe_warm_palette_rule_catches_a_cool_hue_token() -> None:
+    _check_surface_ink_rule_and_accent_tokens_are_warm_in_both_themes(TOKENS_CSS)  # baseline: clean
+    corrupted = TOKENS_CSS.replace("--accent: #96570b;", "--accent: #0b5796;", 1)
+    assert corrupted != TOKENS_CSS, "probe fixture did not corrupt --accent"
+    with pytest.raises(AssertionError):
+        _check_surface_ink_rule_and_accent_tokens_are_warm_in_both_themes(corrupted)
+
+
+def test_probe_ink_level_contrast_rule_catches_a_low_contrast_correction() -> None:
+    _check_every_ink_level_meets_contrast_after_repalette(TOKENS_CSS)  # baseline: clean
+    corrupted = TOKENS_CSS.replace("--muted: #6d685e;", "--muted: #d9d5cc;", 1)
+    assert corrupted != TOKENS_CSS, "probe fixture did not corrupt --muted"
+    with pytest.raises(AssertionError):
+        _check_every_ink_level_meets_contrast_after_repalette(corrupted)
+
+
+def test_probe_surface_grammar_rule_catches_a_reintroduced_elevation() -> None:
+    _check_data_surfaces_separate_with_rules_not_elevation(STYLES_CSS)  # baseline: clean
+    corrupted = STYLES_CSS + "\n.probe-card {\n  box-shadow: 0 8px 30px rgb(0 0 0 / 10%);\n}\n"
+    assert corrupted != STYLES_CSS, "probe fixture did not add a box-shadow"
+    with pytest.raises(AssertionError):
+        _check_data_surfaces_separate_with_rules_not_elevation(corrupted)
+
+
+def test_probe_surface_grammar_rule_catches_a_reintroduced_radius() -> None:
+    _check_data_surfaces_separate_with_rules_not_elevation(STYLES_CSS)  # baseline: clean
+    corrupted = STYLES_CSS + "\n.probe-card {\n  border-radius: 12px;\n}\n"
+    assert corrupted != STYLES_CSS, "probe fixture did not add a border-radius"
+    with pytest.raises(AssertionError):
+        _check_data_surfaces_separate_with_rules_not_elevation(corrupted)
+
+
+def test_probe_row_density_rule_catches_a_hardcoded_row_height() -> None:
+    _check_canvas_row_density_are_tokens_consumed_by_data_rows(
+        TOKENS_CSS, STYLES_CSS
+    )  # baseline: clean
+    corrupted = STYLES_CSS.replace("height: var(--row-height);", "height: 25px;")
+    assert corrupted != STYLES_CSS, "probe fixture did not hardcode the row height"
+    with pytest.raises(AssertionError):
+        _check_canvas_row_density_are_tokens_consumed_by_data_rows(TOKENS_CSS, corrupted)
+
+
+def test_probe_pinned_literal_exception_rule_catches_a_stale_palette_value() -> None:
+    _check_index_html_literal_exceptions_match_the_declared_tokens(
+        INDEX_HTML, TOKENS_CSS
+    )  # baseline: clean
+    corrupted = INDEX_HTML.replace(
+        '<meta name="theme-color" content="#141310">',
+        '<meta name="theme-color" content="#0b111c">',
+        1,
+    )
+    assert corrupted != INDEX_HTML, "probe fixture did not reintroduce the stale theme-color"
+    with pytest.raises(AssertionError):
+        _check_index_html_literal_exceptions_match_the_declared_tokens(corrupted, TOKENS_CSS)
+
+
+def test_probe_external_network_rule_catches_a_web_font_link() -> None:
+    _check_no_external_reference(INDEX_HTML, label="index.html")  # baseline: clean
+    corrupted = INDEX_HTML.replace(
+        "</head>",
+        '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans">'
+        "</head>",
+        1,
+    )
+    assert corrupted != INDEX_HTML, "probe fixture did not add a web font link"
+    with pytest.raises(AssertionError):
+        _check_no_external_reference(corrupted, label="index.html")
