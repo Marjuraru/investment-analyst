@@ -1780,6 +1780,7 @@ def _check_document_timeline_exposes_revision_identity_and_coverage(app_js: str)
         "is_amendment",
         "available_at",
         "content_sha256",
+        "source_url",
         "matched_count",
         "returned_count",
         "legacy_records_excluded",
@@ -1790,6 +1791,25 @@ def _check_document_timeline_exposes_revision_identity_and_coverage(app_js: str)
 
 def test_document_timeline_exposes_revision_identity_and_coverage() -> None:
     _check_document_timeline_exposes_revision_identity_and_coverage(APP_JS)
+
+
+_TIMELINE_MISSING_PREFIX = (
+    '(payload.state === "missing" ? "Sin documentos SEC para el activo y corte '
+    'seleccionados · " : "") +'
+)
+
+
+def _check_document_timeline_shows_coverage_even_when_missing(app_js: str) -> None:
+    fn = _extract_js_function(app_js, "renderCazatiburonesDocumentTimeline")
+    assert _TIMELINE_MISSING_PREFIX in fn, (
+        "the four coverage counters (matched_count, returned_count, legacy_records_excluded, "
+        "truncated) must render unconditionally, including under state: 'missing' -- only the "
+        "absence phrasing may be conditional, never the counters themselves"
+    )
+
+
+def test_document_timeline_shows_coverage_even_when_missing() -> None:
+    _check_document_timeline_shows_coverage_even_when_missing(APP_JS)
 
 
 def _check_cazatiburones_board_uses_the_global_known_at_cut(index_html: str, app_js: str) -> None:
@@ -2514,3 +2534,19 @@ def test_probe_cazatiburones_known_at_change_rule_catches_a_removed_reload() -> 
     assert corrupted != APP_JS, "probe fixture did not remove the known_at-change reload"
     with pytest.raises(AssertionError):
         _check_cazatiburones_board_reloads_when_the_known_at_cut_changes(corrupted)
+
+
+def test_probe_document_timeline_missing_coverage_rule_catches_a_hidden_counter() -> None:
+    _check_document_timeline_shows_coverage_even_when_missing(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        _TIMELINE_MISSING_PREFIX,
+        (
+            'payload.state === "missing"\n'
+            '      ? "Sin documentos SEC para el activo y corte seleccionados"\n'
+            "      : "
+        ),
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not reintroduce the hidden-counter ternary"
+    with pytest.raises(AssertionError):
+        _check_document_timeline_shows_coverage_even_when_missing(corrupted)

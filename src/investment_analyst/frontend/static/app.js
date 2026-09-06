@@ -5953,17 +5953,21 @@ function renderCazatiburonesDocumentTimeline(payload) {
         `<dt>Disponible desde</dt><dd>${formatInstant(entry.available_at)}</dd>` +
         `<dt>Enmienda</dt><dd>${entry.is_amendment ? "Sí" : "No"}</dd>` +
         `<dt>SHA-256</dt><dd>${entry.content_sha256}</dd>` +
+        `<dt>Fuente</dt><dd>${entry.source_url}</dd>` +
         `</dl>`;
       container.append(row);
     }
   }
+  // The four coverage counters (matched_count, returned_count,
+  // legacy_records_excluded, truncated) are always present in the contract,
+  // including under state: "missing" -- they must stay visible there too,
+  // never hidden behind the absence phrasing.
   byId("cazatiburones-document-timeline-summary").innerHTML =
-    payload.state === "missing"
-      ? "Sin documentos SEC para el activo y corte seleccionados"
-      : `<span class="figure">${formatInteger(payload.returned_count)}</span> de ` +
-        `<span class="figure">${formatInteger(payload.matched_count)}</span> revisiones` +
-        ` · <span class="figure">${formatInteger(payload.legacy_records_excluded)}</span> legado excluido` +
-        (payload.truncated ? " · truncado" : "");
+    (payload.state === "missing" ? "Sin documentos SEC para el activo y corte seleccionados · " : "") +
+    `<span class="figure">${formatInteger(payload.returned_count)}</span> de ` +
+    `<span class="figure">${formatInteger(payload.matched_count)}</span> revisiones` +
+    ` · <span class="figure">${formatInteger(payload.legacy_records_excluded)}</span> legado excluido` +
+    (payload.truncated ? " · truncado" : "");
 }
 
 async function loadCazatiburonesBoard() {
