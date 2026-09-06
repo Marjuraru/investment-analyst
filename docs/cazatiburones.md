@@ -192,6 +192,11 @@ Los cambios institucionales descriptivos comparan cierres 13F del mismo gestor s
 resultados. Exponen deltas y concentración con `Decimal`, pero no umbrales, anomalías, eventos ni
 candidatos.
 
+La cartera pública efectiva 13F es una proyección efímera distinta: parte del cierre seleccionado,
+un `RESTATEMENT` reemplaza su conjunto y `NEW HOLDINGS` posterior lo suplementa bajo la política
+`sec-13f-composition-policy-v2` únicamente cuando cada contribuyente está completo. Conserva la
+trazabilidad literal de sus filas y falla cerrado si la cadena o los totales no son verificables.
+
 Cazatiburones tendrá una sección propia en la ficha del activo y una línea temporal. Sus reglas
 podrán crear candidatos por hechos explícitos —por ejemplo, un nuevo Schedule 13D o una transacción
 insider declarada—, pero no se combinarán con mercado o fundamentales en un score.
