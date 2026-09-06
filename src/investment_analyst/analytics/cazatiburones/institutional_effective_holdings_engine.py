@@ -1,8 +1,12 @@
 """Pure, deterministic composition of the public-effective 13F row set."""
 
-from investment_analyst.analytics.cazatiburones.institutional_composition_engine import resolve
-from investment_analyst.analytics.cazatiburones.institutional_composition_models import (
-    InstitutionalCompositionCandidate,
+from decimal import Decimal
+
+from investment_analyst.analytics.cazatiburones.institutional_composition_v2_engine import (
+    resolve_v2,
+)
+from investment_analyst.analytics.cazatiburones.institutional_composition_v2_models import (
+    InstitutionalCompositionV2Candidate,
 )
 from investment_analyst.analytics.cazatiburones.institutional_effective_holdings_models import (
     InstitutionalEffectiveContributor,
@@ -22,7 +26,7 @@ def compose(
 ) -> InstitutionalEffectiveHoldingsResult:
     visible = tuple(item for item in artifacts if item.available_at <= query.known_at)
     candidates = tuple(
-        InstitutionalCompositionCandidate(
+        InstitutionalCompositionV2Candidate(
             artifact_id=item.artifact_id,
             accession=item.accession,
             manager_cik=item.manager_cik,
@@ -34,11 +38,13 @@ def compose(
             declared_entry_total=item.declared_entry_total,
             declared_value_total=item.declared_value_total,
             observed_entry_total=len(item.rows),
-            observed_value_total=sum((row.value_as_reported for row in item.rows), start=0),
+            observed_value_total=sum(
+                (row.value_as_reported for row in item.rows), start=Decimal(0)
+            ),
         )
         for item in visible
     )
-    base = resolve(
+    base = resolve_v2(
         manager_cik=query.manager_cik,
         report_period=query.report_period,
         known_at=query.known_at,
@@ -49,21 +55,26 @@ def compose(
             "insufficient": "composition_insufficient",
             "ambiguous": "composition_ambiguous",
             "not_evaluable": "composition_not_evaluable",
-        }[base.status]
+        }.get(base.status, "composition_not_evaluable")
         return _unresolved(
-            query, base.status if base.status != "original_complete" else "not_evaluable", reason
+            query,
+            base.status
+            if base.status in {"insufficient", "ambiguous", "not_evaluable"}
+            else "not_evaluable",
+            reason,
         )
     originals = [item for item in visible if not item.is_amendment]
     if len(originals) != 1:
-        return _unresolved(query, "ambiguous", "composition_ambiguous")
+        status = "insufficient" if len(originals) == 0 else "ambiguous"
+        reason = "composition_insufficient" if len(originals) == 0 else "composition_ambiguous"
+        return _unresolved(query, status, reason)
     ordered = sorted(visible, key=lambda item: (item.available_at, item.accession))
     restatements = [item for item in ordered if item.amendment_type == "RESTATEMENT"]
     base_artifact = restatements[-1] if restatements else originals[0]
     supplements = [
         item
         for item in ordered
-        if item.amendment_type == "NEW HOLDINGS ENTRIES"
-        and item.available_at > base_artifact.available_at
+        if item.amendment_type == "NEW HOLDINGS" and item.available_at > base_artifact.available_at
     ]
     contributors = (base_artifact, *supplements)
     if any(not _complete(item) for item in contributors):
@@ -106,7 +117,8 @@ def _complete(item: InstitutionalHoldingsSemantics) -> bool:
         item.declared_entry_total is not None
         and item.declared_value_total is not None
         and item.declared_entry_total == len(item.rows)
-        and item.declared_value_total == sum((row.value_as_reported for row in item.rows), start=0)
+        and item.declared_value_total
+        == sum((row.value_as_reported for row in item.rows), start=Decimal(0))
     )
 
 
