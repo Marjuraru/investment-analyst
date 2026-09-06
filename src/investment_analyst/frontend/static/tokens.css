@@ -15,6 +15,21 @@
  * not-applicable, overdue, blocked) never collapse into each other or into
  * zero. Their tokens are grouped below; the shape/label that makes each one
  * distinguishable without color lives in styles.css (.absence-mark rules).
+ *
+ * Canvas convergence (UI-3): every surface, ink, rule and accent token below
+ * is warm -- R >= G >= B on its own RGB channels, in both themes, with zero
+ * exception -- matching the approved canvas. Two families are explicitly
+ * exempt, by name, never by omission: the four semantic-state families
+ * (--positive, --warning, --negative, --blocked-ink and their -soft/-ink
+ * pairs) because their color encodes direction/state, not brand
+ * temperature, exactly as the canvas itself leaves them; and the
+ * categorical chart/series family (--series-sma-5/20/50, --series-revenue,
+ * --series-net-income, --compare-series-1..5) because those exist
+ * specifically to stay mutually DISTINGUISHABLE from each other on the same
+ * chart -- collapsing five comparison lines or three SMA windows into
+ * shades of one hue would destroy the exact legibility they exist for.
+ * --series-close is NOT exempt: it is the single primary price line, so it
+ * carries the warm accent language like any other singular UI accent.
  */
 
 :root {
@@ -25,35 +40,43 @@
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --figure-font: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
-  /* Ink ramp */
-  --ink: #182230;
-  --ink-strong: #0b1220;
-  --muted: #5f6b7a;
-  --muted-strong: #455466;
+  /* Ink ramp. --muted is the corrected canvas "ink4": the canvas literal
+     failed 4.5:1 against every one of its own surfaces (see
+     local_interface_design_system.md for the measured ratios), so this
+     keeps its hue and raises luminance until it clears the threshold. */
+  --ink-strong: #17150f;
+  --ink: #332f28;
+  --muted-strong: #5a554b;
+  --muted: #6d685e;
 
-  /* Surfaces */
-  --canvas: #f3f5f7;
+  /* Surfaces. --surface stays pure white (already R=G=B, already warm):
+     the canvas's own light artboard has no separate "surface" token, only
+     "paper" (--canvas below) and "sunken" (--surface-subtle), so the
+     pre-existing lighter-than-canvas relationship is kept. */
+  --canvas: #fbfaf8;
   --surface: #ffffff;
-  --surface-subtle: #f8fafb;
-  --surface-dark: #101827;
-  --surface-dark-raised: #172235;
+  --surface-subtle: #f2efe9;
+  --surface-dark: #171310;
+  --surface-dark-raised: #241f18;
 
   /* Rules */
-  --line: #dce2e8;
-  --line-strong: #c8d0d9;
-  --line-soft: #e8ecef;
+  --line: #e0dbd2;
+  --line-strong: #c6bfb3;
+  --line-soft: #ece7de;
 
   /* Accent */
-  --accent: #176b87;
-  --accent-dark: #0e526a;
-  --accent-soft: #e4f2f6;
-  --on-accent: #ffffff;
+  --accent: #96570b;
+  --accent-dark: #7a4708;
+  --accent-soft: #f4e8d5;
+  --on-accent: #fffaf2;
 
-  /* Focus */
-  --focus: #2d7ff9;
-  --on-focus: #0b1220;
+  /* Focus: a distinct warm hue from --accent so a focus ring never reads as
+     "just another button", kept warm like every other token here. */
+  --focus: #c2700f;
+  --on-focus: #0d0904;
 
-  /* Semantic: positive / warning / negative */
+  /* Semantic: positive / warning / negative -- exempt from the warm rule
+     by name (see file header); values unchanged by this block. */
   --positive: #167657;
   --positive-soft: #e5f4ee;
   --positive-ink: #0d684b;
@@ -63,27 +86,29 @@
   --negative: #b33b45;
   --negative-soft: #fcebed;
   --negative-ink: #9e2934;
-  --neutral-soft: #edf1f4;
-  --neutral-ink: #566575;
+  --neutral-soft: #efece5;
+  --neutral-ink: #5f594e;
 
   /* Absence grammar: blocked (missing/not-evaluable/not-applicable/overdue
      reuse the neutral, muted, line and warning tokens above with distinct
-     shapes; blocked is the one state without an existing equivalent) */
+     shapes; blocked is the one state without an existing equivalent) --
+     exempt from the warm rule by name, values unchanged by this block. */
   --blocked-ink: #6b3fa0;
   --blocked-soft: #f1e9fb;
 
   /* Controls */
-  --control-hover: #e9eef2;
+  --control-hover: #efe9de;
   --topbar: rgb(255 255 255 / 92%);
-  --shadow: 0 8px 30px rgb(16 24 39 / 6%);
-  --shadow-accent: 0 4px 12px rgb(23 107 135 / 18%);
 
-  /* Charts */
-  --chart-grid: #e5e9ed;
-  --chart-axis: #748191;
-  --chart-volume: #d8e1e7;
-  --chart-selection: #526172;
-  --series-close: #176b87;
+  /* Charts: grid/axis/volume/selection are chrome (rule/ink equivalents
+     for the SVG chart), warm like the rest of the shell. series-close is
+     the single primary price line -- warm too. The SMA/revenue/net-income/
+     compare-series family is the named categorical exemption above. */
+  --chart-grid: #e0dbd2;
+  --chart-axis: #5a554b;
+  --chart-volume: #e0d5c3;
+  --chart-selection: #332f28;
+  --series-close: #96570b;
   --series-sma-5: #ca6d21;
   --series-sma-20: #7567aa;
   --series-sma-50: #b84d81;
@@ -99,14 +124,14 @@
      theme, so its ink and overlay tokens hold the same value in both
      theme blocks below. */
   --rail-ink-strong: #ffffff;
-  --rail-ink-base: #d5dce6;
-  --rail-ink: #aeb9c7;
-  --rail-ink-muted: #9ba9ba;
-  --rail-ink-quiet: #8190a3;
-  --rail-ink-faint: #7a92a8;
-  --rail-accent-start: #2380a0;
-  --rail-accent-end: #15566f;
-  --rail-active-bar: #4fa2bc;
+  --rail-ink-base: #e3ddd0;
+  --rail-ink: #c7bda8;
+  --rail-ink-muted: #b0a690;
+  --rail-ink-quiet: #96897a;
+  --rail-ink-faint: #8a7d68;
+  --rail-accent-start: #a86a1a;
+  --rail-accent-end: #6b3f0a;
+  --rail-active-bar: #d9922f;
   --rail-overlay-weak: rgb(255 255 255 / 6%);
   --rail-overlay: rgb(255 255 255 / 10%);
   --rail-overlay-strong: rgb(255 255 255 / 18%);
@@ -114,10 +139,11 @@
 
   /* Code/report surfaces: always rendered on --surface-dark regardless of
      theme, so these are also theme-invariant. */
-  --code-ink: #dce6f1;
-  --code-border: #26364c;
+  --code-ink: #e6ded0;
+  --code-border: #332c22;
 
-  --sidebar-width: 212px;
+  /* Rail width: 158px in the approved canvas (was 212px). */
+  --sidebar-width: 158px;
 
   /* Canvas grid + density (UI-2 board shell): rem/clamp layout values, not
      colors, but declared under the same single-declaration/dual-theme
@@ -128,6 +154,18 @@
   --canvas-row-gap: 0.75rem;
   --canvas-block-gap: 1.55rem;
   --canvas-density: 1.42;
+
+  /* Row density (UI-3 canvas convergence): the approved canvas's data-row
+     metrics -- 25px row height, a 1px rule separator (never elevation), 4px
+     horizontal row padding, a 12px typographic base and a 9.5px uppercase
+     label with .09em tracking. Theme-invariant like every layout token
+     above. */
+  --row-height: 25px;
+  --row-padding-inline: 4px;
+  --row-rule-width: 1px;
+  --base-font-size: 12px;
+  --label-font-size: 9.5px;
+  --label-tracking: 0.09em;
 }
 
 :root[data-theme="dark"] {
@@ -136,28 +174,28 @@
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --figure-font: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
-  --ink: #cbd5e1;
-  --ink-strong: #f1f5f9;
-  --muted: #91a0b3;
-  --muted-strong: #b1bdcc;
+  --ink-strong: #f4f0e9;
+  --ink: #d6d0c2;
+  --muted-strong: #a89f8f;
+  --muted: #8a8275;
 
-  --canvas: #0b111c;
-  --surface: #111a28;
-  --surface-subtle: #162131;
-  --surface-dark: #080d16;
-  --surface-dark-raised: #172438;
+  --canvas: #141310;
+  --surface: #1c1a17;
+  --surface-subtle: #1a1712;
+  --surface-dark: #171310;
+  --surface-dark-raised: #241f18;
 
-  --line: #273548;
-  --line-strong: #3a4a60;
-  --line-soft: #223044;
+  --line: #2e2b26;
+  --line-strong: #3d3930;
+  --line-soft: #242119;
 
-  --accent: #58b2ca;
-  --accent-dark: #7cc7da;
-  --accent-soft: #173747;
-  --on-accent: #080d16;
+  --accent: #e0a03d;
+  --accent-dark: #f0b565;
+  --accent-soft: #3a2a12;
+  --on-accent: #241a0a;
 
-  --focus: #74aaff;
-  --on-focus: #0b1220;
+  --focus: #e8a13a;
+  --on-focus: #1c1204;
 
   --positive: #62c6a1;
   --positive-soft: #15382f;
@@ -168,22 +206,20 @@
   --negative: #e47f88;
   --negative-soft: #45232a;
   --negative-ink: #f09aa2;
-  --neutral-soft: #253244;
-  --neutral-ink: #c1ccda;
+  --neutral-soft: #2b2721;
+  --neutral-ink: #c7c0b0;
 
   --blocked-ink: #c9a3ec;
   --blocked-soft: #2c2140;
 
-  --control-hover: #223044;
-  --topbar: rgb(17 26 40 / 96%);
-  --shadow: 0 10px 34px rgb(0 0 0 / 24%);
-  --shadow-accent: 0 4px 14px rgb(88 178 202 / 22%);
+  --control-hover: #242019;
+  --topbar: rgb(20 19 16 / 96%);
 
-  --chart-grid: #263549;
-  --chart-axis: #8190a3;
-  --chart-volume: #33465a;
-  --chart-selection: #9eb0c4;
-  --series-close: #4db1cf;
+  --chart-grid: #3d3930;
+  --chart-axis: #a89f8f;
+  --chart-volume: #3a3225;
+  --chart-selection: #d6d0c2;
+  --series-close: #e0a03d;
   --series-sma-5: #e29951;
   --series-sma-20: #a695df;
   --series-sma-50: #d778aa;
@@ -196,26 +232,33 @@
   --compare-series-5: #bd6284;
 
   --rail-ink-strong: #ffffff;
-  --rail-ink-base: #d5dce6;
-  --rail-ink: #aeb9c7;
-  --rail-ink-muted: #9ba9ba;
-  --rail-ink-quiet: #8190a3;
-  --rail-ink-faint: #7a92a8;
-  --rail-accent-start: #2380a0;
-  --rail-accent-end: #15566f;
-  --rail-active-bar: #4fa2bc;
+  --rail-ink-base: #e3ddd0;
+  --rail-ink: #c7bda8;
+  --rail-ink-muted: #b0a690;
+  --rail-ink-quiet: #96897a;
+  --rail-ink-faint: #8a7d68;
+  --rail-accent-start: #a86a1a;
+  --rail-accent-end: #6b3f0a;
+  --rail-active-bar: #d9922f;
   --rail-overlay-weak: rgb(255 255 255 / 6%);
   --rail-overlay: rgb(255 255 255 / 10%);
   --rail-overlay-strong: rgb(255 255 255 / 18%);
   --rail-border-overlay: rgb(255 255 255 / 22%);
 
-  --code-ink: #dce6f1;
-  --code-border: #26364c;
+  --code-ink: #e6ded0;
+  --code-border: #332c22;
 
-  --sidebar-width: 212px;
+  --sidebar-width: 158px;
 
   --canvas-gutter: clamp(1.1rem, 3vw, 2.25rem);
   --canvas-row-gap: 0.75rem;
   --canvas-block-gap: 1.55rem;
   --canvas-density: 1.42;
+
+  --row-height: 25px;
+  --row-padding-inline: 4px;
+  --row-rule-width: 1px;
+  --base-font-size: 12px;
+  --label-font-size: 9.5px;
+  --label-tracking: 0.09em;
 }

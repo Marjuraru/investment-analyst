@@ -87,7 +87,6 @@ h4 {
   top: 0.75rem;
   left: 0.75rem;
   padding: 0.75rem 1rem;
-  border-radius: 8px;
   background: var(--focus);
   color: var(--on-focus);
   font-weight: 750;
@@ -142,7 +141,6 @@ h4 {
   height: 38px;
   place-items: center;
   border: 1px solid var(--rail-border-overlay);
-  border-radius: 10px;
   background: linear-gradient(145deg, var(--rail-accent-start), var(--rail-accent-end));
   box-shadow: inset 0 1px var(--rail-overlay-strong);
   font-size: 0.75rem;
@@ -173,7 +171,6 @@ h4 {
   border: none;
   cursor: pointer;
   padding: 0.35rem;
-  border-radius: 6px;
   display: grid;
   place-items: center;
   flex-shrink: 0;
@@ -215,7 +212,6 @@ h4 {
   gap: 0.75rem;
   min-height: 38px;
   padding: 0.45rem 0.65rem;
-  border-radius: 9px;
   color: var(--rail-ink);
   font-size: 0.88rem;
   font-weight: 650;
@@ -310,7 +306,6 @@ h4 {
 .asset-avatar {
   width: 58px;
   height: 58px;
-  border-radius: 14px;
   flex-shrink: 0;
 }
 
@@ -343,7 +338,6 @@ h4 {
   color: var(--muted-strong);
   border: 1px solid var(--line);
   padding: 0.15rem 0.35rem;
-  border-radius: 6px;
   background: var(--surface-subtle);
   flex-shrink: 0;
 }
@@ -425,8 +419,6 @@ h4 {
   overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  box-shadow: var(--shadow);
   list-style: none;
   padding: 0.25rem 0;
   margin: 0;
@@ -482,7 +474,6 @@ h4 {
   height: 36px;
   padding: 0;
   border: 1px solid var(--line-strong);
-  border-radius: 8px;
   background: var(--surface);
   color: var(--muted-strong);
   cursor: pointer;
@@ -554,9 +545,7 @@ section {
   margin-top: 0;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 9px;
   background: var(--surface);
-  box-shadow: var(--shadow);
 }
 
 .status-card {
@@ -586,7 +575,6 @@ section {
   height: 7px;
   border-radius: 50%;
   background: var(--chart-axis);
-  box-shadow: 0 0 0 3px var(--neutral-soft);
 }
 
 .status-card strong,
@@ -607,9 +595,7 @@ section {
 .preferences-panel {
   margin-top: 0.75rem;
   border: 1px solid var(--line);
-  border-radius: 9px;
   background: var(--surface);
-  box-shadow: var(--shadow);
 }
 
 .preferences-panel > summary {
@@ -650,7 +636,6 @@ section {
 .preferences-table {
   overflow-x: auto;
   border: 1px solid var(--line-soft);
-  border-radius: 7px;
 }
 
 .preferences-heading,
@@ -810,7 +795,6 @@ section {
   margin-left: 0.85rem;
   padding: 0.2rem 0.55rem;
   border: 1px dashed var(--accent);
-  border-radius: 6px;
   background: var(--accent-soft);
 }
 
@@ -847,7 +831,6 @@ section {
   display: inline-flex;
   align-items: center;
   width: fit-content;
-  border-radius: 999px;
   font-weight: 740;
   white-space: nowrap;
 }
@@ -891,20 +874,17 @@ section {
   min-height: 44px;
   padding: 0.68rem 1rem;
   border: 1px solid transparent;
-  border-radius: 8px;
   cursor: pointer;
   font-weight: 720;
   transition:
     background-color 120ms ease,
-    border-color 120ms ease,
-    box-shadow 120ms ease;
+    border-color 120ms ease;
 }
 
 .button.primary {
   border-color: var(--accent);
   background: var(--accent);
   color: var(--on-accent);
-  box-shadow: var(--shadow-accent);
 }
 
 .button.primary:hover {
@@ -943,7 +923,6 @@ section {
   margin: 1rem 0;
   padding: 0.8rem 1rem;
   border: 1px solid var(--positive);
-  border-radius: 9px;
   background: var(--positive-soft);
   color: var(--positive-ink);
   font-size: 0.82rem;
@@ -980,7 +959,6 @@ section {
   margin-top: 1rem;
   padding: 1.1rem 1.25rem;
   border: 1px dashed var(--line-strong);
-  border-radius: 12px;
   background: var(--surface-subtle);
 }
 
@@ -991,7 +969,6 @@ section {
   height: 34px;
   place-items: center;
   border: 1px solid var(--line-strong);
-  border-radius: 9px;
   background: var(--surface);
   color: var(--muted-strong);
   font-size: 1rem;
@@ -1031,9 +1008,7 @@ section {
 .crypto-derivatives-card {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 12px;
   background: var(--surface);
-  box-shadow: var(--shadow);
 }
 
 .crypto-derivatives-card > summary {
@@ -1131,9 +1106,7 @@ section {
 .market-chart-card {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 12px;
   background: var(--surface);
-  box-shadow: var(--shadow);
 }
 
 .market-chart-header {
@@ -1274,7 +1247,6 @@ section {
   display: inline-flex;
   padding: 2px;
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
   background: var(--surface-subtle);
 }
 
@@ -1282,7 +1254,6 @@ section {
   min-height: 26px;
   padding: 0.25rem 0.48rem;
   border: 0;
-  border-radius: 4px;
   background: transparent;
   color: var(--muted-strong);
   cursor: pointer;
@@ -1330,7 +1301,6 @@ section {
   min-height: 32px;
   padding: 0.4rem 0.58rem;
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
   background: var(--surface-subtle);
   color: var(--accent-dark);
   cursor: pointer;
@@ -1359,9 +1329,7 @@ section {
   gap: 0.55rem;
   padding: 0.7rem;
   border: 1px solid var(--line-strong);
-  border-radius: 8px;
   background: var(--surface);
-  box-shadow: var(--shadow);
 }
 
 .chart-settings-panel > label {
@@ -1422,7 +1390,6 @@ section {
   min-height: 32px;
   padding: 0.35rem 0.55rem;
   border: 1px solid var(--line-strong);
-  border-radius: 5px;
   background: var(--surface-subtle);
   color: var(--muted-strong);
   cursor: pointer;
@@ -1447,7 +1414,6 @@ section {
   min-height: 32px;
   padding: 0.32rem 0.58rem;
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
   background: var(--surface-subtle);
   color: var(--accent-dark);
   cursor: pointer;
@@ -1488,7 +1454,6 @@ section {
   min-height: 30px;
   padding: 0.25rem 0.45rem;
   border: 1px solid transparent;
-  border-radius: 6px;
 }
 
 .series-toggle {
@@ -1782,7 +1747,6 @@ section {
   align-items: center;
   min-height: 24px;
   padding: 0.2rem 0.45rem;
-  border-radius: 999px;
   background: var(--neutral-soft);
   color: var(--muted-strong);
   font-size: 0.58rem;
@@ -1818,7 +1782,6 @@ section {
   gap: 0.35rem;
   min-height: 22px;
   padding: 0.15rem 0.5rem;
-  border-radius: 6px;
   border: 1px solid transparent;
   font-size: 0.68rem;
   font-weight: 700;
@@ -1912,7 +1875,6 @@ section {
   margin: 0;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 7px;
   background: var(--line);
 }
 
@@ -1957,7 +1919,6 @@ section {
   margin: 1rem 1.25rem;
   padding: 1rem;
   border: 1px solid var(--line);
-  border-radius: 8px;
   background: var(--surface-subtle);
   color: var(--muted-strong);
   font-size: 0.78rem;
@@ -2011,10 +1972,12 @@ section {
 
 .chart-table-scroll th,
 .chart-table-scroll td {
-  padding: 0.6rem 1rem;
-  border-bottom: 1px solid var(--line-soft);
+  height: var(--row-height);
+  padding: 0 var(--row-padding-inline);
+  border-bottom: var(--row-rule-width) solid var(--line);
   font-family: var(--figure-font);
   font-variant-numeric: tabular-nums;
+  font-size: var(--base-font-size);
   text-align: right;
   white-space: nowrap;
 }
@@ -2030,8 +1993,8 @@ section {
   top: 0;
   background: var(--surface-subtle);
   color: var(--muted-strong);
-  font-size: 0.62rem;
-  letter-spacing: 0.035em;
+  font-size: var(--label-font-size);
+  letter-spacing: var(--label-tracking);
   text-transform: uppercase;
 }
 
@@ -2051,9 +2014,7 @@ section {
 .fundamental-trend-card {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 12px;
   background: var(--surface);
-  box-shadow: var(--shadow);
 }
 
 .fundamental-trend-header {
@@ -2074,7 +2035,6 @@ section {
   gap: 0.15rem;
   padding: 0.2rem;
   border: 1px solid var(--line);
-  border-radius: 9px;
   background: var(--surface-subtle);
 }
 
@@ -2082,7 +2042,6 @@ section {
   min-height: 32px;
   padding: 0.32rem 0.65rem;
   border: 0;
-  border-radius: 7px;
   background: transparent;
   color: var(--muted-strong);
   cursor: pointer;
@@ -2098,7 +2057,6 @@ section {
 .frequency-button.active {
   background: var(--surface-dark-raised);
   color: var(--rail-ink-strong);
-  box-shadow: var(--shadow);
 }
 
 .frequency-button:disabled {
@@ -2304,7 +2262,6 @@ section {
   flex: 0 0 auto;
   padding: 0.24rem 0.42rem;
   border: 1px solid var(--line);
-  border-radius: 999px;
   color: var(--muted-strong);
   background: var(--surface);
   font-size: 0.53rem;
@@ -2357,7 +2314,6 @@ section {
   gap: 1px;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 7px;
   background: var(--line);
 }
 
@@ -2498,7 +2454,6 @@ section {
   margin: 0.1rem 0;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 6px;
   background: var(--line);
 }
 
@@ -2583,9 +2538,7 @@ section {
 .query-panel {
   padding: 1.1rem;
   border: 1px solid var(--line);
-  border-radius: 12px;
   background: var(--surface);
-  box-shadow: var(--shadow);
 }
 
 .query-main {
@@ -2685,9 +2638,7 @@ input::placeholder {
 .diagnostic-card,
 .trace-card {
   border: 1px solid var(--line);
-  border-radius: 12px;
   background: var(--surface);
-  box-shadow: var(--shadow);
 }
 
 .diagnostic-card {
@@ -2791,7 +2742,6 @@ input::placeholder {
   min-width: 0;
   padding: 0.65rem;
   border: 1px solid var(--chart-grid);
-  border-radius: 8px;
   background: var(--surface-subtle);
 }
 
@@ -2943,7 +2893,6 @@ input::placeholder {
 
 code {
   padding: 0.1rem 0.25rem;
-  border-radius: 4px;
   background: var(--neutral-soft);
   color: var(--neutral-ink);
   font-family: var(--figure-font);
@@ -2955,7 +2904,6 @@ pre {
   margin: 0.75rem 0 0;
   padding: 1rem;
   border: 1px solid var(--code-border);
-  border-radius: 9px;
   background: var(--surface-dark);
   color: var(--code-ink);
   font-family: var(--figure-font);
@@ -2968,9 +2916,7 @@ pre {
 .operation-panel {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 12px;
   background: var(--surface);
-  box-shadow: var(--shadow);
 }
 
 .alert-inbox-panel,
@@ -3007,7 +2953,6 @@ pre {
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 9px;
   background: var(--surface);
 }
 
@@ -3040,7 +2985,6 @@ pre {
   flex: 0 0 auto;
   padding: 0.16rem 0.4rem;
   border: 1px solid var(--line);
-  border-radius: 999px;
   color: var(--muted);
   font-size: 0.58rem;
   font-weight: 720;
@@ -3085,7 +3029,6 @@ pre {
   margin: 0;
   padding: 0.55rem;
   border: 1px solid var(--line);
-  border-radius: 7px;
 }
 
 .screening-condition legend {
@@ -3122,7 +3065,6 @@ pre {
   min-height: 46px;
   padding: 0.55rem;
   border: 1px solid var(--line);
-  border-radius: 7px;
   background: var(--surface-subtle);
 }
 
@@ -3139,7 +3081,6 @@ pre {
   gap: 1px;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 6px;
   background: var(--line);
 }
 
@@ -3195,7 +3136,6 @@ pre {
   padding: 0.6rem 0.7rem;
   border: 1px solid var(--line);
   border-left: 3px solid var(--negative);
-  border-radius: 8px;
   background: var(--surface);
 }
 
@@ -3216,7 +3156,6 @@ pre {
 .candidate-condition-list li {
   padding: 0.2rem 0.4rem;
   border: 1px solid var(--line);
-  border-radius: 6px;
   color: var(--muted-strong);
   font-size: 0.62rem;
 }
@@ -3255,7 +3194,6 @@ pre {
   align-self: start;
   padding: 0.12rem 0.38rem;
   border: 1px solid var(--line);
-  border-radius: 999px;
   color: var(--muted-strong);
   font-size: 0.58rem;
   font-weight: 700;
@@ -3283,7 +3221,6 @@ pre {
   min-height: 26px;
   padding: 0.25rem 0.55rem;
   border: 1px solid var(--line);
-  border-radius: 6px;
   background: var(--surface-subtle);
   color: var(--muted-strong);
   font: inherit;
@@ -3457,9 +3394,7 @@ footer p:last-child {
 .valuation-card {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 10px;
   background: var(--surface);
-  box-shadow: var(--shadow);
 }
 
 .valuation-header {
@@ -3636,8 +3571,10 @@ footer p:last-child {
 
 .valuation-history-table th,
 .valuation-history-table td {
-  padding: 0.45rem;
-  border: 1px solid var(--line-soft);
+  height: var(--row-height);
+  padding: 0 var(--row-padding-inline);
+  border-bottom: var(--row-rule-width) solid var(--line);
+  font-size: var(--base-font-size);
   overflow-wrap: anywhere;
   text-align: left;
 }
@@ -3654,9 +3591,6 @@ footer p:last-child {
 }
 
 @media (max-width: 1080px) {
-  :root {
-    --sidebar-width: 190px;
-  }
   .market-workbench {
     grid-template-columns: 1fr;
   }

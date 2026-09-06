@@ -18,6 +18,14 @@ function designToken(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+// Categorical/decorative: --compare-series-1..5 (read here) and
+// --series-sma-5/20/50 below stay outside UI-3's warm-canvas repalette on
+// purpose. They exist to stay mutually DISTINGUISHABLE from each other on
+// the same chart; collapsing five comparison lines or three SMA windows
+// into shades of one warm hue would destroy the exact legibility they
+// exist for. --series-close is not exempt -- it is the single primary
+// price line, so it carries the warm accent language like every other
+// singular UI accent.
 const COMPARISON_PALETTE = Object.freeze([
   "--compare-series-1",
   "--compare-series-2",

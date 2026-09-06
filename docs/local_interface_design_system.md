@@ -86,12 +86,14 @@ JavaScript.
 
 ## Densidad
 
-Retícula base de 4 px; filas de tabla de 25 px; una regla de 1 px
-(`--line`/`--line-soft`) reemplaza la sombra de tarjeta en la mayoría de
-los separadores (el par `--shadow`/`--shadow-accent` que queda se reserva
-para superficies genuinamente elevadas y flotantes — una lista
-desplegable, un botón primario — no para el marco general de una
-tarjeta).
+Filas de tabla de 25 px con `padding:0 4px` y una regla de 1 px
+(`--line`) como único separador; base tipográfica de 12 px; etiqueta de
+9,5 px en versal con `letter-spacing:.09em`. Ver «Convergencia con el
+lienzo (`UI-3`)» abajo para el origen de estos valores y por qué la
+«retícula de 4 px» que proponía el sistema original **no** es lo que el
+lienzo aprobado dibuja. Los tokens `--shadow`/`--shadow-accent` de la
+versión anterior de este documento ya no existen: `UI-3` retira la
+elevación decorativa por completo (ver esa misma sección).
 
 ## Gramática de ausencia
 
@@ -247,6 +249,106 @@ La división de JavaScript y CSS por componentes (punto 5.4 de
 bloque: el registro de tableros crea la costura que la abaratará, pero
 hacerla aquí habría duplicado el tamaño de un diff que ya mueve toda la
 superficie.
+
+## Convergencia con el lienzo (`UI-3`)
+
+`UI-1` entregó el contrato del sistema visual y `UI-2` el armazón de seis
+tableros; ninguno de los dos cambió el lenguaje visual del interior de las
+secciones. `UI-3` sustituye ese lenguaje por el del lienzo aprobado, sin
+mover una sola sección y sin tocar el servidor: es una migración de
+presentación, verificable por contrato estático.
+
+### Regla mecánica: R ≥ G ≥ B
+
+Todo token de superficie, ink, regla y acento declarado en `tokens.css`
+cumple **R ≥ G ≥ B** sobre sus propios canales RGB, en ambos temas, sin una
+sola excepción silenciosa. Dos familias quedan explícitamente exentas, por
+nombre, nunca por omisión:
+
+- **Los cuatro estados semánticos** — `--positive`, `--warning`,
+  `--negative`, `--blocked-ink` y sus pares `-soft`/`-ink`. Su color
+  significa dirección o estado, no temperatura de marca, y el lienzo
+  tampoco los hace cálidos.
+- **La familia categórica de gráfico** — `--series-sma-5/20/50`,
+  `--series-revenue`, `--series-net-income` y `--compare-series-1..5`.
+  Estos colores existen para permanecer **mutuamente distinguibles** entre
+  sí sobre el mismo gráfico: colapsar cinco series de comparación o tres
+  ventanas SMA en tonos de un solo matiz destruiría exactamente la
+  legibilidad para la que existen. `--series-close` **no** está exenta: es
+  la única línea de precio primaria, así que lleva el mismo lenguaje de
+  acento cálido que cualquier otro acento singular de la interfaz.
+
+### Contraste conservado, con la desviación de `ink4` declarada
+
+Los cuatro niveles de la rampa de ink (`--ink-strong`, `--ink`,
+`--muted-strong`, `--muted`) siguen alcanzando 4,5:1 contra `--surface`,
+`--surface-subtle` y `--canvas` en ambos temas — el contrato ya integrado
+por `UI-1` pasa **sin modificarse**. El cuarto nivel (`--muted`, el
+equivalente de «ink4» del lienzo) **no** adopta el literal del lienzo:
+calculado con luminancia relativa WCAG, ese literal falla 4,5:1 contra las
+tres superficies en ambos temas (3,71/4,08/4,26 en claro; 3,86/4,13/4,32 en
+oscuro). Este bloque conserva su matiz y ajusta la luminancia hasta cruzar
+el umbral: `#6d685e` en tema claro mide 5,31/5,54/4,83 contra
+canvas/surface/surface-subtle, y `#8a8275` en tema oscuro mide 4,89/4,57
+contra canvas/surface. El contrato de contraste gana sobre el literal del
+lienzo, y la desviación queda documentada con sus números, no silenciada.
+
+### Gramática de superficie: reglas, no elevación
+
+`box-shadow` desaparece de toda superficie de datos y de panel. Sobreviven
+únicamente dos declaraciones, ambas ya integradas por bloques anteriores y
+ninguna decorativa: el realce interior del logotipo del rail
+(`inset 0 1px var(--rail-overlay-strong)`) y la barra del tablero activo en
+la navegación (`inset 3px 0 var(--rail-active-bar)`). Una tercera categoría
+—el anillo de foco— no tiene ninguna instancia viva porque el foco ya se
+expresa con `outline`, una propiedad distinta que la prohibición de
+`box-shadow` no alcanza.
+
+`border-radius` desaparece de paneles, tarjetas, tablas, insignias y filas.
+Sobreviven sólo dos categorías, ambas nombradas: los puntos circulares de
+estado o viñeta (`.status-dot`, `.session-status-dot`, la viñeta de
+`.badge`, la viñeta de `.limitations-list` y el indicador de serie
+`.legend-swatch`) y los controles de formulario nativos (`<input>` de
+texto, número y color; `<select>`). El conteo total —2 `box-shadow`, 13
+`border-radius`— es una regla de contrato ejecutable, no una prosa
+descriptiva: cualquier reintroducción de elevación o esquina redondeada
+fuera de esas listas lo hace fallar.
+
+### Densidad de fila como tokens
+
+`--row-height` (25px), `--row-padding-inline` (4px), `--row-rule-width`
+(1px), `--base-font-size` (12px), `--label-font-size` (9,5px) y
+`--label-tracking` (.09em) son los valores reales de fila del lienzo,
+declarados una vez y consumidos por las filas de datos de
+`.chart-table-scroll` (mercado y fundamentales) y `.valuation-history-table`.
+La «retícula de 4 px» que proponía la versión original del sistema **no**
+es lo que el lienzo dibuja: sus separaciones reales son 8, 9, 10, 13, 18,
+20, 26 y 30 px, no todas múltiplos de 4. Este documento declara sólo lo que
+el lienzo hace de verdad —altura de fila, separador de 1 px, padding
+horizontal de fila, base tipográfica— y no inventa una retícula que el
+propio lienzo incumple. La aplicación de estos tokens a cada patrón de
+lista o de tarjeta de la interfaz (bandejas, preferencias, reglas de
+screening) queda fuera de este bloque: la superficie donde ya existen
+`<table>` reales con filas de datos literales es la evidencia mínima
+suficiente y verificable de esta sección; retroadaptar cada patrón visual
+de lista es trabajo de seguimiento, no silenciado, sólo no ejecutado aquí.
+
+### Rail y ancho lateral
+
+`--sidebar-width` pasa de 212px a los 158px del lienzo. El punto de ruptura
+intermedio que antes lo reducía a 190px en pantallas medianas quedó
+retirado: era una reducción relativa al valor anterior, y con el nuevo
+valor base ya menor habría sido un **aumento** incoherente.
+
+### Tipografía: IBM Plex sigue diferida
+
+El lienzo carga IBM Plex Sans/Mono desde `fonts.googleapis.com`. La regla
+`test_no_external_network_reference_in_static_surface`, integrada por
+`UI-1`, lo prohíbe. Este bloque adopta únicamente las **métricas** de
+densidad del lienzo sobre la pila tipográfica del sistema ya declarada
+(`--font-sans`/`--figure-font`); vendorizar y versionar los binarios de IBM
+Plex sigue siendo un bloque posterior y acotado, tal como ya declaró
+`UI-1`.
 
 ## Qué no son estas pruebas
 
