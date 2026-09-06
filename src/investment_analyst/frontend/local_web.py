@@ -196,6 +196,10 @@ from investment_analyst.application.sec_fundamental_refresh_models import (
     SecIssuerFundamentalRefreshRequest,
     SecIssuerFundamentalRefreshSummary,
 )
+from investment_analyst.application.universe_coverage_models import (
+    UniverseCoverageRequest,
+    UniverseCoverageResult,
+)
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.core.models.base import UTCDateTime
 from investment_analyst.evidence.sec_documents.timeline_models import (
@@ -439,6 +443,15 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> SecDocumentTimelineResult:
         """Execute a point-in-time SEC document timeline query."""
+        ...
+
+    def query_universe_coverage(
+        self,
+        request: UniverseCoverageRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> UniverseCoverageResult:
+        """Execute a point-in-time universe coverage query."""
         ...
 
     def query_cazatiburones_declared_activity(
@@ -710,6 +723,10 @@ class _WebOperations(Protocol):
         """Return one bounded point-in-time SEC document timeline query."""
         ...
 
+    def universe_coverage(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return one cached read-only point-in-time universe coverage matrix."""
+        ...
+
     def cazatiburones_declared_activity(
         self, parameters: Mapping[str, tuple[str, ...]]
     ) -> dict[str, object]:
@@ -818,6 +835,7 @@ class AaplLocalController:
         self._fundamental_analysis_cache: dict[
             tuple[str, AaplFundamentalResearchRequest], AaplFundamentalAnalysisResult
         ] = {}
+        self._coverage_cache: dict[UniverseCoverageRequest, UniverseCoverageResult] = {}
         self._market_assets = self._application.list_market_assets()
         self._runtime_capabilities = build_capability_runtime_plan(self._market_assets)
         self._health_snapshot = self._runner.inspect(workspace=self._workspace)
@@ -1018,6 +1036,22 @@ class AaplLocalController:
             query,
             location=StorageLocationRequest(workspace=self._workspace),
         )
+
+    def coverage_request(self, request: UniverseCoverageRequest) -> UniverseCoverageResult:
+        """Read cached universe coverage evidence without providers or writer acquisition."""
+        with self._cache_lock:
+            cached = self._coverage_cache.get(request)
+            if cached is not None:
+                return cached
+        result = self._application.query_universe_coverage(
+            request,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+        with self._cache_lock:
+            if len(self._coverage_cache) >= _MAX_READ_CACHE_ENTRIES:
+                self._coverage_cache.pop(next(iter(self._coverage_cache)))
+            self._coverage_cache[request] = result
+        return result
 
     def cazatiburones_declared_activity_request(
         self,
@@ -1299,6 +1333,7 @@ class AaplLocalController:
             self._drop_asset_cache_entries(self._fundamental_research_cache, APPLE_ASSET_ID)
             self._drop_asset_cache_entries(self._fundamental_research_history_cache, APPLE_ASSET_ID)
             self._drop_asset_cache_entries(self._fundamental_analysis_cache, APPLE_ASSET_ID)
+            self._coverage_cache.clear()
 
     @staticmethod
     def _drop_asset_cache_entries(cache: dict[tuple[str, object], object], asset_id: str) -> None:
@@ -1886,6 +1921,44 @@ class AaplLocalWebApplication:
         )
         return self._controller.sec_document_timeline_request(query).model_dump(mode="json")
 
+    def universe_coverage(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Validate and query the read-only point-in-time universe coverage matrix."""
+        allowed = {
+            "known_at",
+            "market_start",
+            "market_end",
+            "fundamental_start",
+            "fundamental_end",
+            "frequency",
+            "asset_id",
+        }
+        if set(parameters) - allowed:
+            raise ValueError("universe coverage query contains unsupported parameters")
+        known_at = _aware_datetime(_one_parameter(parameters, "known_at", required=True))
+        market_start = _date_parameter(_one_parameter(parameters, "market_start", required=True))
+        market_end = _date_parameter(_one_parameter(parameters, "market_end", required=True))
+        fundamental_start = _date_parameter(
+            _one_parameter(parameters, "fundamental_start", required=True)
+        )
+        fundamental_end = _date_parameter(
+            _one_parameter(parameters, "fundamental_end", required=True)
+        )
+        frequency = _one_parameter(parameters, "frequency", required=False) or "annual"
+        asset_ids = tuple(sorted(parameters.get("asset_id", ())))
+        request = UniverseCoverageRequest(
+            known_at=known_at,
+            market_start=market_start,
+            market_end=market_end,
+            fundamental_start=fundamental_start,
+            fundamental_end=fundamental_end,
+            frequency=frequency,
+            asset_ids=asset_ids,
+        )
+        return self._controller.coverage_request(request).model_dump(mode="json")
+
     def cazatiburones_declared_activity(
         self,
         parameters: Mapping[str, tuple[str, ...]],
@@ -2372,6 +2445,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     HTTPStatus.OK,
                     server.application.sec_document_timeline(parameters),
+                )
+                return
+            if parsed.path == "/api/v1/universe-coverage":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=106)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.universe_coverage(parameters),
                 )
                 return
             if parsed.path == "/api/v1/cazatiburones/declared-activity":

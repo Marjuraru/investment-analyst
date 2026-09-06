@@ -35,6 +35,17 @@ PYTHONPATH=src .venv/bin/python scripts/query_universe_coverage.py \
   --asset-id crypto:sol-usd --asset-id equity:us:msft
 ```
 
+`GET /api/v1/universe-coverage` expone la misma matriz por HTTP local, sin añadir ni extender
+ningún contrato: reutiliza literalmente `UniverseCoverageRequest`/`UniverseCoverageResult`. Acepta
+exactamente `known_at`, `market_start`, `market_end`, `fundamental_start`, `fundamental_end`,
+`frequency` (opcional, por defecto `annual`) y `asset_id` repetible; omitirlo consulta el catálogo
+completo, igual que el script. El corte `known_at`, el rango público inclusivo y la regla de día UTC
+completamente transcurrido para `market_end` se conservan sin reinterpretarse en HTTP. La respuesta
+se cachea en memoria bajo la misma cota compartida `_MAX_READ_CACHE_ENTRIES` que el resto de lecturas
+locales, y esa caché se vacía por completo tras cualquier ejecución operativa completada; una matriz
+abarca las 37 identidades, así que no existe invalidación parcial por activo. El endpoint no alcanza
+ningún camino de escritura: no normaliza, materializa, calcula ni reconcilia evidencia.
+
 El smoke de entrega es deliberadamente distinto de la consulta: crea sólo un workspace scratch nuevo,
 refresca las 12 altas con las facades existentes y, después, elimina las credenciales del entorno
 antes de repetir la matriz local offline. No acepta un workspace existente ni toca el workspace

@@ -153,7 +153,18 @@ from investment_analyst.application.sec_fundamental_refresh_models import (
     SecIssuerFundamentalRefreshRequest,
     SecIssuerFundamentalRefreshSummary,
 )
-from investment_analyst.core.models import DataFrequency, UTCDateTime
+from investment_analyst.application.universe_coverage_models import (
+    CoverageCapability,
+    EvidenceState,
+    UniverseBvlRegistryCoverage,
+    UniverseCoverageAsset,
+    UniverseCoverageRequest,
+    UniverseCoverageResult,
+    UniverseFundamentalCoverage,
+    UniverseMarketCoverage,
+    UniverseValuationCoverage,
+)
+from investment_analyst.core.models import AssetClass, DataFrequency, UTCDateTime
 from investment_analyst.evidence.sec_documents.timeline_models import (
     SecDocumentTimelineEntry,
     SecDocumentTimelineQuery,
@@ -164,6 +175,7 @@ from investment_analyst.evidence.sec_institutional_observations.models import (
     InstitutionalObservationQueryResult,
 )
 from investment_analyst.frontend.local_web import (
+    _MAX_READ_CACHE_ENTRIES,
     AaplLocalController,
     AaplLocalHttpServer,
     AaplLocalWebApplication,
@@ -285,6 +297,9 @@ class _FakeApplication:
         self.institutional_observation_queries: list[InstitutionalObservationQuery] = []
         self.institutional_observation_locations: list[StorageLocationRequest] = []
         self.institutional_observation_result: InstitutionalObservationQueryResult | None = None
+        self.universe_coverage_requests: list[UniverseCoverageRequest] = []
+        self.universe_coverage_locations: list[StorageLocationRequest] = []
+        self.universe_coverage_result: UniverseCoverageResult | None = None
 
     def list_market_assets(self) -> MarketAssetUniverse:
         return InvestmentAnalystApplication.create_default().list_market_assets()
@@ -867,6 +882,23 @@ class _FakeApplication:
             returned_count=0,
             legacy_records_excluded=0,
             truncated=False,
+        )
+
+    def query_universe_coverage(
+        self,
+        request: UniverseCoverageRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> UniverseCoverageResult:
+        self.universe_coverage_requests.append(request)
+        self.universe_coverage_locations.append(location)
+        if self.universe_coverage_result is not None:
+            return self.universe_coverage_result
+        return UniverseCoverageResult(
+            catalog_version=1,
+            catalog_sha256="0" * 64,
+            request=request,
+            assets=(),
         )
 
     def query_cazatiburones_declared_activity(
@@ -3962,6 +3994,520 @@ def test_probe_extra_endpoint_outside_the_three_fails(tmp_path: Path) -> None:
             "/api/v1/cazatiburones/aggregate",
             "/api/v1/cazatiburones/score",
             "/api/v1/cazatiburones/rankings",
+        ]:
+            status, resp, _ = _json_request(Request(f"{root}{unapproved_path}"))
+            assert status == 404
+            assert resp["error"]["code"] == "not_found"
+
+
+def _sample_coverage_result(request: UniverseCoverageRequest) -> UniverseCoverageResult:
+    """Build one deterministic fixture spanning all six capability/evidence states."""
+    aapl = UniverseCoverageAsset(
+        asset_id="equity:us:aapl",
+        symbol="AAPL",
+        name="Apple Inc.",
+        asset_class=AssetClass.EQUITY,
+        exchange="NASDAQ",
+        quote_currency="USD",
+        market=UniverseMarketCoverage(
+            capability=CoverageCapability.SUPPORTED,
+            evidence=EvidenceState.PRESENT,
+            source_id="alpaca-market-data:iex:aapl:daily-bars:adjustment-all",
+            bar_count=252,
+            candidate_versions=252,
+            discarded_revisions=0,
+        ),
+        fundamentals=UniverseFundamentalCoverage(
+            capability=CoverageCapability.SUPPORTED,
+            evidence=EvidenceState.PRESENT,
+            source_id="sec-edgar:aapl:companyfacts",
+            source_periods=4,
+            output_periods=4,
+            metrics_returned=40,
+        ),
+        corporate_valuation=UniverseValuationCoverage(
+            capability=CoverageCapability.SUPPORTED,
+            evidence=EvidenceState.PRESENT,
+            status="complete",
+        ),
+        bvl_registry=UniverseBvlRegistryCoverage(
+            capability=CoverageCapability.NOT_APPLICABLE,
+            evidence=EvidenceState.NOT_QUERIED,
+        ),
+        additional_capabilities_not_queried=(),
+        limitations=("IEX market data is not consolidated SIP coverage",),
+    )
+    btc = UniverseCoverageAsset(
+        asset_id="crypto:btc-usd",
+        symbol="BTC-USD",
+        name="Bitcoin",
+        asset_class=AssetClass.CRYPTO,
+        exchange="COINBASE",
+        quote_currency="USD",
+        market=UniverseMarketCoverage(
+            capability=CoverageCapability.SUPPORTED,
+            evidence=EvidenceState.MISSING,
+            source_id="coinbase-exchange:btc-usd:daily-candles",
+            bar_count=0,
+            candidate_versions=0,
+            discarded_revisions=0,
+        ),
+        fundamentals=UniverseFundamentalCoverage(
+            capability=CoverageCapability.NOT_APPLICABLE,
+            evidence=EvidenceState.NOT_QUERIED,
+            source_periods=0,
+            output_periods=0,
+            metrics_returned=0,
+        ),
+        corporate_valuation=UniverseValuationCoverage(
+            capability=CoverageCapability.NOT_APPLICABLE,
+            evidence=EvidenceState.NOT_QUERIED,
+        ),
+        bvl_registry=UniverseBvlRegistryCoverage(
+            capability=CoverageCapability.NOT_APPLICABLE,
+            evidence=EvidenceState.NOT_QUERIED,
+        ),
+        additional_capabilities_not_queried=(),
+        limitations=(),
+    )
+    bvl = UniverseCoverageAsset(
+        asset_id="equity:pe:credicorp",
+        symbol="BAP",
+        name="Credicorp Ltd.",
+        asset_class=AssetClass.EQUITY,
+        exchange="BVL",
+        quote_currency="PEN",
+        market=UniverseMarketCoverage(
+            capability=CoverageCapability.NOT_CONFIGURED,
+            evidence=EvidenceState.NOT_QUERIED,
+            bar_count=0,
+            candidate_versions=0,
+            discarded_revisions=0,
+        ),
+        fundamentals=UniverseFundamentalCoverage(
+            capability=CoverageCapability.NOT_CONFIGURED,
+            evidence=EvidenceState.NOT_QUERIED,
+            source_periods=0,
+            output_periods=0,
+            metrics_returned=0,
+        ),
+        corporate_valuation=UniverseValuationCoverage(
+            capability=CoverageCapability.NOT_CONFIGURED,
+            evidence=EvidenceState.NOT_QUERIED,
+        ),
+        bvl_registry=UniverseBvlRegistryCoverage(
+            capability=CoverageCapability.SUPPORTED,
+            evidence=EvidenceState.MISSING,
+            status="not_imported",
+        ),
+        additional_capabilities_not_queried=(),
+        limitations=(),
+    )
+    return UniverseCoverageResult(
+        catalog_version=7,
+        catalog_sha256="b" * 64,
+        request=request,
+        assets=(btc, bvl, aapl),
+    )
+
+
+def _assert_no_float(value: object) -> None:
+    """Recursively assert no field in a JSON-shaped payload is a bare Python float."""
+    if isinstance(value, float):
+        raise AssertionError(f"unexpected float value in payload: {value!r}")
+    if isinstance(value, dict):
+        for item in value.values():
+            _assert_no_float(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _assert_no_float(item)
+
+
+def test_universe_coverage_endpoint_reuses_contract_verbatim_and_separates_domains(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    sample_request = UniverseCoverageRequest(
+        known_at=datetime(2026, 7, 16, 15, 47, tzinfo=UTC),
+        market_start=date(2026, 1, 1),
+        market_end=date(2026, 7, 15),
+        fundamental_start=date(2020, 1, 1),
+        fundamental_end=date(2026, 7, 15),
+    )
+    application.universe_coverage_result = _sample_coverage_result(sample_request)
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    query = urlencode(
+        [
+            ("known_at", "2026-07-16T15:47:00Z"),
+            ("market_start", "2026-01-01"),
+            ("market_end", "2026-07-15"),
+            ("fundamental_start", "2020-01-01"),
+            ("fundamental_end", "2026-07-15"),
+        ]
+    )
+
+    with _server(web) as (_, root):
+        status, payload, _ = _json_request(Request(f"{root}/api/v1/universe-coverage?{query}"))
+
+    assert status == 200
+    assert payload["schema_version"] == "universe-coverage-v1"
+    assert payload["catalog_version"] == 7
+    assert payload["catalog_sha256"] == "b" * 64
+    assets = cast(list[dict[str, object]], payload["assets"])
+    assert [item["asset_id"] for item in assets] == [
+        "crypto:btc-usd",
+        "equity:pe:credicorp",
+        "equity:us:aapl",
+    ]
+
+    aapl_asset = assets[2]
+    assert aapl_asset["market"]["capability"] == "supported"
+    assert aapl_asset["market"]["evidence"] == "present"
+    assert aapl_asset["fundamentals"]["capability"] == "supported"
+    assert aapl_asset["fundamentals"]["evidence"] == "present"
+    assert aapl_asset["corporate_valuation"]["capability"] == "supported"
+    assert aapl_asset["corporate_valuation"]["evidence"] == "present"
+    assert aapl_asset["bvl_registry"]["capability"] == "not_applicable"
+    assert aapl_asset["bvl_registry"]["evidence"] == "not_queried"
+
+    bvl_asset = assets[1]
+    assert bvl_asset["market"]["capability"] == "not_configured"
+    assert bvl_asset["market"]["evidence"] == "not_queried"
+    assert bvl_asset["bvl_registry"]["capability"] == "supported"
+    assert bvl_asset["bvl_registry"]["evidence"] == "missing"
+
+    # Four domains stay separate: each asset carries exactly these four keyed sections,
+    # never a combined total.
+    for asset in assets:
+        assert {"market", "fundamentals", "corporate_valuation", "bvl_registry"} <= set(asset)
+        assert "total" not in asset
+        assert "coverage_score" not in asset
+
+    # No arbitrary aggregate score, verdict, or ranking anywhere in the response.
+    for forbidden in ("score", "verdict", "ranking", "rating", "recommendation"):
+        assert forbidden not in payload
+
+    # No incidental float conversion anywhere in the serialized payload.
+    _assert_no_float(payload)
+
+    assert len(application.universe_coverage_requests) == 1
+    recorded = application.universe_coverage_requests[0]
+    assert recorded.known_at == datetime(2026, 7, 16, 15, 47, tzinfo=UTC)
+    assert recorded.market_start == date(2026, 1, 1)
+    assert recorded.market_end == date(2026, 7, 15)
+    assert recorded.fundamental_start == date(2020, 1, 1)
+    assert recorded.fundamental_end == date(2026, 7, 15)
+    assert recorded.frequency == "annual"
+    assert recorded.asset_ids == ()
+    assert application.universe_coverage_locations[0].workspace == tmp_path / "workspace"
+
+
+def test_universe_coverage_endpoint_governs_selection_by_known_at_and_keeps_range_inclusive(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    query = urlencode(
+        [
+            ("known_at", "2026-07-16T15:47:00Z"),
+            ("market_start", "2026-01-01"),
+            ("market_end", "2026-07-15"),
+            ("fundamental_start", "2020-01-01"),
+            ("fundamental_end", "2026-07-15"),
+            ("frequency", "quarterly"),
+            ("asset_id", "equity:us:amd"),
+            ("asset_id", "equity:us:aapl"),
+        ]
+    )
+
+    with _server(web) as (_, root):
+        status, _payload, _ = _json_request(Request(f"{root}/api/v1/universe-coverage?{query}"))
+
+    assert status == 200
+    assert len(application.universe_coverage_requests) == 1
+    recorded = application.universe_coverage_requests[0]
+    assert recorded.known_at == datetime(2026, 7, 16, 15, 47, tzinfo=UTC)
+    assert recorded.market_start == date(2026, 1, 1)
+    assert recorded.market_end == date(2026, 7, 15)
+    assert recorded.fundamental_start == date(2020, 1, 1)
+    assert recorded.fundamental_end == date(2026, 7, 15)
+    assert recorded.frequency == "quarterly"
+    assert recorded.asset_ids == ("equity:us:aapl", "equity:us:amd")
+    assert isinstance(recorded.market_start, date)
+    assert isinstance(recorded.market_end, date)
+    assert not isinstance(recorded.market_end, datetime)
+    assert application.universe_coverage_locations[0].workspace == tmp_path / "workspace"
+
+
+def test_universe_coverage_endpoint_rejects_market_end_not_fully_elapsed(tmp_path: Path) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    query = urlencode(
+        [
+            ("known_at", "2026-07-15T12:00:00Z"),
+            ("market_start", "2026-07-01"),
+            ("market_end", "2026-07-15"),
+            ("fundamental_start", "2020-01-01"),
+            ("fundamental_end", "2026-07-14"),
+        ]
+    )
+
+    with _server(web) as (_, root):
+        status, payload, _ = _json_request(Request(f"{root}/api/v1/universe-coverage?{query}"))
+
+    assert status == 400
+    assert payload["error"]["code"] == "invalid_request"
+    assert len(application.universe_coverage_requests) == 0
+
+    with pytest.raises(ValidationError, match="fully elapsed"):
+        UniverseCoverageRequest(
+            known_at=datetime(2026, 7, 15, 12, tzinfo=UTC),
+            market_start=date(2026, 7, 1),
+            market_end=date(2026, 7, 15),
+            fundamental_start=date(2020, 1, 1),
+            fundamental_end=date(2026, 7, 14),
+        )
+
+
+def test_universe_coverage_endpoint_rejects_unsupported_parameter_and_inverted_range(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    base = {
+        "known_at": "2026-07-16T15:47:00Z",
+        "market_start": "2026-01-01",
+        "market_end": "2026-07-15",
+        "fundamental_start": "2020-01-01",
+        "fundamental_end": "2026-07-15",
+    }
+
+    with _server(web) as (_, root):
+        unsupported_status, unsupported_payload, _ = _json_request(
+            Request(f"{root}/api/v1/universe-coverage?{urlencode({**base, 'unsupported': 'x'})}")
+        )
+        inverted_status, inverted_payload, _ = _json_request(
+            Request(
+                f"{root}/api/v1/universe-coverage?"
+                f"{urlencode({**base, 'market_start': '2026-07-15', 'market_end': '2026-01-01'})}"
+            )
+        )
+
+    assert unsupported_status == 400
+    assert unsupported_payload["error"]["code"] == "invalid_request"
+    assert inverted_status == 400
+    assert inverted_payload["error"]["code"] == "invalid_request"
+    assert len(application.universe_coverage_requests) == 0
+
+
+def test_universe_coverage_cache_respects_the_shared_bound_and_hits_on_repeat(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    base_request = UniverseCoverageRequest(
+        known_at=datetime(2026, 7, 16, tzinfo=UTC),
+        market_start=date(2026, 1, 1),
+        market_end=date(2026, 7, 15),
+        fundamental_start=date(2020, 1, 1),
+        fundamental_end=date(2026, 7, 15),
+    )
+    distinct_requests = [
+        base_request.model_copy(update={"asset_ids": (f"equity:us:sym{index}",)})
+        for index in range(_MAX_READ_CACHE_ENTRIES + 1)
+    ]
+
+    controller.coverage_request(distinct_requests[0])
+    controller.coverage_request(distinct_requests[0])
+    assert len(application.universe_coverage_requests) == 1
+
+    for request in distinct_requests[1:]:
+        controller.coverage_request(request)
+    assert len(application.universe_coverage_requests) == 1 + _MAX_READ_CACHE_ENTRIES
+
+    # The bound is the one shared constant; no second policy or unbounded growth.
+    controller.coverage_request(distinct_requests[0])
+    assert len(application.universe_coverage_requests) == 2 + _MAX_READ_CACHE_ENTRIES
+
+
+def test_universe_coverage_cache_is_invalidated_after_a_completed_run(tmp_path: Path) -> None:
+    runner = _FakeRunner()
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        runner,
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    request = UniverseCoverageRequest(
+        known_at=datetime(2026, 7, 16, tzinfo=UTC),
+        market_start=date(2026, 1, 1),
+        market_end=date(2026, 7, 15),
+        fundamental_start=date(2020, 1, 1),
+        fundamental_end=date(2026, 7, 15),
+    )
+    run_payload: dict[str, object] = {
+        "asset_id": "equity:us:aapl",
+        "market_start": "2025-01-01",
+        "market_end": "2026-07-15",
+        "fundamental_frequency": "quarterly",
+        "refresh_mode": "auto",
+        "requested_known_at": None,
+        "require_complete": True,
+    }
+
+    controller.coverage_request(request)
+    controller.coverage_request(request)
+    assert len(application.universe_coverage_requests) == 1
+
+    controller.run_payload(run_payload)
+    controller.coverage_request(request)
+
+    assert len(application.universe_coverage_requests) == 2
+    assert len(runner.requests) == 1
+
+
+def test_probe_universe_coverage_contract_modification_attempt_fails() -> None:
+    """Probe 8: Undeclared field on the coverage contract fails."""
+    now = datetime(2026, 7, 16, 15, 47, tzinfo=UTC)
+    with pytest.raises(ValidationError):
+        UniverseCoverageRequest(
+            known_at=now,
+            market_start=date(2026, 1, 1),
+            market_end=date(2026, 7, 15),
+            fundamental_start=date(2020, 1, 1),
+            fundamental_end=date(2026, 7, 15),
+            undeclared_field="illegal",  # type: ignore[call-arg]
+        )
+    with pytest.raises(ValidationError):
+        UniverseCoverageAsset(
+            asset_id="equity:us:aapl",
+            symbol="AAPL",
+            name="Apple Inc.",
+            asset_class=AssetClass.EQUITY,
+            exchange="NASDAQ",
+            quote_currency="USD",
+            market=UniverseMarketCoverage(
+                capability=CoverageCapability.SUPPORTED,
+                evidence=EvidenceState.PRESENT,
+                bar_count=0,
+                candidate_versions=0,
+                discarded_revisions=0,
+            ),
+            fundamentals=UniverseFundamentalCoverage(
+                capability=CoverageCapability.NOT_APPLICABLE,
+                evidence=EvidenceState.NOT_QUERIED,
+                source_periods=0,
+                output_periods=0,
+                metrics_returned=0,
+            ),
+            corporate_valuation=UniverseValuationCoverage(
+                capability=CoverageCapability.NOT_APPLICABLE,
+                evidence=EvidenceState.NOT_QUERIED,
+            ),
+            bvl_registry=UniverseBvlRegistryCoverage(
+                capability=CoverageCapability.NOT_APPLICABLE,
+                evidence=EvidenceState.NOT_QUERIED,
+            ),
+            additional_capabilities_not_queried=(),
+            limitations=(),
+            total_score=Decimal("1"),  # type: ignore[call-arg]
+        )
+
+
+def test_probe_universe_coverage_read_write_path_reachability_fails(tmp_path: Path) -> None:
+    """Probe 9: Universe coverage never reaches a write path; only GET is registered."""
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    web.universe_coverage(
+        {
+            "known_at": ("2026-07-16T15:47:00Z",),
+            "market_start": ("2026-01-01",),
+            "market_end": ("2026-07-15",),
+            "fundamental_start": ("2020-01-01",),
+            "fundamental_end": ("2026-07-15",),
+        }
+    )
+    assert len(application.universe_coverage_requests) == 1
+    assert len(application.fundamental_refresh_requests) == 0
+    assert len(application.listed_refresh_requests) == 0
+    assert len(application.crypto_refresh_requests) == 0
+    assert len(application.btc_refresh_requests) == 0
+
+    with _server(web) as (_, root):
+        status, payload, _ = _json_request(
+            Request(
+                f"{root}/api/v1/universe-coverage",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert status == 404
+    assert payload["error"]["code"] == "not_found"
+
+
+def test_probe_universe_coverage_extra_endpoint_fails(tmp_path: Path) -> None:
+    """Probe 10: No endpoint beyond the one added exists for universe coverage."""
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    with _server(web) as (_, root):
+        for unapproved_path in [
+            "/api/v1/universe-coverage/aggregate",
+            "/api/v1/universe-coverage/score",
+            "/api/v1/universe-coverage/ranking",
         ]:
             status, resp, _ = _json_request(Request(f"{root}{unapproved_path}"))
             assert status == 404

@@ -187,6 +187,11 @@ from investment_analyst.application.sec_fundamental_refresh_models import (
     SecIssuerFundamentalRefreshRequest,
     SecIssuerFundamentalRefreshSummary,
 )
+from investment_analyst.application.universe_coverage import UniverseCoverageApplication
+from investment_analyst.application.universe_coverage_models import (
+    UniverseCoverageRequest,
+    UniverseCoverageResult,
+)
 from investment_analyst.catalog.provider_configuration import (
     resolve_alpaca_configuration,
     resolve_coinbase_configuration,
@@ -826,6 +831,15 @@ class InvestmentAnalystApplication:
             query=query,
             location=location,
         )
+
+    def query_universe_coverage(
+        self,
+        request: UniverseCoverageRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> UniverseCoverageResult:
+        """Execute a point-in-time universe coverage query."""
+        return UniverseCoverageApplication(self._runtime).query(location, request)
 
     def query_cazatiburones_declared_activity(
         self,

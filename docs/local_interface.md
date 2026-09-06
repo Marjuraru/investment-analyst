@@ -820,3 +820,28 @@ agregar puntuaciones, veredictos ni rankings:
    - Valida que `asset_id` corresponda a un emisor corporativo con configuración SEC en el catálogo.
    - Devuelve `InstitutionalObservationQueryResult` paginado (`observations`, `total_matching`, `truncated`).
    - Conserva la semántica as-filed de cada fila y referencia de correspondencia.
+
+## Endpoint de lectura de la matriz de cobertura del universo
+
+`GET /api/v1/universe-coverage` es una cuarta ruta de solo lectura (`WorkspaceAccessMode.READ_ONLY`),
+independiente de las tres anteriores, que reutiliza verbatim `UniverseCoverageRequest`/
+`UniverseCoverageResult` (ver `docs/universe_coverage.md`) sin mutar almacenamiento, sin ejecutar
+refresh y sin agregar puntuaciones, veredictos ni rankings:
+
+- Parámetros: `known_at` (obligatorio, UTC), `market_start`/`market_end` (obligatorios, fecha inclusiva
+  `YYYY-MM-DD`), `fundamental_start`/`fundamental_end` (obligatorios, fecha inclusiva `YYYY-MM-DD`),
+  `frequency` (opcional, `annual` por defecto o `quarterly`), `asset_id` (opcional múltiple; omitido
+  consulta el catálogo completo).
+- El corte `known_at` gobierna la selección; el rango público permanece inclusivo en ambos extremos y
+  `market_end` debe ser un día UTC completamente transcurrido al `known_at`, sin reimplementar esa
+  regla en HTTP.
+- Un `asset_id` fuera del catálogo, un rango invertido o excedido, una frecuencia inválida o un
+  parámetro no soportado producen un error acotado 400 sin traza interna, ruta de workspace ni
+  credencial.
+- Devuelve `UniverseCoverageResult` serializado como JSON estricto (`schema_version`,
+  `catalog_version`, `catalog_sha256`, `request`, `assets`). Cada activo conserva por separado
+  mercado diario, fundamentales SEC, valoración corporativa y registro BVL, y los siete estados de
+  configuración/evidencia declarados por el contrato, sin colapsarlos entre sí ni combinarlos en un
+  total.
+- Se cachea en memoria bajo la misma cota compartida `_MAX_READ_CACHE_ENTRIES` que el resto de
+  lecturas locales; la caché se vacía por completo tras cualquier ejecución operativa completada.
