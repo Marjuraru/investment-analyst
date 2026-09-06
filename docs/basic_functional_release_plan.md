@@ -154,7 +154,7 @@ crea `LOCAL-INTERFACE` | `PLANNED` y mantiene `SEC-CORPUS` | `NEXT` como
 - existe una outbox local con acuse; no existe canal de notificación externo;
 - no existe todavía un corpus local de filings, comunicados y noticias;
 - sin corpus no es posible implementar una IA auditable con citas;
-- Cazatiburones ya conserva evidencia 13F as-filed de #134/#135 con enlace PIT y unidades explícitas; las métricas institucionales descriptivas, la composición/completitud, eventos y la outbox local deduplicada de #153 están integrados; reglas complejas, cartera efectiva, búsqueda y UI permanecen pendientes;
+- Cazatiburones ya conserva evidencia 13F as-filed de #134/#135 con enlace PIT y unidades explícitas; las métricas institucionales descriptivas, la composición/completitud, eventos y la outbox local deduplicada de #153 están integrados; `UI-4` conecta el tablero local a los tres caminos de lectura; reglas complejas, cartera efectiva y búsqueda permanecen pendientes;
 - BVL tiene identidad registral, pero mercado y fundamentales siguen bloqueados por fuente,
   autorización o adaptador.
 

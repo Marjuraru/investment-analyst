@@ -1946,6 +1946,70 @@ def test_route_keeps_sec_corpus_as_the_single_next() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Cazatiburones stays fresh under the shared cut (UI-4 AUDIT fix): a direct
+# deep link into #cazatiburones must not read eligibility before
+# marketAssets exists, and the board must reload -- with the new asset or
+# cut -- when either changes while it is the active board. Point-in-time
+# correctness means the board never keeps showing a stale asset or a stale
+# known_at once either one has moved.
+# ---------------------------------------------------------------------------
+
+
+def _check_cazatiburones_board_reloads_after_market_assets_are_ready(app_js: str) -> None:
+    fn = _extract_js_function(app_js, "initialize")
+    reload_call = "if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();"
+    assert reload_call in fn, (
+        "initialize() must re-run the cazatiburones load once assets are ready"
+    )
+    assert "await loadMarketAssets();" in fn
+    assert "applySelectedMarketAsset();" in fn
+    assert fn.index("await loadMarketAssets();") < fn.index(reload_call), (
+        "a #cazatiburones deep link must not evaluate eligibility before marketAssets loads"
+    )
+    assert fn.index("applySelectedMarketAsset();") < fn.index(reload_call)
+
+
+def test_cazatiburones_board_reloads_after_market_assets_are_ready() -> None:
+    _check_cazatiburones_board_reloads_after_market_assets_are_ready(APP_JS)
+
+
+def _check_cazatiburones_board_reloads_when_the_selected_asset_changes(app_js: str) -> None:
+    match = re.search(
+        r"async function selectComboboxOption\(assetId\) \{(.*?)\n  \}", app_js, re.DOTALL
+    )
+    assert match, "selectComboboxOption(assetId) must exist"
+    body = match.group(1)
+    reload_call = "if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();"
+    assert "selectedMarketAsset = assetId;" in body
+    assert reload_call in body, (
+        "changing the selected asset must reload an active cazatiburones board"
+    )
+    assert body.index("selectedMarketAsset = assetId;") < body.index(reload_call), (
+        "cazatiburones must reload with the NEW asset, after selectedMarketAsset is reassigned"
+    )
+
+
+def test_cazatiburones_board_reloads_when_the_selected_asset_changes() -> None:
+    _check_cazatiburones_board_reloads_when_the_selected_asset_changes(APP_JS)
+
+
+def _check_cazatiburones_board_reloads_when_the_known_at_cut_changes(app_js: str) -> None:
+    match = re.search(
+        r'byId\("report-known-at"\)\.addEventListener\("change", \(\) => \{(.*?)\n\}\);',
+        app_js,
+        re.DOTALL,
+    )
+    assert match, "report-known-at change listener must exist"
+    assert "if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();" in match.group(1), (
+        "changing the known_at cut must reload an active cazatiburones board"
+    )
+
+
+def test_cazatiburones_board_reloads_when_the_known_at_cut_changes() -> None:
+    _check_cazatiburones_board_reloads_when_the_known_at_cut_changes(APP_JS)
+
+
+# ---------------------------------------------------------------------------
 # Regression probes: each rule above must fail on a deliberately corrupted
 # fixture, proving the checker is not vacuously true. Every probe below
 # calls the SAME `_check_*` function its declarative test calls -- against
@@ -2408,3 +2472,45 @@ def test_probe_external_network_rule_catches_a_web_font_link() -> None:
     assert corrupted != INDEX_HTML, "probe fixture did not add a web font link"
     with pytest.raises(AssertionError):
         _check_no_external_reference(corrupted, label="index.html")
+
+
+def test_probe_cazatiburones_deep_link_rule_catches_a_removed_reload() -> None:
+    _check_cazatiburones_board_reloads_after_market_assets_are_ready(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        "  applySelectedMarketAsset();\n"
+        "  // A deep link straight into #cazatiburones activates the board (and fires\n"
+        "  // its load) before marketAssets exists, so the eligibility check above\n"
+        "  // always misreads it as ineligible. Re-run the load now that\n"
+        "  // loadMarketAssets()/applySelectedMarketAsset() have populated it.\n"
+        "  if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();\n",
+        "  applySelectedMarketAsset();\n",
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not remove the deep-link reload"
+    with pytest.raises(AssertionError):
+        _check_cazatiburones_board_reloads_after_market_assets_are_ready(corrupted)
+
+
+def test_probe_cazatiburones_asset_change_rule_catches_a_removed_reload() -> None:
+    _check_cazatiburones_board_reloads_when_the_selected_asset_changes(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        "    const presentation = marketAssetPresentation();\n"
+        "    if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();\n",
+        "    const presentation = marketAssetPresentation();\n",
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not remove the asset-change reload"
+    with pytest.raises(AssertionError):
+        _check_cazatiburones_board_reloads_when_the_selected_asset_changes(corrupted)
+
+
+def test_probe_cazatiburones_known_at_change_rule_catches_a_removed_reload() -> None:
+    _check_cazatiburones_board_reloads_when_the_known_at_cut_changes(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        "  if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();\n});",
+        "});",
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not remove the known_at-change reload"
+    with pytest.raises(AssertionError):
+        _check_cazatiburones_board_reloads_when_the_known_at_cut_changes(corrupted)

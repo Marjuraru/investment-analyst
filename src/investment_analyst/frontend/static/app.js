@@ -726,6 +726,7 @@ async function loadMarketAssets() {
     }
 
     const presentation = marketAssetPresentation();
+    if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();
     await Promise.all([
       queryMarketChart(),
       ...(presentation.hasFundamentals
@@ -5471,6 +5472,7 @@ byId("report-known-at").addEventListener("change", () => {
     cryptoDerivativesPayload = null;
     void queryCryptoDerivatives();
   }
+  if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();
 });
 
 function populateMarketComparisonAssets() {
@@ -5797,6 +5799,11 @@ function initializeBoardShell() {
 // into an effective portfolio, a score or a signal.
 let cazatiburonesRequestSequence = 0;
 
+function cazatiburonesBoardIsActive() {
+  const section = byId("board-cazatiburones");
+  return section !== null && !section.hidden;
+}
+
 function cazatiburonesEligiblePresentation() {
   const presentation = marketAssets[selectedMarketAsset];
   return presentation && presentation.hasFundamentals && presentation.fundamentalMode === "corporate"
@@ -6017,6 +6024,11 @@ async function initialize() {
   await loadAssetPreferences();
   initializeChartSettings();
   applySelectedMarketAsset();
+  // A deep link straight into #cazatiburones activates the board (and fires
+  // its load) before marketAssets exists, so the eligibility check above
+  // always misreads it as ineligible. Re-run the load now that
+  // loadMarketAssets()/applySelectedMarketAsset() have populated it.
+  if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();
   populateMarketComparisonAssets();
   startMarketClocks();
   await refreshOverview();
