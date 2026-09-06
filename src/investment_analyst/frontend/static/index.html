@@ -965,15 +965,47 @@
           </div>
 
           <div class="board" id="board-cazatiburones" data-board="cazatiburones" tabindex="-1" hidden>
-            <section class="board-placeholder" aria-labelledby="cazatiburones-titulo">
-              <div class="section-intro">
-                <div>
-                  <p class="eyebrow">CAZATIBURONES</p>
-                  <h2 id="cazatiburones-titulo">Actividad institucional declarada</h2>
-                </div>
+            <div class="section-intro">
+              <div>
+                <p class="eyebrow">CAZATIBURONES</p>
+                <h2 id="cazatiburones-titulo">Actividad institucional declarada</h2>
+                <p>Tres lecturas descriptivas independientes al corte global vigente; ninguna combina familias, activos ni infiere una cartera efectiva.</p>
               </div>
-              <div id="board-cazatiburones-not-built"></div>
-            </section>
+            </div>
+            <div id="cazatiburones-not-applicable" class="hidden"></div>
+            <div id="cazatiburones-content">
+              <section id="cazatiburones-declared-activity" class="operation-panel" aria-labelledby="cazatiburones-declared-activity-titulo">
+                <div class="panel-header">
+                  <span>
+                    <strong id="cazatiburones-declared-activity-titulo">Actividad declarada</strong>
+                    <small id="cazatiburones-declared-activity-summary">Sin consultar</small>
+                  </span>
+                </div>
+                <div id="cazatiburones-insider-features" class="cazatiburones-feature-group"></div>
+                <div id="cazatiburones-beneficial-features" class="cazatiburones-feature-group"></div>
+              </section>
+
+              <section id="cazatiburones-institutional-observations" class="operation-panel" aria-labelledby="cazatiburones-institutional-observations-titulo">
+                <div class="panel-header">
+                  <span>
+                    <strong id="cazatiburones-institutional-observations-titulo">Observaciones institucionales 13F</strong>
+                    <small id="cazatiburones-institutional-observations-summary">Sin consultar</small>
+                  </span>
+                </div>
+                <div id="cazatiburones-institutional-observations-rows" class="cazatiburones-feature-group"></div>
+              </section>
+
+              <section id="cazatiburones-document-timeline" class="operation-panel" aria-labelledby="cazatiburones-document-timeline-titulo">
+                <div class="panel-header">
+                  <span>
+                    <strong id="cazatiburones-document-timeline-titulo">Línea temporal documental SEC</strong>
+                    <small id="cazatiburones-document-timeline-summary">Sin consultar</small>
+                  </span>
+                </div>
+                <div id="cazatiburones-timeline-asset-document" class="cazatiburones-feature-group"></div>
+                <div id="cazatiburones-timeline-filer-document" class="cazatiburones-feature-group"></div>
+              </section>
+            </div>
           </div>
 
           <div class="board" id="board-sistema" data-board="sistema" tabindex="-1" hidden>

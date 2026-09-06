@@ -3239,6 +3239,55 @@ pre {
   opacity: 0.55;
 }
 
+.cazatiburones-feature-group {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.7rem;
+  border-top: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.cazatiburones-feature-group > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.cazatiburones-feature-group-title {
+  display: block;
+  color: var(--muted-strong);
+  font-size: var(--label-font-size);
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+}
+
+.cazatiburones-row {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.cazatiburones-row dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 0.6rem;
+  margin: 0.3rem 0 0;
+}
+
+.cazatiburones-row dt {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.cazatiburones-row dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.7rem;
+}
+
 .operation-panel > summary,
 .operation-panel > .panel-header {
   display: flex;

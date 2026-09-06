@@ -878,31 +878,30 @@ def _check_board_registry_declares_exactly_six_boards(app_js: str) -> None:
         "BOARD_REGISTRY must be the single source for nav, not-built rendering "
         f"and routing (found only {consumers} consumer loop(s))"
     )
+    # UI-4 connects cazatiburones: the obsolete promise that it "connects its
+    # read path in UI-3" must not survive in the registry it once lived in.
+    assert "conecta su lectura en UI-3" not in body
 
 
 def test_board_registry_declares_exactly_the_six_boards() -> None:
     _check_board_registry_declares_exactly_six_boards(APP_JS)
 
 
-def _check_cazatiburones_is_the_only_not_built_board(app_js: str) -> None:
+def _check_no_board_remains_not_built(app_js: str) -> None:
     entries = _board_registry_entries(app_js)
     assert set(entries) == set(_EXPECTED_BOARD_IDS)
     not_built = [board_id for board_id, text in entries.items() if "built: false" in text]
-    assert not_built == ["cazatiburones"], (
-        f"exactly 'cazatiburones' must be built: false, found {not_built}"
-    )
+    assert not_built == [], f"no board may remain built: false, found {not_built}"
     for board_id, text in entries.items():
-        if board_id == "cazatiburones":
-            assert re.search(r'reason:\s*\n?\s*"\S', text) or "reason:\n" in text, (
-                "cazatiburones must declare a non-empty reason"
-            )
-            assert "UI-3" in text, "the declared reason must name the block that builds it"
-        else:
-            assert "built: true" in text, f"{board_id} must be declared built: true"
+        assert "built: true" in text, f"{board_id} must be declared built: true"
+    # UI-4 connects cazatiburones: the stale promise that it "connects its
+    # read path in UI-3" must not survive alongside the block that fulfills
+    # it, whether inside the registry or anywhere else in the shell.
+    assert "conecta su lectura en UI-3" not in app_js
 
 
-def test_cazatiburones_is_the_only_not_built_board_and_declares_its_reason() -> None:
-    _check_cazatiburones_is_the_only_not_built_board(APP_JS)
+def test_no_board_remains_not_built() -> None:
+    _check_no_board_remains_not_built(APP_JS)
 
 
 _BOARD_DIV_RE = re.compile(r'<div class="board" id="board-([a-z-]+)"[^>]*>')
@@ -1312,10 +1311,13 @@ def _check_board_switch_never_touches_the_known_at_cut_or_session_clock(app_js: 
             f"activateBoard must never reference {forbidden!r}: switching boards must not "
             "touch the known_at cut, the session clock, or issue any query of its own"
         )
-    # The only two query-triggering calls activateBoard is allowed to make
-    # are the "revisar" board's promoted-panel loads (checked separately).
+    # The only query-triggering calls activateBoard is allowed to make are
+    # the "revisar" board's promoted-panel loads and the "cazatiburones"
+    # board's own deferred load (checked separately) -- each reads the
+    # shared known_at cut and selectedMarketAsset from inside its own
+    # function body, never from inside activateBoard itself.
     calls = re.findall(r"void (\w+)\(\)", body)
-    assert set(calls) <= {"loadCandidateInbox", "loadAlertInbox"}, calls
+    assert set(calls) <= {"loadCandidateInbox", "loadAlertInbox", "loadCazatiburonesBoard"}, calls
 
 
 def test_board_switch_never_touches_the_known_at_cut_or_session_clock() -> None:
@@ -1437,10 +1439,11 @@ def _check_no_new_capability_or_route_is_introduced_by_the_shell(app_js: str) ->
 
 
 # The exact route set app.js requested on the base this Work Block started
-# from (origin/main@3eee98f5e1...), extracted the same way the check above
+# from (origin/main@4fc61c7ca3...), extracted the same way the check above
 # extracts the candidate's routes: every `/api/...` literal outside the
-# BOARD_REGISTRY declaration (whose cazatiburones reason text names two
-# already-integrated read endpoints in prose, never calls them).
+# BOARD_REGISTRY declaration. UI-4 connects the cazatiburones board to the
+# three read paths already integrated by #159/#160 -- the only routes this
+# block is authorized to add, exactly once each.
 _BASELINE_API_ROUTES = frozenset(
     {
         "/api/alerts",
@@ -1462,9 +1465,12 @@ _BASELINE_API_ROUTES = frozenset(
         "/api/v1/asset-preferences",
         "/api/v1/candidate-notifications",
         "/api/v1/candidate-notifications/acknowledge",
+        "/api/v1/cazatiburones/declared-activity",
+        "/api/v1/cazatiburones/institutional-observations",
         "/api/v1/crypto-derivatives",
         "/api/v1/market-comparison",
         "/api/v1/overview",
+        "/api/v1/sec-document-timeline",
         "/api/v1/valuation",
         "/api/v1/valuation-history",
         "/api/v1/valuation-history-rule",
@@ -1721,6 +1727,309 @@ def test_route_registers_canvas_convergence_and_reassigns_cazatiburones() -> Non
 
 
 # ---------------------------------------------------------------------------
+# Cazatiburones connected read paths (UI-4): three separate presentations
+# over the three read-only endpoints already integrated by #159/#160, all
+# sharing the single global known_at cut and selectedMarketAsset, mapping
+# every empty/None/not_evaluable state to the declared absence grammar, and
+# never combining families, participants or rows into an aggregate,
+# effective portfolio, or signal.
+# ---------------------------------------------------------------------------
+
+
+def _cazatiburones_region(app_js: str) -> str:
+    start = app_js.index("let cazatiburonesRequestSequence")
+    end = app_js.index("async function initialize")
+    return app_js[start:end]
+
+
+def _check_declared_activity_separates_insider_and_beneficial(index_html: str, app_js: str) -> None:
+    assert 'id="cazatiburones-insider-features"' in index_html
+    assert 'id="cazatiburones-beneficial-features"' in index_html
+    fn = _extract_js_function(app_js, "renderCazatiburonesDeclaredActivity")
+    assert "payload.insider_features" in fn
+    assert "payload.beneficial_features" in fn
+    assert "cazatiburones-insider-features" in fn
+    assert "cazatiburones-beneficial-features" in fn
+    assert fn.count("renderCazatiburonesFeatureGroup") == 2, (
+        "insider and beneficial features must render through two separate calls, never one "
+        "combined list"
+    )
+    assert "total_statements" in fn
+    assert "truncated" in fn
+
+
+def test_declared_activity_separates_insider_and_beneficial() -> None:
+    _check_declared_activity_separates_insider_and_beneficial(INDEX_HTML, APP_JS)
+
+
+def _check_institutional_observations_expose_page_coverage(app_js: str) -> None:
+    fn = _extract_js_function(app_js, "renderCazatiburonesInstitutionalObservations")
+    for token in ("total_matching", "offset", "limit", "truncated"):
+        assert token in fn, f"institutional observations render must expose {token!r}"
+    assert "manager_cik" in fn and "report_id" in fn and "cusip" in fn
+
+
+def test_institutional_observations_expose_page_coverage() -> None:
+    _check_institutional_observations_expose_page_coverage(APP_JS)
+
+
+def _check_document_timeline_exposes_revision_identity_and_coverage(app_js: str) -> None:
+    fn = _extract_js_function(app_js, "renderCazatiburonesDocumentTimeline")
+    for token in (
+        "accession",
+        "is_amendment",
+        "available_at",
+        "content_sha256",
+        "source_url",
+        "matched_count",
+        "returned_count",
+        "legacy_records_excluded",
+        "truncated",
+    ):
+        assert token in fn, f"document timeline render must expose {token!r}"
+
+
+def test_document_timeline_exposes_revision_identity_and_coverage() -> None:
+    _check_document_timeline_exposes_revision_identity_and_coverage(APP_JS)
+
+
+_TIMELINE_MISSING_PREFIX = (
+    '(payload.state === "missing" ? "Sin documentos SEC para el activo y corte '
+    'seleccionados · " : "") +'
+)
+
+
+def _check_document_timeline_shows_coverage_even_when_missing(app_js: str) -> None:
+    fn = _extract_js_function(app_js, "renderCazatiburonesDocumentTimeline")
+    assert _TIMELINE_MISSING_PREFIX in fn, (
+        "the four coverage counters (matched_count, returned_count, legacy_records_excluded, "
+        "truncated) must render unconditionally, including under state: 'missing' -- only the "
+        "absence phrasing may be conditional, never the counters themselves"
+    )
+
+
+def test_document_timeline_shows_coverage_even_when_missing() -> None:
+    _check_document_timeline_shows_coverage_even_when_missing(APP_JS)
+
+
+def _check_cazatiburones_board_uses_the_global_known_at_cut(index_html: str, app_js: str) -> None:
+    fn = _extract_js_function(app_js, "loadCazatiburonesBoard")
+    assert 'byId("report-known-at")' in fn
+    assert "selectedMarketAsset" in fn
+    # No second cut control and no second asset selector for this board.
+    assert 'id="cazatiburones-known-at"' not in index_html
+    assert 'id="cazatiburones-asset"' not in index_html
+    assert index_html.count('id="report-known-at"') == 1
+
+
+def test_cazatiburones_board_uses_the_global_known_at_cut() -> None:
+    _check_cazatiburones_board_uses_the_global_known_at_cut(INDEX_HTML, APP_JS)
+
+
+def _check_cazatiburones_board_never_fabricates_a_known_at_cut(app_js: str) -> None:
+    fn = _extract_js_function(app_js, "loadCazatiburonesBoard")
+    assert "new Date(" not in fn, "loadCazatiburonesBoard must never invent its own known_at cut"
+    assert 'byId("report-known-at").value.trim()' in fn
+
+
+def test_cazatiburones_board_never_fabricates_a_known_at_cut() -> None:
+    _check_cazatiburones_board_never_fabricates_a_known_at_cut(APP_JS)
+
+
+def _check_cazatiburones_absence_states_map_to_declared_marks(app_js: str) -> None:
+    metric_fn = _extract_js_function(app_js, "cazatiburonesMetricMarkup")
+    assert '"missing" : "not-evaluable"' in metric_fn
+    field_fn = _extract_js_function(app_js, "cazatiburonesFieldOrAbsence")
+    assert 'renderAbsenceMark("missing"' in field_fn
+    comparison_fn = _extract_js_function(app_js, "cazatiburonesComparisonMarkup")
+    assert 'renderAbsenceMark(\n      "not-evaluable"' in comparison_fn or (
+        "not-evaluable" in comparison_fn and "not_evaluable" in comparison_fn
+    )
+    load_fn = _extract_js_function(app_js, "loadCazatiburonesBoard")
+    assert '"not-applicable"' in load_fn
+    region = _cazatiburones_region(app_js)
+    assert 'renderAbsenceMark("missing"' in region
+
+
+def test_cazatiburones_absence_states_map_to_declared_marks() -> None:
+    _check_cazatiburones_absence_states_map_to_declared_marks(APP_JS)
+
+
+def _check_sec_document_families_never_share_a_row(index_html: str, app_js: str) -> None:
+    assert 'id="cazatiburones-timeline-asset-document"' in index_html
+    assert 'id="cazatiburones-timeline-filer-document"' in index_html
+    fn = _extract_js_function(app_js, "renderCazatiburonesDocumentTimeline")
+    assert "asset_document" in fn and "filer_document" in fn
+    assert "cazatiburones-timeline-asset-document" in fn
+    assert "cazatiburones-timeline-filer-document" in fn
+
+
+def test_sec_document_families_never_share_a_row() -> None:
+    _check_sec_document_families_never_share_a_row(INDEX_HTML, APP_JS)
+
+
+def _check_cazatiburones_board_issues_read_only_requests(app_js: str) -> None:
+    fn = _extract_js_function(app_js, "loadCazatiburonesBoard")
+    assert "method:" not in fn, "cazatiburones must never issue anything but a plain GET"
+    assert fn.count("api(`/api/v1/") == 3
+
+
+def test_cazatiburones_board_issues_read_only_requests() -> None:
+    _check_cazatiburones_board_issues_read_only_requests(APP_JS)
+
+
+_FORBIDDEN_PORTFOLIO_TERMS = ("effective_portfolio", "effectiveportfolio", "cartera efectiva")
+_FORBIDDEN_SIGNAL_CHANNEL_TERMS = ("postmessage(", "notification(", "sendalert", "webhook")
+
+
+def _check_cazatiburones_board_declares_no_effective_portfolio(app_js: str) -> None:
+    region = _cazatiburones_region(app_js).lower()
+    found = [term for term in _FORBIDDEN_PORTFOLIO_TERMS if term in region]
+    assert not found, f"forbidden effective-portfolio term(s) in cazatiburones region: {found}"
+    assert "portfolio" not in region
+
+
+def test_cazatiburones_board_declares_no_effective_portfolio() -> None:
+    _check_cazatiburones_board_declares_no_effective_portfolio(APP_JS)
+
+
+def _check_cazatiburones_board_emits_no_signal_or_channel(app_js: str) -> None:
+    region = _cazatiburones_region(app_js).lower()
+    found = [term for term in _FORBIDDEN_SIGNAL_CHANNEL_TERMS if term in region]
+    assert not found, f"forbidden signal/channel term(s) in cazatiburones region: {found}"
+
+
+def test_cazatiburones_board_emits_no_signal_or_channel() -> None:
+    _check_cazatiburones_board_emits_no_signal_or_channel(APP_JS)
+
+
+def _check_design_system_documentation_declares_the_cazatiburones_read_path(doc_text: str) -> None:
+    normalized = re.sub(r"\s+", " ", doc_text).lower()
+    for endpoint in (
+        "sec-document-timeline",
+        "cazatiburones/declared-activity",
+        "cazatiburones/institutional-observations",
+    ):
+        assert endpoint in normalized, f"the doc must name the {endpoint!r} read path"
+    assert "not-applicable" in normalized
+    assert "not-evaluable" in normalized
+    assert "missing" in normalized
+
+
+def test_design_system_documentation_declares_the_cazatiburones_read_path() -> None:
+    doc_path = (
+        Path(str(files("investment_analyst"))).parent.parent
+        / "docs"
+        / "local_interface_design_system.md"
+    )
+    _check_design_system_documentation_declares_the_cazatiburones_read_path(
+        doc_path.read_text(encoding="utf-8")
+    )
+
+
+def _check_route_registers_the_connected_cazatiburones_board(doc_text: str) -> None:
+    assert re.search(r"\|\s*`LOCAL-INTERFACE`\s*\|\s*`PLANNED`\s*\|", doc_text), (
+        "LOCAL-INTERFACE must remain PLANNED; this block advances evidence, completes nothing"
+    )
+    normalized = re.sub(r"\s+", " ", doc_text).lower()
+    assert "cazatiburones" in normalized and "ui-4" in normalized
+    assert "reservado `not-built`" not in doc_text, (
+        "the pending not-built reservation must not survive alongside the block that connects it"
+    )
+    assert "5.4" in doc_text
+    assert "ibm plex" in normalized
+
+
+def test_route_registers_the_connected_cazatiburones_board() -> None:
+    doc_path = (
+        Path(str(files("investment_analyst"))).parent.parent
+        / "docs"
+        / "basic_functional_release_plan.md"
+    )
+    _check_route_registers_the_connected_cazatiburones_board(doc_path.read_text(encoding="utf-8"))
+
+
+def _check_route_keeps_sec_corpus_as_the_single_next(doc_text: str) -> None:
+    next_rows = re.findall(r"\|\s*`([A-Z-]+)`\s*\|\s*`NEXT`\s*\|", doc_text)
+    assert next_rows == ["SEC-CORPUS"], (
+        f"expected exactly one NEXT row (SEC-CORPUS), found {next_rows}"
+    )
+
+
+def test_route_keeps_sec_corpus_as_the_single_next() -> None:
+    doc_path = (
+        Path(str(files("investment_analyst"))).parent.parent
+        / "docs"
+        / "basic_functional_release_plan.md"
+    )
+    _check_route_keeps_sec_corpus_as_the_single_next(doc_path.read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# Cazatiburones stays fresh under the shared cut (UI-4 AUDIT fix): a direct
+# deep link into #cazatiburones must not read eligibility before
+# marketAssets exists, and the board must reload -- with the new asset or
+# cut -- when either changes while it is the active board. Point-in-time
+# correctness means the board never keeps showing a stale asset or a stale
+# known_at once either one has moved.
+# ---------------------------------------------------------------------------
+
+
+def _check_cazatiburones_board_reloads_after_market_assets_are_ready(app_js: str) -> None:
+    fn = _extract_js_function(app_js, "initialize")
+    reload_call = "if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();"
+    assert reload_call in fn, (
+        "initialize() must re-run the cazatiburones load once assets are ready"
+    )
+    assert "await loadMarketAssets();" in fn
+    assert "applySelectedMarketAsset();" in fn
+    assert fn.index("await loadMarketAssets();") < fn.index(reload_call), (
+        "a #cazatiburones deep link must not evaluate eligibility before marketAssets loads"
+    )
+    assert fn.index("applySelectedMarketAsset();") < fn.index(reload_call)
+
+
+def test_cazatiburones_board_reloads_after_market_assets_are_ready() -> None:
+    _check_cazatiburones_board_reloads_after_market_assets_are_ready(APP_JS)
+
+
+def _check_cazatiburones_board_reloads_when_the_selected_asset_changes(app_js: str) -> None:
+    match = re.search(
+        r"async function selectComboboxOption\(assetId\) \{(.*?)\n  \}", app_js, re.DOTALL
+    )
+    assert match, "selectComboboxOption(assetId) must exist"
+    body = match.group(1)
+    reload_call = "if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();"
+    assert "selectedMarketAsset = assetId;" in body
+    assert reload_call in body, (
+        "changing the selected asset must reload an active cazatiburones board"
+    )
+    assert body.index("selectedMarketAsset = assetId;") < body.index(reload_call), (
+        "cazatiburones must reload with the NEW asset, after selectedMarketAsset is reassigned"
+    )
+
+
+def test_cazatiburones_board_reloads_when_the_selected_asset_changes() -> None:
+    _check_cazatiburones_board_reloads_when_the_selected_asset_changes(APP_JS)
+
+
+def _check_cazatiburones_board_reloads_when_the_known_at_cut_changes(app_js: str) -> None:
+    match = re.search(
+        r'byId\("report-known-at"\)\.addEventListener\("change", \(\) => \{(.*?)\n\}\);',
+        app_js,
+        re.DOTALL,
+    )
+    assert match, "report-known-at change listener must exist"
+    assert "if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();" in match.group(1), (
+        "changing the known_at cut must reload an active cazatiburones board"
+    )
+
+
+def test_cazatiburones_board_reloads_when_the_known_at_cut_changes() -> None:
+    _check_cazatiburones_board_reloads_when_the_known_at_cut_changes(APP_JS)
+
+
+# ---------------------------------------------------------------------------
 # Regression probes: each rule above must fail on a deliberately corrupted
 # fixture, proving the checker is not vacuously true. Every probe below
 # calls the SAME `_check_*` function its declarative test calls -- against
@@ -1948,7 +2257,7 @@ def test_probe_board_registry_rule_catches_a_removed_board() -> None:
 
 
 def test_probe_not_built_board_rule_catches_a_second_not_built_board() -> None:
-    _check_cazatiburones_is_the_only_not_built_board(APP_JS)  # baseline: clean
+    _check_no_board_remains_not_built(APP_JS)  # baseline: clean
     corrupted = APP_JS.replace(
         '{ id: "sistema", label: "Sistema", icon: "gear", built: true },',
         '{ id: "sistema", label: "Sistema", icon: "gear", built: false },',
@@ -1956,7 +2265,7 @@ def test_probe_not_built_board_rule_catches_a_second_not_built_board() -> None:
     )
     assert corrupted != APP_JS, "probe fixture did not corrupt the sistema entry"
     with pytest.raises(AssertionError):
-        _check_cazatiburones_is_the_only_not_built_board(corrupted)
+        _check_no_board_remains_not_built(corrupted)
 
 
 def test_probe_two_visible_boards_rule_catches_a_missing_hidden_attribute() -> None:
@@ -2093,7 +2402,7 @@ def test_probe_not_built_isolation_rule_catches_reuse_as_a_sixth_absence_mark() 
 
 def test_probe_no_new_route_rule_catches_an_added_endpoint_call() -> None:
     _check_no_new_capability_or_route_is_introduced_by_the_shell(APP_JS)  # baseline: clean
-    corrupted = APP_JS + '\nvoid api("/api/v1/cazatiburones/declared-activity");\n'
+    corrupted = APP_JS + '\nvoid api("/api/v1/cazatiburones/effective-portfolio");\n'
     assert corrupted != APP_JS, "probe fixture did not add a new route call"
     with pytest.raises(AssertionError):
         _check_no_new_capability_or_route_is_introduced_by_the_shell(corrupted)
@@ -2183,3 +2492,61 @@ def test_probe_external_network_rule_catches_a_web_font_link() -> None:
     assert corrupted != INDEX_HTML, "probe fixture did not add a web font link"
     with pytest.raises(AssertionError):
         _check_no_external_reference(corrupted, label="index.html")
+
+
+def test_probe_cazatiburones_deep_link_rule_catches_a_removed_reload() -> None:
+    _check_cazatiburones_board_reloads_after_market_assets_are_ready(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        "  applySelectedMarketAsset();\n"
+        "  // A deep link straight into #cazatiburones activates the board (and fires\n"
+        "  // its load) before marketAssets exists, so the eligibility check above\n"
+        "  // always misreads it as ineligible. Re-run the load now that\n"
+        "  // loadMarketAssets()/applySelectedMarketAsset() have populated it.\n"
+        "  if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();\n",
+        "  applySelectedMarketAsset();\n",
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not remove the deep-link reload"
+    with pytest.raises(AssertionError):
+        _check_cazatiburones_board_reloads_after_market_assets_are_ready(corrupted)
+
+
+def test_probe_cazatiburones_asset_change_rule_catches_a_removed_reload() -> None:
+    _check_cazatiburones_board_reloads_when_the_selected_asset_changes(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        "    const presentation = marketAssetPresentation();\n"
+        "    if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();\n",
+        "    const presentation = marketAssetPresentation();\n",
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not remove the asset-change reload"
+    with pytest.raises(AssertionError):
+        _check_cazatiburones_board_reloads_when_the_selected_asset_changes(corrupted)
+
+
+def test_probe_cazatiburones_known_at_change_rule_catches_a_removed_reload() -> None:
+    _check_cazatiburones_board_reloads_when_the_known_at_cut_changes(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        "  if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();\n});",
+        "});",
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not remove the known_at-change reload"
+    with pytest.raises(AssertionError):
+        _check_cazatiburones_board_reloads_when_the_known_at_cut_changes(corrupted)
+
+
+def test_probe_document_timeline_missing_coverage_rule_catches_a_hidden_counter() -> None:
+    _check_document_timeline_shows_coverage_even_when_missing(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        _TIMELINE_MISSING_PREFIX,
+        (
+            'payload.state === "missing"\n'
+            '      ? "Sin documentos SEC para el activo y corte seleccionados"\n'
+            "      : "
+        ),
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not reintroduce the hidden-counter ternary"
+    with pytest.raises(AssertionError):
+        _check_document_timeline_shows_coverage_even_when_missing(corrupted)
