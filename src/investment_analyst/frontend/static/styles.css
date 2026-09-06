@@ -20,7 +20,7 @@ body {
   background: var(--canvas);
   font-family: var(--font-sans);
   font-variant-numeric: tabular-nums lining-nums;
-  line-height: 1.42;
+  line-height: var(--canvas-density);
 }
 
 button,
@@ -288,9 +288,9 @@ h4 {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 1.2rem;
-  row-gap: 0.75rem;
+  row-gap: var(--canvas-row-gap);
   min-height: 88px;
-  padding: 0.75rem clamp(1.1rem, 3vw, 2.25rem);
+  padding: var(--canvas-row-gap) var(--canvas-gutter);
   border-bottom: 1px solid var(--line);
   background: var(--topbar);
 }
@@ -520,7 +520,7 @@ footer {
   width: 100%;
   max-width: 1800px;
   margin-inline: auto;
-  padding-inline: clamp(1.1rem, 3vw, 2.25rem);
+  padding-inline: var(--canvas-gutter);
 }
 
 main {
@@ -959,11 +959,65 @@ section {
   display: none !important;
 }
 
+/* Board shell (UI-2): exactly one .board is visible at a time, toggled via
+   the native [hidden] attribute -- never .hidden or an inline
+   style.display, which the reset above already governs for everything
+   else. No rule sets a competing `display` on .board itself, so the
+   browser's own [hidden] behavior is sufficient; this rule exists only to
+   make that contract explicit and testable. */
+.board {
+  min-width: 0;
+}
+
+.board[hidden] {
+  display: none;
+}
+
+.board-not-built {
+  display: flex;
+  gap: 0.85rem;
+  align-items: flex-start;
+  margin-top: 1rem;
+  padding: 1.1rem 1.25rem;
+  border: 1px dashed var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface-subtle);
+}
+
+.board-not-built-icon {
+  display: grid;
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-size: 1rem;
+}
+
+.board-not-built-icon::before {
+  content: "◌";
+}
+
+.board-not-built-label {
+  display: block;
+  color: var(--ink-strong);
+  font-size: 0.9rem;
+}
+
+.board-not-built-reason {
+  margin: 0.3rem 0 0;
+  color: var(--muted-strong);
+  font-size: 0.8rem;
+}
+
 .market-section,
 .crypto-derivatives-section,
 .analysis-section,
 .operations-section {
-  margin-top: 1.55rem;
+  margin-top: var(--canvas-block-gap);
 }
 
 .market-section {
@@ -971,7 +1025,7 @@ section {
 }
 
 .crypto-derivatives-section {
-  margin-top: 1.55rem;
+  margin-top: var(--canvas-block-gap);
 }
 
 .crypto-derivatives-card {
@@ -1991,7 +2045,7 @@ section {
 }
 
 .fundamental-section {
-  margin-top: 1.55rem;
+  margin-top: var(--canvas-block-gap);
 }
 
 .fundamental-trend-card {
@@ -2926,7 +2980,9 @@ pre {
 }
 
 .alert-inbox-panel > summary,
+.alert-inbox-panel > .panel-header,
 .candidate-inbox-panel > summary,
+.candidate-inbox-panel > .panel-header,
 .screening-rules-panel > summary {
   min-height: 58px;
   padding-block: 0.7rem;
@@ -3246,15 +3302,19 @@ pre {
   opacity: 0.55;
 }
 
-.operation-panel > summary {
+.operation-panel > summary,
+.operation-panel > .panel-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
   min-height: 72px;
   padding: 1rem 1.15rem;
-  cursor: pointer;
   list-style: none;
+}
+
+.operation-panel > summary {
+  cursor: pointer;
 }
 
 .operation-panel > summary::-webkit-details-marker {
@@ -3262,16 +3322,20 @@ pre {
 }
 
 .operation-panel > summary strong,
-.operation-panel > summary small {
+.operation-panel > .panel-header strong,
+.operation-panel > summary small,
+.operation-panel > .panel-header small {
   display: block;
 }
 
-.operation-panel > summary strong {
+.operation-panel > summary strong,
+.operation-panel > .panel-header strong {
   color: var(--ink-strong);
   font-size: 0.84rem;
 }
 
-.operation-panel > summary small {
+.operation-panel > summary small,
+.operation-panel > .panel-header small {
   margin-top: 0.18rem;
   color: var(--muted);
   font-size: 0.7rem;
