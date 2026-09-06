@@ -145,6 +145,10 @@ from investment_analyst.application.operational_models import (
     AaplDailyRunState,
     AaplOperationalHealth,
 )
+from investment_analyst.application.peru_registry import (
+    BvlRegistryRefreshRequest,
+    BvlRegistryRefreshSummary,
+)
 from investment_analyst.application.runtime import StorageLocationRequest
 from investment_analyst.application.sec_document_timeline import (
     SecDocumentTimelineApplicationError,
@@ -280,6 +284,8 @@ class _FakeApplication:
         self.fundamental_refresh_requests: list[SecIssuerFundamentalRefreshRequest] = []
         self.fundamental_refresh_locations: list[StorageLocationRequest] = []
         self.fundamental_refresh_identities: list[SecEdgarIdentity] = []
+        self.bvl_refresh_requests: list[BvlRegistryRefreshRequest] = []
+        self.bvl_refresh_locations: list[StorageLocationRequest] = []
         self.valuation_requests: list[CorporateValuationRequest] = []
         self.valuation_locations: list[StorageLocationRequest] = []
         self.valuation_history_requests: list[CorporateValuationHistoryRequest] = []
@@ -635,6 +641,27 @@ class _FakeApplication:
                     "refresh_plan": {"mode": "incremental"},
                     "bars_received": 1,
                     "metric_results_created": 7,
+                    "traceability_verified": True,
+                }
+            ),
+        )
+
+    def refresh_bvl_registry(
+        self,
+        request: BvlRegistryRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> BvlRegistryRefreshSummary:
+        self.bvl_refresh_requests.append(request)
+        self.bvl_refresh_locations.append(location)
+        return cast(
+            BvlRegistryRefreshSummary,
+            _JsonResult(
+                {
+                    "requested_asset_ids": list(request.asset_ids),
+                    "assets": [],
+                    "raw_records_created": 0,
+                    "raw_records_reused": 0,
                     "traceability_verified": True,
                 }
             ),
@@ -4400,6 +4427,74 @@ def test_universe_coverage_cache_is_invalidated_after_a_completed_run(tmp_path: 
 
     assert len(application.universe_coverage_requests) == 2
     assert len(runner.requests) == 1
+
+
+def test_universe_coverage_cache_is_invalidated_after_any_domain_refresh(tmp_path: Path) -> None:
+    """A refresh in any of the four coverage domains must not leave a stale cached matrix."""
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    request = UniverseCoverageRequest(
+        known_at=datetime(2026, 7, 16, tzinfo=UTC),
+        market_start=date(2026, 1, 1),
+        market_end=date(2026, 7, 15),
+        fundamental_start=date(2020, 1, 1),
+        fundamental_end=date(2026, 7, 15),
+    )
+    refreshers = (
+        lambda: controller.btc_market_refresh_request(
+            BtcMarketRefreshRequest(market_start=date(2026, 6, 1), market_end=date(2026, 6, 30))
+        ),
+        lambda: controller.crypto_spot_daily_refresh_request(
+            CryptoSpotDailyRefreshRequest(
+                asset_id="crypto:sol-usd",
+                market_start=date(2026, 6, 1),
+                market_end=date(2026, 6, 30),
+            )
+        ),
+        lambda: controller.listed_market_refresh_request(
+            ListedMarketRefreshRequest(
+                asset_id="equity:us:amd",
+                market_start=date(2026, 6, 1),
+                market_end=date(2026, 6, 30),
+            )
+        ),
+        lambda: controller.sec_fundamental_refresh_request(
+            SecIssuerFundamentalRefreshRequest(
+                asset_id="equity:us:amd",
+                frequency=DataFrequency.QUARTERLY,
+            )
+        ),
+        lambda: controller.bvl_registry_refresh_request(BvlRegistryRefreshRequest()),
+    )
+
+    # Populate the cache once: this is the only cache miss not caused by a refresh below.
+    controller.coverage_request(request)
+    expected_backend_calls = 1
+    assert len(application.universe_coverage_requests) == expected_backend_calls
+
+    for refresh in refreshers:
+        # Immediately before its own refresh, the matrix is still served from cache.
+        controller.coverage_request(request)
+        assert len(application.universe_coverage_requests) == expected_backend_calls
+
+        refresh()
+
+        # Every domain refresh must force exactly one new backend call afterward.
+        controller.coverage_request(request)
+        expected_backend_calls += 1
+        assert len(application.universe_coverage_requests) == expected_backend_calls
+
+    assert len(application.btc_refresh_requests) == 1
+    assert len(application.crypto_refresh_requests) == 1
+    assert len(application.listed_refresh_requests) == 1
+    assert len(application.fundamental_refresh_requests) == 1
+    assert len(application.bvl_refresh_requests) == 1
 
 
 def test_probe_universe_coverage_contract_modification_attempt_fails() -> None:

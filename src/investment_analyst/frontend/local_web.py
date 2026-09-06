@@ -1131,6 +1131,7 @@ class AaplLocalController:
             finally:
                 with self._cache_lock:
                     self._btc_market_chart_cache.clear()
+                    self._coverage_cache.clear()
                 self._refresh_health_snapshot()
 
     def crypto_spot_daily_refresh_request(
@@ -1147,6 +1148,7 @@ class AaplLocalController:
             finally:
                 with self._cache_lock:
                     self._crypto_spot_daily_chart_cache.clear()
+                    self._coverage_cache.clear()
                 self._refresh_health_snapshot()
 
     def listed_market_refresh_request(
@@ -1165,6 +1167,7 @@ class AaplLocalController:
                 with self._cache_lock:
                     self._listed_market_chart_cache.clear()
                     self._corporate_valuation_cache.clear()
+                    self._coverage_cache.clear()
                 self._refresh_health_snapshot()
 
     def btc_intraday_refresh_request(
@@ -1202,6 +1205,7 @@ class AaplLocalController:
                     self._fundamental_research_history_cache.clear()
                     self._fundamental_analysis_cache.clear()
                     self._corporate_valuation_cache.clear()
+                    self._coverage_cache.clear()
                 self._refresh_health_snapshot()
 
     def fred_catalog_refresh_request(
@@ -1224,10 +1228,14 @@ class AaplLocalController:
     ) -> BvlRegistryRefreshSummary:
         """Refresh official SMV registry evidence through the shared writer mutex."""
         with self._writer_lock:
-            return self._application.refresh_bvl_registry(
-                request,
-                location=StorageLocationRequest(workspace=self._workspace),
-            )
+            try:
+                return self._application.refresh_bvl_registry(
+                    request,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                )
+            finally:
+                with self._cache_lock:
+                    self._coverage_cache.clear()
 
     def fundamental_trend_request(
         self,
