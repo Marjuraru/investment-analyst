@@ -5671,16 +5671,7 @@ const BOARD_REGISTRY = Object.freeze([
   { id: "activo", label: "Activo", icon: "trending", built: true },
   { id: "tecnico", label: "Técnico", icon: "bars", built: true },
   { id: "revisar", label: "Revisar", icon: "inbox", built: true },
-  {
-    id: "cazatiburones",
-    label: "Cazatiburones",
-    icon: "eye",
-    built: false,
-    reason:
-      "El corpus documental SEC y las observaciones institucionales 13F ya tienen transporte " +
-      "en el servidor (/api/v1/sec-document-timeline, /api/v1/cazatiburones/declared-activity, " +
-      "/api/v1/cazatiburones/institutional-observations); este tablero conecta su lectura en UI-3.",
-  },
+  { id: "cazatiburones", label: "Cazatiburones", icon: "eye", built: true },
   { id: "sistema", label: "Sistema", icon: "gear", built: true },
 ]);
 
@@ -5776,6 +5767,9 @@ function activateBoard(boardId, { focus = true } = {}) {
     void loadCandidateInbox();
     void loadAlertInbox();
   }
+  if (resolvedId === "cazatiburones") {
+    void loadCazatiburonesBoard();
+  }
 }
 
 function initializeBoardShell() {
@@ -5791,6 +5785,228 @@ function initializeBoardShell() {
   window.addEventListener("hashchange", () => {
     activateBoard(boardIdFromLocationHash(), { focus: false });
   });
+}
+
+// Cazatiburones (UI-4): three separate read-only presentations over
+// already-integrated point-in-time endpoints (issue 159), sharing the
+// single global known_at cut (control id report-known-at) and selectedMarketAsset --
+// this board never fabricates its own cut, never adds a second asset
+// selector, and never issues anything but a GET read. asset_document and
+// filer_document, insider and beneficial, and every 13F row stay in
+// disjoint containers with independent counts: nothing here is combined
+// into an effective portfolio, a score or a signal.
+let cazatiburonesRequestSequence = 0;
+
+function cazatiburonesEligiblePresentation() {
+  const presentation = marketAssets[selectedMarketAsset];
+  return presentation && presentation.hasFundamentals && presentation.fundamentalMode === "corporate"
+    ? presentation
+    : null;
+}
+
+// Every optional descriptive field that can be legitimately absent from a
+// declared-activity or document-timeline record renders through the
+// declared absence grammar -- never a bare "0", "—" or empty cell.
+function cazatiburonesFieldOrAbsence(value, formatter = String) {
+  return value === null || value === undefined
+    ? renderAbsenceMark("missing", "Sin evidencia").outerHTML
+    : formatter(value);
+}
+
+function cazatiburonesMetricMarkup(metric) {
+  if (metric.status === "available") {
+    return `<span class="figure">${formatNumber(metric.value)}</span>`;
+  }
+  return renderAbsenceMark(
+    metric.status === "missing" ? "missing" : "not-evaluable",
+    metric.status === "missing" ? "Sin evidencia" : "No evaluable",
+  ).outerHTML;
+}
+
+function cazatiburonesComparisonMarkup(status) {
+  if (status === "not_evaluable") {
+    return renderAbsenceMark(
+      "not-evaluable",
+      "No evaluable",
+      "Comparación no evaluable con la cobertura común disponible",
+    ).outerHTML;
+  }
+  return `<span>${status === "discontinuous" ? "Discontinua" : "Disponible"}</span>`;
+}
+
+function renderCazatiburonesFeatureGroup(containerId, label, features) {
+  const container = byId(containerId);
+  container.replaceChildren();
+  container.append(createElement("strong", "cazatiburones-feature-group-title", label));
+  if (features.length === 0) {
+    container.append(
+      renderAbsenceMark("missing", "Sin evidencia", `Sin ${label.toLowerCase()} declarados`),
+    );
+    return;
+  }
+  for (const feature of features) {
+    const row = createElement("div", "cazatiburones-row");
+    const metricsMarkup = feature.metrics
+      .map((metric) => `<dt>${metric.key}</dt><dd>${cazatiburonesMetricMarkup(metric)}</dd>`)
+      .join("");
+    row.innerHTML =
+      `<p class="eyebrow">${feature.form} · ${feature.participant_cik}</p>` +
+      `<dl>` +
+      `<dt>Naturaleza declarada</dt><dd>${cazatiburonesFieldOrAbsence(feature.declared_nature)}</dd>` +
+      `<dt>Título del valor</dt><dd>${cazatiburonesFieldOrAbsence(feature.security_title)}</dd>` +
+      `<dt>Tabla</dt><dd>${cazatiburonesFieldOrAbsence(feature.table)}</dd>` +
+      `<dt>Fecha del evento</dt><dd>${cazatiburonesFieldOrAbsence(feature.event_date, formatCalendarDate)}</dd>` +
+      `<dt>Disponible desde</dt><dd>${formatInstant(feature.available_at)}</dd>` +
+      `<dt>Comparación</dt><dd>${cazatiburonesComparisonMarkup(feature.comparison_status)}</dd>` +
+      `${metricsMarkup}` +
+      `</dl>`;
+    container.append(row);
+  }
+}
+
+function renderCazatiburonesDeclaredActivity(payload) {
+  renderCazatiburonesFeatureGroup(
+    "cazatiburones-insider-features",
+    "Actividad de insiders declarada",
+    payload.insider_features,
+  );
+  renderCazatiburonesFeatureGroup(
+    "cazatiburones-beneficial-features",
+    "Propiedad beneficiaria declarada",
+    payload.beneficial_features,
+  );
+  byId("cazatiburones-declared-activity-summary").innerHTML =
+    `<span class="figure">${formatInteger(payload.total_statements)}</span> declaraciones` +
+    (payload.truncated ? " · resultado truncado" : "");
+}
+
+function renderCazatiburonesInstitutionalObservations(payload, offset, limit) {
+  const container = byId("cazatiburones-institutional-observations-rows");
+  container.replaceChildren();
+  if (payload.observations.length === 0) {
+    container.append(
+      renderAbsenceMark("missing", "Sin evidencia", "Sin observaciones institucionales 13F"),
+    );
+  } else {
+    for (const view of payload.observations) {
+      const row = createElement("div", "cazatiburones-row");
+      row.innerHTML =
+        `<p class="eyebrow">${view.report.manager_cik} · ${view.report.report_id}</p>` +
+        `<dl>` +
+        `<dt>CUSIP</dt><dd>${view.row.cusip}</dd>` +
+        `<dt>Campo</dt><dd>${view.observation.field_name}</dd>` +
+        `<dt>Valor as-filed</dt><dd><span class="figure">${formatNumber(view.observation.value)}</span></dd>` +
+        `<dt>Disponible desde</dt><dd>${formatInstant(view.observation.available_at)}</dd>` +
+        `</dl>`;
+      container.append(row);
+    }
+  }
+  byId("cazatiburones-institutional-observations-summary").innerHTML =
+    `<span class="figure">${formatInteger(payload.observations.length)}</span> de ` +
+    `<span class="figure">${formatInteger(payload.total_matching)}</span> filas as-filed ` +
+    `· página offset <span class="figure">${formatInteger(offset)}</span> ` +
+    `límite <span class="figure">${formatInteger(limit)}</span>` +
+    (payload.truncated ? " · truncado" : "");
+}
+
+function renderCazatiburonesDocumentTimeline(payload) {
+  const assetContainer = byId("cazatiburones-timeline-asset-document");
+  const filerContainer = byId("cazatiburones-timeline-filer-document");
+  assetContainer.replaceChildren();
+  filerContainer.replaceChildren();
+  assetContainer.append(
+    createElement("strong", "cazatiburones-feature-group-title", "Documentos del activo"),
+  );
+  filerContainer.append(
+    createElement("strong", "cazatiburones-feature-group-title", "Documentos del emisor"),
+  );
+  const entriesByFamily = { asset_document: [], filer_document: [] };
+  if (payload.state !== "missing") {
+    for (const entry of payload.entries) entriesByFamily[entry.family].push(entry);
+  }
+  for (const [family, container] of [
+    ["asset_document", assetContainer],
+    ["filer_document", filerContainer],
+  ]) {
+    const entries = entriesByFamily[family];
+    if (entries.length === 0) {
+      container.append(
+        renderAbsenceMark("missing", "Sin evidencia", "Sin revisiones documentales SEC"),
+      );
+      continue;
+    }
+    for (const entry of entries) {
+      const row = createElement("div", "cazatiburones-row");
+      row.innerHTML =
+        `<p class="eyebrow">${entry.form} · ${entry.accession}</p>` +
+        `<dl>` +
+        `<dt>Fecha de presentación</dt><dd>${formatCalendarDate(entry.filing_date)}</dd>` +
+        `<dt>Fecha del reporte</dt><dd>${cazatiburonesFieldOrAbsence(entry.report_date, formatCalendarDate)}</dd>` +
+        `<dt>Aceptado</dt><dd>${formatInstant(entry.accepted_at)}</dd>` +
+        `<dt>Disponible desde</dt><dd>${formatInstant(entry.available_at)}</dd>` +
+        `<dt>Enmienda</dt><dd>${entry.is_amendment ? "Sí" : "No"}</dd>` +
+        `<dt>SHA-256</dt><dd>${entry.content_sha256}</dd>` +
+        `</dl>`;
+      container.append(row);
+    }
+  }
+  byId("cazatiburones-document-timeline-summary").innerHTML =
+    payload.state === "missing"
+      ? "Sin documentos SEC para el activo y corte seleccionados"
+      : `<span class="figure">${formatInteger(payload.returned_count)}</span> de ` +
+        `<span class="figure">${formatInteger(payload.matched_count)}</span> revisiones` +
+        ` · <span class="figure">${formatInteger(payload.legacy_records_excluded)}</span> legado excluido` +
+        (payload.truncated ? " · truncado" : "");
+}
+
+async function loadCazatiburonesBoard() {
+  const sequence = ++cazatiburonesRequestSequence;
+  const assetId = selectedMarketAsset;
+  const knownAt = byId("report-known-at").value.trim();
+  const notApplicable = byId("cazatiburones-not-applicable");
+  const content = byId("cazatiburones-content");
+  if (!cazatiburonesEligiblePresentation()) {
+    content.classList.add("hidden");
+    notApplicable.replaceChildren(
+      renderAbsenceMark(
+        "not-applicable",
+        "No aplica",
+        "El activo seleccionado no tiene presentación SEC corporativa habilitada",
+      ),
+    );
+    notApplicable.classList.remove("hidden");
+    return;
+  }
+  notApplicable.classList.add("hidden");
+  notApplicable.replaceChildren();
+  content.classList.remove("hidden");
+  const offset = 0;
+  const limit = 200;
+  const featureParameters = new URLSearchParams({ asset_id: assetId, known_at: knownAt });
+  const observationParameters = new URLSearchParams({
+    asset_id: assetId,
+    known_at: knownAt,
+    offset: String(offset),
+    limit: String(limit),
+  });
+  const timelineParameters = new URLSearchParams({ known_at: knownAt });
+  timelineParameters.append("asset_id", assetId);
+  try {
+    const [declaredActivity, institutionalObservations, documentTimeline] = await Promise.all([
+      api(`/api/v1/cazatiburones/declared-activity?${featureParameters.toString()}`),
+      api(`/api/v1/cazatiburones/institutional-observations?${observationParameters.toString()}`),
+      api(`/api/v1/sec-document-timeline?${timelineParameters.toString()}`),
+    ]);
+    if (sequence !== cazatiburonesRequestSequence || assetId !== selectedMarketAsset) return;
+    renderCazatiburonesDeclaredActivity(declaredActivity);
+    renderCazatiburonesInstitutionalObservations(institutionalObservations, offset, limit);
+    renderCazatiburonesDocumentTimeline(documentTimeline);
+  } catch (error) {
+    if (sequence !== cazatiburonesRequestSequence || assetId !== selectedMarketAsset) return;
+    byId("cazatiburones-declared-activity-summary").textContent = error.message;
+    byId("cazatiburones-institutional-observations-summary").textContent = error.message;
+    byId("cazatiburones-document-timeline-summary").textContent = error.message;
+  }
 }
 
 async function initialize() {

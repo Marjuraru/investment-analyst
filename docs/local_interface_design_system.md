@@ -222,17 +222,69 @@ por activación.
 
 ### Gramática `not-built`, aislada de la gramática de ausencia
 
-`cazatiburones` es el único tablero `not-built` de este bloque: reserva la
-lectura de la actividad institucional 13F y del corpus documental SEC, ya
-transportados por el servidor, para cuando `UI-3` conecte su interfaz.
+`UI-2` declaró `cazatiburones` como el único tablero `not-built`, reservando
+la lectura de la actividad institucional 13F y del corpus documental SEC,
+ya transportados por el servidor, para cuando su interfaz se conectara.
+`UI-4` conecta esa lectura y cierra la reserva: los seis tableros de
+`BOARD_REGISTRY` son ahora `built: true` y `board-cazatiburones-not-built`
+deja de existir en el marcado. `renderNotBuiltBoards()` y `.board-not-built`
+no se eliminan -- siguen siendo genéricos sobre cualquier entrada futura con
+`built: false`, exactamente como los declaró `UI-2` -- pero hoy no
+renderizan nada porque cero tableros lo declaran.
+
 `not-built` **no es una sexta marca de ausencia**: una marca de ausencia
 (`missing`, `not-evaluable`, `not-applicable`, `overdue`, `blocked`)
 describe un dato que falta bajo un corte `known_at` ya vigente; `not-built`
 describe una capacidad de producto que todavía no existe, con su propia
-clase CSS (`.board-not-built`) y su propia función de render
-(`renderNotBuiltBoards()`), separadas por completo de `.absence-mark` y de
-`renderAbsenceMark()`. Las cinco marcas de ausencia declaradas por `UI-1`
-siguen siendo exactamente cinco.
+clase CSS (`.board-not-built`) y su
+propia función de render (`renderNotBuiltBoards()`), separadas por completo
+de `.absence-mark` y de `renderAbsenceMark()`. Las cinco marcas de ausencia
+declaradas por `UI-1` siguen siendo exactamente cinco.
+
+### Camino de lectura conectado (`UI-4`)
+
+`cazatiburones` presenta tres lecturas descriptivas independientes para el
+activo seleccionado y el corte `known_at` global vigente, cada una servida
+por un endpoint de solo lectura ya integrado por `SEC-CORPUS` (#159/#160) y
+consumido sin modificar transporte ni contratos:
+
+- **Actividad declarada** (`GET /api/v1/cazatiburones/declared-activity`) --
+  `insider_features` y `beneficial_features` en dos contenedores separados
+  (`#cazatiburones-insider-features`, `#cazatiburones-beneficial-features`),
+  nunca combinados en una fila o total común.
+- **Observaciones institucionales 13F**
+  (`GET /api/v1/cazatiburones/institutional-observations`) -- filas as-filed
+  por `manager_cik`/`report_id`/`cusip`, con `total_matching`, la página
+  solicitada (`offset`/`limit`) y `truncated` expuestos como cobertura de
+  página, nunca como total del dominio.
+- **Línea temporal documental SEC** (`GET /api/v1/sec-document-timeline`) --
+  entradas por revisión separadas en dos contenedores por familia
+  (`#cazatiburones-timeline-asset-document`,
+  `#cazatiburones-timeline-filer-document`), con `accession`,
+  `is_amendment`, `available_at`, `content_sha256`, y `matched_count`,
+  `returned_count`, `legacy_records_excluded`, `truncated` visibles.
+
+Las tres peticiones son `GET` puras: el tablero no dispara refresh,
+escritura, provider ni acceso al workspace permanente, y comparte
+exclusivamente el corte de `#report-known-at` y `selectedMarketAsset` ya
+declarados por bloques anteriores -- no expone un segundo selector de
+activo ni un segundo control de corte.
+
+Cuando el activo seleccionado no tiene presentación SEC corporativa
+habilitada (`hasFundamentals && fundamentalMode === "corporate"`), el
+tablero presenta una única marca `not-applicable`, nunca un error de red ni
+una ausencia de datos: la pregunta "¿esto aplica a este activo?" es
+distinta de "¿este dato existe bajo este corte?".
+
+El estado de cada lectura se traduce a la gramática de ausencia ya
+declarada, nunca a `0`, `—` o una celda vacía: un grupo de features, de
+observaciones o de entradas de línea temporal vacío -- o
+`state: "missing"` en la línea temporal -- se presenta como `missing`; un
+`DescriptiveMetric` o un `comparison_status` en `not_evaluable` se presenta
+como `not-evaluable`; y cualquier campo opcional ausente en un registro
+individual (`declared_nature`, `security_title`, `table`, `event_date`,
+`report_date`) se presenta como `missing`, nunca como un guion sin
+significado.
 
 ### Rejilla y densidad del lienzo, ahora en tokens
 
