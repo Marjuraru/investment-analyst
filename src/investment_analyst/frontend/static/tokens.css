@@ -118,6 +118,16 @@
   --code-border: #26364c;
 
   --sidebar-width: 212px;
+
+  /* Canvas grid + density (UI-2 board shell): rem/clamp layout values, not
+     colors, but declared under the same single-declaration/dual-theme
+     parity discipline as every token above, so the approved canvas grid
+     never drifts between the light and dark build. Theme-invariant like
+     --sidebar-width, so both blocks below carry identical values. */
+  --canvas-gutter: clamp(1.1rem, 3vw, 2.25rem);
+  --canvas-row-gap: 0.75rem;
+  --canvas-block-gap: 1.55rem;
+  --canvas-density: 1.42;
 }
 
 :root[data-theme="dark"] {
@@ -203,4 +213,9 @@
   --code-border: #26364c;
 
   --sidebar-width: 212px;
+
+  --canvas-gutter: clamp(1.1rem, 3vw, 2.25rem);
+  --canvas-row-gap: 0.75rem;
+  --canvas-block-gap: 1.55rem;
+  --canvas-density: 1.42;
 }

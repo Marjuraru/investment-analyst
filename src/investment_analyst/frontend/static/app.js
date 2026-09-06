@@ -5428,9 +5428,13 @@ for (const button of document.querySelectorAll(".frequency-button")) {
   });
 }
 
-for (const link of document.querySelectorAll(".nav-link")) {
+// Board-nav-links (the six-board switcher) are excluded here: they carry
+// their own independent active/aria-current tracking in activateBoard(),
+// separate from this pre-existing cosmetic exclusivity group shared by the
+// sidebar's asset-nav sub-tabs.
+for (const link of document.querySelectorAll(".nav-link:not(.board-nav-link)")) {
   link.addEventListener("click", () => {
-    for (const candidate of document.querySelectorAll(".nav-link")) {
+    for (const candidate of document.querySelectorAll(".nav-link:not(.board-nav-link)")) {
       candidate.classList.toggle("active", candidate === link);
       if (candidate === link) candidate.setAttribute("aria-current", "page");
       else candidate.removeAttribute("aria-current");
@@ -5440,14 +5444,6 @@ for (const link of document.querySelectorAll(".nav-link")) {
 
 byId("valuation-nav-link").addEventListener("click", () => {
   if (valuationPayload === null) void queryValuation();
-});
-
-byId("alert-inbox-panel").addEventListener("toggle", (event) => {
-  if (event.currentTarget.open) void loadAlertInbox();
-});
-
-byId("candidate-inbox-panel").addEventListener("toggle", (event) => {
-  if (event.currentTarget.open) void loadCandidateInbox();
 });
 
 byId("candidate-notification-panel").addEventListener("toggle", (event) => {
@@ -5657,7 +5653,140 @@ byId("sidebar-toggle").addEventListener("click", () => {
   toggle.setAttribute("aria-label", isCollapsed ? "Expandir navegación" : "Colapsar navegación");
 });
 
+// Board shell (UI-2): the single source of truth for the six-board
+// navigation, routing and built/not-built state. Nothing else declares a
+// board id, label or not-built reason -- renderBoardNav() and
+// renderNotBuiltBoards() below read exclusively from this array, so the
+// nav, the routing table and the not-built grammar can never drift apart.
+const BOARD_REGISTRY = Object.freeze([
+  { id: "mesa", label: "Mesa", icon: "grid", built: true },
+  { id: "activo", label: "Activo", icon: "trending", built: true },
+  { id: "tecnico", label: "Técnico", icon: "bars", built: true },
+  { id: "revisar", label: "Revisar", icon: "inbox", built: true },
+  {
+    id: "cazatiburones",
+    label: "Cazatiburones",
+    icon: "eye",
+    built: false,
+    reason:
+      "El corpus documental SEC y las observaciones institucionales 13F ya tienen transporte " +
+      "en el servidor (/api/v1/sec-document-timeline, /api/v1/cazatiburones/declared-activity, " +
+      "/api/v1/cazatiburones/institutional-observations); este tablero conecta su lectura en UI-3.",
+  },
+  { id: "sistema", label: "Sistema", icon: "gear", built: true },
+]);
+
+const DEFAULT_BOARD_ID = BOARD_REGISTRY[0].id;
+
+// Feather-style stroke icon paths, one per BOARD_REGISTRY.icon value. "grid"
+// and "gear" are copied verbatim from the pre-existing Resumen/Operación
+// nav-link glyphs they replace; the rest are new but follow the same
+// viewBox/stroke convention as every other inline icon in this file.
+const BOARD_NAV_ICON_PATHS = Object.freeze({
+  grid: '<rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect>',
+  trending: '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>',
+  bars: '<line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line>',
+  inbox: '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"></polyline><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path>',
+  eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle>',
+  gear: '<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>',
+});
+
+function isKnownBoardId(boardId) {
+  return BOARD_REGISTRY.some((board) => board.id === boardId);
+}
+
+function boardIdFromLocationHash() {
+  const raw = window.location.hash.replace(/^#/, "");
+  return isKnownBoardId(raw) ? raw : DEFAULT_BOARD_ID;
+}
+
+function renderBoardNav() {
+  const nav = byId("board-nav");
+  nav.replaceChildren();
+  for (const board of BOARD_REGISTRY) {
+    const link = document.createElement("a");
+    link.className = "nav-link board-nav-link";
+    link.href = `#${board.id}`;
+    link.dataset.board = board.id;
+    if (!board.built) link.title = `${board.label} · aún no construido`;
+    link.innerHTML =
+      `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" ` +
+      `stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+      `${BOARD_NAV_ICON_PATHS[board.icon]}</svg>` +
+      `<span class="nav-text">${board.label}</span>`;
+    nav.append(link);
+  }
+}
+
+// cazatiburones is the only not-built board in this Work Block, but this
+// stays generic over every BOARD_REGISTRY entry with built === false so a
+// future not-built board never needs a second code path.
+function renderNotBuiltBoards() {
+  for (const board of BOARD_REGISTRY) {
+    if (board.built) continue;
+    const container = byId(`board-${board.id}-not-built`);
+    if (!container) continue;
+    const wrapper = createElement("div", "board-not-built");
+    wrapper.setAttribute("role", "status");
+    const icon = createElement("span", "board-not-built-icon");
+    icon.setAttribute("aria-hidden", "true");
+    const copy = createElement("div", "board-not-built-copy");
+    copy.append(
+      createElement("strong", "board-not-built-label", `${board.label} · aún no construido`),
+      createElement("p", "board-not-built-reason", board.reason),
+    );
+    wrapper.append(icon, copy);
+    container.replaceChildren(wrapper);
+  }
+}
+
+// activateBoard() only ever touches [hidden] on each .board and the
+// board-nav-link active/aria-current pair -- it never reads or writes the
+// known_at cut, the session clock, or fires any query for a board that
+// merely becomes visible. "revisar" is the sole exception: its two
+// promoted panels lost their <details> toggle event, so their deferred
+// load now fires from here instead, once per activation, exactly like the
+// toggle it replaces.
+function activateBoard(boardId, { focus = true } = {}) {
+  const resolvedId = isKnownBoardId(boardId) ? boardId : DEFAULT_BOARD_ID;
+  for (const board of BOARD_REGISTRY) {
+    const section = byId(`board-${board.id}`);
+    if (section) section.hidden = board.id !== resolvedId;
+  }
+  for (const link of document.querySelectorAll(".board-nav-link")) {
+    const isActive = link.dataset.board === resolvedId;
+    link.classList.toggle("active", isActive);
+    if (isActive) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+  if (window.location.hash.replace(/^#/, "") !== resolvedId) {
+    history.replaceState(null, "", `#${resolvedId}`);
+  }
+  const activeSection = byId(`board-${resolvedId}`);
+  if (focus && activeSection) activeSection.focus({ preventScroll: true });
+  if (resolvedId === "revisar") {
+    void loadCandidateInbox();
+    void loadAlertInbox();
+  }
+}
+
+function initializeBoardShell() {
+  renderBoardNav();
+  renderNotBuiltBoards();
+  activateBoard(boardIdFromLocationHash(), { focus: false });
+  for (const link of document.querySelectorAll(".board-nav-link")) {
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      activateBoard(link.dataset.board);
+    });
+  }
+  window.addEventListener("hashchange", () => {
+    activateBoard(boardIdFromLocationHash(), { focus: false });
+  });
+}
+
 async function initialize() {
+  initializeBoardShell();
   initializeTheme();
   captureDefaultSmaColors();
   await loadMarketAssets();

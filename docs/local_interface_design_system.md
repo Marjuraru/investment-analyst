@@ -190,6 +190,64 @@ sólo de presentación: cada exportación JSON/CSV sigue serializando el
 objeto de payload subyacente, nunca un valor reconstruido a partir de su
 texto redondeado.
 
+## Armazón de tableros (`UI-2`)
+
+`UI-2` sustituye la página única acumulativa por un **armazón de seis
+tableros**: `mesa`, `activo`, `tecnico`, `revisar`, `cazatiburones` y
+`sistema`. Un único registro en `app.js` (`BOARD_REGISTRY`) declara los seis
+`board_id` con su etiqueta y su estado construido/no construido; la
+navegación, el enrutado (`activateBoard()`, `boardIdFromLocationHash()`) y la
+gramática `not-built` se derivan exclusivamente de ese registro, nunca de una
+segunda lista paralela.
+
+Exactamente un tablero es visible a la vez, alternado con el atributo nativo
+`hidden` -- nunca con la clase `.hidden` ni con `style.display`, que el reset
+general de la superficie ya gobierna para todo lo demás. El tablero activo es
+enlazable y restaurable desde el fragmento de la URL (`#activo`, `#revisar`,
+…), y su enlace de navegación lleva `aria-current="page"`.
+
+Toda sección y todo control ya entregado por bloques anteriores se **movió
+intacto** a un tablero declarado: los once `id` de sección de la base
+(`resumen`, `mercado`, `derivados-crypto`, `fundamentales`, `valoracion`,
+`analisis`, `report-area`, `comparacion-mercado`, `operacion`,
+`candidate-inbox-panel`, `alert-inbox-panel`) siguen presentes exactamente
+una vez cada uno, y cada uno pertenece a exactamente un tablero. Los dos
+paneles de bandeja (`candidate-inbox-panel`, `alert-inbox-panel`) dejaron de
+ser `<details>` colapsados: son ahora el contenido directo del tablero
+`revisar`, y su carga bajo demanda se disparó antes por el evento `toggle`
+del panel y ahora se dispara al activarse ese tablero, exactamente una vez
+por activación.
+
+### Gramática `not-built`, aislada de la gramática de ausencia
+
+`cazatiburones` es el único tablero `not-built` de este bloque: reserva la
+lectura de la actividad institucional 13F y del corpus documental SEC, ya
+transportados por el servidor, para cuando `UI-3` conecte su interfaz.
+`not-built` **no es una sexta marca de ausencia**: una marca de ausencia
+(`missing`, `not-evaluable`, `not-applicable`, `overdue`, `blocked`)
+describe un dato que falta bajo un corte `known_at` ya vigente; `not-built`
+describe una capacidad de producto que todavía no existe, con su propia
+clase CSS (`.board-not-built`) y su propia función de render
+(`renderNotBuiltBoards()`), separadas por completo de `.absence-mark` y de
+`renderAbsenceMark()`. Las cinco marcas de ausencia declaradas por `UI-1`
+siguen siendo exactamente cinco.
+
+### Rejilla y densidad del lienzo, ahora en tokens
+
+`--canvas-gutter`, `--canvas-row-gap`, `--canvas-block-gap` y
+`--canvas-density` son los primeros tokens no cromáticos de este sistema:
+igual que `--sidebar-width`, son valores de layout theme-invariantes,
+declarados con el mismo valor en `:root` y en `:root[data-theme="dark"]` bajo
+la misma disciplina de paridad que todo color de este documento.
+
+### Deuda declarada
+
+La división de JavaScript y CSS por componentes (punto 5.4 de
+`docs/basic_functional_release_plan.md`) queda explícitamente fuera de este
+bloque: el registro de tableros crea la costura que la abaratará, pero
+hacerla aquí habría duplicado el tamaño de un diff que ya mueve toda la
+superficie.
+
 ## Qué no son estas pruebas
 
 `tests/unit/frontend/test_design_system.py` es una suite de contrato

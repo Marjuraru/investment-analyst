@@ -827,6 +827,662 @@ def test_design_system_documentation_declares_its_limits() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Board shell (UI-2): six-board registry, routing, section survival, the
+# isolated not-built grammar, canvas grid/density tokens, and the route/
+# documentation updates that declare the shell. Every rule below is a static
+# contract check over the shipped text, exactly like every rule above: no
+# browser, no real DOM, no computed layout. The mandatory browser-driven
+# behavior (exactly one board visible at runtime, deep-linking, focus) is
+# exercised separately by the Work Block's real smoke, not by this suite.
+# ---------------------------------------------------------------------------
+
+_BOARD_REGISTRY_RE = re.compile(r"const BOARD_REGISTRY = Object\.freeze\(\[(.*?)\n\]\);", re.DOTALL)
+_BOARD_ENTRY_ID_RE = re.compile(r'\{\s*id:\s*"([a-z-]+)"')
+_EXPECTED_BOARD_IDS = ("mesa", "activo", "tecnico", "revisar", "cazatiburones", "sistema")
+
+
+def _board_registry_body(app_js: str) -> str:
+    match = _BOARD_REGISTRY_RE.search(app_js)
+    assert match, "BOARD_REGISTRY must be declared as a frozen array in app.js"
+    return match.group(1)
+
+
+def _board_registry_entries(app_js: str) -> dict[str, str]:
+    body = _board_registry_body(app_js)
+    positions = [m.start() for m in _BOARD_ENTRY_ID_RE.finditer(body)]
+    positions.append(len(body))
+    entries: dict[str, str] = {}
+    for start, end in zip(positions, positions[1:], strict=False):
+        entry_id = _BOARD_ENTRY_ID_RE.match(body[start:]).group(1)
+        entries[entry_id] = body[start:end]
+    return entries
+
+
+def _check_board_registry_declares_exactly_six_boards(app_js: str) -> None:
+    body = _board_registry_body(app_js)
+    ids = _BOARD_ENTRY_ID_RE.findall(body)
+    assert ids == list(_EXPECTED_BOARD_IDS), (
+        f"BOARD_REGISTRY must declare exactly {_EXPECTED_BOARD_IDS} in order, found {ids}"
+    )
+    # The nav, the not-built grammar and the routing table all derive from
+    # this same array -- not a second hardcoded list -- so it must have more
+    # than one live consumer.
+    consumers = app_js.count("for (const board of BOARD_REGISTRY)")
+    assert consumers >= 3, (
+        "BOARD_REGISTRY must be the single source for nav, not-built rendering "
+        f"and routing (found only {consumers} consumer loop(s))"
+    )
+
+
+def test_board_registry_declares_exactly_the_six_boards() -> None:
+    _check_board_registry_declares_exactly_six_boards(APP_JS)
+
+
+def _check_cazatiburones_is_the_only_not_built_board(app_js: str) -> None:
+    entries = _board_registry_entries(app_js)
+    assert set(entries) == set(_EXPECTED_BOARD_IDS)
+    not_built = [board_id for board_id, text in entries.items() if "built: false" in text]
+    assert not_built == ["cazatiburones"], (
+        f"exactly 'cazatiburones' must be built: false, found {not_built}"
+    )
+    for board_id, text in entries.items():
+        if board_id == "cazatiburones":
+            assert re.search(r'reason:\s*\n?\s*"\S', text) or "reason:\n" in text, (
+                "cazatiburones must declare a non-empty reason"
+            )
+            assert "UI-3" in text, "the declared reason must name the block that builds it"
+        else:
+            assert "built: true" in text, f"{board_id} must be declared built: true"
+
+
+def test_cazatiburones_is_the_only_not_built_board_and_declares_its_reason() -> None:
+    _check_cazatiburones_is_the_only_not_built_board(APP_JS)
+
+
+_BOARD_DIV_RE = re.compile(r'<div class="board" id="board-([a-z-]+)"[^>]*>')
+
+
+def _board_div_tags(index_html: str) -> list[tuple[str, str]]:
+    return [(m.group(1), m.group(0)) for m in _BOARD_DIV_RE.finditer(index_html)]
+
+
+def _check_exactly_one_board_is_visible_and_routing_is_deep_linkable(
+    index_html: str, app_js: str
+) -> None:
+    tags = _board_div_tags(index_html)
+    board_ids = [board_id for board_id, _ in tags]
+    assert board_ids == list(_EXPECTED_BOARD_IDS), (
+        f"expected board wrappers in registry order {_EXPECTED_BOARD_IDS}, found {board_ids}"
+    )
+    visible = [board_id for board_id, tag in tags if "hidden" not in tag]
+    hidden = [board_id for board_id, tag in tags if "hidden" in tag]
+    assert visible == ["mesa"], f"exactly 'mesa' must ship visible by default, found {visible}"
+    assert set(hidden) == {"activo", "tecnico", "revisar", "cazatiburones", "sistema"}
+    # Routing must toggle the native [hidden] attribute -- never .hidden or
+    # inline style.display -- and must track a real, deep-linkable board id
+    # through the URL fragment, with an exclusive aria-current pair.
+    assert "section.hidden = board.id !== resolvedId" in app_js
+    assert "style.display" not in _activate_board_body(app_js)
+    assert "boardIdFromLocationHash" in app_js
+    assert 'history.replaceState(null, "", `#${resolvedId}`)' in app_js
+    assert 'link.setAttribute("aria-current", "page")' in app_js
+    assert 'link.removeAttribute("aria-current")' in app_js
+
+
+def test_exactly_one_board_is_visible_and_routing_is_deep_linkable() -> None:
+    _check_exactly_one_board_is_visible_and_routing_is_deep_linkable(INDEX_HTML, APP_JS)
+
+
+_SURVIVAL_SECTION_IDS = (
+    "resumen",
+    "mercado",
+    "derivados-crypto",
+    "fundamentales",
+    "valoracion",
+    "analisis",
+    "report-area",
+    "comparacion-mercado",
+    "operacion",
+    "candidate-inbox-panel",
+    "alert-inbox-panel",
+)
+
+_EXPECTED_BOARD_OF_SECTION = {
+    "resumen": "mesa",
+    "mercado": "activo",
+    "derivados-crypto": "activo",
+    "fundamentales": "activo",
+    "valoracion": "activo",
+    "analisis": "activo",
+    "report-area": "activo",
+    "comparacion-mercado": "tecnico",
+    "operacion": "sistema",
+    "candidate-inbox-panel": "revisar",
+    "alert-inbox-panel": "revisar",
+}
+
+
+def _board_slices(index_html: str) -> dict[str, str]:
+    starts = [(m.start(), m.group(1)) for m in _BOARD_DIV_RE.finditer(index_html)]
+    slices: dict[str, str] = {}
+    for index, (start, board_id) in enumerate(starts):
+        end = starts[index + 1][0] if index + 1 < len(starts) else len(index_html)
+        slices[board_id] = index_html[start:end]
+    return slices
+
+
+def _check_every_baseline_section_id_survives_in_exactly_one_board(index_html: str) -> None:
+    for section_id in _SURVIVAL_SECTION_IDS:
+        count = len(re.findall(rf'id="{re.escape(section_id)}"', index_html))
+        assert count == 1, f"id={section_id!r} must appear exactly once, found {count}"
+    slices = _board_slices(index_html)
+    for section_id, expected_board in _EXPECTED_BOARD_OF_SECTION.items():
+        assert f'id="{section_id}"' in slices.get(expected_board, ""), (
+            f"id={section_id!r} must live inside board {expected_board!r}"
+        )
+
+
+def test_every_baseline_section_id_survives_in_exactly_one_board() -> None:
+    _check_every_baseline_section_id_survives_in_exactly_one_board(INDEX_HTML)
+
+
+# The full set of ids app.js resolved via byId("literal") on the base this
+# Work Block started from (origin/main@3eee98f5e1...), captured before any
+# section was moved. "chart-selection-line" is the one documented exception:
+# app.js creates that <line> element itself (id: "chart-selection-line" at
+# its createElementNS call site) and only byId()s it afterward, so it never
+# appears in static markup, in the base or here.
+_BASELINE_BY_ID_IDS = frozenset(
+    {
+        "alert-inbox",
+        "alert-inbox-panel",
+        "alert-inbox-summary",
+        "alert-latest",
+        "alert-status",
+        "app-sidebar",
+        "asset-avatar-text",
+        "asset-combobox-container",
+        "asset-daily-change",
+        "asset-meta",
+        "asset-name",
+        "asset-preferences-form",
+        "asset-preferences-list",
+        "asset-preferences-status",
+        "asset-preferences-summary",
+        "asset-price",
+        "asset-symbol",
+        "bollinger-multiplier",
+        "bollinger-window",
+        "candidate-inbox",
+        "candidate-inbox-panel",
+        "candidate-inbox-summary",
+        "candidate-latest",
+        "candidate-notification-panel",
+        "candidate-notification-summary",
+        "candidate-notifications",
+        "candidate-status",
+        "chart-data-caption",
+        "chart-data-disclosure",
+        "chart-empty",
+        "chart-interval",
+        "chart-latest-close",
+        "chart-latest-date",
+        "chart-latest-sma-20",
+        "chart-latest-sma-5",
+        "chart-latest-sma-50",
+        "chart-point-bollinger",
+        "chart-point-close",
+        "chart-point-date",
+        "chart-point-high",
+        "chart-point-low",
+        "chart-point-open",
+        "chart-point-period-label",
+        "chart-point-sma-20",
+        "chart-point-sma-5",
+        "chart-point-sma-50",
+        "chart-point-volume",
+        "chart-point-volume-label",
+        "chart-price-scale",
+        "chart-range-change",
+        "chart-settings",
+        "chart-settings-error",
+        "chart-settings-form",
+        "chart-settings-reset",
+        "chart-settings-summary",
+        "chart-status",
+        "chart-table-body",
+        "chart-table-volume-label",
+        "chart-visible-sessions",
+        "chart-visible-sessions-label",
+        "company-profile",
+        "company-profile-categories",
+        "company-profile-explanation",
+        "company-profile-requirements-list",
+        "company-profile-requirements-summary",
+        "company-profile-status",
+        "company-profile-title",
+        "comparison-assets",
+        "comparison-benchmark",
+        "comparison-cards",
+        "comparison-chart",
+        "comparison-end",
+        "comparison-json",
+        "comparison-results",
+        "comparison-start",
+        "comparison-status",
+        "comparison-submit",
+        "crypto-derivatives-content",
+        "crypto-derivatives-context",
+        "crypto-derivatives-coverage",
+        "crypto-derivatives-panel",
+        "crypto-derivatives-status",
+        "derivatives-current-funding",
+        "derivatives-diagnostic-status",
+        "derivatives-dvol-7d",
+        "derivatives-dvol-direction",
+        "derivatives-evidence",
+        "derivatives-funding-168h",
+        "derivatives-funding-direction",
+        "derivatives-known-at",
+        "derivatives-limitations",
+        "derivatives-missing",
+        "derivatives-open-interest",
+        "derivatives-range",
+        "derivatives-source-ids",
+        "derivatives-spread",
+        "derivatives-traceability",
+        "export-fundamental-csv",
+        "export-fundamental-research-csv",
+        "export-market-csv",
+        "export-report-json",
+        "export-valuation-history-json",
+        "export-valuation-history-rule-json",
+        "export-valuation-json",
+        "fundamental-as-of",
+        "fundamental-chart",
+        "fundamental-chart-symbol",
+        "fundamental-completeness",
+        "fundamental-empty",
+        "fundamental-form",
+        "fundamental-latest-context",
+        "fundamental-report",
+        "fundamental-research-audit",
+        "fundamental-research-context",
+        "fundamental-research-coverage",
+        "fundamental-research-empty",
+        "fundamental-research-grid",
+        "fundamental-research-panel",
+        "fundamental-status",
+        "fundamental-table-body",
+        "fundamental-trend-card",
+        "global-message",
+        "health-badge",
+        "known-at-cut-value",
+        "known-at-status",
+        "market-as-of",
+        "market-asset-listbox",
+        "market-asset-search",
+        "market-chart",
+        "market-chart-card",
+        "market-chart-symbol",
+        "market-comparison-form",
+        "market-end",
+        "market-report",
+        "market-start",
+        "nyse-session-dot",
+        "nyse-session-remaining",
+        "nyse-session-status",
+        "operacion-titulo",
+        "price-series-legend-label",
+        "price-series-swatch",
+        "query-valuation",
+        "query-valuation-history",
+        "query-valuation-history-rule",
+        "refresh-mode",
+        "refresh-overview",
+        "report-area",
+        "report-button",
+        "report-form",
+        "report-frequency",
+        "report-json",
+        "report-known-at",
+        "report-limitations",
+        "report-status",
+        "report-traceability",
+        "run-button",
+        "run-form",
+        "run-frequency",
+        "run-known-at",
+        "run-note",
+        "run-source-label",
+        "run-status",
+        "run-time",
+        "save-asset-preferences",
+        "schedule-next",
+        "schedule-status",
+        "screening-rules",
+        "screening-rules-panel",
+        "screening-rules-summary",
+        "sidebar-toggle",
+        "sma-long-color",
+        "sma-long-window",
+        "sma-short-color",
+        "sma-short-window",
+        "sma-third-color",
+        "sma-third-window",
+        "snapshot-day-range",
+        "snapshot-open",
+        "snapshot-quality",
+        "snapshot-range-cagr",
+        "snapshot-range-drawdown",
+        "snapshot-range-high",
+        "snapshot-range-low",
+        "snapshot-range-return",
+        "snapshot-range-title",
+        "snapshot-relative-volume",
+        "snapshot-return-1d",
+        "snapshot-sma-20-distance",
+        "snapshot-sma-5-distance",
+        "snapshot-sma-50-distance",
+        "snapshot-trades",
+        "snapshot-volatility",
+        "snapshot-volume",
+        "snapshot-volume-label",
+        "snapshot-vwap",
+        "theme-toggle",
+        "traceability-status",
+        "unavailable-metrics-disclosure",
+        "unavailable-metrics-grid",
+        "unavailable-metrics-summary",
+        "valuation-card",
+        "valuation-context",
+        "valuation-coverage",
+        "valuation-date",
+        "valuation-evidence",
+        "valuation-filing-context",
+        "valuation-history-end",
+        "valuation-history-metric",
+        "valuation-history-series",
+        "valuation-history-start",
+        "valuation-history-status",
+        "valuation-history-summary",
+        "valuation-metrics",
+        "valuation-nav-link",
+        "valuation-period-context",
+        "valuation-price-context",
+        "valuation-rule-evidence",
+        "valuation-rule-metric",
+        "valuation-rule-minimum",
+        "valuation-rule-operator",
+        "valuation-rule-result",
+        "valuation-rule-status",
+        "valuation-rule-threshold",
+        "valuation-status",
+        "valuation-unit-context",
+        "workspace-counts",
+        "workspace-status",
+    }
+)
+
+_LITERAL_BY_ID_RE = re.compile(r'byId\("([a-zA-Z0-9-]+)"\)')
+
+# Ids app.js creates itself (via an element-creation call site setting
+# `id: "..."`) before ever byId()-ing them back -- legitimately absent from
+# static markup, in the base and here. "board-<id>"/"board-<id>-not-built"
+# are template-literal byId() calls (`byId(\`board-${board.id}\`)`), never a
+# literal string, so they never match _LITERAL_BY_ID_RE in the first place.
+_DYNAMICALLY_CREATED_IDS = frozenset({"chart-selection-line"})
+
+
+def _html_ids(index_html: str) -> set[str]:
+    return set(re.findall(r'id="([a-zA-Z0-9-]+)"', index_html))
+
+
+def _check_no_control_id_is_orphaned_between_markup_and_script(
+    index_html: str, app_js: str
+) -> None:
+    html_ids = _html_ids(index_html)
+    dropped = _BASELINE_BY_ID_IDS - html_ids
+    assert not dropped, (
+        f"id(s) app.js resolved on the base are missing from markup: {sorted(dropped)}"
+    )
+    orphaned = _LITERAL_BY_ID_RE.findall(app_js)
+    missing_targets = {
+        control_id
+        for control_id in orphaned
+        if control_id not in html_ids and control_id not in _DYNAMICALLY_CREATED_IDS
+    }
+    assert not missing_targets, (
+        f"app.js resolves id(s) absent from markup: {sorted(missing_targets)}"
+    )
+
+
+def test_no_control_id_is_orphaned_between_markup_and_script() -> None:
+    _check_no_control_id_is_orphaned_between_markup_and_script(INDEX_HTML, APP_JS)
+
+
+def _check_deferred_inbox_and_valuation_loads_are_preserved(app_js: str) -> None:
+    # Valuation's deferred load keeps its original trigger untouched.
+    valuation_click = re.search(
+        r'byId\("valuation-nav-link"\)\.addEventListener\("click", \(\) => \{(.*?)\n\}\);',
+        app_js,
+        re.DOTALL,
+    )
+    assert valuation_click, "valuation-nav-link click handler must still exist"
+    assert "valuationPayload === null" in valuation_click.group(1)
+    assert "void queryValuation()" in valuation_click.group(1)
+    # The two promoted panels lost their <details> "toggle" event; their
+    # load now fires from board activation instead, exactly once per call.
+    assert 'byId("alert-inbox-panel").addEventListener("toggle"' not in app_js
+    assert 'byId("candidate-inbox-panel").addEventListener("toggle"' not in app_js
+    activate_body = _activate_board_body(app_js)
+    assert "void loadCandidateInbox()" in activate_body
+    assert "void loadAlertInbox()" in activate_body
+    assert 'resolvedId === "revisar"' in activate_body
+    # The two panels NOT promoted keep their pre-existing toggle-based loads.
+    assert 'byId("candidate-notification-panel").addEventListener("toggle"' in app_js
+    assert 'byId("screening-rules-panel").addEventListener("toggle"' in app_js
+
+
+def test_deferred_inbox_and_valuation_loads_are_preserved() -> None:
+    _check_deferred_inbox_and_valuation_loads_are_preserved(APP_JS)
+
+
+_ACTIVATE_BOARD_RE = re.compile(
+    r"function activateBoard\(boardId, \{ focus = true \} = \{\}\) \{(.*?)\n\}", re.DOTALL
+)
+
+
+def _activate_board_body(app_js: str) -> str:
+    match = _ACTIVATE_BOARD_RE.search(app_js)
+    assert match, "activateBoard(boardId, { focus }) must exist"
+    return match.group(1)
+
+
+def _check_board_switch_never_touches_the_known_at_cut_or_session_clock(app_js: str) -> None:
+    body = _activate_board_body(app_js)
+    for forbidden in ("known-at", "known_at", "nyse", "session-clock", "queryReport", "api("):
+        assert forbidden not in body.lower(), (
+            f"activateBoard must never reference {forbidden!r}: switching boards must not "
+            "touch the known_at cut, the session clock, or issue any query of its own"
+        )
+    # The only two query-triggering calls activateBoard is allowed to make
+    # are the "revisar" board's promoted-panel loads (checked separately).
+    calls = re.findall(r"void (\w+)\(\)", body)
+    assert set(calls) <= {"loadCandidateInbox", "loadAlertInbox"}, calls
+
+
+def test_board_switch_never_touches_the_known_at_cut_or_session_clock() -> None:
+    _check_board_switch_never_touches_the_known_at_cut_or_session_clock(APP_JS)
+
+
+_CANVAS_GRID_DENSITY_TOKENS = (
+    "canvas-gutter",
+    "canvas-row-gap",
+    "canvas-block-gap",
+    "canvas-density",
+)
+
+
+def _check_canvas_grid_and_density_are_tokens_with_theme_parity(
+    tokens_css: str, styles_css: str
+) -> None:
+    blocks = _theme_blocks(tokens_css)
+    for token_name in _CANVAS_GRID_DENSITY_TOKENS:
+        assert token_name in blocks["light"], f"--{token_name} must be declared in :root"
+        assert token_name in blocks["dark"], (
+            f'--{token_name} must be declared in :root[data-theme="dark"]'
+        )
+        assert blocks["light"][token_name] == blocks["dark"][token_name], (
+            f"--{token_name} is a layout value, theme-invariant like --sidebar-width: "
+            f"light={blocks['light'][token_name]!r} dark={blocks['dark'][token_name]!r}"
+        )
+    for token_name in _CANVAS_GRID_DENSITY_TOKENS:
+        assert f"var(--{token_name})" in styles_css, (
+            f"--{token_name} must actually be consumed from styles.css, not merely declared"
+        )
+
+
+def test_canvas_grid_and_density_are_tokens_with_theme_parity() -> None:
+    _check_canvas_grid_and_density_are_tokens_with_theme_parity(TOKENS_CSS, STYLES_CSS)
+
+
+def _check_design_system_documentation_declares_the_board_shell(doc_text: str) -> None:
+    normalized = re.sub(r"\s+", " ", doc_text).lower()
+    assert "seis tablero" in normalized, "the doc must declare the six-board registry"
+    assert "not-built" in doc_text, "the doc must name the not-built grammar"
+    assert "marca de ausencia" in normalized or "marcas de ausencia" in normalized
+    # The distinction from the five absence marks must be explicit, not
+    # merely implied by proximity.
+    assert re.search(r"not-built[^.]*no es[^.]*marca de ausencia", normalized) or re.search(
+        r"marca de ausencia[^.]*no es[^.]*not-built", normalized
+    ), "the doc must explicitly distinguish not-built from an absence mark"
+
+
+def test_design_system_documentation_declares_the_board_shell() -> None:
+    doc_path = (
+        Path(str(files("investment_analyst"))).parent.parent
+        / "docs"
+        / "local_interface_design_system.md"
+    )
+    _check_design_system_documentation_declares_the_board_shell(
+        doc_path.read_text(encoding="utf-8")
+    )
+
+
+def _check_route_declares_local_interface_planned_and_sec_corpus_next(doc_text: str) -> None:
+    assert re.search(r"\|\s*`LOCAL-INTERFACE`\s*\|\s*`PLANNED`\s*\|", doc_text), (
+        "the route table must declare LOCAL-INTERFACE as PLANNED"
+    )
+    assert re.search(r"\|\s*`SEC-CORPUS`\s*\|\s*`NEXT`\s*\|", doc_text), (
+        "SEC-CORPUS must remain the sole NEXT candidate; this block advances a new row, "
+        "it does not complete anything"
+    )
+
+
+def test_route_declares_local_interface_planned_and_sec_corpus_next() -> None:
+    doc_path = (
+        Path(str(files("investment_analyst"))).parent.parent
+        / "docs"
+        / "basic_functional_release_plan.md"
+    )
+    _check_route_declares_local_interface_planned_and_sec_corpus_next(
+        doc_path.read_text(encoding="utf-8")
+    )
+
+
+def _check_not_built_grammar_is_isolated_from_absence_marks(styles_css: str, app_js: str) -> None:
+    # not-built describes a capability that does not exist yet; an absence
+    # mark describes a missing datum under a cut. They must never share a
+    # class or a rendering function.
+    assert ".board-not-built" in styles_css
+    assert "absence-mark" not in _extract_css_rule(styles_css, "board-not-built")
+    assert "renderAbsenceMark" not in _extract_js_function(app_js, "renderNotBuiltBoards")
+    declarations = _absence_mark_declarations(styles_css)
+    assert set(declarations) == set(_ABSENCE_KINDS), (
+        "adding not-built must not grow or shrink the five declared absence marks"
+    )
+
+
+def _extract_css_rule(css_text: str, class_name: str) -> str:
+    match = re.search(rf"\.{re.escape(class_name)}\s*\{{([^}}]*)\}}", css_text, re.DOTALL)
+    return match.group(1) if match else ""
+
+
+def _extract_js_function(app_js: str, function_name: str) -> str:
+    match = re.search(
+        rf"function {re.escape(function_name)}\([^)]*\) \{{(.*?)\n\}}", app_js, re.DOTALL
+    )
+    assert match, f"function {function_name} must exist"
+    return match.group(1)
+
+
+def test_not_built_grammar_is_isolated_from_absence_marks() -> None:
+    _check_not_built_grammar_is_isolated_from_absence_marks(STYLES_CSS, APP_JS)
+
+
+def _check_no_new_capability_or_route_is_introduced_by_the_shell(app_js: str) -> None:
+    without_registry = _BOARD_REGISTRY_RE.sub("", app_js)
+    routes = set(re.findall(r"/api/[a-zA-Z0-9/_-]*", without_registry))
+    assert routes == _BASELINE_API_ROUTES, (
+        f"requested routes changed: added={routes - _BASELINE_API_ROUTES} "
+        f"removed={_BASELINE_API_ROUTES - routes}"
+    )
+
+
+# The exact route set app.js requested on the base this Work Block started
+# from (origin/main@3eee98f5e1...), extracted the same way the check above
+# extracts the candidate's routes: every `/api/...` literal outside the
+# BOARD_REGISTRY declaration (whose cazatiburones reason text names two
+# already-integrated read endpoints in prose, never calls them).
+_BASELINE_API_ROUTES = frozenset(
+    {
+        "/api/alerts",
+        "/api/alerts/transition",
+        "/api/candidates",
+        "/api/candidates/transition",
+        "/api/fundamental-analysis",
+        "/api/fundamental-refresh",
+        "/api/fundamental-trend",
+        "/api/listed-company-report",
+        "/api/market-assets",
+        "/api/market-chart",
+        "/api/market-intraday",
+        "/api/market-intraday-refresh",
+        "/api/market-refresh",
+        "/api/screening-backtest",
+        "/api/screening-rules",
+        "/api/screening-rules/update",
+        "/api/v1/asset-preferences",
+        "/api/v1/candidate-notifications",
+        "/api/v1/candidate-notifications/acknowledge",
+        "/api/v1/crypto-derivatives",
+        "/api/v1/market-comparison",
+        "/api/v1/overview",
+        "/api/v1/valuation",
+        "/api/v1/valuation-history",
+        "/api/v1/valuation-history-rule",
+    }
+)
+
+
+def test_no_new_capability_or_route_is_introduced_by_the_shell() -> None:
+    _check_no_new_capability_or_route_is_introduced_by_the_shell(APP_JS)
+
+
+def _check_shell_is_local_only_with_no_javascript_runner_or_dependency(app_js: str) -> None:
+    board_shell_js = app_js[
+        app_js.index("const BOARD_REGISTRY") : app_js.index("async function initialize")
+    ]
+    for banned in ("import ", "require(", "<script", 'fetch("http', "fetch('http"):
+        assert banned not in board_shell_js, f"board shell code must not introduce {banned!r}"
+
+
+def test_shell_is_local_only_with_no_javascript_runner_or_dependency() -> None:
+    _check_shell_is_local_only_with_no_javascript_runner_or_dependency(APP_JS)
+
+
+# ---------------------------------------------------------------------------
 # Regression probes: each rule above must fail on a deliberately corrupted
 # fixture, proving the checker is not vacuously true. Every probe below
 # calls the SAME `_check_*` function its declarative test calls -- against
@@ -1036,3 +1692,182 @@ def test_probe_capture_sma_defaults_rule_catches_a_removed_inline_bypass() -> No
     assert corrupted != APP_JS, "probe fixture did not replace the function body"
     with pytest.raises(AssertionError):
         _check_capture_default_sma_colors_bypasses_inline_override(corrupted)
+
+
+# ---------------------------------------------------------------------------
+# Board shell (UI-2) probes
+# ---------------------------------------------------------------------------
+
+
+def test_probe_board_registry_rule_catches_a_removed_board() -> None:
+    _check_board_registry_declares_exactly_six_boards(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        '{ id: "sistema", label: "Sistema", icon: "gear", built: true },\n', "", 1
+    )
+    assert corrupted != APP_JS, "probe fixture did not remove a board entry"
+    with pytest.raises(AssertionError):
+        _check_board_registry_declares_exactly_six_boards(corrupted)
+
+
+def test_probe_not_built_board_rule_catches_a_second_not_built_board() -> None:
+    _check_cazatiburones_is_the_only_not_built_board(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        '{ id: "sistema", label: "Sistema", icon: "gear", built: true },',
+        '{ id: "sistema", label: "Sistema", icon: "gear", built: false },',
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not corrupt the sistema entry"
+    with pytest.raises(AssertionError):
+        _check_cazatiburones_is_the_only_not_built_board(corrupted)
+
+
+def test_probe_two_visible_boards_rule_catches_a_missing_hidden_attribute() -> None:
+    _check_exactly_one_board_is_visible_and_routing_is_deep_linkable(
+        INDEX_HTML, APP_JS
+    )  # baseline: clean
+    corrupted = INDEX_HTML.replace(
+        '<div class="board" id="board-activo" data-board="activo" tabindex="-1" hidden>',
+        '<div class="board" id="board-activo" data-board="activo" tabindex="-1">',
+        1,
+    )
+    assert corrupted != INDEX_HTML, "probe fixture did not remove the hidden attribute"
+    with pytest.raises(AssertionError):
+        _check_exactly_one_board_is_visible_and_routing_is_deep_linkable(corrupted, APP_JS)
+
+
+def test_probe_two_visible_boards_rule_catches_a_style_display_toggle() -> None:
+    _check_exactly_one_board_is_visible_and_routing_is_deep_linkable(
+        INDEX_HTML, APP_JS
+    )  # baseline: clean
+    corrupted = APP_JS.replace(
+        "if (section) section.hidden = board.id !== resolvedId;",
+        'if (section) section.style.display = board.id !== resolvedId ? "none" : "";',
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not switch to style.display"
+    with pytest.raises(AssertionError):
+        _check_exactly_one_board_is_visible_and_routing_is_deep_linkable(INDEX_HTML, corrupted)
+
+
+def test_probe_section_survival_rule_catches_a_removed_section() -> None:
+    _check_every_baseline_section_id_survives_in_exactly_one_board(INDEX_HTML)  # baseline: clean
+    corrupted = INDEX_HTML.replace(
+        '<section id="comparacion-mercado" class="comparison-section"',
+        '<section id="comparacion-mercado-removed" class="comparison-section"',
+        1,
+    )
+    assert corrupted != INDEX_HTML, "probe fixture did not remove the section id"
+    with pytest.raises(AssertionError):
+        _check_every_baseline_section_id_survives_in_exactly_one_board(corrupted)
+
+
+def test_probe_orphaned_control_id_rule_catches_a_renamed_markup_id() -> None:
+    _check_no_control_id_is_orphaned_between_markup_and_script(
+        INDEX_HTML, APP_JS
+    )  # baseline: clean
+    corrupted = INDEX_HTML.replace('id="run-button"', 'id="run-button-renamed"', 1)
+    assert corrupted != INDEX_HTML, "probe fixture did not rename the control id"
+    with pytest.raises(AssertionError):
+        _check_no_control_id_is_orphaned_between_markup_and_script(corrupted, APP_JS)
+
+
+def test_probe_deferred_loads_rule_catches_a_reintroduced_toggle_listener() -> None:
+    _check_deferred_inbox_and_valuation_loads_are_preserved(APP_JS)  # baseline: clean
+    corrupted = APP_JS + (
+        '\nbyId("alert-inbox-panel").addEventListener("toggle", (event) => {\n'
+        "  if (event.currentTarget.open) void loadAlertInbox();\n"
+        "});\n"
+    )
+    with pytest.raises(AssertionError):
+        _check_deferred_inbox_and_valuation_loads_are_preserved(corrupted)
+
+
+def test_probe_board_switch_rule_catches_a_known_at_reference() -> None:
+    _check_board_switch_never_touches_the_known_at_cut_or_session_clock(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        '  if (resolvedId === "revisar") {',
+        '  byId("known-at-status").textContent = "poked";\n  if (resolvedId === "revisar") {',
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not inject a known_at reference"
+    with pytest.raises(AssertionError):
+        _check_board_switch_never_touches_the_known_at_cut_or_session_clock(corrupted)
+
+
+def test_probe_canvas_grid_density_rule_catches_a_dark_pair_dropped() -> None:
+    _check_canvas_grid_and_density_are_tokens_with_theme_parity(
+        TOKENS_CSS, STYLES_CSS
+    )  # baseline: clean
+    corrupted = TOKENS_CSS.replace(
+        '  --canvas-density: 1.42;\n}\n\n:root[data-theme="dark"] {',
+        '  --canvas-density: 1.42;\n}\n\n:root[data-theme="dark"] {',
+        1,
+    )
+    # Remove only the SECOND (dark-theme) declaration of --canvas-block-gap.
+    dark_start = corrupted.index(':root[data-theme="dark"]')
+    corrupted = corrupted[:dark_start] + corrupted[dark_start:].replace(
+        "  --canvas-block-gap: 1.55rem;\n", "", 1
+    )
+    assert corrupted != TOKENS_CSS, "probe fixture did not drop the dark-theme token"
+    with pytest.raises(AssertionError):
+        _check_canvas_grid_and_density_are_tokens_with_theme_parity(corrupted, STYLES_CSS)
+
+
+def test_probe_documentation_board_shell_rule_catches_a_missing_distinction() -> None:
+    doc_path = (
+        Path(str(files("investment_analyst"))).parent.parent
+        / "docs"
+        / "local_interface_design_system.md"
+    )
+    text = doc_path.read_text(encoding="utf-8")
+    _check_design_system_documentation_declares_the_board_shell(text)  # baseline: clean
+    corrupted = text.replace(
+        "`not-built` **no es una sexta marca de ausencia**",
+        "`not-built` es compatible con una marca de ausencia",
+        1,
+    )
+    assert corrupted != text, "probe fixture did not remove the distinction sentence"
+    with pytest.raises(AssertionError):
+        _check_design_system_documentation_declares_the_board_shell(corrupted)
+
+
+def test_probe_route_local_interface_rule_catches_a_missing_row() -> None:
+    doc_path = (
+        Path(str(files("investment_analyst"))).parent.parent
+        / "docs"
+        / "basic_functional_release_plan.md"
+    )
+    text = doc_path.read_text(encoding="utf-8")
+    _check_route_declares_local_interface_planned_and_sec_corpus_next(text)  # baseline: clean
+    corrupted = re.sub(r"\| `LOCAL-INTERFACE` \| `PLANNED` \|.*\|\n", "", text, count=1)
+    assert corrupted != text, "probe fixture did not remove the LOCAL-INTERFACE row"
+    with pytest.raises(AssertionError):
+        _check_route_declares_local_interface_planned_and_sec_corpus_next(corrupted)
+
+
+def test_probe_not_built_isolation_rule_catches_reuse_as_a_sixth_absence_mark() -> None:
+    _check_not_built_grammar_is_isolated_from_absence_marks(STYLES_CSS, APP_JS)  # baseline: clean
+    corrupted = STYLES_CSS + "\n.absence-mark.not-built {\n  color: var(--muted-strong);\n}\n"
+    assert corrupted != STYLES_CSS, "probe fixture did not add a sixth absence-mark rule"
+    with pytest.raises(AssertionError):
+        _check_not_built_grammar_is_isolated_from_absence_marks(corrupted, APP_JS)
+
+
+def test_probe_no_new_route_rule_catches_an_added_endpoint_call() -> None:
+    _check_no_new_capability_or_route_is_introduced_by_the_shell(APP_JS)  # baseline: clean
+    corrupted = APP_JS + '\nvoid api("/api/v1/cazatiburones/declared-activity");\n'
+    assert corrupted != APP_JS, "probe fixture did not add a new route call"
+    with pytest.raises(AssertionError):
+        _check_no_new_capability_or_route_is_introduced_by_the_shell(corrupted)
+
+
+def test_probe_shell_local_only_rule_catches_an_introduced_import() -> None:
+    _check_shell_is_local_only_with_no_javascript_runner_or_dependency(APP_JS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        "const DEFAULT_BOARD_ID = BOARD_REGISTRY[0].id;",
+        'import "left-pad";\nconst DEFAULT_BOARD_ID = BOARD_REGISTRY[0].id;',
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not inject an import"
+    with pytest.raises(AssertionError):
+        _check_shell_is_local_only_with_no_javascript_runner_or_dependency(corrupted)
