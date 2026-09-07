@@ -281,7 +281,7 @@ h4 {
 
 .topbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 1.2rem;
   row-gap: var(--canvas-row-gap);
@@ -762,12 +762,22 @@ section {
   white-space: nowrap;
 }
 
-/*
- * UI-6: the Mesa reading hierarchy. Four stacked layers -- novedades,
- * en qué confío, qué está roto, universo -- separated by the same block
- * gap already used between canvas sections, never a new spacing scale.
- */
-.mesa-layer + .mesa-layer {
+/* UI-9 keeps the global rail outside Mesa and gives the board a fluid
+ * reading column plus its fixed 340px evidence aside. */
+.mesa-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: var(--canvas-block-gap);
+  max-width: 100%;
+}
+
+.mesa-main,
+.mesa-aside {
+  min-width: 0;
+}
+
+.mesa-main .mesa-layer + .mesa-layer,
+.mesa-aside .mesa-layer + .mesa-layer {
   margin-top: var(--canvas-block-gap);
 }
 
@@ -805,7 +815,7 @@ section {
 
 .mesa-trust-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 0.85rem;
   margin-top: 0.65rem;
 }
@@ -836,6 +846,35 @@ section {
   margin-top: 0.15rem;
   color: var(--muted);
   font-size: 0.62rem;
+}
+
+.mesa-bvl-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0.65rem 0 0;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.mesa-bvl-summary > div {
+  min-width: 0;
+  padding: 0.42rem 0.5rem;
+  background: var(--surface);
+}
+
+.mesa-bvl-summary dt {
+  color: var(--muted);
+  font-size: 0.56rem;
+  font-weight: 760;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.mesa-bvl-summary dd {
+  margin: 0.2rem 0 0;
+  color: var(--ink-strong);
+  font-size: 0.72rem;
 }
 
 .mesa-universe-window,
@@ -878,6 +917,12 @@ section {
   text-align: left;
 }
 
+.universe-matrix-table td:nth-child(3),
+.universe-matrix-table td:nth-child(4),
+.universe-matrix-table td:nth-child(5) {
+  text-align: center;
+}
+
 .universe-matrix-table thead th {
   color: var(--muted);
   background: var(--surface-subtle);
@@ -887,27 +932,90 @@ section {
   text-transform: uppercase;
 }
 
-.universe-matrix-fresh {
-  color: var(--positive-ink);
-  font-weight: 700;
+.mesa-universe-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.65rem;
+  margin-top: 0.45rem;
+  color: var(--muted-strong);
+  font-size: 0.64rem;
+}
+
+.mesa-universe-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.mesa-matrix-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mesa-matrix-mark {
+  display: inline-block;
+  box-sizing: border-box;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--line-strong);
+}
+
+.mesa-matrix-fresh {
+  border-color: var(--positive-ink);
+  background: var(--positive);
+  clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%);
+}
+
+.mesa-matrix-overdue {
+  border-color: var(--warning-ink);
+  background: var(--surface);
+  transform: rotate(45deg);
+}
+
+.mesa-matrix-missing {
+  border-color: var(--muted-strong);
+  background: var(--surface-subtle);
+  clip-path: circle(50% at 50% 50%);
+}
+
+.mesa-matrix-blocked {
+  border-color: var(--blocked-ink);
+  background: repeating-linear-gradient(
+    135deg,
+    var(--blocked-soft) 0,
+    var(--blocked-soft) 1px,
+    var(--surface) 1px,
+    var(--surface) 2px
+  );
+}
+
+.mesa-matrix-not-applicable {
+  width: 7px;
+  height: 2px;
+  border-width: 1px 0;
+  border-color: var(--muted);
+  background: var(--surface-subtle);
+}
+
+@media (max-width: 1120px) {
+  .mesa-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 900px) {
-  .mesa-news-families,
-  .mesa-trust-grid {
+  .mesa-news-families {
     grid-template-columns: 1fr;
   }
 }
 
 .market-clock-strip {
   display: flex;
-  grid-column: 1 / -1;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: center;
   gap: 0.85rem;
   min-width: 0;
-  padding-top: 0.28rem;
-  border-top: 1px solid var(--line-soft);
 }
 
 .market-clock-item {

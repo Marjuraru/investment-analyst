@@ -116,33 +116,45 @@ vacío, cargando, ausente y error conservan la gramática y los mensajes
 existentes, y una respuesta vigente mantiene su marca de ausencia cuando no
 hay evidencia elegible.
 
-## Mesa: jerarquía de lectura (`UI-6`)
+## Mesa: composición y cobertura (`UI-9`)
 
-El tablero de entrada `mesa` se lee en el orden que declara el lienzo aprobado: el corte
-`known_at` y el reloj de mercado en la cabecera compartida (sin duplicarse), y debajo cuatro
-capas -- **Novedades desde el corte anterior**, **En qué confío**, **Qué está roto** y, al final,
-**Universo** -- nunca un score, ranking o veredicto agregado que las colapse.
+El rail global ya ocupa la primera columna de la aplicación; `mesa` no lo duplica. Dentro del
+tablero, una columna principal fluida contiene **Novedades de las bandejas** y **Universo**, y un
+`aside` fijo de 340 px contiene, en este orden, **Cobertura del corte**, **Fuentes bloqueadas** e
+**Incidencias**. En pantalla estrecha el tablero colapsa a una columna antes de perder legibilidad;
+el único desplazamiento horizontal propio es el de la matriz. El corte `known_at` y el reloj siguen
+en la cabecera compartida y no se crea un score, ranking ni veredicto que mezcle los dominios.
 
-Novedades separa tres bloques con procedencia propia -- institucional 13F, actividad declarada y
-reglas analíticas -- sin conteo combinado. Reglas analíticas conserva su camino de lectura
-universo-wide (`GET /api/v1/candidate-notifications`), mientras institucional 13F y actividad
-declarada usan la outbox Cazatiburones mediante `GET /api/v1/cazatiburones/notifications`, sin
-restringirse a un activo. Las tres familias siguen siendo lecturas separadas: nunca se pueblan con
-otra fuente, con incidencias operativas, ni se agregan en una lista, total o score común. En qué
-confío conserva el estado del corte, la última ejecución, la próxima ejecución programada y la
-trazabilidad ya entregados por bloques anteriores. Qué está roto añade, de solo lectura, hasta
-cinco incidencias operativas recientes desde `GET /api/alerts`, junto a los indicadores de resumen
-ya existentes.
+Novedades conserva tres bloques de procedencia independiente -- institucional 13F, actividad
+declarada y reglas analíticas -- sin total, orden ni score común. Reglas analíticas sigue leyendo
+`GET /api/v1/candidate-notifications`; institucional 13F y actividad declarada siguen usando la
+outbox Cazatiburones mediante `GET /api/v1/cazatiburones/notifications`, sin restringirse a un
+activo. Las tres bandejas declaran visiblemente que no están acotadas por el `known_at` global.
+Incidencias sigue siendo una lectura de solo lectura de hasta cinco incidencias operativas desde
+`GET /api/alerts`, separada de aquellas tres familias.
 
 Universo consume `GET /api/v1/universe-coverage` exactamente una vez por activación, nunca por
 activo. La ventana de cuatro fechas se deriva del corte global con una regla fija -- fin en el
 último día UTC completamente transcurrido al corte, inicio 365 días antes, frecuencia anual -- y se
-muestra literalmente junto a la matriz. La matriz tiene una fila por activo devuelto y una columna
-por cada una de las cuatro capacidades que el contrato consulta (mercado, fundamentales, valoración
-corporativa, registro BVL); cada celda resuelve a "al día", "vencida", "sin evidencia", "bloqueada"
-o "no aplica", según `capability`, `evidence` y edad. Cazatiburones, Documentos y Derivados por
-activo se enumeran como capacidades no consultadas por este contrato, nunca como columna vacía ni
-como petición adicional; las `limitations` declaradas por activo se listan íntegras bajo la matriz.
+muestra literalmente junto a la matriz. Sus únicas celdas analíticas consultadas son Mercado,
+Fundamentales y Valoración corporativa. La cabecera compacta es `Activo`, `Dominio`, `Mercado`,
+`Fund.`, `Valor.`, `Última evidencia`: Dominio sólo traduce exhaustivamente `asset_class`
+(`equity`, `etf`, `crypto`) y no infiere ticker, exchange ni disponibilidad.
+
+Cada estado de capacidad usa una marca de 7 px con forma, borde o trama y relleno distinguibles,
+con nombre accesible y una leyenda única: "Al día", "Vencida", "Sin evidencia", "Bloqueada" o
+"No aplica". El orden es `capability`, `evidence` y edad; `not_configured` y
+`not_implemented` siguen bloqueados, `not_applicable` no aplica, `missing` y `not_queried` no
+tienen evidencia, y evidencia presente dentro de 365 días está al día. `Última evidencia` es el
+máximo válido de `reference_at` y `latest_input_available_at` de esos tres dominios solamente; si
+no existe, se presenta como ausencia accesible. No usa `computed_at`, la hora de render ni BVL.
+
+`Registro BVL` deja de ser una columna o dominio analítico: aparece una sola vez en Fuentes
+bloqueadas, derivado del mismo payload ya cargado. Su lectura separa activos aplicables, evidencia
+presente, evidencia ausente, no consultada, sin configurar, no implementada y no aplica; no afirma
+mercado o fundamentales BVL ni genera score. Cazatiburones, Documentos y Derivados por activo se
+declaran en `additional_capabilities_not_queried`, nunca como columna, celda vacía o petición
+adicional. Las `limitations` declaradas por activo se listan íntegras bajo la matriz.
 
 El panel de watchlist y automatización (`asset-preferences-panel`) se trasladó de `mesa` a
 `sistema`: la Mesa se consulta, no se configura desde ella. Su formulario, sus controles y
@@ -168,12 +180,13 @@ Los relojes se calculan enteramente en el navegador con las zonas IANA `America/
 minuto, se pausa cuando la pestaña deja de estar visible. Esto permite reflejar automáticamente los
 cambios de horario de verano de Nueva York sin fijar una diferencia horaria estática.
 
-La franja compacta del encabezado muestra ambas horas y describe exclusivamente la sesión regular
-NYSE publicada de 09:30 a 16:00 ET. Distingue si Nueva York está antes, dentro o después de esa
-ventana sin ocupar otra tarjeta del área analítica. No afirma que el mercado esté operando: fines de
-semana se identifican, pero los feriados y cierres anticipados todavía no se evalúan. Esta
-limitación permanece disponible para tecnologías de asistencia. Un calendario oficial versionado
-será un contrato separado antes de convertir el estado horario en un estado operativo de mercado.
+La franja compacta del encabezado reúne Lima, Nueva York y NYSE en un solo renglón de escritorio,
+sin regla superior ni otra tarjeta analítica; puede envolver en pantalla estrecha. Distingue si
+Nueva York está antes, dentro o después de la sesión regular NYSE publicada de 09:30 a 16:00 ET.
+No afirma que el mercado esté operando: fines de semana se identifican, pero los feriados y cierres
+anticipados todavía no se evalúan. Esta limitación permanece disponible para tecnologías de
+asistencia. Un calendario oficial versionado será un contrato separado antes de convertir el estado
+horario en un estado operativo de mercado.
 
 ## Criterios de presentación
 

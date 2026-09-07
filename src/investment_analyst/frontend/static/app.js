@@ -5296,28 +5296,109 @@ function renderMesaUniverseWindow(coverageWindow) {
     `Ventana consultada: ${coverageWindow.start} a ${coverageWindow.end} · frecuencia anual`;
 }
 
+const MESA_MATRIX_STATE_LABELS = Object.freeze({
+  fresh: "Al día",
+  overdue: "Vencida",
+  missing: "Sin evidencia",
+  blocked: "Bloqueada",
+  "not-applicable": "No aplica",
+});
+
+const MESA_ASSET_CLASS_LABELS = Object.freeze({
+  equity: "Acción",
+  etf: "ETF",
+  crypto: "Cripto",
+});
+
+function mesaMatrixStateMarkup(state) {
+  const label = MESA_MATRIX_STATE_LABELS[state];
+  return `<span class="mesa-matrix-state mesa-matrix-state-${state}" role="img" aria-label="${label}"><span class="mesa-matrix-mark mesa-matrix-${state}" aria-hidden="true"></span><span class="visually-hidden">${label}</span></span>`;
+}
+
 function mesaUniverseCellMarkup(capability, evidence, ageDays) {
   if (capability === "not_applicable") {
-    return renderAbsenceMark("not-applicable", "No aplica").outerHTML;
+    return mesaMatrixStateMarkup("not-applicable");
   }
   if (capability === "not_configured" || capability === "not_implemented") {
-    return renderAbsenceMark("blocked", "Bloqueada").outerHTML;
+    return mesaMatrixStateMarkup("blocked");
   }
   if (evidence === "missing" || evidence === "not_queried") {
-    return renderAbsenceMark("missing", "Sin evidencia").outerHTML;
+    return mesaMatrixStateMarkup("missing");
   }
   if (typeof ageDays === "number" && ageDays <= MESA_COVERAGE_WINDOW_DAYS) {
-    return '<span class="universe-matrix-fresh">Al día</span>';
+    return mesaMatrixStateMarkup("fresh");
   }
-  return renderAbsenceMark("overdue", "Vencida").outerHTML;
+  return mesaMatrixStateMarkup("overdue");
 }
 
 const MESA_COVERAGE_CAPABILITY_KEYS = Object.freeze([
   "market",
   "fundamentals",
   "corporate_valuation",
-  "bvl_registry",
 ]);
+
+function mesaAssetDomainLabel(assetClass) {
+  const label = MESA_ASSET_CLASS_LABELS[assetClass];
+  if (!label) throw new Error(`Clase de activo no representable: ${assetClass}`);
+  return label;
+}
+
+function mesaLatestEvidenceTimestamp(asset) {
+  const timestamps = MESA_COVERAGE_CAPABILITY_KEYS.flatMap((key) => {
+    const coverage = asset[key];
+    return [coverage.reference_at, coverage.latest_input_available_at];
+  }).filter((value) => typeof value === "string" && !Number.isNaN(new Date(value).valueOf()));
+  return timestamps.sort((left, right) => new Date(right).valueOf() - new Date(left).valueOf())[0] ?? null;
+}
+
+function mesaLatestEvidenceMarkup(asset) {
+  const timestamp = mesaLatestEvidenceTimestamp(asset);
+  if (!timestamp) {
+    return renderAbsenceMark("missing", "Sin evidencia", "Sin referencia temporal en los dominios consultados").outerHTML;
+  }
+  return `<time datetime="${timestamp}">${formatInstant(timestamp)}</time>`;
+}
+
+const MESA_BVL_SUMMARY_KEYS = Object.freeze([
+  "applicable",
+  "present",
+  "missing",
+  "not-queried",
+  "not-configured",
+  "not-implemented",
+  "not-applicable",
+]);
+
+function resetMesaBvlRegistrySummary() {
+  for (const key of MESA_BVL_SUMMARY_KEYS) byId(`mesa-bvl-${key}`).textContent = "—";
+}
+
+function renderMesaBvlRegistrySummary(payload) {
+  const counts = Object.fromEntries(MESA_BVL_SUMMARY_KEYS.map((key) => [key, 0]));
+  for (const asset of payload.assets || []) {
+    const coverage = asset.bvl_registry;
+    if (coverage.capability === "not_applicable") {
+      counts["not-applicable"] += 1;
+      continue;
+    }
+    counts.applicable += 1;
+    if (coverage.capability === "not_configured") {
+      counts["not-configured"] += 1;
+      continue;
+    }
+    if (coverage.capability === "not_implemented") {
+      counts["not-implemented"] += 1;
+      continue;
+    }
+    if (coverage.evidence === "present") counts.present += 1;
+    if (coverage.evidence === "missing") counts.missing += 1;
+    if (coverage.evidence === "not_queried") counts["not-queried"] += 1;
+  }
+  for (const key of MESA_BVL_SUMMARY_KEYS) {
+    byId(`mesa-bvl-${key}`).textContent = formatInteger(counts[key]);
+  }
+  byId("mesa-bvl-applicable").textContent = `${formatInteger(counts.applicable)} aplicables`;
+}
 
 function renderMesaUniverseMatrix(payload) {
   const body = byId("mesa-universe-table-body");
@@ -5334,7 +5415,7 @@ function renderMesaUniverseMatrix(payload) {
       )}</td>`;
     }).join("");
     row.innerHTML =
-      `<td><strong>${asset.symbol}</strong><br><small>${asset.name} · ${asset.exchange}</small></td>${cellsMarkup}`;
+      `<td><strong>${asset.symbol}</strong><br><small>${asset.name} · ${asset.exchange}</small></td><td>${mesaAssetDomainLabel(asset.asset_class)}</td>${cellsMarkup}<td>${mesaLatestEvidenceMarkup(asset)}</td>`;
     body.append(row);
     for (const text of asset.limitations || []) {
       allLimitations.push(`${asset.symbol}: ${text}`);
@@ -5343,7 +5424,7 @@ function renderMesaUniverseMatrix(payload) {
   if (!body.childElementCount) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 5;
+    cell.colSpan = 6;
     cell.append(renderAbsenceMark("missing", "Sin evidencia", "Sin activos en el catálogo devuelto"));
     row.append(cell);
     body.append(row);
@@ -5356,6 +5437,7 @@ function renderMesaUniverseMatrix(payload) {
       document.createTextNode(allLimitations.join(" · ")),
     );
   }
+  renderMesaBvlRegistrySummary(payload);
 }
 
 function renderMesaUniverseAbsentTable(mark) {
@@ -5363,7 +5445,7 @@ function renderMesaUniverseAbsentTable(mark) {
   body.replaceChildren();
   const row = document.createElement("tr");
   const cell = document.createElement("td");
-  cell.colSpan = 5;
+  cell.colSpan = 6;
   cell.append(mark);
   row.append(cell);
   body.append(row);
@@ -5374,6 +5456,7 @@ async function loadMesaUniverseCoverage() {
   const knownAt = byId("report-known-at").value.trim();
   if (!knownAt) {
     renderMesaUniverseWindow({ start: "—", end: "—" });
+    resetMesaBvlRegistrySummary();
     renderMesaUniverseAbsentTable(
       renderAbsenceMark("missing", "Sin evidencia", "Sin corte known_at establecido"),
     );
@@ -5403,6 +5486,7 @@ async function loadMesaUniverseCoverage() {
       sequence !== mesaUniverseCoverageRequestSequence
       || knownAt !== byId("report-known-at").value.trim()
     ) return;
+    resetMesaBvlRegistrySummary();
     renderMesaUniverseAbsentTable(createElement("span", "", error.message));
   } finally {
     if (sequence === mesaUniverseCoverageRequestSequence) body.setAttribute("aria-busy", "false");

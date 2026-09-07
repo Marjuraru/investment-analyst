@@ -2363,15 +2363,12 @@ def test_ui5_documentation_matrix_and_invalidation() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Mesa reading hierarchy (UI-6): four ordered layers, three separated
-# novedades families (only one with a real universo-wide read path), the
-# universe-coverage matrix's exhaustive capability/evidence/age mapping, its
-# derived-and-shown query window, its own sequence guard, and the relocation
-# of every #resumen control (including the preferences panel to sistema).
+# Mesa composition (UI-9): a fluid main column and a fixed evidence aside,
+# three separated novedades families, a compact three-domain universe matrix,
+# its derived-and-shown query window, and the relocation of every #resumen
+# control without changing any deferred request.
 # Same discipline as every rule above: static contract checks, no browser.
 # ---------------------------------------------------------------------------
-
-_MESA_LAYER_EYEBROWS = ("NOVEDADES", "EN QUÉ CONFÍO", "QUÉ ESTÁ ROTO", "UNIVERSO")
 
 
 def _mesa_slice(index_html: str) -> str:
@@ -2380,10 +2377,14 @@ def _mesa_slice(index_html: str) -> str:
 
 def _check_mesa_presents_the_four_reading_layers_in_order(index_html: str) -> None:
     mesa = _mesa_slice(index_html)
-    positions = [mesa.index(eyebrow) for eyebrow in _MESA_LAYER_EYEBROWS]
-    assert positions == sorted(positions), (
-        f"mesa layers are out of order: {list(zip(_MESA_LAYER_EYEBROWS, positions, strict=True))}"
-    )
+    assert 'class="mesa-layout"' in mesa
+    main_start = mesa.index('class="mesa-main"')
+    aside_start = mesa.index('<aside class="mesa-aside"')
+    main = mesa[main_start:aside_start]
+    assert main.index('id="mesa-news-analytical"') < main.index('id="mesa-universe-table"')
+    assert "EN QUÉ CONFÍO" not in mesa
+    assert 'id="app-sidebar"' not in mesa
+    assert 'id="board-nav"' not in mesa
 
 
 def test_mesa_presents_the_four_reading_layers_in_order() -> None:
@@ -2392,13 +2393,20 @@ def test_mesa_presents_the_four_reading_layers_in_order() -> None:
 
 def _check_universe_matrix_is_the_last_layer(index_html: str) -> None:
     mesa = _mesa_slice(index_html)
-    universe_position = mesa.index("UNIVERSO")
-    table_position = mesa.index('id="mesa-universe-table"')
-    assert universe_position < table_position
-    # Nothing that belongs to an earlier layer follows the Universo eyebrow.
-    tail = mesa[universe_position:]
-    for earlier_id in ("mesa-news-analytical", "mesa-incidents-list", "workspace-status"):
-        assert earlier_id not in tail, f"{earlier_id!r} must not follow the Universo eyebrow"
+    main_start = mesa.index('class="mesa-main"')
+    aside_start = mesa.index('<aside class="mesa-aside"')
+    main = mesa[main_start:aside_start]
+    aside = mesa[aside_start:]
+    assert main.index('id="mesa-news-analytical"') < main.index('id="mesa-universe-table"')
+    assert 'id="mesa-incidents-list"' not in main
+    headings = (
+        'id="mesa-coverage-titulo"',
+        'id="mesa-blocked-sources-titulo"',
+        'id="mesa-incidents-titulo"',
+    )
+    assert [aside.index(heading) for heading in headings] == sorted(
+        aside.index(heading) for heading in headings
+    )
 
 
 def test_universe_matrix_is_the_last_layer() -> None:
@@ -2549,15 +2557,15 @@ def _check_capability_evidence_and_age_map_exhaustively_to_the_five_marks(app_js
     not_applicable_pos = body.index('"not_applicable"')
     blocked_pos = body.index('"not_configured" || capability === "not_implemented"')
     missing_pos = body.index('"missing" || evidence === "not_queried"')
-    fresh_pos = body.index("universe-matrix-fresh")
-    overdue_pos = body.index('renderAbsenceMark("overdue"')
+    fresh_pos = body.index('mesaMatrixStateMarkup("fresh")')
+    overdue_pos = body.index('mesaMatrixStateMarkup("overdue")')
     # capability is decided before evidence, and evidence before age, exactly
     # as the design-system table declares -- this order is what makes
     # not_queried fall through to "missing" only when supported.
     assert not_applicable_pos < blocked_pos < missing_pos < fresh_pos < overdue_pos
-    assert 'renderAbsenceMark("not-applicable"' in body
-    assert 'renderAbsenceMark("blocked"' in body
-    assert 'renderAbsenceMark("missing"' in body
+    assert 'mesaMatrixStateMarkup("not-applicable")' in body
+    assert 'mesaMatrixStateMarkup("blocked")' in body
+    assert 'mesaMatrixStateMarkup("missing")' in body
 
 
 def test_capability_evidence_and_age_map_exhaustively_to_the_five_marks() -> None:
@@ -2568,7 +2576,7 @@ def _check_not_configured_and_not_implemented_render_as_blocked(app_js: str) -> 
     body = _extract_js_function(app_js, "mesaUniverseCellMarkup")
     assert (
         'if (capability === "not_configured" || capability === "not_implemented") {\n'
-        '    return renderAbsenceMark("blocked", "Bloqueada").outerHTML;\n  }' in body
+        '    return mesaMatrixStateMarkup("blocked");\n  }' in body
     )
 
 
@@ -2579,8 +2587,8 @@ def test_not_configured_and_not_implemented_render_as_blocked() -> None:
 def _check_present_past_freshness_renders_as_stale(app_js: str) -> None:
     body = _extract_js_function(app_js, "mesaUniverseCellMarkup")
     assert "ageDays <= MESA_COVERAGE_WINDOW_DAYS" in body
-    fresh_pos = body.index("universe-matrix-fresh")
-    overdue_pos = body.index('renderAbsenceMark("overdue", "Vencida")')
+    fresh_pos = body.index('mesaMatrixStateMarkup("fresh")')
+    overdue_pos = body.index('mesaMatrixStateMarkup("overdue")')
     assert fresh_pos < overdue_pos, "the fresh branch must return before the overdue fallback"
 
 
@@ -2613,11 +2621,13 @@ def _check_universe_matrix_covers_exactly_the_four_queried_capabilities(
     match = _MESA_COVERAGE_CAPABILITY_KEYS_RE.search(app_js)
     assert match, "MESA_COVERAGE_CAPABILITY_KEYS must be declared"
     keys = re.findall(r'"([a-z_]+)"', match.group(1))
-    assert keys == ["market", "fundamentals", "corporate_valuation", "bvl_registry"]
+    assert keys == ["market", "fundamentals", "corporate_valuation"]
     mesa = _mesa_slice(index_html)
     header_start = mesa.index("<thead>")
     header_end = mesa.index("</thead>")
-    assert mesa[header_start:header_end].count('<th scope="col">') == 5
+    headers = re.findall(r'<th scope="col">(.*?)</th>', mesa[header_start:header_end])
+    assert headers == ["Activo", "Dominio", "Mercado", "Fund.", "Valor.", "Última evidencia"]
+    assert "Registro BVL</th>" not in mesa
 
 
 def test_universe_matrix_covers_exactly_the_four_queried_capabilities() -> None:
@@ -2697,13 +2707,17 @@ def _check_design_system_documentation_declares_the_mesa_hierarchy(doc_text: str
     normalized = re.sub(r"\s+", " ", doc_text).lower()
     for phrase in (
         "novedades de las bandejas",
-        "en qué confío",
-        "qué está roto",
+        "columna principal",
+        "340 px",
+        "fuentes bloqueadas",
+        "incidencias",
         "universo",
         "/api/v1/cazatiburones/notifications?family=institutional&limit=5",
         "/api/v1/cazatiburones/notifications?family=activity&limit=5",
         "al día",
         "vencida",
+        "última evidencia",
+        "registro bvl",
         "365",
     ):
         assert phrase in normalized, f"design-system documentation must declare {phrase!r}"
@@ -2717,6 +2731,179 @@ def test_design_system_documentation_declares_the_mesa_hierarchy() -> None:
             / "local_interface_design_system.md"
         ).read_text(encoding="utf-8")
     )
+
+
+def _check_mesa_three_column_composition(index_html: str, styles_css: str) -> None:
+    mesa = _mesa_slice(index_html)
+    assert mesa.count('class="mesa-layout"') == 1
+    assert mesa.count('<aside class="mesa-aside"') == 1
+    assert "grid-template-columns: minmax(0, 1fr) 340px;" in styles_css
+    assert "@media (max-width: 1120px)" in styles_css
+    assert ".mesa-layout {\n    grid-template-columns: 1fr;" in styles_css
+
+
+def test_mesa_has_main_and_340px_aside_composition() -> None:
+    _check_mesa_three_column_composition(INDEX_HTML, STYLES_CSS)
+
+
+def test_mesa_right_aside_orders_coverage_blocked_sources_and_incidents() -> None:
+    _check_universe_matrix_is_the_last_layer(INDEX_HTML)
+
+
+def test_responsive_mesa_collapses_without_page_overflow() -> None:
+    _check_mesa_three_column_composition(INDEX_HTML, STYLES_CSS)
+    assert ".mesa-main,\n.mesa-aside {\n  min-width: 0;" in STYLES_CSS
+    assert ".universe-matrix-scroll {\n  overflow-x: auto;" in STYLES_CSS
+
+
+def _check_compact_universe_matrix(index_html: str, app_js: str) -> None:
+    _check_universe_matrix_covers_exactly_the_four_queried_capabilities(index_html, app_js)
+    matrix_body = _extract_js_function(app_js, "renderMesaUniverseMatrix")
+    assert "bvl_registry" not in matrix_body
+    assert 'class="mesa-universe-legend"' in _mesa_slice(index_html)
+
+
+def test_universe_matrix_has_only_three_queried_analytical_domain_state_columns() -> None:
+    _check_compact_universe_matrix(INDEX_HTML, APP_JS)
+
+
+def _check_asset_domain_is_derived_only_from_asset_class(app_js: str) -> None:
+    mapping_body = _extract_js_function(app_js, "mesaAssetDomainLabel")
+    assert "MESA_ASSET_CLASS_LABELS[assetClass]" in mapping_body
+    mapping_start = app_js.index("const MESA_ASSET_CLASS_LABELS")
+    mapping_end = app_js.index("function mesaMatrixStateMarkup", mapping_start)
+    mapping = app_js[mapping_start:mapping_end]
+    for asset_class in ('equity: "Acción"', 'etf: "ETF"', 'crypto: "Cripto"'):
+        assert asset_class in mapping
+    for forbidden in ("symbol", "exchange", "capability", "evidence"):
+        assert forbidden not in mapping_body
+
+
+def test_asset_domain_is_derived_only_from_asset_class() -> None:
+    _check_asset_domain_is_derived_only_from_asset_class(APP_JS)
+
+
+def _check_latest_evidence_uses_only_queried_domain_availability(app_js: str) -> None:
+    body = _extract_js_function(app_js, "mesaLatestEvidenceTimestamp")
+    assert "MESA_COVERAGE_CAPABILITY_KEYS.flatMap" in body
+    assert "coverage.reference_at" in body
+    assert "coverage.latest_input_available_at" in body
+    for forbidden in ("bvl_registry", "computed_at", "Date.now", "new Date()"):
+        assert forbidden not in body
+    markup = _extract_js_function(app_js, "mesaLatestEvidenceMarkup")
+    assert "formatInstant(timestamp)" in markup
+    assert 'renderAbsenceMark("missing", "Sin evidencia"' in markup
+
+
+def test_latest_evidence_uses_only_queried_domain_availability() -> None:
+    _check_latest_evidence_uses_only_queried_domain_availability(APP_JS)
+
+
+def _check_matrix_legend_and_accessible_marks(
+    index_html: str, app_js: str, styles_css: str
+) -> None:
+    mesa = _mesa_slice(index_html)
+    assert mesa.count('class="mesa-universe-legend"') == 1
+    for label in ("Al día", "Vencida", "Sin evidencia", "Bloqueada", "No aplica"):
+        assert label in mesa
+    markup = _extract_js_function(app_js, "mesaMatrixStateMarkup")
+    assert 'role="img" aria-label="${label}"' in markup
+    assert "visually-hidden" in markup
+    assert ".mesa-matrix-mark {" in styles_css
+    assert "width: 7px;" in styles_css
+    assert "height: 7px;" in styles_css
+    for selector in (
+        ".mesa-matrix-fresh",
+        ".mesa-matrix-overdue",
+        ".mesa-matrix-missing",
+        ".mesa-matrix-blocked",
+        ".mesa-matrix-not-applicable",
+    ):
+        assert selector in styles_css
+    assert "clip-path" in styles_css
+    assert "repeating-linear-gradient" in styles_css
+
+
+def test_matrix_has_one_five_state_legend_and_accessible_7px_marks() -> None:
+    _check_matrix_legend_and_accessible_marks(INDEX_HTML, APP_JS, STYLES_CSS)
+
+
+def test_cell_state_mapping_preserves_capability_evidence_age_order() -> None:
+    _check_capability_evidence_and_age_map_exhaustively_to_the_five_marks(APP_JS)
+    _check_not_configured_and_not_implemented_render_as_blocked(APP_JS)
+    _check_present_past_freshness_renders_as_stale(APP_JS)
+
+
+def _check_matrix_absent_rows_span_six_columns(index_html: str, app_js: str) -> None:
+    assert '<tr><td colspan="6">Cargando…</td></tr>' in _mesa_slice(index_html)
+    render_absent = _extract_js_function(app_js, "renderMesaUniverseAbsentTable")
+    render_matrix = _extract_js_function(app_js, "renderMesaUniverseMatrix")
+    assert "cell.colSpan = 6;" in render_absent
+    assert "cell.colSpan = 6;" in render_matrix
+
+
+def test_matrix_empty_and_error_rows_span_six_columns() -> None:
+    _check_matrix_absent_rows_span_six_columns(INDEX_HTML, APP_JS)
+
+
+def _check_bvl_summary_is_lateral_and_reuses_payload(index_html: str, app_js: str) -> None:
+    mesa = _mesa_slice(index_html)
+    assert mesa.count("Registro BVL") == 1
+    aside = mesa[mesa.index('<aside class="mesa-aside"') :]
+    assert aside.index("Registro BVL") < aside.index('id="mesa-incidents-titulo"')
+    summary_body = _extract_js_function(app_js, "renderMesaBvlRegistrySummary")
+    assert "asset.bvl_registry" in summary_body
+    for key in (
+        "applicable",
+        "present",
+        "missing",
+        "not_queried",
+        "not_configured",
+        "not_implemented",
+    ):
+        assert key in summary_body
+    assert "api(" not in summary_body
+    assert "bvl_registry" not in _extract_js_function(app_js, "renderMesaUniverseMatrix")
+
+
+def test_bvl_registry_is_summarized_once_in_blocked_sources_without_extra_request() -> None:
+    _check_bvl_summary_is_lateral_and_reuses_payload(INDEX_HTML, APP_JS)
+
+
+def test_unqueried_additional_capabilities_remain_text_not_cells() -> None:
+    _check_unqueried_capabilities_are_declared_textually(INDEX_HTML)
+    _check_compact_universe_matrix(INDEX_HTML, APP_JS)
+
+
+def test_all_universe_limitations_remain_visible() -> None:
+    matrix_body = _extract_js_function(APP_JS, "renderMesaUniverseMatrix")
+    assert "for (const text of asset.limitations || [])" in matrix_body
+    assert "allLimitations.join" in matrix_body
+    assert 'id="mesa-universe-limitations"' in _mesa_slice(INDEX_HTML)
+
+
+def _check_compact_clock_keeps_one_desktop_row(index_html: str, styles_css: str) -> None:
+    for control_id in (
+        "lima-clock",
+        "lima-clock-date",
+        "new-york-clock",
+        "new-york-clock-date",
+        "nyse-session-status",
+        "nyse-session-dot",
+        "nyse-session-remaining",
+        "market-clock-note",
+    ):
+        assert index_html.count(f'id="{control_id}"') == 1
+    assert "grid-template-columns: auto minmax(0, 1fr) auto;" in styles_css
+    clock_start = styles_css.index(".market-clock-strip {")
+    clock_end = styles_css.index(".market-clock-item {", clock_start)
+    clock = styles_css[clock_start:clock_end]
+    assert "grid-column: 1 / -1" not in clock
+    assert "border-top" not in clock
+
+
+def test_clock_keeps_all_ids_information_and_accessible_limit() -> None:
+    _check_compact_clock_keeps_one_desktop_row(INDEX_HTML, STYLES_CSS)
 
 
 # ---------------------------------------------------------------------------
@@ -3335,6 +3522,15 @@ def test_every_new_rule_has_a_matching_probe() -> None:
         "test_probe_resumen_control_rule_catches_a_dropped_control",
         "test_probe_preferences_panel_rule_catches_a_duplicated_panel",
         "test_probe_mesa_hierarchy_documentation_rule_catches_a_missing_declaration",
+        # UI-9
+        "test_probe_ui9_mesa_layout_rule_catches_a_non_340px_aside",
+        "test_probe_ui9_matrix_capabilities_rule_catches_bvl_as_cell",
+        "test_probe_ui9_domain_rule_catches_a_symbol_fallback",
+        "test_probe_ui9_latest_evidence_rule_catches_bvl_input",
+        "test_probe_ui9_legend_rule_catches_an_inaccessible_mark",
+        "test_probe_ui9_absent_row_rule_catches_a_five_column_span",
+        "test_probe_ui9_bvl_summary_rule_catches_a_second_label",
+        "test_probe_ui9_clock_rule_catches_a_full_grid_span",
     }
     available = {name for name in globals() if name.startswith("test_probe_")}
     assert expected <= available
@@ -3363,9 +3559,9 @@ def test_probe_document_timeline_missing_coverage_rule_catches_a_hidden_counter(
 
 def test_probe_mesa_layer_order_rule_catches_a_reordered_layer() -> None:
     _check_mesa_presents_the_four_reading_layers_in_order(INDEX_HTML)  # baseline: clean
-    marker = '<h2 id="resumen-titulo" class="visually-hidden">Mesa: jerarquía de lectura</h2>'
+    marker = 'class="mesa-layout"'
     assert marker in INDEX_HTML
-    corrupted = INDEX_HTML.replace(marker, f"{marker}UNIVERSO", 1)
+    corrupted = INDEX_HTML.replace(marker, 'class="mesa-layout-corrupted"', 1)
     assert corrupted != INDEX_HTML
     with pytest.raises(AssertionError):
         _check_mesa_presents_the_four_reading_layers_in_order(corrupted)
@@ -3373,9 +3569,9 @@ def test_probe_mesa_layer_order_rule_catches_a_reordered_layer() -> None:
 
 def test_probe_universe_layer_position_rule_catches_a_layer_after_universe() -> None:
     _check_universe_matrix_is_the_last_layer(INDEX_HTML)  # baseline: clean
-    marker = '<p class="eyebrow">UNIVERSO</p>'
+    marker = '<div class="mesa-main">'
     assert marker in INDEX_HTML
-    corrupted = INDEX_HTML.replace(marker, f"{marker}<!-- workspace-status -->", 1)
+    corrupted = INDEX_HTML.replace(marker, f'{marker}<span id="mesa-incidents-list"></span>', 1)
     assert corrupted != INDEX_HTML
     with pytest.raises(AssertionError):
         _check_universe_matrix_is_the_last_layer(corrupted)
@@ -3545,12 +3741,12 @@ def test_probe_capability_mapping_rule_catches_a_reordered_branch() -> None:
     _check_capability_evidence_and_age_map_exhaustively_to_the_five_marks(APP_JS)  # clean
     block_a = (
         '  if (capability === "not_applicable") {\n'
-        '    return renderAbsenceMark("not-applicable", "No aplica").outerHTML;\n'
+        '    return mesaMatrixStateMarkup("not-applicable");\n'
         "  }"
     )
     block_b = (
         '  if (capability === "not_configured" || capability === "not_implemented") {\n'
-        '    return renderAbsenceMark("blocked", "Bloqueada").outerHTML;\n'
+        '    return mesaMatrixStateMarkup("blocked");\n'
         "  }"
     )
     original_pair = f"{block_a}\n{block_b}"
@@ -3607,12 +3803,11 @@ def test_probe_universe_matrix_columns_rule_catches_an_invented_capability() -> 
         '  "market",\n'
         '  "fundamentals",\n'
         '  "corporate_valuation",\n'
-        '  "bvl_registry",\n'
         "]);"
     )
     assert marker in APP_JS
     corrupted_marker = marker.replace(
-        '"bvl_registry",\n]);', '"bvl_registry",\n  "cazatiburones",\n]);', 1
+        '  "corporate_valuation",\n]);', '  "corporate_valuation",\n  "bvl_registry",\n]);', 1
     )
     assert corrupted_marker != marker
     corrupted = APP_JS.replace(marker, corrupted_marker, 1)
@@ -3685,6 +3880,92 @@ def test_probe_mesa_hierarchy_documentation_rule_catches_a_missing_declaration()
     assert corrupted != design_doc
     with pytest.raises(AssertionError):
         _check_design_system_documentation_declares_the_mesa_hierarchy(corrupted)
+
+
+def test_probe_ui9_mesa_layout_rule_catches_a_non_340px_aside() -> None:
+    _check_mesa_three_column_composition(INDEX_HTML, STYLES_CSS)
+    corrupted = STYLES_CSS.replace(
+        "grid-template-columns: minmax(0, 1fr) 340px;",
+        "grid-template-columns: minmax(0, 1fr) 341px;",
+        1,
+    )
+    assert corrupted != STYLES_CSS
+    with pytest.raises(AssertionError):
+        _check_mesa_three_column_composition(INDEX_HTML, corrupted)
+
+
+def test_probe_ui9_matrix_capabilities_rule_catches_bvl_as_cell() -> None:
+    _check_compact_universe_matrix(INDEX_HTML, APP_JS)
+    corrupted = APP_JS.replace(
+        '  "corporate_valuation",\n]);', '  "corporate_valuation",\n  "bvl_registry",\n]);', 1
+    )
+    assert corrupted != APP_JS
+    with pytest.raises(AssertionError):
+        _check_compact_universe_matrix(INDEX_HTML, corrupted)
+
+
+def test_probe_ui9_domain_rule_catches_a_symbol_fallback() -> None:
+    _check_asset_domain_is_derived_only_from_asset_class(APP_JS)
+    original = _extract_js_function(APP_JS, "mesaAssetDomainLabel")
+    corrupted_body = original.replace(
+        "const label = MESA_ASSET_CLASS_LABELS[assetClass];",
+        "const label = MESA_ASSET_CLASS_LABELS[assetClass] || asset.symbol;",
+        1,
+    )
+    assert corrupted_body != original
+    corrupted = APP_JS.replace(original, corrupted_body, 1)
+    with pytest.raises(AssertionError):
+        _check_asset_domain_is_derived_only_from_asset_class(corrupted)
+
+
+def test_probe_ui9_latest_evidence_rule_catches_bvl_input() -> None:
+    _check_latest_evidence_uses_only_queried_domain_availability(APP_JS)
+    original = _extract_js_function(APP_JS, "mesaLatestEvidenceTimestamp")
+    corrupted_body = f"{original}\n// bvl_registry"
+    corrupted = APP_JS.replace(original, corrupted_body, 1)
+    with pytest.raises(AssertionError):
+        _check_latest_evidence_uses_only_queried_domain_availability(corrupted)
+
+
+def test_probe_ui9_legend_rule_catches_an_inaccessible_mark() -> None:
+    _check_matrix_legend_and_accessible_marks(INDEX_HTML, APP_JS, STYLES_CSS)
+    original = _extract_js_function(APP_JS, "mesaMatrixStateMarkup")
+    corrupted_body = original.replace('role="img" aria-label="${label}"', 'aria-hidden="true"', 1)
+    assert corrupted_body != original
+    corrupted = APP_JS.replace(original, corrupted_body, 1)
+    with pytest.raises(AssertionError):
+        _check_matrix_legend_and_accessible_marks(INDEX_HTML, corrupted, STYLES_CSS)
+
+
+def test_probe_ui9_absent_row_rule_catches_a_five_column_span() -> None:
+    _check_matrix_absent_rows_span_six_columns(INDEX_HTML, APP_JS)
+    original = _extract_js_function(APP_JS, "renderMesaUniverseAbsentTable")
+    corrupted_body = original.replace("cell.colSpan = 6;", "cell.colSpan = 5;", 1)
+    assert corrupted_body != original
+    corrupted = APP_JS.replace(original, corrupted_body, 1)
+    with pytest.raises(AssertionError):
+        _check_matrix_absent_rows_span_six_columns(INDEX_HTML, corrupted)
+
+
+def test_probe_ui9_bvl_summary_rule_catches_a_second_label() -> None:
+    _check_bvl_summary_is_lateral_and_reuses_payload(INDEX_HTML, APP_JS)
+    marker = '<aside class="mesa-aside" aria-label="Cobertura y fuentes bloqueadas">'
+    assert marker in INDEX_HTML
+    corrupted = INDEX_HTML.replace(marker, f"{marker}<p>Registro BVL</p>", 1)
+    with pytest.raises(AssertionError):
+        _check_bvl_summary_is_lateral_and_reuses_payload(corrupted, APP_JS)
+
+
+def test_probe_ui9_clock_rule_catches_a_full_grid_span() -> None:
+    _check_compact_clock_keeps_one_desktop_row(INDEX_HTML, STYLES_CSS)
+    corrupted = STYLES_CSS.replace(
+        ".market-clock-strip {\n  display: flex;",
+        ".market-clock-strip {\n  display: flex;\n  grid-column: 1 / -1;",
+        1,
+    )
+    assert corrupted != STYLES_CSS
+    with pytest.raises(AssertionError):
+        _check_compact_clock_keeps_one_desktop_row(INDEX_HTML, corrupted)
 
 
 # ---------------------------------------------------------------------------
