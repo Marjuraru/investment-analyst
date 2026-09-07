@@ -87,6 +87,33 @@ observation→raw, metric→observation, metric→metric y diagnostic→metric. 
 reconciliar exactamente sus conteos escalares; no se usan conjuntos globales, aproximaciones ni
 umbrales de memoria dependientes de CI.
 
+## Reinstalación y lectura del presupuesto de memoria
+
+El presupuesto por trabajo tiene una cota cooperativa de proceso y una cota dura de cgroup. La
+unidad sólo recibe la segunda después de generar una configuración privada con el instalador:
+
+```bash
+.venv/bin/python scripts/install_local_service.py \
+  --workspace <workspace-inicializado> \
+  --env-file <environment-file-privado> \
+  --memory-max-mb <cota-cgroup> \
+  --memory-ceiling-mb <techo-del-proceso> \
+  --output <unit-file-privado>
+```
+
+Cuando ambas cotas se declaran, el techo de proceso debe ser estrictamente menor que `MemoryMax`.
+La generación no arranca ni recarga el servicio y no modifica el fichero de entorno. Una persona
+debe revisar la unidad, comprobar `MemoryAccounting=yes`, `MemoryMax=`,
+`StartLimitIntervalSec=900s`, `StartLimitBurst=3` y el argumento `--memory-ceiling-mb`, y sólo
+después ejecutar `systemctl --user daemon-reload` y el enablement/reinicio operativo autorizado.
+
+Cada intento nuevo conserva `ProviderJobTelemetry` con `peak_rss_kb`. Un entero es el mayor
+`VmRSS` observado para ese proceso durante el intento; `None` significa que `/proc/self/status` no
+estaba disponible o no entregó una muestra. `None` no significa cero y no debe convertirse en un
+umbral, un reason code analítico o una recomendación. La lectura de readiness sigue siendo
+read-only y debe correlacionar la categoría `memory_budget_exceeded` con `retryable=false` sin
+ocultar el intento fallido.
+
 ## Rehearsal HUMAN exact-SHA
 
 BUILD y AUDIT no ejecutan este procedimiento. Una persona lo realiza antes del merge, sobre el SHA

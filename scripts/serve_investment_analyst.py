@@ -89,6 +89,7 @@ _MANUAL_OPERATION_STATE_FILE = "manual_operation_state_v1.json"
 _ASSET_PREFERENCES_STATE_FILE = "asset_preferences_state_v1.json"
 _SERVICE_LOCK_FILE = "aapl_local_service.lock"
 _SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS = 60.0
+_BYTES_PER_MEGABYTE = 1024 * 1024
 
 
 class _DerivativesLocalController(AaplLocalController):
@@ -158,6 +159,18 @@ def _lag(value: str) -> int:
     return parsed
 
 
+def _positive_megabytes(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "memory limits must be an integer number of megabytes"
+        ) from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("memory limits must be positive")
+    return parsed
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path)
@@ -183,6 +196,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-schedule-intraday", action="store_true")
     parser.add_argument("--no-schedule-smv", action="store_true")
     parser.add_argument("--no-schedule-macro", action="store_true")
+    parser.add_argument("--memory-ceiling-mb", type=_positive_megabytes)
     return parser
 
 
@@ -333,6 +347,11 @@ def _serve_after_lock(
                     analytical_monitor,
                     notification_monitor,
                 )
+            ),
+            memory_ceiling_bytes=(
+                arguments.memory_ceiling_mb * _BYTES_PER_MEGABYTE
+                if arguments.memory_ceiling_mb is not None
+                else None
             ),
         )
 

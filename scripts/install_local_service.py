@@ -21,6 +21,7 @@ from investment_analyst.workspace.service import WorkspaceError, WorkspaceServic
 
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _REQUIRED_ENVIRONMENT = frozenset({"ALPACA_API_KEY", "ALPACA_API_SECRET", "SEC_USER_AGENT"})
+_BYTES_PER_MEGABYTE = 1024 * 1024
 
 
 def _date_value(value: str) -> date:
@@ -50,6 +51,18 @@ def _frequency(value: str) -> DataFrequency:
         ) from error
 
 
+def _positive_megabytes(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "memory limits must be an integer number of megabytes"
+        ) from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("memory limits must be positive")
+    return parsed
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path)
@@ -77,6 +90,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-schedule-intraday", action="store_true")
     parser.add_argument("--no-schedule-smv", action="store_true")
     parser.add_argument("--no-schedule-macro", action="store_true")
+    parser.add_argument("--memory-max-mb", type=_positive_megabytes)
+    parser.add_argument("--memory-ceiling-mb", type=_positive_megabytes)
     return parser
 
 
@@ -151,6 +166,16 @@ def main() -> int:
             environment_file=environment_file,
             workspace_root=paths.root,
             port=arguments.port,
+            memory_max_bytes=(
+                arguments.memory_max_mb * _BYTES_PER_MEGABYTE
+                if arguments.memory_max_mb is not None
+                else None
+            ),
+            memory_ceiling_bytes=(
+                arguments.memory_ceiling_mb * _BYTES_PER_MEGABYTE
+                if arguments.memory_ceiling_mb is not None
+                else None
+            ),
             schedule=schedule,
             scheduled_asset_ids=tuple(
                 sorted(

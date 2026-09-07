@@ -4,12 +4,15 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from investment_analyst.application.aapl_scheduler import AaplDailyScheduleConfig
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
 
 LOCAL_SERVICE_UNIT_NAME = "investment-analyst.service"
+_BYTES_PER_MEGABYTE = 1024 * 1024
+_MEMORY_START_LIMIT_INTERVAL = "900s"
+_MEMORY_START_LIMIT_BURST = 3
 
 
 class AaplLocalServiceUnitConfig(ContractModel):
@@ -21,6 +24,8 @@ class AaplLocalServiceUnitConfig(ContractModel):
     environment_file: Path
     workspace_root: Path
     port: int = Field(default=8765, ge=1, le=65_535)
+    memory_max_bytes: int | None = None
+    memory_ceiling_bytes: int | None = None
     schedule: AaplDailyScheduleConfig | None
     scheduled_asset_ids: tuple[NonEmptyStr, ...] = ()
     schedule_intraday: bool = True
@@ -63,6 +68,27 @@ class AaplLocalServiceUnitConfig(ContractModel):
             raise ValueError("port must be an integer")
         return value
 
+    @field_validator("memory_max_bytes", "memory_ceiling_bytes", mode="before")
+    @classmethod
+    def require_positive_memory_bytes(cls, value: object) -> object:
+        """Reject ambiguous or non-positive memory limits."""
+        if value is None:
+            return value
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("memory limits must be positive integers or None")
+        return value
+
+    @model_validator(mode="after")
+    def require_process_ceiling_below_cgroup_max(self) -> "AaplLocalServiceUnitConfig":
+        """Keep the cooperative process ceiling below the hard cgroup ceiling."""
+        if (
+            self.memory_max_bytes is not None
+            and self.memory_ceiling_bytes is not None
+            and self.memory_ceiling_bytes >= self.memory_max_bytes
+        ):
+            raise ValueError("memory ceiling must be below memory max")
+        return self
+
     @field_validator("scheduled_asset_ids")
     @classmethod
     def require_deterministic_asset_ids(
@@ -100,6 +126,13 @@ def render_local_service_unit(config: AaplLocalServiceUnitConfig) -> str:
         "--port",
         str(config.port),
     ]
+    if config.memory_ceiling_bytes is not None:
+        arguments.extend(
+            (
+                "--memory-ceiling-mb",
+                str(_whole_megabytes(config.memory_ceiling_bytes, "memory ceiling")),
+            )
+        )
     if config.schedule is None:
         arguments.append("--no-scheduler")
     else:
@@ -130,12 +163,21 @@ def render_local_service_unit(config: AaplLocalServiceUnitConfig) -> str:
         if not config.schedule_macro:
             arguments.append("--no-schedule-macro")
     command = " ".join(_quote_systemd(item) for item in arguments)
-    return "\n".join(
+    unit_lines = [
+        "[Unit]",
+        "Description=Investment Analyst local interface and watchlist scheduler",
+        "Wants=network-online.target",
+        "After=network-online.target",
+    ]
+    if config.memory_max_bytes is not None or config.memory_ceiling_bytes is not None:
+        unit_lines.extend(
+            (
+                f"StartLimitIntervalSec={_MEMORY_START_LIMIT_INTERVAL}",
+                f"StartLimitBurst={_MEMORY_START_LIMIT_BURST}",
+            )
+        )
+    unit_lines.extend(
         (
-            "[Unit]",
-            "Description=Investment Analyst local interface and watchlist scheduler",
-            "Wants=network-online.target",
-            "After=network-online.target",
             "",
             "[Service]",
             "Type=notify",
@@ -149,12 +191,24 @@ def render_local_service_unit(config: AaplLocalServiceUnitConfig) -> str:
             "UMask=0077",
             "NoNewPrivileges=true",
             "PrivateTmp=true",
+        )
+    )
+    if config.memory_max_bytes is not None:
+        unit_lines.extend(
+            (
+                "MemoryAccounting=yes",
+                f"MemoryMax={config.memory_max_bytes}",
+            )
+        )
+    unit_lines.extend(
+        (
             "",
             "[Install]",
             "WantedBy=default.target",
             "",
         )
     )
+    return "\n".join(unit_lines)
 
 
 def write_local_service_unit(target: Path, document: str) -> Path:
@@ -192,3 +246,10 @@ def _quote_systemd(value: str) -> str:
 def _unit_path(value: str) -> str:
     """Disable percent specifiers in a validated unquoted unit path."""
     return value.replace("%", "%%")
+
+
+def _whole_megabytes(value: int, label: str) -> int:
+    """Convert a byte limit to the exact integer unit accepted by the CLI."""
+    if value % _BYTES_PER_MEGABYTE:
+        raise ValueError(f"{label} must use whole megabytes")
+    return value // _BYTES_PER_MEGABYTE
