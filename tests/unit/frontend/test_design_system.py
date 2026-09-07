@@ -1277,13 +1277,18 @@ def _check_deferred_inbox_and_valuation_loads_are_preserved(app_js: str) -> None
     assert "valuationPayload === null" in valuation_click.group(1)
     assert "void queryValuation()" in valuation_click.group(1)
     # The two promoted panels lost their <details> "toggle" event; their
-    # load now fires from board activation instead, exactly once per call.
+    # load now belongs to the single board-to-request graph and fires from
+    # board activation, exactly once per loaded-board mark.
     assert 'byId("alert-inbox-panel").addEventListener("toggle"' not in app_js
     assert 'byId("candidate-inbox-panel").addEventListener("toggle"' not in app_js
+    assert "const BOARD_DEFERRED_LOADS = Object.freeze(" in app_js
+    board_loads = app_js[
+        app_js.index("const BOARD_DEFERRED_LOADS") : app_js.index("const DEFAULT_BOARD_ID")
+    ]
+    assert "revisar: Object.freeze([loadCandidateInbox, loadAlertInbox])" in board_loads
     activate_body = _activate_board_body(app_js)
-    assert "void loadCandidateInbox()" in activate_body
-    assert "void loadAlertInbox()" in activate_body
-    assert 'resolvedId === "revisar"' in activate_body
+    assert "loadDeferredBoardData(resolvedId)" in activate_body
+    assert "loadedBoardIds.has(boardId)" in app_js
     # The two panels NOT promoted keep their pre-existing toggle-based loads.
     assert 'byId("candidate-notification-panel").addEventListener("toggle"' in app_js
     assert 'byId("screening-rules-panel").addEventListener("toggle"' in app_js
@@ -1311,13 +1316,8 @@ def _check_board_switch_never_touches_the_known_at_cut_or_session_clock(app_js: 
             f"activateBoard must never reference {forbidden!r}: switching boards must not "
             "touch the known_at cut, the session clock, or issue any query of its own"
         )
-    # The only query-triggering calls activateBoard is allowed to make are
-    # the "revisar" board's promoted-panel loads and the "cazatiburones"
-    # board's own deferred load (checked separately) -- each reads the
-    # shared known_at cut and selectedMarketAsset from inside its own
-    # function body, never from inside activateBoard itself.
-    calls = re.findall(r"void (\w+)\(\)", body)
-    assert set(calls) <= {"loadCandidateInbox", "loadAlertInbox", "loadCazatiburonesBoard"}, calls
+    assert "loadDeferredBoardData(resolvedId)" in body
+    assert "activateBoard(boardIdFromLocationHash()" not in body
 
 
 def test_board_switch_never_touches_the_known_at_cut_or_session_clock() -> None:
@@ -1977,8 +1977,8 @@ def test_route_keeps_sec_corpus_as_the_single_next() -> None:
 
 def _check_cazatiburones_board_reloads_after_market_assets_are_ready(app_js: str) -> None:
     fn = _extract_js_function(app_js, "initialize")
-    reload_call = "if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();"
-    assert reload_call in fn, (
+    reload_call = "void loadCazatiburonesBoard();"
+    assert "if (cazatiburonesBoardIsActive()) {" in fn and reload_call in fn, (
         "initialize() must re-run the cazatiburones load once assets are ready"
     )
     assert "await loadMarketAssets();" in fn
@@ -1999,14 +1999,14 @@ def _check_cazatiburones_board_reloads_when_the_selected_asset_changes(app_js: s
     )
     assert match, "selectComboboxOption(assetId) must exist"
     body = match.group(1)
-    reload_call = "if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();"
     assert "selectedMarketAsset = assetId;" in body
-    assert reload_call in body, (
-        "changing the selected asset must reload an active cazatiburones board"
-    )
-    assert body.index("selectedMarketAsset = assetId;") < body.index(reload_call), (
-        "cazatiburones must reload with the NEW asset, after selectedMarketAsset is reassigned"
-    )
+    assert "invalidateDeferredBoardLoads();" in body
+    assert "activateBoard(boardIdFromLocationHash(), { focus: false });" in body
+    assert (
+        body.index("selectedMarketAsset = assetId;")
+        < body.index("invalidateDeferredBoardLoads();")
+        < body.index("activateBoard(boardIdFromLocationHash(), { focus: false });")
+    ), "asset changes must invalidate before reloading the visible board"
 
 
 def test_cazatiburones_board_reloads_when_the_selected_asset_changes() -> None:
@@ -2020,13 +2020,332 @@ def _check_cazatiburones_board_reloads_when_the_known_at_cut_changes(app_js: str
         re.DOTALL,
     )
     assert match, "report-known-at change listener must exist"
-    assert "if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();" in match.group(1), (
-        "changing the known_at cut must reload an active cazatiburones board"
-    )
+    body = match.group(1)
+    assert "invalidateDeferredBoardLoads();" in body
+    assert "activateBoard(boardIdFromLocationHash(), { focus: false });" in body
 
 
 def test_cazatiburones_board_reloads_when_the_known_at_cut_changes() -> None:
     _check_cazatiburones_board_reloads_when_the_known_at_cut_changes(APP_JS)
+
+
+# ---------------------------------------------------------------------------
+# Deferred board loading (UI-5): the visible board owns its data requests.
+# These checks stay static by design; the Work Block's required smoke covers
+# the browser-level activation and late-response behavior separately.
+# ---------------------------------------------------------------------------
+
+_BOARD_DEFERRED_LOADS_RE = re.compile(
+    r"const BOARD_DEFERRED_LOADS = Object\.freeze\(\{(.*?)\n\}\);\n\n"
+    r"const DEFAULT_BOARD_ID",
+    re.DOTALL,
+)
+_DEFERRED_LOAD_NAMES = (
+    "refreshOverview",
+    "queryReport",
+    "queryMarketChart",
+    "queryFundamentalTrend",
+    "queryFundamentalResearch",
+    "loadCandidateInbox",
+    "loadAlertInbox",
+    "loadCazatiburonesBoard",
+)
+
+
+def _board_deferred_loads_body(app_js: str) -> str:
+    match = _BOARD_DEFERRED_LOADS_RE.search(app_js)
+    assert match, "BOARD_DEFERRED_LOADS must be the single frozen request graph"
+    return match.group(1)
+
+
+def _board_deferred_load_entry(app_js: str, board_id: str) -> str:
+    body = _board_deferred_loads_body(app_js)
+    match = re.search(
+        rf"{re.escape(board_id)}: Object\.freeze\(\[(.*?)\]\)",
+        body,
+        re.DOTALL,
+    )
+    assert match, f"BOARD_DEFERRED_LOADS must declare {board_id!r}"
+    return match.group(1)
+
+
+def _check_initialize_fires_no_board_query(app_js: str) -> None:
+    initialize = _extract_js_function(app_js, "initialize")
+    for query_name in (
+        "refreshOverview",
+        "queryReport",
+        "queryMarketChart",
+        "queryFundamentalTrend",
+        "queryFundamentalResearch",
+    ):
+        assert f"{query_name}(" not in initialize, (
+            f"initialize() must not invoke the deferred board query {query_name}"
+        )
+    assert "await loadMarketAssets();" in initialize
+    assert "await loadAssetPreferences();" in initialize
+    assert "loadDeferredBoardData(boardIdFromLocationHash());" in initialize
+
+
+def test_initialize_fires_no_board_query() -> None:
+    _check_initialize_fires_no_board_query(APP_JS)
+
+
+def _check_initialize_shell_loads_are_exactly_market_assets_and_preferences(app_js: str) -> None:
+    initialize = _extract_js_function(app_js, "initialize")
+    allowed_framework_loads = (
+        "await loadMarketAssets();",
+        "await loadAssetPreferences();",
+    )
+    for call in allowed_framework_loads:
+        assert call in initialize
+    assert "void loadCazatiburonesBoard();" in initialize
+    assert "await refreshOverview();" not in initialize
+    assert "Promise.all([" not in initialize
+
+
+def test_initialize_shell_loads_are_exactly_market_assets_and_preferences() -> None:
+    _check_initialize_shell_loads_are_exactly_market_assets_and_preferences(APP_JS)
+
+
+def _check_board_to_deferred_loads_table_covers_the_six_registered_boards(app_js: str) -> None:
+    assert set(_EXPECTED_BOARD_IDS) == {
+        board_id
+        for board_id in _EXPECTED_BOARD_IDS
+        if re.search(
+            rf"{re.escape(board_id)}: Object\.freeze\(", _board_deferred_loads_body(app_js)
+        )
+    }
+    expected_loads = {
+        "mesa": ["refreshOverview"],
+        "activo": [
+            "queryReport",
+            "queryMarketChart",
+            "queryFundamentalTrend",
+            "queryFundamentalResearch",
+        ],
+        "tecnico": [],
+        "revisar": ["loadCandidateInbox", "loadAlertInbox"],
+        "cazatiburones": ["loadCazatiburonesBoard"],
+        "sistema": [],
+    }
+    for board_id, expected in expected_loads.items():
+        entry = _board_deferred_load_entry(app_js, board_id)
+        actual = [name for name in _DEFERRED_LOAD_NAMES if re.search(rf"\b{name}\b", entry)]
+        assert actual == expected, (
+            f"deferred loads for {board_id}: expected {expected}, found {actual}"
+        )
+
+
+def test_board_to_deferred_loads_table_covers_the_six_registered_boards() -> None:
+    _check_board_to_deferred_loads_table_covers_the_six_registered_boards(APP_JS)
+
+
+def _check_activate_board_fires_exactly_the_declared_loads(app_js: str) -> None:
+    body = _activate_board_body(app_js)
+    assert "loadDeferredBoardData(resolvedId)" in body
+    for forbidden in (
+        "refreshoverview",
+        "queryreport",
+        "querymarketchart",
+        "queryfundamentaltrend",
+        "queryfundamentalresearch",
+        "known_at",
+        "known-at",
+        "session-clock",
+        "api(",
+    ):
+        assert forbidden not in body.lower(), (
+            f"activateBoard must not hardcode deferred load or cut behavior: {forbidden}"
+        )
+    assert "loadedBoardIds.has(boardId)" in app_js
+    assert "loadedBoardIds.add(boardId)" in app_js
+
+
+def test_activate_board_fires_exactly_the_declared_loads() -> None:
+    _check_activate_board_fires_exactly_the_declared_loads(APP_JS)
+
+
+def _check_revisar_and_cazatiburones_keep_their_current_triggers(app_js: str) -> None:
+    assert _board_deferred_load_entry(app_js, "revisar").count("loadCandidateInbox") == 1
+    assert _board_deferred_load_entry(app_js, "revisar").count("loadAlertInbox") == 1
+    assert _board_deferred_load_entry(app_js, "cazatiburones").count("loadCazatiburonesBoard") == 1
+    initialize = _extract_js_function(app_js, "initialize")
+    assert "if (cazatiburonesBoardIsActive()) {" in initialize
+    assert "void loadCazatiburonesBoard();" in initialize
+    assert 'byId("candidate-notification-panel").addEventListener("toggle"' in app_js
+    assert 'byId("screening-rules-panel").addEventListener("toggle"' in app_js
+
+
+def test_revisar_and_cazatiburones_keep_their_current_triggers() -> None:
+    _check_revisar_and_cazatiburones_keep_their_current_triggers(APP_JS)
+
+
+def _check_same_board_reactivation_does_not_refetch(app_js: str) -> None:
+    dispatcher = _extract_js_function(app_js, "loadDeferredBoardData")
+    assert "loadedBoardIds.has(boardId)" in dispatcher
+    assert "loadedBoardIds.add(boardId)" in dispatcher
+    assert "loadedBoardIds.clear()" in _extract_js_function(app_js, "invalidateDeferredBoardLoads")
+    activate = _activate_board_body(app_js)
+    assert activate.count("loadDeferredBoardData(resolvedId)") == 1
+
+
+def test_same_board_reactivation_does_not_refetch() -> None:
+    _check_same_board_reactivation_does_not_refetch(APP_JS)
+
+
+def _check_asset_or_cut_change_invalidates_loaded_marks_and_refetches_visible_board(
+    app_js: str,
+) -> None:
+    invalidation = _extract_js_function(app_js, "invalidateDeferredBoardLoads")
+    assert "loadedBoardIds.clear()" in invalidation
+    assert "activoBoardRequestSequence += 1" in invalidation
+    assert "marketChartRequestSequence += 1" in invalidation
+    assert "fundamentalTrendRequestSequence += 1" in invalidation
+    assert "fundamentalResearchRequestSequence += 1" in invalidation
+    selection = re.search(
+        r"async function selectComboboxOption\(assetId\) \{(.*?)\n  \}",
+        app_js,
+        re.DOTALL,
+    )
+    assert selection and "invalidateDeferredBoardLoads();" in selection.group(1)
+    cut_change = re.search(
+        r'byId\("report-known-at"\)\.addEventListener\("change", \(\) => \{(.*?)\n\}\);',
+        app_js,
+        re.DOTALL,
+    )
+    assert cut_change and "invalidateDeferredBoardLoads();" in cut_change.group(1)
+    assert "activateBoard(boardIdFromLocationHash(), { focus: false });" in cut_change.group(1)
+
+
+def test_asset_or_cut_change_invalidates_loaded_marks_and_refetches_visible_board() -> None:
+    _check_asset_or_cut_change_invalidates_loaded_marks_and_refetches_visible_board(APP_JS)
+
+
+def _async_query_region(app_js: str, function_name: str) -> str:
+    start = app_js.index(f"async function {function_name}(")
+    following = [
+        position
+        for position in (
+            app_js.find("\nasync function ", start + 1),
+            app_js.find("\nfunction ", start + 1),
+            app_js.find("\nconst VALUATION_STATUS_LABELS", start + 1),
+            app_js.find('\nbyId("report-form")', start + 1),
+        )
+        if position >= 0
+    ]
+    assert following, f"could not delimit async function {function_name}"
+    return app_js[start : min(following)]
+
+
+_ACTIVO_QUERY_NAMES = (
+    "queryReport",
+    "queryMarketChart",
+    "queryFundamentalTrend",
+    "queryFundamentalResearch",
+)
+
+
+def _check_activo_loads_guard_sequence_and_selected_asset_before_painting(app_js: str) -> None:
+    assert "let activoBoardRequestSequence = 0;" in app_js
+    assert "sequence: ++activoBoardRequestSequence" in _extract_js_function(
+        app_js, "loadDeferredBoardData"
+    )
+    for function_name in _ACTIVO_QUERY_NAMES:
+        region = _async_query_region(app_js, function_name)
+        assert "deferredRequest?.assetId" in region
+        assert "deferredRequest?.knownAt" in region
+        assert "isCurrentActivoBoardRequest(deferredRequest)" in region
+        assert "assetId === selectedMarketAsset" in region
+        assert 'knownAt === byId("report-known-at").value.trim()' in region
+        assert "if (!isCurrentRequest()) return;" in region
+
+
+def test_activo_loads_guard_sequence_and_selected_asset_before_painting() -> None:
+    _check_activo_loads_guard_sequence_and_selected_asset_before_painting(APP_JS)
+
+
+def _check_superseded_response_is_discarded_without_rendering(app_js: str) -> None:
+    render_names = {
+        "queryReport": "renderReport",
+        "queryMarketChart": "renderMarketChart",
+        "queryFundamentalTrend": "renderFundamentalTrend",
+        "queryFundamentalResearch": "renderFundamentalResearch",
+    }
+    for function_name, render_name in render_names.items():
+        region = _async_query_region(app_js, function_name)
+        api_position = region.index("await api(")
+        guard_marker = (
+            "request !== listedCompanyReportRequest"
+            if function_name == "queryReport"
+            else "!isCurrentRequest()"
+        )
+        guard_position = region.index(guard_marker, api_position)
+        render_position = region.index(render_name, guard_position)
+        assert api_position < guard_position < render_position
+
+
+def test_superseded_response_is_discarded_without_rendering() -> None:
+    _check_superseded_response_is_discarded_without_rendering(APP_JS)
+
+
+def _check_single_global_known_at_cut_remains_visible_in_every_board(
+    app_js: str, index_html: str
+) -> None:
+    assert index_html.count('id="report-known-at"') == 1
+    assert 'byId("report-known-at")' in app_js
+    assert 'known_at: byId("report-known-at").value.trim()' in app_js
+    assert 'const knownAt = byId("report-known-at").value.trim();' in app_js
+    assert "report-known-at" not in _activate_board_body(app_js)
+
+
+def test_single_global_known_at_cut_remains_visible_in_every_board() -> None:
+    _check_single_global_known_at_cut_remains_visible_in_every_board(APP_JS, INDEX_HTML)
+
+
+def _check_absence_grammar_and_error_messages_are_preserved(app_js: str) -> None:
+    assert "renderAbsenceMark" in app_js
+    for function_name, required_text in (
+        ("queryReport", "setMessage(error.message, true)"),
+        ("queryMarketChart", "El gráfico no pudo construirse para el corte solicitado."),
+        ("queryFundamentalTrend", "La tendencia fundamental no pudo construirse."),
+        ("queryFundamentalResearch", "error.message"),
+    ):
+        assert required_text in _async_query_region(app_js, function_name)
+
+
+def test_absence_grammar_and_error_messages_are_preserved() -> None:
+    _check_absence_grammar_and_error_messages_are_preserved(APP_JS)
+
+
+def _check_ui5_documentation_matrix_and_invalidation(
+    *, interface_doc: str, design_doc: str
+) -> None:
+    normalized = re.sub(r"\s+", " ", f"{interface_doc} {design_doc}").lower()
+    for phrase in (
+        "carga por activación",
+        "matriz tablero",
+        "vacío",
+        "cargando",
+        "ausente",
+        "error",
+        "known_at",
+        "activo seleccionado",
+        "mesa",
+        "activo",
+        "tecnico",
+        "revisar",
+        "cazatiburones",
+        "sistema",
+    ):
+        assert phrase in normalized, f"UI-5 documentation must declare {phrase!r}"
+
+
+def test_ui5_documentation_matrix_and_invalidation() -> None:
+    root = Path(str(files("investment_analyst"))).parent.parent
+    _check_ui5_documentation_matrix_and_invalidation(
+        interface_doc=(root / "docs" / "local_interface.md").read_text(encoding="utf-8"),
+        design_doc=(root / "docs" / "local_interface_design_system.md").read_text(encoding="utf-8"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2332,8 +2651,9 @@ def test_probe_deferred_loads_rule_catches_a_reintroduced_toggle_listener() -> N
 def test_probe_board_switch_rule_catches_a_known_at_reference() -> None:
     _check_board_switch_never_touches_the_known_at_cut_or_session_clock(APP_JS)  # baseline: clean
     corrupted = APP_JS.replace(
-        '  if (resolvedId === "revisar") {',
-        '  byId("known-at-status").textContent = "poked";\n  if (resolvedId === "revisar") {',
+        "  if (boardDataReady) loadDeferredBoardData(resolvedId);",
+        '  byId("known-at-status").textContent = "poked";\n'
+        "  if (boardDataReady) loadDeferredBoardData(resolvedId);",
         1,
     )
     assert corrupted != APP_JS, "probe fixture did not inject a known_at reference"
@@ -2496,16 +2816,7 @@ def test_probe_external_network_rule_catches_a_web_font_link() -> None:
 
 def test_probe_cazatiburones_deep_link_rule_catches_a_removed_reload() -> None:
     _check_cazatiburones_board_reloads_after_market_assets_are_ready(APP_JS)  # baseline: clean
-    corrupted = APP_JS.replace(
-        "  applySelectedMarketAsset();\n"
-        "  // A deep link straight into #cazatiburones activates the board (and fires\n"
-        "  // its load) before marketAssets exists, so the eligibility check above\n"
-        "  // always misreads it as ineligible. Re-run the load now that\n"
-        "  // loadMarketAssets()/applySelectedMarketAsset() have populated it.\n"
-        "  if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();\n",
-        "  applySelectedMarketAsset();\n",
-        1,
-    )
+    corrupted = APP_JS.replace("    void loadCazatiburonesBoard();\n", "", 1)
     assert corrupted != APP_JS, "probe fixture did not remove the deep-link reload"
     with pytest.raises(AssertionError):
         _check_cazatiburones_board_reloads_after_market_assets_are_ready(corrupted)
@@ -2514,9 +2825,9 @@ def test_probe_cazatiburones_deep_link_rule_catches_a_removed_reload() -> None:
 def test_probe_cazatiburones_asset_change_rule_catches_a_removed_reload() -> None:
     _check_cazatiburones_board_reloads_when_the_selected_asset_changes(APP_JS)  # baseline: clean
     corrupted = APP_JS.replace(
-        "    const presentation = marketAssetPresentation();\n"
-        "    if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();\n",
-        "    const presentation = marketAssetPresentation();\n",
+        "    invalidateDeferredBoardLoads();\n"
+        "    activateBoard(boardIdFromLocationHash(), { focus: false });",
+        "    invalidateDeferredBoardLoads();",
         1,
     )
     assert corrupted != APP_JS, "probe fixture did not remove the asset-change reload"
@@ -2527,13 +2838,117 @@ def test_probe_cazatiburones_asset_change_rule_catches_a_removed_reload() -> Non
 def test_probe_cazatiburones_known_at_change_rule_catches_a_removed_reload() -> None:
     _check_cazatiburones_board_reloads_when_the_known_at_cut_changes(APP_JS)  # baseline: clean
     corrupted = APP_JS.replace(
-        "  if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();\n});",
+        "  activateBoard(boardIdFromLocationHash(), { focus: false });\n});",
         "});",
         1,
     )
     assert corrupted != APP_JS, "probe fixture did not remove the known_at-change reload"
     with pytest.raises(AssertionError):
         _check_cazatiburones_board_reloads_when_the_known_at_cut_changes(corrupted)
+
+
+def test_probe_initialize_rule_catches_a_reintroduced_board_query() -> None:
+    _check_initialize_fires_no_board_query(APP_JS)
+    corrupted = APP_JS.replace(
+        "  startMarketClocks();\n}",
+        "  startMarketClocks();\n  await queryReport();\n}",
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not reintroduce a board query"
+    with pytest.raises(AssertionError):
+        _check_initialize_fires_no_board_query(corrupted)
+
+
+def test_probe_deferred_table_rule_catches_a_board_missing_from_the_table() -> None:
+    _check_board_to_deferred_loads_table_covers_the_six_registered_boards(APP_JS)
+    corrupted = APP_JS.replace("  tecnico: Object.freeze([]),\n", "", 1)
+    assert corrupted != APP_JS, "probe fixture did not remove tecnico from the table"
+    with pytest.raises(AssertionError):
+        _check_board_to_deferred_loads_table_covers_the_six_registered_boards(corrupted)
+
+
+def test_probe_dispatch_rule_catches_an_undeclared_activate_board_trigger() -> None:
+    _check_activate_board_fires_exactly_the_declared_loads(APP_JS)
+    corrupted = APP_JS.replace(
+        "  if (boardDataReady) loadDeferredBoardData(resolvedId);",
+        "  if (boardDataReady) loadDeferredBoardData(resolvedId);\n  void queryReport();",
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not add an undeclared trigger"
+    with pytest.raises(AssertionError):
+        _check_activate_board_fires_exactly_the_declared_loads(corrupted)
+
+
+def test_probe_sequence_guard_rule_catches_a_removed_guard() -> None:
+    _check_activo_loads_guard_sequence_and_selected_asset_before_painting(APP_JS)
+    corrupted = APP_JS.replace(
+        "    && (!deferredRequest || isCurrentActivoBoardRequest(deferredRequest));",
+        "    && (!deferredRequest);",
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not remove the deferred guard"
+    with pytest.raises(AssertionError):
+        _check_activo_loads_guard_sequence_and_selected_asset_before_painting(corrupted)
+
+
+def test_probe_selected_asset_rule_catches_a_removed_comparison() -> None:
+    _check_activo_loads_guard_sequence_and_selected_asset_before_painting(APP_JS)
+    corrupted = APP_JS.replace(
+        "    && assetId === selectedMarketAsset\n"
+        '    && knownAt === byId("report-known-at").value.trim()',
+        '    && knownAt === byId("report-known-at").value.trim()',
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not remove the selected asset comparison"
+    with pytest.raises(AssertionError):
+        _check_activo_loads_guard_sequence_and_selected_asset_before_painting(corrupted)
+
+
+def test_probe_invalidation_rule_catches_a_loaded_mark_not_invalidated() -> None:
+    _check_asset_or_cut_change_invalidates_loaded_marks_and_refetches_visible_board(APP_JS)
+    corrupted = APP_JS.replace("  loadedBoardIds.clear();\n", "", 1)
+    assert corrupted != APP_JS, "probe fixture did not remove loaded-mark invalidation"
+    with pytest.raises(AssertionError):
+        _check_asset_or_cut_change_invalidates_loaded_marks_and_refetches_visible_board(corrupted)
+
+
+def test_probe_activate_board_rule_catches_a_cut_reference() -> None:
+    _check_activate_board_fires_exactly_the_declared_loads(APP_JS)
+    corrupted = APP_JS.replace(
+        "  if (boardDataReady) loadDeferredBoardData(resolvedId);",
+        '  if (boardDataReady) loadDeferredBoardData(resolvedId);\n  byId("report-known-at");',
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not add a cut reference"
+    with pytest.raises(AssertionError):
+        _check_activate_board_fires_exactly_the_declared_loads(corrupted)
+
+
+def test_probe_no_hidden_preload_rule_catches_a_preloaded_board() -> None:
+    _check_initialize_fires_no_board_query(APP_JS)
+    corrupted = APP_JS.replace(
+        "    loadDeferredBoardData(boardIdFromLocationHash());",
+        '    loadDeferredBoardData("activo");',
+        1,
+    )
+    assert corrupted != APP_JS, "probe fixture did not preload a hidden board"
+    with pytest.raises(AssertionError):
+        _check_initialize_fires_no_board_query(corrupted)
+
+
+def test_every_new_rule_has_a_matching_probe() -> None:
+    expected = {
+        "test_probe_initialize_rule_catches_a_reintroduced_board_query",
+        "test_probe_deferred_table_rule_catches_a_board_missing_from_the_table",
+        "test_probe_dispatch_rule_catches_an_undeclared_activate_board_trigger",
+        "test_probe_sequence_guard_rule_catches_a_removed_guard",
+        "test_probe_selected_asset_rule_catches_a_removed_comparison",
+        "test_probe_invalidation_rule_catches_a_loaded_mark_not_invalidated",
+        "test_probe_activate_board_rule_catches_a_cut_reference",
+        "test_probe_no_hidden_preload_rule_catches_a_preloaded_board",
+    }
+    available = {name for name in globals() if name.startswith("test_probe_")}
+    assert expected <= available
 
 
 def test_probe_document_timeline_missing_coverage_rule_catches_a_hidden_counter() -> None:
