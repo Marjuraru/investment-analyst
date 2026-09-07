@@ -24,6 +24,7 @@ from investment_analyst.alerts.candidate_notifications import (
     CandidateNotificationMonitor,
     CandidateNotificationStore,
 )
+from investment_analyst.alerts.cazatiburones_notifications import CazatiburonesNotificationStore
 from investment_analyst.application.aapl_bootstrap_models import AaplRefreshMode
 from investment_analyst.application.aapl_daily_runner import AaplDailyRunner
 from investment_analyst.application.aapl_scheduler import (
@@ -84,6 +85,7 @@ _SCHEDULE_STATE_FILE = "multi_asset_schedule_state_v1.json"
 _ALERT_STATE_FILE = "operational_alert_state_v1.json"
 _ANALYTICAL_STATE_FILE = "analytical_screening_state_v1.json"
 _NOTIFICATION_OUTBOX_STATE_FILE = "candidate_notification_outbox_state_v1.json"
+_CAZATIBURONES_NOTIFICATION_OUTBOX_STATE_FILE = "cazatiburones_notification_outbox_state_v1.json"
 _ANALYTICAL_RULE_REGISTRY_FILE = "analytical_rule_registry_state_v1.json"
 _MANUAL_OPERATION_STATE_FILE = "manual_operation_state_v1.json"
 _ASSET_PREFERENCES_STATE_FILE = "asset_preferences_state_v1.json"
@@ -260,6 +262,9 @@ def _serve_after_lock(
     alert_store = OperationalAlertStateStore(state_root / _ALERT_STATE_FILE)
     analytical_store = AnalyticalScreeningStateStore(state_root / _ANALYTICAL_STATE_FILE)
     notification_store = CandidateNotificationStore(state_root / _NOTIFICATION_OUTBOX_STATE_FILE)
+    cazatiburones_notification_store = CazatiburonesNotificationStore(
+        state_root / _CAZATIBURONES_NOTIFICATION_OUTBOX_STATE_FILE
+    )
     analytical_rule_store = AnalyticalRuleRegistryStore(
         state_root / _ANALYTICAL_RULE_REGISTRY_FILE,
         INITIAL_ANALYTICAL_RULES,
@@ -371,6 +376,7 @@ def _serve_after_lock(
         analytical_rule_store,
         analytical_backtest,
         notification_store=notification_store,
+        cazatiburones_notification_store=cazatiburones_notification_store,
         asset_preferences=preference_service,
     )
     manual_operations = ManualOperationQueue(

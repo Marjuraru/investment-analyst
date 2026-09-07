@@ -31,6 +31,7 @@ from investment_analyst.alerts.analytical_state import (
     AnalyticalScreeningStateStore,
 )
 from investment_analyst.alerts.candidate_notifications import CandidateNotificationStore
+from investment_analyst.alerts.cazatiburones_notifications import CazatiburonesNotificationStore
 from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagnosticReport
 from investment_analyst.analytics.aapl_daily_report_service import AaplDailyReportError
 from investment_analyst.analytics.cazatiburones.declared_activity_models import (
@@ -1414,6 +1415,7 @@ class AaplLocalWebApplication:
         notification_store: CandidateNotificationStore | None = None,
         manual_operations: ManualOperationQueue | None = None,
         asset_preferences: AssetPreferencesService | None = None,
+        cazatiburones_notification_store: CazatiburonesNotificationStore | None = None,
     ) -> None:
         self._controller = controller
         self._scheduler = scheduler
@@ -1422,6 +1424,7 @@ class AaplLocalWebApplication:
         self._analytical_rule_store = analytical_rule_store
         self._analytical_backtest = analytical_backtest
         self._notification_store = notification_store
+        self._cazatiburones_notification_store = cazatiburones_notification_store
         self._manual_operations = manual_operations
         self._asset_preferences = asset_preferences
 
@@ -1698,6 +1701,63 @@ class AaplLocalWebApplication:
             "schema_version": "candidate-notification-acknowledge-response-v1",
             "changed": changed,
             "item": item.model_dump(mode="json"),
+        }
+
+    def cazatiburones_notifications(
+        self, parameters: Mapping[str, tuple[str, ...]]
+    ) -> dict[str, object]:
+        """Return the persisted Cazatiburones notification outbox without mutation."""
+        allowed = {"family", "limit"}
+        if set(parameters) - allowed:
+            raise ValueError("cazatiburones notifications query contains unsupported parameters")
+        family = _one_parameter(parameters, "family", required=False)
+        if family is not None and family not in {"activity", "institutional"}:
+            raise ValueError("family must be activity or institutional")
+        limit = _integer_parameter(
+            _one_parameter(parameters, "limit", required=False),
+            name="limit",
+            default=50,
+        )
+        if not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        if self._cazatiburones_notification_store is None:
+            return {
+                "schema_version": "cazatiburones-notification-inbox-v1",
+                "enabled": False,
+                "items": [],
+                "total": 0,
+                "pending_count": 0,
+                "returned": 0,
+                "truncated": False,
+            }
+
+        state = self._cazatiburones_notification_store.load()
+        acknowledged = {item.notification_id for item in state.acknowledgements}
+        filtered = tuple(item for item in state.items if family is None or item.family == family)
+        ordered = tuple(
+            sorted(
+                filtered,
+                key=lambda item: (item.created_at, str(item.notification_id)),
+                reverse=True,
+            )
+        )
+        selected = ordered[:limit]
+        return {
+            "schema_version": "cazatiburones-notification-inbox-v1",
+            "enabled": True,
+            "items": [
+                {
+                    "item": item.model_dump(mode="json"),
+                    "status": (
+                        "acknowledged" if item.notification_id in acknowledged else "pending"
+                    ),
+                }
+                for item in selected
+            ],
+            "total": len(ordered),
+            "pending_count": sum(item.notification_id not in acknowledged for item in ordered),
+            "returned": len(selected),
+            "truncated": len(selected) < len(ordered),
         }
 
     def screening_rules(self) -> dict[str, object]:
@@ -2525,6 +2585,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     HTTPStatus.OK,
                     server.application.cazatiburones_universe_activity(parameters),
+                )
+                return
+            if parsed.path == "/api/v1/cazatiburones/notifications":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.cazatiburones_notifications(parameters),
                 )
                 return
             if parsed.path == "/api/v1/cazatiburones/declared-activity":
