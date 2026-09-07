@@ -1471,6 +1471,7 @@ _BASELINE_API_ROUTES = frozenset(
         "/api/v1/market-comparison",
         "/api/v1/overview",
         "/api/v1/sec-document-timeline",
+        "/api/v1/universe-coverage",
         "/api/v1/valuation",
         "/api/v1/valuation-history",
         "/api/v1/valuation-history-rule",
@@ -2042,6 +2043,9 @@ _BOARD_DEFERRED_LOADS_RE = re.compile(
 )
 _DEFERRED_LOAD_NAMES = (
     "refreshOverview",
+    "loadMesaAnalyticalNews",
+    "loadMesaIncidents",
+    "loadMesaUniverseCoverage",
     "queryReport",
     "queryMarketChart",
     "queryFundamentalTrend",
@@ -2073,6 +2077,9 @@ def _check_initialize_fires_no_board_query(app_js: str) -> None:
     initialize = _extract_js_function(app_js, "initialize")
     for query_name in (
         "refreshOverview",
+        "loadMesaAnalyticalNews",
+        "loadMesaIncidents",
+        "loadMesaUniverseCoverage",
         "queryReport",
         "queryMarketChart",
         "queryFundamentalTrend",
@@ -2116,7 +2123,12 @@ def _check_board_to_deferred_loads_table_covers_the_six_registered_boards(app_js
         )
     }
     expected_loads = {
-        "mesa": ["refreshOverview"],
+        "mesa": [
+            "refreshOverview",
+            "loadMesaAnalyticalNews",
+            "loadMesaIncidents",
+            "loadMesaUniverseCoverage",
+        ],
         "activo": [
             "queryReport",
             "queryMarketChart",
@@ -2345,6 +2357,307 @@ def test_ui5_documentation_matrix_and_invalidation() -> None:
     _check_ui5_documentation_matrix_and_invalidation(
         interface_doc=(root / "docs" / "local_interface.md").read_text(encoding="utf-8"),
         design_doc=(root / "docs" / "local_interface_design_system.md").read_text(encoding="utf-8"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Mesa reading hierarchy (UI-6): four ordered layers, three separated
+# novedades families (only one with a real universo-wide read path), the
+# universe-coverage matrix's exhaustive capability/evidence/age mapping, its
+# derived-and-shown query window, its own sequence guard, and the relocation
+# of every #resumen control (including the preferences panel to sistema).
+# Same discipline as every rule above: static contract checks, no browser.
+# ---------------------------------------------------------------------------
+
+_MESA_LAYER_EYEBROWS = ("NOVEDADES", "EN QUÉ CONFÍO", "QUÉ ESTÁ ROTO", "UNIVERSO")
+
+
+def _mesa_slice(index_html: str) -> str:
+    return _board_slices(index_html)["mesa"]
+
+
+def _check_mesa_presents_the_four_reading_layers_in_order(index_html: str) -> None:
+    mesa = _mesa_slice(index_html)
+    positions = [mesa.index(eyebrow) for eyebrow in _MESA_LAYER_EYEBROWS]
+    assert positions == sorted(positions), (
+        f"mesa layers are out of order: {list(zip(_MESA_LAYER_EYEBROWS, positions, strict=True))}"
+    )
+
+
+def test_mesa_presents_the_four_reading_layers_in_order() -> None:
+    _check_mesa_presents_the_four_reading_layers_in_order(INDEX_HTML)
+
+
+def _check_universe_matrix_is_the_last_layer(index_html: str) -> None:
+    mesa = _mesa_slice(index_html)
+    universe_position = mesa.index("UNIVERSO")
+    table_position = mesa.index('id="mesa-universe-table"')
+    assert universe_position < table_position
+    # Nothing that belongs to an earlier layer follows the Universo eyebrow.
+    tail = mesa[universe_position:]
+    for earlier_id in ("mesa-news-analytical", "mesa-incidents-list", "workspace-status"):
+        assert earlier_id not in tail, f"{earlier_id!r} must not follow the Universo eyebrow"
+
+
+def test_universe_matrix_is_the_last_layer() -> None:
+    _check_universe_matrix_is_the_last_layer(INDEX_HTML)
+
+
+def _check_analytical_rules_family_is_populated_from_candidate_notifications(
+    index_html: str, app_js: str
+) -> None:
+    mesa = _mesa_slice(index_html)
+    assert 'id="mesa-news-analytical-count"' in mesa
+    assert 'id="mesa-news-analytical-list"' in mesa
+    assert "loadMesaAnalyticalNews" in _board_deferred_load_entry(app_js, "mesa")
+    load_body = _extract_js_function(app_js, "loadMesaAnalyticalNews")
+    assert 'await api("/api/v1/candidate-notifications")' in load_body
+    render_body = _extract_js_function(app_js, "renderMesaAnalyticalNews")
+    assert 'byId("mesa-news-analytical-count")' in render_body
+    assert 'byId("mesa-news-analytical-list")' in render_body
+
+
+def test_analytical_rules_family_is_populated_from_candidate_notifications() -> None:
+    _check_analytical_rules_family_is_populated_from_candidate_notifications(INDEX_HTML, APP_JS)
+
+
+def _check_institutional_and_activity_families_declare_missing_read_path(
+    index_html: str, app_js: str
+) -> None:
+    mesa = _mesa_slice(index_html)
+    for family_id, artifact in (
+        ("mesa-news-institutional", "cazatiburones_institutional_events_v1"),
+        ("mesa-news-activity", "cazatiburones_activity_events_v1"),
+    ):
+        family_start = mesa.index(f'id="{family_id}"')
+        family_end = mesa.index("</article>", family_start)
+        family_markup = mesa[family_start:family_end]
+        assert 'class="absence-mark blocked"' in family_markup
+        assert artifact in family_markup
+        assert "mesa-news-count" not in family_markup, (
+            f"{family_id} must never carry its own count -- only reglas analíticas does"
+        )
+    # Neither family is ever populated from a per-asset Cazatiburones endpoint
+    # or from operational alerts inside the mesa deferred-load graph.
+    mesa_loads = _board_deferred_load_entry(app_js, "mesa")
+    for forbidden in ("declared-activity", "institutional-observations"):
+        assert forbidden not in mesa_loads
+
+
+def test_institutional_and_activity_families_declare_missing_read_path() -> None:
+    _check_institutional_and_activity_families_declare_missing_read_path(INDEX_HTML, APP_JS)
+
+
+def _check_no_combined_news_family_count(index_html: str) -> None:
+    mesa = _mesa_slice(index_html)
+    assert mesa.count('class="mesa-news-count"') == 1
+    for forbidden in ("mesa-news-total", "mesa-news-combined", "novedades-total"):
+        assert forbidden not in mesa
+
+
+def test_no_combined_news_family_count() -> None:
+    _check_no_combined_news_family_count(INDEX_HTML)
+
+
+def _check_mesa_universe_coverage_requested_once_with_no_per_asset_parameter(app_js: str) -> None:
+    assert app_js.count("/api/v1/universe-coverage") == 1
+    mesa_loads = _board_deferred_load_entry(app_js, "mesa")
+    assert mesa_loads.count("loadMesaUniverseCoverage") == 1
+    load_body = _extract_js_function(app_js, "loadMesaUniverseCoverage")
+    assert "selectedMarketAsset" not in load_body
+    assert "asset_id" not in load_body
+    window_body = _extract_js_function(app_js, "mesaCoverageWindowFromKnownAt")
+    assert "selectedMarketAsset" not in window_body
+    assert "asset_id" not in window_body
+
+
+def test_mesa_universe_coverage_requested_once_with_no_per_asset_parameter() -> None:
+    _check_mesa_universe_coverage_requested_once_with_no_per_asset_parameter(APP_JS)
+
+
+def _check_mesa_news_and_incidents_issue_no_per_asset_request(app_js: str) -> None:
+    for function_name in ("loadMesaAnalyticalNews", "loadMesaIncidents"):
+        body = _extract_js_function(app_js, function_name)
+        assert "selectedMarketAsset" not in body
+        assert "asset_id" not in body
+
+
+def test_mesa_news_and_incidents_issue_no_per_asset_request() -> None:
+    _check_mesa_news_and_incidents_issue_no_per_asset_request(APP_JS)
+
+
+def _check_capability_evidence_and_age_map_exhaustively_to_the_five_marks(app_js: str) -> None:
+    body = _extract_js_function(app_js, "mesaUniverseCellMarkup")
+    not_applicable_pos = body.index('"not_applicable"')
+    blocked_pos = body.index('"not_configured" || capability === "not_implemented"')
+    missing_pos = body.index('"missing" || evidence === "not_queried"')
+    fresh_pos = body.index("universe-matrix-fresh")
+    overdue_pos = body.index('renderAbsenceMark("overdue"')
+    # capability is decided before evidence, and evidence before age, exactly
+    # as the design-system table declares -- this order is what makes
+    # not_queried fall through to "missing" only when supported.
+    assert not_applicable_pos < blocked_pos < missing_pos < fresh_pos < overdue_pos
+    assert 'renderAbsenceMark("not-applicable"' in body
+    assert 'renderAbsenceMark("blocked"' in body
+    assert 'renderAbsenceMark("missing"' in body
+
+
+def test_capability_evidence_and_age_map_exhaustively_to_the_five_marks() -> None:
+    _check_capability_evidence_and_age_map_exhaustively_to_the_five_marks(APP_JS)
+
+
+def _check_not_configured_and_not_implemented_render_as_blocked(app_js: str) -> None:
+    body = _extract_js_function(app_js, "mesaUniverseCellMarkup")
+    assert (
+        'if (capability === "not_configured" || capability === "not_implemented") {\n'
+        '    return renderAbsenceMark("blocked", "Bloqueada").outerHTML;\n  }' in body
+    )
+
+
+def test_not_configured_and_not_implemented_render_as_blocked() -> None:
+    _check_not_configured_and_not_implemented_render_as_blocked(APP_JS)
+
+
+def _check_present_past_freshness_renders_as_stale(app_js: str) -> None:
+    body = _extract_js_function(app_js, "mesaUniverseCellMarkup")
+    assert "ageDays <= MESA_COVERAGE_WINDOW_DAYS" in body
+    fresh_pos = body.index("universe-matrix-fresh")
+    overdue_pos = body.index('renderAbsenceMark("overdue", "Vencida")')
+    assert fresh_pos < overdue_pos, "the fresh branch must return before the overdue fallback"
+
+
+def test_present_past_freshness_renders_as_stale() -> None:
+    _check_present_past_freshness_renders_as_stale(APP_JS)
+
+
+def _check_unqueried_capabilities_are_declared_textually(index_html: str) -> None:
+    mesa = _mesa_slice(index_html)
+    assert 'id="mesa-universe-not-queried"' in mesa
+    not_queried_start = mesa.index('id="mesa-universe-not-queried"')
+    not_queried_end = mesa.index("</p>", not_queried_start)
+    paragraph = mesa[not_queried_start:not_queried_end]
+    for term in ("Cazatiburones", "Documentos", "Derivados", "additional_capabilities_not_queried"):
+        assert term in paragraph
+
+
+def test_unqueried_capabilities_are_declared_textually() -> None:
+    _check_unqueried_capabilities_are_declared_textually(INDEX_HTML)
+
+
+_MESA_COVERAGE_CAPABILITY_KEYS_RE = re.compile(
+    r"const MESA_COVERAGE_CAPABILITY_KEYS = Object\.freeze\(\[(.*?)\]\);", re.DOTALL
+)
+
+
+def _check_universe_matrix_covers_exactly_the_four_queried_capabilities(
+    index_html: str, app_js: str
+) -> None:
+    match = _MESA_COVERAGE_CAPABILITY_KEYS_RE.search(app_js)
+    assert match, "MESA_COVERAGE_CAPABILITY_KEYS must be declared"
+    keys = re.findall(r'"([a-z_]+)"', match.group(1))
+    assert keys == ["market", "fundamentals", "corporate_valuation", "bvl_registry"]
+    mesa = _mesa_slice(index_html)
+    header_start = mesa.index("<thead>")
+    header_end = mesa.index("</thead>")
+    assert mesa[header_start:header_end].count('<th scope="col">') == 5
+
+
+def test_universe_matrix_covers_exactly_the_four_queried_capabilities() -> None:
+    _check_universe_matrix_covers_exactly_the_four_queried_capabilities(INDEX_HTML, APP_JS)
+
+
+def _check_queried_window_is_derived_from_the_cut_and_shown(app_js: str) -> None:
+    window_body = _extract_js_function(app_js, "mesaCoverageWindowFromKnownAt")
+    assert "MESA_COVERAGE_WINDOW_DAYS * 86_400_000" in window_body
+    assert "- 86_400_000" in window_body
+    load_body = _extract_js_function(app_js, "loadMesaUniverseCoverage")
+    window_call_pos = load_body.index("renderMesaUniverseWindow(coverageWindow);")
+    api_pos = load_body.index("await api(")
+    assert window_call_pos < api_pos, (
+        "the derived window must be shown before the request is even sent"
+    )
+
+
+def test_queried_window_is_derived_from_the_cut_and_shown() -> None:
+    _check_queried_window_is_derived_from_the_cut_and_shown(APP_JS)
+
+
+def _check_mesa_universe_deferred_load_keeps_sequence_guard_and_cut_discard(app_js: str) -> None:
+    invalidation = _extract_js_function(app_js, "invalidateDeferredBoardLoads")
+    assert "mesaUniverseCoverageRequestSequence += 1" in invalidation
+    load_body = _extract_js_function(app_js, "loadMesaUniverseCoverage")
+    assert "const sequence = ++mesaUniverseCoverageRequestSequence;" in load_body
+    assert load_body.count("sequence !== mesaUniverseCoverageRequestSequence") == 2
+    assert load_body.count('knownAt !== byId("report-known-at").value.trim()') == 2
+
+
+def test_mesa_universe_deferred_load_keeps_sequence_guard_and_cut_discard() -> None:
+    _check_mesa_universe_deferred_load_keeps_sequence_guard_and_cut_discard(APP_JS)
+
+
+_MESA_RESUMEN_CONTROL_IDS = (
+    "workspace-status",
+    "workspace-counts",
+    "run-status",
+    "run-time",
+    "schedule-status",
+    "schedule-next",
+    "traceability-status",
+    "known-at-status",
+    "candidate-status",
+    "candidate-latest",
+    "alert-status",
+    "alert-latest",
+)
+
+
+def _check_every_resumen_control_survives_relocation(index_html: str) -> None:
+    mesa = _mesa_slice(index_html)
+    for control_id in _MESA_RESUMEN_CONTROL_IDS:
+        marker = f'id="{control_id}"'
+        assert index_html.count(marker) == 1, f"id={control_id!r} must appear exactly once"
+        assert marker in mesa, f"id={control_id!r} must remain inside board mesa"
+
+
+def test_every_resumen_control_survives_relocation() -> None:
+    _check_every_resumen_control_survives_relocation(INDEX_HTML)
+
+
+def _check_asset_preferences_panel_moved_to_sistema_and_absent_from_mesa(index_html: str) -> None:
+    marker = 'id="asset-preferences-panel"'
+    assert index_html.count(marker) == 1
+    slices = _board_slices(index_html)
+    assert marker in slices["sistema"]
+    assert marker not in slices["mesa"]
+
+
+def test_asset_preferences_panel_moved_to_sistema_and_absent_from_mesa() -> None:
+    _check_asset_preferences_panel_moved_to_sistema_and_absent_from_mesa(INDEX_HTML)
+
+
+def _check_design_system_documentation_declares_the_mesa_hierarchy(doc_text: str) -> None:
+    normalized = re.sub(r"\s+", " ", doc_text).lower()
+    for phrase in (
+        "novedades desde el corte anterior",
+        "en qué confío",
+        "qué está roto",
+        "universo",
+        "cazatiburones_institutional_events_v1",
+        "cazatiburones_activity_events_v1",
+        "al día",
+        "vencida",
+        "365",
+    ):
+        assert phrase in normalized, f"design-system documentation must declare {phrase!r}"
+
+
+def test_design_system_documentation_declares_the_mesa_hierarchy() -> None:
+    _check_design_system_documentation_declares_the_mesa_hierarchy(
+        (
+            Path(str(files("investment_analyst"))).parent.parent
+            / "docs"
+            / "local_interface_design_system.md"
+        ).read_text(encoding="utf-8")
     )
 
 
@@ -2946,6 +3259,24 @@ def test_every_new_rule_has_a_matching_probe() -> None:
         "test_probe_invalidation_rule_catches_a_loaded_mark_not_invalidated",
         "test_probe_activate_board_rule_catches_a_cut_reference",
         "test_probe_no_hidden_preload_rule_catches_a_preloaded_board",
+        # UI-6
+        "test_probe_mesa_layer_order_rule_catches_a_reordered_layer",
+        "test_probe_universe_layer_position_rule_catches_a_layer_after_universe",
+        "test_probe_analytical_family_rule_catches_a_removed_candidate_notifications_call",
+        "test_probe_institutional_family_rule_catches_a_populated_family",
+        "test_probe_news_family_rule_catches_a_combined_count",
+        "test_probe_universe_coverage_rule_catches_a_per_asset_parameter",
+        "test_probe_mesa_news_incidents_rule_catches_a_per_asset_reference",
+        "test_probe_capability_mapping_rule_catches_a_reordered_branch",
+        "test_probe_blocked_mapping_rule_catches_a_narrowed_capability",
+        "test_probe_freshness_rule_catches_a_removed_age_comparison",
+        "test_probe_unqueried_capabilities_rule_catches_a_removed_declaration",
+        "test_probe_universe_matrix_columns_rule_catches_an_invented_capability",
+        "test_probe_query_window_rule_catches_a_hidden_window",
+        "test_probe_universe_sequence_guard_rule_catches_a_removed_discard",
+        "test_probe_resumen_control_rule_catches_a_dropped_control",
+        "test_probe_preferences_panel_rule_catches_a_duplicated_panel",
+        "test_probe_mesa_hierarchy_documentation_rule_catches_a_missing_declaration",
     }
     available = {name for name in globals() if name.startswith("test_probe_")}
     assert expected <= available
@@ -2965,3 +3296,242 @@ def test_probe_document_timeline_missing_coverage_rule_catches_a_hidden_counter(
     assert corrupted != APP_JS, "probe fixture did not reintroduce the hidden-counter ternary"
     with pytest.raises(AssertionError):
         _check_document_timeline_shows_coverage_even_when_missing(corrupted)
+
+
+# ---------------------------------------------------------------------------
+# UI-6 regression probes
+# ---------------------------------------------------------------------------
+
+
+def test_probe_mesa_layer_order_rule_catches_a_reordered_layer() -> None:
+    _check_mesa_presents_the_four_reading_layers_in_order(INDEX_HTML)  # baseline: clean
+    marker = '<h2 id="resumen-titulo" class="visually-hidden">Mesa: jerarquía de lectura</h2>'
+    assert marker in INDEX_HTML
+    corrupted = INDEX_HTML.replace(marker, f"{marker}UNIVERSO", 1)
+    assert corrupted != INDEX_HTML
+    with pytest.raises(AssertionError):
+        _check_mesa_presents_the_four_reading_layers_in_order(corrupted)
+
+
+def test_probe_universe_layer_position_rule_catches_a_layer_after_universe() -> None:
+    _check_universe_matrix_is_the_last_layer(INDEX_HTML)  # baseline: clean
+    marker = '<p class="eyebrow">UNIVERSO</p>'
+    assert marker in INDEX_HTML
+    corrupted = INDEX_HTML.replace(marker, f"{marker}<!-- workspace-status -->", 1)
+    assert corrupted != INDEX_HTML
+    with pytest.raises(AssertionError):
+        _check_universe_matrix_is_the_last_layer(corrupted)
+
+
+def test_probe_analytical_family_rule_catches_a_removed_candidate_notifications_call() -> None:
+    _check_analytical_rules_family_is_populated_from_candidate_notifications(
+        INDEX_HTML, APP_JS
+    )  # baseline: clean
+    original_body = _extract_js_function(APP_JS, "loadMesaAnalyticalNews")
+    corrupted_body = original_body.replace(
+        'await api("/api/v1/candidate-notifications")', 'await api("/api/candidates")', 1
+    )
+    assert corrupted_body != original_body
+    corrupted = APP_JS.replace(original_body, corrupted_body, 1)
+    with pytest.raises(AssertionError):
+        _check_analytical_rules_family_is_populated_from_candidate_notifications(
+            INDEX_HTML, corrupted
+        )
+
+
+def test_probe_institutional_family_rule_catches_a_populated_family() -> None:
+    _check_institutional_and_activity_families_declare_missing_read_path(
+        INDEX_HTML, APP_JS
+    )  # baseline: clean
+    marker = 'class="absence-mark blocked"'
+    first_occurrence = INDEX_HTML.index(marker)
+    corrupted = (
+        INDEX_HTML[:first_occurrence]
+        + 'class="alert-inbox"'
+        + INDEX_HTML[first_occurrence + len(marker) :]
+    )
+    assert corrupted != INDEX_HTML
+    with pytest.raises(AssertionError):
+        _check_institutional_and_activity_families_declare_missing_read_path(corrupted, APP_JS)
+
+
+def test_probe_news_family_rule_catches_a_combined_count() -> None:
+    _check_no_combined_news_family_count(INDEX_HTML)  # baseline: clean
+    marker = '<span id="mesa-news-analytical-count" class="mesa-news-count">—</span>'
+    assert marker in INDEX_HTML
+    corrupted = INDEX_HTML.replace(marker, f'{marker}<span class="mesa-news-count">total</span>', 1)
+    assert corrupted != INDEX_HTML
+    with pytest.raises(AssertionError):
+        _check_no_combined_news_family_count(corrupted)
+
+
+def test_probe_universe_coverage_rule_catches_a_per_asset_parameter() -> None:
+    _check_mesa_universe_coverage_requested_once_with_no_per_asset_parameter(APP_JS)  # clean
+    original_body = _extract_js_function(APP_JS, "loadMesaUniverseCoverage")
+    corrupted_body = original_body.replace(
+        "known_at: knownAt,", "known_at: knownAt,\n    asset_id: selectedMarketAsset,", 1
+    )
+    assert corrupted_body != original_body
+    corrupted = APP_JS.replace(original_body, corrupted_body, 1)
+    with pytest.raises(AssertionError):
+        _check_mesa_universe_coverage_requested_once_with_no_per_asset_parameter(corrupted)
+
+
+def test_probe_mesa_news_incidents_rule_catches_a_per_asset_reference() -> None:
+    _check_mesa_news_and_incidents_issue_no_per_asset_request(APP_JS)  # baseline: clean
+    original_body = _extract_js_function(APP_JS, "loadMesaIncidents")
+    corrupted_body = original_body.replace(
+        'const list = byId("mesa-incidents-list");',
+        'const list = byId("mesa-incidents-list"); const asset = selectedMarketAsset;',
+        1,
+    )
+    assert corrupted_body != original_body
+    corrupted = APP_JS.replace(original_body, corrupted_body, 1)
+    with pytest.raises(AssertionError):
+        _check_mesa_news_and_incidents_issue_no_per_asset_request(corrupted)
+
+
+def test_probe_capability_mapping_rule_catches_a_reordered_branch() -> None:
+    _check_capability_evidence_and_age_map_exhaustively_to_the_five_marks(APP_JS)  # clean
+    block_a = (
+        '  if (capability === "not_applicable") {\n'
+        '    return renderAbsenceMark("not-applicable", "No aplica").outerHTML;\n'
+        "  }"
+    )
+    block_b = (
+        '  if (capability === "not_configured" || capability === "not_implemented") {\n'
+        '    return renderAbsenceMark("blocked", "Bloqueada").outerHTML;\n'
+        "  }"
+    )
+    original_pair = f"{block_a}\n{block_b}"
+    assert original_pair in APP_JS
+    swapped_pair = f"{block_b}\n{block_a}"
+    corrupted = APP_JS.replace(original_pair, swapped_pair, 1)
+    assert corrupted != APP_JS
+    with pytest.raises(AssertionError):
+        _check_capability_evidence_and_age_map_exhaustively_to_the_five_marks(corrupted)
+
+
+def test_probe_blocked_mapping_rule_catches_a_narrowed_capability() -> None:
+    _check_not_configured_and_not_implemented_render_as_blocked(APP_JS)  # baseline: clean
+    original_body = _extract_js_function(APP_JS, "mesaUniverseCellMarkup")
+    corrupted_body = original_body.replace(
+        'capability === "not_configured" || capability === "not_implemented"',
+        'capability === "not_configured"',
+        1,
+    )
+    assert corrupted_body != original_body
+    corrupted = APP_JS.replace(original_body, corrupted_body, 1)
+    with pytest.raises(AssertionError):
+        _check_not_configured_and_not_implemented_render_as_blocked(corrupted)
+
+
+def test_probe_freshness_rule_catches_a_removed_age_comparison() -> None:
+    _check_present_past_freshness_renders_as_stale(APP_JS)  # baseline: clean
+    original_body = _extract_js_function(APP_JS, "mesaUniverseCellMarkup")
+    corrupted_body = original_body.replace(
+        "ageDays <= MESA_COVERAGE_WINDOW_DAYS", "ageDays >= MESA_COVERAGE_WINDOW_DAYS", 1
+    )
+    assert corrupted_body != original_body
+    corrupted = APP_JS.replace(original_body, corrupted_body, 1)
+    with pytest.raises(AssertionError):
+        _check_present_past_freshness_renders_as_stale(corrupted)
+
+
+def test_probe_unqueried_capabilities_rule_catches_a_removed_declaration() -> None:
+    _check_unqueried_capabilities_are_declared_textually(INDEX_HTML)  # baseline: clean
+    marker = "Cazatiburones, Documentos y Derivados"
+    assert marker in INDEX_HTML
+    corrupted = INDEX_HTML.replace(marker, "Xazatiburones, Documentos y Derivados", 1)
+    assert corrupted != INDEX_HTML
+    with pytest.raises(AssertionError):
+        _check_unqueried_capabilities_are_declared_textually(corrupted)
+
+
+def test_probe_universe_matrix_columns_rule_catches_an_invented_capability() -> None:
+    _check_universe_matrix_covers_exactly_the_four_queried_capabilities(
+        INDEX_HTML, APP_JS
+    )  # baseline: clean
+    marker = (
+        "const MESA_COVERAGE_CAPABILITY_KEYS = Object.freeze([\n"
+        '  "market",\n'
+        '  "fundamentals",\n'
+        '  "corporate_valuation",\n'
+        '  "bvl_registry",\n'
+        "]);"
+    )
+    assert marker in APP_JS
+    corrupted_marker = marker.replace(
+        '"bvl_registry",\n]);', '"bvl_registry",\n  "cazatiburones",\n]);', 1
+    )
+    assert corrupted_marker != marker
+    corrupted = APP_JS.replace(marker, corrupted_marker, 1)
+    with pytest.raises(AssertionError):
+        _check_universe_matrix_covers_exactly_the_four_queried_capabilities(INDEX_HTML, corrupted)
+
+
+def test_probe_query_window_rule_catches_a_hidden_window() -> None:
+    _check_queried_window_is_derived_from_the_cut_and_shown(APP_JS)  # baseline: clean
+    original_body = _extract_js_function(APP_JS, "loadMesaUniverseCoverage")
+    # Relocate the call rather than delete it: the checker must fail via its
+    # own position assertion (window shown only after the request), never
+    # via a bare lookup crash on a literal that no longer exists at all.
+    without_call = original_body.replace("renderMesaUniverseWindow(coverageWindow);\n  ", "", 1)
+    assert without_call != original_body
+    corrupted_body = without_call.replace(
+        "renderMesaUniverseMatrix(payload);",
+        "renderMesaUniverseWindow(coverageWindow);\n    renderMesaUniverseMatrix(payload);",
+        1,
+    )
+    assert corrupted_body != without_call
+    corrupted = APP_JS.replace(original_body, corrupted_body, 1)
+    with pytest.raises(AssertionError):
+        _check_queried_window_is_derived_from_the_cut_and_shown(corrupted)
+
+
+def test_probe_universe_sequence_guard_rule_catches_a_removed_discard() -> None:
+    _check_mesa_universe_deferred_load_keeps_sequence_guard_and_cut_discard(APP_JS)  # clean
+    original_body = _extract_js_function(APP_JS, "loadMesaUniverseCoverage")
+    corrupted_body = original_body.replace(
+        "sequence !== mesaUniverseCoverageRequestSequence", "false", 1
+    )
+    assert corrupted_body != original_body
+    corrupted = APP_JS.replace(original_body, corrupted_body, 1)
+    with pytest.raises(AssertionError):
+        _check_mesa_universe_deferred_load_keeps_sequence_guard_and_cut_discard(corrupted)
+
+
+def test_probe_resumen_control_rule_catches_a_dropped_control() -> None:
+    _check_every_resumen_control_survives_relocation(INDEX_HTML)  # baseline: clean
+    marker = 'id="workspace-status"'
+    assert INDEX_HTML.count(marker) == 1
+    corrupted = INDEX_HTML.replace(marker, 'id="workspace-status-renamed"', 1)
+    assert corrupted != INDEX_HTML
+    with pytest.raises(AssertionError):
+        _check_every_resumen_control_survives_relocation(corrupted)
+
+
+def test_probe_preferences_panel_rule_catches_a_duplicated_panel() -> None:
+    _check_asset_preferences_panel_moved_to_sistema_and_absent_from_mesa(INDEX_HTML)  # clean
+    marker = '<div class="board" id="board-mesa" data-board="mesa" tabindex="-1">'
+    assert marker in INDEX_HTML
+    corrupted = INDEX_HTML.replace(marker, f'{marker}<span id="asset-preferences-panel"></span>', 1)
+    assert corrupted != INDEX_HTML
+    with pytest.raises(AssertionError):
+        _check_asset_preferences_panel_moved_to_sistema_and_absent_from_mesa(corrupted)
+
+
+def test_probe_mesa_hierarchy_documentation_rule_catches_a_missing_declaration() -> None:
+    design_doc_path = (
+        Path(str(files("investment_analyst"))).parent.parent
+        / "docs"
+        / "local_interface_design_system.md"
+    )
+    design_doc = design_doc_path.read_text(encoding="utf-8")
+    _check_design_system_documentation_declares_the_mesa_hierarchy(design_doc)  # baseline: clean
+    marker = "cazatiburones_institutional_events_v1"
+    assert marker in design_doc
+    corrupted = design_doc.replace(marker, "cazatiburones_institutional_removed", 1)
+    assert corrupted != design_doc
+    with pytest.raises(AssertionError):
+        _check_design_system_documentation_declares_the_mesa_hierarchy(corrupted)
