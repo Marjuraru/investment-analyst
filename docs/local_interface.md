@@ -75,9 +75,11 @@ necesarias para resolver el armazón. Después de que `activateBoard()` resuelve
 el hash y fija `[hidden]`, una matriz única dispara las peticiones del tablero
 visible:
 
-- `mesa` carga el snapshot operativo;
+- `mesa` (`UI-6`) carga el snapshot operativo, las novedades de reglas analíticas, las
+  incidencias operativas y, una sola vez por activación, la matriz de cobertura del universo;
 - `activo` carga el reporte, el gráfico de mercado y las dos lecturas fundamentales;
-- `tecnico` y `sistema` no hacen peticiones en este bloque;
+- `tecnico` no hace peticiones en este bloque; `sistema` tampoco añade ninguna nueva, más allá de
+  las que ya disparaba bajo demanda su panel de watchlist, ahora alojado en este tablero;
 - `revisar` carga las bandejas de candidatos y alertas;
 - `cazatiburones` carga sus tres lecturas SEC/13F de solo lectura.
 
@@ -91,6 +93,38 @@ respuesta superada se descarta sin tocar el estado renderizado. Los estados
 vacío, cargando, ausente y error conservan la gramática y los mensajes
 existentes, y una respuesta vigente mantiene su marca de ausencia cuando no
 hay evidencia elegible.
+
+## Mesa: jerarquía de lectura (`UI-6`)
+
+El tablero de entrada `mesa` se lee en el orden que declara el lienzo aprobado: el corte
+`known_at` y el reloj de mercado en la cabecera compartida (sin duplicarse), y debajo cuatro
+capas -- **Novedades desde el corte anterior**, **En qué confío**, **Qué está roto** y, al final,
+**Universo** -- nunca un score, ranking o veredicto agregado que las colapse.
+
+Novedades separa tres bloques con procedencia propia -- institucional 13F, actividad declarada y
+reglas analíticas -- sin conteo combinado. Sólo reglas analíticas tiene hoy un camino de lectura
+universo-wide (`GET /api/v1/candidate-notifications`); institucional 13F y actividad declarada
+declaran, con la marca `blocked` y su motivo literal, que el artefacto correspondiente
+(`cazatiburones_institutional_events_v1`, `cazatiburones_activity_events_v1`) existe pero carece de
+transporte HTTP sin restringirse a un activo -- nunca se pueblan con otra fuente, con incidencias
+operativas, ni se ocultan. En qué confío conserva el estado del corte, la última ejecución, la
+próxima ejecución programada y la trazabilidad ya entregados por bloques anteriores. Qué está roto
+añade, de solo lectura, hasta cinco incidencias operativas recientes desde `GET /api/alerts`, junto
+a los indicadores de resumen ya existentes.
+
+Universo consume `GET /api/v1/universe-coverage` exactamente una vez por activación, nunca por
+activo. La ventana de cuatro fechas se deriva del corte global con una regla fija -- fin en el
+último día UTC completamente transcurrido al corte, inicio 365 días antes, frecuencia anual -- y se
+muestra literalmente junto a la matriz. La matriz tiene una fila por activo devuelto y una columna
+por cada una de las cuatro capacidades que el contrato consulta (mercado, fundamentales, valoración
+corporativa, registro BVL); cada celda resuelve a "al día", "vencida", "sin evidencia", "bloqueada"
+o "no aplica", según `capability`, `evidence` y edad. Cazatiburones, Documentos y Derivados por
+activo se enumeran como capacidades no consultadas por este contrato, nunca como columna vacía ni
+como petición adicional; las `limitations` declaradas por activo se listan íntegras bajo la matriz.
+
+El panel de watchlist y automatización (`asset-preferences-panel`) se trasladó de `mesa` a
+`sistema`: la Mesa se consulta, no se configura desde ella. Su formulario, sus controles y
+`PUT /api/v1/asset-preferences` no cambian.
 
 ## Estado operativo automático
 

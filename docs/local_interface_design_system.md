@@ -296,7 +296,7 @@ armazón compartidas y se resuelven antes de la primera carga diferida.
 
 | Tablero | Peticiones diferidas | Estados que puede mostrar |
 | --- | --- | --- |
-| `mesa` | `GET /api/v1/overview` | vacío mientras no existe snapshot, cargando, ausente si no hay ejecución elegible, error operativo o snapshot disponible |
+| `mesa` | `GET /api/v1/overview`, `GET /api/v1/candidate-notifications`, `GET /api/alerts?limit=5`, `GET /api/v1/universe-coverage` | vacío mientras no existe snapshot, cargando, ausente si no hay ejecución elegible, error operativo, snapshot disponible, o (universo) sin corte, cargando, error o matriz disponible |
 | `activo` | `GET /api/listed-company-report`, `GET /api/market-chart` (o intradía), `GET /api/fundamental-trend`, `GET /api/fundamental-analysis` | vacío inicial, cargando por superficie, ausente según la gramática `missing`/`not-evaluable`, error vigente o evidencia disponible |
 | `tecnico` | ninguna | vacío de armazón; sus cargas pertenecen a bloques posteriores |
 | `revisar` | `GET /api/candidates?limit=50`, `GET /api/alerts?limit=50` | cargando, vacío sin elementos, error de bandeja o lista disponible |
@@ -310,6 +310,100 @@ secuencia de activación y comprueba esa secuencia, el activo y el corte antes
 de pintar o aplicar su estado de error; una respuesta superada se descarta en
 silencio. La invalidación no crea persistencia entre recargas, un segundo
 reloj, un segundo selector ni un corte por tablero.
+
+### Mesa según la jerarquía de lectura (`UI-6`)
+
+El lienzo aprobado fija tres anotaciones de diseño para el tablero de entrada, ahora pinneadas
+aquí en vez de vivir sólo en una URL mutable:
+
+1. **Jerarquía de lectura.** El corte `known_at` y el reloj de mercado permanecen en la cabecera
+   compartida, sin duplicarse. Debajo, `mesa` presenta cuatro capas explícitas y en este orden:
+   **Novedades desde el corte anterior**, **En qué confío** (cobertura del corte y fuentes
+   bloqueadas), **Qué está roto** (incidencias clasificadas) y, al final, **Universo** -- el
+   catálogo completo de 37 activos como consulta, no como vigilancia.
+2. **La restricción que define el diseño.** Sin score agregado, ranking ni recomendación: la
+   jerarquía sale de la densidad, el orden y la tipografía, nunca de un número héroe. `missing !=
+   zero` sigue rigiendo: la matriz del Universo resuelve cada celda a exactamente una de las cinco
+   marcas de ausencia/presencia declaradas abajo, nunca una celda vacía.
+3. **Seis tableros, no nueve.** `UI-6` no crea, renombra ni elimina ningún tablero; `BOARD_REGISTRY`
+   conserva sus seis entradas.
+
+#### Novedades: tres familias, una con camino de lectura real
+
+La capa "qué cambió" separa tres bloques con procedencia y rótulo propios -- institucional 13F,
+actividad declarada y reglas analíticas -- sin conteo combinado ni orden entre ellos. Verificado
+sobre el código antes de escribir una sola línea de este bloque:
+
+- **Reglas analíticas** es la única de las tres con un camino de lectura universo-wide ya
+  integrado: `GET /api/v1/candidate-notifications` (`CandidateNotificationStore`, dominio
+  `AnalyticalScreeningDomain.MARKET`/`FUNDAMENTALS`). Mesa la consulta exactamente una vez por
+  activación y muestra su conteo y sus filas más recientes (`#mesa-news-analytical-count`,
+  `#mesa-news-analytical-list`).
+- **Institucional 13F** y **actividad declarada** existen como artefactos persistidos --
+  `cazatiburones_institutional_events_v1` y `cazatiburones_activity_events_v1`
+  (`CazatiburonesNotificationStore`, familias `institutional`/`activity`) -- pero sin transporte
+  HTTP universo-wide: sus únicos caminos HTTP son `/api/v1/cazatiburones/declared-activity` e
+  `/institutional-observations`, ambos por activo, y usarlos costaría 37 peticiones por familia
+  que este bloque prohíbe explícitamente. `mesa` declara esa ausencia con la marca `blocked` y su
+  motivo literal (`#mesa-news-institutional`, `#mesa-news-activity`); nunca la puebla con otra
+  fuente, con incidencias operativas o con una petición por activo, y nunca la oculta. Exponer ese
+  store por HTTP es trabajo de `BUILD_PRODUCT` en un Work Block propio, posterior a éste.
+- `GET /api/alerts` no es una cuarta familia de novedades: sirve `OperationalRuleId`
+  (`operation.job_failed`, `job_interrupted`, `job_skipped`, `job_coverage_incomplete`), es decir,
+  incidencias del scheduler. Pertenece a la capa "Qué está roto" (`#mesa-incidents-list`), no a
+  "Novedades", y su renderizado en `mesa` es de solo lectura -- sin los botones de transición que
+  sí tiene la bandeja interactiva de `revisar`.
+
+`loadMesaAnalyticalNews` y `loadMesaIncidents` no llevan `known_at` como parámetro de consulta --
+ambos endpoints devuelven estado local ya materializado, no una proyección point-in-time del
+corte -- así que `invalidateDeferredBoardLoads()` no necesita descartarlos por cambio de corte;
+`loadedBoardIds.clear()` ya fuerza su recarga la próxima vez que `mesa` se activa.
+
+#### Universo: ventana derivada y cinco marcas exhaustivas
+
+`loadMesaUniverseCoverage` consulta `GET /api/v1/universe-coverage` exactamente una vez por
+activación, nunca por activo. La ventana de cuatro fechas es una regla única, determinista y
+visible junto a la matriz (`#mesa-universe-window`), derivada exclusivamente del corte global
+(`#report-known-at`), nunca de un control que el analista no ve:
+
+- `market_end`/`fundamental_end` = el último día UTC completamente transcurrido al corte (la
+  fecha del corte menos un día calendario -- el propio corte nunca cae dentro de su día en curso).
+- `market_start`/`fundamental_start` = 365 días antes de ese fin.
+- `frequency` = `annual`.
+
+La matriz tiene una fila por activo devuelto y una columna por cada una de las cuatro capacidades
+que el contrato consulta -- mercado, fundamentales, valoración corporativa, registro BVL --. Cada
+celda resuelve sin ambigüedad, mapeando `capability`/`evidence`/edad a la gramática existente:
+
+| `capability` | `evidence` | edad vs. ventana (365 días) | Marca |
+| --- | --- | --- | --- |
+| `not_applicable` | (cualquiera) | (cualquiera) | `not-applicable` ("No aplica") |
+| `not_configured` / `not_implemented` | (cualquiera) | (cualquiera) | `blocked` ("Bloqueada") |
+| `supported` | `missing` | (cualquiera) | `missing` ("Sin evidencia") |
+| `supported` | `not_queried` | (cualquiera) | `missing` ("Sin evidencia") |
+| `supported` | `present` | ≤ 365 días (`reference_age_days`, o `latest_input_age_days` si el primero es nulo) | **presente y fresca** -- "Al día" |
+| `supported` | `present` | > 365 días, o edad desconocida | `overdue` ("Vencida") |
+
+`capability` se evalúa siempre antes que `evidence`: eso es exactamente lo que hace que
+`not_queried` sólo se lea como "sin evidencia" cuando la capacidad está `supported` (fila 4), y
+que conserve el estado de la capacidad en cualquier otro caso (filas 1-2), tal como exige el
+contrato. "Al día" **no** es una sexta marca de ausencia: `.universe-matrix-fresh` es una clase
+deliberadamente separada de `.absence-mark`, sin icono ni motivo declarado propios, porque
+describe presencia vigente, no una de las cinco formas en que un valor puede faltar. Las cinco
+marcas de ausencia declaradas por `UI-1` siguen siendo exactamente cinco.
+
+Cazatiburones, Documentos y Derivados por activo no son columnas de esta matriz: el contrato
+integrado los devuelve en `additional_capabilities_not_queried`, y `mesa` los enumera como texto
+declarado (`#mesa-universe-not-queried`), nunca como columna vacía ni como petición adicional. Las
+`limitations` por activo se acumulan íntegras, sin normalizar a un booleano, bajo la matriz
+(`#mesa-universe-limitations`).
+
+#### Traslado del panel de preferencias
+
+`asset-preferences-panel` se traslada íntegro -- controles, formulario y comportamiento -- del
+tablero `mesa` al tablero `sistema`, junto al resto de la operación. La Mesa se consulta; no se
+configura desde ella. Ningún endpoint, parámetro ni contrato cambia: `update_asset_preferences` y
+`/api/v1/asset-preferences` son exactamente los mismos que antes de este bloque.
 
 ### Rejilla y densidad del lienzo, ahora en tokens
 

@@ -155,37 +155,90 @@
 
           <div class="board" id="board-mesa" data-board="mesa" tabindex="-1">
           <section id="resumen" aria-labelledby="resumen-titulo">
-            <h2 id="resumen-titulo" class="visually-hidden">Estado operativo</h2>
+            <h2 id="resumen-titulo" class="visually-hidden">Mesa: jerarquía de lectura</h2>
 
-            <div class="overview-grid" aria-label="Estado operativo">
-              <article class="status-card">
-                <div class="status-label">
-                  <span class="status-dot" aria-hidden="true"></span>
-                  Datos
-                </div>
-                <strong id="workspace-status">—</strong>
-                <small id="workspace-counts">—</small>
-              </article>
-              <article class="status-card">
-                <div class="status-label">
-                  <span class="status-dot" aria-hidden="true"></span>
-                  Ejecución completa
-                </div>
-                <strong id="run-status">—</strong>
-                <small id="run-time">—</small>
-              </article>
-            </div>
-            <details class="traceability-disclosure">
-              <summary>Trazabilidad, programación y alertas</summary>
-              <div class="traceability-grid">
+            <section class="mesa-layer mesa-news" aria-labelledby="mesa-news-titulo">
+              <div class="section-intro">
                 <div>
-                  <strong>Programación</strong>
-                  <span id="schedule-status">—</span>
+                  <p class="eyebrow">NOVEDADES</p>
+                  <h3 id="mesa-news-titulo">Desde el corte anterior</h3>
+                </div>
+              </div>
+              <div class="mesa-news-families">
+                <article class="mesa-news-family" id="mesa-news-analytical">
+                  <header class="mesa-news-family-header">
+                    <strong>Reglas analíticas</strong>
+                    <span id="mesa-news-analytical-count" class="mesa-news-count">—</span>
+                  </header>
+                  <div id="mesa-news-analytical-list" class="alert-inbox" aria-live="polite" aria-busy="false">
+                    <p>Cargando…</p>
+                  </div>
+                </article>
+                <article class="mesa-news-family" id="mesa-news-institutional">
+                  <header class="mesa-news-family-header">
+                    <strong>Institucional 13F</strong>
+                  </header>
+                  <span
+                    class="absence-mark blocked"
+                    role="status"
+                    aria-label="Bloqueada: cazatiburones_institutional_events_v1 integrado; sin camino de lectura universo-wide"
+                  >
+                    <span class="absence-mark-icon"></span>
+                    <span class="absence-mark-label">Bloqueada</span>
+                    <span class="absence-mark-reason">· cazatiburones_institutional_events_v1 integrado; sin camino de lectura universo-wide</span>
+                  </span>
+                </article>
+                <article class="mesa-news-family" id="mesa-news-activity">
+                  <header class="mesa-news-family-header">
+                    <strong>Actividad declarada</strong>
+                  </header>
+                  <span
+                    class="absence-mark blocked"
+                    role="status"
+                    aria-label="Bloqueada: cazatiburones_activity_events_v1 integrado; sin camino de lectura universo-wide"
+                  >
+                    <span class="absence-mark-icon"></span>
+                    <span class="absence-mark-label">Bloqueada</span>
+                    <span class="absence-mark-reason">· cazatiburones_activity_events_v1 integrado; sin camino de lectura universo-wide</span>
+                  </span>
+                </article>
+              </div>
+            </section>
+
+            <section class="mesa-layer mesa-trust" aria-labelledby="mesa-trust-titulo">
+              <div class="section-intro">
+                <div>
+                  <p class="eyebrow">EN QUÉ CONFÍO</p>
+                  <h3 id="mesa-trust-titulo">Cobertura del corte y fuentes bloqueadas</h3>
+                </div>
+              </div>
+              <div class="overview-grid" aria-label="Estado operativo">
+                <article class="status-card">
+                  <div class="status-label">
+                    <span class="status-dot" aria-hidden="true"></span>
+                    Datos
+                  </div>
+                  <strong id="workspace-status">—</strong>
+                  <small id="workspace-counts">—</small>
+                </article>
+                <article class="status-card">
+                  <div class="status-label">
+                    <span class="status-dot" aria-hidden="true"></span>
+                    Ejecución completa
+                  </div>
+                  <strong id="run-status">—</strong>
+                  <small id="run-time">—</small>
+                </article>
+              </div>
+              <dl class="mesa-trust-grid">
+                <div>
+                  <dt>Programación</dt>
+                  <dd id="schedule-status">—</dd>
                   <small id="schedule-next">—</small>
                 </div>
                 <div>
-                  <strong>Trazabilidad</strong>
-                  <span id="traceability-status">—</span>
+                  <dt>Trazabilidad</dt>
+                  <dd id="traceability-status">—</dd>
                   <small id="known-at-status">
                     <span
                       class="absence-mark missing"
@@ -199,49 +252,65 @@
                   </small>
                 </div>
                 <div>
-                  <strong>Candidatos</strong>
-                  <span id="candidate-status">—</span>
+                  <dt>Candidatos (resumen operativo)</dt>
+                  <dd id="candidate-status">—</dd>
                   <small id="candidate-latest">Modo silencioso</small>
                 </div>
+              </dl>
+            </section>
+
+            <section class="mesa-layer mesa-broken" aria-labelledby="mesa-broken-titulo">
+              <div class="section-intro">
                 <div>
-                  <strong>Alertas</strong>
-                  <span id="alert-status">—</span>
-                  <small id="alert-latest">Modo silencioso</small>
+                  <p class="eyebrow">QUÉ ESTÁ ROTO</p>
+                  <h3 id="mesa-broken-titulo">Incidencias clasificadas</h3>
                 </div>
               </div>
+              <dl class="mesa-trust-grid">
+                <div>
+                  <dt>Alertas (resumen operativo)</dt>
+                  <dd id="alert-status">—</dd>
+                  <small id="alert-latest">Modo silencioso</small>
+                </div>
+              </dl>
+              <div id="mesa-incidents-list" class="alert-inbox" aria-live="polite" aria-busy="false">
+                <p>Cargando…</p>
+              </div>
+            </section>
 
-              <details id="asset-preferences-panel" class="preferences-panel">
-                <summary>
-                  <span>
-                    <strong>Watchlist y automatización</strong>
-                    <small id="asset-preferences-summary">Cargando selección local…</small>
-                  </span>
-                </summary>
-                <form id="asset-preferences-form">
-                  <p class="panel-copy">
-                    Define cada activo de forma independiente. Los favoritos se muestran primero;
-                    la programación cambia en ejecución sin consultar proveedores.
-                  </p>
-                  <div class="preferences-table" role="group" aria-label="Preferencias por activo">
-                    <div class="preferences-heading" aria-hidden="true">
-                      <span>Activo y cobertura</span>
-                      <span>Watchlist</span>
-                      <span>Favorito</span>
-                      <span>Programado</span>
-                    </div>
-                    <div id="asset-preferences-list"></div>
-                  </div>
-                  <div class="preferences-actions">
-                    <button id="save-asset-preferences" class="button primary compact" type="submit">
-                      Guardar preferencias
-                    </button>
-                    <span id="asset-preferences-status" role="status" aria-live="polite"></span>
-                  </div>
-                </form>
-              </details>
-            </details>
-
-
+            <section class="mesa-layer mesa-universe" aria-labelledby="mesa-universe-titulo">
+              <div class="section-intro">
+                <div>
+                  <p class="eyebrow">UNIVERSO</p>
+                  <h3 id="mesa-universe-titulo">Cobertura consultada</h3>
+                </div>
+              </div>
+              <p id="mesa-universe-window" class="mesa-universe-window">—</p>
+              <p id="mesa-universe-not-queried" class="mesa-universe-not-queried">
+                Cazatiburones, Documentos y Derivados no son columnas de esta matriz: el contrato
+                consultado las devuelve como capacidades no consultadas
+                (<code>additional_capabilities_not_queried</code>), sin celda vacía ni petición
+                adicional por activo.
+              </p>
+              <div class="universe-matrix-scroll">
+                <table class="universe-matrix-table" id="mesa-universe-table">
+                  <caption class="visually-hidden">Cobertura del universo de activos por capacidad consultada</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Activo</th>
+                      <th scope="col">Mercado</th>
+                      <th scope="col">Fundamentales</th>
+                      <th scope="col">Valoración corporativa</th>
+                      <th scope="col">Registro BVL</th>
+                    </tr>
+                  </thead>
+                  <tbody id="mesa-universe-table-body">
+                    <tr><td colspan="5">Cargando…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p id="mesa-universe-limitations" class="mesa-universe-limitations"></p>
+            </section>
           </section>
           </div>
 
@@ -1041,6 +1110,36 @@
               <div id="candidate-notifications" class="alert-inbox candidate-inbox" aria-live="polite">
                 <p>No hay notificaciones locales pendientes.</p>
               </div>
+            </details>
+
+            <details id="asset-preferences-panel" class="preferences-panel">
+              <summary>
+                <span>
+                  <strong>Watchlist y automatización</strong>
+                  <small id="asset-preferences-summary">Cargando selección local…</small>
+                </span>
+              </summary>
+              <form id="asset-preferences-form">
+                <p class="panel-copy">
+                  Define cada activo de forma independiente. Los favoritos se muestran primero;
+                  la programación cambia en ejecución sin consultar proveedores.
+                </p>
+                <div class="preferences-table" role="group" aria-label="Preferencias por activo">
+                  <div class="preferences-heading" aria-hidden="true">
+                    <span>Activo y cobertura</span>
+                    <span>Watchlist</span>
+                    <span>Favorito</span>
+                    <span>Programado</span>
+                  </div>
+                  <div id="asset-preferences-list"></div>
+                </div>
+                <div class="preferences-actions">
+                  <button id="save-asset-preferences" class="button primary compact" type="submit">
+                    Guardar preferencias
+                  </button>
+                  <span id="asset-preferences-status" role="status" aria-live="polite"></span>
+                </div>
+              </form>
             </details>
 
             <details class="operation-panel">
