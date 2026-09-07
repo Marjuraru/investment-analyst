@@ -179,6 +179,11 @@ mismas dos constantes. El reloj y su nota visualmente oculta declaran
 ambos, en la propia interfaz, que sólo se modela la sesión regular de
 lunes a viernes: sin calendario de feriados, sin cierre anticipado.
 
+`UI-9` conserva esas tres lecturas e IDs, pero las reúne en una única franja del mismo renglón
+del encabezado en escritorio. La franja no fuerza el ancho completo de la grilla ni lleva una regla
+superior; en anchos estrechos puede envolver sin eliminar fecha, zona, estado, tiempo restante o la
+nota accesible. Sigue siendo un cálculo local, sin petición de red ni calendario nuevo.
+
 ## Cifras
 
 `body` ya aplicaba `font-variant-numeric: tabular-nums` globalmente; este
@@ -311,22 +316,23 @@ de pintar o aplicar su estado de error; una respuesta superada se descarta en
 silencio. La invalidación no crea persistencia entre recargas, un segundo
 reloj, un segundo selector ni un corte por tablero.
 
-### Mesa según la jerarquía de lectura (`UI-6`)
+### Mesa: tres columnas y matriz por dominio (`UI-9`)
 
-El lienzo aprobado fija tres anotaciones de diseño para el tablero de entrada, ahora pinneadas
-aquí en vez de vivir sólo en una URL mutable:
+El lienzo aprobado define una composición que aprovecha el rail global ya existente, sin duplicarlo
+dentro de `mesa`:
 
-1. **Jerarquía de lectura.** El corte `known_at` y el reloj de mercado permanecen en la cabecera
-   compartida, sin duplicarse. Debajo, `mesa` presenta cuatro capas explícitas y en este orden:
-   **Novedades desde el corte anterior**, **En qué confío** (cobertura del corte y fuentes
-   bloqueadas), **Qué está roto** (incidencias clasificadas) y, al final, **Universo** -- el
-   catálogo completo de 37 activos como consulta, no como vigilancia.
-2. **La restricción que define el diseño.** Sin score agregado, ranking ni recomendación: la
-   jerarquía sale de la densidad, el orden y la tipografía, nunca de un número héroe. `missing !=
-   zero` sigue rigiendo: la matriz del Universo resuelve cada celda a exactamente una de las cinco
-   marcas de ausencia/presencia declaradas abajo, nunca una celda vacía.
-3. **Seis tableros, no nueve.** `UI-6` no crea, renombra ni elimina ningún tablero; `BOARD_REGISTRY`
-   conserva sus seis entradas.
+1. **Columna principal y aside.** `#board-mesa` contiene una columna principal fluida con
+   **Novedades de las bandejas** seguida de **Universo**, y un `aside` fijo de 340 px con
+   **Cobertura del corte**, **Fuentes bloqueadas** e **Incidencias**, en ese orden. Antes de que la
+   lectura pierda espacio, la composición colapsa a una columna; la matriz es el único elemento que
+   puede desplazarse horizontalmente.
+2. **Datos sin reordenar su significado.** Los IDs operativos de cobertura, programación,
+   trazabilidad y candidatos permanecen en Cobertura/Fuentes bloqueadas; los de alertas e
+   incidencias permanecen en Incidencias. El corte `known_at` y el reloj siguen compartidos en la
+   cabecera. Sin score, ranking ni recomendación: la jerarquía sale de densidad, orden y
+   tipografía, nunca de un número héroe.
+3. **Seis tableros, no nueve.** `UI-9` no crea, renombra ni elimina ningún tablero;
+   `BOARD_REGISTRY` conserva sus seis entradas.
 
 #### Novedades: tres familias con caminos de lectura separados
 
@@ -350,7 +356,7 @@ sobre el código antes de escribir una sola línea de este bloque:
   declara de forma visible.
 - `GET /api/alerts` no es una cuarta familia de novedades: sirve `OperationalRuleId`
   (`operation.job_failed`, `job_interrupted`, `job_skipped`, `job_coverage_incomplete`), es decir,
-  incidencias del scheduler. Pertenece a la capa "Qué está roto" (`#mesa-incidents-list`), no a
+  incidencias del scheduler. Pertenece a **Incidencias** (`#mesa-incidents-list`), no a
   "Novedades", y su renderizado en `mesa` es de solo lectura -- sin los botones de transición que
   sí tiene la bandeja interactiva de `revisar`.
 
@@ -359,7 +365,7 @@ sobre el código antes de escribir una sola línea de este bloque:
 corte -- así que `invalidateDeferredBoardLoads()` no necesita descartarlos por cambio de corte;
 `loadedBoardIds.clear()` ya fuerza su recarga la próxima vez que `mesa` se activa.
 
-#### Universo: ventana derivada y cinco marcas exhaustivas
+#### Universo: tres dominios, última evidencia y cinco marcas compactas
 
 `loadMesaUniverseCoverage` consulta `GET /api/v1/universe-coverage` exactamente una vez por
 activación, nunca por activo. La ventana de cuatro fechas es una regla única, determinista y
@@ -371,9 +377,12 @@ visible junto a la matriz (`#mesa-universe-window`), derivada exclusivamente del
 - `market_start`/`fundamental_start` = 365 días antes de ese fin.
 - `frequency` = `annual`.
 
-La matriz tiene una fila por activo devuelto y una columna por cada una de las cuatro capacidades
-que el contrato consulta -- mercado, fundamentales, valoración corporativa, registro BVL --. Cada
-celda resuelve sin ambigüedad, mapeando `capability`/`evidence`/edad a la gramática existente:
+La matriz tiene una fila por activo devuelto y exactamente seis columnas: `Activo`, `Dominio`,
+`Mercado`, `Fund.`, `Valor.`, `Última evidencia`. Sus únicas celdas de estado son las tres
+capacidades analíticas que la vista consulta: mercado, fundamentales y valoración corporativa.
+`Dominio` usa sólo el mapa exhaustivo de presentación de `asset_class` (`equity`, `etf`, `crypto`),
+nunca ticker, exchange o disponibilidad. Cada celda resuelve sin ambigüedad, mapeando
+`capability`/`evidence`/edad a la gramática compacta:
 
 | `capability` | `evidence` | edad vs. ventana (365 días) | Marca |
 | --- | --- | --- | --- |
@@ -381,22 +390,32 @@ celda resuelve sin ambigüedad, mapeando `capability`/`evidence`/edad a la gram�
 | `not_configured` / `not_implemented` | (cualquiera) | (cualquiera) | `blocked` ("Bloqueada") |
 | `supported` | `missing` | (cualquiera) | `missing` ("Sin evidencia") |
 | `supported` | `not_queried` | (cualquiera) | `missing` ("Sin evidencia") |
-| `supported` | `present` | ≤ 365 días (`reference_age_days`, o `latest_input_age_days` si el primero es nulo) | **presente y fresca** -- "Al día" |
+| `supported` | `present` | ≤ 365 días (`reference_age_days`, o `latest_input_age_days` si el primero es nulo) | `fresh` -- "Al día" |
 | `supported` | `present` | > 365 días, o edad desconocida | `overdue` ("Vencida") |
 
-`capability` se evalúa siempre antes que `evidence`: eso es exactamente lo que hace que
-`not_queried` sólo se lea como "sin evidencia" cuando la capacidad está `supported` (fila 4), y
-que conserve el estado de la capacidad en cualquier otro caso (filas 1-2), tal como exige el
-contrato. "Al día" **no** es una sexta marca de ausencia: `.universe-matrix-fresh` es una clase
-deliberadamente separada de `.absence-mark`, sin icono ni motivo declarado propios, porque
-describe presencia vigente, no una de las cinco formas en que un valor puede faltar. Las cinco
-marcas de ausencia declaradas por `UI-1` siguen siendo exactamente cinco.
+`capability` se evalúa antes de `evidence`, y evidencia antes de edad: `not_queried` es "Sin
+evidencia" sólo para una capacidad soportada y los estados de capacidad conservan su prioridad. La
+gramática específica de la matriz usa exactamente `fresh`, `overdue`, `missing`, `blocked` y
+`not-applicable`; cada marca mide 7 px y combina forma, borde o trama y relleno, conserva nombre
+accesible y no repite el rótulo visible en cada celda. Una sola leyenda visible declara "Al día",
+"Vencida", "Sin evidencia", "Bloqueada" y "No aplica". No se modifica la gramática global de
+cinco `.absence-mark`.
+
+`Última evidencia` toma el máximo válido de `reference_at` y `latest_input_available_at` de
+mercado, fundamentales y valoración corporativa; se formatea con la utilidad temporal existente.
+Sin una de esas fechas usa ausencia accesible. Nunca toma `computed_at`, reloj de render ni
+`bvl_registry`.
+
+`Registro BVL` no es una celda ni dominio analítico. La única lectura visible está en Fuentes
+bloqueadas y deriva de `asset.bvl_registry` de esta misma respuesta: enumera aplicables, evidencia
+presente, evidencia ausente, no consultada, sin configurar, no implementada y no aplica. No añade
+una petición, no colapsa esos estados y no afirma mercado/fundamentales BVL ni score.
 
 Cazatiburones, Documentos y Derivados por activo no son columnas de esta matriz: el contrato
 integrado los devuelve en `additional_capabilities_not_queried`, y `mesa` los enumera como texto
 declarado (`#mesa-universe-not-queried`), nunca como columna vacía ni como petición adicional. Las
 `limitations` por activo se acumulan íntegras, sin normalizar a un booleano, bajo la matriz
-(`#mesa-universe-limitations`).
+(`#mesa-universe-limitations`), incluso en ausencia o error (`colSpan=6`).
 
 #### Traslado del panel de preferencias
 
