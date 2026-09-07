@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import UUID
 
 import pytest
 
@@ -390,3 +391,79 @@ def test_metric_and_diagnostic_counts(storage) -> None:
     assert storage.metric_results.count(asset_id="asset:other") == 0
     assert storage.diagnostics.count(asset_id="asset:c", mode=DiagnosticMode.MARKET) == 1
     assert storage.diagnostics.count(asset_id="asset:c", mode=DiagnosticMode.FUNDAMENTAL) == 0
+
+
+def test_metric_result_key_projection_preserves_order_and_count(storage) -> None:
+    observation = make_observation(raw_record_id=make_raw_record().record_id)
+    start = datetime(2026, 7, 10, tzinfo=UTC)
+    results = (
+        make_metric_result(
+            observation_id=observation.observation_id,
+            result_id=UUID("90000000-0000-4000-8000-000000000003"),
+            asset_id="asset:scope",
+            as_of=start,
+            metric_key="metric:b",
+        ),
+        make_metric_result(
+            observation_id=observation.observation_id,
+            result_id=UUID("90000000-0000-4000-8000-000000000001"),
+            asset_id="asset:scope",
+            as_of=start + timedelta(days=1),
+            metric_key="metric:a",
+        ),
+        make_metric_result(
+            observation_id=observation.observation_id,
+            result_id=UUID("90000000-0000-4000-8000-000000000002"),
+            asset_id="asset:scope",
+            as_of=start + timedelta(days=2),
+            metric_key="metric:outside",
+        ),
+    )
+    for result in results:
+        storage.metric_results.save(result)
+
+    unbounded = storage.metric_results.list(asset_id="asset:scope")
+    bounded = storage.metric_results.list(
+        asset_id="asset:scope",
+        metric_keys=("metric:a", "metric:b", "metric:a"),
+    )
+
+    assert bounded == unbounded[:2]
+    assert (
+        storage.metric_results.count(
+            asset_id="asset:scope",
+            metric_keys=("metric:a", "metric:b"),
+        )
+        == 2
+    )
+    assert storage.metric_results.list(
+        asset_id="asset:scope",
+        metric_keys=("metric:a",),
+    ) == storage.metric_results.list(asset_id="asset:scope", metric_key="metric:a")
+
+    clauses, parameters = storage.metric_results._build_filter_clauses(
+        metric_keys=("metric'injection", "metric:a"),
+    )
+    assert clauses == ["metric_key IN (?, ?)"]
+    assert parameters == ["metric'injection", "metric:a"]
+
+
+@pytest.mark.parametrize("metric_keys", [(), ("",), ("   ",)])
+def test_metric_result_key_projection_rejects_empty_or_blank_keys(storage, metric_keys) -> None:
+    with pytest.raises(ValueError, match="metric_keys"):
+        storage.metric_results.list(metric_keys=metric_keys)
+    with pytest.raises(ValueError, match="metric_keys"):
+        storage.metric_results.count(metric_keys=metric_keys)
+
+
+def test_metric_result_key_projection_rejects_conflicting_singular_filter(storage) -> None:
+    with pytest.raises(ValueError, match="metric_key and metric_keys"):
+        storage.metric_results.list(
+            metric_key="metric:a",
+            metric_keys=("metric:a",),
+        )
+    with pytest.raises(ValueError, match="metric_key and metric_keys"):
+        storage.metric_results.count(
+            metric_key="metric:a",
+            metric_keys=("metric:a",),
+        )

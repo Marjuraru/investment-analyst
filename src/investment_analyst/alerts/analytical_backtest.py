@@ -190,11 +190,17 @@ class AnalyticalBacktestService:
             raise AnalyticalBacktestUnavailableError(
                 "the analytical rule is not compatible with this asset class"
             )
+        metric_keys = tuple(sorted({condition.metric_key for condition in rule.conditions}))
         with self._runtime.open_storage(
             StorageLocationRequest(workspace=self._workspace),
             access_mode=WorkspaceAccessMode.READ_ONLY,
         ) as storage:
-            metrics = tuple(storage.metric_results.list(asset_id=asset.asset_id))
+            metrics = tuple(
+                storage.metric_results.list(
+                    asset_id=asset.asset_id,
+                    metric_keys=metric_keys,
+                )
+            )
         relevant = self._relevant_metrics(rule, metrics)
         sources = tuple(
             sorted(

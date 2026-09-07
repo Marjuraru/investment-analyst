@@ -26,6 +26,24 @@ Assets, source definitions, and metric definitions are explicitly updatable thro
 Normalized observations, metric results, diagnostic results, and raw records are append-only. Repeated
 writes with an identical identifier and document are idempotent, while different content conflicts.
 
+El repositorio de `metric_results` acepta además `metric_keys` como filtro opcional y keyword-only
+en `list()`; `count()` usa el mismo filtro. Cuando se proporciona, la consulta construye un
+`metric_key IN (...)` con placeholders parametrizados, conserva el orden `as_of, result_id` y
+rechaza una tupla vacía, claves vacías o la coexistencia con el filtro singular `metric_key`.
+Omitirlo mantiene exactamente la consulta anterior. El monitor de screening y el backtest derivan
+la proyección de las condiciones de la regla que realmente evalúan, antes de aplicar sus filtros
+Python de selección point-in-time; no se empujan `known_at`, `available_at`, `source_id` ni
+`parameter_filters` desde `document_json`.
+
+La proyección está limitada al camino programado de alertas. Los ocho lectores bajo petición
+conservan la materialización por activo porque pertenecen a superficies distintas y no forman
+parte del bucle de screening: `analytics/market/diagnostic_selection.py`,
+`analytics/consolidated_diagnostic_service.py`, `analytics/valuation/history_service.py`,
+`analytics/valuation/pipeline.py`, `analytics/cazatiburones/activity_event_service.py`,
+`analytics/cazatiburones/institutional_event_service.py`,
+`providers/fundamentals/sec_diagnostic_selection.py` y
+`providers/fundamentals/sec_metric_pipeline.py`.
+
 The DuckDB schema is currently version **1**. Initialization is idempotent and rejects an incompatible
 version. The first implementation assumes a single writer process. Connections are owned explicitly
 and closed by context managers; no global DuckDB connection is used.

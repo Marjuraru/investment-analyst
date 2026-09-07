@@ -14,12 +14,14 @@ from investment_analyst.alerts.analytical_backtest import (
     AnalyticalBacktestService,
     AnalyticalBacktestUnavailableError,
 )
+from investment_analyst.alerts.analytical_engine import AmbiguousAnalyticalMetricError
 from investment_analyst.alerts.analytical_rule_catalog import INITIAL_ANALYTICAL_RULES
 from investment_analyst.alerts.analytical_rule_registry import (
     AnalyticalRuleRegistryStore,
 )
 from investment_analyst.application.runtime import ApplicationRuntime
 from investment_analyst.core.models import DataQuality, MetricResult
+from investment_analyst.storage.repositories import DuckDBMetricResultRepository
 from investment_analyst.workspace.models import WorkspaceAccessMode
 from investment_analyst.workspace.service import WorkspaceService
 
@@ -151,6 +153,90 @@ def test_market_backtest_simulates_confirmations_hysteresis_cooldown_and_replay(
     )
     assert first.evaluations[2].result.retained is True
     assert first.evaluations[3].result.retained is False
+
+
+def test_backtest_bounds_query_to_rule_condition_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = datetime(2026, 7, 20, tzinfo=UTC)
+    metrics = (
+        _market_metric(
+            "1.6",
+            identifier=31,
+            as_of=start,
+            known_at=start + timedelta(hours=12),
+        ),
+        _fundamental_metric(
+            "fundamental.net_margin",
+            "0.2",
+            identifier=32,
+            as_of=start,
+            available_at=start + timedelta(hours=12),
+        ),
+    )
+    seen_metric_keys: list[tuple[str, ...] | None] = []
+    original_list = DuckDBMetricResultRepository.list
+
+    def tracked_list(
+        repository: DuckDBMetricResultRepository,
+        *,
+        asset_id: str | None = None,
+        metric_key: str | None = None,
+        metric_keys: tuple[str, ...] | None = None,
+        as_of_from: datetime | None = None,
+        as_of_to: datetime | None = None,
+    ) -> list[MetricResult]:
+        seen_metric_keys.append(metric_keys)
+        return original_list(
+            repository,
+            asset_id=asset_id,
+            metric_key=metric_key,
+            metric_keys=metric_keys,
+            as_of_from=as_of_from,
+            as_of_to=as_of_to,
+        )
+
+    monkeypatch.setattr(DuckDBMetricResultRepository, "list", tracked_list)
+    result = _service(tmp_path, metrics).run(
+        AnalyticalBacktestRequest(
+            rule_id=_MARKET_RULE_ID,
+            asset_id=_ASSET_ID,
+            max_cuts=20,
+        )
+    )
+
+    assert result.total_available_cuts == 1
+    assert seen_metric_keys == [("market.history.relative_volume",)]
+
+
+def test_backtest_bounded_query_does_not_hide_ambiguous_metric_revision(
+    tmp_path: Path,
+) -> None:
+    known_at = datetime(2026, 7, 20, 12, tzinfo=UTC)
+    metrics = (
+        _market_metric(
+            "1.6",
+            identifier=41,
+            as_of=known_at - timedelta(days=1),
+            known_at=known_at,
+        ),
+        _market_metric(
+            "1.7",
+            identifier=42,
+            as_of=known_at - timedelta(days=1),
+            known_at=known_at,
+        ),
+    )
+
+    with pytest.raises(AmbiguousAnalyticalMetricError, match="multiple compatible"):
+        _service(tmp_path, metrics).run(
+            AnalyticalBacktestRequest(
+                rule_id=_MARKET_RULE_ID,
+                asset_id=_ASSET_ID,
+                max_cuts=20,
+            )
+        )
 
 
 def test_backtest_is_bounded_to_latest_cuts_and_reports_truncation(tmp_path: Path) -> None:

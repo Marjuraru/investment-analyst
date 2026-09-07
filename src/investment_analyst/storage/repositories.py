@@ -76,6 +76,21 @@ def _normalize_period_bound(bound: datetime | date, *, is_end_of_day: bool = Fal
     return datetime.combine(bound, time_part, tzinfo=UTC)
 
 
+def _normalize_metric_keys(metric_keys: tuple[str, ...]) -> tuple[str, ...]:
+    """Validate and deterministically deduplicate a metric-key projection."""
+    if not metric_keys:
+        raise ValueError("metric_keys must not be empty")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for key in metric_keys:
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("metric_keys must contain non-empty strings")
+        if key not in seen:
+            seen.add(key)
+            normalized.append(key)
+    return tuple(normalized)
+
+
 class DuckDBAssetRepository:
     """DuckDB repository for explicitly updatable assets."""
 
@@ -581,6 +596,7 @@ class DuckDBMetricResultRepository:
         *,
         asset_id: str | None = None,
         metric_key: str | None = None,
+        metric_keys: tuple[str, ...] | None = None,
         as_of_from: datetime | None = None,
         as_of_to: datetime | None = None,
     ) -> tuple[list[str], list[object]]:
@@ -589,9 +605,16 @@ class DuckDBMetricResultRepository:
         if asset_id is not None:
             clauses.append("asset_id = ?")
             parameters.append(asset_id)
+        if metric_key is not None and metric_keys is not None:
+            raise ValueError("metric_key and metric_keys cannot be used together")
         if metric_key is not None:
             clauses.append("metric_key = ?")
             parameters.append(metric_key)
+        if metric_keys is not None:
+            normalized_keys = _normalize_metric_keys(metric_keys)
+            placeholders = ", ".join("?" for _ in normalized_keys)
+            clauses.append(f"metric_key IN ({placeholders})")
+            parameters.extend(normalized_keys)
         if as_of_from is not None:
             clauses.append("as_of >= ?")
             parameters.append(as_of_from)
@@ -605,12 +628,14 @@ class DuckDBMetricResultRepository:
         *,
         asset_id: str | None = None,
         metric_key: str | None = None,
+        metric_keys: tuple[str, ...] | None = None,
         as_of_from: datetime | None = None,
         as_of_to: datetime | None = None,
     ) -> list[MetricResult]:
         clauses, parameters = self._build_filter_clauses(
             asset_id=asset_id,
             metric_key=metric_key,
+            metric_keys=metric_keys,
             as_of_from=as_of_from,
             as_of_to=as_of_to,
         )
@@ -627,12 +652,14 @@ class DuckDBMetricResultRepository:
         *,
         asset_id: str | None = None,
         metric_key: str | None = None,
+        metric_keys: tuple[str, ...] | None = None,
         as_of_from: datetime | None = None,
         as_of_to: datetime | None = None,
     ) -> int:
         clauses, parameters = self._build_filter_clauses(
             asset_id=asset_id,
             metric_key=metric_key,
+            metric_keys=metric_keys,
             as_of_from=as_of_from,
             as_of_to=as_of_to,
         )

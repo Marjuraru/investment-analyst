@@ -20,3 +20,17 @@ PYTHONPATH=src .venv/bin/python scripts/benchmark_evidence_read_path.py
 El script crea un corpus sintético en un directorio temporal externo y emite
 conteos de lecturas SHA, parseos, invalidaciones y una aproximación de tiempo
 y memoria para la ruta anterior y la memoizada.
+
+El camino programado de alertas usa una medición equivalente para `metric_results`:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/benchmark_analytical_metric_query.py
+```
+
+El benchmark crea métricas sintéticas en un directorio temporal externo y compara la consulta por
+activo sin proyección con la consulta acotada a las claves de una regla. Informa conteos de filas
+materializadas y documentos deserializados, además de una aproximación efímera de tiempo y memoria;
+los conteos son reproducibles y no se persisten. La reducción se aplica sólo a
+`AnalyticalScreeningMonitor` y `AnalyticalBacktestService`. Los ocho call sites de lectura bajo
+petición documentados en `docs/storage.md` conservan el patrón anterior de forma intencional:
+este bloque no amplía la superficie ni cambia su semántica point-in-time.

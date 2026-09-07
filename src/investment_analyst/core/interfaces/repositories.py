@@ -100,6 +100,7 @@ class MetricResultRepository(Protocol):
         *,
         asset_id: str | None = None,
         metric_key: str | None = None,
+        metric_keys: tuple[str, ...] | None = None,
         as_of_from: datetime | None = None,
         as_of_to: datetime | None = None,
     ) -> list[MetricResult]: ...
