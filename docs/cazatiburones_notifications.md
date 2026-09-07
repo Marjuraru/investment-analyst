@@ -52,9 +52,28 @@ dependen del directorio de trabajo actual.
 
 ## Límites
 
-- No hay transporte, red, correo, webhook, scheduler, servidor ni endpoint HTTP.
+- No hay transporte externo, red, correo, webhook ni scheduler; el único transporte es la lectura
+  HTTP local descrita abajo.
 - No se modifica la outbox analítica ni su contrato.
 - No se fusionan las familias ni se agregan candidatos en un artefacto común de análisis.
 - No se modifican snapshots, observaciones, métricas, eventos ni el schema DuckDB.
 - El smoke usa exclusivamente un workspace y una outbox temporales; el workspace permanente no se
   abre.
+
+## Camino de lectura HTTP local
+
+El servicio local puede inyectar el almacén de esta outbox y exponer una lectura estrictamente
+read-only mediante `GET /api/v1/cazatiburones/notifications`. La ruta carga el archivo de estado
+una vez, no abre el workspace de evidencia, no reconcilia, no proyecta eventos y no escribe. Si el
+almacén no está configurado, devuelve `enabled: false` con listas y conteos en cero.
+
+Acepta únicamente `family` (`activity` o `institutional`) y `limit` (entero entre 1 y 200, por
+defecto 50). La respuesta usa el sobre `cazatiburones-notification-inbox-v1`; cada entrada contiene
+el item persistido `cazatiburones-notification-v1` sin modificar y un estado `pending` o
+`acknowledged` calculado desde los acuses persistidos. `total` y `pending_count` se calculan antes
+de truncar, mientras `returned` y `truncated` declaran el resultado efectivamente entregado.
+
+Las familias se filtran sin mezclarse ni agregarse. El orden es determinista de más reciente a más
+antiguo por `(created_at, notification_id)` y los valores `Decimal`, la procedencia y los campos
+específicos de cada vertical conservan su serialización contractual. No existe `POST` de acuse:
+el acuse sigue siendo un acto explícito de CLI.

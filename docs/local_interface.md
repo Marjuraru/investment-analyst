@@ -109,15 +109,15 @@ capas -- **Novedades desde el corte anterior**, **En qué confío**, **Qué est�
 **Universo** -- nunca un score, ranking o veredicto agregado que las colapse.
 
 Novedades separa tres bloques con procedencia propia -- institucional 13F, actividad declarada y
-reglas analíticas -- sin conteo combinado. Sólo reglas analíticas tiene hoy un camino de lectura
-universo-wide (`GET /api/v1/candidate-notifications`); institucional 13F y actividad declarada
-declaran, con la marca `blocked` y su motivo literal, que el artefacto correspondiente
-(`cazatiburones_institutional_events_v1`, `cazatiburones_activity_events_v1`) existe pero carece de
-transporte HTTP sin restringirse a un activo -- nunca se pueblan con otra fuente, con incidencias
-operativas, ni se ocultan. En qué confío conserva el estado del corte, la última ejecución, la
-próxima ejecución programada y la trazabilidad ya entregados por bloques anteriores. Qué está roto
-añade, de solo lectura, hasta cinco incidencias operativas recientes desde `GET /api/alerts`, junto
-a los indicadores de resumen ya existentes.
+reglas analíticas -- sin conteo combinado. Reglas analíticas conserva su camino de lectura
+universo-wide (`GET /api/v1/candidate-notifications`), mientras institucional 13F y actividad
+declarada usan la outbox Cazatiburones mediante `GET /api/v1/cazatiburones/notifications`, sin
+restringirse a un activo. Las tres familias siguen siendo lecturas separadas: nunca se pueblan con
+otra fuente, con incidencias operativas, ni se agregan en una lista, total o score común. En qué
+confío conserva el estado del corte, la última ejecución, la próxima ejecución programada y la
+trazabilidad ya entregados por bloques anteriores. Qué está roto añade, de solo lectura, hasta
+cinco incidencias operativas recientes desde `GET /api/alerts`, junto a los indicadores de resumen
+ya existentes.
 
 Universo consume `GET /api/v1/universe-coverage` exactamente una vez por activación, nunca por
 activo. La ventana de cuatro fechas se deriva del corte global con una regla fija -- fin en el
@@ -885,6 +885,26 @@ agregar puntuaciones, veredictos ni rankings:
    - Valida que `asset_id` corresponda a un emisor corporativo con configuración SEC en el catálogo.
    - Devuelve `InstitutionalObservationQueryResult` paginado (`observations`, `total_matching`, `truncated`).
    - Conserva la semántica as-filed de cada fila y referencia de correspondencia.
+
+## Endpoint de lectura de la outbox Cazatiburones
+
+`GET /api/v1/cazatiburones/notifications` es una ruta local de solo lectura que reutiliza literalmente
+`cazatiburones-notification-v1` y `cazatiburones-notification-acknowledgement-v1` sin crear ni
+extender contratos de dominio. Acepta `family=activity|institutional` (opcional) y `limit`
+(opcional, entero 1..200; por defecto 50). Rechaza parámetros no soportados, valores repetidos,
+familias desconocidas y límites fuera de rango.
+
+Devuelve `cazatiburones-notification-inbox-v1` con `enabled`, `items`, `total`, `pending_count`,
+`returned` y `truncated`. Cada item se serializa sin alterar campos ni procedencia, y lleva el
+estado `pending` o `acknowledged` según el acuse persistido. El filtro mantiene separadas las
+familias `activity` e `institutional`; sin filtro devuelve ambas sin fusionarlas ni sumar sus
+significados. El orden es determinista por `(created_at, notification_id)`, de más reciente a más
+antiguo, y `total` se calcula antes del límite para que toda truncación sea explícita.
+
+El camino hace una sola carga de la outbox, no abre el workspace permanente, no reconcilia, no
+proyecta eventos y no escribe. Sin almacén configurado devuelve `enabled: false`, listas vacías y
+conteos cero. No expone acuse por HTTP: no existe `POST` para esta bandeja y el acuse sigue siendo
+un acto explícito de CLI.
 
 ## Endpoint de lectura de la matriz de cobertura del universo
 

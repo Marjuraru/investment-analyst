@@ -1,6 +1,7 @@
 """Socket-level tests for the loopback-only local web interface."""
 
 import gzip
+import hashlib
 import http.client
 import json
 import threading
@@ -35,6 +36,14 @@ from investment_analyst.alerts.candidate_notifications import (
     CandidateNotificationStore,
     notification_id,
 )
+from investment_analyst.alerts.cazatiburones_notification_models import (
+    CazatiburonesNotification,
+    NotificationFamily,
+)
+from investment_analyst.alerts.cazatiburones_notification_models import (
+    notification_id as cazatiburones_notification_id,
+)
+from investment_analyst.alerts.cazatiburones_notifications import CazatiburonesNotificationStore
 from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagnosticReport
 from investment_analyst.analytics.cazatiburones.declared_activity_models import (
     DeclaredActivityFeatureSet,
@@ -202,6 +211,46 @@ class _JsonResult:
 
     def to_json_dict(self) -> dict[str, object]:
         return self._payload
+
+
+class _CountingCazatiburonesNotificationStore(CazatiburonesNotificationStore):
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.load_calls = 0
+
+    def load(self):  # type: ignore[no-untyped-def]
+        self.load_calls += 1
+        return super().load()
+
+
+def _cazatiburones_notification(
+    *, family: NotificationFamily, ordinal: int, created_at: datetime
+) -> CazatiburonesNotification:
+    candidate_id = UUID(int=ordinal)
+    institutional = family == "institutional"
+    return CazatiburonesNotification(
+        family=family,
+        notification_id=cazatiburones_notification_id(family, candidate_id),
+        candidate_id=candidate_id,
+        event_id=UUID(int=1000 + ordinal),
+        metric_result_id=UUID(int=2000 + ordinal),
+        snapshot_id=UUID(int=3000 + ordinal),
+        asset_id="equity:us:aapl",
+        rule_id=f"cazatiburones.{family}.test",
+        metric_key=f"{family}.metric",
+        algorithm_version="cazatiburones-test-v1",
+        unit="ratio",
+        value=Decimal(f"{ordinal}.000000000000000001"),
+        available_at=created_at,
+        created_at=created_at,
+        input_observation_ids=(UUID(int=4000 + ordinal), UUID(int=5000 + ordinal)),
+        manager_cik="0001350694" if institutional else None,
+        report_period="2025-12-31" if institutional else None,
+        prior_report_period="2025-09-30" if institutional else None,
+        cusip="037833100" if institutional else None,
+        title_of_class="COM" if institutional else None,
+        put_call="call" if institutional else None,
+    )
 
 
 class _FakeRunner:
@@ -2618,6 +2667,222 @@ def test_local_api_lists_and_acknowledges_candidate_notifications(tmp_path: Path
     assert invalid["error"]["code"] == "invalid_request"
     assert unknown_status == 400
     assert unknown["error"]["code"] == "invalid_request"
+
+
+def test_local_api_returns_cazatiburones_notifications_verbatim_and_read_only(
+    tmp_path: Path,
+) -> None:
+    controller = AaplLocalController(
+        _FakeRunner(),
+        _FakeApplication(),
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    state_path = tmp_path / "state" / "cazatiburones-notifications.json"
+    store = _CountingCazatiburonesNotificationStore(state_path)
+    base_time = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    activity_old = _cazatiburones_notification(family="activity", ordinal=1, created_at=base_time)
+    institutional_old = _cazatiburones_notification(
+        family="institutional", ordinal=2, created_at=base_time + timedelta(hours=1)
+    )
+    activity_new = _cazatiburones_notification(
+        family="activity", ordinal=3, created_at=base_time + timedelta(hours=2)
+    )
+    institutional_new = _cazatiburones_notification(
+        family="institutional", ordinal=4, created_at=base_time + timedelta(hours=3)
+    )
+    for item in (activity_old, institutional_old, activity_new, institutional_new):
+        store.enqueue(item)
+    store.acknowledge(activity_old.notification_id, recorded_at=base_time + timedelta(days=1))
+    store.acknowledge(
+        institutional_new.notification_id,
+        recorded_at=base_time + timedelta(days=1, minutes=1),
+    )
+    store.load_calls = 0
+    before_bytes = state_path.read_bytes()
+    before_hash = hashlib.sha256(before_bytes).hexdigest()
+    before_mtime_ns = state_path.stat().st_mtime_ns
+
+    with _server(
+        AaplLocalWebApplication(
+            controller,
+            None,
+            cazatiburones_notification_store=store,
+        )
+    ) as (_, root):
+        all_status, all_payload, _ = _json_request(
+            Request(f"{root}/api/v1/cazatiburones/notifications?limit=3")
+        )
+        activity_status, activity_payload, _ = _json_request(
+            Request(
+                f"{root}/api/v1/cazatiburones/notifications?{urlencode({'family': 'activity'})}"
+            )
+        )
+        institutional_status, institutional_payload, _ = _json_request(
+            Request(
+                f"{root}/api/v1/cazatiburones/notifications?"
+                f"{urlencode({'family': 'institutional'})}"
+            )
+        )
+
+    assert all_status == 200
+    assert all_payload["schema_version"] == "cazatiburones-notification-inbox-v1"
+    assert all_payload["enabled"] is True
+    assert all_payload["total"] == 4
+    assert all_payload["returned"] == 3
+    assert all_payload["pending_count"] == 2
+    assert all_payload["truncated"] is True
+    assert [entry["item"]["notification_id"] for entry in all_payload["items"]] == [
+        str(institutional_new.notification_id),
+        str(activity_new.notification_id),
+        str(institutional_old.notification_id),
+    ]
+    assert {entry["item"]["family"] for entry in all_payload["items"]} == {
+        "activity",
+        "institutional",
+    }
+    assert all(key not in all_payload for key in ("aggregate", "score", "ranking"))
+
+    expected_items = {
+        str(item.notification_id): item.model_dump(mode="json")
+        for item in (activity_old, institutional_old, activity_new, institutional_new)
+    }
+    for entry in all_payload["items"]:
+        assert entry["item"] == expected_items[entry["item"]["notification_id"]]
+
+    assert activity_status == 200
+    assert activity_payload["total"] == 2
+    assert activity_payload["returned"] == 2
+    assert activity_payload["pending_count"] == 1
+    assert activity_payload["truncated"] is False
+    activity_entries = {
+        entry["item"]["notification_id"]: entry for entry in activity_payload["items"]
+    }
+    assert set(entry["item"]["family"] for entry in activity_entries.values()) == {"activity"}
+    assert activity_entries[str(activity_old.notification_id)]["status"] == "acknowledged"
+    assert activity_entries[str(activity_new.notification_id)]["status"] == "pending"
+    assert activity_entries[str(activity_new.notification_id)]["item"]["manager_cik"] is None
+
+    assert institutional_status == 200
+    assert institutional_payload["total"] == 2
+    assert institutional_payload["returned"] == 2
+    assert institutional_payload["pending_count"] == 1
+    assert institutional_payload["truncated"] is False
+    institutional_entries = {
+        entry["item"]["notification_id"]: entry for entry in institutional_payload["items"]
+    }
+    assert set(entry["item"]["family"] for entry in institutional_entries.values()) == {
+        "institutional"
+    }
+    assert institutional_entries[str(institutional_new.notification_id)]["status"] == (
+        "acknowledged"
+    )
+    assert institutional_entries[str(institutional_new.notification_id)]["item"]["manager_cik"] == (
+        "0001350694"
+    )
+    assert institutional_entries[str(institutional_new.notification_id)]["item"]["put_call"] == (
+        "call"
+    )
+
+    assert store.load_calls == 3
+    assert hashlib.sha256(state_path.read_bytes()).hexdigest() == before_hash
+    assert state_path.read_bytes() == before_bytes
+    assert state_path.stat().st_mtime_ns == before_mtime_ns
+    assert not (tmp_path / "workspace").exists()
+
+
+def test_local_api_rejects_cazatiburones_notification_mutations_and_invalid_queries(
+    tmp_path: Path,
+) -> None:
+    controller = AaplLocalController(
+        _FakeRunner(),
+        _FakeApplication(),
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    store = CazatiburonesNotificationStore(tmp_path / "state" / "notifications.json")
+    web = AaplLocalWebApplication(
+        controller,
+        None,
+        cazatiburones_notification_store=store,
+    )
+
+    invalid_queries = (
+        "unsupported=value",
+        "family=unknown",
+        "limit=not-an-integer",
+        "limit=0",
+        "limit=201",
+        "family=activity&family=institutional",
+        "limit=1&limit=2",
+    )
+    with _server(web) as (_, root):
+        for query in invalid_queries:
+            status, payload, _ = _json_request(
+                Request(f"{root}/api/v1/cazatiburones/notifications?{query}")
+            )
+            assert status == 400
+            assert payload["error"]["code"] == "invalid_request"
+
+        post_status, post_payload, _ = _json_request(
+            Request(
+                f"{root}/api/v1/cazatiburones/notifications",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        acknowledge_status, acknowledge_payload, _ = _json_request(
+            Request(
+                f"{root}/api/v1/cazatiburones/notifications/acknowledge",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert post_status == 404
+    assert post_payload["error"]["code"] == "not_found"
+    assert acknowledge_status == 404
+    assert acknowledge_payload["error"]["code"] == "not_found"
+
+    with _server(AaplLocalWebApplication(controller, None)) as (_, root):
+        disabled_status, disabled, _ = _json_request(
+            Request(f"{root}/api/v1/cazatiburones/notifications")
+        )
+        disabled_invalid_status, disabled_invalid, _ = _json_request(
+            Request(f"{root}/api/v1/cazatiburones/notifications?limit=0")
+        )
+
+    assert disabled_status == 200
+    assert disabled == {
+        "schema_version": "cazatiburones-notification-inbox-v1",
+        "enabled": False,
+        "items": [],
+        "total": 0,
+        "pending_count": 0,
+        "returned": 0,
+        "truncated": False,
+    }
+    assert disabled_invalid_status == 400
+    assert disabled_invalid["error"]["code"] == "invalid_request"
+
+
+def test_local_service_injects_cazatiburones_outbox_without_reconciliation() -> None:
+    source = (Path(__file__).parents[3] / "scripts" / "serve_investment_analyst.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "_CAZATIBURONES_NOTIFICATION_OUTBOX_STATE_FILE = "
+        '"cazatiburones_notification_outbox_state_v1.json"'
+    ) in source
+    assert "cazatiburones_notification_store = CazatiburonesNotificationStore(" in source
+    assert "state_root / _CAZATIBURONES_NOTIFICATION_OUTBOX_STATE_FILE" in source
+    assert "cazatiburones_notification_store=cazatiburones_notification_store" in source
+    assert "cazatiburones_notification_store.reconcile" not in source
 
 
 def test_local_api_versions_rule_updates_and_rejects_stale_edits(tmp_path: Path) -> None:
