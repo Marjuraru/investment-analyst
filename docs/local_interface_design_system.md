@@ -459,10 +459,38 @@ Valoración conserva su carga diferida en la primera activación, no en cada cam
 
 La estructura por vista queda explícita: `mesa` mantiene cabecera y un riel; su destino de tres
 columnas y el retiro de la columna BVL de la matriz pertenecen a `UI-9`. `activo` entrega en este
-bloque la barra y sus subpestañas. `tecnico` comparte sólo la barra de alcance; su búsqueda específica
-queda para `UI-10`. `revisar` conserva su disposición actual y queda para `UI-10`. `cazatiburones`
-comparte la barra de alcance pero sus filtros pertenecen a `UI-11`. Esas entregas futuras no alteran
-el hecho de que `SEC-CORPUS` sigue siendo la única ruta `NEXT`.
+bloque la barra y sus subpestañas. `tecnico` comparte la barra de alcance y recibe en `UI-10` una
+búsqueda de catálogo local; `revisar` recibe en `UI-10` su master-detail con dos familias semánticas
+separadas. `cazatiburones` comparte la barra de alcance pero sus filtros pertenecen a `UI-11`. Esas
+entregas no alteran el hecho de que `SEC-CORPUS` sigue siendo la única ruta `NEXT`.
+
+### Técnico, Revisar y sesiones locales (`UI-10`)
+
+El control de Técnico reutiliza el catálogo `marketAssets` y el contrato de comparación vigente:
+`benchmark_id`, `asset_id`, `start`, `end` y `known_at` no cambian. El selector visible es un
+combobox con `role="combobox"`, `role="listbox"`, foco por flechas, selección por Enter, cierre por
+Escape, `aria-activedescendant` y anuncio vivo. El `<select multiple>` queda como representación
+de estado para el contrato de formulario, pero no es la única interacción. La selección siempre
+incluye la referencia, acepta de dos a cinco activos y filtra por `quote_currency`; el combobox no
+consulta mientras se escribe ni al cambiar chips.
+
+`revisar` usa una rejilla de dos columnas que colapsa a una en pantallas estrechas. La columna
+maestra conserva dos paneles independientes y la columna de detalle sólo pinta el payload de la
+identidad elegida. `candidate_id` y `alert_id` son los únicos vínculos para acciones; no se calcula
+un total común ni se trasladan datos entre familias. `cooldown_until` del candidato se presenta como
+**Espera**, mientras que la alerta operativa muestra **No aplica** porque su contrato no declara
+cooldown. Una selección que deja de existir se marca como no disponible, no se reasigna por índice.
+
+La franja compartida calcula localmente los estados regulares de BVL en `America/Lima`: lunes a
+viernes, 08:30–14:50 entre el segundo domingo de marzo y el primero de noviembre, y 09:30–15:50
+fuera de ese periodo. No incorpora feriados, cierres especiales, calendario remoto ni zona horaria
+del navegador. BVL comparte la gramática textual y geométrica de NYSE, pero sus límites no se
+mezclan con el mercado estadounidense.
+
+La limpieza global retira del DOM la frase de `known_at`, la explicación de capacidades no
+consultadas, el agregado visible de `limitations` y el footer de cobertura/uso. El contrato de
+universo conserva `limitations` y `additional_capabilities_not_queried`; ambos se documentan aquí
+como datos no renderizados y no disparan nuevas peticiones.
 
 ### Rejilla y densidad del lienzo, ahora en tokens
 

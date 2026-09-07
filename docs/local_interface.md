@@ -129,7 +129,8 @@ Novedades conserva tres bloques de procedencia independiente -- institucional 13
 declarada y reglas analíticas -- sin total, orden ni score común. Reglas analíticas sigue leyendo
 `GET /api/v1/candidate-notifications`; institucional 13F y actividad declarada siguen usando la
 outbox Cazatiburones mediante `GET /api/v1/cazatiburones/notifications`, sin restringirse a un
-activo. Las tres bandejas declaran visiblemente que no están acotadas por el `known_at` global.
+activo. Las tres bandejas conservan procedencia y conteos independientes; la interfaz no presenta
+una afirmación adicional de corte global.
 Incidencias sigue siendo una lectura de solo lectura de hasta cinco incidencias operativas desde
 `GET /api/alerts`, separada de aquellas tres familias.
 
@@ -154,11 +155,41 @@ bloqueadas, derivado del mismo payload ya cargado. Su lectura separa activos apl
 presente, evidencia ausente, no consultada, sin configurar, no implementada y no aplica; no afirma
 mercado o fundamentales BVL ni genera score. Cazatiburones, Documentos y Derivados por activo se
 declaran en `additional_capabilities_not_queried`, nunca como columna, celda vacía o petición
-adicional. Las `limitations` declaradas por activo se listan íntegras bajo la matriz.
+adicional. Las `limitations` declaradas por activo permanecen en el contrato y en esta
+documentación, pero no crean celdas ni copy operativo visible en la Mesa.
 
 El panel de watchlist y automatización (`asset-preferences-panel`) se trasladó de `mesa` a
 `sistema`: la Mesa se consulta, no se configura desde ella. Su formulario, sus controles y
 `PUT /api/v1/asset-preferences` no cambian.
+
+## Técnico y Revisar (`UI-10`)
+
+`tecnico` conserva `GET /api/v1/market-comparison` y sus parámetros. La referencia se elige en el
+catálogo existente y los demás activos se buscan mediante un combobox accesible, con resultados por
+símbolo o nombre, chips removibles y una muestra de dos a cinco activos de una sola
+`quote_currency`. La referencia siempre permanece seleccionada; cambiarla reconstruye de forma
+determinista la muestra compatible. Escribir, navegar por teclado, elegir o quitar un chip no
+consulta datos: la petición ocurre únicamente al enviar el formulario.
+
+`revisar` mantiene sus dos cargas independientes (`GET /api/candidates?limit=50` y
+`GET /api/alerts?limit=50`) y las presenta en un master-detail responsive. La lista separa
+**Candidatos analíticos** de **Bandeja operativa**, con conteos, estados, vacíos y errores propios;
+no existe total, rango, score ni orden común entre familias. El detalle conserva la identidad
+estable del origen (`candidate_id` o `alert_id`) para ejecutar las mismas transiciones existentes.
+Un candidato muestra su `cooldown_until` como **Espera**; una alerta operativa no tiene cooldown y
+muestra **No aplica**. Si la identidad seleccionada desaparece tras una actualización, el detalle lo
+declara sin ejecutar una acción sobre otra fila.
+
+La franja de sesiones conserva Nueva York y NYSE, y reemplaza el reloj corriente de Lima por el
+estado regular de BVL en `America/Lima`. Usa sólo días laborables y dos periodos oficiales: del
+segundo domingo de marzo al primer domingo de noviembre, 08:30–14:50; el periodo restante,
+09:30–15:50. No modela feriados ni sesiones especiales y no consulta red. La referencia operativa
+es la [fuente oficial BVL](https://documents.bvl.com.pe/empresas/alertas/Anexo2TextodcRentaFija.pdf).
+
+La Mesa ya no muestra el texto global de `known_at`, la explicación de capacidades no consultadas,
+el agregado visible de `limitations` ni el footer de cobertura/uso. Las limitaciones y
+`additional_capabilities_not_queried` siguen formando parte de los contratos documentados y no
+generan nuevas solicitudes.
 
 ## Estado operativo automático
 
@@ -175,18 +206,20 @@ requisito de uso. La bandeja carga hasta 50 eventos únicamente al abrirla media
 
 ## Relojes de mercado
 
-Los relojes se calculan enteramente en el navegador con las zonas IANA `America/Lima` y
+Los estados de sesión se calculan enteramente en el navegador con las zonas IANA `America/Lima` y
 `America/New_York`. No realizan consultas de red y una única actualización, alineada al cambio de
 minuto, se pausa cuando la pestaña deja de estar visible. Esto permite reflejar automáticamente los
-cambios de horario de verano de Nueva York sin fijar una diferencia horaria estática.
+cambios de horario de verano de Nueva York y elegir el periodo regular BVL sin fijar una diferencia
+horaria estática.
 
-La franja compacta del encabezado reúne Lima, Nueva York y NYSE en un solo renglón de escritorio,
+La franja compacta del encabezado reúne BVL, Nueva York y NYSE en un solo renglón de escritorio,
 sin regla superior ni otra tarjeta analítica; puede envolver en pantalla estrecha. Distingue si
-Nueva York está antes, dentro o después de la sesión regular NYSE publicada de 09:30 a 16:00 ET.
-No afirma que el mercado esté operando: fines de semana se identifican, pero los feriados y cierres
-anticipados todavía no se evalúan. Esta limitación permanece disponible para tecnologías de
-asistencia. Un calendario oficial versionado será un contrato separado antes de convertir el estado
-horario en un estado operativo de mercado.
+Nueva York está antes, dentro o después de la sesión regular NYSE publicada de 09:30 a 16:00 ET,
+y si BVL está antes, dentro o después de su periodo regular 08:30–14:50 o 09:30–15:50 según la
+temporada. No afirma que el mercado esté operando: fines de semana se identifican, pero los feriados
+y sesiones especiales todavía no se evalúan. Esta limitación permanece disponible para tecnologías
+de asistencia. Un calendario oficial versionado será un contrato separado antes de convertir el
+estado horario en un estado operativo de mercado.
 
 ## Criterios de presentación
 

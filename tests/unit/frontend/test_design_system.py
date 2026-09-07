@@ -722,7 +722,7 @@ def test_session_clock_consumes_existing_nyse_state() -> None:
 
 
 def test_session_clock_declares_no_holiday_coverage() -> None:
-    assert "no evalúa feriados ni cierres" in INDEX_HTML
+    assert "no evalúa feriados ni sesiones especiales" in INDEX_HTML
     assert "Regular session only" in APP_JS or "no holiday" in APP_JS.lower()
 
 
@@ -2490,7 +2490,7 @@ def _check_mesa_news_counts_describe_inboxes_without_known_at_claim(
 ) -> None:
     mesa = _mesa_slice(index_html)
     assert "desde el corte anterior" not in mesa.lower()
-    assert "no están acotadas por el corte" in mesa
+    assert "no están acotadas por el corte" not in mesa.lower()
     for function_name in ("renderMesaAnalyticalNews", "renderMesaCazatiburonesNews"):
         body = _extract_js_function(app_js, function_name)
         assert "payload.total" in body
@@ -2598,12 +2598,14 @@ def test_present_past_freshness_renders_as_stale() -> None:
 
 def _check_unqueried_capabilities_are_declared_textually(index_html: str) -> None:
     mesa = _mesa_slice(index_html)
-    assert 'id="mesa-universe-not-queried"' in mesa
-    not_queried_start = mesa.index('id="mesa-universe-not-queried"')
-    not_queried_end = mesa.index("</p>", not_queried_start)
-    paragraph = mesa[not_queried_start:not_queried_end]
-    for term in ("Cazatiburones", "Documentos", "Derivados", "additional_capabilities_not_queried"):
-        assert term in paragraph
+    assert 'id="mesa-universe-not-queried"' not in mesa
+    assert 'id="mesa-universe-limitations"' not in mesa
+    for term in (
+        "Cazatiburones, Documentos",
+        "additional_capabilities_not_queried",
+        "Limitaciones declaradas",
+    ):
+        assert term not in mesa
 
 
 def test_unqueried_capabilities_are_declared_textually() -> None:
@@ -2875,25 +2877,28 @@ def test_unqueried_additional_capabilities_remain_text_not_cells() -> None:
     _check_compact_universe_matrix(INDEX_HTML, APP_JS)
 
 
-def test_all_universe_limitations_remain_visible() -> None:
+def test_universe_limitations_are_not_rendered_in_the_matrix() -> None:
     matrix_body = _extract_js_function(APP_JS, "renderMesaUniverseMatrix")
-    assert "for (const text of asset.limitations || [])" in matrix_body
-    assert "allLimitations.join" in matrix_body
-    assert 'id="mesa-universe-limitations"' in _mesa_slice(INDEX_HTML)
+    assert "asset.limitations" not in matrix_body
+    assert "allLimitations" not in matrix_body
+    assert 'id="mesa-universe-limitations"' not in _mesa_slice(INDEX_HTML)
 
 
 def _check_compact_clock_keeps_one_desktop_row(index_html: str, styles_css: str) -> None:
     for control_id in (
-        "lima-clock",
-        "lima-clock-date",
         "new-york-clock",
         "new-york-clock-date",
+        "bvl-session-status",
+        "bvl-session-dot",
+        "bvl-session-remaining",
         "nyse-session-status",
         "nyse-session-dot",
         "nyse-session-remaining",
         "market-clock-note",
     ):
         assert index_html.count(f'id="{control_id}"') == 1
+    assert 'id="lima-clock"' not in index_html
+    assert 'id="lima-clock-date"' not in index_html
     assert "grid-template-columns: auto minmax(0, 1fr) auto;" in styles_css
     clock_start = styles_css.index(".market-clock-strip {")
     clock_end = styles_css.index(".market-clock-item {", clock_start)
@@ -3786,9 +3791,13 @@ def test_probe_freshness_rule_catches_a_removed_age_comparison() -> None:
 
 def test_probe_unqueried_capabilities_rule_catches_a_removed_declaration() -> None:
     _check_unqueried_capabilities_are_declared_textually(INDEX_HTML)  # baseline: clean
-    marker = "Cazatiburones, Documentos y Derivados"
+    marker = 'id="mesa-universe-table"'
     assert marker in INDEX_HTML
-    corrupted = INDEX_HTML.replace(marker, "Xazatiburones, Documentos y Derivados", 1)
+    corrupted = INDEX_HTML.replace(
+        marker,
+        '<p id="mesa-universe-not-queried">Cazatiburones, Documentos y Derivados</p>' + marker,
+        1,
+    )
     assert corrupted != INDEX_HTML
     with pytest.raises(AssertionError):
         _check_unqueried_capabilities_are_declared_textually(corrupted)
@@ -4158,3 +4167,242 @@ def test_probe_ui8_documentation_rule_catches_a_missing_route_declaration() -> N
     assert corrupted != design_doc
     with pytest.raises(AssertionError):
         _check_ui8_composition_is_documented(corrupted, local_doc, plan_doc)
+
+
+# ---------------------------------------------------------------------------
+# UI-10: technical search, review master-detail, BVL regular session and
+# removal of redundant global copy. These checks remain static; the required
+# supported-client smoke exercises the live DOM and request behavior.
+# ---------------------------------------------------------------------------
+
+
+def test_technical_combobox_searches_catalog_and_manages_two_to_five_currency_compatible_assets():
+    tecnico = _board_slices(INDEX_HTML)["tecnico"]
+    assert 'id="comparison-asset-search"' in tecnico
+    assert 'role="combobox"' in tecnico
+    assert 'id="comparison-asset-options"' in tecnico
+    assert 'role="listbox"' in tecnico
+    assert 'id="comparison-selected-assets"' in tecnico
+    assert 'id="comparison-assets"' in tecnico
+    assert 'class="comparison-assets-native"' in tecnico
+    assert "quoteCurrency" in APP_JS
+    assert "syncComparisonAssetOptions" in APP_JS
+    assert "compatible" in APP_JS
+    assert ".slice(0, 5)" in APP_JS
+    assert "La muestra admite como máximo cinco activos." in APP_JS
+    assert "option.selected = true" in APP_JS
+    assert "option.selected = false" in APP_JS
+
+
+def test_technical_keyboard_aria_and_submit_only_query_contract() -> None:
+    tecnico = _board_slices(INDEX_HTML)["tecnico"]
+    for attribute in (
+        'aria-autocomplete="list"',
+        'aria-controls="comparison-asset-options"',
+        'aria-expanded="false"',
+        'aria-describedby="comparison-selection-status"',
+    ):
+        assert attribute in tecnico
+    search_start = APP_JS.index("comparisonAssetSearch.addEventListener")
+    search_end = APP_JS.index("async function queryMarketComparison", search_start)
+    search_block = APP_JS[search_start:search_end]
+    assert "ArrowDown" in search_block
+    assert "ArrowUp" in search_block
+    assert "Enter" in search_block
+    assert "Escape" in search_block
+    assert "aria-activedescendant" in APP_JS
+    assert 'byId("market-comparison-form").addEventListener("submit"' in APP_JS
+    assert "await queryMarketComparison();" in APP_JS
+    assert "queryMarketComparison" not in search_block
+
+
+def test_review_board_has_responsive_master_detail_with_two_semantic_groups() -> None:
+    revisar = _board_slices(INDEX_HTML)["revisar"]
+    for marker in (
+        'id="review-master-detail"',
+        'id="review-master-list"',
+        'id="candidate-inbox-panel"',
+        'id="alert-inbox-panel"',
+        'id="review-detail-panel"',
+        'id="review-detail"',
+    ):
+        assert marker in revisar
+    assert "review-master-detail" in STYLES_CSS
+    assert "grid-template-columns: 1fr;" in STYLES_CSS[STYLES_CSS.index(".review-master-detail") :]
+    assert "revisar: Object.freeze([loadCandidateInbox, loadAlertInbox])" in APP_JS
+    assert 'api("/api/candidates?limit=50")' in APP_JS
+    assert 'api("/api/alerts?limit=50")' in APP_JS
+
+
+def test_review_selection_and_actions_remain_bound_to_stable_source_identity() -> None:
+    assert "reviewItemId(family, item)" in APP_JS
+    assert "data-review-id" in APP_JS
+    assert "reviewSelectionMissing" in APP_JS
+    assert "event.candidate_id" in APP_JS
+    assert "event.alert_id" in APP_JS
+    assert "transitionCandidate(event.candidate_id, target, button)" in APP_JS
+    assert "transitionAlert(event.alert_id, target, button)" in APP_JS
+    assert "La selección ya no está disponible" in APP_JS
+    assert "reviewSelection.family" in APP_JS
+
+
+def test_candidate_cooldown_and_operational_not_applicable_are_not_conflated() -> None:
+    detail = APP_JS[
+        APP_JS.index("function renderReviewDetail") : APP_JS.index(
+            "function updateReviewMasterSelection"
+        )
+    ]
+    assert 'reviewDetailField(fields, "Espera", formatInstant(event.cooldown_until));' in detail
+    assert 'reviewDetailField(fields, "Espera", "No aplica");' in detail
+    assert "cooldown_until" in detail
+    assert "transitionCandidate(event.candidate_id" in detail
+    assert "transitionAlert(event.alert_id" in detail
+    assert 'class="review-detail-panel"' in INDEX_HTML or "review-detail-panel" in INDEX_HTML
+
+
+def test_bvl_session_uses_lima_zone_two_official_periods_and_weekdays() -> None:
+    assert "timeZone: DEFAULT_TIME_ZONE" in APP_JS
+    assert "const BVL_SESSION_PERIODS = Object.freeze" in APP_JS
+    assert "summer: Object.freeze" in APP_JS
+    assert "winter: Object.freeze" in APP_JS
+    assert "8 * 60 + 30" in APP_JS
+    assert "14 * 60 + 50" in APP_JS
+    assert "9 * 60 + 30" in APP_JS
+    assert "15 * 60 + 50" in APP_JS
+    assert "nthSundayOfMonth(parts.year, 3, 2)" in APP_JS
+    assert "nthSundayOfMonth(parts.year, 11, 1)" in APP_JS
+    bvl_state = _extract_js_function(APP_JS, "bvlRegularSessionState")
+    assert 'parts.weekday === "Sat" || parts.weekday === "Sun"' in bvl_state
+    assert "period.open" in bvl_state and "period.close" in bvl_state
+
+
+def test_market_strip_removes_lima_clock_and_keeps_new_york_nyse_and_accessible_limit() -> None:
+    for control_id in (
+        "new-york-clock",
+        "new-york-clock-date",
+        "bvl-session-status",
+        "bvl-session-dot",
+        "bvl-session-remaining",
+        "nyse-session-status",
+        "nyse-session-dot",
+        "nyse-session-remaining",
+        "market-clock-note",
+    ):
+        assert INDEX_HTML.count(f'id="{control_id}"') == 1
+    assert 'id="lima-clock"' not in INDEX_HTML
+    assert 'id="lima-clock-date"' not in INDEX_HTML
+    assert "America/Lima" in INDEX_HTML
+    assert "no evalúa feriados ni sesiones especiales" in INDEX_HTML
+    assert "bvlRegularSessionState(now)" in APP_JS
+
+
+def test_requested_global_copy_and_footer_are_absent_from_dom() -> None:
+    for text in (
+        "Estas bandejas no están acotadas por el corte",
+        "Cazatiburones, Documentos y Derivados",
+        "Limitaciones declaradas",
+        "Uso local · Sin ejecución de órdenes · No constituye asesoramiento financiero",
+    ):
+        assert text not in INDEX_HTML
+    assert "<footer" not in INDEX_HTML
+    assert "</footer>" not in INDEX_HTML
+
+
+def test_removed_copy_leaves_no_orphan_aria_css_or_js() -> None:
+    for text in (
+        "mesa-universe-not-queried",
+        "mesa-universe-limitations",
+        "lima-clock",
+        "lima-clock-date",
+    ):
+        assert text not in INDEX_HTML
+        assert text not in APP_JS
+        assert text not in STYLES_CSS
+    assert 'aria-describedby="mesa-universe-legend mesa-universe-window"' in INDEX_HTML
+
+
+def test_contract_limitations_remain_documented_and_do_not_create_ui_cells_or_requests() -> None:
+    repository_root = Path(str(files("investment_analyst"))).parent.parent
+    local_doc = (repository_root / "docs" / "local_interface.md").read_text(encoding="utf-8")
+    design_doc = (repository_root / "docs" / "local_interface_design_system.md").read_text(
+        encoding="utf-8"
+    )
+    for document in (local_doc, design_doc):
+        assert "limitations" in document
+        assert "additional_capabilities_not_queried" in document
+    matrix_body = _extract_js_function(APP_JS, "renderMesaUniverseMatrix")
+    assert "asset.limitations" not in matrix_body
+    assert "additional_capabilities_not_queried" not in APP_JS
+    assert "api(" not in matrix_body
+
+
+def test_board_registry_still_declares_exactly_six_boards() -> None:
+    _check_board_registry_declares_exactly_six_boards(APP_JS)
+
+
+def test_technical_review_and_mesa_load_graphs_and_endpoints_are_unchanged() -> None:
+    _check_board_to_deferred_loads_table_covers_the_six_registered_boards(APP_JS)
+    _check_no_new_capability_or_route_is_introduced_by_the_shell(APP_JS)
+    assert "loadCandidateInbox" in _board_deferred_load_entry(APP_JS, "revisar")
+    assert "loadAlertInbox" in _board_deferred_load_entry(APP_JS, "revisar")
+    assert "api(`/api/v1/market-comparison?" in APP_JS
+
+
+def test_no_cross_family_score_rank_order_or_synthesized_fields() -> None:
+    revisar = _board_slices(INDEX_HTML)["revisar"]
+    assert revisar.count('class="operation-panel') == 2
+    assert "review-master-list" in revisar and "review-detail-panel" in revisar
+    assert (
+        "combined"
+        not in APP_JS[
+            APP_JS.index("function renderAlertInbox") : APP_JS.index(
+                "async function transitionAlert"
+            )
+        ]
+    )
+    assert (
+        "rank"
+        not in APP_JS[
+            APP_JS.index("function renderReviewDetail") : APP_JS.index(
+                "function renderCandidateNotifications"
+            )
+        ]
+    )
+
+
+def test_no_network_calendar_or_market_data_used_for_session_clocks() -> None:
+    bvl_start = APP_JS.index("function limaWallClockDateParts")
+    bvl_end = APP_JS.index("function renderMarketClocks", bvl_start)
+    bvl_helpers = APP_JS[bvl_start:bvl_end]
+    assert "api(" not in bvl_helpers
+    assert "fetch(" not in bvl_helpers
+    assert "getTimezoneOffset" not in bvl_helpers
+    assert "LIMA_DATE_PARTS_FORMATTER" in bvl_helpers
+
+
+def test_no_hidden_relocation_of_removed_visible_copy() -> None:
+    for source in (INDEX_HTML, APP_JS, STYLES_CSS):
+        assert "Estas bandejas no están acotadas por el corte" not in source
+        assert "Cazatiburones, Documentos y Derivados" not in source
+        assert "Limitaciones declaradas" not in source
+        assert "Uso local · Sin ejecución de órdenes" not in source
+
+
+def test_docs_state_technical_review_bvl_and_clean_ui_boundaries() -> None:
+    repository_root = Path(str(files("investment_analyst"))).parent.parent
+    local_doc = (repository_root / "docs" / "local_interface.md").read_text(encoding="utf-8")
+    design_doc = (repository_root / "docs" / "local_interface_design_system.md").read_text(
+        encoding="utf-8"
+    )
+    plan_doc = (repository_root / "docs" / "basic_functional_release_plan.md").read_text(
+        encoding="utf-8"
+    )
+    for document in (local_doc, design_doc):
+        assert "UI-10" in document
+        assert "America/Lima" in document
+        assert "08:30–14:50" in document
+        assert "09:30–15:50" in document
+        assert "master-detail" in document
+    assert "Anexo2TextodcRentaFija.pdf" in local_doc
+    assert "`SEC-CORPUS` permanece como la única ruta `NEXT`" in plan_doc
+    assert "UI-11" in plan_doc
