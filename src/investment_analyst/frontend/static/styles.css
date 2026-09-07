@@ -189,7 +189,7 @@ h4 {
   color: var(--rail-ink-strong);
 }
 
-.primary-nav, .asset-nav {
+.primary-nav {
   display: grid;
   gap: 0.2rem;
   margin-top: 1.65rem;
@@ -293,7 +293,62 @@ h4 {
 
 .asset-context {
   min-width: 0;
-  flex: 1 1 0%;
+}
+
+.asset-scope-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--canvas-row-gap) 1.2rem;
+  align-items: center;
+  margin-bottom: var(--canvas-row-gap);
+  padding: 0 var(--canvas-gutter) var(--canvas-row-gap);
+  border-bottom: 1px solid var(--line);
+}
+
+.asset-scope-bar[hidden],
+.asset-subtabs[hidden] {
+  display: none;
+}
+
+.asset-scope-controls {
+  justify-self: end;
+}
+
+.asset-subtabs {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: 0.2rem;
+  overflow-x: auto;
+  border-top: 1px solid var(--line);
+  padding-top: 0.45rem;
+}
+
+.asset-subtab {
+  min-height: 32px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted-strong);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 760;
+  padding: 0.35rem 0.55rem;
+  white-space: nowrap;
+}
+
+.asset-subtab:hover {
+  color: var(--ink-strong);
+}
+
+.asset-subtab[aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  color: var(--ink-strong);
+}
+
+.asset-subtab:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
 }
 
 .asset-heading {
@@ -3838,6 +3893,20 @@ footer p:last-child {
 }
 
 @media (max-width: 760px) {
+  .asset-scope-bar {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.7rem;
+    padding-inline: 1.15rem;
+  }
+
+  .asset-scope-controls {
+    justify-self: stretch;
+  }
+
+  .asset-scope-controls .combobox input {
+    width: 100%;
+  }
+
   .crypto-derivatives-header {
     align-items: stretch;
     flex-direction: column;

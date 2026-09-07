@@ -405,6 +405,46 @@ tablero `mesa` al tablero `sistema`, junto al resto de la operación. La Mesa se
 configura desde ella. Ningún endpoint, parámetro ni contrato cambia: `update_asset_preferences` y
 `/api/v1/asset-preferences` son exactamente los mismos que antes de este bloque.
 
+### Marco global y alcance de activo (`UI-8`)
+
+`UI-8` fija una composición única para las seis vistas sin crear un séptimo tablero, sin mover sus
+secciones de datos y sin cambiar ningún endpoint. La cabecera persistente conserva sólo la identidad
+de la aplicación, el corte global `known_at`, el reloj de mercado, salud, tema y verificación. La
+identidad y el selector del activo viven en una única barra de alcance: aparece únicamente en
+`activo`, `tecnico` y `cazatiburones`; no se filtra hacia `mesa`, `revisar` ni `sistema`. El riel
+lateral contiene exclusivamente `#board-nav`.
+
+La composición queda regida por estas siete reglas verificables:
+
+1. No hay número héroe: la lectura nunca se reduce a un score, ranking o veredicto.
+2. Mercado, fundamentales, valoración y Cazatiburones conservan dominios paralelos, separados por
+   reglas verticales y pies de procedencia cuando comparten una vista.
+3. El corte global visible es el único control permanente de tiempo; una vista no inventa un corte
+   adicional ni lo oculta.
+4. La densidad usa la retícula de 4 px donde la composición la permite, filas de 25 px, reglas de
+   1 px y aire entre bloques; no introduce tarjetas, sombras ni elevación decorativa.
+5. No carga fuentes web; las tablas largas se virtualizan cuando corresponda y los paneles diferidos
+   conservan el objetivo de p95 menor de 100 ms y menos de 20 KiB para su lectura inicial.
+6. Estado, forma, relleno y rótulo se combinan para accesibilidad, con contraste AA, foco visible y
+   navegación completa por teclado.
+7. Claro y oscuro son estados de primera clase; el tema oscuro mantiene el grafito cálido de la
+   rampa existente, no una variante azulada o una inversión automática.
+
+La barra de alcance reúne identidad, cotización, clasificación y combobox conservando sus IDs y
+actualizaciones operativas. Dentro de `activo` añade el único `tablist` de subpestañas, en este orden:
+Mercado, Derivados, Fundamentales, Valoración y Análisis. Son `button[type=button]`, no anclas: no
+modifican el fragmento de URL ni vuelven a activar un tablero. Cada una conserva su atributo de
+capacidad; exactamente una queda seleccionada y exactamente su sección asociada queda visible con
+`hidden`. Si la capacidad del activo oculta la selección vigente, el retorno determinista es Mercado.
+Valoración conserva su carga diferida en la primera activación, no en cada cambio entre pestañas.
+
+La estructura por vista queda explícita: `mesa` mantiene cabecera y un riel; su destino de tres
+columnas y el retiro de la columna BVL de la matriz pertenecen a `UI-9`. `activo` entrega en este
+bloque la barra y sus subpestañas. `tecnico` comparte sólo la barra de alcance; su búsqueda específica
+queda para `UI-10`. `revisar` conserva su disposición actual y queda para `UI-10`. `cazatiburones`
+comparte la barra de alcance pero sus filtros pertenecen a `UI-11`. Esas entregas futuras no alteran
+el hecho de que `SEC-CORPUS` sigue siendo la única ruta `NEXT`.
+
 ### Rejilla y densidad del lienzo, ahora en tokens
 
 `--canvas-gutter`, `--canvas-row-gap`, `--canvas-block-gap` y
