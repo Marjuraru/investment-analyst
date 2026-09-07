@@ -10,6 +10,7 @@ from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
 from investment_analyst.analytics.market.diagnostic_models import MarketDiagnosticRequest
 from investment_analyst.analytics.market.diagnostic_selection import (
     AmbiguousMetricRevisionError,
+    InvalidMetricContextError,
     MarketDiagnosticMetricSelector,
     describe_missing_requirements,
 )
@@ -20,6 +21,12 @@ ASSET_ID = "crypto:btc-usd"
 SOURCE_ID = "coinbase-exchange:btc-usd:daily-candles"
 KNOWN_AT = datetime(2026, 7, 20, tzinfo=UTC)
 AS_OF = datetime(2026, 7, 10, tzinfo=UTC)
+REQUIRED_METRIC_KEYS = (
+    "market.history.simple_return_1d",
+    "market.history.sma",
+    "market.history.rolling_daily_volatility",
+    "market.history.relative_volume",
+)
 
 
 def make_request(**overrides: object) -> MarketDiagnosticRequest:
@@ -120,6 +127,60 @@ def test_selector_builds_complete_snapshot(tmp_path) -> None:
     assert snapshot.metric_result_ids() == tuple(item.result_id for item in metrics)
 
 
+def test_selector_projects_only_the_four_required_metric_keys(tmp_path, monkeypatch) -> None:
+    request = make_request()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        save_all(storage, complete_metrics())
+        original_list = storage.metric_results.list
+        calls: list[dict[str, object]] = []
+
+        def tracked_list(**kwargs: object) -> list[MetricResult]:
+            calls.append(kwargs)
+            return original_list(**kwargs)
+
+        monkeypatch.setattr(storage.metric_results, "list", tracked_list)
+        candidates = MarketDiagnosticMetricSelector(storage).candidates(request)
+
+    assert len(candidates) == 5
+    assert calls == [
+        {
+            "asset_id": ASSET_ID,
+            "metric_keys": REQUIRED_METRIC_KEYS,
+            "as_of_from": request.query.start,
+            "as_of_to": request.query.end,
+        }
+    ]
+
+
+def test_selector_candidates_are_identical_to_base_for_the_same_request(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    request = make_request()
+    edge_metrics = (
+        make_metric("market.history.simple_return_1d", as_of=request.query.end),
+        make_metric(
+            "market.history.simple_return_1d",
+            as_of=request.query.start - timedelta(days=1),
+        ),
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        save_all(storage, complete_metrics() + edge_metrics)
+        original_list = storage.metric_results.list
+        unbounded_rows = tuple(original_list(asset_id=ASSET_ID))
+        monkeypatch.setattr(
+            storage.metric_results,
+            "list",
+            lambda **kwargs: list(unbounded_rows),
+        )
+        baseline = MarketDiagnosticMetricSelector(storage).candidates(request)
+
+        monkeypatch.setattr(storage.metric_results, "list", original_list)
+        projected = MarketDiagnosticMetricSelector(storage).candidates(request)
+
+    assert projected == baseline
+
+
 def test_selector_uses_latest_complete_as_of_without_mixing(tmp_path) -> None:
     older = complete_metrics(as_of=AS_OF - timedelta(days=1))
     latest_incomplete = complete_metrics(as_of=AS_OF)[:-1]
@@ -170,6 +231,43 @@ def test_selector_selects_latest_available_revision(tmp_path) -> None:
 
     assert snapshot is not None
     assert snapshot.simple_return.result_id == new_return.result_id
+
+
+def test_revision_visible_at_known_at_is_still_selected(tmp_path) -> None:
+    base = list(complete_metrics())
+    old_return = base[0]
+    visible_revision = make_metric(
+        "market.history.simple_return_1d",
+        available_at=KNOWN_AT,
+        value=Decimal("0.03"),
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        save_all(storage, tuple(base) + (visible_revision,))
+        snapshot = MarketDiagnosticMetricSelector(storage).select(make_request())
+
+    assert snapshot is not None
+    assert snapshot.simple_return.result_id == visible_revision.result_id
+    assert snapshot.simple_return.available_at >= old_return.available_at
+
+
+def test_as_of_upper_bound_stays_half_open(tmp_path) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        save_all(
+            storage,
+            (make_metric("market.history.simple_return_1d", as_of=make_request().query.end),),
+        )
+
+        assert MarketDiagnosticMetricSelector(storage).candidates(make_request()) == ()
+
+
+def test_invalid_source_id_still_fails_closed_after_projection(tmp_path) -> None:
+    malformed = make_metric("market.history.simple_return_1d")
+    malformed.parameters["source_id"] = 123
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        save_all(storage, complete_metrics() + (malformed,))
+
+        with pytest.raises(InvalidMetricContextError, match="invalid source_id"):
+            MarketDiagnosticMetricSelector(storage).candidates(make_request())
 
 
 def test_selector_rejects_equal_availability_revisions(tmp_path) -> None:

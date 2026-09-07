@@ -4,6 +4,31 @@ Este bloque contiene el consumo de un trabajo programado sin atribuirle todavía
 interna. El presupuesto es una medida operativa y no un umbral analítico, una señal, una
 recomendación ni una autorización de ejecución.
 
+## Atribución de las lecturas del refresh diario Coinbase
+
+El consumo que el bloque anterior contenía queda atribuido a tres lecturas que materializaban
+toda la evidencia del `asset_id` y filtraban después en Python:
+
+| Lectura | Proyección persistida aplicada |
+| --- | --- |
+| `btc_refresh_planner._persisted_observations` | `asset_id`, `source_id` de BTC diario y `DataFrequency.DAY_1` |
+| `crypto_spot_daily_planner._persisted_observations` | `asset_id` configurado, `source_id` configurado y `DataFrequency.DAY_1` |
+| `MarketDiagnosticMetricSelector.candidates` | `asset_id`, las cuatro claves métricas requeridas y `as_of >= start`; `as_of <= end` sólo reduce la lectura y el `< end` sigue siendo una guarda Python |
+
+BTC y ETH reutilizan el mismo `asset_id` para su serie diaria, la serie intradía de un minuto y
+las observaciones de derivados. Por eso una lectura sin `source_id` y frecuencia podía crecer con
+toda la historia del activo, aunque el planner sólo necesitara la serie diaria de una fuente
+concreta. La proyección al repositorio deja fuera de la materialización las fuentes y frecuencias
+ajenas; las guardas Python, incluidas las comprobaciones de timestamps, permanecen como defensa
+redundante. En el selector, el rango superior SQL es inclusivo por el contrato existente, por lo
+que la comparación Python `result.as_of < request.query.end` no se puede eliminar.
+
+La cota establecida es de atribución y alcance de lectura, no un número fijo de filas ni un
+presupuesto analítico: la serie diaria declarada todavía puede crecer y otras lecturas de
+`observations`, `metric_results` o `raw_records` siguen fuera de este bloque. Tampoco se separan
+los `asset_id` compartidos ni se modifica el vigilante cooperativo o la cota `systemd`; la unidad
+instalada sigue necesitando la reinstalación operativa humana descrita abajo.
+
 ## Tres capas independientes
 
 1. **Cota dura de la unidad.** La unidad `systemd --user` puede renderizar `MemoryAccounting=yes`

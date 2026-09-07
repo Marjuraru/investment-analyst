@@ -18,6 +18,12 @@ _RETURN_ALGORITHM = "market-simple-return-1d-v1-decimal34"
 _SMA_ALGORITHM = "market-sma-v1-decimal34"
 _VOLATILITY_ALGORITHM = "market-rolling-daily-volatility-v1-decimal34"
 _RELATIVE_VOLUME_ALGORITHM = "market-relative-volume-v1-decimal34"
+_REQUIRED_METRIC_KEYS = (
+    _RETURN_KEY,
+    _SMA_KEY,
+    _VOLATILITY_KEY,
+    _RELATIVE_VOLUME_KEY,
+)
 
 _RETURN_SLOT = "simple_return_1d"
 _SHORT_SMA_SLOT = "sma_short"
@@ -138,16 +144,15 @@ class MarketDiagnosticMetricSelector:
         """Return deterministically ordered metrics compatible with the request context."""
         self._storage.require_open()
         output: list[MetricResult] = []
-        required_keys = {
-            _RETURN_KEY,
-            _SMA_KEY,
-            _VOLATILITY_KEY,
-            _RELATIVE_VOLUME_KEY,
-        }
-        for result in self._storage.metric_results.list(asset_id=request.query.asset_id):
+        for result in self._storage.metric_results.list(
+            asset_id=request.query.asset_id,
+            metric_keys=_REQUIRED_METRIC_KEYS,
+            as_of_from=request.query.start,
+            as_of_to=request.query.end,
+        ):
             if result.asset_id != request.query.asset_id:
                 continue
-            if result.metric_key not in required_keys or not _algorithm_matches(result):
+            if result.metric_key not in _REQUIRED_METRIC_KEYS or not _algorithm_matches(result):
                 continue
             if not request.query.start <= result.as_of < request.query.end:
                 continue
