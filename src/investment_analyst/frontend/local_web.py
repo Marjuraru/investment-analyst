@@ -138,6 +138,10 @@ from investment_analyst.application.capability_runtime import (
     CapabilityDrivenRuntimePlan,
     build_capability_runtime_plan,
 )
+from investment_analyst.application.cazatiburones_universe_activity_models import (
+    CazatiburonesUniverseActivityRequest,
+    CazatiburonesUniverseActivityResult,
+)
 from investment_analyst.application.crypto_derivatives_models import CryptoDerivativesQueryRequest
 from investment_analyst.application.crypto_spot_daily import (
     CryptoSpotDailyRefreshError,
@@ -452,6 +456,15 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> UniverseCoverageResult:
         """Execute a point-in-time universe coverage query."""
+        ...
+
+    def query_cazatiburones_universe_activity(
+        self,
+        request: CazatiburonesUniverseActivityRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CazatiburonesUniverseActivityResult:
+        """Execute a point-in-time universe activity query."""
         ...
 
     def query_cazatiburones_declared_activity(
@@ -836,6 +849,9 @@ class AaplLocalController:
             tuple[str, AaplFundamentalResearchRequest], AaplFundamentalAnalysisResult
         ] = {}
         self._coverage_cache: dict[UniverseCoverageRequest, UniverseCoverageResult] = {}
+        self._universe_activity_cache: dict[
+            CazatiburonesUniverseActivityRequest, CazatiburonesUniverseActivityResult
+        ] = {}
         self._market_assets = self._application.list_market_assets()
         self._runtime_capabilities = build_capability_runtime_plan(self._market_assets)
         self._health_snapshot = self._runner.inspect(workspace=self._workspace)
@@ -1053,6 +1069,24 @@ class AaplLocalController:
             self._coverage_cache[request] = result
         return result
 
+    def cazatiburones_universe_activity_request(
+        self, request: CazatiburonesUniverseActivityRequest
+    ) -> CazatiburonesUniverseActivityResult:
+        """Read cached universe activity evidence without providers or writer acquisition."""
+        with self._cache_lock:
+            cached = self._universe_activity_cache.get(request)
+            if cached is not None:
+                return cached
+        result = self._application.query_cazatiburones_universe_activity(
+            request,
+            location=StorageLocationRequest(workspace=self._workspace),
+        )
+        with self._cache_lock:
+            if len(self._universe_activity_cache) >= _MAX_READ_CACHE_ENTRIES:
+                self._universe_activity_cache.pop(next(iter(self._universe_activity_cache)))
+            self._universe_activity_cache[request] = result
+        return result
+
     def cazatiburones_declared_activity_request(
         self,
         *,
@@ -1132,6 +1166,7 @@ class AaplLocalController:
                 with self._cache_lock:
                     self._btc_market_chart_cache.clear()
                     self._coverage_cache.clear()
+                    self._universe_activity_cache.clear()
                 self._refresh_health_snapshot()
 
     def crypto_spot_daily_refresh_request(
@@ -1149,6 +1184,7 @@ class AaplLocalController:
                 with self._cache_lock:
                     self._crypto_spot_daily_chart_cache.clear()
                     self._coverage_cache.clear()
+                    self._universe_activity_cache.clear()
                 self._refresh_health_snapshot()
 
     def listed_market_refresh_request(
@@ -1168,6 +1204,7 @@ class AaplLocalController:
                     self._listed_market_chart_cache.clear()
                     self._corporate_valuation_cache.clear()
                     self._coverage_cache.clear()
+                    self._universe_activity_cache.clear()
                 self._refresh_health_snapshot()
 
     def btc_intraday_refresh_request(
@@ -1206,6 +1243,7 @@ class AaplLocalController:
                     self._fundamental_analysis_cache.clear()
                     self._corporate_valuation_cache.clear()
                     self._coverage_cache.clear()
+                    self._universe_activity_cache.clear()
                 self._refresh_health_snapshot()
 
     def fred_catalog_refresh_request(
@@ -1236,6 +1274,7 @@ class AaplLocalController:
             finally:
                 with self._cache_lock:
                     self._coverage_cache.clear()
+                    self._universe_activity_cache.clear()
 
     def fundamental_trend_request(
         self,
@@ -1342,6 +1381,7 @@ class AaplLocalController:
             self._drop_asset_cache_entries(self._fundamental_research_history_cache, APPLE_ASSET_ID)
             self._drop_asset_cache_entries(self._fundamental_analysis_cache, APPLE_ASSET_ID)
             self._coverage_cache.clear()
+            self._universe_activity_cache.clear()
 
     @staticmethod
     def _drop_asset_cache_entries(cache: dict[tuple[str, object], object], asset_id: str) -> None:
@@ -1967,6 +2007,22 @@ class AaplLocalWebApplication:
         )
         return self._controller.coverage_request(request).model_dump(mode="json")
 
+    def cazatiburones_universe_activity(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Validate and query the read-only universe activity index."""
+        allowed = {"known_at", "asset_id"}
+        if set(parameters) - allowed:
+            raise ValueError("universe activity query contains unsupported parameters")
+        request = CazatiburonesUniverseActivityRequest(
+            known_at=_aware_datetime(_one_parameter(parameters, "known_at", required=True)),
+            asset_ids=tuple(sorted(parameters.get("asset_id", ()))),
+        )
+        return self._controller.cazatiburones_universe_activity_request(request).model_dump(
+            mode="json"
+        )
+
     def cazatiburones_declared_activity(
         self,
         parameters: Mapping[str, tuple[str, ...]],
@@ -2461,6 +2517,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     HTTPStatus.OK,
                     server.application.universe_coverage(parameters),
+                )
+                return
+            if parsed.path == "/api/v1/cazatiburones/universe-activity":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=41)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.cazatiburones_universe_activity(parameters),
                 )
                 return
             if parsed.path == "/api/v1/cazatiburones/declared-activity":

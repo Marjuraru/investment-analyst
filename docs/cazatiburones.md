@@ -39,6 +39,10 @@ transacciones de insiders y cambios de propiedad beneficiaria, siempre con evide
 No se agregará todo en un "score de tiburones", no se reconstruirán operaciones inexistentes y no se
 presentará una publicación tardía como información conocida antes de su `available_at`.
 
+El índice universo-wide read-only de presencia, ausencia y frescura as-filed está documentado en
+[`cazatiburones_universe_activity.md`](cazatiburones_universe_activity.md). Mantiene `insider`,
+`beneficial` e `institutional` como familias independientes y no crea una señal ni un agregado.
+
 Para cripto se necesitará otro contrato: movimientos on-chain, concentración, treasury y flujos de
 exchanges tienen identidades y limitaciones distintas. Las etiquetas heurísticas de wallets nunca se
 tratarán como identidad institucional confirmada sin evidencia.
