@@ -181,6 +181,25 @@ def test_selector_candidates_are_identical_to_base_for_the_same_request(
     assert projected == baseline
 
 
+def test_point_in_time_selection_is_unchanged_by_the_projection(tmp_path, monkeypatch) -> None:
+    request = make_request()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        save_all(storage, complete_metrics())
+        original_list = storage.metric_results.list
+        unbounded_rows = tuple(original_list(asset_id=ASSET_ID))
+        monkeypatch.setattr(
+            storage.metric_results,
+            "list",
+            lambda **kwargs: list(unbounded_rows),
+        )
+        baseline = MarketDiagnosticMetricSelector(storage).select(request)
+
+        monkeypatch.setattr(storage.metric_results, "list", original_list)
+        projected = MarketDiagnosticMetricSelector(storage).select(request)
+
+    assert projected == baseline
+
+
 def test_selector_uses_latest_complete_as_of_without_mixing(tmp_path) -> None:
     older = complete_metrics(as_of=AS_OF - timedelta(days=1))
     latest_incomplete = complete_metrics(as_of=AS_OF)[:-1]

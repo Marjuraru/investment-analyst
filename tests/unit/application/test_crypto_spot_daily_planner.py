@@ -201,7 +201,7 @@ def test_crypto_spot_plan_is_identical_to_base_for_every_refresh_mode(
     )
 
 
-def test_crypto_spot_planner_still_refuses_to_infer_internal_gaps() -> None:
+def test_planner_still_refuses_to_infer_internal_gaps() -> None:
     plan = _plan(
         (
             datetime(2026, 7, 1, tzinfo=UTC),
