@@ -5054,7 +5054,9 @@ function renderMesaAnalyticalNews(payload) {
   const list = byId("mesa-news-analytical-list");
   const count = byId("mesa-news-analytical-count");
   const items = Array.isArray(payload.items) ? payload.items : [];
-  count.textContent = `${formatInteger(items.length)} desde el corte anterior`;
+  const total = Number.isInteger(payload.total) ? payload.total : items.length;
+  const pendingCount = Number.isInteger(payload.pending_count) ? payload.pending_count : 0;
+  count.textContent = `Bandeja: ${formatInteger(total)} · ${formatInteger(pendingCount)} sin acuse`;
   list.replaceChildren();
   if (items.length === 0) {
     list.append(createElement("p", "", "Sin candidatos nuevos de reglas analíticas."));
@@ -5087,6 +5089,78 @@ async function loadMesaAnalyticalNews() {
   } finally {
     if (sequence === mesaAnalyticalNewsRequestSequence) list.setAttribute("aria-busy", "false");
   }
+}
+
+let mesaInstitutionalNewsRequestSequence = 0;
+let mesaActivityNewsRequestSequence = 0;
+
+const MESA_CAZATIBURONES_STATUS_LABELS = Object.freeze({
+  pending: "Pendiente de acuse",
+  acknowledged: "Acusada",
+});
+
+function renderMesaCazatiburonesNews(family, payload) {
+  const list = byId(`mesa-news-${family}-list`);
+  const count = byId(`mesa-news-${family}-count`);
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  list.replaceChildren();
+  if (!payload.enabled) {
+    count.textContent = "Bandeja no configurada";
+    list.append(renderAbsenceMark("blocked", "Bloqueada", "La outbox no está configurada en el servicio"));
+    return;
+  }
+  const total = Number.isInteger(payload.total) ? payload.total : items.length;
+  const pendingCount = Number.isInteger(payload.pending_count) ? payload.pending_count : 0;
+  count.textContent = `Bandeja: ${formatInteger(total)} · ${formatInteger(pendingCount)} sin acuse`;
+  if (total === 0) {
+    list.append(createElement("p", "", "Sin novedades en esta bandeja."));
+    return;
+  }
+  if (payload.truncated) {
+    const returned = Number.isInteger(payload.returned) ? payload.returned : items.length;
+    list.append(createElement("p", "", `Se muestran ${formatInteger(returned)} de ${formatInteger(total)} novedades.`));
+  }
+  for (const view of items) {
+    const notification = view.item;
+    const item = createElement("article", "alert-inbox-item");
+    item.append(
+      createElement("strong", "", `${notification.rule_id} · ${notification.asset_id}`),
+      createElement("span", "alert-inbox-status", MESA_CAZATIBURONES_STATUS_LABELS[view.status] || view.status),
+      createElement("time", "", formatInstant(notification.created_at)),
+    );
+    list.append(item);
+  }
+}
+
+async function loadMesaCazatiburonesNews(family, request) {
+  const sequence = family === "institutional"
+    ? ++mesaInstitutionalNewsRequestSequence
+    : ++mesaActivityNewsRequestSequence;
+  const list = byId(`mesa-news-${family}-list`);
+  list.setAttribute("aria-busy", "true");
+  try {
+    const payload = await request();
+    if (sequence !== (family === "institutional" ? mesaInstitutionalNewsRequestSequence : mesaActivityNewsRequestSequence)) return;
+    renderMesaCazatiburonesNews(family, payload);
+  } catch (error) {
+    if (sequence !== (family === "institutional" ? mesaInstitutionalNewsRequestSequence : mesaActivityNewsRequestSequence)) return;
+    list.replaceChildren(
+      createElement("p", "", `No se pudieron consultar las novedades: ${error.message}`),
+    );
+  } finally {
+    if (sequence === (family === "institutional" ? mesaInstitutionalNewsRequestSequence : mesaActivityNewsRequestSequence)) {
+      list.setAttribute("aria-busy", "false");
+    }
+  }
+}
+
+function loadMesaCazatiburonesNewsFamilies() {
+  void loadMesaCazatiburonesNews("institutional", () =>
+    api("/api/v1/cazatiburones/notifications?family=institutional&limit=5"),
+  );
+  void loadMesaCazatiburonesNews("activity", () =>
+    api("/api/v1/cazatiburones/notifications?family=activity&limit=5"),
+  );
 }
 
 // UI-6: Mesa's "Qué está roto" layer. A read-only, five-row projection of
@@ -5983,6 +6057,7 @@ const BOARD_DEFERRED_LOADS = Object.freeze({
   mesa: Object.freeze([
     refreshOverview,
     loadMesaAnalyticalNews,
+    loadMesaCazatiburonesNewsFamilies,
     loadMesaIncidents,
     loadMesaUniverseCoverage,
   ]),
@@ -6015,6 +6090,8 @@ function invalidateDeferredBoardLoads() {
   fundamentalTrendRequestSequence += 1;
   fundamentalResearchRequestSequence += 1;
   cryptoDerivativesRequest += 1;
+  mesaInstitutionalNewsRequestSequence += 1;
+  mesaActivityNewsRequestSequence += 1;
   mesaUniverseCoverageRequestSequence += 1;
 }
 
