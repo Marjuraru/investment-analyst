@@ -1441,9 +1441,8 @@ def _check_no_new_capability_or_route_is_introduced_by_the_shell(app_js: str) ->
 # The exact route set app.js requested on the base this Work Block started
 # from (origin/main@4fc61c7ca3...), extracted the same way the check above
 # extracts the candidate's routes: every `/api/...` literal outside the
-# BOARD_REGISTRY declaration. UI-4 connects the cazatiburones board to the
-# three read paths already integrated by #159/#160 -- the only routes this
-# block is authorized to add, exactly once each.
+# BOARD_REGISTRY declaration. UI-7 adds the already-integrated, read-only
+# Cazatiburones notification inbox route; no transport or contract changes.
 _BASELINE_API_ROUTES = frozenset(
     {
         "/api/alerts",
@@ -1467,6 +1466,7 @@ _BASELINE_API_ROUTES = frozenset(
         "/api/v1/candidate-notifications/acknowledge",
         "/api/v1/cazatiburones/declared-activity",
         "/api/v1/cazatiburones/institutional-observations",
+        "/api/v1/cazatiburones/notifications",
         "/api/v1/crypto-derivatives",
         "/api/v1/market-comparison",
         "/api/v1/overview",
@@ -2044,6 +2044,7 @@ _BOARD_DEFERRED_LOADS_RE = re.compile(
 _DEFERRED_LOAD_NAMES = (
     "refreshOverview",
     "loadMesaAnalyticalNews",
+    "loadMesaCazatiburonesNewsFamilies",
     "loadMesaIncidents",
     "loadMesaUniverseCoverage",
     "queryReport",
@@ -2126,6 +2127,7 @@ def _check_board_to_deferred_loads_table_covers_the_six_registered_boards(app_js
         "mesa": [
             "refreshOverview",
             "loadMesaAnalyticalNews",
+            "loadMesaCazatiburonesNewsFamilies",
             "loadMesaIncidents",
             "loadMesaUniverseCoverage",
         ],
@@ -2421,22 +2423,49 @@ def test_analytical_rules_family_is_populated_from_candidate_notifications() -> 
     _check_analytical_rules_family_is_populated_from_candidate_notifications(INDEX_HTML, APP_JS)
 
 
-def _check_institutional_and_activity_families_declare_missing_read_path(
+def _check_institutional_and_activity_families_use_separate_notification_inboxes(
     index_html: str, app_js: str
 ) -> None:
     mesa = _mesa_slice(index_html)
-    for family_id, artifact in (
-        ("mesa-news-institutional", "cazatiburones_institutional_events_v1"),
-        ("mesa-news-activity", "cazatiburones_activity_events_v1"),
-    ):
+    for family in ("institutional", "activity"):
+        family_id = f"mesa-news-{family}"
         family_start = mesa.index(f'id="{family_id}"')
         family_end = mesa.index("</article>", family_start)
         family_markup = mesa[family_start:family_end]
-        assert 'class="absence-mark blocked"' in family_markup
-        assert artifact in family_markup
-        assert "mesa-news-count" not in family_markup, (
-            f"{family_id} must never carry its own count -- only reglas analíticas does"
-        )
+        assert 'class="absence-mark blocked"' not in family_markup
+        assert f'id="mesa-news-{family}-count"' in family_markup
+        assert f'id="mesa-news-{family}-list"' in family_markup
+        assert 'class="alert-inbox"' in family_markup
+        assert 'aria-live="polite"' in family_markup
+        assert 'aria-busy="false"' in family_markup
+
+    assert "loadMesaCazatiburonesNewsFamilies" in _board_deferred_load_entry(app_js, "mesa")
+    loader_body = _extract_js_function(app_js, "loadMesaCazatiburonesNewsFamilies")
+    assert 'loadMesaCazatiburonesNews("institutional", () =>' in loader_body
+    assert 'loadMesaCazatiburonesNews("activity", () =>' in loader_body
+    assert 'api("/api/v1/cazatiburones/notifications?family=institutional&limit=5")' in loader_body
+    assert 'api("/api/v1/cazatiburones/notifications?family=activity&limit=5")' in loader_body
+    load_body = _extract_js_function(app_js, "loadMesaCazatiburonesNews")
+    assert "const payload = await request();" in load_body
+    assert "mesaInstitutionalNewsRequestSequence" in app_js
+    assert "mesaActivityNewsRequestSequence" in app_js
+    render_body = _extract_js_function(app_js, "renderMesaCazatiburonesNews")
+    assert "byId(`mesa-news-${family}-list`)" in render_body
+    assert "byId(`mesa-news-${family}-count`)" in render_body
+    assert (
+        'renderAbsenceMark("blocked", "Bloqueada", "La outbox no está configurada en el servicio")'
+        in render_body
+    )
+    assert "Sin novedades en esta bandeja." in render_body
+    assert (
+        "Se muestran ${formatInteger(returned)} de ${formatInteger(total)} novedades."
+        in render_body
+    )
+    assert "MESA_CAZATIBURONES_STATUS_LABELS" in app_js
+    assert "notification.rule_id" in render_body
+    assert "notification.asset_id" in render_body
+    assert "notification.created_at" in render_body
+    assert "view.status" in render_body
     # Neither family is ever populated from a per-asset Cazatiburones endpoint
     # or from operational alerts inside the mesa deferred-load graph.
     mesa_loads = _board_deferred_load_entry(app_js, "mesa")
@@ -2444,13 +2473,42 @@ def _check_institutional_and_activity_families_declare_missing_read_path(
         assert forbidden not in mesa_loads
 
 
-def test_institutional_and_activity_families_declare_missing_read_path() -> None:
-    _check_institutional_and_activity_families_declare_missing_read_path(INDEX_HTML, APP_JS)
+def test_institutional_and_activity_families_use_separate_notification_inboxes() -> None:
+    _check_institutional_and_activity_families_use_separate_notification_inboxes(INDEX_HTML, APP_JS)
+
+
+def _check_mesa_news_counts_describe_inboxes_without_known_at_claim(
+    index_html: str, app_js: str
+) -> None:
+    mesa = _mesa_slice(index_html)
+    assert "desde el corte anterior" not in mesa.lower()
+    assert "no están acotadas por el corte" in mesa
+    for function_name in ("renderMesaAnalyticalNews", "renderMesaCazatiburonesNews"):
+        body = _extract_js_function(app_js, function_name)
+        assert "payload.total" in body
+        assert "payload.pending_count" in body
+        assert "desde el corte anterior" not in body.lower()
+
+
+def test_mesa_news_counts_describe_inboxes_without_known_at_claim() -> None:
+    _check_mesa_news_counts_describe_inboxes_without_known_at_claim(INDEX_HTML, APP_JS)
+
+
+def _check_mesa_news_is_read_only_without_cross_family_aggregation(app_js: str) -> None:
+    render_body = _extract_js_function(app_js, "renderMesaCazatiburonesNews")
+    load_body = _extract_js_function(app_js, "loadMesaCazatiburonesNews")
+    for forbidden in ("POST", "acknowledge", "transition"):
+        assert forbidden not in render_body
+        assert forbidden not in load_body
+
+
+def test_mesa_news_is_read_only_without_cross_family_aggregation() -> None:
+    _check_mesa_news_is_read_only_without_cross_family_aggregation(APP_JS)
 
 
 def _check_no_combined_news_family_count(index_html: str) -> None:
     mesa = _mesa_slice(index_html)
-    assert mesa.count('class="mesa-news-count"') == 1
+    assert mesa.count('class="mesa-news-count"') == 3
     for forbidden in ("mesa-news-total", "mesa-news-combined", "novedades-total"):
         assert forbidden not in mesa
 
@@ -2638,12 +2696,12 @@ def test_asset_preferences_panel_moved_to_sistema_and_absent_from_mesa() -> None
 def _check_design_system_documentation_declares_the_mesa_hierarchy(doc_text: str) -> None:
     normalized = re.sub(r"\s+", " ", doc_text).lower()
     for phrase in (
-        "novedades desde el corte anterior",
+        "novedades de las bandejas",
         "en qué confío",
         "qué está roto",
         "universo",
-        "cazatiburones_institutional_events_v1",
-        "cazatiburones_activity_events_v1",
+        "/api/v1/cazatiburones/notifications?family=institutional&limit=5",
+        "/api/v1/cazatiburones/notifications?family=activity&limit=5",
         "al día",
         "vencida",
         "365",
@@ -3263,7 +3321,7 @@ def test_every_new_rule_has_a_matching_probe() -> None:
         "test_probe_mesa_layer_order_rule_catches_a_reordered_layer",
         "test_probe_universe_layer_position_rule_catches_a_layer_after_universe",
         "test_probe_analytical_family_rule_catches_a_removed_candidate_notifications_call",
-        "test_probe_institutional_family_rule_catches_a_populated_family",
+        "test_probe_cazatiburones_families_rule_catches_a_static_blocked_mark",
         "test_probe_news_family_rule_catches_a_combined_count",
         "test_probe_universe_coverage_rule_catches_a_per_asset_parameter",
         "test_probe_mesa_news_incidents_rule_catches_a_per_asset_reference",
@@ -3339,20 +3397,17 @@ def test_probe_analytical_family_rule_catches_a_removed_candidate_notifications_
         )
 
 
-def test_probe_institutional_family_rule_catches_a_populated_family() -> None:
-    _check_institutional_and_activity_families_declare_missing_read_path(
+def test_probe_cazatiburones_families_rule_catches_a_static_blocked_mark() -> None:
+    _check_institutional_and_activity_families_use_separate_notification_inboxes(
         INDEX_HTML, APP_JS
     )  # baseline: clean
-    marker = 'class="absence-mark blocked"'
-    first_occurrence = INDEX_HTML.index(marker)
-    corrupted = (
-        INDEX_HTML[:first_occurrence]
-        + 'class="alert-inbox"'
-        + INDEX_HTML[first_occurrence + len(marker) :]
-    )
-    assert corrupted != INDEX_HTML
+    marker = 'id="mesa-news-institutional-list" class="alert-inbox"'
+    assert marker in INDEX_HTML
+    corrupted = INDEX_HTML.replace(marker, 'class="absence-mark blocked"', 1)
     with pytest.raises(AssertionError):
-        _check_institutional_and_activity_families_declare_missing_read_path(corrupted, APP_JS)
+        _check_institutional_and_activity_families_use_separate_notification_inboxes(
+            corrupted, APP_JS
+        )
 
 
 def test_probe_news_family_rule_catches_a_combined_count() -> None:
@@ -3363,6 +3418,101 @@ def test_probe_news_family_rule_catches_a_combined_count() -> None:
     assert corrupted != INDEX_HTML
     with pytest.raises(AssertionError):
         _check_no_combined_news_family_count(corrupted)
+
+
+def test_probe_cazatiburones_families_rule_catches_a_request_without_family() -> None:
+    _check_institutional_and_activity_families_use_separate_notification_inboxes(
+        INDEX_HTML, APP_JS
+    )  # baseline: clean
+    corrupted = APP_JS.replace("?family=institutional&limit=5", "?limit=5", 1)
+    assert corrupted != APP_JS
+    with pytest.raises(AssertionError):
+        _check_institutional_and_activity_families_use_separate_notification_inboxes(
+            INDEX_HTML, corrupted
+        )
+
+
+def test_probe_cazatiburones_families_rule_catches_cross_family_container() -> None:
+    _check_institutional_and_activity_families_use_separate_notification_inboxes(
+        INDEX_HTML, APP_JS
+    )  # baseline: clean
+    corrupted = APP_JS.replace("mesa-news-${family}-list", "mesa-news-activity-list", 1)
+    assert corrupted != APP_JS
+    with pytest.raises(AssertionError):
+        _check_institutional_and_activity_families_use_separate_notification_inboxes(
+            INDEX_HTML, corrupted
+        )
+
+
+def test_probe_cazatiburones_families_rule_catches_collapsed_disabled_and_empty_states() -> None:
+    _check_institutional_and_activity_families_use_separate_notification_inboxes(
+        INDEX_HTML, APP_JS
+    )  # baseline: clean
+    corrupted = APP_JS.replace(
+        'renderAbsenceMark("blocked", "Bloqueada", "La outbox no está configurada en el servicio")',
+        'createElement("p", "", "Sin novedades en esta bandeja.")',
+        1,
+    )
+    assert corrupted != APP_JS
+    with pytest.raises(AssertionError):
+        _check_institutional_and_activity_families_use_separate_notification_inboxes(
+            INDEX_HTML, corrupted
+        )
+
+
+def test_probe_cazatiburones_families_rule_catches_hidden_truncation() -> None:
+    _check_institutional_and_activity_families_use_separate_notification_inboxes(
+        INDEX_HTML, APP_JS
+    )  # baseline: clean
+    corrupted = APP_JS.replace(
+        "Se muestran ${formatInteger(returned)} de ${formatInteger(total)} novedades.",
+        "Novedades disponibles.",
+        1,
+    )
+    assert corrupted != APP_JS
+    with pytest.raises(AssertionError):
+        _check_institutional_and_activity_families_use_separate_notification_inboxes(
+            INDEX_HTML, corrupted
+        )
+
+
+def test_probe_mesa_news_count_rule_catches_known_at_claim() -> None:
+    _check_mesa_news_counts_describe_inboxes_without_known_at_claim(INDEX_HTML, APP_JS)  # clean
+    corrupted = APP_JS.replace(
+        "Bandeja: ${formatInteger(total)}",
+        "Desde el corte anterior: ${formatInteger(total)}",
+        1,
+    )
+    assert corrupted != APP_JS
+    with pytest.raises(AssertionError):
+        _check_mesa_news_counts_describe_inboxes_without_known_at_claim(INDEX_HTML, corrupted)
+
+
+def test_probe_mesa_news_read_only_rule_catches_an_acknowledge_action() -> None:
+    _check_mesa_news_is_read_only_without_cross_family_aggregation(APP_JS)  # clean
+    original = _extract_js_function(APP_JS, "renderMesaCazatiburonesNews")
+    corrupted_body = original.replace(
+        "list.append(item);",
+        'item.append(createElement("button", "", "acknowledge"));\n    list.append(item);',
+        1,
+    )
+    assert corrupted_body != original
+    corrupted = APP_JS.replace(original, corrupted_body, 1)
+    with pytest.raises(AssertionError):
+        _check_mesa_news_is_read_only_without_cross_family_aggregation(corrupted)
+
+
+def test_probe_board_registry_rule_catches_a_seventh_board() -> None:
+    _check_board_registry_declares_exactly_six_boards(APP_JS)  # clean
+    marker = '  { id: "sistema", label: "Sistema", icon: "gear", built: true },'
+    assert marker in APP_JS
+    corrupted = APP_JS.replace(
+        marker,
+        f'{marker}\n  {{ id: "extra", label: "Extra", icon: "gear", built: true }},',
+        1,
+    )
+    with pytest.raises(AssertionError):
+        _check_board_registry_declares_exactly_six_boards(corrupted)
 
 
 def test_probe_universe_coverage_rule_catches_a_per_asset_parameter() -> None:
@@ -3529,9 +3679,9 @@ def test_probe_mesa_hierarchy_documentation_rule_catches_a_missing_declaration()
     )
     design_doc = design_doc_path.read_text(encoding="utf-8")
     _check_design_system_documentation_declares_the_mesa_hierarchy(design_doc)  # baseline: clean
-    marker = "cazatiburones_institutional_events_v1"
+    marker = "/api/v1/cazatiburones/notifications?family=institutional&limit=5"
     assert marker in design_doc
-    corrupted = design_doc.replace(marker, "cazatiburones_institutional_removed", 1)
+    corrupted = design_doc.replace(marker, "/api/v1/cazatiburones/notifications?limit=5")
     assert corrupted != design_doc
     with pytest.raises(AssertionError):
         _check_design_system_documentation_declares_the_mesa_hierarchy(corrupted)

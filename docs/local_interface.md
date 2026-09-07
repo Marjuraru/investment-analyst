@@ -906,6 +906,13 @@ proyecta eventos y no escribe. Sin almacén configurado devuelve `enabled: false
 conteos cero. No expone acuse por HTTP: no existe `POST` para esta bandeja y el acuse sigue siendo
 un acto explícito de CLI.
 
+En `mesa`, la capa Novedades consulta esta ruta por separado para `family=institutional` y
+`family=activity`, ambas con `limit=5`, y las renderiza en listas y conteos distintos. Cada conteo
+declara `total` y `pending_count`; si la respuesta está truncada, la interfaz muestra `returned` de
+`total`. `enabled: false` se muestra como `blocked` por outbox no configurada, mientras que un
+`total` de cero declara explícitamente que no hay novedades. Estas bandejas no aceptan `known_at` y
+la interfaz declara de forma visible que no están acotadas por el corte global.
+
 ## Endpoint de lectura de la matriz de cobertura del universo
 
 `GET /api/v1/universe-coverage` es una cuarta ruta de solo lectura (`WorkspaceAccessMode.READ_ONLY`),

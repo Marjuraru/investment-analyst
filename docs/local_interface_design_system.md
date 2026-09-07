@@ -296,7 +296,7 @@ armazón compartidas y se resuelven antes de la primera carga diferida.
 
 | Tablero | Peticiones diferidas | Estados que puede mostrar |
 | --- | --- | --- |
-| `mesa` | `GET /api/v1/overview`, `GET /api/v1/candidate-notifications`, `GET /api/alerts?limit=5`, `GET /api/v1/universe-coverage` | vacío mientras no existe snapshot, cargando, ausente si no hay ejecución elegible, error operativo, snapshot disponible, o (universo) sin corte, cargando, error o matriz disponible |
+| `mesa` | `GET /api/v1/overview`, `GET /api/v1/candidate-notifications`, `GET /api/v1/cazatiburones/notifications?family=institutional&limit=5`, `GET /api/v1/cazatiburones/notifications?family=activity&limit=5`, `GET /api/alerts?limit=5`, `GET /api/v1/universe-coverage` | vacío mientras no existe snapshot, cargando, ausente si no hay ejecución elegible, error operativo, snapshot disponible; las tres bandejas declaran total y no acusados, y las dos Cazatiburones distinguen outbox bloqueada, sin novedades, truncación o error; el universo muestra sin corte, cargando, error o matriz disponible |
 | `activo` | `GET /api/listed-company-report`, `GET /api/market-chart` (o intradía), `GET /api/fundamental-trend`, `GET /api/fundamental-analysis` | vacío inicial, cargando por superficie, ausente según la gramática `missing`/`not-evaluable`, error vigente o evidencia disponible |
 | `tecnico` | ninguna | vacío de armazón; sus cargas pertenecen a bloques posteriores |
 | `revisar` | `GET /api/candidates?limit=50`, `GET /api/alerts?limit=50` | cargando, vacío sin elementos, error de bandeja o lista disponible |
@@ -328,34 +328,34 @@ aquí en vez de vivir sólo en una URL mutable:
 3. **Seis tableros, no nueve.** `UI-6` no crea, renombra ni elimina ningún tablero; `BOARD_REGISTRY`
    conserva sus seis entradas.
 
-#### Novedades: tres familias, una con camino de lectura real
+#### Novedades: tres familias con caminos de lectura separados
+
+La capa lleva el título visible **Novedades de las bandejas**: describe el contenido de las
+bandejas locales sin afirmar que esté filtrado por el corte global.
 
 La capa "qué cambió" separa tres bloques con procedencia y rótulo propios -- institucional 13F,
 actividad declarada y reglas analíticas -- sin conteo combinado ni orden entre ellos. Verificado
 sobre el código antes de escribir una sola línea de este bloque:
 
-- **Reglas analíticas** es la única de las tres con un camino de lectura universo-wide ya
-  integrado: `GET /api/v1/candidate-notifications` (`CandidateNotificationStore`, dominio
-  `AnalyticalScreeningDomain.MARKET`/`FUNDAMENTALS`). Mesa la consulta exactamente una vez por
-  activación y muestra su conteo y sus filas más recientes (`#mesa-news-analytical-count`,
-  `#mesa-news-analytical-list`).
-- **Institucional 13F** y **actividad declarada** existen como artefactos persistidos --
-  `cazatiburones_institutional_events_v1` y `cazatiburones_activity_events_v1`
-  (`CazatiburonesNotificationStore`, familias `institutional`/`activity`) -- pero sin transporte
-  HTTP universo-wide: sus únicos caminos HTTP son `/api/v1/cazatiburones/declared-activity` e
-  `/institutional-observations`, ambos por activo, y usarlos costaría 37 peticiones por familia
-  que este bloque prohíbe explícitamente. `mesa` declara esa ausencia con la marca `blocked` y su
-  motivo literal (`#mesa-news-institutional`, `#mesa-news-activity`); nunca la puebla con otra
-  fuente, con incidencias operativas o con una petición por activo, y nunca la oculta. Exponer ese
-  store por HTTP es trabajo de `BUILD_PRODUCT` en un Work Block propio, posterior a éste.
+- **Reglas analíticas** usa `GET /api/v1/candidate-notifications`; **institucional 13F** y
+  **actividad declarada** usan, respectivamente, `GET /api/v1/cazatiburones/notifications?family=institutional&limit=5`
+  y `GET /api/v1/cazatiburones/notifications?family=activity&limit=5`. Cada familia tiene contador,
+  lista y secuencia de petición propios: no se fusionan, ordenan ni suman entre sí, y ninguna lectura
+  es por activo.
+- Las tres familias expresan su bandeja con `total` y `pending_count`, no como novedades «desde el
+  corte anterior». Las dos bandejas Cazatiburones muestran `blocked` sólo si la outbox no está
+  configurada; si está habilitada y `total` es cero dicen «sin novedades», y si `truncated` es
+  verdadero muestran `returned` de `total`. Esas representaciones y un error de petición son
+  distintas. Ninguna de las tres bandejas está acotada por el `known_at` global, y la capa lo
+  declara de forma visible.
 - `GET /api/alerts` no es una cuarta familia de novedades: sirve `OperationalRuleId`
   (`operation.job_failed`, `job_interrupted`, `job_skipped`, `job_coverage_incomplete`), es decir,
   incidencias del scheduler. Pertenece a la capa "Qué está roto" (`#mesa-incidents-list`), no a
   "Novedades", y su renderizado en `mesa` es de solo lectura -- sin los botones de transición que
   sí tiene la bandeja interactiva de `revisar`.
 
-`loadMesaAnalyticalNews` y `loadMesaIncidents` no llevan `known_at` como parámetro de consulta --
-ambos endpoints devuelven estado local ya materializado, no una proyección point-in-time del
+`loadMesaAnalyticalNews`, `loadMesaCazatiburonesNewsFamilies` y `loadMesaIncidents` no llevan
+`known_at` como parámetro de consulta -- estas cargas devuelven estado local ya materializado, no una proyección point-in-time del
 corte -- así que `invalidateDeferredBoardLoads()` no necesita descartarlos por cambio de corte;
 `loadedBoardIds.clear()` ya fuerza su recarga la próxima vez que `mesa` se activa.
 
