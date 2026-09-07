@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -105,6 +105,12 @@ from investment_analyst.application.btc_intraday_models import (
 from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshRequest,
     BtcMarketRefreshSummary,
+)
+from investment_analyst.application.cazatiburones_universe_activity_models import (
+    CazatiburonesUniverseActivityAsset,
+    CazatiburonesUniverseActivityFamily,
+    CazatiburonesUniverseActivityRequest,
+    CazatiburonesUniverseActivityResult,
 )
 from investment_analyst.application.crypto_derivatives_models import CryptoDerivativesQueryRequest
 from investment_analyst.application.crypto_spot_daily_models import (
@@ -306,6 +312,9 @@ class _FakeApplication:
         self.universe_coverage_requests: list[UniverseCoverageRequest] = []
         self.universe_coverage_locations: list[StorageLocationRequest] = []
         self.universe_coverage_result: UniverseCoverageResult | None = None
+        self.universe_activity_requests: list[CazatiburonesUniverseActivityRequest] = []
+        self.universe_activity_locations: list[StorageLocationRequest] = []
+        self.universe_activity_result: CazatiburonesUniverseActivityResult | None = None
 
     def list_market_assets(self) -> MarketAssetUniverse:
         return InvestmentAnalystApplication.create_default().list_market_assets()
@@ -947,6 +956,20 @@ class _FakeApplication:
             total_statements=0,
             truncated=False,
         )
+
+    def query_cazatiburones_universe_activity(
+        self,
+        request: CazatiburonesUniverseActivityRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CazatiburonesUniverseActivityResult:
+        self.universe_activity_requests.append(request)
+        self.universe_activity_locations.append(location)
+        if "equity:us:unknown" in request.asset_ids:
+            raise ValueError("asset is not configured in the catalog")
+        if self.universe_activity_result is not None:
+            return self.universe_activity_result.model_copy(update={"request": request})
+        return _sample_universe_activity_result(request)
 
     def query_cazatiburones_institutional_observations(
         self,
@@ -4138,6 +4161,52 @@ def _sample_coverage_result(request: UniverseCoverageRequest) -> UniverseCoverag
     )
 
 
+def _sample_universe_activity_result(
+    request: CazatiburonesUniverseActivityRequest,
+) -> CazatiburonesUniverseActivityResult:
+    present = CazatiburonesUniverseActivityFamily(
+        capability=CoverageCapability.SUPPORTED,
+        evidence=EvidenceState.PRESENT,
+        statements=2,
+        latest_available_at=datetime(2026, 7, 15, tzinfo=UTC),
+        latest_age_days=1,
+    )
+    missing = CazatiburonesUniverseActivityFamily(
+        capability=CoverageCapability.SUPPORTED,
+        evidence=EvidenceState.MISSING,
+        statements=0,
+    )
+    not_configured = CazatiburonesUniverseActivityFamily(
+        capability=CoverageCapability.NOT_CONFIGURED,
+        evidence=EvidenceState.NOT_QUERIED,
+        statements=0,
+    )
+    aapl = CazatiburonesUniverseActivityAsset(
+        asset_id="equity:us:aapl",
+        symbol="AAPL",
+        name="Apple Inc.",
+        insider=present,
+        beneficial=missing,
+        institutional=not_configured,
+        limitations=("as-filed evidence only", "families remain independent"),
+    )
+    btc = CazatiburonesUniverseActivityAsset(
+        asset_id="crypto:btc-usd",
+        symbol="BTC-USD",
+        name="Bitcoin",
+        insider=not_configured,
+        beneficial=not_configured,
+        institutional=not_configured,
+        limitations=("as-filed evidence only", "families remain independent"),
+    )
+    return CazatiburonesUniverseActivityResult(
+        catalog_version=7,
+        catalog_sha256="c" * 64,
+        request=request,
+        assets=(btc, aapl),
+    )
+
+
 def _assert_no_float(value: object) -> None:
     """Recursively assert no field in a JSON-shaped payload is a bare Python float."""
     if isinstance(value, float):
@@ -4148,6 +4217,136 @@ def _assert_no_float(value: object) -> None:
     elif isinstance(value, (list, tuple)):
         for item in value:
             _assert_no_float(item)
+
+
+def test_endpoint_returns_the_contract_verbatim_and_separates_the_three_families(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    request = CazatiburonesUniverseActivityRequest(
+        known_at=datetime(2026, 7, 16, 15, 47, tzinfo=UTC),
+        asset_ids=("crypto:btc-usd", "equity:us:aapl"),
+    )
+    application.universe_activity_result = _sample_universe_activity_result(request)
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+
+    query = urlencode(
+        [
+            ("known_at", "2026-07-16T15:47:00Z"),
+            ("asset_id", "equity:us:aapl"),
+            ("asset_id", "crypto:btc-usd"),
+        ]
+    )
+    with _server(AaplLocalWebApplication(controller, None)) as (_, root):
+        status, payload, _ = _json_request(
+            Request(f"{root}/api/v1/cazatiburones/universe-activity?{query}")
+        )
+
+    assert status == 200
+    assert payload["schema_version"] == "cazatiburones-universe-activity-v1"
+    assets = cast(list[dict[str, object]], payload["assets"])
+    aapl = next(item for item in assets if item["asset_id"] == "equity:us:aapl")
+    assert set(aapl) == {
+        "asset_id",
+        "symbol",
+        "name",
+        "insider",
+        "beneficial",
+        "institutional",
+        "limitations",
+    }
+    assert aapl["insider"]["evidence"] == "present"
+    assert aapl["beneficial"]["evidence"] == "missing"
+    assert aapl["institutional"]["evidence"] == "not_queried"
+    for forbidden in ("total", "score", "verdict", "ranking", "recommendation"):
+        assert forbidden not in json.dumps(payload)
+    assert application.universe_activity_requests == [request]
+    assert application.universe_activity_locations == [
+        StorageLocationRequest(workspace=tmp_path / "workspace")
+    ]
+
+
+def test_endpoint_rejects_unsupported_parameters_missing_known_at_and_unknown_asset(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    with _server(web) as (_, root):
+        unsupported_status, unsupported, _ = _json_request(
+            Request(
+                f"{root}/api/v1/cazatiburones/universe-activity?"
+                f"{urlencode({'known_at': '2026-07-16T15:47:00Z', 'unsupported': 'x'})}"
+            )
+        )
+        missing_status, missing, _ = _json_request(
+            Request(f"{root}/api/v1/cazatiburones/universe-activity?asset_id=equity%3Aus%3Aaapl")
+        )
+        unknown_query = urlencode(
+            {"known_at": "2026-07-16T15:47:00Z", "asset_id": "equity:us:unknown"}
+        )
+        unknown_status, unknown, _ = _json_request(
+            Request(f"{root}/api/v1/cazatiburones/universe-activity?{unknown_query}")
+        )
+
+    assert unsupported_status == missing_status == unknown_status == 400
+    assert unsupported["error"]["code"] == "invalid_request"
+    assert missing["error"]["code"] == "invalid_request"
+    assert unknown["error"]["code"] == "invalid_request"
+
+
+def test_endpoint_serves_from_the_bounded_cache_and_invalidates_with_coverage(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    request = CazatiburonesUniverseActivityRequest(
+        known_at=datetime(2026, 7, 16, 15, 47, tzinfo=UTC)
+    )
+    query = "known_at=2026-07-16T15%3A47%3A00Z"
+
+    with _server(web) as (_, root):
+        first_status, _first, _ = _json_request(
+            Request(f"{root}/api/v1/cazatiburones/universe-activity?{query}")
+        )
+        second_status, _second, _ = _json_request(
+            Request(f"{root}/api/v1/cazatiburones/universe-activity?{query}")
+        )
+
+    assert first_status == second_status == 200
+    assert len(application.universe_activity_requests) == 1
+    controller.btc_market_refresh_request(
+        BtcMarketRefreshRequest(market_start=date(2026, 7, 1), market_end=date(2026, 7, 15))
+    )
+    controller.cazatiburones_universe_activity_request(request)
+    assert len(application.universe_activity_requests) == 2
+
+    for index in range(_MAX_READ_CACHE_ENTRIES):
+        controller.cazatiburones_universe_activity_request(
+            request.model_copy(update={"known_at": request.known_at + timedelta(hours=index + 1)})
+        )
+    controller.cazatiburones_universe_activity_request(request)
+    assert len(application.universe_activity_requests) == 2 + _MAX_READ_CACHE_ENTRIES + 1
 
 
 def test_universe_coverage_endpoint_reuses_contract_verbatim_and_separates_domains(

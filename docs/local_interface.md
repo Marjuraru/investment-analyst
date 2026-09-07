@@ -9,6 +9,13 @@ Trading API ni un LLM activo.
 
 `GET /api/v1/market-comparison` acepta `asset_id` repetido, `benchmark_id`, `start`, `end` y `known_at`. Devuelve `market-multi-asset-comparison-v1` desde almacenamiento local de solo lectura; la interfaz carga el gráfico normalizado bajo demanda.
 
+`GET /api/v1/cazatiburones/universe-activity` acepta `known_at` obligatorio y `asset_id` repetido
+opcional (hasta 40). Devuelve `cazatiburones-universe-activity-v1` desde almacenamiento local de
+solo lectura, con `insider`, `beneficial` e `institutional` separados por activo. El corte
+`known_at` excluye evidencia posterior a `available_at`; no hay conteo agregado, ranking, score ni
+recomendación. Si no se envía `asset_id`, se consultan los emisores corporativos configurados en
+SEC; un identificador desconocido falla cerrado.
+
 La página permite:
 
 - revisar el workspace, la última ejecución, la trazabilidad y la programación;

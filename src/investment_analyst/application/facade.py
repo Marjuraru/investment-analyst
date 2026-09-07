@@ -139,6 +139,13 @@ from investment_analyst.application.cazatiburones_declared_activity import (
 from investment_analyst.application.cazatiburones_institutional_observations import (
     CazatiburonesInstitutionalObservationsApplication,
 )
+from investment_analyst.application.cazatiburones_universe_activity import (
+    CazatiburonesUniverseActivityApplication,
+)
+from investment_analyst.application.cazatiburones_universe_activity_models import (
+    CazatiburonesUniverseActivityRequest,
+    CazatiburonesUniverseActivityResult,
+)
 from investment_analyst.application.crypto_derivatives import (
     CryptoDerivativesRefreshService,
 )
@@ -840,6 +847,15 @@ class InvestmentAnalystApplication:
     ) -> UniverseCoverageResult:
         """Execute a point-in-time universe coverage query."""
         return UniverseCoverageApplication(self._runtime).query(location, request)
+
+    def query_cazatiburones_universe_activity(
+        self,
+        request: CazatiburonesUniverseActivityRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CazatiburonesUniverseActivityResult:
+        """Execute a point-in-time universe activity query."""
+        return CazatiburonesUniverseActivityApplication(self._runtime).query(location, request)
 
     def query_cazatiburones_declared_activity(
         self,
