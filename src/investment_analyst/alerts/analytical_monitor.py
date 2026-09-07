@@ -163,11 +163,19 @@ class AnalyticalScreeningMonitor:
             return
         source_id = attempt.execution.source_ids[0]
         known_at = attempt.execution.effective_known_at
+        metric_keys = tuple(
+            sorted({condition.metric_key for rule in rules for condition in rule.conditions})
+        )
         with self._runtime.open_storage(
             StorageLocationRequest(workspace=self._workspace),
             access_mode=WorkspaceAccessMode.READ_ONLY,
         ) as storage:
-            metrics = tuple(storage.metric_results.list(asset_id=asset.asset_id))
+            metrics = tuple(
+                storage.metric_results.list(
+                    asset_id=asset.asset_id,
+                    metric_keys=metric_keys,
+                )
+            )
         computed_at = self._normalized_clock()
         if computed_at < known_at:
             computed_at = known_at

@@ -41,6 +41,7 @@ from investment_analyst.application.multi_asset_scheduler import (
 from investment_analyst.application.operational_state import AaplOperationalStateError
 from investment_analyst.application.runtime import ApplicationRuntime
 from investment_analyst.core.models import AssetClass, DataQuality, MetricResult
+from investment_analyst.storage.repositories import DuckDBMetricResultRepository
 from investment_analyst.workspace.models import WorkspaceAccessMode
 from investment_analyst.workspace.service import WorkspaceService
 
@@ -461,6 +462,68 @@ def test_monitor_reads_workspace_once_then_restart_replay_is_noop(tmp_path: Path
     assert len(state.results) == 1
     assert len(state.candidates) == 1
     assert len(state.receipts) == 1
+
+
+def test_monitor_bounds_query_to_compatible_rule_condition_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    workspace = service.initialize(tmp_path / "workspace").paths
+    known_at = datetime(2026, 7, 29, 12, tzinfo=UTC)
+    writer = service.open_storage(workspace, WorkspaceAccessMode.READ_WRITE)
+    try:
+        writer.metric_results.save(
+            _metric(
+                "1.8",
+                identifier=21,
+                as_of=datetime(2026, 7, 28, tzinfo=UTC),
+                known_at=known_at,
+            )
+        )
+    finally:
+        writer.close()
+    runtime = ApplicationRuntime.create_default(workspace_service=service)
+    store = AnalyticalScreeningStateStore(workspace.state_root / "analytical.json")
+    rule = INITIAL_MARKET_ACTIVITY_RULE.model_copy(update={"confirmations_required": 1})
+    attempt = _attempt(
+        attempt_id=UUID("30000000-0000-4000-8000-000000000021"),
+        known_at=known_at,
+    )
+    seen_metric_keys: list[tuple[str, ...] | None] = []
+    original_list = DuckDBMetricResultRepository.list
+
+    def tracked_list(
+        repository: DuckDBMetricResultRepository,
+        *,
+        asset_id: str | None = None,
+        metric_key: str | None = None,
+        metric_keys: tuple[str, ...] | None = None,
+        as_of_from: datetime | None = None,
+        as_of_to: datetime | None = None,
+    ) -> list[MetricResult]:
+        seen_metric_keys.append(metric_keys)
+        return original_list(
+            repository,
+            asset_id=asset_id,
+            metric_key=metric_key,
+            metric_keys=metric_keys,
+            as_of_from=as_of_from,
+            as_of_to=as_of_to,
+        )
+
+    monkeypatch.setattr(DuckDBMetricResultRepository, "list", tracked_list)
+    monitor = AnalyticalScreeningMonitor(
+        store,
+        runtime,
+        workspace.root,
+        (rule, INITIAL_QUARTERLY_FUNDAMENTAL_RULE),
+        clock=lambda: datetime(2026, 7, 29, 12, 3, tzinfo=UTC),
+    )
+
+    monitor(attempt)
+
+    assert seen_metric_keys == [("market.history.relative_volume",)]
 
 
 def test_monitor_resolves_versioned_rules_for_each_new_attempt(tmp_path: Path) -> None:
