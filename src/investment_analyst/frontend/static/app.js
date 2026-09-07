@@ -515,6 +515,12 @@ let cryptoDerivativesRequest = 0;
 let fundamentalBusyCount = 0;
 let reportPayload = null;
 let listedCompanyReportRequest = 0;
+let marketChartRequestSequence = 0;
+let fundamentalTrendRequestSequence = 0;
+let fundamentalResearchRequestSequence = 0;
+let activoBoardRequestSequence = 0;
+let boardDataReady = false;
+const loadedBoardIds = new Set();
 let chartSettings = { ...DEFAULT_CHART_SETTINGS, ...DEFAULT_SMA_COLORS };
 const chartSeriesVisibility = {
   "sma-5": true,
@@ -725,14 +731,11 @@ async function loadMarketAssets() {
       }
     }
 
-    const presentation = marketAssetPresentation();
-    if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();
-    await Promise.all([
-      queryMarketChart(),
-      ...(presentation.hasFundamentals
-        ? [queryFundamentalTrend(), queryFundamentalResearch(), queryReport()]
-        : []),
-    ]);
+    // The former asset-specific fan-out (`presentation.hasFundamentals`,
+    // `queryReport()`, and its companion queries) is intentionally centralized
+    // in the visible-board dispatcher below.
+    invalidateDeferredBoardLoads();
+    activateBoard(boardIdFromLocationHash(), { focus: false });
   }
 
   input.addEventListener("focus", openListbox);
@@ -1171,16 +1174,28 @@ async function queryCryptoDerivatives() {
     const range = cryptoDerivativesRange(knownAt);
     const parameters = new URLSearchParams({ asset_id: assetId, ...range, known_at: knownAt });
     const payload = await api(`/api/v1/crypto-derivatives?${parameters.toString()}`);
-    if (request !== cryptoDerivativesRequest || assetId !== selectedMarketAsset) return;
+    if (
+      request !== cryptoDerivativesRequest
+      || assetId !== selectedMarketAsset
+      || knownAt !== byId("report-known-at").value.trim()
+    ) return;
     cryptoDerivativesPayload = payload;
     renderCryptoDerivatives(payload);
   } catch (error) {
-    if (request !== cryptoDerivativesRequest || assetId !== selectedMarketAsset) return;
+    if (
+      request !== cryptoDerivativesRequest
+      || assetId !== selectedMarketAsset
+      || knownAt !== byId("report-known-at").value.trim()
+    ) return;
     cryptoDerivativesPayload = null;
     byId("crypto-derivatives-coverage").textContent = "No disponible";
     byId("crypto-derivatives-status").textContent = error.message;
   } finally {
-    if (request === cryptoDerivativesRequest && assetId === selectedMarketAsset) {
+    if (
+      request === cryptoDerivativesRequest
+      && assetId === selectedMarketAsset
+      && knownAt === byId("report-known-at").value.trim()
+    ) {
       content.setAttribute("aria-busy", "false");
     }
   }
@@ -2919,7 +2934,17 @@ function setChartBusy(busy) {
   }
 }
 
-async function queryMarketChart() {
+async function queryMarketChart(deferredRequest = null) {
+  const request = ++marketChartRequestSequence;
+  const assetId = deferredRequest?.assetId ?? selectedMarketAsset;
+  const knownAt = deferredRequest?.knownAt ?? byId("report-known-at").value.trim();
+  const isLatestRequest = () => request === marketChartRequestSequence;
+  const isCurrentRequest = () =>
+    isLatestRequest()
+    && assetId === selectedMarketAsset
+    && knownAt === byId("report-known-at").value.trim()
+    && (!deferredRequest || isCurrentActivoBoardRequest(deferredRequest));
+  if (!isCurrentRequest()) return;
   marketChartDrag = null;
   byId("market-chart").classList.remove("is-panning");
   setChartBusy(true);
@@ -2928,8 +2953,8 @@ async function queryMarketChart() {
   const requestedPeriod = marketChartPeriod();
   const intraday = isIntradayInterval();
   const parameters = new URLSearchParams({
-    asset_id: selectedMarketAsset,
-    known_at: byId("report-known-at").value.trim(),
+    asset_id: assetId,
+    known_at: knownAt,
     interval: chartSettings.interval,
   });
   if (!intraday) {
@@ -2944,8 +2969,10 @@ async function queryMarketChart() {
     const payload = await api(
       `${intraday ? "/api/market-intraday" : "/api/market-chart"}?${parameters.toString()}`,
     );
+    if (!isCurrentRequest()) return;
     renderMarketChart(intraday ? normalizeBtcIntradayChart(payload) : payload);
   } catch (error) {
+    if (!isCurrentRequest()) return;
     marketChartPayload = null;
     marketChartViewport = null;
     updateMarketChartZoomState();
@@ -2961,7 +2988,7 @@ async function queryMarketChart() {
     empty.classList.remove("hidden");
     byId("chart-status").textContent = "El gráfico no pudo construirse para el corte solicitado.";
   } finally {
-    setChartBusy(false);
+    if (isLatestRequest()) setChartBusy(false);
   }
 }
 
@@ -3627,18 +3654,32 @@ function selectFundamentalFrequency(frequency) {
   }
 }
 
-async function queryFundamentalTrend() {
+async function queryFundamentalTrend(deferredRequest = null) {
+  const request = ++fundamentalTrendRequestSequence;
+  const assetId = deferredRequest?.assetId ?? selectedMarketAsset;
+  const knownAt = deferredRequest?.knownAt ?? byId("report-known-at").value.trim();
+  const frequency = selectedFundamentalFrequency;
+  const isCurrentRequest = () =>
+    request === fundamentalTrendRequestSequence
+    && assetId === selectedMarketAsset
+    && knownAt === byId("report-known-at").value.trim()
+    && frequency === selectedFundamentalFrequency
+    && (!deferredRequest || isCurrentActivoBoardRequest(deferredRequest));
+  if (!isCurrentRequest()) return;
   setFundamentalBusy(true);
   setExportAvailable("export-fundamental-csv", false);
   byId("fundamental-status").textContent = "Consultando fundamentales locales…";
   const parameters = new URLSearchParams({
-    asset_id: selectedMarketAsset,
-    known_at: byId("report-known-at").value.trim(),
-    frequency: selectedFundamentalFrequency,
+    asset_id: assetId,
+    known_at: knownAt,
+    frequency,
   });
   try {
-    renderFundamentalTrend(await api(`/api/fundamental-trend?${parameters.toString()}`));
+    const payload = await api(`/api/fundamental-trend?${parameters.toString()}`);
+    if (!isCurrentRequest()) return;
+    renderFundamentalTrend(payload);
   } catch (error) {
+    if (!isCurrentRequest()) return;
     fundamentalTrendPayload = null;
     setExportAvailable("export-fundamental-csv", false);
     resetFundamentalTrend();
@@ -3653,19 +3694,31 @@ async function queryFundamentalTrend() {
   }
 }
 
-async function queryFundamentalResearch() {
+async function queryFundamentalResearch(deferredRequest = null) {
+  const request = ++fundamentalResearchRequestSequence;
+  const assetId = deferredRequest?.assetId ?? selectedMarketAsset;
+  const knownAt = deferredRequest?.knownAt ?? byId("report-known-at").value.trim();
+  const frequency = selectedFundamentalFrequency;
+  const isCurrentRequest = () =>
+    request === fundamentalResearchRequestSequence
+    && assetId === selectedMarketAsset
+    && knownAt === byId("report-known-at").value.trim()
+    && frequency === selectedFundamentalFrequency
+    && (!deferredRequest || isCurrentActivoBoardRequest(deferredRequest));
+  if (!isCurrentRequest()) return;
   setFundamentalBusy(true);
   setExportAvailable("export-fundamental-research-csv", false);
   const parameters = new URLSearchParams({
-    asset_id: selectedMarketAsset,
-    known_at: byId("report-known-at").value.trim(),
-    frequency: selectedFundamentalFrequency,
+    asset_id: assetId,
+    known_at: knownAt,
+    frequency,
   });
   try {
-    renderFundamentalResearch(
-      await api(`/api/fundamental-analysis?${parameters.toString()}`),
-    );
+    const payload = await api(`/api/fundamental-analysis?${parameters.toString()}`);
+    if (!isCurrentRequest()) return;
+    renderFundamentalResearch(payload);
   } catch (error) {
+    if (!isCurrentRequest()) return;
     fundamentalResearchPayload = null;
     setExportAvailable("export-fundamental-research-csv", false);
     resetFundamentalResearch();
@@ -5211,12 +5264,9 @@ byId("run-form").addEventListener("submit", async (event) => {
         + `${formatInteger(summary.metric_results_created)} métricas nuevas.${intradayText} `
         + `${fundamentalText} Trazabilidad verificada.`,
       );
-      await Promise.all([
-        queryMarketChart(),
-        ...(presentation.hasFundamentals
-          ? [queryFundamentalTrend(), queryFundamentalResearch()]
-          : []),
-      ]);
+      resetListedCompanyReport();
+      invalidateDeferredBoardLoads();
+      activateBoard(boardIdFromLocationHash(), { focus: false });
   } catch (error) {
     setMessage(error.message, true);
   } finally {
@@ -5225,21 +5275,30 @@ byId("run-form").addEventListener("submit", async (event) => {
 });
 
 async function queryReport() {
+  const deferredRequest = arguments[0] || null;
   const button = byId("report-button");
   const reportArea = byId("report-area");
-  const assetId = selectedMarketAsset;
+  const assetId = deferredRequest?.assetId ?? selectedMarketAsset;
+  const knownAt = deferredRequest?.knownAt ?? byId("report-known-at").value.trim();
+  if (deferredRequest && !isCurrentActivoBoardRequest(deferredRequest)) return;
   const presentation = marketAssets[assetId];
   if (!presentation?.hasFundamentals) {
     resetListedCompanyReport();
     return;
   }
   const request = ++listedCompanyReportRequest;
+  const isLatestRequest = () => request === listedCompanyReportRequest;
+  const isCurrentRequest = () =>
+    isLatestRequest()
+    && assetId === selectedMarketAsset
+    && knownAt === byId("report-known-at").value.trim()
+    && (!deferredRequest || isCurrentActivoBoardRequest(deferredRequest));
   reportPayload = null;
   setExportAvailable("export-report-json", false);
   setButtonBusy(button, true, "Consultando…", "Consultar análisis");
   reportArea.setAttribute("aria-busy", "true");
   const parameters = new URLSearchParams({
-    known_at: byId("report-known-at").value.trim(),
+    known_at: knownAt,
     fundamental_frequency: byId("report-frequency").value,
   });
   if (byId("market-as-of").value) parameters.set("market_as_of", byId("market-as-of").value);
@@ -5252,15 +5311,17 @@ async function queryReport() {
     if (
       request !== listedCompanyReportRequest
       || assetId !== selectedMarketAsset
+      || knownAt !== byId("report-known-at").value.trim()
+      || (deferredRequest && !isCurrentActivoBoardRequest(deferredRequest))
       || report?.asset?.asset_id !== assetId
     ) return;
     renderReport(report);
     setMessage(operationalIssues.join(" · "), operationalIssues.length > 0);
   } catch (error) {
-    if (request !== listedCompanyReportRequest || assetId !== selectedMarketAsset) return;
+    if (!isCurrentRequest()) return;
     setMessage(error.message, true);
   } finally {
-    if (request === listedCompanyReportRequest && assetId === selectedMarketAsset) {
+    if (isCurrentRequest()) {
       reportArea.setAttribute("aria-busy", "false");
       setButtonBusy(button, false, "Consultando…", "Consultar análisis");
     }
@@ -5468,11 +5529,13 @@ byId("crypto-derivatives-panel").addEventListener("toggle", (event) => {
 });
 
 byId("report-known-at").addEventListener("change", () => {
+  resetListedCompanyReport();
+  invalidateDeferredBoardLoads();
   if (marketAssetPresentation().supportsCryptoDerivatives && byId("crypto-derivatives-panel").open) {
     cryptoDerivativesPayload = null;
     void queryCryptoDerivatives();
   }
-  if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();
+  activateBoard(boardIdFromLocationHash(), { focus: false });
 });
 
 function populateMarketComparisonAssets() {
@@ -5677,7 +5740,58 @@ const BOARD_REGISTRY = Object.freeze([
   { id: "sistema", label: "Sistema", icon: "gear", built: true },
 ]);
 
+// UI-5: the only board-to-request graph. Function references keep the
+// declared graph and the activation dispatcher together without introducing
+// another endpoint, parameter or transport contract.
+const BOARD_DEFERRED_LOADS = Object.freeze({
+  mesa: Object.freeze([refreshOverview]),
+  activo: Object.freeze([
+    queryReport,
+    queryMarketChart,
+    queryFundamentalTrend,
+    queryFundamentalResearch,
+  ]),
+  tecnico: Object.freeze([]),
+  revisar: Object.freeze([loadCandidateInbox, loadAlertInbox]),
+  cazatiburones: Object.freeze([loadCazatiburonesBoard]),
+  sistema: Object.freeze([]),
+});
+
 const DEFAULT_BOARD_ID = BOARD_REGISTRY[0].id;
+
+function isCurrentActivoBoardRequest(deferredRequest) {
+  return (
+    deferredRequest.sequence === activoBoardRequestSequence
+    && deferredRequest.assetId === selectedMarketAsset
+    && deferredRequest.knownAt === byId("report-known-at").value.trim()
+  );
+}
+
+function invalidateDeferredBoardLoads() {
+  loadedBoardIds.clear();
+  activoBoardRequestSequence += 1;
+  marketChartRequestSequence += 1;
+  fundamentalTrendRequestSequence += 1;
+  fundamentalResearchRequestSequence += 1;
+  cryptoDerivativesRequest += 1;
+}
+
+function loadDeferredBoardData(boardId) {
+  if (!boardDataReady || loadedBoardIds.has(boardId)) return;
+  const loaders = BOARD_DEFERRED_LOADS[boardId];
+  if (!loaders) return;
+  loadedBoardIds.add(boardId);
+  if (boardId === "activo") {
+    const deferredRequest = Object.freeze({
+      sequence: ++activoBoardRequestSequence,
+      assetId: selectedMarketAsset,
+      knownAt: byId("report-known-at").value.trim(),
+    });
+    for (const load of loaders) void load(deferredRequest);
+    return;
+  }
+  for (const load of loaders) void load();
+}
 
 // Feather-style stroke icon paths, one per BOARD_REGISTRY.icon value. "grid"
 // and "gear" are copied verbatim from the pre-existing Resumen/Operación
@@ -5742,12 +5856,9 @@ function renderNotBuiltBoards() {
 }
 
 // activateBoard() only ever touches [hidden] on each .board and the
-// board-nav-link active/aria-current pair -- it never reads or writes the
-// known_at cut, the session clock, or fires any query for a board that
-// merely becomes visible. "revisar" is the sole exception: its two
-// promoted panels lost their <details> toggle event, so their deferred
-// load now fires from here instead, once per activation, exactly like the
-// toggle it replaces.
+// board-nav-link active/aria-current pair. The single dispatcher below reads
+// the board-to-request graph, while this function itself never reads or
+// writes the known_at cut, the session clock, or a query parameter.
 function activateBoard(boardId, { focus = true } = {}) {
   const resolvedId = isKnownBoardId(boardId) ? boardId : DEFAULT_BOARD_ID;
   for (const board of BOARD_REGISTRY) {
@@ -5765,13 +5876,7 @@ function activateBoard(boardId, { focus = true } = {}) {
   }
   const activeSection = byId(`board-${resolvedId}`);
   if (focus && activeSection) activeSection.focus({ preventScroll: true });
-  if (resolvedId === "revisar") {
-    void loadCandidateInbox();
-    void loadAlertInbox();
-  }
-  if (resolvedId === "cazatiburones") {
-    void loadCazatiburonesBoard();
-  }
+  if (boardDataReady) loadDeferredBoardData(resolvedId);
 }
 
 function initializeBoardShell() {
@@ -6008,12 +6113,20 @@ async function loadCazatiburonesBoard() {
       api(`/api/v1/cazatiburones/institutional-observations?${observationParameters.toString()}`),
       api(`/api/v1/sec-document-timeline?${timelineParameters.toString()}`),
     ]);
-    if (sequence !== cazatiburonesRequestSequence || assetId !== selectedMarketAsset) return;
+    if (
+      sequence !== cazatiburonesRequestSequence
+      || assetId !== selectedMarketAsset
+      || knownAt !== byId("report-known-at").value.trim()
+    ) return;
     renderCazatiburonesDeclaredActivity(declaredActivity);
     renderCazatiburonesInstitutionalObservations(institutionalObservations, offset, limit);
     renderCazatiburonesDocumentTimeline(documentTimeline);
   } catch (error) {
-    if (sequence !== cazatiburonesRequestSequence || assetId !== selectedMarketAsset) return;
+    if (
+      sequence !== cazatiburonesRequestSequence
+      || assetId !== selectedMarketAsset
+      || knownAt !== byId("report-known-at").value.trim()
+    ) return;
     byId("cazatiburones-declared-activity-summary").textContent = error.message;
     byId("cazatiburones-institutional-observations-summary").textContent = error.message;
     byId("cazatiburones-document-timeline-summary").textContent = error.message;
@@ -6028,20 +6141,18 @@ async function initialize() {
   await loadAssetPreferences();
   initializeChartSettings();
   applySelectedMarketAsset();
-  // A deep link straight into #cazatiburones activates the board (and fires
-  // its load) before marketAssets exists, so the eligibility check above
-  // always misreads it as ineligible. Re-run the load now that
-  // loadMarketAssets()/applySelectedMarketAsset() have populated it.
-  if (cazatiburonesBoardIsActive()) void loadCazatiburonesBoard();
+  boardDataReady = true;
+  // A deep link straight into #cazatiburones activates the board before
+  // marketAssets exists. Re-run its existing load now that the catalog and
+  // selected asset are ready; every other board uses the same deferred graph.
+  if (cazatiburonesBoardIsActive()) {
+    loadedBoardIds.add("cazatiburones");
+    void loadCazatiburonesBoard();
+  } else {
+    loadDeferredBoardData(boardIdFromLocationHash());
+  }
   populateMarketComparisonAssets();
   startMarketClocks();
-  await refreshOverview();
-  await Promise.all([
-    queryReport(),
-    queryMarketChart(),
-    queryFundamentalTrend(),
-    queryFundamentalResearch(),
-  ]);
 }
 
 initialize();

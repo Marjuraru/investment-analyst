@@ -286,6 +286,31 @@ individual (`declared_nature`, `security_title`, `table`, `event_date`,
 `report_date`) se presenta como `missing`, nunca como un guion sin
 significado.
 
+### Carga por activación y estados (`UI-5`)
+
+El armazón conserva una única matriz tablero→peticiones. `activateBoard()`
+resuelve el tablero, fija su visibilidad con `hidden` y dispara sólo la fila
+visible; una marca en memoria por sesión evita repetir una carga al volver al
+mismo tablero. `loadMarketAssets()` y `loadAssetPreferences()` son cargas de
+armazón compartidas y se resuelven antes de la primera carga diferida.
+
+| Tablero | Peticiones diferidas | Estados que puede mostrar |
+| --- | --- | --- |
+| `mesa` | `GET /api/v1/overview` | vacío mientras no existe snapshot, cargando, ausente si no hay ejecución elegible, error operativo o snapshot disponible |
+| `activo` | `GET /api/listed-company-report`, `GET /api/market-chart` (o intradía), `GET /api/fundamental-trend`, `GET /api/fundamental-analysis` | vacío inicial, cargando por superficie, ausente según la gramática `missing`/`not-evaluable`, error vigente o evidencia disponible |
+| `tecnico` | ninguna | vacío de armazón; sus cargas pertenecen a bloques posteriores |
+| `revisar` | `GET /api/candidates?limit=50`, `GET /api/alerts?limit=50` | cargando, vacío sin elementos, error de bandeja o lista disponible |
+| `cazatiburones` | `GET /api/v1/cazatiburones/declared-activity`, `GET /api/v1/cazatiburones/institutional-observations`, `GET /api/v1/sec-document-timeline` | cargando, `not-applicable` para un activo sin corpus corporativo, ausente bajo el corte, error vigente o lectura disponible |
+| `sistema` | ninguna | vacío de armazón; la operación permanece bajo demanda |
+
+El activo seleccionado y el único `known_at` global son parte de la identidad
+de cada carga de `activo`. Cambiar cualquiera invalida las marcas de cargado y
+vuelve a pedir sólo el tablero visible. Cada carga de `activo` comparte una
+secuencia de activación y comprueba esa secuencia, el activo y el corte antes
+de pintar o aplicar su estado de error; una respuesta superada se descarta en
+silencio. La invalidación no crea persistencia entre recargas, un segundo
+reloj, un segundo selector ni un corte por tablero.
+
 ### Rejilla y densidad del lienzo, ahora en tokens
 
 `--canvas-gutter`, `--canvas-row-gap`, `--canvas-block-gap` y

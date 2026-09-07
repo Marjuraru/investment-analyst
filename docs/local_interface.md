@@ -68,6 +68,30 @@ La página permite:
 Mercado y fundamentales se muestran en tarjetas separadas. La interfaz no calcula ni muestra un
 veredicto, confianza, calidad, recomendación o ranking combinado.
 
+## Carga por activación de tablero (`UI-5`)
+
+La carga inicial conserva únicamente el catálogo de activos y las preferencias
+necesarias para resolver el armazón. Después de que `activateBoard()` resuelve
+el hash y fija `[hidden]`, una matriz única dispara las peticiones del tablero
+visible:
+
+- `mesa` carga el snapshot operativo;
+- `activo` carga el reporte, el gráfico de mercado y las dos lecturas fundamentales;
+- `tecnico` y `sistema` no hacen peticiones en este bloque;
+- `revisar` carga las bandejas de candidatos y alertas;
+- `cazatiburones` carga sus tres lecturas SEC/13F de solo lectura.
+
+Cada tablero se marca como cargado en memoria una sola vez por sesión de
+página. Cambiar el activo seleccionado o el único corte `known_at` global
+borra esas marcas y vuelve a cargar sólo el tablero que permanece visible; no
+se crea un segundo reloj, selector o corte por tablero. La carga de `activo`
+captura la secuencia, el activo y el corte al iniciar. Antes de pintar o
+mostrar un error, cada respuesta comprueba que los tres siguen vigentes; una
+respuesta superada se descarta sin tocar el estado renderizado. Los estados
+vacío, cargando, ausente y error conservan la gramática y los mensajes
+existentes, y una respuesta vigente mantiene su marca de ausencia cuando no
+hay evidencia elegible.
+
 ## Estado operativo automático
 
 Las celdas operativas que se actualizan cada 30 segundos consultan
