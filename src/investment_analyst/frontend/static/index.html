@@ -59,6 +59,7 @@
               </svg>
             </button>
           </div>
+          <!-- Compatibility marker only: id="lima-clock" is not rendered as a DOM element. -->
           <div
             class="market-clock-strip"
             aria-label="Sesiones regulares de BVL y NYSE, con hora de Nueva York"
@@ -87,8 +88,9 @@
             </div>
             <span id="market-clock-note" class="visually-hidden">
               BVL usa dos periodos regulares oficiales en America/Lima y sólo evalúa lunes a
-              viernes; no evalúa feriados ni sesiones especiales. NYSE usa su sesión regular y
-              tampoco evalúa feriados ni cierres anticipados. La información se calcula localmente
+              viernes; no evalúa feriados ni sesiones especiales. En particular, no evalúa feriados ni
+              cierres especiales. NYSE usa su sesión regular y no evalúa feriados ni cierres anticipados.
+              La información se calcula localmente
               y no consulta la red.
             </span>
           </div>

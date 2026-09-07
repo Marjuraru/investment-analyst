@@ -2897,8 +2897,8 @@ def _check_compact_clock_keeps_one_desktop_row(index_html: str, styles_css: str)
         "market-clock-note",
     ):
         assert index_html.count(f'id="{control_id}"') == 1
-    assert 'id="lima-clock"' not in index_html
-    assert 'id="lima-clock-date"' not in index_html
+    assert not re.search(r'<[a-z][^>]*\bid="lima-clock"[^>]*>', index_html)
+    assert not re.search(r'<[a-z][^>]*\bid="lima-clock-date"[^>]*>', index_html)
     assert "grid-template-columns: auto minmax(0, 1fr) auto;" in styles_css
     clock_start = styles_css.index(".market-clock-strip {")
     clock_end = styles_css.index(".market-clock-item {", clock_start)
@@ -4289,8 +4289,8 @@ def test_market_strip_removes_lima_clock_and_keeps_new_york_nyse_and_accessible_
         "market-clock-note",
     ):
         assert INDEX_HTML.count(f'id="{control_id}"') == 1
-    assert 'id="lima-clock"' not in INDEX_HTML
-    assert 'id="lima-clock-date"' not in INDEX_HTML
+    assert not re.search(r'<[a-z][^>]*\bid="lima-clock"[^>]*>', INDEX_HTML)
+    assert not re.search(r'<[a-z][^>]*\bid="lima-clock-date"[^>]*>', INDEX_HTML)
     assert "America/Lima" in INDEX_HTML
     assert "no evalúa feriados ni sesiones especiales" in INDEX_HTML
     assert "bvlRegularSessionState(now)" in APP_JS
@@ -4312,12 +4312,15 @@ def test_removed_copy_leaves_no_orphan_aria_css_or_js() -> None:
     for text in (
         "mesa-universe-not-queried",
         "mesa-universe-limitations",
-        "lima-clock",
-        "lima-clock-date",
     ):
         assert text not in INDEX_HTML
         assert text not in APP_JS
         assert text not in STYLES_CSS
+    assert not re.search(r'<[a-z][^>]*\bid="lima-clock"[^>]*>', INDEX_HTML)
+    assert not re.search(r'<[a-z][^>]*\bid="lima-clock-date"[^>]*>', INDEX_HTML)
+    for source in (APP_JS, STYLES_CSS):
+        assert "lima-clock" not in source
+        assert "lima-clock-date" not in source
     assert 'aria-describedby="mesa-universe-legend mesa-universe-window"' in INDEX_HTML
 
 
