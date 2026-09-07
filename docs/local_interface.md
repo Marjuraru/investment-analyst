@@ -75,6 +75,21 @@ La página permite:
 Mercado y fundamentales se muestran en tarjetas separadas. La interfaz no calcula ni muestra un
 veredicto, confianza, calidad, recomendación o ranking combinado.
 
+## Marco global y subpestañas de activo (`UI-8`)
+
+La cabecera global mantiene identidad de la aplicación, corte `known_at`, reloj de mercado, salud,
+tema y verificación. El nombre, símbolo, cotización, clasificación y selector del activo dejan de
+formar parte de esa cabecera: una única barra de alcance los muestra sólo en `activo`, `tecnico` y
+`cazatiburones`. `mesa`, `revisar` y `sistema` no reciben ese contexto. El lateral contiene una sola
+navegación, `#board-nav`.
+
+Dentro de `activo`, Mercado, Derivados, Fundamentales, Valoración y Análisis son botones con roles
+`tab`/`tablist`. La selección no cambia el fragmento de URL ni reactiva la ruta del tablero; conserva
+un único panel visible mediante `hidden`, respeta las capacidades declaradas por activo y retorna a
+Mercado si la pestaña vigente deja de aplicar. El panel de valoración continúa cargándose bajo demanda
+en la primera activación. La composición sólo reorganiza presentación y foco: no añade peticiones,
+contratos, cálculos, proveedores ni escrituras.
+
 ## Carga por activación de tablero (`UI-5`)
 
 La carga inicial conserva únicamente el catálogo de activos y las preferencias

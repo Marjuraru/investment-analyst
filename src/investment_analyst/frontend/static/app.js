@@ -712,24 +712,12 @@ async function loadMarketAssets() {
     marketChartDrag = null;
     resetValuation();
     resetCryptoDerivatives();
+    // An asset switch starts at the market surface, as the former sidebar
+    // navigation did; capability changes still use the same deterministic
+    // fallback in selectAssetSubtab().
+    activeAssetSubtabId = "mercado";
     applySelectedMarketAsset();
     applyChartSettings();
-    const activeFundamentalLink = document.querySelector(
-      (
-        ".nav-link.active[data-fundamental-only], "
-        + ".nav-link.active[data-valuation-only], "
-        + ".nav-link.active[data-complete-analysis-only]"
-      ),
-    );
-    if (activeFundamentalLink) {
-      activeFundamentalLink.classList.remove("active");
-      activeFundamentalLink.removeAttribute("aria-current");
-      const marketLink = document.querySelector('.nav-link[href="#mercado"]');
-      if (marketLink) {
-        marketLink.classList.add("active");
-        marketLink.setAttribute("aria-current", "page");
-      }
-    }
 
     // The former asset-specific fan-out (`presentation.hasFundamentals`,
     // `queryReport()`, and its companion queries) is intentionally centralized
@@ -956,6 +944,72 @@ function marketChartPeriodLabel(period) {
   return MARKET_CHART_PERIOD_LABELS[period] || "Rango consultado";
 }
 
+const ASSET_SCOPE_BOARD_IDS = new Set(["activo", "tecnico", "cazatiburones"]);
+let activeAssetSubtabId = "mercado";
+
+function assetSubtabButtons() {
+  return [...document.querySelectorAll(".asset-subtab")];
+}
+
+function assetSubtabIsAvailable(button) {
+  return Boolean(button) && !button.classList.contains("hidden") && !button.disabled;
+}
+
+function selectAssetSubtab(requestedId) {
+  const buttons = assetSubtabButtons();
+  const marketButton = buttons.find((button) => button.dataset.assetSubtab === "mercado");
+  const requestedButton = buttons.find((button) => button.dataset.assetSubtab === requestedId);
+  const selectedButton = assetSubtabIsAvailable(requestedButton)
+    ? requestedButton
+    : marketButton;
+  if (!selectedButton) return;
+
+  activeAssetSubtabId = selectedButton.dataset.assetSubtab;
+  for (const button of buttons) {
+    const selected = button === selectedButton;
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+    const section = byId(button.getAttribute("aria-controls"));
+    if (section) section.hidden = !selected;
+  }
+}
+
+function renderAssetScopeForBoard(boardId) {
+  const scopeBar = byId("asset-scope-bar");
+  const shouldShow = ASSET_SCOPE_BOARD_IDS.has(boardId);
+  scopeBar.hidden = !shouldShow;
+  if (!shouldShow) return;
+
+  const activeBoard = byId(`board-${boardId}`);
+  if (activeBoard) activeBoard.prepend(scopeBar);
+  const subtabs = byId("asset-subtabs");
+  subtabs.hidden = boardId !== "activo";
+  if (boardId === "activo") selectAssetSubtab(activeAssetSubtabId);
+}
+
+function initializeAssetSubtabs() {
+  const buttons = assetSubtabButtons();
+  for (const button of buttons) {
+    button.addEventListener("click", () => {
+      selectAssetSubtab(button.dataset.assetSubtab);
+    });
+    button.addEventListener("keydown", (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const available = buttons.filter(assetSubtabIsAvailable);
+      const currentIndex = available.indexOf(button);
+      const nextIndex = event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? available.length - 1
+          : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + available.length) % available.length;
+      const next = available[nextIndex];
+      selectAssetSubtab(next.dataset.assetSubtab);
+      next.focus();
+    });
+  }
+}
+
 function applySelectedMarketAsset() {
   const presentation = marketAssetPresentation();
   if (!presentation.intradaySourceId && BTC_INTRADAY_INTERVAL_VALUES.has(chartSettings.interval)) {
@@ -1010,6 +1064,7 @@ function applySelectedMarketAsset() {
   for (const element of document.querySelectorAll("[data-crypto-derivatives-only]")) {
     element.classList.toggle("hidden", !presentation.supportsCryptoDerivatives);
   }
+  selectAssetSubtab(activeAssetSubtabId);
   const supportedFrequencies = new Set(presentation.fundamentalFrequencies);
   if (
     presentation.hasFundamentals
@@ -5808,19 +5863,7 @@ for (const button of document.querySelectorAll(".frequency-button")) {
   });
 }
 
-// Board-nav-links (the six-board switcher) are excluded here: they carry
-// their own independent active/aria-current tracking in activateBoard(),
-// separate from this pre-existing cosmetic exclusivity group shared by the
-// sidebar's asset-nav sub-tabs.
-for (const link of document.querySelectorAll(".nav-link:not(.board-nav-link)")) {
-  link.addEventListener("click", () => {
-    for (const candidate of document.querySelectorAll(".nav-link:not(.board-nav-link)")) {
-      candidate.classList.toggle("active", candidate === link);
-      if (candidate === link) candidate.setAttribute("aria-current", "page");
-      else candidate.removeAttribute("aria-current");
-    }
-  });
-}
+initializeAssetSubtabs();
 
 byId("valuation-nav-link").addEventListener("click", () => {
   if (valuationPayload === null) void queryValuation();
@@ -6174,10 +6217,9 @@ function renderNotBuiltBoards() {
   }
 }
 
-// activateBoard() only ever touches [hidden] on each .board and the
-// board-nav-link active/aria-current pair. The single dispatcher below reads
-// the board-to-request graph, while this function itself never reads or
-// writes the known_at cut, the session clock, or a query parameter.
+// activateBoard() owns board visibility, board-nav state and placement of
+// the one asset scope bar. The tab selector itself neither mutates the
+// location hash nor dispatches a board activation.
 function activateBoard(boardId, { focus = true } = {}) {
   const resolvedId = isKnownBoardId(boardId) ? boardId : DEFAULT_BOARD_ID;
   for (const board of BOARD_REGISTRY) {
@@ -6190,6 +6232,7 @@ function activateBoard(boardId, { focus = true } = {}) {
     if (isActive) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
+  renderAssetScopeForBoard(resolvedId);
   if (window.location.hash.replace(/^#/, "") !== resolvedId) {
     history.replaceState(null, "", `#${resolvedId}`);
   }

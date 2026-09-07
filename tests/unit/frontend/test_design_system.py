@@ -3685,3 +3685,195 @@ def test_probe_mesa_hierarchy_documentation_rule_catches_a_missing_declaration()
     assert corrupted != design_doc
     with pytest.raises(AssertionError):
         _check_design_system_documentation_declares_the_mesa_hierarchy(corrupted)
+
+
+# ---------------------------------------------------------------------------
+# Asset scope and sub-tabs (UI-8) probes
+# ---------------------------------------------------------------------------
+
+
+_ASSET_SUBTAB_IDS = (
+    "mercado",
+    "derivados-crypto",
+    "fundamentales",
+    "valoracion",
+    "analisis",
+)
+
+
+def _asset_scope_markup(index_html: str) -> str:
+    match = re.search(
+        r'<div id="asset-scope-bar" class="asset-scope-bar">(.*?)</div>\n\s*<section id="mercado"',
+        index_html,
+        re.DOTALL,
+    )
+    assert match, "the single asset scope bar must precede the activo sections"
+    return match.group(1)
+
+
+def _check_asset_scope_and_subtabs(
+    index_html: str, app_js: str, styles_css: str = STYLES_CSS
+) -> None:
+    topbar = re.search(r'<header class="topbar">(.*?)</header>', index_html, re.DOTALL)
+    assert topbar, "persistent topbar must exist"
+    for control_id in (
+        "asset-name",
+        "asset-symbol",
+        "asset-classification",
+        "asset-price",
+        "asset-daily-change",
+        "asset-meta",
+        "asset-quality",
+        "asset-avatar",
+        "market-asset-search",
+        "market-asset-listbox",
+        "asset-selector-label",
+    ):
+        assert f'id="{control_id}"' not in topbar.group(1), (
+            f"{control_id} must not leak from the global header"
+        )
+        assert index_html.count(f'id="{control_id}"') == 1
+    assert index_html.count('id="board-nav"') == 1
+    assert 'class="asset-nav"' not in index_html
+
+    scope = _asset_scope_markup(index_html)
+    assert scope.count('id="asset-subtabs"') == 1
+    assert 'role="tablist"' in scope
+    assert 'href="#' not in scope, "asset sub-tabs must be buttons, not hash anchors"
+    selected = re.findall(r'class="asset-subtab[^\"]*"[^>]*aria-selected="true"', scope)
+    assert len(selected) == 1, "exactly one asset sub-tab must ship selected"
+    for section_id in _ASSET_SUBTAB_IDS[1:]:
+        section_tag = re.search(rf'<section\b(?=[^>]*\bid="{section_id}")[^>]*>', index_html)
+        assert section_tag and "hidden" in section_tag.group(0), (
+            f"{section_id} must ship hidden until its tab is selected"
+        )
+    cursor = -1
+    for section_id in _ASSET_SUBTAB_IDS:
+        button = re.search(
+            rf'<button(?P<attrs>[^>]*)aria-controls="{section_id}"(?P<tail>[^>]*)>', scope
+        )
+        assert button, f"missing button controlling {section_id}"
+        attrs = button.group(0)
+        assert 'type="button"' in attrs
+        assert 'role="tab"' in attrs
+        assert f'data-asset-subtab="{section_id}"' in attrs
+        position = scope.index(button.group(0))
+        assert position > cursor, "asset sub-tabs must keep their declared order"
+        cursor = position
+    for capability in (
+        "data-crypto-derivatives-only",
+        "data-fundamental-only",
+        "data-valuation-only",
+        "data-complete-analysis-only",
+    ):
+        assert capability in scope
+    assert 'id="valuation-nav-link"' in scope
+
+    scope_board_ids = (
+        'const ASSET_SCOPE_BOARD_IDS = new Set(["activo", "tecnico", "cazatiburones"]);'
+    )
+    assert scope_board_ids in app_js
+    assert "scopeBar.hidden = !shouldShow;" in app_js
+    assert "activeBoard.prepend(scopeBar);" in app_js
+    assert 'subtabs.hidden = boardId !== "activo";' in app_js
+    assert "if (section) section.hidden = !selected;" in app_js
+    assert ".asset-scope-bar[hidden],\n.asset-subtabs[hidden]" in styles_css
+    assert 'activeAssetSubtabId = "mercado";' in app_js
+    selector_body = re.search(
+        r"function selectAssetSubtab\(requestedId\) \{(.*?)\n\}", app_js, re.DOTALL
+    )
+    assert selector_body
+    assert "activateBoard(" not in selector_body.group(1)
+    assert "history.replaceState" not in selector_body.group(1)
+    assert "assetSubtabIsAvailable(requestedButton)" in selector_body.group(1)
+    assert "marketButton" in selector_body.group(1)
+
+
+def test_asset_scope_and_subtabs_are_the_only_asset_navigation() -> None:
+    _check_asset_scope_and_subtabs(INDEX_HTML, APP_JS, STYLES_CSS)
+
+
+def _check_ui8_composition_is_documented(design_doc: str, local_doc: str, plan_doc: str) -> None:
+    for declaration in (
+        "No hay número héroe",
+        "reglas verticales y pies de procedencia",
+        "único control permanente de tiempo",
+        "filas de 25 px",
+        "No carga fuentes web",
+        "contraste AA, foco visible",
+        "grafito cálido",
+        "UI-9",
+        "UI-10",
+        "UI-11",
+    ):
+        assert declaration in design_doc
+    assert "subpestañas de activo (`UI-8`)" in local_doc
+    assert "`UI-8` mueve la identidad y el selector del activo" in plan_doc
+    assert "`SEC-CORPUS` permanece como la única ruta `NEXT`" in plan_doc
+
+
+def test_ui8_composition_and_route_are_documented() -> None:
+    repository_root = Path(str(files("investment_analyst"))).parent.parent
+    design_doc = (repository_root / "docs" / "local_interface_design_system.md").read_text(
+        encoding="utf-8"
+    )
+    local_doc = (repository_root / "docs" / "local_interface.md").read_text(encoding="utf-8")
+    plan_doc = (repository_root / "docs" / "basic_functional_release_plan.md").read_text(
+        encoding="utf-8"
+    )
+    _check_ui8_composition_is_documented(design_doc, local_doc, plan_doc)
+
+
+def test_probe_asset_scope_rule_catches_a_hash_anchor() -> None:
+    _check_asset_scope_and_subtabs(INDEX_HTML, APP_JS, STYLES_CSS)  # baseline: clean
+    market_button = (
+        'type="button" class="asset-subtab" role="tab" aria-selected="true" aria-controls="mercado"'
+    )
+    corrupted = INDEX_HTML.replace(
+        market_button,
+        f'{market_button} href="#mercado"',
+        1,
+    )
+    assert corrupted != INDEX_HTML
+    with pytest.raises(AssertionError):
+        _check_asset_scope_and_subtabs(corrupted, APP_JS, STYLES_CSS)
+
+
+def test_probe_asset_scope_rule_catches_a_nonexclusive_section_toggle() -> None:
+    _check_asset_scope_and_subtabs(INDEX_HTML, APP_JS, STYLES_CSS)  # baseline: clean
+    corrupted = APP_JS.replace(
+        "if (section) section.hidden = !selected;",
+        'if (section) section.classList.toggle("hidden", !selected);',
+        1,
+    )
+    assert corrupted != APP_JS
+    with pytest.raises(AssertionError):
+        _check_asset_scope_and_subtabs(INDEX_HTML, corrupted, STYLES_CSS)
+
+
+def test_probe_asset_scope_rule_catches_hidden_override() -> None:
+    _check_asset_scope_and_subtabs(INDEX_HTML, APP_JS, STYLES_CSS)  # baseline: clean
+    corrupted = STYLES_CSS.replace(
+        ".asset-scope-bar[hidden],\n.asset-subtabs[hidden] {",
+        ".asset-scope-bar.is-hidden,\n.asset-subtabs.is-hidden {",
+        1,
+    )
+    assert corrupted != STYLES_CSS
+    with pytest.raises(AssertionError):
+        _check_asset_scope_and_subtabs(INDEX_HTML, APP_JS, corrupted)
+
+
+def test_probe_ui8_documentation_rule_catches_a_missing_route_declaration() -> None:
+    repository_root = Path(str(files("investment_analyst"))).parent.parent
+    design_doc = (repository_root / "docs" / "local_interface_design_system.md").read_text(
+        encoding="utf-8"
+    )
+    local_doc = (repository_root / "docs" / "local_interface.md").read_text(encoding="utf-8")
+    plan_doc = (repository_root / "docs" / "basic_functional_release_plan.md").read_text(
+        encoding="utf-8"
+    )
+    _check_ui8_composition_is_documented(design_doc, local_doc, plan_doc)  # baseline: clean
+    corrupted = design_doc.replace("UI-11", "UI-XX", 1)
+    assert corrupted != design_doc
+    with pytest.raises(AssertionError):
+        _check_ui8_composition_is_documented(corrupted, local_doc, plan_doc)
