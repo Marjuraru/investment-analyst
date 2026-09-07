@@ -13,6 +13,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from investment_analyst.application.job_memory_budget import (
+    JobMemoryBudget,
+    JobMemoryWatchdog,
+)
 from investment_analyst.application.operational_state import AaplOperationalStateError
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 from investment_analyst.core.operation_control import (
@@ -69,6 +73,7 @@ class ScheduledJobFailureCategory(StrEnum):
     HTTP = "http_error"
     UNEXPECTED = "unexpected_error"
     INTERRUPTED = "interrupted_job"
+    MEMORY_BUDGET = "memory_budget_exceeded"
     LEGACY_UNKNOWN = "legacy_unknown"
 
 
@@ -102,6 +107,7 @@ _FAILURE_RETRY_POLICY: dict[ScheduledJobFailureCategory, bool] = {
     ScheduledJobFailureCategory.HTTP: False,
     ScheduledJobFailureCategory.UNEXPECTED: False,
     ScheduledJobFailureCategory.INTERRUPTED: True,
+    ScheduledJobFailureCategory.MEMORY_BUDGET: False,
     ScheduledJobFailureCategory.LEGACY_UNKNOWN: False,
 }
 
@@ -124,6 +130,7 @@ class ProviderJobTelemetry(ContractModel):
     reused_count: int = Field(default=0, ge=0)
     coverage_complete: bool | None = None
     failure_category: NonEmptyStr | None = None
+    peak_rss_kb: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_outcome(self) -> "ProviderJobTelemetry":
@@ -738,6 +745,7 @@ class MultiAssetScheduler:
         observer: ScheduledJobObserver | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         attempt_id_factory: Callable[[], UUID] = uuid4,
+        memory_ceiling_bytes: int | None = None,
     ) -> None:
         if not jobs:
             raise ValueError("multi-asset scheduler requires at least one job")
@@ -750,6 +758,7 @@ class MultiAssetScheduler:
         self._observer = observer
         self._clock = clock
         self._attempt_id_factory = attempt_id_factory
+        self._memory_budget = JobMemoryBudget(ceiling_bytes=memory_ceiling_bytes)
         self._tick_lock = threading.Lock()
         self._active_job_id: str | None = None
         self._observer_issue: str | None = None
@@ -866,6 +875,9 @@ class MultiAssetScheduler:
             started_at=now,
         )
         state = self._store.write_attempt_from_state(state, running)
+        memory_watchdog: JobMemoryWatchdog | None = None
+        if operation_control is None and self._memory_budget.ceiling_bytes is not None:
+            operation_control = OperationControl()
         try:
             invocation = ScheduledJobInvocation(
                 definition=definition,
@@ -877,22 +889,30 @@ class MultiAssetScheduler:
             with operation_control_scope(operation_control):
                 if operation_control is not None:
                     operation_control.raise_if_cancelled()
-                execution = job.run(invocation)
+                with self._memory_budget.watch(operation_control) as memory_watchdog:
+                    execution = job.run(invocation)
                 if operation_control is not None:
                     operation_control.raise_if_cancelled()
                 if execution.job_id != definition.job_id:
                     raise ValueError("scheduled execution job_id does not match its definition")
         except OperationCancelledError:
+            failure_category = (
+                ScheduledJobFailureCategory.MEMORY_BUDGET
+                if memory_watchdog is not None and memory_watchdog.breached
+                else ScheduledJobFailureCategory.INTERRUPTED
+            )
+            failure_message = (
+                "scheduled job exceeded its cooperative memory budget"
+                if failure_category is ScheduledJobFailureCategory.MEMORY_BUDGET
+                else "the scheduled job was interrupted at a safe boundary"
+            )
             completed = ScheduledJobAttempt(
                 **running.model_dump(
                     exclude={"status", "completed_at", "execution", "failure", "telemetry"}
                 ),
                 status=ScheduledJobAttemptStatus.FAILED,
                 completed_at=self._now(),
-                failure=scheduled_job_failure(
-                    ScheduledJobFailureCategory.INTERRUPTED,
-                    "the scheduled job was interrupted at a safe boundary",
-                ),
+                failure=scheduled_job_failure(failure_category, failure_message),
             )
         except ScheduledJobRunError as error:
             completed = ScheduledJobAttempt(
@@ -948,7 +968,14 @@ class MultiAssetScheduler:
                 completed_at=self._now(),
                 execution=execution,
             )
-        completed = completed.model_copy(update={"telemetry": _attempt_telemetry(completed)})
+        completed = completed.model_copy(
+            update={
+                "telemetry": _attempt_telemetry(
+                    completed,
+                    peak_rss_kb=memory_watchdog.peak_rss_kb if memory_watchdog else None,
+                )
+            }
+        )
         state = self._store.write_attempt_from_state(state, completed)
         self._notify(completed)
         return completed, state
@@ -1205,7 +1232,11 @@ class MultiAssetScheduler:
         return value.astimezone(UTC)
 
 
-def _attempt_telemetry(attempt: ScheduledJobAttempt) -> ProviderJobTelemetry:
+def _attempt_telemetry(
+    attempt: ScheduledJobAttempt,
+    *,
+    peak_rss_kb: int | None = None,
+) -> ProviderJobTelemetry:
     """Build telemetry from the already-captured lifecycle without another clock read."""
     if attempt.completed_at is None:
         raise ValueError("completed attempt telemetry requires completed_at")
@@ -1222,6 +1253,7 @@ def _attempt_telemetry(attempt: ScheduledJobAttempt) -> ProviderJobTelemetry:
         reused_count=execution.reused_count if execution else 0,
         coverage_complete=execution.coverage_complete if execution else None,
         failure_category=failure.category if failure else None,
+        peak_rss_kb=peak_rss_kb,
     )
 
 
