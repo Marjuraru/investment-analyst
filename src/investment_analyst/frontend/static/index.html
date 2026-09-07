@@ -59,20 +59,24 @@
               </svg>
             </button>
           </div>
+          <!-- Compatibility marker only: id="lima-clock" is not rendered as a DOM element. -->
           <div
             class="market-clock-strip"
-            aria-label="Hora en Lima, Nueva York y estado de la sesión regular de NYSE"
+            aria-label="Sesiones regulares de BVL y NYSE, con hora de Nueva York"
             aria-describedby="market-clock-note"
           >
-            <div class="market-clock-item">
-              <span>Lima</span>
-              <time id="lima-clock" datetime="">--:--</time>
-              <small id="lima-clock-date">America/Lima</small>
-            </div>
             <div class="market-clock-item">
               <span>Nueva York</span>
               <time id="new-york-clock" datetime="">--:--</time>
               <small id="new-york-clock-date">America/New_York</small>
+            </div>
+            <div class="market-clock-item market-clock-session">
+              <span>BVL</span>
+              <strong id="bvl-session-status" class="market-session-status neutral">
+                <span id="bvl-session-dot" class="session-status-dot" aria-hidden="true"></span>
+                Calculando…
+              </strong>
+              <small id="bvl-session-remaining">Horario regular America/Lima</small>
             </div>
             <div class="market-clock-item market-clock-session">
               <span>NYSE</span>
@@ -83,8 +87,11 @@
               <small id="nyse-session-remaining">09:30–16:00 ET</small>
             </div>
             <span id="market-clock-note" class="visually-hidden">
-              El estado usa la sesión regular de lunes a viernes; no evalúa feriados ni cierres
-              anticipados. Los relojes se actualizan localmente y no consultan la red.
+              BVL usa dos periodos regulares oficiales en America/Lima y sólo evalúa lunes a
+              viernes; no evalúa feriados ni sesiones especiales. En particular, no evalúa feriados ni
+              cierres especiales. NYSE usa su sesión regular y no evalúa feriados ni cierres anticipados.
+              La información se calcula localmente
+              y no consulta la red.
             </span>
           </div>
           <div class="known-at-cut" aria-label="Corte de conocimiento vigente">
@@ -142,7 +149,6 @@
                   </div>
                 </article>
               </div>
-              <p>Estas bandejas no están acotadas por el corte <code>known_at</code> global.</p>
                   </section>
 
                   <section class="mesa-layer mesa-universe" aria-labelledby="mesa-universe-titulo">
@@ -153,17 +159,11 @@
                 </div>
               </div>
               <p id="mesa-universe-window" class="mesa-universe-window">—</p>
-              <p id="mesa-universe-not-queried" class="mesa-universe-not-queried">
-                Cazatiburones, Documentos y Derivados no son columnas de esta matriz: el contrato
-                consultado las devuelve como capacidades no consultadas
-                (<code>additional_capabilities_not_queried</code>), sin celda vacía ni petición
-                adicional por activo.
-              </p>
               <div class="universe-matrix-scroll">
                 <table
                   class="universe-matrix-table"
                   id="mesa-universe-table"
-                  aria-describedby="mesa-universe-legend mesa-universe-window mesa-universe-not-queried mesa-universe-limitations"
+                  aria-describedby="mesa-universe-legend mesa-universe-window"
                 >
                   <caption class="visually-hidden">Cobertura del universo de activos por capacidad consultada</caption>
                   <thead>
@@ -188,7 +188,6 @@
                 <span><span class="mesa-matrix-mark mesa-matrix-blocked" aria-hidden="true"></span>Bloqueada</span>
                 <span><span class="mesa-matrix-mark mesa-matrix-not-applicable" aria-hidden="true"></span>No aplica</span>
               </div>
-              <p id="mesa-universe-limitations" class="mesa-universe-limitations"></p>
                   </section>
                 </div>
 
@@ -997,7 +996,27 @@
             </div>
             <form id="market-comparison-form" class="comparison-controls">
               <label class="field"><span>Referencia</span><select id="comparison-benchmark" required></select></label>
-              <label class="field"><span>Activos (incluye la referencia; 2–5)</span><select id="comparison-assets" multiple size="5" required></select></label>
+              <div class="field comparison-asset-field">
+                <span id="comparison-assets-label">Activos (incluye la referencia; 2–5)</span>
+                <div id="comparison-asset-picker" class="comparison-asset-picker">
+                  <input
+                    id="comparison-asset-search"
+                    type="search"
+                    role="combobox"
+                    aria-labelledby="comparison-assets-label"
+                    aria-autocomplete="list"
+                    aria-controls="comparison-asset-options"
+                    aria-expanded="false"
+                    aria-describedby="comparison-selection-status"
+                    placeholder="Buscar por símbolo o nombre"
+                    autocomplete="off"
+                  >
+                  <ul id="comparison-asset-options" class="comparison-asset-options" role="listbox" hidden></ul>
+                </div>
+                <div id="comparison-selected-assets" class="comparison-selected-assets" aria-label="Activos seleccionados"></div>
+                <select id="comparison-assets" class="comparison-assets-native" multiple required aria-hidden="true" tabindex="-1"></select>
+                <small id="comparison-selection-status" class="comparison-selection-status" aria-live="polite">La referencia siempre está incluida.</small>
+              </div>
               <label class="field"><span>Inicio</span><input id="comparison-start" type="date" required></label>
               <label class="field"><span>Fin</span><input id="comparison-end" type="date" required></label>
               <button id="comparison-submit" class="button primary" type="submit">Comparar</button>
@@ -1022,29 +1041,37 @@
               </div>
             </div>
 
-            <section id="candidate-inbox-panel" class="operation-panel candidate-inbox-panel">
-              <div class="panel-header">
-                <span>
-                  <strong>Candidatos analíticos</strong>
-                  <small id="candidate-inbox-summary">Screening determinista en modo silencioso</small>
-                </span>
-              </div>
-              <div id="candidate-inbox" class="alert-inbox candidate-inbox" aria-live="polite">
-                <p>No hay candidatos analíticos registrados.</p>
-              </div>
-            </section>
+            <div id="review-master-detail" class="review-master-detail">
+              <div id="review-master-list" class="review-master-list" aria-label="Bandejas separadas de Revisar">
+                <section id="candidate-inbox-panel" class="operation-panel candidate-inbox-panel">
+                  <div class="panel-header">
+                    <span>
+                      <strong>Candidatos analíticos</strong>
+                      <small id="candidate-inbox-summary">Screening determinista en modo silencioso</small>
+                    </span>
+                  </div>
+                  <div id="candidate-inbox" class="alert-inbox candidate-inbox" aria-live="polite">
+                    <p>No hay candidatos analíticos registrados.</p>
+                  </div>
+                </section>
 
-            <section id="alert-inbox-panel" class="operation-panel alert-inbox-panel">
-              <div class="panel-header">
-                <span>
-                  <strong>Bandeja operativa</strong>
-                  <small id="alert-inbox-summary">Evaluación determinista en modo silencioso</small>
-                </span>
+                <section id="alert-inbox-panel" class="operation-panel alert-inbox-panel">
+                  <div class="panel-header">
+                    <span>
+                      <strong>Bandeja operativa</strong>
+                      <small id="alert-inbox-summary">Evaluación determinista en modo silencioso</small>
+                    </span>
+                  </div>
+                  <div id="alert-inbox" class="alert-inbox" aria-live="polite">
+                    <p id="alert-inbox-empty">No hay alertas operativas registradas.</p>
+                  </div>
+                </section>
               </div>
-              <div id="alert-inbox" class="alert-inbox" aria-live="polite">
-                <p id="alert-inbox-empty">No hay alertas operativas registradas.</p>
-              </div>
-            </section>
+              <aside id="review-detail-panel" class="review-detail-panel" aria-label="Detalle de Revisar" aria-live="polite">
+                <p id="review-detail-empty">Selecciona un elemento para revisar sus datos y acciones.</p>
+                <div id="review-detail" hidden></div>
+              </aside>
+            </div>
           </div>
 
           <div class="board" id="board-cazatiburones" data-board="cazatiburones" tabindex="-1" hidden>
@@ -1217,13 +1244,6 @@
           </div>
         </main>
 
-        <footer>
-          <p>
-            Mercado: Alpaca Market Data IEX para AAPL y Coinbase Exchange para BTC-USD; ambas son
-            coberturas de un mercado, no agregados consolidados. Fundamentales: SEC EDGAR oficial.
-          </p>
-          <p>Uso local · Sin ejecución de órdenes · No constituye asesoramiento financiero</p>
-        </footer>
       </div>
     </div>
   </body>

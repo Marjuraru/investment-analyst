@@ -105,11 +105,6 @@ const FUNDAMENTAL_CHART_LAYOUT = Object.freeze({
 });
 const MARKET_CLOCK_DEFINITIONS = Object.freeze([
   Object.freeze({
-    timeElementId: "lima-clock",
-    dateElementId: "lima-clock-date",
-    timeZone: DEFAULT_TIME_ZONE,
-  }),
-  Object.freeze({
     timeElementId: "new-york-clock",
     dateElementId: "new-york-clock-date",
     timeZone: NEW_YORK_TIME_ZONE,
@@ -147,6 +142,27 @@ const NYSE_SESSION_STATES = Object.freeze({
   open: Object.freeze({ label: "Dentro de sesión regular", tone: "open" }),
   after: Object.freeze({ label: "Después del cierre regular", tone: "neutral" }),
 });
+const BVL_SESSION_PERIODS = Object.freeze({
+  summer: Object.freeze({ open: 8 * 60 + 30, close: 14 * 60 + 50, label: "08:30–14:50" }),
+  winter: Object.freeze({ open: 9 * 60 + 30, close: 15 * 60 + 50, label: "09:30–15:50" }),
+});
+const BVL_SESSION_STATES = Object.freeze({
+  weekend: Object.freeze({ label: "Fuera de sesión · fin de semana", tone: "neutral" }),
+  before: Object.freeze({ label: "Antes de apertura regular", tone: "neutral" }),
+  open: Object.freeze({ label: "Dentro de sesión regular", tone: "open" }),
+  after: Object.freeze({ label: "Después del cierre regular", tone: "neutral" }),
+});
+const LIMA_WEEKDAY_ORDER = Object.freeze(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]);
+const LIMA_DATE_PARTS_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: DEFAULT_TIME_ZONE,
+  weekday: "short",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
 
 const MARKET_CHART_PERIOD_BY_INTERVAL = Object.freeze({
   auto: "1y",
@@ -183,6 +199,10 @@ const MARKET_CHART_PERIOD_LABELS = Object.freeze({
 let marketAssets = Object.freeze({});
 let assetPreferencesSnapshot = null;
 let marketComparisonRequestSequence = 0;
+let reviewCandidateItems = [];
+let reviewAlertItems = [];
+let reviewSelection = null;
+let reviewSelectionMissing = false;
 
 const MARKET_RESOLUTION_PRESENTATION = Object.freeze({
   daily: Object.freeze({ singular: "día", plural: "días", adjective: "diarios" }),
@@ -4331,50 +4351,173 @@ function applyOverview(payload) {
   setMessage(operationalIssues.join(" · "), operationalIssues.length > 0);
 }
 
-function renderAlertInbox(payload) {
-  const inbox = byId("alert-inbox");
-  inbox.replaceChildren();
-  if (!Array.isArray(payload.events) || payload.events.length === 0) {
-    inbox.append(createElement("p", "", "No hay alertas operativas registradas."));
+const REVIEW_STATUS_LABELS = Object.freeze({
+  new: "Nueva",
+  seen: "Vista",
+  dismissed: "Descartada",
+  resolved: "Resuelta",
+  silenced: "Silenciada",
+});
+
+function reviewItemId(family, item) {
+  return String(family === "candidate" ? item.event.candidate_id : item.alert_id);
+}
+
+function reviewSelectedItem() {
+  if (!reviewSelection) return null;
+  const items = reviewSelection.family === "candidate" ? reviewCandidateItems : reviewAlertItems;
+  const item = items.find((candidate) => reviewItemId(reviewSelection.family, candidate) === reviewSelection.id);
+  if (item) return item;
+  reviewSelectionMissing = true;
+  reviewSelection = null;
+  return null;
+}
+
+function reviewSelectItem(family, id) {
+  reviewSelection = { family, id: String(id) };
+  reviewSelectionMissing = false;
+  renderReviewDetail();
+}
+
+function reviewEnsureSelection() {
+  if (reviewSelection || reviewSelectionMissing) return;
+  const firstCandidate = reviewCandidateItems[0];
+  if (firstCandidate) {
+    reviewSelection = { family: "candidate", id: reviewItemId("candidate", firstCandidate) };
     return;
   }
-  for (const event of payload.events) {
-    const item = createElement("article", "alert-inbox-item");
-    const statusLabels = {
-      new: "Nueva",
-      seen: "Vista",
-      dismissed: "Descartada",
-      resolved: "Resuelta",
-      silenced: "Silenciada",
-    };
-    const status = createElement(
-      "span",
-      `alert-inbox-status ${event.status}`,
-      statusLabels[event.status] || event.status,
-    );
-    item.append(
-      createElement("strong", "", event.title),
-      status,
-      createElement("p", "", event.message),
-      createElement("time", "", formatInstant(event.last_activated_at)),
-    );
-    const actions = createElement("div", "alert-inbox-actions");
-    const availableActions = event.status === "new"
-      ? [["seen", "Marcar vista"], ["dismissed", "Descartar"], ["resolved", "Resolver"]]
-      : event.status === "seen"
-        ? [["dismissed", "Descartar"], ["resolved", "Resolver"]]
-        : ["dismissed", "silenced"].includes(event.status)
-          ? [["resolved", "Resolver"]]
-          : [];
-    for (const [target, label] of availableActions) {
+  const firstAlert = reviewAlertItems[0];
+  if (firstAlert) reviewSelection = { family: "alert", id: reviewItemId("alert", firstAlert) };
+}
+
+function reviewActionTargets(status) {
+  return status === "new"
+    ? [["seen", "Marcar vista"], ["dismissed", "Descartar"], ["resolved", "Resolver"]]
+    : status === "seen"
+      ? [["dismissed", "Descartar"], ["resolved", "Resolver"]]
+      : ["dismissed", "silenced"].includes(status)
+        ? [["resolved", "Resolver"]]
+        : [];
+}
+
+function reviewDetailField(container, label, value) {
+  container.append(createElement("dt", "", label), createElement("dd", "", value));
+}
+
+function renderReviewDetail() {
+  reviewEnsureSelection();
+  const detail = byId("review-detail");
+  const empty = byId("review-detail-empty");
+  const selected = reviewSelectedItem();
+  detail.replaceChildren();
+  if (!selected || !reviewSelection) {
+    detail.hidden = true;
+    empty.hidden = false;
+    empty.textContent = reviewSelectionMissing
+      ? "La selección ya no está disponible en la bandeja actual."
+      : "Selecciona un elemento para revisar sus datos y acciones.";
+    updateReviewMasterSelection();
+    return;
+  }
+  detail.hidden = false;
+  empty.hidden = true;
+  const family = reviewSelection.family;
+  const title = createElement("h3", "review-detail-title", family === "candidate" ? "Detalle del candidato" : "Detalle de la alerta");
+  title.id = "review-detail-title";
+  detail.append(title);
+  const fields = createElement("dl", "review-detail-fields");
+  if (family === "candidate") {
+    const { event, result } = selected;
+    const assetLabel = marketAssets[result.asset_id]?.symbol || result.asset_id;
+    detail.append(createElement("p", "review-detail-kicker", `${result.rule.name_es} · ${assetLabel}`));
+    reviewDetailField(fields, "Estado", REVIEW_STATUS_LABELS[event.status] || event.status);
+    reviewDetailField(fields, "Activo", result.asset_id);
+    reviewDetailField(fields, "Confirmaciones", formatInteger(event.confirmations));
+    reviewDetailField(fields, "Vigencia", formatCalendarDate(event.as_of));
+    reviewDetailField(fields, "Espera", formatInstant(event.cooldown_until));
+    const conditions = createElement("ul", "candidate-condition-list review-detail-conditions");
+    result.conditions.forEach((condition, index) => {
+      const definition = result.rule.conditions[index];
+      conditions.append(createElement("li", condition.state, formatCandidateCondition(condition, definition)));
+    });
+    detail.append(fields, createElement("h4", "review-detail-subtitle", "Condiciones evaluadas"), conditions);
+    const actions = createElement("div", "alert-inbox-actions review-detail-actions");
+    for (const [target, label] of reviewActionTargets(event.status)) {
+      const button = createElement("button", "alert-action-button", label);
+      button.type = "button";
+      button.addEventListener("click", () => transitionCandidate(event.candidate_id, target, button));
+      actions.append(button);
+    }
+    if (actions.childElementCount > 0) detail.append(actions);
+  } else {
+    const event = selected;
+    detail.append(createElement("p", "review-detail-kicker", event.title));
+    reviewDetailField(fields, "Estado", REVIEW_STATUS_LABELS[event.status] || event.status);
+    reviewDetailField(fields, "Activo", event.asset_id || "No especificado");
+    reviewDetailField(fields, "Proveedor", event.provider);
+    reviewDetailField(fields, "Dominio", event.domain);
+    reviewDetailField(fields, "Última activación", formatInstant(event.last_activated_at));
+    reviewDetailField(fields, "Espera", "No aplica");
+    detail.append(fields, createElement("p", "review-detail-message", event.message));
+    const actions = createElement("div", "alert-inbox-actions review-detail-actions");
+    for (const [target, label] of reviewActionTargets(event.status)) {
       const button = createElement("button", "alert-action-button", label);
       button.type = "button";
       button.addEventListener("click", () => transitionAlert(event.alert_id, target, button));
       actions.append(button);
     }
-    if (availableActions.length > 0) item.append(actions);
-    inbox.append(item);
+    if (actions.childElementCount > 0) detail.append(actions);
   }
+  updateReviewMasterSelection();
+}
+
+function updateReviewMasterSelection() {
+  document.querySelectorAll("[data-review-family][data-review-id]").forEach((row) => {
+    const selected = reviewSelection
+      && row.dataset.reviewFamily === reviewSelection.family
+      && row.dataset.reviewId === reviewSelection.id;
+    row.setAttribute("aria-pressed", selected ? "true" : "false");
+    row.classList.toggle("selected", selected);
+  });
+}
+
+function renderReviewMasterRow(family, id, title, status, meta) {
+  const row = createElement("button", `review-master-row ${family === "candidate" ? "candidate-master-row" : "alert-master-row"}`);
+  row.type = "button";
+  row.dataset.reviewFamily = family;
+  row.dataset.reviewId = String(id);
+  row.setAttribute("aria-pressed", "false");
+  row.append(
+    createElement("strong", "review-master-title", title),
+    createElement("span", `alert-inbox-status ${status}`, REVIEW_STATUS_LABELS[status] || status),
+    createElement("small", "review-master-meta", meta),
+  );
+  row.addEventListener("click", () => reviewSelectItem(family, id));
+  return row;
+}
+
+function renderAlertInbox(payload) {
+  const inbox = byId("alert-inbox");
+  reviewAlertItems = Array.isArray(payload.events) ? payload.events : [];
+  byId("alert-inbox-summary").textContent = reviewAlertItems.length > 0
+    ? `${formatInteger(payload.total ?? reviewAlertItems.length)} registradas · separadas de candidatos`
+    : "Sin alertas operativas";
+  inbox.replaceChildren();
+  if (reviewAlertItems.length === 0) {
+    inbox.append(createElement("p", "", "No hay alertas operativas registradas."));
+    renderReviewDetail();
+    return;
+  }
+  for (const event of reviewAlertItems) {
+    inbox.append(renderReviewMasterRow(
+      "alert",
+      event.alert_id,
+      event.title,
+      event.status,
+      `${event.asset_id || "Activo no especificado"} · ${formatInstant(event.last_activated_at)}`,
+    ));
+  }
+  renderReviewDetail();
 }
 
 async function transitionAlert(alertId, status, button) {
@@ -4397,9 +4540,11 @@ async function loadAlertInbox() {
   try {
     renderAlertInbox(await api("/api/alerts?limit=50"));
   } catch (error) {
+    reviewAlertItems = [];
     inbox.replaceChildren(
       createElement("p", "", `No se pudo consultar la bandeja: ${error.message}`),
     );
+    renderReviewDetail();
   } finally {
     inbox.setAttribute("aria-busy", "false");
   }
@@ -4740,70 +4885,28 @@ function formatCandidateCondition(condition, definition) {
 
 function renderCandidateInbox(payload) {
   const inbox = byId("candidate-inbox");
+  reviewCandidateItems = Array.isArray(payload.items) ? payload.items : [];
+  byId("candidate-inbox-summary").textContent = reviewCandidateItems.length > 0
+    ? `${formatInteger(payload.total ?? reviewCandidateItems.length)} registrados · separados de alertas`
+    : "Sin candidatos analíticos";
   inbox.replaceChildren();
-  if (!Array.isArray(payload.items) || payload.items.length === 0) {
+  if (reviewCandidateItems.length === 0) {
     inbox.append(createElement("p", "", "No hay candidatos analíticos registrados."));
+    renderReviewDetail();
     return;
   }
-  const statusLabels = {
-    new: "Nuevo",
-    seen: "Visto",
-    dismissed: "Descartado",
-    resolved: "Resuelto",
-    silenced: "Silenciado",
-  };
-  for (const itemPayload of payload.items) {
+  for (const itemPayload of reviewCandidateItems) {
     const { event, result } = itemPayload;
     const assetLabel = marketAssets[result.asset_id]?.symbol || result.asset_id;
-    const item = createElement("article", "alert-inbox-item candidate-inbox-item");
-    item.append(
-      createElement("strong", "", `${result.rule.name_es} · ${assetLabel}`),
-      createElement(
-        "span",
-        `alert-inbox-status ${event.status}`,
-        statusLabels[event.status] || event.status,
-      ),
-    );
-    const conditions = createElement("ul", "candidate-condition-list");
-    result.conditions.forEach((condition, index) => {
-      const definition = result.rule.conditions[index];
-      conditions.append(
-        createElement(
-          "li",
-          condition.state,
-          formatCandidateCondition(condition, definition),
-        ),
-      );
-    });
-    item.append(
-      conditions,
-      createElement(
-        "span",
-        "candidate-meta",
-        `${formatCalendarDate(event.as_of)} · ${formatInteger(event.confirmations)} confirmación${event.confirmations === 1 ? "" : "es"}`,
-      ),
-      createElement("time", "", formatInstant(event.activated_at)),
-    );
-    const actions = createElement("div", "alert-inbox-actions");
-    const availableActions = event.status === "new"
-      ? [["seen", "Marcar visto"], ["dismissed", "Descartar"], ["resolved", "Resolver"]]
-      : event.status === "seen"
-        ? [["dismissed", "Descartar"], ["resolved", "Resolver"]]
-        : ["dismissed", "silenced"].includes(event.status)
-          ? [["resolved", "Resolver"]]
-          : [];
-    for (const [target, label] of availableActions) {
-      const button = createElement("button", "alert-action-button", label);
-      button.type = "button";
-      button.addEventListener(
-        "click",
-        () => transitionCandidate(event.candidate_id, target, button),
-      );
-      actions.append(button);
-    }
-    if (availableActions.length > 0) item.append(actions);
-    inbox.append(item);
+    inbox.append(renderReviewMasterRow(
+      "candidate",
+      event.candidate_id,
+      `${result.rule.name_es} · ${assetLabel}`,
+      event.status,
+      `${formatCalendarDate(event.as_of)} · ${formatInteger(event.confirmations)} confirmación${event.confirmations === 1 ? "" : "es"}`,
+    ));
   }
+  renderReviewDetail();
 }
 
 async function transitionCandidate(candidateId, status, button) {
@@ -4826,9 +4929,11 @@ async function loadCandidateInbox() {
   try {
     renderCandidateInbox(await api("/api/candidates?limit=50"));
   } catch (error) {
+    reviewCandidateItems = [];
     inbox.replaceChildren(
       createElement("p", "", `No se pudo consultar la bandeja: ${error.message}`),
     );
+    renderReviewDetail();
   } finally {
     inbox.setAttribute("aria-busy", "false");
   }
@@ -5026,6 +5131,56 @@ function formatSessionCountdown(totalMinutes) {
   return segments.join(" ");
 }
 
+function limaWallClockDateParts(instant) {
+  const parts = Object.fromEntries(
+    LIMA_DATE_PARTS_FORMATTER.formatToParts(instant)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    weekday: parts.weekday,
+  };
+}
+
+function nthSundayOfMonth(year, month, occurrence) {
+  const firstDay = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
+  return 1 + ((7 - firstDay) % 7) + (occurrence - 1) * 7;
+}
+
+function bvlSessionPeriodForDate(parts) {
+  const date = Date.UTC(parts.year, parts.month - 1, parts.day);
+  const summerStart = Date.UTC(
+    parts.year,
+    2,
+    nthSundayOfMonth(parts.year, 3, 2),
+  );
+  const winterStart = Date.UTC(
+    parts.year,
+    10,
+    nthSundayOfMonth(parts.year, 11, 1),
+  );
+  return date >= summerStart && date < winterStart
+    ? BVL_SESSION_PERIODS.summer
+    : BVL_SESSION_PERIODS.winter;
+}
+
+function bvlRegularSessionState(now) {
+  const parts = limaWallClockDateParts(now);
+  const period = bvlSessionPeriodForDate(parts);
+  if (parts.weekday === "Sat" || parts.weekday === "Sun") {
+    return { ...BVL_SESSION_STATES.weekend, period };
+  }
+  const minutes = parts.hour * 60 + parts.minute;
+  if (minutes < period.open) return { ...BVL_SESSION_STATES.before, period };
+  if (minutes < period.close) return { ...BVL_SESSION_STATES.open, period };
+  return { ...BVL_SESSION_STATES.after, period };
+}
+
 function renderMarketClocks(now = new Date()) {
   const instant = now.toISOString();
   for (const definition of MARKET_CLOCK_DEFINITIONS) {
@@ -5035,6 +5190,12 @@ function renderMarketClocks(now = new Date()) {
     timeElement.textContent = formatters.time.format(now);
     byId(definition.dateElementId).textContent = formatters.date.format(now);
   }
+  const bvlSession = bvlRegularSessionState(now);
+  const bvlStatus = byId("bvl-session-status");
+  const bvlDot = byId("bvl-session-dot");
+  bvlStatus.replaceChildren(bvlDot, document.createTextNode(bvlSession.label));
+  bvlStatus.className = `market-session-status ${bvlSession.tone}`;
+  byId("bvl-session-remaining").textContent = `${bvlSession.period.label} America/Lima`;
   const session = newYorkRegularSessionState(now);
   const status = byId("nyse-session-status");
   const dot = byId("nyse-session-dot");
@@ -5403,7 +5564,6 @@ function renderMesaBvlRegistrySummary(payload) {
 function renderMesaUniverseMatrix(payload) {
   const body = byId("mesa-universe-table-body");
   body.replaceChildren();
-  const allLimitations = [];
   for (const asset of payload.assets || []) {
     const row = document.createElement("tr");
     const cellsMarkup = MESA_COVERAGE_CAPABILITY_KEYS.map((key) => {
@@ -5417,9 +5577,6 @@ function renderMesaUniverseMatrix(payload) {
     row.innerHTML =
       `<td><strong>${asset.symbol}</strong><br><small>${asset.name} · ${asset.exchange}</small></td><td>${mesaAssetDomainLabel(asset.asset_class)}</td>${cellsMarkup}<td>${mesaLatestEvidenceMarkup(asset)}</td>`;
     body.append(row);
-    for (const text of asset.limitations || []) {
-      allLimitations.push(`${asset.symbol}: ${text}`);
-    }
   }
   if (!body.childElementCount) {
     const row = document.createElement("tr");
@@ -5428,14 +5585,6 @@ function renderMesaUniverseMatrix(payload) {
     cell.append(renderAbsenceMark("missing", "Sin evidencia", "Sin activos en el catálogo devuelto"));
     row.append(cell);
     body.append(row);
-  }
-  const limitations = byId("mesa-universe-limitations");
-  limitations.replaceChildren();
-  if (allLimitations.length > 0) {
-    limitations.append(
-      createElement("strong", "", "Limitaciones declaradas · "),
-      document.createTextNode(allLimitations.join(" · ")),
-    );
   }
   renderMesaBvlRegistrySummary(payload);
 }
@@ -5978,30 +6127,194 @@ byId("report-known-at").addEventListener("change", () => {
 function populateMarketComparisonAssets() {
   const benchmark = byId("comparison-benchmark");
   const assets = byId("comparison-assets");
-  const selectedCurrency = marketAssetPresentation().quoteCurrency;
   benchmark.replaceChildren();
   assets.replaceChildren();
   for (const presentation of Object.values(marketAssets)) {
-    if (presentation.quoteCurrency !== selectedCurrency) continue;
     const label = `${presentation.symbol} · ${presentation.name}`;
     const benchmarkOption = document.createElement("option");
     benchmarkOption.value = presentation.assetId;
     benchmarkOption.textContent = label;
     benchmark.append(benchmarkOption);
-    const assetOption = document.createElement("option");
-    assetOption.value = presentation.assetId;
-    assetOption.textContent = label;
-    assetOption.selected = presentation.assetId === selectedMarketAsset;
-    assets.append(assetOption);
   }
-  benchmark.value = selectedMarketAsset;
-  const firstPeer = [...assets.options].find((option) => option.value !== selectedMarketAsset);
-  if (firstPeer) firstPeer.selected = true;
+  benchmark.value = marketAssets[selectedMarketAsset] ? selectedMarketAsset : benchmark.options[0]?.value;
+  syncComparisonAssetOptions({ initial: true });
 }
 
 function comparisonSelectedAssets() {
   return [...byId("comparison-assets").selectedOptions].map((option) => option.value);
 }
+
+function comparisonAssetLabel(assetId) {
+  const presentation = marketAssets[assetId];
+  return presentation ? `${presentation.symbol} · ${presentation.name}` : assetId;
+}
+
+function comparisonSelectionStatus(message) {
+  byId("comparison-selection-status").textContent = message;
+}
+
+function renderComparisonSelectedAssets() {
+  const container = byId("comparison-selected-assets");
+  const benchmarkId = byId("comparison-benchmark").value;
+  const selected = comparisonSelectedAssets();
+  container.replaceChildren();
+  for (const assetId of selected) {
+    const chip = createElement("span", "comparison-selected-chip");
+    chip.append(createElement("span", "comparison-selected-chip-label", comparisonAssetLabel(assetId)));
+    if (assetId === benchmarkId) {
+      chip.append(createElement("span", "comparison-selected-chip-lock", "Referencia"));
+    } else {
+      const remove = createElement("button", "comparison-chip-remove", "Quitar");
+      remove.type = "button";
+      remove.setAttribute("aria-label", `Quitar ${comparisonAssetLabel(assetId)}`);
+      remove.addEventListener("click", () => {
+        const option = [...byId("comparison-assets").options].find((candidate) => candidate.value === assetId);
+        if (!option) return;
+        option.selected = false;
+        renderComparisonSelectedAssets();
+        comparisonSelectionStatus(`${formatInteger(comparisonSelectedAssets().length)} de 5 activos seleccionados.`);
+      });
+      chip.append(remove);
+    }
+    container.append(chip);
+  }
+  comparisonSelectionStatus(
+    `${formatInteger(selected.length)} de 5 activos seleccionados · ${marketAssets[benchmarkId]?.quoteCurrency || "moneda no disponible"}.`,
+  );
+}
+
+function renderComparisonAssetOptions(filter = "") {
+  const listbox = byId("comparison-asset-options");
+  const selected = new Set(comparisonSelectedAssets());
+  const normalizedFilter = filter.trim().toLocaleLowerCase(LOCALE);
+  listbox.replaceChildren();
+  comparisonAssetOptionIndex = -1;
+  const options = [...byId("comparison-assets").options].filter((option) => {
+    if (selected.has(option.value)) return false;
+    return !normalizedFilter || option.textContent.toLocaleLowerCase(LOCALE).includes(normalizedFilter);
+  });
+  if (options.length === 0) {
+    listbox.append(createElement("li", "comparison-asset-option-empty", "No se encontraron activos compatibles."));
+    return;
+  }
+  for (const [index, option] of options.entries()) {
+    const item = createElement("li", "comparison-asset-option", option.textContent);
+    item.id = `comparison-asset-option-${option.value.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+    item.dataset.value = option.value;
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", "false");
+    item.addEventListener("mouseenter", () => {
+      comparisonAssetOptionIndex = index;
+      updateComparisonAssetOptionFocus();
+    });
+    item.addEventListener("click", () => selectComparisonAsset(option.value));
+    listbox.append(item);
+  }
+}
+
+let comparisonAssetOptionIndex = -1;
+
+function updateComparisonAssetOptionFocus() {
+  const options = [...byId("comparison-asset-options").querySelectorAll('[role="option"]')];
+  options.forEach((option, index) => option.classList.toggle("active", index === comparisonAssetOptionIndex));
+  const input = byId("comparison-asset-search");
+  if (comparisonAssetOptionIndex >= 0 && options[comparisonAssetOptionIndex]) {
+    input.setAttribute("aria-activedescendant", options[comparisonAssetOptionIndex].id);
+    options[comparisonAssetOptionIndex].scrollIntoView({ block: "nearest" });
+  } else {
+    input.removeAttribute("aria-activedescendant");
+  }
+}
+
+function openComparisonAssetPicker() {
+  const input = byId("comparison-asset-search");
+  const listbox = byId("comparison-asset-options");
+  input.setAttribute("aria-expanded", "true");
+  listbox.hidden = false;
+  renderComparisonAssetOptions(input.value);
+}
+
+function closeComparisonAssetPicker() {
+  const input = byId("comparison-asset-search");
+  input.setAttribute("aria-expanded", "false");
+  input.removeAttribute("aria-activedescendant");
+  byId("comparison-asset-options").hidden = true;
+  comparisonAssetOptionIndex = -1;
+}
+
+function selectComparisonAsset(assetId) {
+  const option = [...byId("comparison-assets").options].find((candidate) => candidate.value === assetId);
+  if (!option) return;
+  const selected = comparisonSelectedAssets();
+  if (selected.includes(assetId)) return;
+  if (selected.length >= 5) {
+    comparisonSelectionStatus("La muestra admite como máximo cinco activos.");
+    return;
+  }
+  option.selected = true;
+  byId("comparison-asset-search").value = "";
+  closeComparisonAssetPicker();
+  renderComparisonSelectedAssets();
+}
+
+function syncComparisonAssetOptions({ initial = false } = {}) {
+  const benchmarkId = byId("comparison-benchmark").value;
+  const benchmarkPresentation = marketAssets[benchmarkId];
+  const selectedBefore = comparisonSelectedAssets();
+  const compatible = Object.values(marketAssets).filter(
+    (presentation) => presentation.quoteCurrency === benchmarkPresentation?.quoteCurrency,
+  );
+  const compatibleIds = new Set(compatible.map((presentation) => presentation.assetId));
+  const retainedIds = [benchmarkId, ...selectedBefore.filter((assetId) => assetId !== benchmarkId)]
+    .filter((assetId, index, values) => compatibleIds.has(assetId) && values.indexOf(assetId) === index)
+    .slice(0, 5);
+  if (initial && retainedIds.length < 2) {
+    const firstPeer = compatible.find((presentation) => presentation.assetId !== benchmarkId);
+    if (firstPeer) retainedIds.push(firstPeer.assetId);
+  }
+  const assets = byId("comparison-assets");
+  assets.replaceChildren();
+  for (const presentation of compatible) {
+    const option = document.createElement("option");
+    option.value = presentation.assetId;
+    option.textContent = comparisonAssetLabel(presentation.assetId);
+    option.selected = retainedIds.includes(presentation.assetId);
+    assets.append(option);
+  }
+  renderComparisonSelectedAssets();
+  if (!initial && selectedBefore.some((assetId) => !retainedIds.includes(assetId))) {
+    comparisonSelectionStatus("Se retiraron los activos incompatibles; la muestra conserva una sola moneda.");
+  }
+}
+
+const comparisonAssetSearch = byId("comparison-asset-search");
+comparisonAssetSearch.addEventListener("focus", openComparisonAssetPicker);
+comparisonAssetSearch.addEventListener("input", () => {
+  openComparisonAssetPicker();
+  renderComparisonAssetOptions(comparisonAssetSearch.value);
+});
+comparisonAssetSearch.addEventListener("keydown", (event) => {
+  const options = [...byId("comparison-asset-options").querySelectorAll('[role="option"]')];
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    if (!options.length) return;
+    comparisonAssetOptionIndex = event.key === "ArrowDown"
+      ? (comparisonAssetOptionIndex + 1) % options.length
+      : (comparisonAssetOptionIndex - 1 + options.length) % options.length;
+    updateComparisonAssetOptionFocus();
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    if (options[comparisonAssetOptionIndex]) selectComparisonAsset(options[comparisonAssetOptionIndex].dataset.value);
+    else if (options.length === 1) selectComparisonAsset(options[0].dataset.value);
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    closeComparisonAssetPicker();
+  }
+});
+
+document.addEventListener("click", (event) => {
+  if (!byId("comparison-asset-picker").contains(event.target)) closeComparisonAssetPicker();
+});
 
 function comparisonPercent(value) {
   const parsed = numericValue(value);
@@ -6133,9 +6446,7 @@ byId("market-comparison-form").addEventListener("submit", async (event) => {
 });
 
 byId("comparison-benchmark").addEventListener("change", () => {
-  for (const option of byId("comparison-assets").options) {
-    if (option.value === byId("comparison-benchmark").value) option.selected = true;
-  }
+  syncComparisonAssetOptions();
 });
 
 const yesterday = new Date();

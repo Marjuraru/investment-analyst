@@ -561,8 +561,7 @@ h4 {
   animation: ia-spin 0.8s linear infinite;
 }
 
-main,
-footer {
+main {
   width: 100%;
   max-width: 1800px;
   margin-inline: auto;
@@ -877,22 +876,10 @@ section {
   font-size: 0.72rem;
 }
 
-.mesa-universe-window,
-.mesa-universe-not-queried {
+.mesa-universe-window {
   margin: 0 0 0.5rem;
   color: var(--muted-strong);
   font-size: 0.72rem;
-}
-
-.mesa-universe-not-queried code {
-  font-family: var(--figure-font);
-  font-size: 0.68rem;
-}
-
-.mesa-universe-limitations {
-  margin-top: 0.5rem;
-  color: var(--muted);
-  font-size: 0.66rem;
 }
 
 .universe-matrix-scroll {
@@ -3539,6 +3526,119 @@ pre {
   opacity: 0.55;
 }
 
+.review-master-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1.12fr) minmax(280px, 0.88fr);
+  gap: var(--canvas-block-gap);
+  align-items: start;
+}
+
+.review-master-list {
+  display: grid;
+  gap: var(--canvas-block-gap);
+  min-width: 0;
+}
+
+.review-master-list .operation-panel {
+  margin-bottom: 0;
+}
+
+.review-detail-panel {
+  min-width: 0;
+  min-height: 220px;
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.review-detail-panel > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.review-master-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.2rem 0.65rem;
+  width: 100%;
+  padding: 0.65rem 0.7rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--negative);
+  background: var(--surface);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.candidate-master-row {
+  border-left-color: var(--accent);
+}
+
+.review-master-row:hover,
+.review-master-row:focus-visible,
+.review-master-row.selected {
+  border-color: var(--accent);
+  background: var(--surface-subtle);
+}
+
+.review-master-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-strong);
+  font-size: 0.74rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-master-meta {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.review-detail-kicker,
+.review-detail-message {
+  color: var(--muted-strong) !important;
+  font-size: 0.7rem !important;
+}
+
+.review-detail-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 0.28rem 0.7rem;
+  margin: 0.85rem 0;
+}
+
+.review-detail-fields dt {
+  color: var(--muted);
+  font-size: 0.64rem;
+}
+
+.review-detail-fields dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: 0.66rem;
+  overflow-wrap: anywhere;
+}
+
+.review-detail-subtitle {
+  margin: 0.9rem 0 0.4rem;
+  color: var(--ink-strong);
+  font-size: 0.72rem;
+}
+
+.review-detail-conditions {
+  display: grid;
+}
+
+.review-detail-actions {
+  margin-top: 0.85rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--line);
+}
+
 .cazatiburones-feature-group {
   display: grid;
   gap: 0.4rem;
@@ -3700,27 +3800,6 @@ pre {
   margin-bottom: 0;
   color: var(--muted);
   font-size: 0.7rem;
-}
-
-footer {
-  display: flex;
-  justify-content: space-between;
-  gap: 2rem;
-  padding-top: 1.3rem;
-  padding-bottom: 2rem;
-  border-top: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 0.67rem;
-}
-
-footer p {
-  max-width: 48rem;
-  margin-bottom: 0;
-}
-
-footer p:last-child {
-  flex-shrink: 0;
-  text-align: right;
 }
 
 .valuation-section {
@@ -4156,8 +4235,7 @@ footer p:last-child {
     display: none;
   }
 
-  main,
-  footer {
+  main {
     padding-inline: 1.15rem;
   }
 
@@ -4254,14 +4332,6 @@ footer p:last-child {
     grid-template-columns: 1fr;
   }
 
-  footer {
-    flex-direction: column;
-    gap: 0.7rem;
-  }
-
-  footer p:last-child {
-    text-align: left;
-  }
 }
 
 @media (max-width: 540px) {
@@ -4475,7 +4545,6 @@ footer p:last-child {
   }
 
   main,
-  footer,
   .topbar {
     padding-inline: 0.85rem;
   }
@@ -4510,6 +4579,119 @@ footer p:last-child {
 
 .comparison-controls .button {
   align-self: end;
+}
+
+.comparison-asset-field {
+  min-width: 0;
+}
+
+.comparison-asset-picker {
+  position: relative;
+}
+
+.comparison-asset-picker input {
+  min-width: 0;
+}
+
+.comparison-asset-options {
+  position: absolute;
+  z-index: 3;
+  top: calc(100% + 0.25rem);
+  right: 0;
+  left: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0.25rem;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  list-style: none;
+}
+
+.comparison-asset-option,
+.comparison-asset-option-empty {
+  min-height: 36px;
+  padding: 0.48rem 0.55rem;
+  color: var(--ink-strong);
+  font-size: 0.68rem;
+}
+
+.comparison-asset-option {
+  cursor: pointer;
+}
+
+.comparison-asset-option:hover,
+.comparison-asset-option.active {
+  background: var(--surface-subtle);
+  color: var(--accent-dark);
+}
+
+.comparison-asset-option-empty {
+  color: var(--muted);
+}
+
+.comparison-selected-assets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  min-height: 28px;
+  margin-top: 0.35rem;
+}
+
+.comparison-selected-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 100%;
+  padding: 0.22rem 0.38rem;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+  color: var(--ink-strong);
+  font-size: 0.62rem;
+}
+
+.comparison-selected-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comparison-selected-chip-lock {
+  color: var(--muted);
+  font-size: 0.56rem;
+  white-space: nowrap;
+}
+
+.comparison-chip-remove {
+  min-height: 24px;
+  padding: 0.15rem 0.3rem;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--muted-strong);
+  cursor: pointer;
+  font-size: 0.58rem;
+}
+
+.comparison-chip-remove:hover,
+.comparison-chip-remove:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent-dark);
+}
+
+.comparison-selection-status {
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 480;
+}
+
+.comparison-assets-native {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .comparison-results {
@@ -4556,6 +4738,16 @@ footer p:last-child {
 @media (max-width: 900px) {
   .comparison-controls {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .review-master-detail {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .comparison-controls {
+    grid-template-columns: 1fr;
   }
 }
 
