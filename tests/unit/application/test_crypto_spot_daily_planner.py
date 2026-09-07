@@ -1,4 +1,4 @@
-"""Unit tests for read-only incremental Coinbase edge planning."""
+"""Unit tests for configured Coinbase daily-series edge planning."""
 
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
@@ -10,13 +10,17 @@ from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshMode,
     BtcRefreshMode,
 )
-from investment_analyst.application.btc_refresh_planner import BtcMarketRefreshPlanner
+from investment_analyst.application.crypto_spot_daily_planner import (
+    CryptoSpotDailyRefreshPlanner,
+)
 from investment_analyst.core.models import DataFrequency
-from investment_analyst.providers.crypto.coinbase_normalizer import ASSET_ID, SOURCE_ID
+
+ASSET_ID = "crypto:eth-usd"
+SOURCE_ID = "coinbase-exchange:eth-usd:daily-candles"
 
 
 class ObservationRepositoryDouble:
-    """Return supplied observations without storage writes."""
+    """Return supplied observations while recording the repository projection."""
 
     def __init__(self, observations: list[SimpleNamespace]) -> None:
         self.observations = observations
@@ -28,7 +32,7 @@ class ObservationRepositoryDouble:
         asset_id: str,
         source_id: str | None = None,
         frequency: DataFrequency | None = None,
-    ):
+    ) -> list[SimpleNamespace]:
         self.calls.append(
             {
                 "asset_id": asset_id,
@@ -77,17 +81,26 @@ def _plan(
     extras: tuple[SimpleNamespace, ...] = (),
 ):
     storage = StorageDouble([*(_observation(timestamp) for timestamp in timestamps), *extras])
-    return BtcMarketRefreshPlanner(storage).plan(
+    plan = CryptoSpotDailyRefreshPlanner(
+        storage,
+        asset_id=ASSET_ID,
+        source_id=SOURCE_ID,
+    ).plan(
         requested_start=start,
         requested_end=end,
         refresh_mode=mode,
     )
+    return plan
 
 
-def test_btc_planner_projects_source_and_daily_frequency_in_sql() -> None:
+def test_crypto_spot_planner_projects_source_and_daily_frequency_in_sql() -> None:
     storage = StorageDouble([_observation(datetime(2026, 7, 5, tzinfo=UTC))])
 
-    plan = BtcMarketRefreshPlanner(storage).plan(
+    plan = CryptoSpotDailyRefreshPlanner(
+        storage,
+        asset_id=ASSET_ID,
+        source_id=SOURCE_ID,
+    ).plan(
         requested_start=date(2026, 7, 1),
         requested_end=date(2026, 7, 10),
         refresh_mode=BtcRefreshMode.AUTO,
@@ -103,18 +116,18 @@ def test_btc_planner_projects_source_and_daily_frequency_in_sql() -> None:
     ]
 
 
-def test_btc_planner_ignores_intraday_and_derivative_rows_of_the_same_asset() -> None:
+def test_crypto_spot_planner_ignores_intraday_and_derivative_rows_of_the_same_asset() -> None:
     plan = _plan(
         (datetime(2026, 7, 5, tzinfo=UTC),),
         extras=(
             _observation(
                 datetime(2020, 1, 1, tzinfo=UTC),
-                source_id="coinbase-exchange:btc-usd:minute-1-candles",
+                source_id="coinbase-exchange:eth-usd:minute-1-candles",
                 frequency=DataFrequency.MINUTE_1,
             ),
             _observation(
                 datetime(2020, 1, 2, tzinfo=UTC),
-                source_id="deribit:btc-usd:funding",
+                source_id="deribit:eth-usd:dvol",
                 frequency=DataFrequency.DAY_1,
             ),
         ),
@@ -165,8 +178,8 @@ def test_redundant_python_guards_are_preserved() -> None:
         ),
     ),
 )
-def test_btc_plan_is_identical_to_base_for_every_refresh_mode(
-    timestamps: tuple[tuple[str, ...], ...] | tuple[()],
+def test_crypto_spot_plan_is_identical_to_base_for_every_refresh_mode(
+    timestamps: tuple[tuple[str, ...], ...],
     mode: BtcRefreshMode,
     expected_mode: BtcMarketRefreshMode,
     expected_intervals: tuple[tuple[str, str], ...],
@@ -188,19 +201,7 @@ def test_btc_plan_is_identical_to_base_for_every_refresh_mode(
     )
 
 
-def test_empty_workspace_plans_complete_initial_range() -> None:
-    plan = _plan(())
-
-    assert plan.mode is BtcMarketRefreshMode.INITIAL
-    assert plan.fetch_intervals == (
-        BtcMarketDateInterval(start=date(2026, 7, 1), end=date(2026, 7, 10)),
-    )
-    assert plan.persisted_earliest is None
-    assert plan.persisted_latest_available_at is None
-    assert plan.market_fetch_required is True
-
-
-def test_covered_range_is_current_without_inferring_internal_gaps() -> None:
+def test_planner_still_refuses_to_infer_internal_gaps() -> None:
     plan = _plan(
         (
             datetime(2026, 7, 1, tzinfo=UTC),
@@ -211,51 +212,3 @@ def test_covered_range_is_current_without_inferring_internal_gaps() -> None:
 
     assert plan.mode is BtcMarketRefreshMode.ALREADY_CURRENT
     assert plan.fetch_intervals == ()
-    assert plan.persisted_latest_available_at == datetime(2026, 7, 10, tzinfo=UTC)
-
-
-def test_incremental_and_two_edge_plans_use_utc_calendar_days() -> None:
-    incremental = _plan(
-        (
-            datetime(2026, 7, 1, tzinfo=UTC),
-            datetime(2026, 7, 7, tzinfo=UTC),
-        )
-    )
-    both = _plan(
-        (
-            datetime(2026, 7, 4, tzinfo=UTC),
-            datetime(2026, 7, 7, tzinfo=UTC),
-        )
-    )
-
-    assert incremental.mode is BtcMarketRefreshMode.INCREMENTAL
-    assert incremental.fetch_intervals == (
-        BtcMarketDateInterval(start=date(2026, 7, 8), end=date(2026, 7, 10)),
-    )
-    assert both.mode is BtcMarketRefreshMode.BACKFILL
-    assert both.fetch_intervals == (
-        BtcMarketDateInterval(start=date(2026, 7, 1), end=date(2026, 7, 3)),
-        BtcMarketDateInterval(start=date(2026, 7, 8), end=date(2026, 7, 10)),
-    )
-
-
-def test_full_refetches_range_and_ignores_other_scopes() -> None:
-    extras = (
-        _observation(datetime(2020, 1, 1, tzinfo=UTC), asset_id="equity:us:aapl"),
-        _observation(datetime(2020, 1, 2, tzinfo=UTC), source_id="other:source"),
-        _observation(
-            datetime(2020, 1, 3, tzinfo=UTC),
-            frequency=DataFrequency.QUARTERLY,
-        ),
-    )
-    plan = _plan(
-        (datetime(2026, 7, 5, tzinfo=UTC),),
-        mode=BtcRefreshMode.FULL,
-        extras=extras,
-    )
-
-    assert plan.mode is BtcMarketRefreshMode.FULL
-    assert plan.fetch_intervals == (
-        BtcMarketDateInterval(start=date(2026, 7, 1), end=date(2026, 7, 10)),
-    )
-    assert plan.persisted_earliest == datetime(2026, 7, 5, tzinfo=UTC)

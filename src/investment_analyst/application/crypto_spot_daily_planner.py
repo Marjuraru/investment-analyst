@@ -100,7 +100,11 @@ class CryptoSpotDailyRefreshPlanner:
     def _persisted_observations(self) -> tuple[NormalizedObservation, ...]:
         return tuple(
             item
-            for item in self._storage.observations.list(asset_id=self._asset_id)
+            for item in self._storage.observations.list(
+                asset_id=self._asset_id,
+                source_id=self._source_id,
+                frequency=DataFrequency.DAY_1,
+            )
             if item.asset_id == self._asset_id
             and item.source.source_id == self._source_id
             and item.frequency is DataFrequency.DAY_1

@@ -115,7 +115,11 @@ class BtcMarketRefreshPlanner:
         )
 
     def _persisted_observations(self) -> tuple[NormalizedObservation, ...]:
-        observations = self._storage.observations.list(asset_id=ASSET_ID)
+        observations = self._storage.observations.list(
+            asset_id=ASSET_ID,
+            source_id=SOURCE_ID,
+            frequency=DataFrequency.DAY_1,
+        )
         return tuple(
             observation
             for observation in observations
