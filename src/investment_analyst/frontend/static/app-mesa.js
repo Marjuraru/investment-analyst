@@ -213,7 +213,7 @@ const MESA_ASSET_CLASS_LABELS = Object.freeze({
 
 function mesaMatrixStateMarkup(state) {
   const label = MESA_MATRIX_STATE_LABELS[state];
-  return `<span class="mesa-matrix-state mesa-matrix-state-${state}" role="img" aria-label="${label}"><span class="mesa-matrix-mark mesa-matrix-${state}" aria-hidden="true"></span><span class="visually-hidden">${label}</span></span>`;
+  return `<span class="mesa-matrix-state mesa-matrix-state-${state}" role="img" aria-label="${label}" title="${label}"><span class="mesa-matrix-mark mesa-matrix-${state}" aria-hidden="true"></span><span class="visually-hidden">${label}</span></span>`;
 }
 
 function mesaUniverseCellMarkup(capability, evidence, ageDays) {
