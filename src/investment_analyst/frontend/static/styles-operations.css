@@ -740,3 +740,7 @@ section {
   color: var(--muted);
   font-size: 0.7rem;
 }
+
+.review-asset-navigation {
+  margin-top: 0.75rem;
+}

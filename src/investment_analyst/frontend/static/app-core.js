@@ -716,12 +716,18 @@ async function loadMarketAssets() {
   }
 
   async function selectComboboxOption(assetId) {
-    if (!marketAssets[assetId] || assetId === selectedMarketAsset) {
+    const { activate = true } = arguments[1] || {};
+    const presentation = marketAssets[assetId];
+    if (!presentation) {
       closeListbox();
-      input.value = marketAssets[assetId].symbol + " — " + marketAssets[assetId].name;
-      return;
+      return false;
     }
-    input.value = marketAssets[assetId].symbol + " — " + marketAssets[assetId].name;
+    if (assetId === selectedMarketAsset) {
+      closeListbox();
+      input.value = presentation.symbol + " — " + presentation.name;
+      return true;
+    }
+    input.value = presentation.symbol + " — " + presentation.name;
     closeListbox();
     marketStartByAsset.set(selectedMarketAsset, byId("market-start").value);
     knownAtByAsset.set(selectedMarketAsset, byId("report-known-at").value.trim());
@@ -745,10 +751,14 @@ async function loadMarketAssets() {
     // `queryReport()`, and its companion queries) is intentionally centralized
     // in the visible-board dispatcher below.
     invalidateDeferredBoardLoads();
-    activateBoard(boardIdFromLocationHash(), { focus: false });
+    if (activate) {
+      activateBoard(boardIdFromLocationHash(), { focus: false });
+    }
+    return true;
   }
 
-  selectMarketAssetForNavigation = selectComboboxOption;
+  selectMarketAssetForNavigation = (assetId) =>
+    selectComboboxOption(assetId, { activate: false });
 
   input.addEventListener("focus", openListbox);
   input.addEventListener("input", () => {

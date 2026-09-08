@@ -528,6 +528,29 @@ reglas y notificaciones, con el encabezado `Configuración y automatización`. L
 aplicación es el control accesible para colapsar el lateral; los enlaces de tablero siguen siendo
 enlaces y Sistema permanece último y separado.
 
+### Navegación contextual y controles ocultos (`UI-14`)
+
+UI-14 añade una única `CONTEXTUAL_NAVIGATION_REGISTRY` sobre los seis tableros existentes. Los
+controles semánticos se construyen como botones y transportan la identidad estable del payload:
+`asset_id` para Activo/Cazatiburones, `candidate_id` para candidatos y `alert_id` para incidencias.
+No se resuelve un destino desde el símbolo, el nombre visible, el orden de una lista ni un fallback
+arbitrario; una identidad ausente o ya no disponible produce un estado honesto.
+
+Mesa ofrece navegación a Activo para su identidad y sus tres celdas analíticas, incluso con estado
+vencido, bloqueado o sin evidencia. Sus tres familias de novedades abren el elemento exacto en
+Revisar o Cazatiburones. Técnico y el detalle de Revisar ofrecen `Abrir en Activo`; el puente
+explícito del detalle local de Cazatiburones conserva `asset_id`, familia y selección local, y sólo
+entonces permite abrir el activo global sin mutar el alcance local por accidente.
+
+Las tablas avanzadas `Consultar los datos visibles en una tabla` y `Consultar períodos y hechos SEC
+en una tabla` conservan sus nodos, IDs, renderers, datos, endpoints y exportaciones, pero parten
+con el atributo nativo `hidden`. Por ello no son visibles ni focusables en el flujo principal y su
+presentación se puede revertir quitando ese atributo. El foco visible, el teclado y la gramática de
+ausencia siguen siendo obligatorios en cada control contextual.
+
+El bloque no amplía la matriz de cargas: no agrega endpoints, polling, eventos de acuse, mutaciones,
+dependencias, almacenamiento, rutas públicas o hashes de deep-link.
+
 ### Técnico, Revisar y sesiones locales (`UI-10`)
 
 El control de Técnico reutiliza el catálogo `marketAssets` y el contrato de comparación vigente:

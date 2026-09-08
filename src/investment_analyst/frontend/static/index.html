@@ -601,7 +601,7 @@
                 <p id="chart-status" role="status">Consultando el histórico local…</p>
               </div>
 
-              <details id="chart-data-disclosure" class="chart-data-disclosure">
+              <details id="chart-data-disclosure" class="chart-data-disclosure" hidden>
                 <summary>Consultar los datos visibles en una tabla</summary>
                 <div class="chart-table-scroll">
                   <table>
@@ -836,7 +836,7 @@
                 <p id="fundamental-status" role="status">Consultando fundamentales locales…</p>
               </div>
 
-              <details class="chart-data-disclosure">
+              <details class="chart-data-disclosure" hidden>
                 <summary>Consultar períodos y hechos SEC en una tabla</summary>
                 <div class="chart-table-scroll">
                   <table>
@@ -1162,6 +1162,7 @@
                     <span>Familia</span>
                     <select id="cazatiburones-universe-family" aria-describedby="cazatiburones-universe-filter-status">
                       <option value="all">Todas</option>
+                      <option value="activity">Actividad declarada</option>
                       <option value="insider">Insiders</option>
                       <option value="beneficial">Propiedad beneficiaria</option>
                       <option value="institutional">Institucional 13F</option>
@@ -1206,6 +1207,7 @@
                   <small>Detalle local</small>
                   <strong id="cazatiburones-detail-asset">Sin activo seleccionado</strong>
                 </span>
+                <button id="cazatiburones-open-asset" class="button secondary compact" type="button">Abrir en Activo</button>
                 <button id="cazatiburones-detail-close" class="button secondary compact" type="button">Volver al índice</button>
               </div>
               <p id="cazatiburones-detail-empty" class="chart-status" role="status" aria-live="polite">Selecciona un activo del índice para consultar sus lecturas detalladas.</p>

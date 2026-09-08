@@ -260,3 +260,42 @@
     grid-template-columns: 1fr;
   }
 }
+
+.mesa-contextual-item {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mesa-contextual-item:hover,
+.mesa-contextual-item:focus-visible {
+  border-color: var(--accent);
+  background: var(--surface-subtle);
+}
+
+.mesa-universe-asset-button,
+.mesa-universe-domain-button {
+  width: 100%;
+  min-height: 36px;
+  padding: 0.25rem 0.35rem;
+  border: 0;
+  background: transparent;
+  color: var(--accent-dark);
+  font: inherit;
+  font-weight: 720;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mesa-universe-asset-button:hover,
+.mesa-universe-asset-button:focus-visible {
+  text-decoration: underline;
+}
+
+.mesa-universe-domain-button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}

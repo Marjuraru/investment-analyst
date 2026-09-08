@@ -184,3 +184,18 @@
     grid-template-columns: 1fr;
   }
 }
+
+.comparison-asset-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-dark);
+  font: inherit;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.comparison-asset-link:hover,
+.comparison-asset-link:focus-visible {
+  text-decoration: underline;
+}

@@ -6,6 +6,16 @@
 // container, never the same DOM id as those boards.
 let mesaAnalyticalNewsRequestSequence = 0;
 
+function mesaContextualNavigationItem(className, label, request) {
+  const item = createContextualNavigationButton(
+    label,
+    request,
+    "alert-inbox-item mesa-contextual-item " + className,
+  );
+  item.setAttribute("aria-label", label);
+  return item;
+}
+
 function renderMesaAnalyticalNews(payload) {
   const list = byId("mesa-news-analytical-list");
   const count = byId("mesa-news-analytical-count");
@@ -20,7 +30,11 @@ function renderMesaAnalyticalNews(payload) {
   }
   for (const view of items.slice(0, 5)) {
     const notification = view.item;
-    const item = createElement("article", "alert-inbox-item");
+    const item = mesaContextualNavigationItem(
+      "mesa-analytical-item",
+      "Abrir candidato " + notification.candidate_id,
+      { board: "revisar", family: "candidate", id: notification.candidate_id },
+    );
     item.append(
       createElement("strong", "", `${notification.rule_id} · ${notification.asset_id}`),
       createElement("time", "", formatInstant(notification.created_at)),
@@ -78,7 +92,11 @@ function renderMesaCazatiburonesNews(family, payload) {
   }
   for (const view of items) {
     const notification = view.item;
-    const item = createElement("article", "alert-inbox-item");
+    const item = mesaContextualNavigationItem(
+      "mesa-cazatiburones-" + family + "-item",
+      "Abrir " + family + " para " + notification.asset_id,
+      { board: "cazatiburones", family, id: notification.asset_id },
+    );
     item.append(
       createElement("strong", "", `${notification.rule_id} · ${notification.asset_id}`),
       createElement("span", "alert-inbox-status", MESA_CAZATIBURONES_STATUS_LABELS[view.status] || view.status),
@@ -142,7 +160,11 @@ function renderMesaIncidents(payload) {
     return;
   }
   for (const event of events.slice(0, 5)) {
-    const item = createElement("article", "alert-inbox-item");
+    const item = mesaContextualNavigationItem(
+      "mesa-incident-item",
+      "Abrir incidencia " + event.alert_id,
+      { board: "revisar", family: "alert", id: event.alert_id },
+    );
     item.append(
       createElement("strong", "", event.title),
       createElement(
@@ -306,16 +328,54 @@ function renderMesaUniverseMatrix(payload) {
   body.replaceChildren();
   for (const asset of payload.assets || []) {
     const row = document.createElement("tr");
-    const cellsMarkup = MESA_COVERAGE_CAPABILITY_KEYS.map((key) => {
-      const coverage = asset[key];
-      return `<td>${mesaUniverseCellMarkup(
+    const assetCell = document.createElement("th");
+    assetCell.scope = "row";
+    const assetButton = createContextualNavigationButton(
+      "",
+      { board: "activo", assetId: asset.asset_id, subtab: "mercado" },
+      "mesa-universe-asset-button",
+    );
+    assetButton.setAttribute(
+      "aria-label",
+      "Abrir activo " + (asset.symbol || asset.asset_id || "sin identidad"),
+    );
+    assetButton.append(
+      createElement("strong", "", asset.symbol || asset.asset_id),
+      document.createElement("br"),
+      createElement("small", "", asset.name || "Activo sin nombre"),
+    );
+    assetCell.append(assetButton);
+    row.append(assetCell);
+    row.append(createElement("td", "", mesaAssetDomainLabel(asset.asset_class)));
+    const domainSubtabs = {
+      market: ["mercado", "Mercado"],
+      fundamentals: ["fundamentales", "Fundamentales"],
+      corporate_valuation: ["valoracion", "Valoración"],
+    };
+    for (const key of MESA_COVERAGE_CAPABILITY_KEYS) {
+      const coverage = asset[key] || {};
+      const [subtab, label] = domainSubtabs[key];
+      const domainCell = document.createElement("td");
+      const domainButton = createContextualNavigationButton(
+        "",
+        { board: "activo", assetId: asset.asset_id, subtab },
+        "mesa-universe-domain-button",
+      );
+      domainButton.setAttribute(
+        "aria-label",
+        "Abrir " + label + " para " + (asset.symbol || asset.asset_id || "activo sin identidad"),
+      );
+      domainButton.innerHTML = mesaUniverseCellMarkup(
         coverage.capability,
         coverage.evidence,
         coverage.reference_age_days ?? coverage.latest_input_age_days ?? null,
-      )}</td>`;
-    }).join("");
-    row.innerHTML =
-      `<td><strong>${asset.symbol}</strong><br><small>${asset.name} · ${asset.exchange}</small></td><td>${mesaAssetDomainLabel(asset.asset_class)}</td>${cellsMarkup}<td>${mesaLatestEvidenceMarkup(asset)}</td>`;
+      );
+      domainCell.append(domainButton);
+      row.append(domainCell);
+    }
+    const evidenceCell = document.createElement("td");
+    evidenceCell.innerHTML = mesaLatestEvidenceMarkup(asset);
+    row.append(evidenceCell);
     body.append(row);
   }
   if (!body.childElementCount) {

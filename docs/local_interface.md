@@ -52,6 +52,7 @@ par activo-familia en el orden fijo `insider`, `beneficial`, `institutional`, co
 `Antigüedad`. Expone literalmente `capability`, `evidence`, `statements`,
 `latest_available_at`, `latest_age_days` y `not_evaluable_reason`, sin derivar actividad ni
 combinar familias. La condición point-in-time sigue siendo `available_at <= known_at`.
+La opción `Actividad declarada` agrupa localmente las filas `insider` y `beneficial` de Cazatiburones sin cambiar el contrato ni volver a consultar.
 
 La búsqueda por símbolo o nombre y los selectores de familia (`Todas`, `Insiders`, `Propiedad
 beneficiaria`, `Institucional 13F`) y evidencia (`Todas`, `Presente`, `Sin evidencia`, `No
@@ -147,6 +148,31 @@ formulario `run-form` aparece una sola vez en un panel colapsable dentro de Acti
 la configuración global de watchlist, reglas y notificaciones, se titula `Configuración y
 automatización`, y el encabezado de marca es el control accesible del lateral; Sistema permanece
 último y separado.
+
+## Navegación contextual y superficies accesibles (`UI-14`)
+
+UI-14 completa la interfaz local sobre los seis tableros existentes: `mesa`, `activo`, `tecnico`,
+`revisar`, `cazatiburones` y `sistema`. `app-shell.js` mantiene un registro cerrado de destinos y
+valida cada salto con la identidad estable del payload; no infiere destinos desde texto visible, no
+crea tableros, rutas públicas, hashes o endpoints nuevos y conserva el `known_at` global.
+
+Mesa convierte el `asset_id` del universo y sus celdas de Mercado, Fundamentales y Valoración en
+controles semánticos hacia el activo exacto, incluso cuando la celda está vencida, bloqueada o sin
+evidencia. Sus novedades abren el `candidate_id` exacto en Revisar, la incidencia por `alert_id` y
+la notificación Caz por su `asset_id` y familia. Revisar conserva la espera mientras la bandeja lazy
+carga y declara honestamente una ausencia si la identidad ya no existe; su detalle y las tarjetas
+de Técnico ofrecen `Abrir en Activo` sólo para un activo identificado.
+
+Cazatiburones mantiene separados el activo y la familia locales (`activity` o `institutional`);
+una notificación nunca muta el selector global ni ejecuta un acuse. El botón explícito `Abrir en
+Activo` es el único puente desde ese detalle hacia el activo global y no cambia implícitamente la
+selección local.
+
+Las dos tablas avanzadas de datos de gráfico y hechos SEC conservan sus nodos, IDs, renderers,
+payloads, endpoints y exportaciones, pero sus disclosures llevan el atributo nativo `hidden`: no
+son visibles ni focusables en el flujo principal y pueden revertirse eliminando ese atributo. Todos
+los nuevos saltos usan botones semánticos con foco visible y estados de ausencia accesibles; no
+añaden polling, peticiones eager, mutaciones ni dependencias.
 
 ## Marco global y subpestañas de activo (`UI-8`)
 
@@ -409,6 +435,7 @@ devueltos por la consulta. Los endpoints fundamentales aceptan `asset_id`; la in
 siempre y el servidor rechaza activos sin un pipeline fundamental completo antes de invocar los
 servicios SEC configurados. La omisión conserva AAPL como valor compatible para clientes locales
 anteriores.
+UI-14 conserva los dos disclosures avanzados con sus nodos, IDs, renderers, datos, endpoints y exportaciones, pero los inicia con `hidden` para que no sean visibles ni focusables; retirar el atributo los revierte.
 
 El endpoint `/api/fundamental-research-history` envuelve ese contrato sin modificarlo y añade media,
 mínimo, máximo, rango, cambio frente al período disponible anterior, cambio del horizonte y CAGR.

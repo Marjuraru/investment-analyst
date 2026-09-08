@@ -188,3 +188,7 @@
     width: fit-content;
   }
 }
+
+.cazatiburones-detail-header {
+  flex-wrap: wrap;
+}
