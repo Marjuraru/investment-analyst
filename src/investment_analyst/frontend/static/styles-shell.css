@@ -82,6 +82,16 @@
   flex-shrink: 0;
 }
 
+.sidebar-toggle-icon {
+  flex-shrink: 0;
+  margin-left: auto;
+  transition: transform 0.2s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.sidebar.collapsed .sidebar-toggle-icon {
+  transform: rotate(180deg);
+}
+
 .sidebar-toggle:hover {
   background: var(--rail-overlay);
   color: var(--rail-ink-strong);
