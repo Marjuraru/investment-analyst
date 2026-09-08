@@ -1084,37 +1084,94 @@
             </div>
             <div id="cazatiburones-not-applicable" class="hidden"></div>
             <div id="cazatiburones-content">
-              <section id="cazatiburones-declared-activity" class="operation-panel" aria-labelledby="cazatiburones-declared-activity-titulo">
+              <section id="cazatiburones-universe-index" class="operation-panel cazatiburones-universe-panel" aria-labelledby="cazatiburones-universe-title" aria-busy="false">
                 <div class="panel-header">
                   <span>
-                    <strong id="cazatiburones-declared-activity-titulo">Actividad declarada</strong>
-                    <small id="cazatiburones-declared-activity-summary">Sin consultar</small>
+                    <strong id="cazatiburones-universe-title">Actividad del universo</strong>
+                    <small id="cazatiburones-universe-summary">Índice sin consultar</small>
                   </span>
                 </div>
-                <div id="cazatiburones-insider-features" class="cazatiburones-feature-group"></div>
-                <div id="cazatiburones-beneficial-features" class="cazatiburones-feature-group"></div>
+                <div id="cazatiburones-universe-controls" class="cazatiburones-universe-controls" aria-label="Filtros locales de actividad del universo">
+                  <label class="field" for="cazatiburones-universe-search">
+                    <span>Buscar activo</span>
+                    <input id="cazatiburones-universe-search" type="search" autocomplete="off" placeholder="Símbolo o nombre" aria-describedby="cazatiburones-universe-filter-status">
+                  </label>
+                  <label class="field" for="cazatiburones-universe-family">
+                    <span>Familia</span>
+                    <select id="cazatiburones-universe-family" aria-describedby="cazatiburones-universe-filter-status">
+                      <option value="all">Todas</option>
+                      <option value="insider">Insiders</option>
+                      <option value="beneficial">Propiedad beneficiaria</option>
+                      <option value="institutional">Institucional 13F</option>
+                    </select>
+                  </label>
+                  <label class="field" for="cazatiburones-universe-evidence">
+                    <span>Evidencia</span>
+                    <select id="cazatiburones-universe-evidence" aria-describedby="cazatiburones-universe-filter-status">
+                      <option value="all">Todas</option>
+                      <option value="present">Presente</option>
+                      <option value="missing">Sin evidencia</option>
+                      <option value="not_queried">No consultada</option>
+                    </select>
+                  </label>
+                  <button id="cazatiburones-universe-clear-filters" class="button secondary" type="button">Limpiar filtros</button>
+                </div>
+                <p id="cazatiburones-universe-filter-status" class="chart-status" role="status" aria-live="polite">Filtros locales sin aplicar.</p>
+                <p id="cazatiburones-universe-loading" class="chart-status hidden" role="status" aria-live="polite">Consultando el índice al corte vigente…</p>
+                <p id="cazatiburones-universe-empty" class="chart-status hidden" role="status" aria-live="polite"></p>
+                <p id="cazatiburones-universe-error" class="message error hidden" role="alert"></p>
+                <div id="cazatiburones-universe-table-scroll" class="cazatiburones-universe-table-scroll hidden">
+                  <table id="cazatiburones-universe-table" aria-describedby="cazatiburones-universe-table-caption cazatiburones-universe-filter-status">
+                    <caption id="cazatiburones-universe-table-caption">Actividad descriptiva por activo y familia, preservando capacidad, evidencia, declaraciones y disponibilidad al corte.</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Activo</th>
+                        <th scope="col">Familia</th>
+                        <th scope="col">Capacidad</th>
+                        <th scope="col">Evidencia</th>
+                        <th scope="col">Declaraciones</th>
+                        <th scope="col">Última disponible</th>
+                        <th scope="col">Antigüedad</th>
+                      </tr>
+                    </thead>
+                    <tbody id="cazatiburones-universe-rows"></tbody>
+                  </table>
+                </div>
               </section>
 
-              <section id="cazatiburones-institutional-observations" class="operation-panel" aria-labelledby="cazatiburones-institutional-observations-titulo">
-                <div class="panel-header">
-                  <span>
-                    <strong id="cazatiburones-institutional-observations-titulo">Observaciones institucionales 13F</strong>
-                    <small id="cazatiburones-institutional-observations-summary">Sin consultar</small>
-                  </span>
-                </div>
-                <div id="cazatiburones-institutional-observations-rows" class="cazatiburones-feature-group"></div>
-              </section>
+              <div id="cazatiburones-detail-content">
+                <section id="cazatiburones-declared-activity" class="operation-panel" aria-labelledby="cazatiburones-declared-activity-titulo">
+                  <div class="panel-header">
+                    <span>
+                      <strong id="cazatiburones-declared-activity-titulo">Actividad declarada</strong>
+                      <small id="cazatiburones-declared-activity-summary">Sin consultar</small>
+                    </span>
+                  </div>
+                  <div id="cazatiburones-insider-features" class="cazatiburones-feature-group"></div>
+                  <div id="cazatiburones-beneficial-features" class="cazatiburones-feature-group"></div>
+                </section>
 
-              <section id="cazatiburones-document-timeline" class="operation-panel" aria-labelledby="cazatiburones-document-timeline-titulo">
-                <div class="panel-header">
-                  <span>
-                    <strong id="cazatiburones-document-timeline-titulo">Línea temporal documental SEC</strong>
-                    <small id="cazatiburones-document-timeline-summary">Sin consultar</small>
-                  </span>
-                </div>
-                <div id="cazatiburones-timeline-asset-document" class="cazatiburones-feature-group"></div>
-                <div id="cazatiburones-timeline-filer-document" class="cazatiburones-feature-group"></div>
-              </section>
+                <section id="cazatiburones-institutional-observations" class="operation-panel" aria-labelledby="cazatiburones-institutional-observations-titulo">
+                  <div class="panel-header">
+                    <span>
+                      <strong id="cazatiburones-institutional-observations-titulo">Observaciones institucionales 13F</strong>
+                      <small id="cazatiburones-institutional-observations-summary">Sin consultar</small>
+                    </span>
+                  </div>
+                  <div id="cazatiburones-institutional-observations-rows" class="cazatiburones-feature-group"></div>
+                </section>
+
+                <section id="cazatiburones-document-timeline" class="operation-panel" aria-labelledby="cazatiburones-document-timeline-titulo">
+                  <div class="panel-header">
+                    <span>
+                      <strong id="cazatiburones-document-timeline-titulo">Línea temporal documental SEC</strong>
+                      <small id="cazatiburones-document-timeline-summary">Sin consultar</small>
+                    </span>
+                  </div>
+                  <div id="cazatiburones-timeline-asset-document" class="cazatiburones-feature-group"></div>
+                  <div id="cazatiburones-timeline-filer-document" class="cazatiburones-feature-group"></div>
+                </section>
+              </div>
             </div>
           </div>
 

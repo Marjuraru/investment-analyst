@@ -1467,6 +1467,7 @@ _BASELINE_API_ROUTES = frozenset(
         "/api/v1/cazatiburones/declared-activity",
         "/api/v1/cazatiburones/institutional-observations",
         "/api/v1/cazatiburones/notifications",
+        "/api/v1/cazatiburones/universe-activity",
         "/api/v1/crypto-derivatives",
         "/api/v1/market-comparison",
         "/api/v1/overview",
@@ -1967,6 +1968,237 @@ def test_route_keeps_sec_corpus_as_the_single_next() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Cazatiburones universe index and local filters (UI-11): the existing
+# universe-activity contract is projected into one seven-column row per
+# asset/family, while the three detailed reads remain independent.
+# ---------------------------------------------------------------------------
+
+
+def _cazatiburones_universe_region(app_js: str) -> str:
+    start = app_js.index("const CAZATIBURONES_UNIVERSE_FAMILIES")
+    end = app_js.index("// Every optional descriptive field", start)
+    return app_js[start:end]
+
+
+def test_cazatiburones_universe_index_is_independent_responsive_and_seven_column() -> None:
+    board = _board_slices(INDEX_HTML)["cazatiburones"]
+    table = re.search(r'<table id="cazatiburones-universe-table".*?</table>', board, re.DOTALL)
+    assert table, "the universe index must expose an accessible table"
+    columns = re.findall(r'<th scope="col">([^<]+)</th>', table.group(0))
+    assert columns == [
+        "Activo",
+        "Familia",
+        "Capacidad",
+        "Evidencia",
+        "Declaraciones",
+        "Última disponible",
+        "Antigüedad",
+    ]
+    assert board.index('id="cazatiburones-universe-index"') < board.index(
+        'id="cazatiburones-detail-content"'
+    )
+    assert 'class="cazatiburones-universe-table-scroll hidden"' in board
+    assert ".cazatiburones-universe-table-scroll" in STYLES_CSS
+    assert "overflow-x: auto" in STYLES_CSS
+    assert "@media (max-width: 760px)" in STYLES_CSS
+    loader = _extract_js_function(APP_JS, "loadCazatiburonesUniverseIndex")
+    assert "cazatiburonesEligiblePresentation" not in loader
+    assert "selectedMarketAsset" not in loader
+    assert "asset_id" not in loader
+
+
+def test_universe_load_uses_global_cut_once_without_asset_id_and_discards_stale_responses() -> None:
+    loader = _extract_js_function(APP_JS, "loadCazatiburonesUniverseIndex")
+    assert 'byId("report-known-at").value.trim()' in loader
+    assert "new URLSearchParams({ known_at: knownAt })" in loader
+    assert loader.count("/api/v1/cazatiburones/universe-activity?") == 1
+    assert "cazatiburonesUniverseRequestSequence" in loader
+    assert loader.count("sequence !== cazatiburonesUniverseRequestSequence") >= 2
+    assert 'knownAt !== byId("report-known-at").value.trim()' in loader
+    assert '"asset_id"' not in loader
+
+
+def test_canonical_cazatiburones_load_graph_and_deep_link_dispatch_index_plus_detail() -> None:
+    entry = _board_deferred_load_entry(APP_JS, "cazatiburones")
+    assert re.findall(r"loadCazatiburones(?:UniverseIndex|Board)", entry) == [
+        "loadCazatiburonesUniverseIndex",
+        "loadCazatiburonesBoard",
+    ]
+    initialize = _extract_js_function(APP_JS, "initialize")
+    assert "await loadMarketAssets();" in initialize
+    assert "await loadAssetPreferences();" in initialize
+    assert "loadDeferredBoardData(boardIdFromLocationHash());" in initialize
+    assert "void loadCazatiburonesUniverseIndex();" not in initialize
+    assert "void loadCazatiburonesBoard();" not in initialize
+
+
+def test_one_row_per_asset_family_preserves_capability_evidence_count_and_availability_fields() -> (
+    None
+):
+    rows_fn = _extract_js_function(APP_JS, "cazatiburonesUniverseRowsFromPayload")
+    assert rows_fn.count("rows.push") == 1
+    for field in (
+        "asset.asset_id",
+        "asset.symbol",
+        "asset.name",
+        "family.key",
+        "state.capability",
+        "state.evidence",
+        "state.statements",
+        "state.latest_available_at",
+        "state.latest_age_days",
+        "state.not_evaluable_reason",
+    ):
+        assert field in rows_fn
+    render_fn = _extract_js_function(APP_JS, "renderCazatiburonesUniverseRows")
+    assert "cazatiburonesUniverseSnapshot.rows.filter" in render_fn
+    assert "latestAvailableAt" in render_fn and "latestAgeDays" in render_fn
+
+
+def test_three_families_remain_fixed_separate_and_unaggregated() -> None:
+    family_block = APP_JS[
+        APP_JS.index("const CAZATIBURONES_UNIVERSE_FAMILIES") : APP_JS.index(
+            "let cazatiburonesUniverseRequestSequence"
+        )
+    ]
+    assert re.findall(r'key: "([a-z]+)"', family_block) == [
+        "insider",
+        "beneficial",
+        "institutional",
+    ]
+    rows_fn = _extract_js_function(APP_JS, "cazatiburonesUniverseRowsFromPayload")
+    assert "for (const family of CAZATIBURONES_UNIVERSE_FAMILIES)" in rows_fn
+    assert ".reduce(" not in rows_fn
+    assert ".sort(" not in rows_fn
+    assert "Object.freeze({" in rows_fn
+
+
+def test_search_family_and_evidence_filters_intersect_locally_without_reordering_or_fetching() -> (
+    None
+):
+    match_fn = _extract_js_function(APP_JS, "cazatiburonesUniverseRowMatches")
+    assert "searchMatches && familyMatches && evidenceMatches" in match_fn
+    assert "normalizeCazatiburonesUniverseSearch" in match_fn
+    filter_fn = _extract_js_function(APP_JS, "initializeCazatiburonesUniverseFilters")
+    assert filter_fn.count("renderCazatiburonesUniverseRows()") >= 4
+    assert 'addEventListener("input"' in filter_fn
+    assert filter_fn.count('addEventListener("change"') == 2
+    assert 'addEventListener("click"' in filter_fn
+    assert "api(" not in filter_fn
+    assert "fetch(" not in filter_fn
+    render_fn = _extract_js_function(APP_JS, "renderCazatiburonesUniverseRows")
+    assert ".filter(cazatiburonesUniverseRowMatches)" in render_fn
+    assert ".sort(" not in render_fn
+
+
+def test_filtered_empty_and_endpoint_empty_remain_distinct_and_accessible() -> None:
+    render_fn = _extract_js_function(APP_JS, "renderCazatiburonesUniverseRows")
+    assert "cazatiburonesUniverseSnapshot.rows.length === 0" in render_fn
+    assert "El índice no devolvió activos para el corte seleccionado." in render_fn
+    assert "Ninguna fila coincide con los filtros locales." in render_fn
+    assert 'classList.remove("hidden")' in render_fn
+    board = _board_slices(INDEX_HTML)["cazatiburones"]
+    assert 'id="cazatiburones-universe-empty"' in board
+    assert 'id="cazatiburones-universe-error"' in board
+    assert 'role="alert"' in board
+    assert 'role="status" aria-live="polite"' in board
+
+
+def test_row_navigation_reuses_global_asset_selection_and_preserves_filters() -> None:
+    navigation_fn = _extract_js_function(APP_JS, "navigateCazatiburonesUniverseAsset")
+    assert "selectMarketAssetForNavigation(assetId)" in navigation_fn
+    assert "api(" not in navigation_fn
+    assert "selectMarketAssetForNavigation = selectComboboxOption;" in APP_JS
+    render_fn = _extract_js_function(APP_JS, "renderCazatiburonesUniverseRows")
+    assert "assetButton.addEventListener" in render_fn
+    assert "row.assetId" in render_fn
+    board = _board_slices(INDEX_HTML)["cazatiburones"]
+    assert 'id="cazatiburones-asset"' not in board
+    assert 'id="cazatiburones-known-at"' not in board
+    assert 'id="report-known-at"' not in board
+
+
+def test_docs_state_index_fields_filter_semantics_pit_and_non_aggregation_limits() -> None:
+    repository_root = Path(str(files("investment_analyst"))).parent.parent
+    documents = [
+        (repository_root / "docs" / "local_interface.md").read_text(encoding="utf-8"),
+        (repository_root / "docs" / "local_interface_design_system.md").read_text(encoding="utf-8"),
+    ]
+    for document in documents:
+        normalized = re.sub(r"\s+", " ", document).lower()
+        for token in (
+            "cazatiburones-universe-activity-v1",
+            "known_at",
+            "insider",
+            "beneficial",
+            "institutional",
+            "capability",
+            "evidence",
+            "latest_available_at",
+            "latest_age_days",
+            "not_evaluable_reason",
+            "filtros locales",
+            "available_at <= known_at",
+            "agreg",
+        ):
+            assert token in normalized, f"documentation must declare {token!r}"
+
+
+def test_three_cazatiburones_detail_endpoints_and_read_only_semantics_unchanged() -> None:
+    detail_fn = _extract_js_function(APP_JS, "loadCazatiburonesBoard")
+    for endpoint in (
+        "/api/v1/cazatiburones/declared-activity?",
+        "/api/v1/cazatiburones/institutional-observations?",
+        "/api/v1/sec-document-timeline?",
+    ):
+        assert endpoint in detail_fn
+    for parameter in ("asset_id", "known_at", "offset", "limit"):
+        assert parameter in detail_fn
+    assert detail_fn.count("api(`/api/v1/") == 3
+    assert "method:" not in detail_fn
+    for container_id in (
+        "cazatiburones-insider-features",
+        "cazatiburones-beneficial-features",
+        "cazatiburones-institutional-observations-rows",
+        "cazatiburones-timeline-asset-document",
+        "cazatiburones-timeline-filer-document",
+    ):
+        assert f'id="{container_id}"' in INDEX_HTML
+
+
+def test_no_cross_asset_or_cross_family_total_score_rank_order_or_effective_portfolio() -> None:
+    region = _cazatiburones_universe_region(APP_JS).lower()
+    for forbidden in ("portfolio", "score", "rank", "reduce(", "sum(", ".sort("):
+        assert forbidden not in region
+    assert "payload.assets" in region
+    assert "for (const family of cazatiburones_universe_families)" in region
+
+
+def test_no_filter_or_row_scoped_network_request_and_no_write_action() -> None:
+    region = _cazatiburones_universe_region(APP_JS)
+    filter_fn = _extract_js_function(APP_JS, "initializeCazatiburonesUniverseFilters")
+    render_fn = _extract_js_function(APP_JS, "renderCazatiburonesUniverseRows")
+    for source in (filter_fn, render_fn):
+        assert "api(" not in source
+        assert "fetch(" not in source
+        assert "method:" not in source
+        assert "POST" not in source and "PUT" not in source and "DELETE" not in source
+    assert 'addEventListener("click"' in render_fn
+    assert "renderCazatiburonesUniverseRows()" in filter_fn
+    assert "api(`/api/v1/cazatiburones/universe-activity?" in region
+
+
+def test_no_visible_limitations_wall_or_state_inference_from_limitations() -> None:
+    board = _board_slices(INDEX_HTML)["cazatiburones"]
+    assert "limitations" not in board.lower()
+    render_fn = _extract_js_function(APP_JS, "renderCazatiburonesUniverseSnapshot")
+    assert "limitations" not in render_fn.lower()
+    rows_fn = _extract_js_function(APP_JS, "cazatiburonesUniverseRowsFromPayload")
+    assert "limitations" not in rows_fn.lower()
+    assert "notEvaluableReason" in rows_fn
+
+
+# ---------------------------------------------------------------------------
 # Cazatiburones stays fresh under the shared cut (UI-4 AUDIT fix): a direct
 # deep link into #cazatiburones must not read eligibility before
 # marketAssets exists, and the board must reload -- with the new asset or
@@ -1978,9 +2210,9 @@ def test_route_keeps_sec_corpus_as_the_single_next() -> None:
 
 def _check_cazatiburones_board_reloads_after_market_assets_are_ready(app_js: str) -> None:
     fn = _extract_js_function(app_js, "initialize")
-    reload_call = "void loadCazatiburonesBoard();"
-    assert "if (cazatiburonesBoardIsActive()) {" in fn and reload_call in fn, (
-        "initialize() must re-run the cazatiburones load once assets are ready"
+    reload_call = "loadDeferredBoardData(boardIdFromLocationHash());"
+    assert reload_call in fn, (
+        "initialize() must dispatch the canonical deferred graph once assets are ready"
     )
     assert "await loadMarketAssets();" in fn
     assert "applySelectedMarketAsset();" in fn
@@ -2053,6 +2285,7 @@ _DEFERRED_LOAD_NAMES = (
     "queryFundamentalResearch",
     "loadCandidateInbox",
     "loadAlertInbox",
+    "loadCazatiburonesUniverseIndex",
     "loadCazatiburonesBoard",
 )
 
@@ -2106,7 +2339,7 @@ def _check_initialize_shell_loads_are_exactly_market_assets_and_preferences(app_
     )
     for call in allowed_framework_loads:
         assert call in initialize
-    assert "void loadCazatiburonesBoard();" in initialize
+    assert "loadDeferredBoardData(boardIdFromLocationHash());" in initialize
     assert "await refreshOverview();" not in initialize
     assert "Promise.all([" not in initialize
 
@@ -2139,7 +2372,7 @@ def _check_board_to_deferred_loads_table_covers_the_six_registered_boards(app_js
         ],
         "tecnico": [],
         "revisar": ["loadCandidateInbox", "loadAlertInbox"],
-        "cazatiburones": ["loadCazatiburonesBoard"],
+        "cazatiburones": ["loadCazatiburonesUniverseIndex", "loadCazatiburonesBoard"],
         "sistema": [],
     }
     for board_id, expected in expected_loads.items():
@@ -2182,10 +2415,13 @@ def test_activate_board_fires_exactly_the_declared_loads() -> None:
 def _check_revisar_and_cazatiburones_keep_their_current_triggers(app_js: str) -> None:
     assert _board_deferred_load_entry(app_js, "revisar").count("loadCandidateInbox") == 1
     assert _board_deferred_load_entry(app_js, "revisar").count("loadAlertInbox") == 1
+    assert (
+        _board_deferred_load_entry(app_js, "cazatiburones").count("loadCazatiburonesUniverseIndex")
+        == 1
+    )
     assert _board_deferred_load_entry(app_js, "cazatiburones").count("loadCazatiburonesBoard") == 1
     initialize = _extract_js_function(app_js, "initialize")
-    assert "if (cazatiburonesBoardIsActive()) {" in initialize
-    assert "void loadCazatiburonesBoard();" in initialize
+    assert "loadDeferredBoardData(boardIdFromLocationHash());" in initialize
     assert 'byId("candidate-notification-panel").addEventListener("toggle"' in app_js
     assert 'byId("screening-rules-panel").addEventListener("toggle"' in app_js
 
@@ -3379,7 +3615,11 @@ def test_probe_external_network_rule_catches_a_web_font_link() -> None:
 
 def test_probe_cazatiburones_deep_link_rule_catches_a_removed_reload() -> None:
     _check_cazatiburones_board_reloads_after_market_assets_are_ready(APP_JS)  # baseline: clean
-    corrupted = APP_JS.replace("    void loadCazatiburonesBoard();\n", "", 1)
+    corrupted = APP_JS.replace(
+        "  loadDeferredBoardData(boardIdFromLocationHash());\n",
+        "",
+        1,
+    )
     assert corrupted != APP_JS, "probe fixture did not remove the deep-link reload"
     with pytest.raises(AssertionError):
         _check_cazatiburones_board_reloads_after_market_assets_are_ready(corrupted)
@@ -3490,7 +3730,7 @@ def test_probe_activate_board_rule_catches_a_cut_reference() -> None:
 def test_probe_no_hidden_preload_rule_catches_a_preloaded_board() -> None:
     _check_initialize_fires_no_board_query(APP_JS)
     corrupted = APP_JS.replace(
-        "    loadDeferredBoardData(boardIdFromLocationHash());",
+        "  loadDeferredBoardData(boardIdFromLocationHash());",
         '    loadDeferredBoardData("activo");',
         1,
     )
@@ -4163,7 +4403,7 @@ def test_probe_ui8_documentation_rule_catches_a_missing_route_declaration() -> N
         encoding="utf-8"
     )
     _check_ui8_composition_is_documented(design_doc, local_doc, plan_doc)  # baseline: clean
-    corrupted = design_doc.replace("UI-11", "UI-XX", 1)
+    corrupted = design_doc.replace("UI-11", "UI-XX")
     assert corrupted != design_doc
     with pytest.raises(AssertionError):
         _check_ui8_composition_is_documented(corrupted, local_doc, plan_doc)

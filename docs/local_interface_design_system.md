@@ -291,6 +291,37 @@ individual (`declared_nature`, `security_title`, `table`, `event_date`,
 `report_date`) se presenta como `missing`, nunca como un guion sin
 significado.
 
+### Índice universe-wide y filtros locales (`UI-11`)
+
+La zona superior de `#cazatiburones-content` consume una vez por activación
+`GET /api/v1/cazatiburones/universe-activity` con el único parámetro global
+`known_at`; no añade `asset_id`, un selector ni un contrato nuevo. El contrato
+`cazatiburones-universe-activity-v1` conserva el orden de `assets` y la
+interfaz materializa una fila por cada par activo-familia en el orden fijo
+`insider`, `beneficial`, `institutional`. Las tres familias permanecen
+separadas y exponen sólo los campos suministrados por la respuesta:
+`capability`, `evidence`, `statements`, `latest_available_at`,
+`latest_age_days` y `not_evaluable_reason`. La condición PIT se documenta
+como `available_at <= known_at`; la interfaz no resuelve enmiendas ni infiere
+actividad desde `limitations`.
+
+La tabla tiene exactamente siete columnas (`Activo`, `Familia`, `Capacidad`,
+`Evidencia`, `Declaraciones`, `Última disponible`, `Antigüedad`) y mantiene
+capacidad y evidencia en celdas distintas. Las fechas y conteos ausentes usan
+la gramática de ausencia; `0` sólo se muestra cuando el contrato suministra
+ese valor explícito. No existe total de filas, suma, intensidad, orden
+analítico, score, ranking, tendencia ni recomendación.
+
+La búsqueda por símbolo/nombre normaliza mayúsculas y diacríticos. Los
+selectores de familia y evidencia intersectan localmente el snapshot en
+memoria; escribir, cambiar o limpiar filtros no vuelve a consultar la red y
+conserva el orden recibido. El estado de endpoint vacío se distingue del
+estado filtrado vacío, ambos se anuncian con `role=status`, y el error del
+índice no borra ni sustituye las tres lecturas detalladas. El nombre del activo
+es un botón que reutiliza el selector global por `asset_id`, conserva los
+filtros y deja que la matriz de cargas vuelva a consultar las tres lecturas con
+el mismo corte.
+
 ### Carga por activación y estados (`UI-5`)
 
 El armazón conserva una única matriz tablero→peticiones. `activateBoard()`
@@ -305,7 +336,7 @@ armazón compartidas y se resuelven antes de la primera carga diferida.
 | `activo` | `GET /api/listed-company-report`, `GET /api/market-chart` (o intradía), `GET /api/fundamental-trend`, `GET /api/fundamental-analysis` | vacío inicial, cargando por superficie, ausente según la gramática `missing`/`not-evaluable`, error vigente o evidencia disponible |
 | `tecnico` | ninguna | vacío de armazón; sus cargas pertenecen a bloques posteriores |
 | `revisar` | `GET /api/candidates?limit=50`, `GET /api/alerts?limit=50` | cargando, vacío sin elementos, error de bandeja o lista disponible |
-| `cazatiburones` | `GET /api/v1/cazatiburones/declared-activity`, `GET /api/v1/cazatiburones/institutional-observations`, `GET /api/v1/sec-document-timeline` | cargando, `not-applicable` para un activo sin corpus corporativo, ausente bajo el corte, error vigente o lectura disponible |
+| `cazatiburones` | `GET /api/v1/cazatiburones/universe-activity`, `GET /api/v1/cazatiburones/declared-activity`, `GET /api/v1/cazatiburones/institutional-observations`, `GET /api/v1/sec-document-timeline` | índice y detalle cargando de forma independiente, endpoint vacío, filtros vacíos, `not-applicable` para un activo sin corpus corporativo, ausente bajo el corte, error vigente o lectura disponible |
 | `sistema` | ninguna | vacío de armazón; la operación permanece bajo demanda |
 
 El activo seleccionado y el único `known_at` global son parte de la identidad
