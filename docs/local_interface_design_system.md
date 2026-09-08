@@ -533,11 +533,19 @@ la misma disciplina de paridad que todo color de este documento.
 
 ### Deuda declarada
 
-La división de JavaScript y CSS por componentes (punto 5.4 de
-`docs/basic_functional_release_plan.md`) queda explícitamente fuera de este
-bloque: el registro de tableros crea la costura que la abaratará, pero
-hacerla aquí habría duplicado el tamaño de un diff que ya mueve toda la
-superficie.
+UI-12 integra la división de JavaScript y CSS por componentes prevista en el
+punto 5.4 de `docs/basic_functional_release_plan.md`. La responsabilidad y el
+orden de carga están documentados en [`local_interface.md`](local_interface.md):
+`app-core.js` precede a sus consumidores, `app-shell.js` queda después de los
+seis tableros para materializar la tabla única de cargas y `app.js` sólo inicia
+la inicialización una vez. El manifest CSS importa los siete componentes en
+orden canónico y deja `tokens.css` como fuente única de tokens.
+
+La componentización conserva la experiencia visual y la cascada mediante la
+misma regla, valor, breakpoint, token e inicialización que la base. No añade
+capacidad de producto, dependencia, endpoint, petición funcional, módulo ES,
+bundler o carga diferida. La vendorización local de IBM Plex Sans/Mono sigue
+siendo el siguiente delta UI.
 
 ## Convergencia con el lienzo (`UI-3`)
 

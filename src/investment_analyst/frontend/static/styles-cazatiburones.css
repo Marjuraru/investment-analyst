@@ -1,0 +1,155 @@
+.cazatiburones-feature-group {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.7rem;
+  border-top: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.cazatiburones-feature-group > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.cazatiburones-feature-group-title {
+  display: block;
+  color: var(--muted-strong);
+  font-size: var(--label-font-size);
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+}
+
+.cazatiburones-universe-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.8fr) repeat(2, minmax(160px, 1fr)) auto;
+  align-items: end;
+  gap: 0.7rem;
+  padding: 0.8rem;
+  border-top: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.cazatiburones-universe-controls .button {
+  white-space: nowrap;
+}
+
+.cazatiburones-universe-panel > .chart-status,
+.cazatiburones-universe-panel > .message {
+  margin: 0;
+  padding: 0.65rem 0.8rem;
+  border-top: 1px solid var(--line);
+}
+
+.cazatiburones-universe-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  border-top: 1px solid var(--line);
+}
+
+.cazatiburones-universe-table-scroll table {
+  width: 100%;
+  min-width: 1080px;
+  border-collapse: collapse;
+  font-size: 0.7rem;
+}
+
+.cazatiburones-universe-table-scroll caption {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.cazatiburones-universe-table-scroll th,
+.cazatiburones-universe-table-scroll td {
+  min-width: 118px;
+  height: var(--row-height);
+  padding: 0.45rem 0.65rem;
+  border-bottom: var(--row-rule-width) solid var(--line);
+  color: var(--ink-strong);
+  font-size: var(--base-font-size);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.cazatiburones-universe-table-scroll th:first-child,
+.cazatiburones-universe-table-scroll td:first-child {
+  min-width: 210px;
+}
+
+.cazatiburones-universe-table-scroll thead th {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  background: var(--surface-subtle);
+  color: var(--muted-strong);
+  font-size: var(--label-font-size);
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.cazatiburones-universe-table-scroll tbody th {
+  font-weight: 620;
+}
+
+.cazatiburones-universe-asset-button {
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-dark);
+  cursor: pointer;
+  font-weight: 720;
+  text-align: left;
+}
+
+.cazatiburones-universe-asset-button:hover {
+  text-decoration: underline;
+}
+
+.cazatiburones-universe-family-cell,
+.cazatiburones-universe-state {
+  white-space: nowrap;
+}
+
+.cazatiburones-row {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.cazatiburones-row dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 0.6rem;
+  margin: 0.3rem 0 0;
+}
+
+.cazatiburones-row dt {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.cazatiburones-row dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.7rem;
+}
+
+@media (max-width: 760px) {
+  .cazatiburones-universe-controls {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .cazatiburones-universe-controls .button {
+    width: fit-content;
+  }
+}

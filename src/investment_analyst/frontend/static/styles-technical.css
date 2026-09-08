@@ -1,0 +1,186 @@
+.comparison-section {
+  border-top: 1px solid var(--line);
+  padding: 2.5rem 0;
+}
+
+.comparison-controls,
+.comparison-cards {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin: 1.25rem 0;
+}
+
+.comparison-controls .button {
+  align-self: end;
+}
+
+.comparison-asset-field {
+  min-width: 0;
+}
+
+.comparison-asset-picker {
+  position: relative;
+}
+
+.comparison-asset-picker input {
+  min-width: 0;
+}
+
+.comparison-asset-options {
+  position: absolute;
+  z-index: 3;
+  top: calc(100% + 0.25rem);
+  right: 0;
+  left: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0.25rem;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  list-style: none;
+}
+
+.comparison-asset-option,
+.comparison-asset-option-empty {
+  min-height: 36px;
+  padding: 0.48rem 0.55rem;
+  color: var(--ink-strong);
+  font-size: 0.68rem;
+}
+
+.comparison-asset-option {
+  cursor: pointer;
+}
+
+.comparison-asset-option:hover,
+.comparison-asset-option.active {
+  background: var(--surface-subtle);
+  color: var(--accent-dark);
+}
+
+.comparison-asset-option-empty {
+  color: var(--muted);
+}
+
+.comparison-selected-assets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  min-height: 28px;
+  margin-top: 0.35rem;
+}
+
+.comparison-selected-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 100%;
+  padding: 0.22rem 0.38rem;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+  color: var(--ink-strong);
+  font-size: 0.62rem;
+}
+
+.comparison-selected-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comparison-selected-chip-lock {
+  color: var(--muted);
+  font-size: 0.56rem;
+  white-space: nowrap;
+}
+
+.comparison-chip-remove {
+  min-height: 24px;
+  padding: 0.15rem 0.3rem;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--muted-strong);
+  cursor: pointer;
+  font-size: 0.58rem;
+}
+
+.comparison-chip-remove:hover,
+.comparison-chip-remove:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent-dark);
+}
+
+.comparison-selection-status {
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 480;
+}
+
+.comparison-assets-native {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.comparison-results {
+  display: grid;
+  gap: 1rem;
+}
+
+.comparison-chart {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  min-height: 260px;
+  overflow-x: auto;
+  padding: 0.75rem;
+}
+
+.comparison-chart svg {
+  display: block;
+  min-width: 560px;
+  width: 100%;
+}
+
+.comparison-cards {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+.comparison-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  padding: 1rem;
+}
+
+.comparison-card dl {
+  display: grid;
+  gap: 0.35rem;
+  grid-template-columns: 1fr auto;
+  margin: 0.75rem 0 0;
+}
+
+.comparison-card dd {
+  margin: 0;
+  text-align: right;
+}
+
+@media (max-width: 900px) {
+  .comparison-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .review-master-detail {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .comparison-controls {
+    grid-template-columns: 1fr;
+  }
+}

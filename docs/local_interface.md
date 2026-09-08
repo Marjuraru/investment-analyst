@@ -5,6 +5,34 @@ herramienta básica utilizable desde el navegador. Un scheduler derivado del cat
 actualizar la watchlist por trabajos independientes. No añade scores combinados, recomendaciones,
 Trading API ni un LLM activo.
 
+## Assets estáticos componentizados (`UI-12`)
+
+La entrega local conserva los entrypoints públicos `/assets/app.js` y
+`/assets/styles.css`, pero cada uno se compone de assets raíz enumerados por la
+allowlist fija del servidor. El HTML carga scripts clásicos `defer` en este orden:
+
+1. `app-core.js`: constantes, estado compartido, catálogo, tema, alcance de activo, helpers y cliente API.
+2. `app-analysis.js`: Activo, mercado, gráficos, fundamentales, valoración, reporte y exportación.
+3. `app-technical.js`: comparación técnica.
+4. `app-operations.js`: Revisar, screening, notificaciones, Sistema y acciones operativas.
+5. `app-mesa.js`: Mesa, novedades y universo.
+6. `app-cazatiburones.js`: índice y detalle Cazatiburones.
+7. `app-shell.js`: relojes, sesiones, registro de tableros, navegación, wiring e `initialize()`.
+8. `app.js`: bootstrap final, con una única invocación de `initialize()`.
+
+`styles.css` importa, en el mismo orden canónico de responsabilidad, `styles-foundation.css`,
+`styles-shell.css`, `styles-mesa.css`, `styles-analysis.css`, `styles-technical.css`,
+`styles-operations.css` y `styles-cazatiburones.css`; conserva al final únicamente los overrides
+responsive y de accesibilidad cuya precedencia depende del cierre de la cascada. `tokens.css`
+permanece separado, se carga antes del manifest y no se modifica.
+
+Cada ruta continúa siendo una entrada literal de `_ASSETS`; no hay servidor de directorios,
+wildcards, módulos ES, bundler, CDN, lazy loading ni dependencia nueva. La componentización no
+cambia IDs DOM, clases, endpoints, payloads, parámetros, número de peticiones funcionales,
+inicialización única, cargas diferidas, guards de respuestas stale, contratos financieros ni la
+experiencia visual en desktop/mobile o temas claro/oscuro. El coste conocido es el aumento de
+peticiones same-origin de assets y la continuidad de globals compartidos por scripts clásicos.
+
 ## Capacidades
 
 `GET /api/v1/market-comparison` acepta `asset_id` repetido, `benchmark_id`, `start`, `end` y `known_at`. Devuelve `market-multi-asset-comparison-v1` desde almacenamiento local de solo lectura; la interfaz carga el gráfico normalizado bajo demanda.

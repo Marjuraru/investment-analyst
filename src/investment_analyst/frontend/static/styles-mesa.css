@@ -1,0 +1,233 @@
+.mesa-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: var(--canvas-block-gap);
+  max-width: 100%;
+}
+
+.mesa-main,
+.mesa-aside {
+  min-width: 0;
+}
+
+.mesa-main .mesa-layer + .mesa-layer,
+.mesa-aside .mesa-layer + .mesa-layer {
+  margin-top: var(--canvas-block-gap);
+}
+
+.mesa-news-families {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.mesa-news-family {
+  min-width: 0;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.mesa-news-family-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.mesa-news-family-header strong {
+  color: var(--ink-strong);
+  font-size: 0.78rem;
+}
+
+.mesa-news-count {
+  color: var(--muted);
+  font-size: 0.62rem;
+  white-space: nowrap;
+}
+
+.mesa-trust-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.85rem;
+  margin-top: 0.65rem;
+}
+
+.mesa-trust-grid > div {
+  min-width: 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.mesa-trust-grid dt {
+  color: var(--muted);
+  font-size: 0.58rem;
+  font-weight: 760;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.mesa-trust-grid dd {
+  margin: 0.2rem 0 0;
+  color: var(--ink-strong);
+  font-size: 0.78rem;
+}
+
+.mesa-trust-grid small {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.mesa-bvl-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0.65rem 0 0;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.mesa-bvl-summary > div {
+  min-width: 0;
+  padding: 0.42rem 0.5rem;
+  background: var(--surface);
+}
+
+.mesa-bvl-summary dt {
+  color: var(--muted);
+  font-size: 0.56rem;
+  font-weight: 760;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.mesa-bvl-summary dd {
+  margin: 0.2rem 0 0;
+  color: var(--ink-strong);
+  font-size: 0.72rem;
+}
+
+.mesa-universe-window {
+  margin: 0 0 0.5rem;
+  color: var(--muted-strong);
+  font-size: 0.72rem;
+}
+
+.universe-matrix-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+}
+
+.universe-matrix-table {
+  width: 100%;
+  min-width: 640px;
+  margin: 0;
+  border-collapse: collapse;
+  font-size: var(--base-font-size);
+}
+
+.universe-matrix-table th,
+.universe-matrix-table td {
+  height: var(--row-height);
+  padding: 0 var(--row-padding-inline);
+  border-bottom: var(--row-rule-width) solid var(--line);
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.universe-matrix-table td:nth-child(3),
+.universe-matrix-table td:nth-child(4),
+.universe-matrix-table td:nth-child(5) {
+  text-align: center;
+}
+
+.universe-matrix-table thead th {
+  color: var(--muted);
+  background: var(--surface-subtle);
+  font-size: var(--label-font-size);
+  font-weight: 760;
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+}
+
+.mesa-universe-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.65rem;
+  margin-top: 0.45rem;
+  color: var(--muted-strong);
+  font-size: 0.64rem;
+}
+
+.mesa-universe-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.mesa-matrix-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mesa-matrix-mark {
+  display: inline-block;
+  box-sizing: border-box;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--line-strong);
+}
+
+.mesa-matrix-fresh {
+  border-color: var(--positive-ink);
+  background: var(--positive);
+  clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%);
+}
+
+.mesa-matrix-overdue {
+  border-color: var(--warning-ink);
+  background: var(--surface);
+  transform: rotate(45deg);
+}
+
+.mesa-matrix-missing {
+  border-color: var(--muted-strong);
+  background: var(--surface-subtle);
+  clip-path: circle(50% at 50% 50%);
+}
+
+.mesa-matrix-blocked {
+  border-color: var(--blocked-ink);
+  background: repeating-linear-gradient(
+    135deg,
+    var(--blocked-soft) 0,
+    var(--blocked-soft) 1px,
+    var(--surface) 1px,
+    var(--surface) 2px
+  );
+}
+
+.mesa-matrix-not-applicable {
+  width: 7px;
+  height: 2px;
+  border-width: 1px 0;
+  border-color: var(--muted);
+  background: var(--surface-subtle);
+}
+
+@media (max-width: 1120px) {
+  .mesa-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .mesa-news-families {
+    grid-template-columns: 1fr;
+  }
+}
