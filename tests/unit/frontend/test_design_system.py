@@ -29,15 +29,225 @@ import pytest
 
 _STATIC = files("investment_analyst.frontend").joinpath("static")
 
+JS_COMPONENTS: tuple[str, ...] = (
+    "app-core.js",
+    "app-analysis.js",
+    "app-technical.js",
+    "app-operations.js",
+    "app-mesa.js",
+    "app-cazatiburones.js",
+    "app-shell.js",
+    "app.js",
+)
+CSS_COMPONENTS: tuple[str, ...] = (
+    "styles-foundation.css",
+    "styles-shell.css",
+    "styles-mesa.css",
+    "styles-analysis.css",
+    "styles-technical.css",
+    "styles-operations.css",
+    "styles-cazatiburones.css",
+)
+
 
 def _read(name: str) -> str:
     return _STATIC.joinpath(name).read_text(encoding="utf-8")
 
 
 TOKENS_CSS = _read("tokens.css")
-STYLES_CSS = _read("styles.css")
+STYLES_MANIFEST = _read("styles.css")
 INDEX_HTML = _read("index.html")
-APP_JS = _read("app.js")
+
+
+def _compose(names: tuple[str, ...]) -> str:
+    return "\n".join(_read(name).rstrip("\n") for name in names) + "\n"
+
+
+def _compose_styles(styles_manifest: str) -> str:
+    manifest_tail = "\n".join(styles_manifest.splitlines()[len(CSS_COMPONENTS) :]).lstrip("\n")
+    return f"{_compose(CSS_COMPONENTS)}\n{manifest_tail}\n"
+
+
+STYLES_CSS = _compose_styles(STYLES_MANIFEST)
+APP_JS = _compose(JS_COMPONENTS)
+
+
+def _check_html_component_order_and_bootstrap(
+    index_html: str, component_text: dict[str, str]
+) -> None:
+    expected = [f"/assets/{name}" for name in JS_COMPONENTS]
+    declared = re.findall(r'<script\s+src="([^"]+)"\s+defer></script>', index_html)
+    assert declared == expected
+    assert set(component_text) == set(JS_COMPONENTS)
+    for text in component_text.values():
+        assert text.startswith('"use strict";\n')
+        assert text.count('"use strict";') == 1
+    bootstrap = component_text["app.js"]
+    assert bootstrap == '"use strict";\n\ninitialize();\n'
+    assert bootstrap.count("initialize();") == 1
+    assert "initialize();" not in "\n".join(component_text[name] for name in JS_COMPONENTS[:-1])
+
+
+def test_html_declares_each_classic_deferred_script_once_in_canonical_order_and_bootstrap_initializes_once() -> (  # noqa: E501
+    None
+):
+    _check_html_component_order_and_bootstrap(
+        INDEX_HTML, {name: _read(name) for name in JS_COMPONENTS}
+    )
+
+
+def _check_css_manifest_order_and_component_ownership(
+    styles_manifest: str, component_text: dict[str, str]
+) -> None:
+    expected = [f"/assets/{name}" for name in CSS_COMPONENTS]
+    declared = re.findall(r'^@import url\("([^"]+)"\);$', styles_manifest, re.MULTILINE)
+    assert declared == expected
+    assert set(component_text) == set(CSS_COMPONENTS)
+    assert all(text.strip() for text in component_text.values())
+    assert all("@import" not in text for text in component_text.values())
+    ownership_markers = {
+        "styles-foundation.css": "* {",
+        "styles-shell.css": ".sidebar {",
+        "styles-mesa.css": ".mesa-layout {",
+        "styles-analysis.css": ".market-chart-card {",
+        "styles-technical.css": ".comparison-section {",
+        "styles-operations.css": ".operation-panel {",
+        "styles-cazatiburones.css": ".cazatiburones-feature-group {",
+    }
+    for component, marker in ownership_markers.items():
+        assert marker in component_text[component]
+        assert sum(marker in text for text in component_text.values()) == 1
+
+
+def test_css_manifest_imports_each_component_once_in_canonical_order_without_orphans() -> None:
+    _check_css_manifest_order_and_component_ownership(
+        STYLES_MANIFEST,
+        {name: _read(name) for name in CSS_COMPONENTS},
+    )
+
+
+def test_design_system_checker_aggregates_js_and_css_in_canonical_runtime_order() -> None:
+    assert _compose(JS_COMPONENTS) == APP_JS
+    assert _compose_styles(STYLES_MANIFEST) == STYLES_CSS
+    assert "BOARD_REGISTRY" in _read("app-shell.js")
+    assert "queryMarketChart" in _read("app-analysis.js")
+    assert "queryMarketComparison" in _read("app-technical.js")
+    assert "reviewItemId" in _read("app-operations.js")
+    assert "loadMesaAnalyticalNews" in _read("app-mesa.js")
+    assert "loadCazatiburonesBoard" in _read("app-cazatiburones.js")
+
+
+def test_no_component_is_duplicated_or_orphaned_and_all_existing_assertions_remain_active() -> None:
+    function_names = re.findall(
+        r"^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(",
+        APP_JS,
+        re.MULTILINE,
+    )
+    assert len(function_names) == len(set(function_names))
+    global_names = re.findall(r"^(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=", APP_JS, re.MULTILINE)
+    assert len(global_names) == len(set(global_names))
+    assert len(re.findall(r"<script\s+src=", INDEX_HTML)) == len(JS_COMPONENTS)
+    assert len(re.findall(r"^@import\s+", STYLES_MANIFEST, re.MULTILINE)) == len(CSS_COMPONENTS)
+    assert "test_every_token_defined_in_light_and_dark" in globals()
+
+
+def test_no_duplicate_initialize_listener_timer_state_request_or_stale_response_guard_drift() -> (
+    None
+):
+    assert APP_JS.count("initialize();") == 1
+    for unique_runtime_binding in (
+        "const response = await fetch(path, {",
+        "window.setTimeout(startMarketClocks, delay)",
+        "overviewTimer = window.setTimeout(",
+        'byId("report-known-at").addEventListener("change",',
+        'window.addEventListener("hashchange",',
+        "const BOARD_DEFERRED_LOADS = Object.freeze({",
+        "function isCurrentActivoBoardRequest(deferredRequest)",
+    ):
+        assert APP_JS.count(unique_runtime_binding) == 1
+    for request_sequence in (
+        "marketComparisonRequestSequence",
+        "marketChartRequestSequence",
+        "fundamentalTrendRequestSequence",
+        "fundamentalResearchRequestSequence",
+        "activoBoardRequestSequence",
+        "mesaAnalyticalNewsRequestSequence",
+        "mesaInstitutionalNewsRequestSequence",
+        "mesaActivityNewsRequestSequence",
+        "mesaIncidentsRequestSequence",
+        "mesaUniverseCoverageRequestSequence",
+        "cazatiburonesRequestSequence",
+        "cazatiburonesUniverseRequestSequence",
+    ):
+        assert APP_JS.count(f"let {request_sequence} = 0;") == 1
+
+
+def test_removed_lima_clock_known_at_capability_limitations_and_usage_copy_do_not_reappear() -> (
+    None
+):
+    for control_id in ("lima-clock", "lima-clock-date"):
+        assert not re.search(rf'<[a-z][^>]*\bid="{control_id}"[^>]*>', INDEX_HTML)
+    for forbidden in (
+        "Estas bandejas no están acotadas por el corte",
+        "Cazatiburones, Documentos y Derivados",
+        "Limitaciones declaradas",
+        "Uso local · Sin ejecución de órdenes · No constituye asesoramiento financiero",
+    ):
+        assert forbidden not in INDEX_HTML
+    assert "mesa-universe-not-queried" not in INDEX_HTML
+    assert "mesa-universe-limitations" not in INDEX_HTML
+
+
+def test_probe_component_loader_rejects_swapped_scripts_and_duplicate_initialize() -> None:
+    component_text = {name: _read(name) for name in JS_COMPONENTS}
+    _check_html_component_order_and_bootstrap(INDEX_HTML, component_text)
+    swapped = INDEX_HTML.replace(
+        '<script src="/assets/app-analysis.js" defer></script>\n'
+        '    <script src="/assets/app-technical.js" defer></script>',
+        '<script src="/assets/app-technical.js" defer></script>\n'
+        '    <script src="/assets/app-analysis.js" defer></script>',
+        1,
+    )
+    assert swapped != INDEX_HTML
+    with pytest.raises(AssertionError):
+        _check_html_component_order_and_bootstrap(swapped, component_text)
+
+    duplicated_bootstrap = {
+        **component_text,
+        "app.js": component_text["app.js"] + "initialize();\n",
+    }
+    with pytest.raises(AssertionError):
+        _check_html_component_order_and_bootstrap(INDEX_HTML, duplicated_bootstrap)
+
+
+def test_probe_component_loader_rejects_an_orphaned_script() -> None:
+    component_text = {name: _read(name) for name in JS_COMPONENTS}
+    component_text.pop("app-technical.js")
+    with pytest.raises(AssertionError):
+        _check_html_component_order_and_bootstrap(INDEX_HTML, component_text)
+
+
+def test_probe_css_component_checker_rejects_order_orphan_and_duplicate_ownership() -> None:
+    component_text = {name: _read(name) for name in CSS_COMPONENTS}
+    _check_css_manifest_order_and_component_ownership(STYLES_MANIFEST, component_text)
+    swapped = STYLES_MANIFEST.replace(
+        '@import url("/assets/styles-shell.css");\n@import url("/assets/styles-mesa.css");',
+        '@import url("/assets/styles-mesa.css");\n@import url("/assets/styles-shell.css");',
+        1,
+    )
+    assert swapped != STYLES_MANIFEST
+    with pytest.raises(AssertionError):
+        _check_css_manifest_order_and_component_ownership(swapped, component_text)
+
+    orphaned = dict(component_text)
+    orphaned.pop("styles-technical.css")
+    with pytest.raises(AssertionError):
+        _check_css_manifest_order_and_component_ownership(STYLES_MANIFEST, orphaned)
+
+    duplicated = dict(component_text)
+    duplicated["styles-shell.css"] += "\n.mesa-layout { display: block; }\n"
+    with pytest.raises(AssertionError):
+        _check_css_manifest_order_and_component_ownership(STYLES_MANIFEST, duplicated)
 
 
 # ---------------------------------------------------------------------------
@@ -4581,6 +4791,13 @@ def test_contract_limitations_remain_documented_and_do_not_create_ui_cells_or_re
 
 def test_board_registry_still_declares_exactly_six_boards() -> None:
     _check_board_registry_declares_exactly_six_boards(APP_JS)
+
+
+def test_board_registry_still_declares_exactly_six_boards_with_unchanged_deferred_load_graph() -> (
+    None
+):
+    _check_board_registry_declares_exactly_six_boards(APP_JS)
+    _check_board_to_deferred_loads_table_covers_the_six_registered_boards(APP_JS)
 
 
 def test_technical_review_and_mesa_load_graphs_and_endpoints_are_unchanged() -> None:

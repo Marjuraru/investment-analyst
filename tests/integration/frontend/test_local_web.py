@@ -3,6 +3,7 @@
 import gzip
 import hashlib
 import http.client
+import inspect
 import json
 import threading
 import time
@@ -194,15 +195,60 @@ from investment_analyst.evidence.sec_institutional_observations.models import (
     InstitutionalObservationQueryResult,
 )
 from investment_analyst.frontend.local_web import (
+    _ASSETS,
     _MAX_READ_CACHE_ENTRIES,
+    _MIN_GZIP_BYTES,
     AaplLocalController,
     AaplLocalHttpServer,
+    AaplLocalRequestHandler,
     AaplLocalWebApplication,
     _manual_operation_result,
 )
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
 from investment_analyst.storage import DuckDBStore, StoragePaths
+
+_CANONICAL_STATIC_ASSETS = (
+    "/assets/app-core.js",
+    "/assets/app-analysis.js",
+    "/assets/app-technical.js",
+    "/assets/app-operations.js",
+    "/assets/app-mesa.js",
+    "/assets/app-cazatiburones.js",
+    "/assets/app-shell.js",
+    "/assets/app.js",
+    "/assets/tokens.css",
+    "/assets/styles-foundation.css",
+    "/assets/styles-shell.css",
+    "/assets/styles-mesa.css",
+    "/assets/styles-analysis.css",
+    "/assets/styles-technical.css",
+    "/assets/styles-operations.css",
+    "/assets/styles-cazatiburones.css",
+    "/assets/styles.css",
+)
+_COMPOSED_JS_ASSETS = _CANONICAL_STATIC_ASSETS[:8]
+_COMPOSED_CSS_ASSETS = _CANONICAL_STATIC_ASSETS[9:16]
+
+
+def _read_composed_assets(root: str, routes: tuple[str, ...]) -> str:
+    parts = []
+    for route in routes:
+        with urlopen(f"{root}{route}", timeout=5) as response:
+            parts.append(response.read().decode("utf-8"))
+    return "\n".join(parts)
+
+
+def _read_composed_javascript(root: str) -> str:
+    return _read_composed_assets(root, _COMPOSED_JS_ASSETS)
+
+
+def _read_composed_stylesheet(root: str) -> str:
+    components = _read_composed_assets(root, _COMPOSED_CSS_ASSETS)
+    with urlopen(f"{root}/assets/styles.css", timeout=5) as response:
+        manifest = response.read().decode("utf-8")
+    manifest_tail = "\n".join(manifest.splitlines()[len(_COMPOSED_CSS_ASSETS) :])
+    return f"{components}\n{manifest_tail}"
 
 
 class _JsonResult:
@@ -1466,7 +1512,7 @@ def test_local_server_serves_packaged_assets_with_security_headers() -> None:
         assert head_response.status == 200
         assert head_body == b""
 
-        compressed = Request(f"{root}/assets/app.js", headers={"Accept-Encoding": "gzip"})
+        compressed = Request(f"{root}/assets/app-core.js", headers={"Accept-Encoding": "gzip"})
         with urlopen(compressed, timeout=5) as compressed_response:
             compressed_body = compressed_response.read()
             compressed_headers = dict(compressed_response.headers.items())
@@ -1474,6 +1520,82 @@ def test_local_server_serves_packaged_assets_with_security_headers() -> None:
         assert compressed_headers["Content-Encoding"] == "gzip"
         assert compressed_headers["Vary"] == "Accept-Encoding"
         assert b'const LOCALE = "es-PE"' in gzip.decompress(compressed_body)
+
+
+def test_fixed_asset_registry_serves_every_component_with_correct_mime_get_head_gzip_security_and_no_store() -> (  # noqa: E501
+    None
+):
+    assert tuple(route for route in _ASSETS if route != "/") == _CANONICAL_STATIC_ASSETS
+    with _server(_ExplodingApplication()) as (_, root):
+        for route in _CANONICAL_STATIC_ASSETS:
+            with urlopen(
+                Request(f"{root}{route}", headers={"Accept-Encoding": "identity"}),
+                timeout=5,
+            ) as response:
+                body = response.read()
+                headers = dict(response.headers.items())
+            assert response.status == 200
+            assert headers["Content-Type"] == _ASSETS[route][1]
+            assert headers["Cache-Control"] == "no-store"
+            assert headers["X-Content-Type-Options"] == "nosniff"
+            assert headers["X-Frame-Options"] == "DENY"
+            assert "default-src 'self'" in headers["Content-Security-Policy"]
+
+            with urlopen(Request(f"{root}{route}", method="HEAD"), timeout=5) as head_response:
+                assert head_response.status == 200
+                assert head_response.read() == b""
+                assert head_response.headers["Content-Type"] == _ASSETS[route][1]
+                assert head_response.headers["Cache-Control"] == "no-store"
+
+            with urlopen(
+                Request(f"{root}{route}", headers={"Accept-Encoding": "gzip"}),
+                timeout=5,
+            ) as compressed_response:
+                compressed_body = compressed_response.read()
+                compressed_headers = dict(compressed_response.headers.items())
+            if len(body) >= _MIN_GZIP_BYTES:
+                assert compressed_headers["Content-Encoding"] == "gzip"
+                assert compressed_headers["Vary"] == "Accept-Encoding"
+                assert gzip.decompress(compressed_body) == body
+            else:
+                assert "Content-Encoding" not in compressed_headers
+
+
+def test_unknown_asset_remains_404_and_no_dynamic_path_resolution_exists() -> None:
+    with _server(_ExplodingApplication()) as (_, root), pytest.raises(HTTPError) as error:
+        urlopen(f"{root}/assets/not-listed-by-the-fixed-registry.js", timeout=5)
+    assert error.value.code == 404
+
+
+def test_no_generic_static_serving_wildcard_dynamic_path_cdn_module_import_map_or_lazy_loading() -> (  # noqa: E501
+    None
+):
+    dispatch_source = inspect.getsource(AaplLocalRequestHandler._dispatch)
+    assert "if parsed.path in server.assets:" in dispatch_source
+    for forbidden in (
+        "glob(",
+        "rglob(",
+        "Path(parsed.path",
+        "joinpath(parsed.path",
+        "resolve(parsed.path",
+    ):
+        assert forbidden not in dispatch_source
+
+    with _server(_ExplodingApplication()) as (_, root):
+        with urlopen(f"{root}/", timeout=5) as response:
+            html = response.read().decode("utf-8")
+        with urlopen(f"{root}/assets/styles.css", timeout=5) as response:
+            styles_manifest = response.read().decode("utf-8")
+        javascript = _read_composed_javascript(root)
+
+    assert '<script type="module"' not in html
+    assert '<script type="importmap"' not in html
+    assert '<script src="http' not in html
+    assert '<link rel="stylesheet" href="http' not in html
+    assert 'loading="lazy"' not in html
+    assert "import(" not in javascript
+    assert all(f'src="{route}"' in html for route in _COMPOSED_JS_ASSETS)
+    assert all(f'@import url("{route}");' in styles_manifest for route in _COMPOSED_CSS_ASSETS)
 
 
 def test_market_chart_gzip_preserves_the_exact_canonical_json() -> None:
@@ -1507,11 +1629,11 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
         with urlopen(f"{root}/", timeout=5) as response:
             html = response.read().decode("utf-8")
         with urlopen(f"{root}/assets/app.js", timeout=5) as response:
-            javascript = response.read().decode("utf-8")
             javascript_content_type = response.headers["Content-Type"]
+        javascript = _read_composed_javascript(root)
         with urlopen(f"{root}/assets/styles.css", timeout=5) as response:
-            stylesheet = response.read().decode("utf-8")
             stylesheet_content_type = response.headers["Content-Type"]
+        stylesheet = _read_composed_stylesheet(root)
         with urlopen(f"{root}/assets/tokens.css", timeout=5) as response:
             tokens_stylesheet = response.read().decode("utf-8")
 
@@ -1783,11 +1905,8 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
 
 
 def test_asset_selection_invalidates_and_binds_listed_company_reports_by_asset() -> None:
-    with (
-        _server(_ExplodingApplication()) as (_, root),
-        urlopen(f"{root}/assets/app.js", timeout=5) as response,
-    ):
-        javascript = response.read().decode("utf-8")
+    with _server(_ExplodingApplication()) as (_, root):
+        javascript = _read_composed_javascript(root)
 
     selection = javascript[
         javascript.index("async function selectComboboxOption(assetId)") : javascript.index(
@@ -1822,10 +1941,8 @@ def test_icon_button_refresh_svg_is_preserved_on_busy_state() -> None:
     via aria-busy + disabled + a CSS spin animation on the SVG.
     """
     with _server(_ExplodingApplication()) as (_, root):
-        with urlopen(f"{root}/assets/app.js", timeout=5) as response:
-            javascript = response.read().decode("utf-8")
-        with urlopen(f"{root}/assets/styles.css", timeout=5) as response:
-            stylesheet = response.read().decode("utf-8")
+        javascript = _read_composed_javascript(root)
+        stylesheet = _read_composed_stylesheet(root)
         with urlopen(f"{root}/", timeout=5) as response:
             html = response.read().decode("utf-8")
 

@@ -1,0 +1,99 @@
+/*
+ * All color, ink-ramp and semantic-state custom properties live in
+ * tokens.css (loaded before this file). No color literal is declared here;
+ * every rule below resolves color exclusively through var(--token).
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 1.5rem;
+}
+
+body {
+  min-width: 320px;
+  margin: 0;
+  color: var(--ink);
+  background: var(--canvas);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums lining-nums;
+  line-height: var(--canvas-density);
+}
+
+button,
+input,
+select {
+  font: inherit;
+  font-variant-numeric: inherit;
+}
+
+button,
+summary,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+a {
+  color: inherit;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin-top: 0;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  color: var(--ink-strong);
+  line-height: 1.2;
+}
+
+h1 {
+  margin-bottom: 0.2rem;
+  font-size: clamp(1.45rem, 2.5vw, 1.9rem);
+  font-weight: 730;
+  letter-spacing: -0.025em;
+}
+
+h2 {
+  margin-bottom: 0;
+  font-size: clamp(1.35rem, 2.2vw, 1.7rem);
+  font-weight: 720;
+  letter-spacing: -0.025em;
+}
+
+h3 {
+  margin-bottom: 0;
+  font-size: 1.1rem;
+  font-weight: 720;
+}
+
+h4 {
+  margin-bottom: 0;
+  font-size: 0.88rem;
+}
+
+.skip-link {
+  position: fixed;
+  z-index: 1000;
+  top: 0.75rem;
+  left: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: var(--focus);
+  color: var(--on-focus);
+  font-weight: 750;
+  text-decoration: none;
+  transform: translateY(-180%);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
