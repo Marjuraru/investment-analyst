@@ -521,6 +521,7 @@ let marketChartRenderFrame = null;
 let marketChartDrag = null;
 let selectedChartPoint = -1;
 let selectedMarketAsset = "equity:us:aapl";
+let selectMarketAssetForNavigation = null;
 const marketStartByAsset = new Map();
 const knownAtByAsset = new Map();
 let selectedFundamentalFrequency = "quarterly";
@@ -745,6 +746,8 @@ async function loadMarketAssets() {
     invalidateDeferredBoardLoads();
     activateBoard(boardIdFromLocationHash(), { focus: false });
   }
+
+  selectMarketAssetForNavigation = selectComboboxOption;
 
   input.addEventListener("focus", openListbox);
   input.addEventListener("input", () => {
@@ -6507,7 +6510,7 @@ const BOARD_DEFERRED_LOADS = Object.freeze({
   ]),
   tecnico: Object.freeze([]),
   revisar: Object.freeze([loadCandidateInbox, loadAlertInbox]),
-  cazatiburones: Object.freeze([loadCazatiburonesBoard]),
+  cazatiburones: Object.freeze([loadCazatiburonesUniverseIndex, loadCazatiburonesBoard]),
   sistema: Object.freeze([]),
 });
 
@@ -6531,6 +6534,8 @@ function invalidateDeferredBoardLoads() {
   mesaInstitutionalNewsRequestSequence += 1;
   mesaActivityNewsRequestSequence += 1;
   mesaUniverseCoverageRequestSequence += 1;
+  cazatiburonesUniverseRequestSequence += 1;
+  cazatiburonesRequestSequence += 1;
 }
 
 function loadDeferredBoardData(boardId) {
@@ -6671,6 +6676,270 @@ function cazatiburonesEligiblePresentation() {
   return presentation && presentation.hasFundamentals && presentation.fundamentalMode === "corporate"
     ? presentation
     : null;
+}
+
+const CAZATIBURONES_UNIVERSE_FAMILIES = Object.freeze([
+  Object.freeze({ key: "insider", label: "Insiders" }),
+  Object.freeze({ key: "beneficial", label: "Propiedad beneficiaria" }),
+  Object.freeze({ key: "institutional", label: "Institucional 13F" }),
+]);
+
+let cazatiburonesUniverseRequestSequence = 0;
+let cazatiburonesUniverseSnapshot = null;
+const cazatiburonesUniverseFilters = {
+  search: "",
+  family: "all",
+  evidence: "all",
+};
+
+function normalizeCazatiburonesUniverseSearch(value) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase(LOCALE);
+}
+
+function cazatiburonesUniverseCapabilityMarkup(capability, reason) {
+  if (capability === "supported") return createElement("span", "cazatiburones-universe-state", "Disponible");
+  if (capability === "not_applicable") {
+    return renderAbsenceMark("not-applicable", "No aplica", reason);
+  }
+  if (capability === "not_configured" || capability === "not_implemented") {
+    return renderAbsenceMark("blocked", "Bloqueada", reason || "Capacidad no configurada");
+  }
+  return renderAbsenceMark("not-evaluable", "No evaluable", reason || "Capacidad no evaluable");
+}
+
+function cazatiburonesUniverseEvidenceMarkup(evidence, reason) {
+  if (evidence === "present") return createElement("span", "cazatiburones-universe-state", "Presente");
+  if (evidence === "not_queried") {
+    return renderAbsenceMark("missing", "No consultada", reason || "La evidencia no fue consultada");
+  }
+  if (evidence === "missing") return renderAbsenceMark("missing", "Sin evidencia", reason);
+  return renderAbsenceMark("not-evaluable", "No evaluable", reason || "Estado de evidencia no evaluable");
+}
+
+function cazatiburonesUniverseFieldMarkup(value, formatter, reason) {
+  if (value === null || value === undefined) {
+    return renderAbsenceMark("missing", "Sin evidencia", reason);
+  }
+  return createElement("span", "figure", formatter(value));
+}
+
+function cazatiburonesUniverseRowsFromPayload(payload) {
+  const rows = [];
+  for (const asset of payload.assets) {
+    for (const family of CAZATIBURONES_UNIVERSE_FAMILIES) {
+      const state = asset[family.key] && typeof asset[family.key] === "object"
+        ? asset[family.key]
+        : {};
+      rows.push(Object.freeze({
+        assetId: asset.asset_id,
+        symbol: asset.symbol,
+        name: asset.name,
+        family: family.key,
+        familyLabel: family.label,
+        capability: state.capability,
+        evidence: state.evidence,
+        statements: state.statements,
+        latestAvailableAt: state.latest_available_at,
+        latestAgeDays: state.latest_age_days,
+        notEvaluableReason: state.not_evaluable_reason,
+      }));
+    }
+  }
+  return rows;
+}
+
+function cazatiburonesUniverseRowMatches(row) {
+  const search = cazatiburonesUniverseFilters.search;
+  const searchable = normalizeCazatiburonesUniverseSearch(
+    `${row.symbol || ""} ${row.name || ""} ${row.assetId || ""}`,
+  );
+  const searchMatches = !search || searchable.includes(normalizeCazatiburonesUniverseSearch(search));
+  const familyMatches = cazatiburonesUniverseFilters.family === "all"
+    || row.family === cazatiburonesUniverseFilters.family;
+  const evidenceMatches = cazatiburonesUniverseFilters.evidence === "all"
+    || row.evidence === cazatiburonesUniverseFilters.evidence;
+  return searchMatches && familyMatches && evidenceMatches;
+}
+
+function navigateCazatiburonesUniverseAsset(assetId) {
+  if (typeof selectMarketAssetForNavigation === "function") {
+    void selectMarketAssetForNavigation(assetId);
+  }
+}
+
+function renderCazatiburonesUniverseRows() {
+  const tableScroll = byId("cazatiburones-universe-table-scroll");
+  const empty = byId("cazatiburones-universe-empty");
+  const error = byId("cazatiburones-universe-error");
+  const body = byId("cazatiburones-universe-rows");
+  const filterStatus = byId("cazatiburones-universe-filter-status");
+  body.replaceChildren();
+  tableScroll.classList.add("hidden");
+  empty.classList.add("hidden");
+  error.classList.add("hidden");
+  if (!cazatiburonesUniverseSnapshot) {
+    filterStatus.textContent = "El índice aún no tiene evidencia cargada.";
+    return;
+  }
+  const rows = cazatiburonesUniverseSnapshot.rows.filter(cazatiburonesUniverseRowMatches);
+  if (rows.length === 0) {
+    empty.textContent = cazatiburonesUniverseSnapshot.rows.length === 0
+      ? "El índice no devolvió activos para el corte seleccionado."
+      : "Ninguna fila coincide con los filtros locales.";
+    empty.classList.remove("hidden");
+    filterStatus.textContent = cazatiburonesUniverseSnapshot.rows.length === 0
+      ? "El índice está vacío al corte seleccionado."
+      : "Los filtros se aplican sólo sobre la evidencia cargada; no se hizo una nueva consulta.";
+    return;
+  }
+  for (const row of rows) {
+    const tableRow = document.createElement("tr");
+    const assetCell = document.createElement("th");
+    assetCell.scope = "row";
+    const assetButton = createElement(
+      "button",
+      "cazatiburones-universe-asset-button",
+      `${row.symbol || row.assetId} · ${row.name || "Activo sin nombre"}`,
+    );
+    assetButton.type = "button";
+    assetButton.setAttribute(
+      "aria-label",
+      `Seleccionar activo ${row.symbol || row.assetId} · ${row.name || "Activo sin nombre"}`,
+    );
+    assetButton.addEventListener("click", () => navigateCazatiburonesUniverseAsset(row.assetId));
+    assetCell.append(assetButton);
+    tableRow.append(assetCell);
+    tableRow.append(createElement("td", "cazatiburones-universe-family-cell", row.familyLabel));
+    const capabilityCell = document.createElement("td");
+    capabilityCell.append(cazatiburonesUniverseCapabilityMarkup(row.capability, row.notEvaluableReason));
+    tableRow.append(capabilityCell);
+    const evidenceCell = document.createElement("td");
+    evidenceCell.append(cazatiburonesUniverseEvidenceMarkup(row.evidence, row.notEvaluableReason));
+    tableRow.append(evidenceCell);
+    const statementsCell = document.createElement("td");
+    statementsCell.append(
+      cazatiburonesUniverseFieldMarkup(
+        row.statements,
+        (value) => formatInteger(value),
+        "El contrato no suministró declaraciones",
+      ),
+    );
+    tableRow.append(statementsCell);
+    const latestCell = document.createElement("td");
+    latestCell.append(
+      row.latestAvailableAt === null || row.latestAvailableAt === undefined
+        ? renderAbsenceMark("missing", "Sin evidencia", "Sin fecha disponible en el contrato")
+        : createElement("span", "figure", formatInstant(row.latestAvailableAt)),
+    );
+    tableRow.append(latestCell);
+    const ageCell = document.createElement("td");
+    ageCell.append(
+      row.latestAgeDays === null || row.latestAgeDays === undefined
+        ? renderAbsenceMark("missing", "Sin evidencia", "Sin antigüedad disponible en el contrato")
+        : createElement("span", "figure", `${formatInteger(row.latestAgeDays)} días`),
+    );
+    tableRow.append(ageCell);
+    body.append(tableRow);
+  }
+  tableScroll.classList.remove("hidden");
+  filterStatus.textContent = "Índice cargado; los filtros son locales y conservan el orden recibido.";
+}
+
+function renderCazatiburonesUniverseLoading() {
+  const panel = byId("cazatiburones-universe-index");
+  panel.setAttribute("aria-busy", "true");
+  byId("cazatiburones-universe-summary").textContent = "Consultando índice al corte vigente…";
+  byId("cazatiburones-universe-loading").classList.remove("hidden");
+  byId("cazatiburones-universe-empty").classList.add("hidden");
+  byId("cazatiburones-universe-error").classList.add("hidden");
+  byId("cazatiburones-universe-table-scroll").classList.add("hidden");
+  byId("cazatiburones-universe-filter-status").textContent = "Esperando la evidencia del corte global vigente.";
+}
+
+function renderCazatiburonesUniverseError(message) {
+  const panel = byId("cazatiburones-universe-index");
+  panel.setAttribute("aria-busy", "false");
+  byId("cazatiburones-universe-loading").classList.add("hidden");
+  byId("cazatiburones-universe-empty").classList.add("hidden");
+  byId("cazatiburones-universe-table-scroll").classList.add("hidden");
+  const error = byId("cazatiburones-universe-error");
+  error.textContent = message;
+  error.classList.remove("hidden");
+  byId("cazatiburones-universe-filter-status").textContent = "El índice no está disponible; las lecturas detalladas conservan su propio estado.";
+}
+
+function renderCazatiburonesUniverseSnapshot(snapshot) {
+  const panel = byId("cazatiburones-universe-index");
+  panel.setAttribute("aria-busy", "false");
+  byId("cazatiburones-universe-loading").classList.add("hidden");
+  byId("cazatiburones-universe-error").classList.add("hidden");
+  byId("cazatiburones-universe-summary").textContent =
+    `Índice disponible al corte ${formatInstant(snapshot.knownAt)} · familias separadas`;
+  renderCazatiburonesUniverseRows();
+}
+
+function initializeCazatiburonesUniverseFilters() {
+  byId("cazatiburones-universe-search").addEventListener("input", (event) => {
+    cazatiburonesUniverseFilters.search = event.target.value;
+    renderCazatiburonesUniverseRows();
+  });
+  byId("cazatiburones-universe-family").addEventListener("change", (event) => {
+    cazatiburonesUniverseFilters.family = event.target.value;
+    renderCazatiburonesUniverseRows();
+  });
+  byId("cazatiburones-universe-evidence").addEventListener("change", (event) => {
+    cazatiburonesUniverseFilters.evidence = event.target.value;
+    renderCazatiburonesUniverseRows();
+  });
+  byId("cazatiburones-universe-clear-filters").addEventListener("click", () => {
+    cazatiburonesUniverseFilters.search = "";
+    cazatiburonesUniverseFilters.family = "all";
+    cazatiburonesUniverseFilters.evidence = "all";
+    byId("cazatiburones-universe-search").value = "";
+    byId("cazatiburones-universe-family").value = "all";
+    byId("cazatiburones-universe-evidence").value = "all";
+    renderCazatiburonesUniverseRows();
+    byId("cazatiburones-universe-search").focus();
+  });
+}
+
+async function loadCazatiburonesUniverseIndex() {
+  const sequence = ++cazatiburonesUniverseRequestSequence;
+  const knownAt = byId("report-known-at").value.trim();
+  cazatiburonesUniverseSnapshot = null;
+  renderCazatiburonesUniverseLoading();
+  if (!knownAt) {
+    if (sequence !== cazatiburonesUniverseRequestSequence) return;
+    renderCazatiburonesUniverseError("El corte global no está disponible para consultar el índice.");
+    return;
+  }
+  const parameters = new URLSearchParams({ known_at: knownAt });
+  try {
+    const payload = await api(`/api/v1/cazatiburones/universe-activity?${parameters.toString()}`);
+    if (
+      sequence !== cazatiburonesUniverseRequestSequence
+      || knownAt !== byId("report-known-at").value.trim()
+    ) return;
+    if (
+      payload.schema_version !== "cazatiburones-universe-activity-v1"
+      || !Array.isArray(payload.assets)
+    ) throw new Error("El índice universe-wide no tiene un contrato compatible.");
+    cazatiburonesUniverseSnapshot = Object.freeze({
+      knownAt,
+      rows: cazatiburonesUniverseRowsFromPayload(payload),
+    });
+    renderCazatiburonesUniverseSnapshot(cazatiburonesUniverseSnapshot);
+  } catch (error) {
+    if (
+      sequence !== cazatiburonesUniverseRequestSequence
+      || knownAt !== byId("report-known-at").value.trim()
+    ) return;
+    cazatiburonesUniverseSnapshot = null;
+    renderCazatiburonesUniverseError(error.message || "No fue posible consultar el índice universe-wide.");
+  }
 }
 
 // Every optional descriptive field that can be legitimately absent from a
@@ -6837,7 +7106,7 @@ async function loadCazatiburonesBoard() {
   const assetId = selectedMarketAsset;
   const knownAt = byId("report-known-at").value.trim();
   const notApplicable = byId("cazatiburones-not-applicable");
-  const content = byId("cazatiburones-content");
+  const content = byId("cazatiburones-detail-content");
   if (!cazatiburonesEligiblePresentation()) {
     content.classList.add("hidden");
     notApplicable.replaceChildren(
@@ -6898,16 +7167,12 @@ async function initialize() {
   await loadAssetPreferences();
   initializeChartSettings();
   applySelectedMarketAsset();
+  initializeCazatiburonesUniverseFilters();
   boardDataReady = true;
-  // A deep link straight into #cazatiburones activates the board before
-  // marketAssets exists. Re-run its existing load now that the catalog and
-  // selected asset are ready; every other board uses the same deferred graph.
-  if (cazatiburonesBoardIsActive()) {
-    loadedBoardIds.add("cazatiburones");
-    void loadCazatiburonesBoard();
-  } else {
-    loadDeferredBoardData(boardIdFromLocationHash());
-  }
+  // A deep link waits for the catalog and then uses the same canonical
+  // board-to-loaders matrix as every other board. Cazatiburones therefore
+  // dispatches its index and detail reads together without a second trigger.
+  loadDeferredBoardData(boardIdFromLocationHash());
   populateMarketComparisonAssets();
   startMarketClocks();
 }

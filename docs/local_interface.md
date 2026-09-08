@@ -16,6 +16,24 @@ solo lectura, con `insider`, `beneficial` e `institutional` separados por activo
 recomendación. Si no se envía `asset_id`, se consultan los emisores corporativos configurados en
 SEC; un identificador desconocido falla cerrado.
 
+En `cazatiburones`, `UI-11` consume esa ruta una sola vez por activo seleccionado y corte global,
+sin enviar `asset_id`; el índice es independiente de la elegibilidad del activo para las tres
+lecturas detalladas. La tabla conserva el orden del payload y materializa exactamente una fila por
+par activo-familia en el orden fijo `insider`, `beneficial`, `institutional`, con las columnas
+`Activo`, `Familia`, `Capacidad`, `Evidencia`, `Declaraciones`, `Última disponible` y
+`Antigüedad`. Expone literalmente `capability`, `evidence`, `statements`,
+`latest_available_at`, `latest_age_days` y `not_evaluable_reason`, sin derivar actividad ni
+combinar familias. La condición point-in-time sigue siendo `available_at <= known_at`.
+
+La búsqueda por símbolo o nombre y los selectores de familia (`Todas`, `Insiders`, `Propiedad
+beneficiaria`, `Institucional 13F`) y evidencia (`Todas`, `Presente`, `Sin evidencia`, `No
+consultada`) son filtros locales sobre el snapshot en memoria: intersectan sin reordenar y no
+vuelven a consultar el endpoint. `Limpiar filtros` conserva el snapshot. El vacío del endpoint,
+el vacío filtrado, la carga y el error tienen mensajes accesibles separados; un error del índice
+no reemplaza las tres lecturas detalladas, y una fila navega al selector global por `asset_id`
+sin crear un segundo activo o corte. Las limitaciones del contrato se conservan como evidencia
+fuente y no se convierten en estados de actividad visibles.
+
 La página permite:
 
 - revisar el workspace, la última ejecución, la trazabilidad y la programación;
@@ -103,7 +121,8 @@ visible:
 - `tecnico` no hace peticiones en este bloque; `sistema` tampoco añade ninguna nueva, más allá de
   las que ya disparaba bajo demanda su panel de watchlist, ahora alojado en este tablero;
 - `revisar` carga las bandejas de candidatos y alertas;
-- `cazatiburones` carga sus tres lecturas SEC/13F de solo lectura.
+- `cazatiburones` carga una vez el índice `universe-activity` y sus tres lecturas SEC/13F de solo
+  lectura mediante dos loaders independientes; el índice conserva su propio estado.
 
 Cada tablero se marca como cargado en memoria una sola vez por sesión de
 página. Cambiar el activo seleccionado o el único corte `known_at` global
@@ -111,10 +130,39 @@ borra esas marcas y vuelve a cargar sólo el tablero que permanece visible; no
 se crea un segundo reloj, selector o corte por tablero. La carga de `activo`
 captura la secuencia, el activo y el corte al iniciar. Antes de pintar o
 mostrar un error, cada respuesta comprueba que los tres siguen vigentes; una
-respuesta superada se descarta sin tocar el estado renderizado. Los estados
+respuesta superada se descarta sin tocar el estado renderizado. El índice de
+Cazatiburones comprueba su propia secuencia y el corte antes de pintar o borrar
+su snapshot; los estados del índice y de las tres lecturas detalladas no se
+reemplazan entre sí. Los estados
 vacío, cargando, ausente y error conservan la gramática y los mensajes
 existentes, y una respuesta vigente mantiene su marca de ausencia cuando no
 hay evidencia elegible.
+
+## Cazatiburones: índice universe-wide y lecturas detalladas (`UI-11`)
+
+La zona superior de `#cazatiburones-content` presenta el contrato local
+`cazatiburones-universe-activity-v1`. La consulta usa sólo el `known_at` global
+visible y deja `asset_id` fuera para conservar el alcance universe-wide. La
+respuesta se transforma sin agregación: cada activo conserva su símbolo, nombre
+y `asset_id`, y cada una de las tres familias mantiene por separado
+`capability`, `evidence`, `statements`, `latest_available_at`,
+`latest_age_days` y `not_evaluable_reason`. La ausencia de una fecha o un
+conteo sigue la gramática de ausencia; no se interpreta como actividad cero.
+
+La tabla accesible tiene siete columnas exactas: `Activo`, `Familia`,
+`Capacidad`, `Evidencia`, `Declaraciones`, `Última disponible` y `Antigüedad`.
+Las familias permanecen en el orden fijo `insider`, `beneficial`,
+`institutional`, dentro del orden recibido de activos. La lectura point-in-time
+usa `available_at <= known_at`; la interfaz no reconstituye enmiendas ni
+convierte `limitations` en una inferencia de estado.
+
+Los filtros de símbolo/nombre, familia y evidencia forman una intersección
+local sobre el snapshot cargado. No hay petición al escribir, cambiar o limpiar
+filtros y no se muestra un total, ranking, score, intensidad ni tendencia. El
+vacío filtrado se distingue del índice sin activos y ambos estados son
+anunciados; el error del índice no oculta el panel de detalle. El botón de cada
+activo reutiliza la selección global existente mediante su `asset_id`, conserva
+los filtros y reactiva las tres lecturas con el mismo corte.
 
 ## Mesa: composición y cobertura (`UI-9`)
 
