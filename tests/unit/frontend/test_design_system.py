@@ -1589,8 +1589,8 @@ def test_design_system_documentation_declares_the_board_shell() -> None:
 
 
 def _check_route_declares_local_interface_planned_and_sec_corpus_next(doc_text: str) -> None:
-    assert re.search(r"\|\s*`LOCAL-INTERFACE`\s*\|\s*`PLANNED`\s*\|", doc_text), (
-        "the route table must declare LOCAL-INTERFACE as PLANNED"
+    assert re.search(r"\|\s*`LOCAL-INTERFACE`\s*\|\s*`DONE`\s*\|", doc_text), (
+        "the route table must declare LOCAL-INTERFACE as DONE"
     )
     assert re.search(r"\|\s*`SEC-CORPUS`\s*\|\s*`NEXT`\s*\|", doc_text), (
         "SEC-CORPUS must remain the sole NEXT candidate; this block advances a new row, "
@@ -1916,8 +1916,8 @@ def test_design_system_documentation_declares_the_canvas_convergence() -> None:
 
 
 def _check_route_registers_canvas_convergence_and_reassigns_cazatiburones(doc_text: str) -> None:
-    assert re.search(r"\|\s*`LOCAL-INTERFACE`\s*\|\s*`PLANNED`\s*\|", doc_text), (
-        "LOCAL-INTERFACE must remain PLANNED; this block advances evidence, completes nothing"
+    assert re.search(r"\|\s*`LOCAL-INTERFACE`\s*\|\s*`DONE`\s*\|", doc_text), (
+        "LOCAL-INTERFACE must remain DONE; this block advances evidence, completes nothing"
     )
     assert re.search(r"\|\s*`SEC-CORPUS`\s*\|\s*`NEXT`\s*\|", doc_text), (
         "SEC-CORPUS must remain the sole NEXT candidate"
@@ -2144,8 +2144,8 @@ def test_design_system_documentation_declares_the_cazatiburones_read_path() -> N
 
 
 def _check_route_registers_the_connected_cazatiburones_board(doc_text: str) -> None:
-    assert re.search(r"\|\s*`LOCAL-INTERFACE`\s*\|\s*`PLANNED`\s*\|", doc_text), (
-        "LOCAL-INTERFACE must remain PLANNED; this block advances evidence, completes nothing"
+    assert re.search(r"\|\s*`LOCAL-INTERFACE`\s*\|\s*`DONE`\s*\|", doc_text), (
+        "LOCAL-INTERFACE must remain DONE; this block advances evidence, completes nothing"
     )
     normalized = re.sub(r"\s+", " ", doc_text).lower()
     assert "cazatiburones" in normalized and "ui-4" in normalized
@@ -3721,7 +3721,7 @@ def test_probe_route_local_interface_rule_catches_a_missing_row() -> None:
     )
     text = doc_path.read_text(encoding="utf-8")
     _check_route_declares_local_interface_planned_and_sec_corpus_next(text)  # baseline: clean
-    corrupted = re.sub(r"\| `LOCAL-INTERFACE` \| `PLANNED` \|.*\|\n", "", text, count=1)
+    corrupted = re.sub(r"\| `LOCAL-INTERFACE` \| `DONE` \|.*\|\n", "", text, count=1)
     assert corrupted != text, "probe fixture did not remove the LOCAL-INTERFACE row"
     with pytest.raises(AssertionError):
         _check_route_declares_local_interface_planned_and_sec_corpus_next(corrupted)
@@ -3845,7 +3845,10 @@ def test_probe_cazatiburones_asset_change_rule_catches_a_removed_reload() -> Non
     _check_cazatiburones_board_reloads_when_the_selected_asset_changes(APP_JS)  # baseline: clean
     corrupted = APP_JS.replace(
         "    invalidateDeferredBoardLoads();\n"
-        "    activateBoard(boardIdFromLocationHash(), { focus: false });",
+        "    if (activate) {\n"
+        "      activateBoard(boardIdFromLocationHash(), { focus: false });\n"
+        "    }\n"
+        "    return true;",
         "    invalidateDeferredBoardLoads();",
         1,
     )
@@ -4972,3 +4975,185 @@ def test_docs_state_technical_review_bvl_and_clean_ui_boundaries() -> None:
     assert "Anexo2TextodcRentaFija.pdf" in local_doc
     assert "`SEC-CORPUS` permanece como la única ruta `NEXT`" in plan_doc
     assert "UI-11" in plan_doc
+
+
+# ---------------------------------------------------------------------------
+# UI-14: contextual navigation, reversible hidden disclosures and route state.
+# ---------------------------------------------------------------------------
+
+
+def test_contextual_router_validates_existing_board_stable_identity_known_at_and_lazy_load() -> (
+    None
+):
+    shell = _read("app-shell.js")
+    core = _read("app-core.js")
+    registry_start = shell.index("const CONTEXTUAL_NAVIGATION_REGISTRY")
+    registry = shell[registry_start : shell.index("function contextualIdentity", registry_start)]
+    assert "BOARD_REGISTRY.find" in shell
+    assert "marketAssets[assetId]" in shell
+    assert "selectMarketAssetForNavigation = (assetId)" in core
+    assert "if (activate)" in core
+    for board in ("mesa", "activo", "tecnico", "revisar", "cazatiburones", "sistema"):
+        assert 'id: "' + board + '"' in shell[shell.index("const BOARD_REGISTRY") : registry_start]
+    assert 'boardId: "activo"' in registry
+    assert 'boardId: "revisar"' in registry
+    assert 'boardId: "cazatiburones"' in registry
+
+
+def test_mesa_universe_and_domain_cells_open_exact_asset_subtab_with_honest_state() -> None:
+    mesa = _read("app-mesa.js")
+    matrix = _extract_js_function(APP_JS, "renderMesaUniverseMatrix")
+    assert "asset.asset_id" in matrix
+    assert "createContextualNavigationButton" in matrix
+    assert "mesaUniverseCellMarkup" in matrix
+    assert "reference_age_days" in matrix
+    assert 'subtab: "mercado"' in matrix
+    assert "subtab }" in matrix
+    for state in ("not_applicable", "not_configured", "not_implemented", "missing", "overdue"):
+        assert state in _extract_js_function(APP_JS, "mesaUniverseCellMarkup")
+    assert "asset.limitations" not in matrix
+    assert "api(" not in matrix
+    assert "createContextualNavigationButton" in mesa
+
+
+def test_mesa_candidates_alerts_and_caz_notifications_open_exact_target_without_ack_or_global_caz_mutation() -> (  # noqa: E501
+    None
+):
+    mesa = _read("app-mesa.js")
+    assert 'family: "candidate", id: notification.candidate_id' in mesa
+    assert "family, id: notification.asset_id" in mesa
+    assert 'family: "alert", id: event.alert_id' in mesa
+    caz = _extract_js_function(APP_JS, "selectCazatiburonesNotificationTarget")
+    assert "normalizedAssetId" in caz
+    assert "normalizedFamily" in caz
+    assert "cazatiburonesUniverseFilters.family = normalizedFamily" in caz
+    assert "selectedMarketAsset" not in caz
+    for forbidden in ("acknowledge", "transition", 'method: "POST"'):
+        assert forbidden not in _extract_js_function(APP_JS, "renderMesaCazatiburonesNews")
+
+
+def test_technical_review_and_caz_asset_identities_offer_semantic_keyboard_navigation_to_asset() -> (  # noqa: E501
+    None
+):
+    technical = _extract_js_function(APP_JS, "renderMarketComparison")
+    review = _extract_js_function(APP_JS, "renderReviewDetail")
+    caz = _read("app-cazatiburones.js")
+    assert "createContextualNavigationButton" in technical
+    assert "series.asset_id" in technical
+    assert "comparison-asset-link" in technical
+    assert "reviewAssetNavigationButton" in review
+    assert "result.asset_id" in review
+    assert "event.asset_id" in review
+    assert 'id="cazatiburones-open-asset"' in INDEX_HTML
+    assert "navigateToContext" in caz
+
+
+def test_advanced_market_and_sec_tables_are_hidden_and_unfocusable_while_dom_renderers_endpoints_and_exports_remain() -> (  # noqa: E501
+    None
+):
+    summaries = (
+        "Consultar los datos visibles en una tabla",
+        "Consultar períodos y hechos SEC en una tabla",
+    )
+    for summary in summaries:
+        summary_position = INDEX_HTML.index("<summary>" + summary + "</summary>")
+        details_position = INDEX_HTML.rfind("<details", 0, summary_position)
+        opening = INDEX_HTML[details_position : INDEX_HTML.index(">", details_position) + 1]
+        assert " hidden" in opening
+    for marker in (
+        'id="chart-data-disclosure"',
+        'id="chart-table-body"',
+        'id="fundamental-table-body"',
+        "renderChartTable",
+        "renderFundamentalTable",
+        "exportMarketCsv",
+        "exportFundamentalCsv",
+    ):
+        assert marker in INDEX_HTML or marker in APP_JS
+
+
+def test_docs_describe_only_existing_six_board_destinations_reversible_hidden_tables_and_accessibility() -> (  # noqa: E501
+    None
+):
+    repository_root = Path(str(files("investment_analyst"))).parent.parent
+    documents = [
+        (repository_root / "docs" / "local_interface.md").read_text(encoding="utf-8"),
+        (repository_root / "docs" / "local_interface_design_system.md").read_text(encoding="utf-8"),
+    ]
+    combined = "\n".join(documents)
+    assert "UI-14" in combined
+    assert "seis tableros" in combined
+    assert "candidate_id" in combined and "alert_id" in combined
+    assert "no son visibles ni focusables" in combined
+    assert "revertir" in combined or "revers" in combined
+
+
+def test_canonical_roadmap_reflects_live_sec_caz_ui12_runtime_efficiency_and_priority_state() -> (
+    None
+):
+    repository_root = Path(str(files("investment_analyst"))).parent.parent
+    release_plan = (repository_root / "docs" / "basic_functional_release_plan.md").read_text(
+        encoding="utf-8"
+    )
+    roadmap = (repository_root / "docs" / "product_roadmap.md").read_text(encoding="utf-8")
+    assert "LOCAL-INTERFACE" in release_plan and "DONE" in release_plan
+    assert "SEC-CORPUS" in release_plan and "NEXT" in release_plan
+    assert "BVL-MARKET" in release_plan and "BLOCKED" in release_plan
+    assert "PREDICTIVE-RESEARCH" in release_plan and "DEFERRED" in release_plan
+    assert "UI-14/#202" in release_plan + roadmap
+    assert "RUNTIME-EFFICIENCY" in roadmap
+    assert "UI-12" in roadmap
+    assert "Cazatiburones" in roadmap
+
+
+def test_six_boards_known_at_lazy_load_caz_local_state_and_event_non_mutation_remain() -> None:
+    shell = _read("app-shell.js")
+    assert "BOARD_DEFERRED_LOADS" in shell
+    assert "loadDeferredBoardData(boardId)" in shell
+    caz = _extract_js_function(APP_JS, "selectCazatiburonesNotificationTarget")
+    assert "cazatiburonesUniverseFilters" in caz
+    assert "selectedMarketAsset" not in caz
+    assert 'method: "POST"' not in caz
+    assert "knownAt" in APP_JS
+
+
+def test_no_id_inference_from_visible_text_no_fictional_destination_and_no_arbitrary_fallback_selection() -> (  # noqa: E501
+    None
+):
+    router = APP_JS[
+        APP_JS.index("function resolveContextualDestination") : APP_JS.index(
+            "function contextualNavigationUnavailable"
+        )
+    ]
+    assert ".textContent" not in router
+    assert "innerText" not in router
+    assert "marketAssets[assetId]" in router
+    assert "BOARD_REGISTRY.find" in router
+    assert "fallback" not in router.lower()
+
+
+def test_missing_exact_target_produces_honest_absence_state() -> None:
+    operations = _read("app-operations.js")
+    detail = _extract_js_function(APP_JS, "renderReviewDetail")
+    assert "reviewFamilyIsLoaded" in operations
+    assert "Consultando la identidad exacta" in detail
+    assert "La selección ya no está disponible" in detail
+    assert "reviewSelectionMissing = true" in operations
+
+
+def test_hidden_tables_keep_existing_dom_ids_renderers_data_contracts_and_export_functions() -> (
+    None
+):
+    analysis = _read("app-analysis.js")
+    for marker in (
+        "chart-table-body",
+        "chart-table-body",
+        "fundamental-table-body",
+        "renderChartTable",
+        "renderFundamentalTable",
+        "exportMarketCsv",
+        "exportFundamentalCsv",
+    ):
+        assert marker in INDEX_HTML or marker in analysis
+    assert "chart-data-disclosure" in INDEX_HTML
+    assert "Consultar períodos y hechos SEC en una tabla" in INDEX_HTML

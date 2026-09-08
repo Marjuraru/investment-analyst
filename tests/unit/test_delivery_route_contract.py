@@ -272,3 +272,16 @@ def test_route_rejects_invalid_status_identity_evidence_or_relationship(
 ) -> None:
     with pytest.raises(AssertionError):
         _validate(items)
+
+
+def test_route_completes_local_interface_and_preserves_live_priority_state() -> None:
+    release_plan = (ROOT / "docs/basic_functional_release_plan.md").read_text(encoding="utf-8")
+    roadmap = (ROOT / "docs/product_roadmap.md").read_text(encoding="utf-8")
+    assert "LOCAL-INTERFACE" in release_plan and "DONE" in release_plan
+    assert "SEC-CORPUS" in release_plan and "NEXT" in release_plan
+    assert "BVL-MARKET" in release_plan and "BLOCKED" in release_plan
+    assert "PREDICTIVE-RESEARCH" in release_plan and "DEFERRED" in release_plan
+    assert "UI-14/#202" in release_plan + roadmap
+    assert "COMPLETES" in release_plan
+    assert "Cazatiburones" in roadmap
+    assert "RUNTIME-EFFICIENCY" in roadmap

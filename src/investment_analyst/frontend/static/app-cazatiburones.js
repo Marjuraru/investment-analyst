@@ -57,12 +57,13 @@ function closeCazatiburonesDetail() {
 }
 
 function selectCazatiburonesUniverseAsset(assetId) {
-  if (!marketAssets[assetId]) return;
+  if (!marketAssets[assetId]) return false;
   cazatiburonesSelectedAssetId = assetId;
   renderCazatiburonesDetailHeader();
   byId("cazatiburones-not-applicable").classList.add("hidden");
   byId("cazatiburones-not-applicable").replaceChildren();
   void loadCazatiburonesBoard(assetId);
+  return true;
 }
 
 const CAZATIBURONES_UNIVERSE_FAMILIES = Object.freeze([
@@ -144,8 +145,8 @@ function cazatiburonesUniverseRowMatches(row) {
     `${row.symbol || ""} ${row.name || ""} ${row.assetId || ""}`,
   );
   const searchMatches = !search || searchable.includes(normalizeCazatiburonesUniverseSearch(search));
-  const familyMatches = cazatiburonesUniverseFilters.family === "all"
-    || row.family === cazatiburonesUniverseFilters.family;
+  const family = cazatiburonesUniverseFilters.family;
+  const familyMatches = family === "all" || cazatiburonesNotificationFamilyMatches(row, family);
   const evidenceMatches = cazatiburonesUniverseFilters.evidence === "all"
     || row.evidence === cazatiburonesUniverseFilters.evidence;
   return searchMatches && familyMatches && evidenceMatches;
@@ -153,6 +154,29 @@ function cazatiburonesUniverseRowMatches(row) {
 
 function navigateCazatiburonesUniverseAsset(assetId) {
   selectCazatiburonesUniverseAsset(assetId);
+}
+
+function selectCazatiburonesNotificationTarget(assetId, family) {
+  const normalizedAssetId = String(assetId ?? "").trim();
+  const normalizedFamily = String(family ?? "").trim();
+  if (!marketAssets[normalizedAssetId]) {
+    return contextualNavigationUnavailable("el activo ya no está en el catálogo vigente.");
+  }
+  if (!["activity", "institutional"].includes(normalizedFamily)) {
+    return contextualNavigationUnavailable("la familia de Cazatiburones no está disponible.");
+  }
+  cazatiburonesUniverseFilters.search = "";
+  cazatiburonesUniverseFilters.family = normalizedFamily;
+  byId("cazatiburones-universe-search").value = "";
+  byId("cazatiburones-universe-family").value = normalizedFamily;
+  renderCazatiburonesUniverseRows();
+  return selectCazatiburonesUniverseAsset(normalizedAssetId);
+}
+
+function cazatiburonesNotificationFamilyMatches(row, family) {
+  return family === "activity"
+    ? ["insider", "beneficial"].includes(row.family)
+    : row.family === family;
 }
 
 function renderCazatiburonesUniverseRows() {
@@ -288,6 +312,15 @@ function initializeCazatiburonesUniverseFilters() {
     byId("cazatiburones-universe-evidence").value = "all";
     renderCazatiburonesUniverseRows();
     byId("cazatiburones-universe-search").focus();
+  });
+  byId("cazatiburones-open-asset").addEventListener("click", () => {
+    if (!cazatiburonesSelectedAssetId) {
+      setMessage("Selecciona un activo local antes de abrir Activo.", true);
+      return;
+    }
+    void navigateToContext({
+      board: "activo", assetId: cazatiburonesSelectedAssetId, subtab: "mercado",
+    });
   });
   byId("cazatiburones-detail-close").addEventListener("click", closeCazatiburonesDetail);
 }

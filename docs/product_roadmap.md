@@ -412,6 +412,23 @@ La interfaz conserva español consistente, términos familiares de mercado, deci
 dirección visual inequívoca, teclado, tecnologías de asistencia, responsive y tema oscuro. Los
 paneles pesados se cargan bajo demanda.
 
+## Estado integrado de la interfaz local (`UI-14`)
+
+UI-14/#202 cierra la fila `LOCAL-INTERFACE` con `route_effect: COMPLETES`. Los seis tableros
+existentes comparten navegación contextual por identidades estables (`asset_id`, `candidate_id`,
+`alert_id`), con foco y estados honestos; Cazatiburones mantiene su selección local y sólo una
+acción explícita abre el activo global.
+La componentización de assets de UI-12 permanece integrada y sin dependencia nueva.
+
+Las dos tablas avanzadas de datos permanecen en el DOM con sus IDs, renderers, contratos y
+exportaciones, pero parten ocultas y no focusables mediante `hidden`; la reversión es retirar ese
+atributo. No se agregan endpoints, polling, mutaciones, dependencias ni deep-links públicos.
+
+La prioridad viva queda reconciliada: `LOCAL-INTERFACE` está `DONE`, `SEC-CORPUS` es el único
+`NEXT` y conserva las lecturas Caz ya integradas como base; `RUNTIME-EFFICIENCY` y la observación
+de jobs siguen antes de ampliar cobertura; `BVL-MARKET` permanece `BLOCKED` y
+`PREDICTIVE-RESEARCH` permanece `DEFERRED`.
+
 ## Fase 12 — IA cualitativa opcional
 
 Solo después del corpus de noticias:
@@ -609,8 +626,8 @@ sustrato institucional 13F, #140 la composición/completitud, #142 las métricas
 (`cazatiburones_institutional_events_v1`), candidatos con cooldown de 24h y consulta reproducible por snapshot_id;
 #153 añade una outbox local deduplicada y reanudable para candidatos elegibles de actividad e instituciones;
 #155 añade la línea temporal y búsqueda local point-in-time del corpus documental SEC (`sec-document-timeline-v1`),
-sin presentar SEC-CORPUS como completado ni como cartera efectiva: cartera efectiva, reglas complejas y UI
-continúan siendo fronteras separadas. `EXTENDED-SOAK /
+sin presentar SEC-CORPUS como completado ni como cartera efectiva: cartera efectiva, reglas complejas
+continúan siendo fronteras separadas; UI-14 ya completó la interfaz local. `EXTENDED-SOAK /
 DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
 Block independiente.
 

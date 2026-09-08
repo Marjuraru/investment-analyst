@@ -1,5 +1,12 @@
 "use strict";
 
+let reviewCandidateItemsLoaded = false;
+let reviewAlertItemsLoaded = false;
+
+function reviewFamilyIsLoaded(family) {
+  return family === "candidate" ? reviewCandidateItemsLoaded : reviewAlertItemsLoaded;
+}
+
 function applyOverview(payload) {
   if (payload.schema_version === "operational-overview-snapshot-v1") {
     badge(
@@ -173,6 +180,7 @@ function reviewItemId(family, item) {
 
 function reviewSelectedItem() {
   if (!reviewSelection) return null;
+  if (!reviewFamilyIsLoaded(reviewSelection.family)) return null;
   const items = reviewSelection.family === "candidate" ? reviewCandidateItems : reviewAlertItems;
   const item = items.find((candidate) => reviewItemId(reviewSelection.family, candidate) === reviewSelection.id);
   if (item) return item;
@@ -212,6 +220,18 @@ function reviewDetailField(container, label, value) {
   container.append(createElement("dt", "", label), createElement("dd", "", value));
 }
 
+function reviewAssetNavigationButton(assetId) {
+  const normalized = String(assetId ?? "").trim();
+  if (!normalized) return null;
+  const button = createContextualNavigationButton(
+    "Abrir en Activo",
+    { board: "activo", assetId: normalized, subtab: "mercado" },
+    "button secondary compact review-asset-navigation",
+  );
+  button.setAttribute("aria-label", "Abrir activo " + normalized + " en Activo");
+  return button;
+}
+
 function renderReviewDetail() {
   reviewEnsureSelection();
   const detail = byId("review-detail");
@@ -221,9 +241,11 @@ function renderReviewDetail() {
   if (!selected || !reviewSelection) {
     detail.hidden = true;
     empty.hidden = false;
-    empty.textContent = reviewSelectionMissing
-      ? "La selección ya no está disponible en la bandeja actual."
-      : "Selecciona un elemento para revisar sus datos y acciones.";
+    empty.textContent = reviewSelection
+      ? "Consultando la identidad exacta en la bandeja…"
+      : reviewSelectionMissing
+        ? "La selección ya no está disponible en la bandeja actual."
+        : "Selecciona un elemento para revisar sus datos y acciones.";
     updateReviewMasterSelection();
     return;
   }
@@ -249,6 +271,8 @@ function renderReviewDetail() {
       conditions.append(createElement("li", condition.state, formatCandidateCondition(condition, definition)));
     });
     detail.append(fields, createElement("h4", "review-detail-subtitle", "Condiciones evaluadas"), conditions);
+    const assetNavigation = reviewAssetNavigationButton(result.asset_id);
+    if (assetNavigation) detail.append(assetNavigation);
     const actions = createElement("div", "alert-inbox-actions review-detail-actions");
     for (const [target, label] of reviewActionTargets(event.status)) {
       const button = createElement("button", "alert-action-button", label);
@@ -267,6 +291,8 @@ function renderReviewDetail() {
     reviewDetailField(fields, "Última activación", formatInstant(event.last_activated_at));
     reviewDetailField(fields, "Espera", "No aplica");
     detail.append(fields, createElement("p", "review-detail-message", event.message));
+    const assetNavigation = reviewAssetNavigationButton(event.asset_id);
+    if (assetNavigation) detail.append(assetNavigation);
     const actions = createElement("div", "alert-inbox-actions review-detail-actions");
     for (const [target, label] of reviewActionTargets(event.status)) {
       const button = createElement("button", "alert-action-button", label);
@@ -307,6 +333,7 @@ function renderReviewMasterRow(family, id, title, status, meta) {
 function renderAlertInbox(payload) {
   const inbox = byId("alert-inbox");
   reviewAlertItems = Array.isArray(payload.events) ? payload.events : [];
+  reviewAlertItemsLoaded = true;
   byId("alert-inbox-summary").textContent = reviewAlertItems.length > 0
     ? `${formatInteger(payload.total ?? reviewAlertItems.length)} registradas · separadas de candidatos`
     : "Sin alertas operativas";
@@ -345,10 +372,12 @@ async function transitionAlert(alertId, status, button) {
 async function loadAlertInbox() {
   const inbox = byId("alert-inbox");
   inbox.setAttribute("aria-busy", "true");
+  reviewAlertItemsLoaded = false;
   try {
     renderAlertInbox(await api("/api/alerts?limit=50"));
   } catch (error) {
     reviewAlertItems = [];
+    reviewAlertItemsLoaded = true;
     inbox.replaceChildren(
       createElement("p", "", `No se pudo consultar la bandeja: ${error.message}`),
     );
@@ -694,6 +723,7 @@ function formatCandidateCondition(condition, definition) {
 function renderCandidateInbox(payload) {
   const inbox = byId("candidate-inbox");
   reviewCandidateItems = Array.isArray(payload.items) ? payload.items : [];
+  reviewCandidateItemsLoaded = true;
   byId("candidate-inbox-summary").textContent = reviewCandidateItems.length > 0
     ? `${formatInteger(payload.total ?? reviewCandidateItems.length)} registrados · separados de alertas`
     : "Sin candidatos analíticos";
@@ -734,10 +764,12 @@ async function transitionCandidate(candidateId, status, button) {
 async function loadCandidateInbox() {
   const inbox = byId("candidate-inbox");
   inbox.setAttribute("aria-busy", "true");
+  reviewCandidateItemsLoaded = false;
   try {
     renderCandidateInbox(await api("/api/candidates?limit=50"));
   } catch (error) {
     reviewCandidateItems = [];
+    reviewCandidateItemsLoaded = true;
     inbox.replaceChildren(
       createElement("p", "", `No se pudo consultar la bandeja: ${error.message}`),
     );

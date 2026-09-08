@@ -277,6 +277,16 @@ function renderMarketComparison(payload) {
           ? betaUnavailableMark
           : `<span class="figure">${series.metrics.beta_to_benchmark ?? "No disponible"}</span>`;
     card.innerHTML = `<p class="eyebrow">${identity?.symbol || series.asset_id}</p><h3>${identity?.name || series.asset_id}</h3><dl><dt>Retorno total</dt><dd><span class="figure">${comparisonPercent(series.metrics.total_return)}</span></dd><dt>Drawdown máximo</dt><dd><span class="figure">${comparisonPercent(series.metrics.maximum_drawdown)}</span></dd><dt>Volatilidad diaria</dt><dd><span class="figure">${comparisonPercent(series.metrics.daily_volatility)}</span></dd><dt>Correlación</dt><dd>${correlation}</dd><dt>Beta</dt><dd>${beta}</dd></dl>`;
+    const identityLink = createContextualNavigationButton(
+      identity?.symbol || series.asset_id,
+      { board: "activo", assetId: series.asset_id, subtab: "mercado" },
+      "comparison-asset-link",
+    );
+    identityLink.setAttribute(
+      "aria-label",
+      "Abrir activo " + (identity?.symbol || series.asset_id) + " en Activo",
+    );
+    card.querySelector(".eyebrow").replaceChildren(identityLink);
     cards.append(card);
   }
   byId("comparison-json").textContent = JSON.stringify(payload, null, 2);

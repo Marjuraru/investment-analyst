@@ -550,6 +550,106 @@ const BOARD_REGISTRY = Object.freeze([
   { id: "sistema", label: "Sistema", icon: "gear", built: true },
 ]);
 
+// UI-14: contextual navigation is a closed client-side registry. Destinations
+// are existing boards only; identities come from payload IDs or the loaded
+// market catalog, never from visible labels or inferred text.
+const CONTEXTUAL_NAVIGATION_REGISTRY = Object.freeze({
+  activo: Object.freeze({
+    boardId: "activo",
+    subtabs: Object.freeze(["mercado", "fundamentales", "valoracion", "analisis"]),
+  }),
+  revisar: Object.freeze({
+    boardId: "revisar",
+    families: Object.freeze(["candidate", "alert"]),
+  }),
+  cazatiburones: Object.freeze({
+    boardId: "cazatiburones",
+    families: Object.freeze(["activity", "institutional"]),
+  }),
+});
+
+function contextualIdentity(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized || null;
+}
+
+function resolveContextualDestination(request) {
+  if (!request || typeof request !== "object") return null;
+  const definition = CONTEXTUAL_NAVIGATION_REGISTRY[request.board];
+  const board = BOARD_REGISTRY.find((candidate) => candidate.id === request.board);
+  if (!definition || !board || !board.built) return null;
+
+  if (request.board === "activo") {
+    const assetId = contextualIdentity(request.assetId);
+    const subtab = contextualIdentity(request.subtab) || "mercado";
+    if (!assetId || !definition.subtabs.includes(subtab) || !marketAssets[assetId]) return null;
+    return Object.freeze({ boardId: "activo", assetId, subtab });
+  }
+
+  const id = contextualIdentity(request.id);
+  const family = contextualIdentity(request.family);
+  if (!id || !family || !definition.families.includes(family)) return null;
+  if (request.board === "cazatiburones" && !marketAssets[id]) return null;
+  return Object.freeze({ boardId: request.board, family, id });
+}
+
+function contextualNavigationUnavailable(reason) {
+  setMessage("Destino no disponible: " + reason, true);
+  return false;
+}
+
+function createContextualNavigationButton(label, request, className = "contextual-navigation-button") {
+  const button = createElement("button", className, label);
+  button.type = "button";
+  button.dataset.contextualNavigation = "true";
+  button.addEventListener("click", () => {
+    void navigateToContext(request);
+  });
+  return button;
+}
+
+async function navigateToAssetContext(target) {
+  if (typeof selectMarketAssetForNavigation !== "function") {
+    return contextualNavigationUnavailable("el catálogo de activos todavía no está disponible.");
+  }
+  try {
+    const selected = await selectMarketAssetForNavigation(target.assetId);
+    if (selected === false) {
+      return contextualNavigationUnavailable("el activo ya no está en el catálogo vigente.");
+    }
+  } catch (error) {
+    return contextualNavigationUnavailable(error.message || "no se pudo seleccionar el activo.");
+  }
+  activateBoard("activo", { focus: true });
+  selectAssetSubtab(target.subtab);
+  return true;
+}
+
+function navigateToReviewContext(target) {
+  activateBoard("revisar", { focus: true });
+  reviewSelectItem(target.family, target.id);
+  return true;
+}
+
+function navigateToCazatiburonesContext(target) {
+  activateBoard("cazatiburones", { focus: true });
+  if (typeof selectCazatiburonesNotificationTarget !== "function") {
+    return contextualNavigationUnavailable("la seleccion local de Cazatiburones todavia no esta disponible.");
+  }
+  return selectCazatiburonesNotificationTarget(target.id, target.family);
+}
+
+function navigateToContext(request) {
+  const target = resolveContextualDestination(request);
+  if (!target) {
+    return contextualNavigationUnavailable("la identidad o el destino no es valido.");
+  }
+  if (target.boardId === "activo") return navigateToAssetContext(target);
+  if (target.boardId === "revisar") return navigateToReviewContext(target);
+  if (target.boardId === "cazatiburones") return navigateToCazatiburonesContext(target);
+  return contextualNavigationUnavailable("el tablero no esta habilitado.");
+}
+
 // UI-5: the only board-to-request graph. Function references keep the
 // declared graph and the activation dispatcher together without introducing
 // another endpoint, parameter or transport contract.
