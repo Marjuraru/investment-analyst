@@ -30,13 +30,10 @@ verifica ese anclaje, no sólo la excepción.
 
 Dos tokens tipográficos completan el sistema: `--font-sans` y
 `--figure-font`, ambos pilas del sistema operativo (`ui-sans-serif` /
-`ui-monospace` con sus respaldos). No se carga ninguna fuente web: sin
-`@font-face`, sin `<link>` a un host de fuentes, sin binario vendorizado.
-IBM Plex Sans/Mono, la familia nombrada en la propuesta visual aprobada,
-queda diferida a un bloque posterior, explícitamente acotado, que
-vendorice y versione los archivos binarios; este bloque ships con la pila
-del sistema, que conserva densidad, contraste y cifras tabulares sin
-capacidad nueva.
+`ui-monospace` con sus respaldos). No se carga ninguna fuente externa: sin
+`@font-face`, sin `<link>` a un host de fuentes y sin binario vendorizado.
+La interfaz conserva la pila local, que mantiene densidad, contraste y
+cifras tabulares sin añadir una capacidad ni una dependencia.
 
 ### Rampa de ink
 
@@ -163,7 +160,9 @@ efectivo de la última ejecución completa, o la marca `missing` antes de
 que exista una. El `#known-at-status` preexistente, sepultado dentro del
 `<details>` colapsado de "Trazabilidad", se mantiene sincronizado por la
 misma llamada a `renderKnownAtCut()`, de modo que ambas superficies nunca
-divergen.
+divergen. El valor se muestra como la misma cadena ISO válida que usan las
+consultas; al iniciar o editar el control, una cadena inválida vuelve a la
+marca `missing`.
 
 ## Reloj de sesión
 
@@ -249,7 +248,7 @@ declaradas por `UI-1` siguen siendo exactamente cinco.
 ### Camino de lectura conectado (`UI-4`)
 
 `cazatiburones` presenta tres lecturas descriptivas independientes para el
-activo seleccionado y el corte `known_at` global vigente, cada una servida
+activo local elegido en su índice y el corte `known_at` global vigente, cada una servida
 por un endpoint de solo lectura ya integrado por `SEC-CORPUS` (#159/#160) y
 consumido sin modificar transporte ni contratos:
 
@@ -271,9 +270,9 @@ consumido sin modificar transporte ni contratos:
 
 Las tres peticiones son `GET` puras: el tablero no dispara refresh,
 escritura, provider ni acceso al workspace permanente, y comparte
-exclusivamente el corte de `#report-known-at` y `selectedMarketAsset` ya
-declarados por bloques anteriores -- no expone un segundo selector de
-activo ni un segundo control de corte.
+exclusivamente el corte de `#report-known-at` y el `asset_id` elegido
+localmente -- no expone un segundo selector global ni un segundo control de
+corte.
 
 Cuando el activo seleccionado no tiene presentación SEC corporativa
 habilitada (`hasFundamentals && fundamentalMode === "corporate"`), el
@@ -318,9 +317,10 @@ memoria; escribir, cambiar o limpiar filtros no vuelve a consultar la red y
 conserva el orden recibido. El estado de endpoint vacío se distingue del
 estado filtrado vacío, ambos se anuncian con `role=status`, y el error del
 índice no borra ni sustituye las tres lecturas detalladas. El nombre del activo
-es un botón que reutiliza el selector global por `asset_id`, conserva los
-filtros y deja que la matriz de cargas vuelva a consultar las tres lecturas con
-el mismo corte.
+es un botón de selección local por `asset_id`, conserva los filtros y abre un
+encabezado de detalle con cierre/retorno al índice. Sólo esa acción consulta
+las tres lecturas detalladas con el mismo corte global; entrar al tablero
+consulta únicamente el índice.
 
 ### Carga por activación y estados (`UI-5`)
 
@@ -336,7 +336,7 @@ armazón compartidas y se resuelven antes de la primera carga diferida.
 | `activo` | `GET /api/listed-company-report`, `GET /api/market-chart` (o intradía), `GET /api/fundamental-trend`, `GET /api/fundamental-analysis` | vacío inicial, cargando por superficie, ausente según la gramática `missing`/`not-evaluable`, error vigente o evidencia disponible |
 | `tecnico` | ninguna | vacío de armazón; sus cargas pertenecen a bloques posteriores |
 | `revisar` | `GET /api/candidates?limit=50`, `GET /api/alerts?limit=50` | cargando, vacío sin elementos, error de bandeja o lista disponible |
-| `cazatiburones` | `GET /api/v1/cazatiburones/universe-activity`, `GET /api/v1/cazatiburones/declared-activity`, `GET /api/v1/cazatiburones/institutional-observations`, `GET /api/v1/sec-document-timeline` | índice y detalle cargando de forma independiente, endpoint vacío, filtros vacíos, `not-applicable` para un activo sin corpus corporativo, ausente bajo el corte, error vigente o lectura disponible |
+| `cazatiburones` | `GET /api/v1/cazatiburones/universe-activity` al activar; las tres lecturas SEC/13F sólo tras seleccionar una fila | índice y detalle independientes, endpoint vacío, filtros vacíos, `not-applicable` para un activo sin corpus corporativo, ausente bajo el corte, error vigente o lectura disponible |
 | `sistema` | ninguna | vacío de armazón; la operación permanece bajo demanda |
 
 El activo seleccionado y el único `known_at` global son parte de la identidad
@@ -427,7 +427,7 @@ nunca ticker, exchange o disponibilidad. Cada celda resuelve sin ambigüedad, ma
 `capability` se evalúa antes de `evidence`, y evidencia antes de edad: `not_queried` es "Sin
 evidencia" sólo para una capacidad soportada y los estados de capacidad conservan su prioridad. La
 gramática específica de la matriz usa exactamente `fresh`, `overdue`, `missing`, `blocked` y
-`not-applicable`; cada marca mide 7 px y combina forma, borde o trama y relleno, conserva nombre
+`not-applicable`; cada marca mide al menos 12 px y combina forma, glifo, borde o trama y relleno, conserva nombre
 accesible y no repite el rótulo visible en cada celda. Una sola leyenda visible declara "Al día",
 "Vencida", "Sin evidencia", "Bloqueada" y "No aplica". No se modifica la gramática global de
 cinco `.absence-mark`.
@@ -450,19 +450,21 @@ declarado (`#mesa-universe-not-queried`), nunca como columna vacía ni como peti
 
 #### Traslado del panel de preferencias
 
-`asset-preferences-panel` se traslada íntegro -- controles, formulario y comportamiento -- del
-tablero `mesa` al tablero `sistema`, junto al resto de la operación. La Mesa se consulta; no se
-configura desde ella. Ningún endpoint, parámetro ni contrato cambia: `update_asset_preferences` y
-`/api/v1/asset-preferences` son exactamente los mismos que antes de este bloque.
+`asset-preferences-panel` permanece íntegro -- controles, formulario y comportamiento -- en
+`sistema`, junto al resto de la configuración. El formulario `run-form` de actualización del activo
+se muestra una sola vez, dentro de un panel colapsable de `activo`, con su objetivo y sus IDs
+existentes intactos. La Mesa se consulta; no se configura desde ella. Ningún endpoint, parámetro ni
+contrato cambia: `update_asset_preferences`, `/api/v1/asset-preferences` y la actualización del
+activo son exactamente los mismos que antes de este bloque.
 
 ### Marco global y alcance de activo (`UI-8`)
 
 `UI-8` fija una composición única para las seis vistas sin crear un séptimo tablero, sin mover sus
 secciones de datos y sin cambiar ningún endpoint. La cabecera persistente conserva sólo la identidad
 de la aplicación, el corte global `known_at`, el reloj de mercado, salud, tema y verificación. La
-identidad y el selector del activo viven en una única barra de alcance: aparece únicamente en
-`activo`, `tecnico` y `cazatiburones`; no se filtra hacia `mesa`, `revisar` ni `sistema`. El riel
-lateral contiene exclusivamente `#board-nav`.
+identidad y el selector del activo viven en una única barra de alcance de `activo`; no se filtra
+hacia `tecnico`, `cazatiburones`, `mesa`, `revisar` ni `sistema`. El riel lateral contiene
+exclusivamente `#board-nav` y su marca es el control accesible que lo colapsa.
 
 La composición queda regida por estas siete reglas verificables:
 
@@ -490,10 +492,41 @@ Valoración conserva su carga diferida en la primera activación, no en cada cam
 
 La estructura por vista queda explícita: `mesa` mantiene cabecera y un riel; su destino de tres
 columnas y el retiro de la columna BVL de la matriz pertenecen a `UI-9`. `activo` entrega en este
-bloque la barra y sus subpestañas. `tecnico` comparte la barra de alcance y recibe en `UI-10` una
-búsqueda de catálogo local; `revisar` recibe en `UI-10` su master-detail con dos familias semánticas
-separadas. `cazatiburones` comparte la barra de alcance pero sus filtros pertenecen a `UI-11`. Esas
-entregas no alteran el hecho de que `SEC-CORPUS` sigue siendo la única ruta `NEXT`.
+bloque la barra, sus subpestañas y el panel colapsable de actualización. `tecnico` recibe en `UI-10`
+una búsqueda de catálogo local sin barra de alcance global; `revisar` recibe en `UI-10` su
+master-detail con dos familias semánticas separadas. `cazatiburones` recibe en `UI-11` el índice y
+sus filtros, y en `UI-13` un detalle por selección local sin barra global. Esas entregas no alteran
+el hecho de que `SEC-CORPUS` sigue siendo la única ruta `NEXT`.
+
+### Densidad, alcance global y selección local (`UI-13`)
+
+UI-13 ajusta la presentación sin ampliar contratos ni peticiones. La cabecera de escritorio queda
+en una franja compacta de hasta 68 px; en móvil puede envolver sin desbordar. Los controles
+interactivos nuevos y principales conservan un área mínima de 36 px y foco visible. El espacio se
+reduce entre bloques, no dentro de las filas de datos.
+
+La matriz de Mesa conserva los cinco estados y su mapping existente, pero cada marca visible mide
+al menos 12 px y combina glifo, forma, borde/trama, relleno y color; la leyenda accesible sigue
+siendo única. Las tarjetas de novedades se alinean al inicio para que una familia sin contenido no
+estire artificialmente a sus vecinas. Las métricas de investigación fundamental usan nombre y
+cambio legibles, valor mayor y hasta dos líneas sin elipsis esencial.
+
+El selector global de activo y su barra de alcance viven sólo en `activo`. Técnico conserva la
+comparación descriptiva existente, pero inicia sin referencia ni peer implícito; el analista debe
+elegir una referencia y al menos un segundo activo antes de consultar. Cazatiburones no usa la
+selección global: entrar consulta sólo el índice universe-wide, una fila elige un `asset_id` local,
+y el detalle muestra encabezado y retorno al índice. Sus tres endpoints sólo reciben ese activo
+local y el `known_at` global; las guardas de secuencia, activo local, corte y cierre descartan
+respuestas superadas.
+
+La marca visible del corte es `Corte de consulta` y muestra la misma cadena ISO válida que usan las
+consultas; se sincroniza al iniciar, cambiar de activo y editar el control. La franja BVL añade la
+cuenta regresiva `Abre en…`/`Cierra en…` con los dos periodos y días laborables ya declarados, sin
+modelar feriados ni sesiones especiales. El formulario `run-form` aparece una sola vez, dentro de
+un panel colapsable de Activo; Sistema conserva únicamente la configuración global de watchlist,
+reglas y notificaciones, con el encabezado `Configuración y automatización`. La marca de la
+aplicación es el control accesible para colapsar el lateral; los enlaces de tablero siguen siendo
+enlaces y Sistema permanece último y separado.
 
 ### Técnico, Revisar y sesiones locales (`UI-10`)
 
@@ -501,9 +534,10 @@ El control de Técnico reutiliza el catálogo `marketAssets` y el contrato de co
 `benchmark_id`, `asset_id`, `start`, `end` y `known_at` no cambian. El selector visible es un
 combobox con `role="combobox"`, `role="listbox"`, foco por flechas, selección por Enter, cierre por
 Escape, `aria-activedescendant` y anuncio vivo. El `<select multiple>` queda como representación
-de estado para el contrato de formulario, pero no es la única interacción. La selección siempre
-incluye la referencia, acepta de dos a cinco activos y filtra por `quote_currency`; el combobox no
-consulta mientras se escribe ni al cambiar chips.
+de estado para el contrato de formulario, pero no es la única interacción. La referencia queda
+vacía hasta una elección explícita y la muestra exige un segundo activo explícito; acepta de dos a
+cinco activos y filtra por `quote_currency`. El combobox no consulta mientras se escribe ni al
+cambiar chips, y Técnico no deriva su referencia de `selectedMarketAsset`.
 
 `revisar` usa una rejilla de dos columnas que colapsa a una en pantallas estrechas. La columna
 maestra conserva dos paneles independientes y la columna de detalle sólo pinta el payload de la
@@ -514,9 +548,9 @@ cooldown. Una selección que deja de existir se marca como no disponible, no se 
 
 La franja compartida calcula localmente los estados regulares de BVL en `America/Lima`: lunes a
 viernes, 08:30–14:50 entre el segundo domingo de marzo y el primero de noviembre, y 09:30–15:50
-fuera de ese periodo. No incorpora feriados, cierres especiales, calendario remoto ni zona horaria
-del navegador. BVL comparte la gramática textual y geométrica de NYSE, pero sus límites no se
-mezclan con el mercado estadounidense.
+fuera de ese periodo. Muestra `Abre en…` o `Cierra en…` con esos mismos límites. No incorpora
+feriados, cierres especiales, calendario remoto ni zona horaria del navegador. BVL comparte la
+gramática textual y geométrica de NYSE, pero sus límites no se mezclan con el mercado estadounidense.
 
 La limpieza global retira del DOM la frase de `known_at`, la explicación de capacidades no
 consultadas, el agregado visible de `limitations` y el footer de cobertura/uso. El contrato de
@@ -544,8 +578,8 @@ orden canónico y deja `tokens.css` como fuente única de tokens.
 La componentización conserva la experiencia visual y la cascada mediante la
 misma regla, valor, breakpoint, token e inicialización que la base. No añade
 capacidad de producto, dependencia, endpoint, petición funcional, módulo ES,
-bundler o carga diferida. La vendorización local de IBM Plex Sans/Mono sigue
-siendo el siguiente delta UI.
+bundler o carga diferida. La tipografía permanece resuelta por las pilas
+locales declaradas.
 
 ## Convergencia con el lienzo (`UI-3`)
 
@@ -637,15 +671,12 @@ intermedio que antes lo reducía a 190px en pantallas medianas quedó
 retirado: era una reducción relativa al valor anterior, y con el nuevo
 valor base ya menor habría sido un **aumento** incoherente.
 
-### Tipografía: IBM Plex sigue diferida
+### Tipografía: pila local
 
-El lienzo carga IBM Plex Sans/Mono desde `fonts.googleapis.com`. La regla
-`test_no_external_network_reference_in_static_surface`, integrada por
-`UI-1`, lo prohíbe. Este bloque adopta únicamente las **métricas** de
-densidad del lienzo sobre la pila tipográfica del sistema ya declarada
-(`--font-sans`/`--figure-font`); vendorizar y versionar los binarios de IBM
-Plex sigue siendo un bloque posterior y acotado, tal como ya declaró
-`UI-1`.
+La superficie no incorpora una fuente web, `@font-face`, CDN ni binario
+tipográfico adicional. `--font-sans` y `--figure-font` continúan usando las
+pilas del sistema ya declaradas; UI-13 ajusta tamaños y envoltura donde la
+legibilidad lo exige sin crear una dependencia tipográfica.
 
 ## Qué no son estas pruebas
 

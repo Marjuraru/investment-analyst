@@ -28,7 +28,12 @@
   gap: 0.75rem;
   min-height: 42px;
   padding-inline: 0.4rem;
+  border: 0;
+  background: transparent;
   color: var(--rail-ink-strong);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
   text-decoration: none;
   overflow: hidden;
   white-space: nowrap;
@@ -70,18 +75,11 @@
   color: var(--rail-ink-muted);
   border: none;
   cursor: pointer;
-  padding: 0.35rem;
-  display: grid;
-  place-items: center;
+  padding: 0.2rem 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
   flex-shrink: 0;
-}
-
-.sidebar-toggle svg {
-  transition: transform 0.2s cubic-bezier(0.2, 0, 0, 1);
-}
-
-.sidebar.collapsed .sidebar-toggle svg {
-  transform: rotate(180deg);
 }
 
 .sidebar-toggle:hover {
@@ -90,9 +88,17 @@
 }
 
 .primary-nav {
-  display: grid;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
   gap: 0.2rem;
   margin-top: 1.65rem;
+}
+
+.board-nav-link[data-board="sistema"] {
+  margin-top: auto;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--rail-border-overlay);
 }
 
 .nav-group-title {
@@ -183,10 +189,10 @@
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  column-gap: 1.2rem;
-  row-gap: var(--canvas-row-gap);
-  min-height: 88px;
-  padding: var(--canvas-row-gap) var(--canvas-gutter);
+  column-gap: 0.8rem;
+  row-gap: 0.45rem;
+  min-height: 68px;
+  padding: 0.45rem var(--canvas-gutter);
   border-bottom: 1px solid var(--line);
   background: var(--topbar);
 }
@@ -224,7 +230,7 @@
 }
 
 .asset-subtab {
-  min-height: 32px;
+  min-height: 36px;
   border: 0;
   border-bottom: 2px solid transparent;
   background: transparent;
@@ -335,7 +341,7 @@
 .topbar-actions {
   display: flex;
   align-items: center;
-  gap: 0.65rem;
+  gap: 0.45rem;
   flex-shrink: 0;
 }
 
@@ -555,7 +561,9 @@ main {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  margin-left: 0.85rem;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: 0.35rem;
   padding: 0.2rem 0.55rem;
   border: 1px dashed var(--accent);
   background: var(--accent-soft);
@@ -570,10 +578,12 @@ main {
 }
 
 .known-at-cut strong {
+  min-width: 0;
   color: var(--accent-dark);
   font-family: var(--figure-font);
   font-size: 0.72rem;
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .visually-hidden {

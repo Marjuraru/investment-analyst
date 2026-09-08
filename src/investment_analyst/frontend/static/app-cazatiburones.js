@@ -2,24 +2,67 @@
 
 // Cazatiburones (UI-4): three separate read-only presentations over
 // already-integrated point-in-time endpoints (issue 159), sharing the
-// single global known_at cut (control id report-known-at) and selectedMarketAsset --
-// this board never fabricates its own cut, never adds a second asset
-// selector, and never issues anything but a GET read. asset_document and
+// single global known_at cut (control id report-known-at) and a local row
+// selection -- this board never changes the global asset, never fabricates
+// its own cut, never adds a second asset selector, and never issues anything
+// but a GET read. asset_document and
 // filer_document, insider and beneficial, and every 13F row stay in
 // disjoint containers with independent counts: nothing here is combined
 // into an effective portfolio, a score or a signal.
 let cazatiburonesRequestSequence = 0;
+let cazatiburonesSelectedAssetId = null;
 
 function cazatiburonesBoardIsActive() {
   const section = byId("board-cazatiburones");
   return section !== null && !section.hidden;
 }
 
-function cazatiburonesEligiblePresentation() {
-  const presentation = marketAssets[selectedMarketAsset];
+function cazatiburonesSelectedPresentation() {
+  const presentation = marketAssets[cazatiburonesSelectedAssetId];
   return presentation && presentation.hasFundamentals && presentation.fundamentalMode === "corporate"
     ? presentation
     : null;
+}
+
+function renderCazatiburonesDetailHeader() {
+  const presentation = marketAssets[cazatiburonesSelectedAssetId];
+  if (!presentation) return;
+  const header = byId("cazatiburones-detail-header");
+  header.hidden = false;
+  header.classList.remove("hidden");
+  byId("cazatiburones-detail-asset").textContent =
+    `${presentation.symbol} · ${presentation.name}`;
+  byId("cazatiburones-detail-empty").classList.add("hidden");
+}
+
+function resetCazatiburonesDetail() {
+  cazatiburonesRequestSequence += 1;
+  cazatiburonesSelectedAssetId = null;
+  const header = byId("cazatiburones-detail-header");
+  header.classList.add("hidden");
+  header.hidden = true;
+  byId("cazatiburones-detail-asset").textContent = "Sin activo seleccionado";
+  byId("cazatiburones-detail-empty").classList.remove("hidden");
+  const content = byId("cazatiburones-detail-content");
+  content.classList.add("hidden");
+  content.hidden = true;
+  const notApplicable = byId("cazatiburones-not-applicable");
+  notApplicable.classList.add("hidden");
+  notApplicable.replaceChildren();
+}
+
+function closeCazatiburonesDetail() {
+  resetCazatiburonesDetail();
+  byId("cazatiburones-universe-search").focus();
+}
+
+function selectCazatiburonesUniverseAsset(assetId) {
+  if (!marketAssets[assetId]) return;
+  cazatiburonesSelectedAssetId = assetId;
+  renderCazatiburonesDetailHeader();
+  byId("cazatiburones-not-applicable").classList.add("hidden");
+  byId("cazatiburones-not-applicable").replaceChildren();
+  void loadCazatiburonesBoard(assetId);
 }
 
 const CAZATIBURONES_UNIVERSE_FAMILIES = Object.freeze([
@@ -109,9 +152,7 @@ function cazatiburonesUniverseRowMatches(row) {
 }
 
 function navigateCazatiburonesUniverseAsset(assetId) {
-  if (typeof selectMarketAssetForNavigation === "function") {
-    void selectMarketAssetForNavigation(assetId);
-  }
+  selectCazatiburonesUniverseAsset(assetId);
 }
 
 function renderCazatiburonesUniverseRows() {
@@ -248,6 +289,7 @@ function initializeCazatiburonesUniverseFilters() {
     renderCazatiburonesUniverseRows();
     byId("cazatiburones-universe-search").focus();
   });
+  byId("cazatiburones-detail-close").addEventListener("click", closeCazatiburonesDetail);
 }
 
 async function loadCazatiburonesUniverseIndex() {
@@ -445,19 +487,29 @@ function renderCazatiburonesDocumentTimeline(payload) {
     (payload.truncated ? " · truncado" : "");
 }
 
-async function loadCazatiburonesBoard() {
+async function loadCazatiburonesBoard(assetId = cazatiburonesSelectedAssetId) {
   const sequence = ++cazatiburonesRequestSequence;
-  const assetId = selectedMarketAsset;
+  if (!assetId || assetId !== cazatiburonesSelectedAssetId) return;
   const knownAt = byId("report-known-at").value.trim();
   const notApplicable = byId("cazatiburones-not-applicable");
   const content = byId("cazatiburones-detail-content");
-  if (!cazatiburonesEligiblePresentation()) {
+  if (!knownAt) {
     content.classList.add("hidden");
+    content.hidden = true;
+    notApplicable.replaceChildren(
+      renderAbsenceMark("missing", "Sin evidencia", "El corte global no está disponible"),
+    );
+    notApplicable.classList.remove("hidden");
+    return;
+  }
+  if (!cazatiburonesSelectedPresentation()) {
+    content.classList.add("hidden");
+    content.hidden = true;
     notApplicable.replaceChildren(
       renderAbsenceMark(
         "not-applicable",
         "No aplica",
-        "El activo seleccionado no tiene presentación SEC corporativa habilitada",
+        "El activo local no tiene presentación SEC corporativa habilitada",
       ),
     );
     notApplicable.classList.remove("hidden");
@@ -466,6 +518,10 @@ async function loadCazatiburonesBoard() {
   notApplicable.classList.add("hidden");
   notApplicable.replaceChildren();
   content.classList.remove("hidden");
+  content.hidden = false;
+  byId("cazatiburones-declared-activity-summary").textContent = "Consultando…";
+  byId("cazatiburones-institutional-observations-summary").textContent = "Consultando…";
+  byId("cazatiburones-document-timeline-summary").textContent = "Consultando…";
   const offset = 0;
   const limit = 200;
   const featureParameters = new URLSearchParams({ asset_id: assetId, known_at: knownAt });
@@ -485,7 +541,7 @@ async function loadCazatiburonesBoard() {
     ]);
     if (
       sequence !== cazatiburonesRequestSequence
-      || assetId !== selectedMarketAsset
+      || assetId !== cazatiburonesSelectedAssetId
       || knownAt !== byId("report-known-at").value.trim()
     ) return;
     renderCazatiburonesDeclaredActivity(declaredActivity);
@@ -494,7 +550,7 @@ async function loadCazatiburonesBoard() {
   } catch (error) {
     if (
       sequence !== cazatiburonesRequestSequence
-      || assetId !== selectedMarketAsset
+      || assetId !== cazatiburonesSelectedAssetId
       || knownAt !== byId("report-known-at").value.trim()
     ) return;
     byId("cazatiburones-declared-activity-summary").textContent = error.message;

@@ -143,6 +143,7 @@
 
   .primary-nav {
     display: flex;
+    flex-direction: row;
     justify-content: flex-end;
     gap: 0.15rem;
     margin-top: 0;
@@ -184,6 +185,12 @@
 
   .sidebar.collapsed .primary-nav {
     display: none;
+  }
+
+  .board-nav-link[data-board="sistema"] {
+    margin-top: 0;
+    padding-top: 0.55rem;
+    border-top: 0;
   }
 
   .sidebar.collapsed .brand-text {

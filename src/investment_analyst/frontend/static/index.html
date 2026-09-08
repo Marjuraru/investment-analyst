@@ -24,17 +24,12 @@
     <div class="app-shell">
       <aside id="app-sidebar" class="sidebar" aria-label="Navegación principal">
         <div class="sidebar-header">
-          <a class="brand" href="#resumen" aria-label="Investment Analyst, inicio">
+          <button id="sidebar-toggle" class="brand sidebar-toggle" type="button" aria-expanded="true" aria-controls="app-sidebar" aria-label="Colapsar navegación">
             <span class="brand-mark" aria-hidden="true">IA</span>
             <span class="brand-text">
               <strong>Investment</strong>
               <small>Analyst</small>
             </span>
-          </a>
-          <button id="sidebar-toggle" class="icon-button sidebar-toggle" aria-expanded="true" aria-controls="app-sidebar" aria-label="Colapsar navegación">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M19 12H5M12 19l-7-7 7-7"/>
-            </svg>
           </button>
         </div>
 
@@ -102,7 +97,7 @@
             </span>
           </div>
           <div class="known-at-cut" aria-label="Corte de conocimiento vigente">
-            <span class="known-at-cut-label">Corte</span>
+            <span class="known-at-cut-label">Corte de consulta</span>
             <strong id="known-at-cut-value">
               <span class="absence-mark missing" role="status" aria-label="Sin evidencia">
                 <span class="absence-mark-icon"></span>
@@ -331,8 +326,65 @@
               <button type="button" class="asset-subtab" role="tab" aria-selected="false" aria-controls="fundamentales" data-asset-subtab="fundamentales" data-fundamental-only>Fundamentales</button>
               <button id="valuation-nav-link" type="button" class="asset-subtab" role="tab" aria-selected="false" aria-controls="valoracion" data-asset-subtab="valoracion" data-valuation-only>Valoración</button>
               <button type="button" class="asset-subtab" role="tab" aria-selected="false" aria-controls="analisis" data-asset-subtab="analisis" data-complete-analysis-only>Análisis</button>
-            </div>
           </div>
+          </div>
+          <details id="asset-refresh-panel" class="operation-panel asset-refresh-panel">
+            <summary>
+              <span>
+                <strong id="asset-refresh-title">Actualizar activo</strong>
+                <small id="run-source-label">SEC EDGAR + Alpaca Market Data IEX</small>
+              </span>
+              <span class="summary-action">Abrir</span>
+            </summary>
+            <form id="run-form" class="run-form">
+              <div class="form-grid">
+                <label class="field">
+                  <span>Inicio del histórico de mercado</span>
+                  <input id="market-start" name="market_start" type="date" value="2025-01-01" required>
+                </label>
+                <label class="field">
+                  <span>Fin del histórico de mercado</span>
+                  <input id="market-end" name="market_end" type="date" required>
+                </label>
+                <label class="field" data-fundamental-run-only>
+                  <span>Frecuencia fundamental</span>
+                  <select id="run-frequency" name="fundamental_frequency">
+                    <option value="quarterly">Trimestral</option>
+                    <option value="annual">Anual</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Modo de actualización</span>
+                  <select id="refresh-mode" name="refresh_mode">
+                    <option value="auto">Incremental automática</option>
+                    <option value="full">Rango completo</option>
+                  </select>
+                </label>
+              </div>
+              <label class="field">
+                <span>Corte conocido opcional</span>
+                <input
+                  id="run-known-at"
+                  name="known_at"
+                  type="text"
+                  placeholder="2026-07-16T15:46:09Z"
+                  aria-describedby="run-known-at-help"
+                >
+                <small id="run-known-at-help">Déjalo vacío para que el flujo determine el corte UTC.</small>
+              </label>
+              <label class="check-row" data-complete-run-only>
+                <input id="require-complete" name="require_complete" type="checkbox" checked>
+                <span>
+                  <strong>Exigir un resultado completo</strong>
+                  <small>La ejecución falla si no produce ambos diagnósticos independientes.</small>
+                </span>
+              </label>
+              <div class="run-actions">
+                <p id="run-note">SEC se consulta en cada ejecución, aunque el mercado ya esté actualizado.</p>
+                <button id="run-button" class="button primary" type="submit">Ejecutar actualización</button>
+              </div>
+            </form>
+          </details>
           <section id="mercado" class="market-section" aria-labelledby="mercado-titulo">
             <div class="section-intro analysis-intro">
               <div>
@@ -1022,7 +1074,7 @@
                 </div>
                 <div id="comparison-selected-assets" class="comparison-selected-assets" aria-label="Activos seleccionados"></div>
                 <select id="comparison-assets" class="comparison-assets-native" multiple required aria-hidden="true" tabindex="-1"></select>
-                <small id="comparison-selection-status" class="comparison-selection-status" aria-live="polite">La referencia siempre está incluida.</small>
+                <small id="comparison-selection-status" class="comparison-selection-status" aria-live="polite">Elige una referencia y al menos un segundo activo.</small>
               </div>
               <label class="field"><span>Inicio</span><input id="comparison-start" type="date" required></label>
               <label class="field"><span>Fin</span><input id="comparison-end" type="date" required></label>
@@ -1146,7 +1198,15 @@
                 </div>
               </section>
 
-              <div id="cazatiburones-detail-content">
+              <div id="cazatiburones-detail-header" class="cazatiburones-detail-header hidden" aria-live="polite" hidden>
+                <span>
+                  <small>Detalle local</small>
+                  <strong id="cazatiburones-detail-asset">Sin activo seleccionado</strong>
+                </span>
+                <button id="cazatiburones-detail-close" class="button secondary compact" type="button">Volver al índice</button>
+              </div>
+              <p id="cazatiburones-detail-empty" class="chart-status" role="status" aria-live="polite">Selecciona un activo del índice para consultar sus lecturas detalladas.</p>
+              <div id="cazatiburones-detail-content" class="hidden" hidden>
                 <section id="cazatiburones-declared-activity" class="operation-panel" aria-labelledby="cazatiburones-declared-activity-titulo">
                   <div class="panel-header">
                     <span>
@@ -1187,7 +1247,7 @@
             <div class="section-intro">
               <div>
                 <p class="eyebrow">OPERACIÓN</p>
-                <h2 id="operacion-titulo">Actualizar activo</h2>
+                <h2 id="operacion-titulo">Configuración y automatización</h2>
               </div>
             </div>
 
@@ -1247,63 +1307,6 @@
               </form>
             </details>
 
-            <details class="operation-panel">
-              <summary>
-                <span>
-                  <strong>Configuración de la actualización</strong>
-                  <small id="run-source-label">SEC EDGAR + Alpaca Market Data IEX</small>
-                </span>
-                <span class="summary-action">Abrir</span>
-              </summary>
-              <form id="run-form" class="run-form">
-                <div class="form-grid">
-                  <label class="field">
-                    <span>Inicio del histórico de mercado</span>
-                    <input id="market-start" name="market_start" type="date" value="2025-01-01" required>
-                  </label>
-                  <label class="field">
-                    <span>Fin del histórico de mercado</span>
-                    <input id="market-end" name="market_end" type="date" required>
-                  </label>
-                  <label class="field" data-fundamental-run-only>
-                    <span>Frecuencia fundamental</span>
-                    <select id="run-frequency" name="fundamental_frequency">
-                      <option value="quarterly">Trimestral</option>
-                      <option value="annual">Anual</option>
-                    </select>
-                  </label>
-                  <label class="field">
-                    <span>Modo de actualización</span>
-                    <select id="refresh-mode" name="refresh_mode">
-                      <option value="auto">Incremental automática</option>
-                      <option value="full">Rango completo</option>
-                    </select>
-                  </label>
-                </div>
-                <label class="field">
-                  <span>Corte conocido opcional</span>
-                  <input
-                    id="run-known-at"
-                    name="known_at"
-                    type="text"
-                    placeholder="2026-07-16T15:46:09Z"
-                    aria-describedby="run-known-at-help"
-                  >
-                  <small id="run-known-at-help">Déjalo vacío para que el flujo determine el corte UTC.</small>
-                </label>
-                <label class="check-row" data-complete-run-only>
-                  <input id="require-complete" name="require_complete" type="checkbox" checked>
-                  <span>
-                    <strong>Exigir un resultado completo</strong>
-                    <small>La ejecución falla si no produce ambos diagnósticos independientes.</small>
-                  </span>
-                </label>
-                <div class="run-actions">
-                  <p id="run-note">SEC se consulta en cada ejecución, aunque el mercado ya esté actualizado.</p>
-                  <button id="run-button" class="button primary" type="submit">Ejecutar actualización</button>
-                </div>
-              </form>
-            </details>
           </section>
           </div>
         </main>

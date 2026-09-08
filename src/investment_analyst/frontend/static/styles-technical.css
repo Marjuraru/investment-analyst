@@ -1,14 +1,14 @@
 .comparison-section {
   border-top: 1px solid var(--line);
-  padding: 2.5rem 0;
+  padding: 1.15rem 0;
 }
 
 .comparison-controls,
 .comparison-cards {
   display: grid;
-  gap: 0.85rem;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  margin: 1.25rem 0;
+  gap: 0.6rem;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(260px, 1.45fr) repeat(2, minmax(120px, 0.6fr)) auto;
+  margin: 0.85rem 0;
 }
 
 .comparison-controls .button {
@@ -97,7 +97,7 @@
 }
 
 .comparison-chip-remove {
-  min-height: 24px;
+  min-height: 36px;
   padding: 0.15rem 0.3rem;
   border: 1px solid var(--line-strong);
   background: var(--surface);

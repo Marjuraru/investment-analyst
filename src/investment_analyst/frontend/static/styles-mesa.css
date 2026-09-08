@@ -19,10 +19,12 @@
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.85rem;
+  align-items: start;
 }
 
 .mesa-news-family {
   min-width: 0;
+  align-self: start;
   padding: 0.55rem 0.65rem;
   border: 1px solid var(--line);
   background: var(--surface);
@@ -176,11 +178,16 @@
 }
 
 .mesa-matrix-mark {
-  display: inline-block;
+  display: inline-grid;
+  place-items: center;
   box-sizing: border-box;
-  width: 7px;
-  height: 7px;
+  width: 12px;
+  height: 12px;
   border: 1px solid var(--line-strong);
+  color: var(--ink-strong);
+  font-size: 0.62rem;
+  font-weight: 850;
+  line-height: 1;
 }
 
 .mesa-matrix-fresh {
@@ -189,16 +196,29 @@
   clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%);
 }
 
+.mesa-matrix-fresh::before {
+  content: "✓";
+}
+
 .mesa-matrix-overdue {
   border-color: var(--warning-ink);
   background: var(--surface);
   transform: rotate(45deg);
 }
 
+.mesa-matrix-overdue::before {
+  content: "!";
+  transform: rotate(-45deg);
+}
+
 .mesa-matrix-missing {
   border-color: var(--muted-strong);
   background: var(--surface-subtle);
   clip-path: circle(50% at 50% 50%);
+}
+
+.mesa-matrix-missing::before {
+  content: "?";
 }
 
 .mesa-matrix-blocked {
@@ -212,12 +232,21 @@
   );
 }
 
+.mesa-matrix-blocked::before {
+  content: "×";
+}
+
 .mesa-matrix-not-applicable {
-  width: 7px;
-  height: 2px;
-  border-width: 1px 0;
+  width: 12px;
+  height: 12px;
+  border-width: 1px 3px;
+  border-style: double;
   border-color: var(--muted);
   background: var(--surface-subtle);
+}
+
+.mesa-matrix-not-applicable::before {
+  content: "—";
 }
 
 @media (max-width: 1120px) {

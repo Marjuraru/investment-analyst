@@ -1374,7 +1374,7 @@
 .fundamental-research-metric {
   display: grid;
   min-width: 0;
-  min-height: 56px;
+  min-height: 78px;
   align-content: center;
   gap: 0.12rem;
   padding: 0.38rem 0.45rem;
@@ -1386,26 +1386,22 @@
 }
 
 .fundamental-research-metric-name {
-  overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--muted);
-  font-size: 0.56rem;
+  font-size: 0.72rem;
   font-weight: 640;
   line-height: 1.25;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .fundamental-research-metric-value {
-  overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--ink-strong);
   font-family: var(--figure-font);
   font-variant-numeric: tabular-nums;
-  font-size: 0.78rem;
+  font-size: 0.95rem;
   font-weight: 760;
   letter-spacing: -0.015em;
   text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .fundamental-research-metric-value.negative {
@@ -1413,13 +1409,11 @@
 }
 
 .fundamental-research-metric-change {
-  overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--accent);
-  font-size: 0.52rem;
+  font-size: 0.72rem;
   font-weight: 650;
   line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .fundamental-research-metric-change.increase {

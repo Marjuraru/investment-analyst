@@ -1900,7 +1900,8 @@ def _check_design_system_documentation_declares_the_canvas_convergence(doc_text:
     assert "retícula" in normalized and "4 px" in normalized, (
         "the doc must record that the '4px grid' proposal is not what the canvas draws"
     )
-    assert "ibm plex" in normalized, "the doc must keep declaring IBM Plex as deferred"
+    assert "ibm plex" not in normalized, "the deferred IBM Plex source must be retired"
+    assert "pila local" in normalized or "pilas del sistema" in normalized
 
 
 def test_design_system_documentation_declares_the_canvas_convergence() -> None:
@@ -2024,18 +2025,21 @@ def test_document_timeline_shows_coverage_even_when_missing() -> None:
     _check_document_timeline_shows_coverage_even_when_missing(APP_JS)
 
 
-def _check_cazatiburones_board_uses_the_global_known_at_cut(index_html: str, app_js: str) -> None:
+def _check_cazatiburones_board_uses_local_asset_and_global_known_at_cut(
+    index_html: str, app_js: str
+) -> None:
     fn = _extract_js_function(app_js, "loadCazatiburonesBoard")
     assert 'byId("report-known-at")' in fn
-    assert "selectedMarketAsset" in fn
+    assert "cazatiburonesSelectedAssetId" in fn
+    assert "selectedMarketAsset" not in fn
     # No second cut control and no second asset selector for this board.
     assert 'id="cazatiburones-known-at"' not in index_html
     assert 'id="cazatiburones-asset"' not in index_html
     assert index_html.count('id="report-known-at"') == 1
 
 
-def test_cazatiburones_board_uses_the_global_known_at_cut() -> None:
-    _check_cazatiburones_board_uses_the_global_known_at_cut(INDEX_HTML, APP_JS)
+def test_cazatiburones_board_uses_local_asset_and_global_known_at_cut() -> None:
+    _check_cazatiburones_board_uses_local_asset_and_global_known_at_cut(INDEX_HTML, APP_JS)
 
 
 def _check_cazatiburones_board_never_fabricates_a_known_at_cut(app_js: str) -> None:
@@ -2148,8 +2152,8 @@ def _check_route_registers_the_connected_cazatiburones_board(doc_text: str) -> N
     assert "reservado `not-built`" not in doc_text, (
         "the pending not-built reservation must not survive alongside the block that connects it"
     )
-    assert "5.4" in doc_text
-    assert "ibm plex" in normalized
+    assert "ibm plex" not in normalized
+    assert "ui-13" in normalized
 
 
 def test_route_registers_the_connected_cazatiburones_board() -> None:
@@ -2231,8 +2235,7 @@ def test_universe_load_uses_global_cut_once_without_asset_id_and_discards_stale_
 def test_canonical_cazatiburones_load_graph_and_deep_link_dispatch_index_plus_detail() -> None:
     entry = _board_deferred_load_entry(APP_JS, "cazatiburones")
     assert re.findall(r"loadCazatiburones(?:UniverseIndex|Board)", entry) == [
-        "loadCazatiburonesUniverseIndex",
-        "loadCazatiburonesBoard",
+        "loadCazatiburonesUniverseIndex"
     ]
     initialize = _extract_js_function(APP_JS, "initialize")
     assert "await loadMarketAssets();" in initialize
@@ -2314,11 +2317,12 @@ def test_filtered_empty_and_endpoint_empty_remain_distinct_and_accessible() -> N
     assert 'role="status" aria-live="polite"' in board
 
 
-def test_row_navigation_reuses_global_asset_selection_and_preserves_filters() -> None:
+def test_row_navigation_uses_local_asset_selection_and_preserves_filters() -> None:
     navigation_fn = _extract_js_function(APP_JS, "navigateCazatiburonesUniverseAsset")
-    assert "selectMarketAssetForNavigation(assetId)" in navigation_fn
+    assert "selectCazatiburonesUniverseAsset(assetId)" in navigation_fn
+    assert "selectedMarketAsset =" not in navigation_fn
     assert "api(" not in navigation_fn
-    assert "selectMarketAssetForNavigation = selectComboboxOption;" in APP_JS
+    assert "cazatiburonesSelectedAssetId = assetId;" in APP_JS
     render_fn = _extract_js_function(APP_JS, "renderCazatiburonesUniverseRows")
     assert "assetButton.addEventListener" in render_fn
     assert "row.assetId" in render_fn
@@ -2443,6 +2447,7 @@ def _check_cazatiburones_board_reloads_when_the_selected_asset_changes(app_js: s
     assert match, "selectComboboxOption(assetId) must exist"
     body = match.group(1)
     assert "selectedMarketAsset = assetId;" in body
+    assert 'renderKnownAtCut(byId("report-known-at").value.trim());' in body
     assert "invalidateDeferredBoardLoads();" in body
     assert "activateBoard(boardIdFromLocationHash(), { focus: false });" in body
     assert (
@@ -2582,7 +2587,7 @@ def _check_board_to_deferred_loads_table_covers_the_six_registered_boards(app_js
         ],
         "tecnico": [],
         "revisar": ["loadCandidateInbox", "loadAlertInbox"],
-        "cazatiburones": ["loadCazatiburonesUniverseIndex", "loadCazatiburonesBoard"],
+        "cazatiburones": ["loadCazatiburonesUniverseIndex"],
         "sistema": [],
     }
     for board_id, expected in expected_loads.items():
@@ -2629,7 +2634,8 @@ def _check_revisar_and_cazatiburones_keep_their_current_triggers(app_js: str) ->
         _board_deferred_load_entry(app_js, "cazatiburones").count("loadCazatiburonesUniverseIndex")
         == 1
     )
-    assert _board_deferred_load_entry(app_js, "cazatiburones").count("loadCazatiburonesBoard") == 1
+    assert _board_deferred_load_entry(app_js, "cazatiburones").count("loadCazatiburonesBoard") == 0
+    assert "selectCazatiburonesUniverseAsset(assetId)" in app_js
     initialize = _extract_js_function(app_js, "initialize")
     assert "loadDeferredBoardData(boardIdFromLocationHash());" in initialize
     assert 'byId("candidate-notification-panel").addEventListener("toggle"' in app_js
@@ -4443,11 +4449,11 @@ _ASSET_SUBTAB_IDS = (
 
 def _asset_scope_markup(index_html: str) -> str:
     match = re.search(
-        r'<div id="asset-scope-bar" class="asset-scope-bar">(.*?)</div>\n\s*<section id="mercado"',
+        r'<div id="asset-scope-bar" class="asset-scope-bar">(.*?)<details id="asset-refresh-panel"',
         index_html,
         re.DOTALL,
     )
-    assert match, "the single asset scope bar must precede the activo sections"
+    assert match, "the single asset scope bar must precede the activo refresh panel"
     return match.group(1)
 
 
@@ -4509,9 +4515,7 @@ def _check_asset_scope_and_subtabs(
         assert capability in scope
     assert 'id="valuation-nav-link"' in scope
 
-    scope_board_ids = (
-        'const ASSET_SCOPE_BOARD_IDS = new Set(["activo", "tecnico", "cazatiburones"]);'
-    )
+    scope_board_ids = 'const ASSET_SCOPE_BOARD_IDS = new Set(["activo"]);'
     assert scope_board_ids in app_js
     assert "scopeBar.hidden = !shouldShow;" in app_js
     assert "activeBoard.prepend(scopeBar);" in app_js
@@ -4527,6 +4531,8 @@ def _check_asset_scope_and_subtabs(
     assert "history.replaceState" not in selector_body.group(1)
     assert "assetSubtabIsAvailable(requestedButton)" in selector_body.group(1)
     assert "marketButton" in selector_body.group(1)
+    assert 'id="asset-scope-bar"' not in _board_slices(index_html)["tecnico"]
+    assert 'id="asset-scope-bar"' not in _board_slices(index_html)["cazatiburones"]
 
 
 def test_asset_scope_and_subtabs_are_the_only_asset_navigation() -> None:
@@ -4545,10 +4551,13 @@ def _check_ui8_composition_is_documented(design_doc: str, local_doc: str, plan_d
         "UI-9",
         "UI-10",
         "UI-11",
+        "UI-13",
     ):
         assert declaration in design_doc
     assert "subpestañas de activo (`UI-8`)" in local_doc
     assert "`UI-8` mueve la identidad y el selector del activo" in plan_doc
+    assert "`UI-13`" in local_doc
+    assert "`UI-13`" in plan_doc
     assert "`SEC-CORPUS` permanece como la única ruta `NEXT`" in plan_doc
 
 
@@ -4562,6 +4571,88 @@ def test_ui8_composition_and_route_are_documented() -> None:
         encoding="utf-8"
     )
     _check_ui8_composition_is_documented(design_doc, local_doc, plan_doc)
+
+
+def test_ui13_keeps_the_refresh_form_once_inside_activo_and_makes_brand_the_sidebar_toggle() -> (
+    None
+):
+    activo = _board_slices(INDEX_HTML)["activo"]
+    sistema = _board_slices(INDEX_HTML)["sistema"]
+    refresh_panel = re.search(
+        r'<details id="asset-refresh-panel"[^>]*>(.*?)</details>', activo, re.DOTALL
+    )
+    assert refresh_panel, "Activo must own the collapsible refresh panel"
+    assert refresh_panel.group(1).count('id="run-form"') == 1
+    assert INDEX_HTML.count('id="run-form"') == 1
+    assert 'id="run-form"' not in sistema
+    assert 'id="asset-scope-bar"' in activo
+    assert 'id="asset-refresh-title"' in refresh_panel.group(1)
+    assert 'id="sidebar-toggle" class="brand sidebar-toggle"' in INDEX_HTML
+    assert 'aria-expanded="true"' in INDEX_HTML
+    assert 'class="icon-button sidebar-toggle"' not in INDEX_HTML
+    assert "Configuración y automatización" in sistema
+    assert '.board-nav-link[data-board="sistema"]' in STYLES_CSS
+    assert "margin-top: auto" in STYLES_CSS
+
+
+def test_ui13_matrix_marks_preserve_mapping_and_row_density() -> None:
+    mesa = _board_slices(INDEX_HTML)["mesa"]
+    legend = re.search(r'<div id="mesa-universe-legend"[^>]*>(.*?)</div>', mesa, re.DOTALL)
+    assert legend and legend.group(1).count("Al día") == 1
+    matrix_fn = _extract_js_function(APP_JS, "mesaMatrixStateMarkup")
+    assert "mesa-matrix-state-${state}" in matrix_fn
+    assert "mesa-matrix-mark mesa-matrix-${state}" in matrix_fn
+    for state in ("fresh", "overdue", "missing", "blocked", "not-applicable"):
+        assert f".mesa-matrix-{state}" in STYLES_CSS
+    assert ".mesa-matrix-mark" in STYLES_CSS
+    assert "width: 12px" in STYLES_CSS
+    assert "height: 12px" in STYLES_CSS
+    assert ".mesa-news-families" in STYLES_CSS
+    assert "align-items: start" in STYLES_CSS
+    assert "height: var(--row-height)" in STYLES_CSS
+
+
+def test_ui13_requires_explicit_technical_reference_and_local_cazatiburones_detail() -> None:
+    technical = _extract_js_function(APP_JS, "populateMarketComparisonAssets")
+    comparison_query = _extract_js_function(APP_JS, "queryMarketComparison")
+    caz_board = _extract_js_function(APP_JS, "loadCazatiburonesBoard")
+    assert 'placeholder.textContent = "Selecciona una referencia"' in technical
+    assert 'benchmark.value = ""' in technical
+    assert "firstPeer" not in APP_JS
+    assert "selectedMarketAsset" not in comparison_query
+    assert "!benchmark" in comparison_query
+    assert "assets.length < 2" in comparison_query
+    assert "cazatiburonesSelectedAssetId" in caz_board
+    assert "selectedMarketAsset" not in caz_board
+    assert 'byId("report-known-at").value.trim()' in caz_board
+    assert caz_board.count("api(`/api/v1/") == 3
+    caz = _board_slices(INDEX_HTML)["cazatiburones"]
+    for marker in (
+        'id="cazatiburones-detail-header"',
+        'id="cazatiburones-detail-close"',
+        'id="cazatiburones-detail-empty"',
+        'id="cazatiburones-detail-content"',
+    ):
+        assert marker in caz
+    assert (
+        _board_deferred_load_entry(APP_JS, "cazatiburones").count("loadCazatiburonesUniverseIndex")
+        == 1
+    )
+    assert _board_deferred_load_entry(APP_JS, "cazatiburones").count("loadCazatiburonesBoard") == 0
+
+
+def test_ui13_global_cut_sync_and_bvl_countdown_are_declared_without_new_polling_contract() -> None:
+    assert 'class="known-at-cut-label">Corte de consulta</span>' in INDEX_HTML
+    assert 'byId("report-known-at").addEventListener("input"' in APP_JS
+    assert 'byId("report-known-at").addEventListener("change"' in APP_JS
+    assert 'renderKnownAtCut(byId("report-known-at").value.trim());' in APP_JS
+    assert (
+        'bvlRemaining.toward === "open" ? `Abre en ${bvlCountdown}` : `Cierra en ${bvlCountdown}`'
+        in APP_JS
+    )
+    assert "bvlRegularSessionRemainingMinutes" in APP_JS
+    assert "overviewPayload" not in APP_JS
+    assert "latest?.effective_known_at" in _read("app-operations.js")
 
 
 def test_probe_asset_scope_rule_catches_a_hash_anchor() -> None:
@@ -4642,6 +4733,9 @@ def test_technical_combobox_searches_catalog_and_manages_two_to_five_currency_co
     assert "La muestra admite como máximo cinco activos." in APP_JS
     assert "option.selected = true" in APP_JS
     assert "option.selected = false" in APP_JS
+    comparison_setup = _extract_js_function(APP_JS, "populateMarketComparisonAssets")
+    assert 'placeholder.value = ""' in comparison_setup
+    assert "Selecciona una referencia" in comparison_setup
 
 
 def test_technical_keyboard_aria_and_submit_only_query_contract() -> None:
@@ -4664,6 +4758,11 @@ def test_technical_keyboard_aria_and_submit_only_query_contract() -> None:
     assert 'byId("market-comparison-form").addEventListener("submit"' in APP_JS
     assert "await queryMarketComparison();" in APP_JS
     assert "queryMarketComparison" not in search_block
+    selection_render = _extract_js_function(APP_JS, "renderComparisonSelectedAssets")
+    assert "Selecciona una referencia y al menos un segundo activo." in selection_render
+    query_fn = _extract_js_function(APP_JS, "queryMarketComparison")
+    assert "assets.length < 2" in query_fn
+    assert "benchmark" in query_fn
 
 
 def test_review_board_has_responsive_master_detail_with_two_semantic_groups() -> None:
@@ -4724,6 +4823,13 @@ def test_bvl_session_uses_lima_zone_two_official_periods_and_weekdays() -> None:
     bvl_state = _extract_js_function(APP_JS, "bvlRegularSessionState")
     assert 'parts.weekday === "Sat" || parts.weekday === "Sun"' in bvl_state
     assert "period.open" in bvl_state and "period.close" in bvl_state
+    bvl_remaining = _extract_js_function(APP_JS, "bvlRegularSessionRemainingMinutes")
+    assert 'toward: "open"' in bvl_remaining
+    assert "daysToNextOpen" in bvl_remaining
+    assert (
+        'bvlRemaining.toward === "open" ? `Abre en ${bvlCountdown}` : `Cierra en ${bvlCountdown}`'
+        in APP_JS
+    )
 
 
 def test_market_strip_removes_lima_clock_and_keeps_new_york_nyse_and_accessible_limit() -> None:

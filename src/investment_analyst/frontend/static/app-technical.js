@@ -5,6 +5,12 @@ function populateMarketComparisonAssets() {
   const assets = byId("comparison-assets");
   benchmark.replaceChildren();
   assets.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Selecciona una referencia";
+  placeholder.disabled = true;
+  placeholder.selected = true;
+  benchmark.append(placeholder);
   for (const presentation of Object.values(marketAssets)) {
     const label = `${presentation.symbol} · ${presentation.name}`;
     const benchmarkOption = document.createElement("option");
@@ -12,7 +18,7 @@ function populateMarketComparisonAssets() {
     benchmarkOption.textContent = label;
     benchmark.append(benchmarkOption);
   }
-  benchmark.value = marketAssets[selectedMarketAsset] ? selectedMarketAsset : benchmark.options[0]?.value;
+  benchmark.value = "";
   syncComparisonAssetOptions({ initial: true });
 }
 
@@ -34,6 +40,10 @@ function renderComparisonSelectedAssets() {
   const benchmarkId = byId("comparison-benchmark").value;
   const selected = comparisonSelectedAssets();
   container.replaceChildren();
+  if (!benchmarkId) {
+    comparisonSelectionStatus("Selecciona una referencia y al menos un segundo activo.");
+    return;
+  }
   for (const assetId of selected) {
     const chip = createElement("span", "comparison-selected-chip");
     chip.append(createElement("span", "comparison-selected-chip-label", comparisonAssetLabel(assetId)));
@@ -144,10 +154,6 @@ function syncComparisonAssetOptions({ initial = false } = {}) {
   const retainedIds = [benchmarkId, ...selectedBefore.filter((assetId) => assetId !== benchmarkId)]
     .filter((assetId, index, values) => compatibleIds.has(assetId) && values.indexOf(assetId) === index)
     .slice(0, 5);
-  if (initial && retainedIds.length < 2) {
-    const firstPeer = compatible.find((presentation) => presentation.assetId !== benchmarkId);
-    if (firstPeer) retainedIds.push(firstPeer.assetId);
-  }
   const assets = byId("comparison-assets");
   assets.replaceChildren();
   for (const presentation of compatible) {
@@ -281,8 +287,7 @@ function renderMarketComparison(payload) {
 async function queryMarketComparison() {
   const assets = comparisonSelectedAssets();
   const benchmark = byId("comparison-benchmark").value;
-  if (!assets.includes(benchmark)) assets.unshift(benchmark);
-  if (assets.length < 2 || assets.length > 5) {
+  if (!benchmark || !assets.includes(benchmark) || assets.length < 2 || assets.length > 5) {
     throw new Error("Selecciona entre dos y cinco activos, incluida la referencia.");
   }
   const sequence = ++marketComparisonRequestSequence;
