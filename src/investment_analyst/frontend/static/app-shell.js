@@ -166,6 +166,15 @@ function bvlSessionPeriodForDate(parts) {
     : BVL_SESSION_PERIODS.winter;
 }
 
+function bvlDatePartsAfter(parts, daysAhead) {
+  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + daysAhead));
+  return {
+    year: date.getUTCFullYear(),
+    month: date.getUTCMonth() + 1,
+    day: date.getUTCDate(),
+  };
+}
+
 function bvlRegularSessionState(now) {
   const parts = limaWallClockDateParts(now);
   const period = bvlSessionPeriodForDate(parts);
@@ -176,6 +185,33 @@ function bvlRegularSessionState(now) {
   if (minutes < period.open) return { ...BVL_SESSION_STATES.before, period };
   if (minutes < period.close) return { ...BVL_SESSION_STATES.open, period };
   return { ...BVL_SESSION_STATES.after, period };
+}
+
+function bvlRegularSessionRemainingMinutes(now) {
+  const parts = limaWallClockDateParts(now);
+  const period = bvlSessionPeriodForDate(parts);
+  const minutesSinceMidnight = parts.hour * 60 + parts.minute;
+  const weekdayIndex = LIMA_WEEKDAY_ORDER.indexOf(parts.weekday);
+  if (parts.weekday === "Sat" || parts.weekday === "Sun") {
+    const daysToMonday = parts.weekday === "Sat" ? 2 : 1;
+    const nextPeriod = bvlSessionPeriodForDate(bvlDatePartsAfter(parts, daysToMonday));
+    return {
+      toward: "open",
+      minutes: daysToMonday * 24 * 60 + nextPeriod.open - minutesSinceMidnight,
+    };
+  }
+  if (minutesSinceMidnight < period.open) {
+    return { toward: "open", minutes: period.open - minutesSinceMidnight };
+  }
+  if (minutesSinceMidnight < period.close) {
+    return { toward: "close", minutes: period.close - minutesSinceMidnight };
+  }
+  const daysToNextOpen = weekdayIndex === 5 /* Fri */ ? 3 : 1;
+  const nextPeriod = bvlSessionPeriodForDate(bvlDatePartsAfter(parts, daysToNextOpen));
+  return {
+    toward: "open",
+    minutes: daysToNextOpen * 24 * 60 + nextPeriod.open - minutesSinceMidnight,
+  };
 }
 
 function renderMarketClocks(now = new Date()) {
@@ -192,7 +228,10 @@ function renderMarketClocks(now = new Date()) {
   const bvlDot = byId("bvl-session-dot");
   bvlStatus.replaceChildren(bvlDot, document.createTextNode(bvlSession.label));
   bvlStatus.className = `market-session-status ${bvlSession.tone}`;
-  byId("bvl-session-remaining").textContent = `${bvlSession.period.label} America/Lima`;
+  const bvlRemaining = bvlRegularSessionRemainingMinutes(now);
+  const bvlCountdown = formatSessionCountdown(bvlRemaining.minutes);
+  byId("bvl-session-remaining").textContent =
+    bvlRemaining.toward === "open" ? `Abre en ${bvlCountdown}` : `Cierra en ${bvlCountdown}`;
   const session = newYorkRegularSessionState(now);
   const status = byId("nyse-session-status");
   const dot = byId("nyse-session-dot");
@@ -446,6 +485,7 @@ byId("crypto-derivatives-panel").addEventListener("toggle", (event) => {
 });
 
 byId("report-known-at").addEventListener("change", () => {
+  renderKnownAtCut(byId("report-known-at").value.trim());
   resetListedCompanyReport();
   invalidateDeferredBoardLoads();
   if (marketAssetPresentation().supportsCryptoDerivatives && byId("crypto-derivatives-panel").open) {
@@ -453,6 +493,9 @@ byId("report-known-at").addEventListener("change", () => {
     void queryCryptoDerivatives();
   }
   activateBoard(boardIdFromLocationHash(), { focus: false });
+});
+byId("report-known-at").addEventListener("input", () => {
+  renderKnownAtCut(byId("report-known-at").value.trim());
 });
 byId("market-comparison-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -474,6 +517,7 @@ byId("valuation-date").value = yesterday.toISOString().slice(0, 10);
 byId("valuation-history-start").value = `${yesterday.getUTCFullYear() - 3}-01-01`;
 byId("valuation-history-end").value = yesterday.toISOString().slice(0, 10);
 byId("report-known-at").value = new Date().toISOString();
+renderKnownAtCut(byId("report-known-at").value.trim());
 byId("comparison-end").value = yesterday.toISOString().slice(0, 10);
 const comparisonStart = new Date(yesterday);
 comparisonStart.setUTCFullYear(comparisonStart.getUTCFullYear() - 1);
@@ -525,7 +569,7 @@ const BOARD_DEFERRED_LOADS = Object.freeze({
   ]),
   tecnico: Object.freeze([]),
   revisar: Object.freeze([loadCandidateInbox, loadAlertInbox]),
-  cazatiburones: Object.freeze([loadCazatiburonesUniverseIndex, loadCazatiburonesBoard]),
+  cazatiburones: Object.freeze([loadCazatiburonesUniverseIndex]),
   sistema: Object.freeze([]),
 });
 
@@ -551,6 +595,7 @@ function invalidateDeferredBoardLoads() {
   mesaUniverseCoverageRequestSequence += 1;
   cazatiburonesUniverseRequestSequence += 1;
   cazatiburonesRequestSequence += 1;
+  if (typeof resetCazatiburonesDetail === "function") resetCazatiburonesDetail();
 }
 
 function loadDeferredBoardData(boardId) {
@@ -683,7 +728,7 @@ async function initialize() {
   boardDataReady = true;
   // A deep link waits for the catalog and then uses the same canonical
   // board-to-loaders matrix as every other board. Cazatiburones therefore
-  // dispatches its index and detail reads together without a second trigger.
+  // dispatches only its universe index; detail reads require a local row selection.
   loadDeferredBoardData(boardIdFromLocationHash());
   populateMarketComparisonAssets();
   startMarketClocks();

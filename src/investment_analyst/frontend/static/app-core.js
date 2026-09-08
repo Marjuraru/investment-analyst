@@ -728,6 +728,7 @@ async function loadMarketAssets() {
     resetListedCompanyReport();
     selectedMarketAsset = assetId;
     byId("report-known-at").value = knownAtByAsset.get(assetId) || new Date().toISOString();
+    renderKnownAtCut(byId("report-known-at").value.trim());
     marketChartPayload = null;
     marketChartViewport = null;
     marketChartDrag = null;
@@ -967,7 +968,7 @@ function marketChartPeriodLabel(period) {
   return MARKET_CHART_PERIOD_LABELS[period] || "Rango consultado";
 }
 
-const ASSET_SCOPE_BOARD_IDS = new Set(["activo", "tecnico", "cazatiburones"]);
+const ASSET_SCOPE_BOARD_IDS = new Set(["activo"]);
 let activeAssetSubtabId = "mercado";
 
 function assetSubtabButtons() {
@@ -1114,7 +1115,7 @@ function applySelectedMarketAsset() {
       byId(selectId).value = presentation.fundamentalFrequencies[0];
     }
   }
-  byId("operacion-titulo").textContent = presentation.refreshLabel;
+  byId("asset-refresh-title").textContent = presentation.refreshLabel;
   byId("run-source-label").textContent = presentation.refreshSource;
   byId("run-note").textContent = presentation.hasFundamentals
     ? "Mercado y SEC se actualizan de forma serial e independiente; un fallo SEC no revierte el mercado persistido."
@@ -1486,7 +1487,8 @@ function createElement(tag, className, text) {
 // updated here for both the collapsed traceability detail and the
 // always-visible topbar chip, so every view shares the same declared cut.
 function renderKnownAtCut(effectiveKnownAt) {
-  const formatted = effectiveKnownAt ? formatInstant(effectiveKnownAt) : null;
+  const knownAt = String(effectiveKnownAt ?? "").trim();
+  const formatted = knownAt && !Number.isNaN(Date.parse(knownAt)) ? knownAt : null;
   const detail = byId("known-at-status");
   const header = byId("known-at-cut-value");
   detail.replaceChildren();

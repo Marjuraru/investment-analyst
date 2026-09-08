@@ -44,8 +44,8 @@ solo lectura, con `insider`, `beneficial` e `institutional` separados por activo
 recomendación. Si no se envía `asset_id`, se consultan los emisores corporativos configurados en
 SEC; un identificador desconocido falla cerrado.
 
-En `cazatiburones`, `UI-11` consume esa ruta una sola vez por activo seleccionado y corte global,
-sin enviar `asset_id`; el índice es independiente de la elegibilidad del activo para las tres
+En `cazatiburones`, `UI-11` consume esa ruta una sola vez al activar el tablero y el detalle sólo
+se solicita después de una selección local; el índice es independiente de la elegibilidad del activo para las tres
 lecturas detalladas. La tabla conserva el orden del payload y materializa exactamente una fila por
 par activo-familia en el orden fijo `insider`, `beneficial`, `institutional`, con las columnas
 `Activo`, `Familia`, `Capacidad`, `Evidencia`, `Declaraciones`, `Última disponible` y
@@ -58,8 +58,9 @@ beneficiaria`, `Institucional 13F`) y evidencia (`Todas`, `Presente`, `Sin evide
 consultada`) son filtros locales sobre el snapshot en memoria: intersectan sin reordenar y no
 vuelven a consultar el endpoint. `Limpiar filtros` conserva el snapshot. El vacío del endpoint,
 el vacío filtrado, la carga y el error tienen mensajes accesibles separados; un error del índice
-no reemplaza las tres lecturas detalladas, y una fila navega al selector global por `asset_id`
-sin crear un segundo activo o corte. Las limitaciones del contrato se conservan como evidencia
+no reemplaza las tres lecturas detalladas, y una fila elige localmente su `asset_id` sin cambiar el
+activo global ni crear un segundo corte. El detalle muestra un encabezado local y un retorno al índice.
+Las limitaciones del contrato se conservan como evidencia
 fuente y no se convierten en estados de actividad visibles.
 
 La página permite:
@@ -121,13 +122,39 @@ La página permite:
 Mercado y fundamentales se muestran en tarjetas separadas. La interfaz no calcula ni muestra un
 veredicto, confianza, calidad, recomendación o ranking combinado.
 
+## Densidad y alcance global (`UI-13`)
+
+La cabecera de escritorio se mantiene en una franja compacta de hasta 68 px y puede envolver en
+pantallas estrechas sin desbordar. Se reducen separaciones entre bloques, no las filas de datos, y
+los controles interactivos principales mantienen un área mínima de 36 px. La matriz de Mesa conserva
+sus cinco estados y mapping, con marcas visibles de al menos 12 px, glifos y leyenda accesible. Las
+tarjetas de novedades se alinean al inicio para que una familia sin contenido no estire a sus vecinas.
+
+Las métricas fundamentales usan nombres y cambios legibles, valores mayores y envoltura de hasta dos
+líneas sin perder texto esencial. La barra de alcance del activo y el selector global sólo aparecen
+en `activo`. Técnico conserva su lectura descriptiva, inicia sin referencia ni peer implícito y exige
+una referencia y un segundo activo explícitos antes de consultar; sus parámetros y contrato no cambian.
+
+Cazatiburones entra con una sola consulta al índice universe-wide. Cada fila selecciona localmente un
+`asset_id`, abre el detalle con encabezado y retorno al índice, y consulta sus tres endpoints sólo con
+ese activo local y el `known_at` global; la selección local nunca cambia el activo global. Las guardas
+de secuencia, activo local, corte y cierre descartan respuestas superadas.
+
+El encabezado muestra `Corte de consulta` con la misma cadena ISO válida que usan las consultas, y se
+sincroniza al iniciar, cambiar de activo y editar el control. BVL muestra `Abre en…` o `Cierra en…`
+con los dos periodos y días laborables ya declarados; no modela feriados ni sesiones especiales. El
+formulario `run-form` aparece una sola vez en un panel colapsable dentro de Activo. Sistema conserva
+la configuración global de watchlist, reglas y notificaciones, se titula `Configuración y
+automatización`, y el encabezado de marca es el control accesible del lateral; Sistema permanece
+último y separado.
+
 ## Marco global y subpestañas de activo (`UI-8`)
 
 La cabecera global mantiene identidad de la aplicación, corte `known_at`, reloj de mercado, salud,
 tema y verificación. El nombre, símbolo, cotización, clasificación y selector del activo dejan de
-formar parte de esa cabecera: una única barra de alcance los muestra sólo en `activo`, `tecnico` y
-`cazatiburones`. `mesa`, `revisar` y `sistema` no reciben ese contexto. El lateral contiene una sola
-navegación, `#board-nav`.
+formar parte de esa cabecera: una única barra de alcance los muestra sólo en `activo`. `tecnico`,
+`cazatiburones`, `mesa`, `revisar` y `sistema` no reciben ese contexto. El lateral contiene una sola
+navegación, `#board-nav`, y la marca de la aplicación es su control accesible de colapso.
 
 Dentro de `activo`, Mercado, Derivados, Fundamentales, Valoración y Análisis son botones con roles
 `tab`/`tablist`. La selección no cambia el fragmento de URL ni reactiva la ruta del tablero; conserva
@@ -149,8 +176,8 @@ visible:
 - `tecnico` no hace peticiones en este bloque; `sistema` tampoco añade ninguna nueva, más allá de
   las que ya disparaba bajo demanda su panel de watchlist, ahora alojado en este tablero;
 - `revisar` carga las bandejas de candidatos y alertas;
-- `cazatiburones` carga una vez el índice `universe-activity` y sus tres lecturas SEC/13F de solo
-  lectura mediante dos loaders independientes; el índice conserva su propio estado.
+- `cazatiburones` carga una vez el índice `universe-activity`; sus tres lecturas SEC/13F sólo se
+  solicitan tras elegir una fila local y conservan su propio estado.
 
 Cada tablero se marca como cargado en memoria una sola vez por sesión de
 página. Cambiar el activo seleccionado o el único corte `known_at` global
@@ -189,8 +216,9 @@ local sobre el snapshot cargado. No hay petición al escribir, cambiar o limpiar
 filtros y no se muestra un total, ranking, score, intensidad ni tendencia. El
 vacío filtrado se distingue del índice sin activos y ambos estados son
 anunciados; el error del índice no oculta el panel de detalle. El botón de cada
-activo reutiliza la selección global existente mediante su `asset_id`, conserva
-los filtros y reactiva las tres lecturas con el mismo corte.
+activo selecciona localmente su `asset_id`, conserva los filtros y abre un
+encabezado con retorno al índice; sólo entonces reactiva las tres lecturas con
+el mismo corte global, sin cambiar el activo global.
 
 ## Mesa: composición y cobertura (`UI-9`)
 
@@ -218,7 +246,7 @@ Fundamentales y Valoración corporativa. La cabecera compacta es `Activo`, `Domi
 `Fund.`, `Valor.`, `Última evidencia`: Dominio sólo traduce exhaustivamente `asset_class`
 (`equity`, `etf`, `crypto`) y no infiere ticker, exchange ni disponibilidad.
 
-Cada estado de capacidad usa una marca de 7 px con forma, borde o trama y relleno distinguibles,
+Cada estado de capacidad usa una marca de al menos 12 px con forma, glifo, borde o trama y relleno distinguibles,
 con nombre accesible y una leyenda única: "Al día", "Vencida", "Sin evidencia", "Bloqueada" o
 "No aplica". El orden es `capability`, `evidence` y edad; `not_configured` y
 `not_implemented` siguen bloqueados, `not_applicable` no aplica, `missing` y `not_queried` no
@@ -234,18 +262,20 @@ declaran en `additional_capabilities_not_queried`, nunca como columna, celda vac
 adicional. Las `limitations` declaradas por activo permanecen en el contrato y en esta
 documentación, pero no crean celdas ni copy operativo visible en la Mesa.
 
-El panel de watchlist y automatización (`asset-preferences-panel`) se trasladó de `mesa` a
-`sistema`: la Mesa se consulta, no se configura desde ella. Su formulario, sus controles y
-`PUT /api/v1/asset-preferences` no cambian.
+El panel de watchlist y automatización (`asset-preferences-panel`) permanece en `sistema`: la Mesa
+se consulta, no se configura desde ella. Su formulario, sus controles y `PUT /api/v1/asset-preferences`
+no cambian. El formulario de actualización `run-form` vive una sola vez dentro de un panel
+colapsable de Activo, conservando sus IDs, endpoint y payload.
 
 ## Técnico y Revisar (`UI-10`)
 
 `tecnico` conserva `GET /api/v1/market-comparison` y sus parámetros. La referencia se elige en el
 catálogo existente y los demás activos se buscan mediante un combobox accesible, con resultados por
 símbolo o nombre, chips removibles y una muestra de dos a cinco activos de una sola
-`quote_currency`. La referencia siempre permanece seleccionada; cambiarla reconstruye de forma
-determinista la muestra compatible. Escribir, navegar por teclado, elegir o quitar un chip no
-consulta datos: la petición ocurre únicamente al enviar el formulario.
+`quote_currency`. La referencia queda vacía hasta una elección explícita y la muestra exige un
+segundo activo explícito; cambiarla reconstruye de forma determinista la muestra compatible.
+Escribir, navegar por teclado, elegir o quitar un chip no consulta datos: la petición ocurre
+únicamente al enviar el formulario.
 
 `revisar` mantiene sus dos cargas independientes (`GET /api/candidates?limit=50` y
 `GET /api/alerts?limit=50`) y las presenta en un master-detail responsive. La lista separa
@@ -257,7 +287,7 @@ muestra **No aplica**. Si la identidad seleccionada desaparece tras una actualiz
 declara sin ejecutar una acción sobre otra fila.
 
 La franja de sesiones conserva Nueva York y NYSE, y reemplaza el reloj corriente de Lima por el
-estado regular de BVL en `America/Lima`. Usa sólo días laborables y dos periodos oficiales: del
+estado regular de BVL en `America/Lima`. Muestra `Abre en…` o `Cierra en…` y usa sólo días laborables y dos periodos oficiales: del
 segundo domingo de marzo al primer domingo de noviembre, 08:30–14:50; el periodo restante,
 09:30–15:50. No modela feriados ni sesiones especiales y no consulta red. La referencia operativa
 es la [fuente oficial BVL](https://documents.bvl.com.pe/empresas/alertas/Anexo2TextodcRentaFija.pdf).

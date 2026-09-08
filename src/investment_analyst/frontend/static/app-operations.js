@@ -18,7 +18,7 @@ function applyOverview(payload) {
       : "Sin registro operativo";
     byId("run-time").textContent = "Sin lectura de historial";
     byId("traceability-status").textContent = "Sin verificación reciente";
-    renderKnownAtCut(null);
+    renderKnownAtCut(byId("report-known-at").value.trim());
     if (!payload.scheduler_enabled) {
       byId("schedule-status").textContent = "Desactivada";
       byId("schedule-next").textContent = "Solo actualización manual";
@@ -69,8 +69,6 @@ function applyOverview(payload) {
   byId("traceability-status").textContent = latest?.traceability_verified
     ? "Verificada"
     : "Sin verificación reciente";
-  renderKnownAtCut(latest?.effective_known_at);
-
   if (scheduler.enabled) {
     if (Array.isArray(scheduler.jobs)) {
       const total = scheduler.jobs.length;
@@ -153,6 +151,7 @@ function applyOverview(payload) {
   }
 
   if (latest?.effective_known_at) byId("report-known-at").value = latest.effective_known_at;
+  renderKnownAtCut(byId("report-known-at").value.trim());
   if (["quarterly", "annual"].includes(latest?.request?.fundamental_frequency)) {
     selectFundamentalFrequency(latest.request.fundamental_frequency);
   }
