@@ -203,6 +203,59 @@ let reviewCandidateItems = [];
 let reviewAlertItems = [];
 let reviewSelection = null;
 let reviewSelectionMissing = false;
+const PROGRESSIVE_COLLECTION_PAGE_SIZE = 10;
+let assetPreferencesVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
+
+function progressiveCollectionVisibleCount(total, requestedCount = PROGRESSIVE_COLLECTION_PAGE_SIZE, selectedIndex = -1) {
+  const normalizedTotal = Math.max(0, Number(total) || 0);
+  if (normalizedTotal === 0) return 0;
+  const requested = Math.max(
+    PROGRESSIVE_COLLECTION_PAGE_SIZE,
+    Number(requestedCount) || PROGRESSIVE_COLLECTION_PAGE_SIZE,
+  );
+  const selectedCount = selectedIndex >= 0
+    ? Math.ceil((selectedIndex + 1) / PROGRESSIVE_COLLECTION_PAGE_SIZE) * PROGRESSIVE_COLLECTION_PAGE_SIZE
+    : PROGRESSIVE_COLLECTION_PAGE_SIZE;
+  return Math.min(normalizedTotal, Math.max(requested, selectedCount));
+}
+
+function renderProgressiveCollectionControls(
+  statusTarget,
+  controlsTarget,
+  total,
+  visibleCount,
+  { onMore, onLess, label = "elementos" } = {},
+) {
+  const normalizedTotal = Math.max(0, Number(total) || 0);
+  const normalizedVisible = Math.min(
+    normalizedTotal,
+    Math.max(0, Number(visibleCount) || 0),
+  );
+  statusTarget.textContent =
+    `Mostrando ${formatInteger(normalizedVisible)} de ${formatInteger(normalizedTotal)} ${label}`;
+  controlsTarget.replaceChildren();
+  if (normalizedTotal <= PROGRESSIVE_COLLECTION_PAGE_SIZE) return;
+  if (normalizedVisible < normalizedTotal && onMore) {
+    const more = createElement(
+      "button",
+      "button secondary compact progressive-collection-more",
+      `Mostrar ${PROGRESSIVE_COLLECTION_PAGE_SIZE} más`,
+    );
+    more.type = "button";
+    more.addEventListener("click", onMore);
+    controlsTarget.append(more);
+  }
+  if (normalizedVisible > PROGRESSIVE_COLLECTION_PAGE_SIZE && onLess) {
+    const less = createElement(
+      "button",
+      "button secondary compact progressive-collection-less",
+      "Mostrar menos",
+    );
+    less.type = "button";
+    less.addEventListener("click", onLess);
+    controlsTarget.append(less);
+  }
+}
 
 const MARKET_RESOLUTION_PRESENTATION = Object.freeze({
   daily: Object.freeze({ singular: "día", plural: "días", adjective: "diarios" }),
@@ -530,6 +583,7 @@ let fundamentalTrendPayload = null;
 let fundamentalResearchPayload = null;
 let valuationPayload = null;
 let valuationHistoryPayload = null;
+let valuationHistoryVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
 let valuationRulePayload = null;
 let cryptoDerivativesPayload = null;
 let cryptoDerivativesRequest = 0;
@@ -555,6 +609,12 @@ function marketAssetPresentation() {
   const presentation = marketAssets[selectedMarketAsset];
   if (!presentation) throw new Error("El activo seleccionado no pertenece al catálogo disponible.");
   return presentation;
+}
+
+function assetDisplayLabel(assetId) {
+  const presentation = marketAssets[String(assetId ?? "").trim()];
+  if (!presentation) return "Activo no disponible";
+  return `${presentation.symbol} · ${presentation.name}`;
 }
 
 function marketAssetFromDescriptor(descriptor) {
@@ -863,6 +923,35 @@ function prioritizeAssetSelector(payload) {
   }
 }
 
+function renderAssetPreferencesWindow() {
+  const rows = [...document.querySelectorAll("#asset-preferences-list .preference-row")];
+  const visibleCount = progressiveCollectionVisibleCount(
+    rows.length,
+    assetPreferencesVisibleCount,
+  );
+  assetPreferencesVisibleCount = visibleCount;
+  rows.forEach((row, index) => {
+    row.hidden = index >= visibleCount;
+  });
+  renderProgressiveCollectionControls(
+    byId("asset-preferences-collection-status"),
+    byId("asset-preferences-collection-controls"),
+    rows.length,
+    visibleCount,
+    {
+      label: "activos",
+      onMore: () => {
+        assetPreferencesVisibleCount += PROGRESSIVE_COLLECTION_PAGE_SIZE;
+        renderAssetPreferencesWindow();
+      },
+      onLess: () => {
+        assetPreferencesVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
+        renderAssetPreferencesWindow();
+      },
+    },
+  );
+}
+
 function renderAssetPreferences(payload) {
   if (
     payload.schema_version !== "asset-preferences-view-v1"
@@ -871,6 +960,7 @@ function renderAssetPreferences(payload) {
     throw new Error("Las preferencias locales no tienen un contrato compatible.");
   }
   assetPreferencesSnapshot = payload;
+  assetPreferencesVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
   const list = byId("asset-preferences-list");
   list.replaceChildren();
   for (const asset of payload.assets) {
@@ -915,6 +1005,7 @@ function renderAssetPreferences(payload) {
   byId("asset-preferences-status").textContent = payload.scheduler_enabled
     ? revisionStatus
     : `${revisionStatus} Scheduler desactivado; la selección programada se conserva.`;
+  renderAssetPreferencesWindow();
   prioritizeAssetSelector(payload);
 }
 

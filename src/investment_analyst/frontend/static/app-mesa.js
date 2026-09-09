@@ -16,6 +16,20 @@ function mesaContextualNavigationItem(className, label, request) {
   return item;
 }
 
+function mesaNotificationTitle(notification, fallback) {
+  return notification.payload?.rule_name_es
+    || notification.payload?.operating_title
+    || notification.title
+    || fallback;
+}
+
+function mesaNotificationStatusLabel(status) {
+  return MESA_CAZATIBURONES_STATUS_LABELS[status]
+    || MESA_INCIDENT_STATUS_LABELS[status]
+    || status
+    || "Sin estado";
+}
+
 function renderMesaAnalyticalNews(payload) {
   const list = byId("mesa-news-analytical-list");
   const count = byId("mesa-news-analytical-count");
@@ -30,13 +44,16 @@ function renderMesaAnalyticalNews(payload) {
   }
   for (const view of items.slice(0, 5)) {
     const notification = view.item;
+    const title = mesaNotificationTitle(notification, "Candidato analítico");
+    const assetLabel = assetDisplayLabel(notification.asset_id);
     const item = mesaContextualNavigationItem(
       "mesa-analytical-item",
-      "Abrir candidato " + notification.candidate_id,
+      `Abrir ${title} · ${assetLabel}`,
       { board: "revisar", family: "candidate", id: notification.candidate_id },
     );
     item.append(
-      createElement("strong", "", `${notification.rule_id} · ${notification.asset_id}`),
+      createElement("strong", "", `${title} · ${assetLabel}`),
+      createElement("span", "alert-inbox-status", mesaNotificationStatusLabel(view.status)),
       createElement("time", "", formatInstant(notification.created_at)),
     );
     list.append(item);
@@ -90,16 +107,21 @@ function renderMesaCazatiburonesNews(family, payload) {
     const returned = Number.isInteger(payload.returned) ? payload.returned : items.length;
     list.append(createElement("p", "", `Se muestran ${formatInteger(returned)} de ${formatInteger(total)} novedades.`));
   }
-  for (const view of items) {
+  for (const view of items.slice(0, 5)) {
     const notification = view.item;
+    const title = mesaNotificationTitle(
+      notification,
+      family === "institutional" ? "Actividad institucional" : "Actividad declarada",
+    );
+    const assetLabel = assetDisplayLabel(notification.asset_id);
     const item = mesaContextualNavigationItem(
       "mesa-cazatiburones-" + family + "-item",
-      "Abrir " + family + " para " + notification.asset_id,
+      `Abrir ${title} · ${assetLabel}`,
       { board: "cazatiburones", family, id: notification.asset_id },
     );
     item.append(
-      createElement("strong", "", `${notification.rule_id} · ${notification.asset_id}`),
-      createElement("span", "alert-inbox-status", MESA_CAZATIBURONES_STATUS_LABELS[view.status] || view.status),
+      createElement("strong", "", `${title} · ${assetLabel}`),
+      createElement("span", "alert-inbox-status", mesaNotificationStatusLabel(view.status)),
       createElement("time", "", formatInstant(notification.created_at)),
     );
     list.append(item);
@@ -160,13 +182,14 @@ function renderMesaIncidents(payload) {
     return;
   }
   for (const event of events.slice(0, 5)) {
+    const title = event.title || "Incidencia operativa";
     const item = mesaContextualNavigationItem(
       "mesa-incident-item",
-      "Abrir incidencia " + event.alert_id,
+      "Abrir incidencia " + title,
       { board: "revisar", family: "alert", id: event.alert_id },
     );
     item.append(
-      createElement("strong", "", event.title),
+      createElement("strong", "", title),
       createElement(
         "span",
         `alert-inbox-status ${event.status}`,
@@ -205,6 +228,8 @@ async function loadMesaIncidents() {
 // día", anything older (or of unknown age) renders "Vencida".
 const MESA_COVERAGE_WINDOW_DAYS = 365;
 let mesaUniverseCoverageRequestSequence = 0;
+let mesaUniverseCoveragePayload = null;
+let mesaUniverseVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
 
 function mesaCoverageWindowFromKnownAt(knownAtIso) {
   const cut = new Date(knownAtIso);
@@ -325,8 +350,16 @@ function renderMesaBvlRegistrySummary(payload) {
 
 function renderMesaUniverseMatrix(payload) {
   const body = byId("mesa-universe-table-body");
+  mesaUniverseCoveragePayload = payload;
   body.replaceChildren();
-  for (const asset of payload.assets || []) {
+  const assets = Array.isArray(payload.assets) ? payload.assets : [];
+  const visibleCount = progressiveCollectionVisibleCount(
+    assets.length,
+    mesaUniverseVisibleCount,
+  );
+  mesaUniverseVisibleCount = visibleCount;
+  for (const asset of assets.slice(0, visibleCount)) {
+    const assetLabel = assetDisplayLabel(asset.asset_id);
     const row = document.createElement("tr");
     const assetCell = document.createElement("th");
     assetCell.scope = "row";
@@ -337,12 +370,10 @@ function renderMesaUniverseMatrix(payload) {
     );
     assetButton.setAttribute(
       "aria-label",
-      "Abrir activo " + (asset.symbol || asset.asset_id || "sin identidad"),
+      "Abrir activo " + assetLabel,
     );
     assetButton.append(
-      createElement("strong", "", asset.symbol || asset.asset_id),
-      document.createElement("br"),
-      createElement("small", "", asset.name || "Activo sin nombre"),
+      createElement("strong", "", assetLabel),
     );
     assetCell.append(assetButton);
     row.append(assetCell);
@@ -363,7 +394,7 @@ function renderMesaUniverseMatrix(payload) {
       );
       domainButton.setAttribute(
         "aria-label",
-        "Abrir " + label + " para " + (asset.symbol || asset.asset_id || "activo sin identidad"),
+        "Abrir " + label + " para " + assetLabel,
       );
       domainButton.innerHTML = mesaUniverseCellMarkup(
         coverage.capability,
@@ -386,10 +417,28 @@ function renderMesaUniverseMatrix(payload) {
     row.append(cell);
     body.append(row);
   }
+  renderProgressiveCollectionControls(
+    byId("mesa-universe-collection-status"),
+    byId("mesa-universe-collection-controls"),
+    assets.length,
+    visibleCount,
+    {
+      label: "activos",
+      onMore: () => {
+        mesaUniverseVisibleCount += PROGRESSIVE_COLLECTION_PAGE_SIZE;
+        renderMesaUniverseMatrix(mesaUniverseCoveragePayload);
+      },
+      onLess: () => {
+        mesaUniverseVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
+        renderMesaUniverseMatrix(mesaUniverseCoveragePayload);
+      },
+    },
+  );
   renderMesaBvlRegistrySummary(payload);
 }
 
 function renderMesaUniverseAbsentTable(mark) {
+  mesaUniverseCoveragePayload = null;
   const body = byId("mesa-universe-table-body");
   body.replaceChildren();
   const row = document.createElement("tr");
@@ -398,10 +447,18 @@ function renderMesaUniverseAbsentTable(mark) {
   cell.append(mark);
   row.append(cell);
   body.append(row);
+  renderProgressiveCollectionControls(
+    byId("mesa-universe-collection-status"),
+    byId("mesa-universe-collection-controls"),
+    0,
+    0,
+  );
 }
 
 async function loadMesaUniverseCoverage() {
   const sequence = ++mesaUniverseCoverageRequestSequence;
+  mesaUniverseCoveragePayload = null;
+  mesaUniverseVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
   const knownAt = byId("report-known-at").value.trim();
   if (!knownAt) {
     renderMesaUniverseWindow({ start: "—", end: "—" });

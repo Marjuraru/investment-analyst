@@ -2152,6 +2152,7 @@ function resetValuation() {
   byId("valuation-evidence").textContent = "Sin evidencia cargada.";
   setExportAvailable("export-valuation-json", false);
   valuationHistoryPayload = null;
+  valuationHistoryVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
   const historySelector = byId("valuation-history-metric");
   historySelector.replaceChildren(createElement("option", "", "Todas"));
   historySelector.disabled = true;
@@ -2177,8 +2178,9 @@ function selectedValuationHistorySeries(payload) {
   );
 }
 
-function renderValuationHistory(payload, { preserveSelection = false } = {}) {
+function renderValuationHistory(payload, { preserveSelection = false, preserveWindow = false } = {}) {
   valuationHistoryPayload = payload;
+  if (!preserveWindow) valuationHistoryVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
   const selector = byId("valuation-history-metric");
   const priorSelection = preserveSelection ? selector.value : "";
   selector.replaceChildren(createElement("option", "", "Todas"));
@@ -2194,6 +2196,7 @@ function renderValuationHistory(payload, { preserveSelection = false } = {}) {
   const target = byId("valuation-history-series");
   target.replaceChildren();
   for (const series of selectedValuationHistorySeries(payload)) {
+    const points = Array.isArray(series.points) ? series.points : [];
     const statistics = series.statistics;
     const description = createElement("dl", "valuation-history-statistics");
     for (const [label, value] of [
@@ -2214,7 +2217,12 @@ function renderValuationHistory(payload, { preserveSelection = false } = {}) {
     const header = document.createElement("thead");
     header.innerHTML = "<tr><th>Fecha</th><th>Valor exacto</th><th>Resultado</th></tr>";
     const body = document.createElement("tbody");
-    for (const point of series.points) {
+    const visibleCount = progressiveCollectionVisibleCount(
+      points.length,
+      valuationHistoryVisibleCount,
+    );
+    valuationHistoryVisibleCount = Math.max(valuationHistoryVisibleCount, visibleCount);
+    for (const point of points.slice(0, visibleCount)) {
       const row = document.createElement("tr");
       row.append(
         createElement("td", "", point.valuation_date),
@@ -2224,7 +2232,26 @@ function renderValuationHistory(payload, { preserveSelection = false } = {}) {
       body.append(row);
     }
     table.append(caption, header, body);
-    target.append(table);
+    const status = createElement("p", "collection-status", "");
+    const controls = createElement("div", "collection-controls");
+    target.append(table, status, controls);
+    renderProgressiveCollectionControls(
+      status,
+      controls,
+      points.length,
+      visibleCount,
+      {
+        label: "puntos",
+        onMore: () => {
+          valuationHistoryVisibleCount = visibleCount + PROGRESSIVE_COLLECTION_PAGE_SIZE;
+          renderValuationHistory(payload, { preserveSelection: true, preserveWindow: true });
+        },
+        onLess: () => {
+          valuationHistoryVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
+          renderValuationHistory(payload, { preserveSelection: true, preserveWindow: true });
+        },
+      },
+    );
   }
   byId("valuation-history-status").textContent = `${formatInteger(payload.coverage.returned_points)} puntos materializados; lectura local sin backfill.`;
   setExportAvailable("export-valuation-history-json", Boolean(payload.series?.length));

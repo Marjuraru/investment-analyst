@@ -6,6 +6,37 @@
 @import url("/assets/styles-operations.css");
 @import url("/assets/styles-cazatiburones.css");
 
+.collection-status {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.65rem;
+}
+
+.collection-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+
+.collection-controls .button {
+  min-height: 44px;
+}
+
+.collection-note {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.6rem;
+  overflow-wrap: anywhere;
+}
+
+.collection-status,
+.collection-controls,
+.collection-note {
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 1080px) {
   .market-workbench {
     grid-template-columns: 1fr;

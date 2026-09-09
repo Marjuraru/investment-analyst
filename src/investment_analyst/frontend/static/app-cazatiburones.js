@@ -11,6 +11,7 @@
 // into an effective portfolio, a score or a signal.
 let cazatiburonesRequestSequence = 0;
 let cazatiburonesSelectedAssetId = null;
+const cazatiburonesProgressiveVisibleCounts = new Map();
 
 function cazatiburonesBoardIsActive() {
   const section = byId("board-cazatiburones");
@@ -38,6 +39,7 @@ function renderCazatiburonesDetailHeader() {
 function resetCazatiburonesDetail() {
   cazatiburonesRequestSequence += 1;
   cazatiburonesSelectedAssetId = null;
+  cazatiburonesProgressiveVisibleCounts.clear();
   const header = byId("cazatiburones-detail-header");
   header.classList.add("hidden");
   header.hidden = true;
@@ -59,6 +61,7 @@ function closeCazatiburonesDetail() {
 function selectCazatiburonesUniverseAsset(assetId) {
   if (!marketAssets[assetId]) return false;
   cazatiburonesSelectedAssetId = assetId;
+  cazatiburonesProgressiveVisibleCounts.clear();
   renderCazatiburonesDetailHeader();
   byId("cazatiburones-not-applicable").classList.add("hidden");
   byId("cazatiburones-not-applicable").replaceChildren();
@@ -74,6 +77,8 @@ const CAZATIBURONES_UNIVERSE_FAMILIES = Object.freeze([
 
 let cazatiburonesUniverseRequestSequence = 0;
 let cazatiburonesUniverseSnapshot = null;
+let cazatiburonesUniverseVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
+let cazatiburonesUniversePendingContextAssetId = null;
 const cazatiburonesUniverseFilters = {
   search: "",
   family: "all",
@@ -167,10 +172,16 @@ function selectCazatiburonesNotificationTarget(assetId, family) {
   }
   cazatiburonesUniverseFilters.search = "";
   cazatiburonesUniverseFilters.family = normalizedFamily;
+  cazatiburonesUniversePendingContextAssetId = normalizedAssetId;
   byId("cazatiburones-universe-search").value = "";
   byId("cazatiburones-universe-family").value = normalizedFamily;
   renderCazatiburonesUniverseRows();
   return selectCazatiburonesUniverseAsset(normalizedAssetId);
+}
+
+function resetCazatiburonesUniverseWindow({ preservePendingContext = false } = {}) {
+  cazatiburonesUniverseVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
+  if (!preservePendingContext) cazatiburonesUniversePendingContextAssetId = null;
 }
 
 function cazatiburonesNotificationFamilyMatches(row, family) {
@@ -191,9 +202,27 @@ function renderCazatiburonesUniverseRows() {
   error.classList.add("hidden");
   if (!cazatiburonesUniverseSnapshot) {
     filterStatus.textContent = "El índice aún no tiene evidencia cargada.";
+    renderProgressiveCollectionControls(
+      byId("cazatiburones-universe-collection-status"),
+      byId("cazatiburones-universe-collection-controls"),
+      0,
+      0,
+      { label: "filas" },
+    );
     return;
   }
   const rows = cazatiburonesUniverseSnapshot.rows.filter(cazatiburonesUniverseRowMatches);
+  const pendingAssetId = cazatiburonesUniversePendingContextAssetId;
+  const selectedIndex = pendingAssetId
+    ? rows.findIndex((row) => row.assetId === pendingAssetId)
+    : -1;
+  const visibleCount = progressiveCollectionVisibleCount(
+    rows.length,
+    cazatiburonesUniverseVisibleCount,
+    selectedIndex,
+  );
+  cazatiburonesUniverseVisibleCount = visibleCount;
+  cazatiburonesUniversePendingContextAssetId = null;
   if (rows.length === 0) {
     empty.textContent = cazatiburonesUniverseSnapshot.rows.length === 0
       ? "El índice no devolvió activos para el corte seleccionado."
@@ -202,21 +231,29 @@ function renderCazatiburonesUniverseRows() {
     filterStatus.textContent = cazatiburonesUniverseSnapshot.rows.length === 0
       ? "El índice está vacío al corte seleccionado."
       : "Los filtros se aplican sólo sobre la evidencia cargada; no se hizo una nueva consulta.";
+    renderProgressiveCollectionControls(
+      byId("cazatiburones-universe-collection-status"),
+      byId("cazatiburones-universe-collection-controls"),
+      0,
+      0,
+      { label: "filas" },
+    );
     return;
   }
-  for (const row of rows) {
+  for (const row of rows.slice(0, visibleCount)) {
+    const assetLabel = assetDisplayLabel(row.assetId);
     const tableRow = document.createElement("tr");
     const assetCell = document.createElement("th");
     assetCell.scope = "row";
     const assetButton = createElement(
       "button",
       "cazatiburones-universe-asset-button",
-      `${row.symbol || row.assetId} · ${row.name || "Activo sin nombre"}`,
+      assetLabel,
     );
     assetButton.type = "button";
     assetButton.setAttribute(
       "aria-label",
-      `Seleccionar activo ${row.symbol || row.assetId} · ${row.name || "Activo sin nombre"}`,
+      `Seleccionar activo ${assetLabel}`,
     );
     assetButton.addEventListener("click", () => navigateCazatiburonesUniverseAsset(row.assetId));
     assetCell.append(assetButton);
@@ -255,6 +292,23 @@ function renderCazatiburonesUniverseRows() {
   }
   tableScroll.classList.remove("hidden");
   filterStatus.textContent = "Índice cargado; los filtros son locales y conservan el orden recibido.";
+  renderProgressiveCollectionControls(
+    byId("cazatiburones-universe-collection-status"),
+    byId("cazatiburones-universe-collection-controls"),
+    rows.length,
+    visibleCount,
+    {
+      label: "filas",
+      onMore: () => {
+        cazatiburonesUniverseVisibleCount += PROGRESSIVE_COLLECTION_PAGE_SIZE;
+        renderCazatiburonesUniverseRows();
+      },
+      onLess: () => {
+        resetCazatiburonesUniverseWindow();
+        renderCazatiburonesUniverseRows();
+      },
+    },
+  );
 }
 
 function renderCazatiburonesUniverseLoading() {
@@ -287,20 +341,24 @@ function renderCazatiburonesUniverseSnapshot(snapshot) {
   byId("cazatiburones-universe-error").classList.add("hidden");
   byId("cazatiburones-universe-summary").textContent =
     `Índice disponible al corte ${formatInstant(snapshot.knownAt)} · familias separadas`;
+  resetCazatiburonesUniverseWindow({ preservePendingContext: true });
   renderCazatiburonesUniverseRows();
 }
 
 function initializeCazatiburonesUniverseFilters() {
   byId("cazatiburones-universe-search").addEventListener("input", (event) => {
     cazatiburonesUniverseFilters.search = event.target.value;
+    resetCazatiburonesUniverseWindow();
     renderCazatiburonesUniverseRows();
   });
   byId("cazatiburones-universe-family").addEventListener("change", (event) => {
     cazatiburonesUniverseFilters.family = event.target.value;
+    resetCazatiburonesUniverseWindow();
     renderCazatiburonesUniverseRows();
   });
   byId("cazatiburones-universe-evidence").addEventListener("change", (event) => {
     cazatiburonesUniverseFilters.evidence = event.target.value;
+    resetCazatiburonesUniverseWindow();
     renderCazatiburonesUniverseRows();
   });
   byId("cazatiburones-universe-clear-filters").addEventListener("click", () => {
@@ -310,6 +368,7 @@ function initializeCazatiburonesUniverseFilters() {
     byId("cazatiburones-universe-search").value = "";
     byId("cazatiburones-universe-family").value = "all";
     byId("cazatiburones-universe-evidence").value = "all";
+    resetCazatiburonesUniverseWindow();
     renderCazatiburonesUniverseRows();
     byId("cazatiburones-universe-search").focus();
   });
@@ -329,6 +388,7 @@ async function loadCazatiburonesUniverseIndex() {
   const sequence = ++cazatiburonesUniverseRequestSequence;
   const knownAt = byId("report-known-at").value.trim();
   cazatiburonesUniverseSnapshot = null;
+  resetCazatiburonesUniverseWindow();
   renderCazatiburonesUniverseLoading();
   if (!knownAt) {
     if (sequence !== cazatiburonesUniverseRequestSequence) return;
@@ -393,32 +453,67 @@ function cazatiburonesComparisonMarkup(status) {
 
 function renderCazatiburonesFeatureGroup(containerId, label, features) {
   const container = byId(containerId);
-  container.replaceChildren();
-  container.append(createElement("strong", "cazatiburones-feature-group-title", label));
-  if (features.length === 0) {
-    container.append(
-      renderAbsenceMark("missing", "Sin evidencia", `Sin ${label.toLowerCase()} declarados`),
+  const collection = Array.isArray(features) ? features : [];
+  const render = () => {
+    container.replaceChildren();
+    container.append(createElement("strong", "cazatiburones-feature-group-title", label));
+    if (collection.length === 0) {
+      container.append(
+        renderAbsenceMark("missing", "Sin evidencia", `Sin ${label.toLowerCase()} declarados`),
+      );
+      return;
+    }
+    const visibleCount = progressiveCollectionVisibleCount(
+      collection.length,
+      cazatiburonesProgressiveVisibleCounts.get(containerId),
     );
-    return;
-  }
-  for (const feature of features) {
-    const row = createElement("div", "cazatiburones-row");
-    const metricsMarkup = feature.metrics
-      .map((metric) => `<dt>${metric.key}</dt><dd>${cazatiburonesMetricMarkup(metric)}</dd>`)
-      .join("");
-    row.innerHTML =
-      `<p class="eyebrow">${feature.form} · ${feature.participant_cik}</p>` +
-      `<dl>` +
-      `<dt>Naturaleza declarada</dt><dd>${cazatiburonesFieldOrAbsence(feature.declared_nature)}</dd>` +
-      `<dt>Título del valor</dt><dd>${cazatiburonesFieldOrAbsence(feature.security_title)}</dd>` +
-      `<dt>Tabla</dt><dd>${cazatiburonesFieldOrAbsence(feature.table)}</dd>` +
-      `<dt>Fecha del evento</dt><dd>${cazatiburonesFieldOrAbsence(feature.event_date, formatCalendarDate)}</dd>` +
-      `<dt>Disponible desde</dt><dd>${formatInstant(feature.available_at)}</dd>` +
-      `<dt>Comparación</dt><dd>${cazatiburonesComparisonMarkup(feature.comparison_status)}</dd>` +
-      `${metricsMarkup}` +
-      `</dl>`;
-    container.append(row);
-  }
+    cazatiburonesProgressiveVisibleCounts.set(containerId, visibleCount);
+    for (const feature of collection.slice(0, visibleCount)) {
+      const row = createElement("div", "cazatiburones-row");
+      const metricsMarkup = feature.metrics
+        .map((metric) => `<dt>${metric.key}</dt><dd>${cazatiburonesMetricMarkup(metric)}</dd>`)
+        .join("");
+      row.innerHTML =
+        `<p class="eyebrow">${feature.form} · ${feature.participant_cik}</p>` +
+        `<dl>` +
+        `<dt>Naturaleza declarada</dt><dd>${cazatiburonesFieldOrAbsence(feature.declared_nature)}</dd>` +
+        `<dt>Título del valor</dt><dd>${cazatiburonesFieldOrAbsence(feature.security_title)}</dd>` +
+        `<dt>Tabla</dt><dd>${cazatiburonesFieldOrAbsence(feature.table)}</dd>` +
+        `<dt>Fecha del evento</dt><dd>${cazatiburonesFieldOrAbsence(feature.event_date, formatCalendarDate)}</dd>` +
+        `<dt>Disponible desde</dt><dd>${formatInstant(feature.available_at)}</dd>` +
+        `<dt>Comparación</dt><dd>${cazatiburonesComparisonMarkup(feature.comparison_status)}</dd>` +
+        `${metricsMarkup}` +
+        `</dl>`;
+      container.append(row);
+    }
+    const status = createElement("p", "collection-status", "");
+    const controls = createElement("div", "collection-controls");
+    container.append(status, controls);
+    renderProgressiveCollectionControls(
+      status,
+      controls,
+      collection.length,
+      visibleCount,
+      {
+        label: "registros",
+        onMore: () => {
+          cazatiburonesProgressiveVisibleCounts.set(
+            containerId,
+            visibleCount + PROGRESSIVE_COLLECTION_PAGE_SIZE,
+          );
+          render();
+        },
+        onLess: () => {
+          cazatiburonesProgressiveVisibleCounts.set(
+            containerId,
+            PROGRESSIVE_COLLECTION_PAGE_SIZE,
+          );
+          render();
+        },
+      },
+    );
+  };
+  render();
 }
 
 function renderCazatiburonesDeclaredActivity(payload) {
@@ -439,60 +534,86 @@ function renderCazatiburonesDeclaredActivity(payload) {
 
 function renderCazatiburonesInstitutionalObservations(payload, offset, limit) {
   const container = byId("cazatiburones-institutional-observations-rows");
-  container.replaceChildren();
-  if (payload.observations.length === 0) {
-    container.append(
-      renderAbsenceMark("missing", "Sin evidencia", "Sin observaciones institucionales 13F"),
-    );
-  } else {
-    for (const view of payload.observations) {
-      const row = createElement("div", "cazatiburones-row");
-      row.innerHTML =
-        `<p class="eyebrow">${view.report.manager_cik} · ${view.report.report_id}</p>` +
-        `<dl>` +
-        `<dt>CUSIP</dt><dd>${view.row.cusip}</dd>` +
-        `<dt>Campo</dt><dd>${view.observation.field_name}</dd>` +
-        `<dt>Valor as-filed</dt><dd><span class="figure">${formatNumber(view.observation.value)}</span></dd>` +
-        `<dt>Disponible desde</dt><dd>${formatInstant(view.observation.available_at)}</dd>` +
-        `</dl>`;
-      container.append(row);
+  const observations = Array.isArray(payload.observations) ? payload.observations : [];
+  const render = () => {
+    container.replaceChildren();
+    if (observations.length === 0) {
+      container.append(
+        renderAbsenceMark("missing", "Sin evidencia", "Sin observaciones institucionales 13F"),
+      );
+    } else {
+      const visibleCount = progressiveCollectionVisibleCount(
+        observations.length,
+        cazatiburonesProgressiveVisibleCounts.get("institutional-observations"),
+      );
+      cazatiburonesProgressiveVisibleCounts.set("institutional-observations", visibleCount);
+      for (const view of observations.slice(0, visibleCount)) {
+        const row = createElement("div", "cazatiburones-row");
+        row.innerHTML =
+          `<p class="eyebrow">${view.report.manager_cik} · ${view.report.report_id}</p>` +
+          `<dl>` +
+          `<dt>CUSIP</dt><dd>${view.row.cusip}</dd>` +
+          `<dt>Campo</dt><dd>${view.observation.field_name}</dd>` +
+          `<dt>Valor as-filed</dt><dd><span class="figure">${formatNumber(view.observation.value)}</span></dd>` +
+          `<dt>Disponible desde</dt><dd>${formatInstant(view.observation.available_at)}</dd>` +
+          `</dl>`;
+        container.append(row);
+      }
+      const renderedCount = cazatiburonesProgressiveVisibleCounts.get("institutional-observations");
+      const status = createElement("p", "collection-status", "");
+      const controls = createElement("div", "collection-controls");
+      container.append(status, controls);
+      renderProgressiveCollectionControls(
+        status,
+        controls,
+        observations.length,
+        renderedCount,
+        {
+          label: "observaciones",
+          onMore: () => {
+            cazatiburonesProgressiveVisibleCounts.set(
+              "institutional-observations",
+              renderedCount + PROGRESSIVE_COLLECTION_PAGE_SIZE,
+            );
+            render();
+          },
+          onLess: () => {
+            cazatiburonesProgressiveVisibleCounts.set(
+              "institutional-observations",
+              PROGRESSIVE_COLLECTION_PAGE_SIZE,
+            );
+            render();
+          },
+        },
+      );
     }
-  }
+  };
+  render();
   byId("cazatiburones-institutional-observations-summary").innerHTML =
-    `<span class="figure">${formatInteger(payload.observations.length)}</span> de ` +
+    `<span class="figure">${formatInteger(observations.length)}</span> de ` +
     `<span class="figure">${formatInteger(payload.total_matching)}</span> filas as-filed ` +
     `· página offset <span class="figure">${formatInteger(offset)}</span> ` +
     `límite <span class="figure">${formatInteger(limit)}</span>` +
     (payload.truncated ? " · truncado" : "");
 }
 
-function renderCazatiburonesDocumentTimeline(payload) {
-  const assetContainer = byId("cazatiburones-timeline-asset-document");
-  const filerContainer = byId("cazatiburones-timeline-filer-document");
-  assetContainer.replaceChildren();
-  filerContainer.replaceChildren();
-  assetContainer.append(
-    createElement("strong", "cazatiburones-feature-group-title", "Documentos del activo"),
-  );
-  filerContainer.append(
-    createElement("strong", "cazatiburones-feature-group-title", "Documentos del emisor"),
-  );
-  const entriesByFamily = { asset_document: [], filer_document: [] };
-  if (payload.state !== "missing") {
-    for (const entry of payload.entries) entriesByFamily[entry.family].push(entry);
-  }
-  for (const [family, container] of [
-    ["asset_document", assetContainer],
-    ["filer_document", filerContainer],
-  ]) {
-    const entries = entriesByFamily[family];
+function renderCazatiburonesTimelineGroup(container, title, entries, key) {
+  const render = () => {
+    container.replaceChildren(
+      createElement("strong", "cazatiburones-feature-group-title", title),
+    );
     if (entries.length === 0) {
       container.append(
         renderAbsenceMark("missing", "Sin evidencia", "Sin revisiones documentales SEC"),
       );
-      continue;
+      return;
     }
-    for (const entry of entries) {
+    const visibleCount = progressiveCollectionVisibleCount(
+      entries.length,
+      cazatiburonesProgressiveVisibleCounts.get(key),
+    );
+    cazatiburonesProgressiveVisibleCounts.set(key, visibleCount);
+    for (const entry of entries.slice(0, visibleCount)) {
       const row = createElement("div", "cazatiburones-row");
       row.innerHTML =
         `<p class="eyebrow">${entry.form} · ${entry.accession}</p>` +
@@ -507,7 +628,54 @@ function renderCazatiburonesDocumentTimeline(payload) {
         `</dl>`;
       container.append(row);
     }
+    const status = createElement("p", "collection-status", "");
+    const controls = createElement("div", "collection-controls");
+    container.append(status, controls);
+    renderProgressiveCollectionControls(
+      status,
+      controls,
+      entries.length,
+      visibleCount,
+      {
+        label: "documentos",
+        onMore: () => {
+          cazatiburonesProgressiveVisibleCounts.set(
+            key,
+            visibleCount + PROGRESSIVE_COLLECTION_PAGE_SIZE,
+          );
+          render();
+        },
+        onLess: () => {
+          cazatiburonesProgressiveVisibleCounts.set(key, PROGRESSIVE_COLLECTION_PAGE_SIZE);
+          render();
+        },
+      },
+    );
+  };
+  render();
+}
+
+function renderCazatiburonesDocumentTimeline(payload) {
+  const assetContainer = byId("cazatiburones-timeline-asset-document");
+  const filerContainer = byId("cazatiburones-timeline-filer-document");
+  const entriesByFamily = { asset_document: [], filer_document: [] };
+  if (payload.state !== "missing" && Array.isArray(payload.entries)) {
+    for (const entry of payload.entries) {
+      if (entriesByFamily[entry.family]) entriesByFamily[entry.family].push(entry);
+    }
   }
+  renderCazatiburonesTimelineGroup(
+    assetContainer,
+    "Documentos del activo",
+    entriesByFamily.asset_document,
+    "timeline-asset-document",
+  );
+  renderCazatiburonesTimelineGroup(
+    filerContainer,
+    "Documentos del emisor",
+    entriesByFamily.filer_document,
+    "timeline-filer-document",
+  );
   // The four coverage counters (matched_count, returned_count,
   // legacy_records_excluded, truncated) are always present in the contract,
   // including under state: "missing" -- they must stay visible there too,
@@ -524,6 +692,7 @@ async function loadCazatiburonesBoard(assetId = cazatiburonesSelectedAssetId) {
   const sequence = ++cazatiburonesRequestSequence;
   if (!assetId || assetId !== cazatiburonesSelectedAssetId) return;
   const knownAt = byId("report-known-at").value.trim();
+  cazatiburonesProgressiveVisibleCounts.clear();
   const notApplicable = byId("cazatiburones-not-applicable");
   const content = byId("cazatiburones-detail-content");
   if (!knownAt) {

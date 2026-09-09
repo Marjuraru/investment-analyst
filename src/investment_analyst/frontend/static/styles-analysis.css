@@ -1965,7 +1965,6 @@ pre {
   scroll-margin-top: 1.5rem;
 }
 
-.valuation-query-controls,
 .valuation-actions,
 .valuation-header,
 .valuation-metric-heading {
@@ -1974,8 +1973,52 @@ pre {
 }
 
 .valuation-query-controls {
+  display: block;
+  min-width: 0;
+}
+
+.valuation-control-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.6rem;
+  width: 100%;
+}
+
+.valuation-control-group {
+  display: flex;
+  flex-wrap: wrap;
   align-items: end;
-  gap: 0.75rem;
+  gap: 0.5rem;
+  min-width: 0;
+  margin: 0;
+  padding: 0.6rem;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.valuation-control-group legend {
+  flex: 0 0 100%;
+  padding: 0 0.2rem;
+  color: var(--muted-strong);
+  font-size: 0.62rem;
+  font-weight: 760;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.valuation-control-group .field {
+  flex: 1 1 8rem;
+  min-width: 0;
+}
+
+.valuation-control-group .button,
+.valuation-control-group .data-export-button {
+  flex: 0 1 auto;
+  max-width: 100%;
+}
+
+.valuation-history-series {
+  min-width: 0;
 }
 
 .valuation-card {
@@ -2145,9 +2188,31 @@ pre {
 
 .valuation-history-table {
   width: 100%;
+  max-width: 100%;
   margin: 0 0 1rem;
   border-collapse: collapse;
   font-size: 0.78rem;
+}
+
+@media (max-width: 980px) {
+  .valuation-control-groups {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .valuation-control-groups {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .valuation-control-group {
+    align-items: stretch;
+  }
+
+  .valuation-control-group .button,
+  .valuation-control-group .data-export-button {
+    width: 100%;
+  }
 }
 
 .valuation-history-table caption {
@@ -2175,4 +2240,14 @@ pre {
   font-family: var(--figure-font);
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+
+@media (max-width: 600px) {
+  /* Keep the existing advanced chart settings usable when the toolbar wraps.
+   * The panel is anchored to the settings summary, not to the viewport edge. */
+  .chart-settings-panel {
+    right: auto;
+    left: 0;
+    max-width: calc(100vw - 2rem);
+  }
 }

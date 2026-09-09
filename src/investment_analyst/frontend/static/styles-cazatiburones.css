@@ -97,7 +97,7 @@
 }
 
 .cazatiburones-universe-asset-button {
-  min-height: 36px;
+  min-height: 44px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -119,9 +119,22 @@
 .cazatiburones-row {
   display: grid;
   gap: 0.3rem;
-  padding: 0.6rem 0.7rem;
-  border: 1px solid var(--line);
+  min-width: 0;
+  min-height: 44px;
+  padding: 0.45rem 0.55rem;
+  border-width: 0 0 1px;
+  border-style: solid;
+  border-color: var(--line);
   background: var(--surface);
+}
+
+.cazatiburones-feature-group {
+  gap: 0;
+}
+
+.cazatiburones-feature-group .collection-status,
+.cazatiburones-feature-group .collection-controls {
+  margin-inline: 0.1rem;
 }
 
 .cazatiburones-row dl {
