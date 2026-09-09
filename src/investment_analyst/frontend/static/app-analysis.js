@@ -2178,10 +2178,7 @@ function selectedValuationHistorySeries(payload) {
   );
 }
 
-function renderValuationHistory(
-  payload,
-  { preserveSelection = false, preserveWindow = false } = {},
-) {
+function renderValuationHistory(payload, { preserveSelection = false, preserveWindow = false } = {}) {
   valuationHistoryPayload = payload;
   if (!preserveWindow) valuationHistoryVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
   const selector = byId("valuation-history-metric");
