@@ -452,10 +452,29 @@ declarado (`#mesa-universe-not-queried`), nunca como columna vacía ni como peti
 
 `asset-preferences-panel` permanece íntegro -- controles, formulario y comportamiento -- en
 `sistema`, junto al resto de la configuración. El formulario `run-form` de actualización del activo
-se muestra una sola vez, dentro de un panel colapsable de `activo`, con su objetivo y sus IDs
-existentes intactos. La Mesa se consulta; no se configura desde ella. Ningún endpoint, parámetro ni
-contrato cambia: `update_asset_preferences`, `/api/v1/asset-preferences` y la actualización del
-activo son exactamente los mismos que antes de este bloque.
+se muestra una sola vez, dentro de `Sistema > Mantenimiento manual avanzado`, cerrado por defecto,
+con su objetivo y sus IDs existentes intactos. La Mesa se consulta; no se configura desde ella.
+Ningún endpoint, parámetro ni contrato cambia: `update_asset_preferences`,
+`/api/v1/asset-preferences` y la actualización del activo son exactamente los mismos que antes de
+este bloque.
+
+#### Gramática compacta y colecciones progresivas (`UI-15`)
+
+Las filas de bandeja usan una regla horizontal de 1 px, un objetivo interactivo mínimo de 44 px y
+envoltura de texto sin ocultar datos esenciales. La copia visible identifica el título humano, el
+símbolo/nombre del catálogo, el estado y la fecha; UUID, `asset_id` y `rule_id` siguen presentes en
+los datasets y cierres de navegación, pero no se imprimen como etiquetas de lectura.
+
+Una colección larga conserva su respuesta completa y sólo limita la ventana visible: comienza en
+diez elementos, anuncia `Mostrando X de Y`, incrementa de diez y vuelve a diez con `Mostrar menos`.
+El límite se aplica en el cliente, nunca reemplaza el `limit` del endpoint ni modifica el orden,
+filtros, totales, `truncated`, ausencia o exportación. Cambiar payload, corte, activo o filtro
+reinicia la ventana y una navegación contextual revela y selecciona la identidad exacta.
+
+Mesa mantiene cinco novedades/incidencias por familia; Universo de Mesa, Universo y detalle de
+Cazatiburones, Revisar, notificaciones de Sistema, preferencias y la historia de Valoración usan la
+ventana progresiva. Comparación conserva 2–5 activos y sus dos grupos de controles. Los estados
+vacíos o de hasta diez no agregan botones sin función.
 
 ### Marco global y alcance de activo (`UI-8`)
 
@@ -523,10 +542,12 @@ La marca visible del corte es `Corte de consulta` y muestra la misma cadena ISO 
 consultas; se sincroniza al iniciar, cambiar de activo y editar el control. La franja BVL añade la
 cuenta regresiva `Abre en…`/`Cierra en…` con los dos periodos y días laborables ya declarados, sin
 modelar feriados ni sesiones especiales. El formulario `run-form` aparece una sola vez, dentro de
-un panel colapsable de Activo; Sistema conserva únicamente la configuración global de watchlist,
-reglas y notificaciones, con el encabezado `Configuración y automatización`. La marca de la
-aplicación es el control accesible para colapsar el lateral; los enlaces de tablero siguen siendo
-enlaces y Sistema permanece último y separado.
+un panel colapsable de mantenimiento avanzado en Sistema; Sistema conserva la configuración global
+de watchlist, reglas y notificaciones, con el encabezado `Configuración y automatización`. El copy
+del mantenimiento aclara que el scheduler mantiene la frescura normal y que el formulario es una
+salida de recuperación/backfill, no una garantía de actualidad universal. La marca de la aplicación
+es el control accesible para colapsar el lateral; los enlaces de tablero siguen siendo enlaces y
+Sistema permanece último y separado.
 
 ### Navegación contextual y controles ocultos (`UI-14`)
 

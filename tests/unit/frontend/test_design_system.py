@@ -755,8 +755,7 @@ _FUNDAMENTAL_RESEARCH_AUDIT_ITEM_RE = re.compile(
     r"function fundamentalResearchAuditItem\(metric, history\) \{(.*?)\n\}", re.DOTALL
 )
 _RENDER_VALUATION_HISTORY_RE = re.compile(
-    r"function renderValuationHistory\(payload, "
-    r"\{ preserveSelection = false \} = \{\}\) \{(.*?)\n\}",
+    r"function renderValuationHistory\([^)]*\) \{(.*?)\n\}",
     re.DOTALL,
 )
 _RENDER_VALUATION_HISTORY_RULE_RE = re.compile(
@@ -1988,6 +1987,8 @@ def test_institutional_observations_expose_page_coverage() -> None:
 
 def _check_document_timeline_exposes_revision_identity_and_coverage(app_js: str) -> None:
     fn = _extract_js_function(app_js, "renderCazatiburonesDocumentTimeline")
+    timeline_group = _extract_js_function(app_js, "renderCazatiburonesTimelineGroup")
+    rendered_timeline = f"{fn}\n{timeline_group}"
     for token in (
         "accession",
         "is_amendment",
@@ -1999,7 +2000,7 @@ def _check_document_timeline_exposes_revision_identity_and_coverage(app_js: str)
         "legacy_records_excluded",
         "truncated",
     ):
-        assert token in fn, f"document timeline render must expose {token!r}"
+        assert token in rendered_timeline, f"document timeline render must expose {token!r}"
 
 
 def test_document_timeline_exposes_revision_identity_and_coverage() -> None:
@@ -2922,7 +2923,9 @@ def _check_institutional_and_activity_families_use_separate_notification_inboxes
         in render_body
     )
     assert "MESA_CAZATIBURONES_STATUS_LABELS" in app_js
-    assert "notification.rule_id" in render_body
+    assert app_js.count("mesaNotificationTitle(notification") >= 2
+    assert "assetDisplayLabel(notification.asset_id)" in app_js
+    assert "notification.rule_id" not in render_body
     assert "notification.asset_id" in render_body
     assert "notification.created_at" in render_body
     assert "view.status" in render_body
@@ -4576,20 +4579,28 @@ def test_ui8_composition_and_route_are_documented() -> None:
     _check_ui8_composition_is_documented(design_doc, local_doc, plan_doc)
 
 
-def test_ui13_keeps_the_refresh_form_once_inside_activo_and_makes_brand_the_sidebar_toggle() -> (
+def test_ui13_keeps_the_refresh_form_once_inside_sistema_and_makes_brand_the_sidebar_toggle() -> (
     None
 ):
     activo = _board_slices(INDEX_HTML)["activo"]
     sistema = _board_slices(INDEX_HTML)["sistema"]
     refresh_panel = re.search(
-        r'<details id="asset-refresh-panel"[^>]*>(.*?)</details>', activo, re.DOTALL
+        r'<details id="asset-refresh-panel"(?P<attrs>[^>]*)>(?P<body>.*?)</details>',
+        sistema,
+        re.DOTALL,
     )
-    assert refresh_panel, "Activo must own the collapsible refresh panel"
-    assert refresh_panel.group(1).count('id="run-form"') == 1
+    assert refresh_panel, "Sistema must own the collapsible refresh panel"
+    assert "open" not in refresh_panel.group("attrs")
+    assert refresh_panel.group("body").count('id="run-form"') == 1
     assert INDEX_HTML.count('id="run-form"') == 1
-    assert 'id="run-form"' not in sistema
+    assert 'id="asset-refresh-panel"' not in activo
     assert 'id="asset-scope-bar"' in activo
-    assert 'id="asset-refresh-title"' in refresh_panel.group(1)
+    assert 'id="asset-refresh-title"' in refresh_panel.group("body")
+    assert "Mantenimiento manual avanzado" in refresh_panel.group(0)
+    assert "scheduler" in refresh_panel.group("body")
+    assert "backfill" in refresh_panel.group("body")
+    summary = refresh_panel.group(0).split("</summary>", 1)[0]
+    assert "SEC" not in summary and "Alpaca" not in summary
     assert 'id="sidebar-toggle" class="brand sidebar-toggle"' in INDEX_HTML
     assert 'aria-expanded="true"' in INDEX_HTML
     assert 'class="icon-button sidebar-toggle"' not in INDEX_HTML
@@ -5157,3 +5168,251 @@ def test_hidden_tables_keep_existing_dom_ids_renderers_data_contracts_and_export
         assert marker in INDEX_HTML or marker in analysis
     assert "chart-data-disclosure" in INDEX_HTML
     assert "Consultar períodos y hechos SEC en una tabla" in INDEX_HTML
+
+
+# ---------------------------------------------------------------------------
+# UI-15: compact rows, advanced maintenance and progressive client windows.
+# These checks intentionally remain static; the live browser smoke owns the
+# computed layout and interaction checks for the same acceptance boundary.
+# ---------------------------------------------------------------------------
+
+
+def test_mesa_news_and_incidents_use_human_compact_rows_with_five_item_bound_and_exact_contextual_identity() -> (  # noqa: E501
+    None
+):
+    mesa = _mesa_slice(INDEX_HTML)
+    mesa_js = _read("app-mesa.js")
+    for family in ("analytical", "institutional", "activity"):
+        assert f'id="mesa-news-{family}-list"' in mesa
+    assert 'id="mesa-incidents-list"' in mesa
+    for function_name in (
+        "renderMesaAnalyticalNews",
+        "renderMesaCazatiburonesNews",
+        "renderMesaIncidents",
+    ):
+        body = _extract_js_function(mesa_js, function_name)
+        assert "slice(0, 5)" in body
+        assert "mesaContextualNavigationItem" in body
+        assert "formatInstant" in body
+    assert mesa_js.count("assetDisplayLabel(notification.asset_id)") == 2
+    assert "notification.rule_id" not in mesa_js
+    assert "id: notification.candidate_id" in mesa_js
+    assert "id: notification.asset_id" in mesa_js
+    assert "id: event.alert_id" in mesa_js
+    assert ".mesa-contextual-item" in STYLES_CSS
+    assert "min-height: 44px" in STYLES_CSS
+    assert "border-width: 0 0 1px" in STYLES_CSS
+
+
+def test_manual_refresh_form_occurs_once_under_collapsed_system_maintenance_and_keeps_existing_handler_contract() -> (  # noqa: E501
+    None
+):
+    test_ui13_keeps_the_refresh_form_once_inside_sistema_and_makes_brand_the_sidebar_toggle()
+    sistema = _board_slices(INDEX_HTML)["sistema"]
+    panel = re.search(r'<details id="asset-refresh-panel"[^>]*>(.*?)</details>', sistema, re.DOTALL)
+    assert panel
+    for control_id in (
+        "run-form",
+        "refresh-mode",
+        "run-frequency",
+        "run-known-at",
+        "run-button",
+    ):
+        assert sistema.count(f'id="{control_id}"') == 1
+    assert ".asset-refresh-panel:not([open]) > .run-form" in _read("styles-operations.css")
+    assert INDEX_HTML.count('id="run-status"') == 1
+    analysis = _read("app-analysis.js")
+    assert 'method: "POST"' in analysis
+    assert "/api/market-refresh" in analysis
+
+
+def test_valuation_controls_have_three_semantic_responsive_groups_with_no_rigid_horizontal_row() -> (  # noqa: E501
+    None
+):
+    valuation = _board_slices(INDEX_HTML)["activo"]
+    assert valuation.count('class="valuation-control-group"') == 3
+    for label in ("Valoración al corte", "Historia materializada", "Regla histórica explícita"):
+        assert label in valuation
+    analysis_css = _read("styles-analysis.css")
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr));" in analysis_css
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in analysis_css
+    assert "grid-template-columns: minmax(0, 1fr);" in analysis_css
+    assert "flex-wrap: wrap;" in analysis_css
+    assert ".valuation-query-controls {\n  display: block;" in analysis_css
+
+
+def test_comparison_controls_preserve_two_to_five_local_assets_and_fit_1440_500_390_without_page_overflow() -> (  # noqa: E501
+    None
+):
+    technical = _board_slices(INDEX_HTML)["tecnico"]
+    assert technical.count('class="comparison-control-group') == 2
+    assert "2–5" in technical
+    assert 'id="comparison-asset-search"' in technical
+    assert 'id="comparison-assets"' in technical
+    technical_css = _read("styles-technical.css")
+    assert "grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);" in technical_css
+    assert "grid-template-columns: minmax(0, 1fr);" in technical_css
+    assert "grid-template-columns: 1fr;" in technical_css
+    assert "minmax(160px" not in technical_css
+    comparison_query = _extract_js_function(APP_JS, "queryMarketComparison")
+    assert "assets.length < 2" in comparison_query
+    assert "assets.length > 5" in comparison_query
+
+
+def test_progressive_collections_start_at_ten_increase_by_ten_collapse_and_preserve_full_preference_save() -> (  # noqa: E501
+    None
+):
+    core = _read("app-core.js")
+    operations = _read("app-operations.js")
+    assert "const PROGRESSIVE_COLLECTION_PAGE_SIZE = 10;" in core
+    assert "Mostrar ${PROGRESSIVE_COLLECTION_PAGE_SIZE} más" in core
+    assert "Mostrar menos" in core
+    preference_body = core[
+        core.index("function preferenceEntriesFromForm") : core.index(
+            "async function saveAssetPreferences"
+        )
+    ]
+    assert 'document.querySelectorAll("#asset-preferences-list .preference-row")' in preference_body
+    assert ".slice(" not in preference_body
+    assert "entries: preferenceEntriesFromForm()" in core
+    for marker in (
+        "reviewCandidateItems.slice(0, visibleCount)",
+        "reviewAlertItems.slice(0, visibleCount)",
+    ):
+        assert marker in operations
+    assert "reviewCandidateVisibleCount += PROGRESSIVE_COLLECTION_PAGE_SIZE" in operations
+    assert "reviewAlertVisibleCount += PROGRESSIVE_COLLECTION_PAGE_SIZE" in operations
+    assert "candidateNotificationVisibleCount += PROGRESSIVE_COLLECTION_PAGE_SIZE" in operations
+
+
+def test_caz_universe_activity_institutional_and_timeline_progressive_views_reset_on_filter_asset_cut_and_preserve_server_coverage() -> (  # noqa: E501
+    None
+):
+    caz = _read("app-cazatiburones.js")
+    assert "const cazatiburonesProgressiveVisibleCounts = new Map();" in caz
+    for marker in (
+        "renderCazatiburonesFeatureGroup",
+        "renderCazatiburonesInstitutionalObservations",
+        "renderCazatiburonesTimelineGroup",
+        "renderCazatiburonesUniverseRows",
+    ):
+        assert marker in caz
+    assert "collection.slice(0, visibleCount)" in caz
+    assert "observations.slice(0, visibleCount)" in caz
+    assert "entries.slice(0, visibleCount)" in caz
+    assert "cazatiburonesProgressiveVisibleCounts.clear();" in caz
+    assert caz.count("resetCazatiburonesUniverseWindow();") >= 5
+    assert "preservePendingContext: true" in caz
+    assert "const selectedIndex = pendingAssetId" in caz
+    for marker in ("payload.total_matching", "offset", "limit", "payload.truncated"):
+        assert marker in caz
+    assert "/api/v1/cazatiburones/universe-activity?" in caz
+
+
+def test_valuation_history_shows_ten_points_progressively_while_export_keeps_complete_payload() -> (
+    None
+):
+    analysis = _read("app-analysis.js")
+    history = analysis[
+        analysis.index("function renderValuationHistory") : analysis.index(
+            "async function queryValuationHistory"
+        )
+    ]
+    assert "valuationHistoryVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE" in history
+    assert "points.slice(0, visibleCount)" in history
+    assert "Mostrar ${PROGRESSIVE_COLLECTION_PAGE_SIZE} más" not in history
+    assert "valuationHistoryPayload = payload" in history
+    export_start = analysis.index("function exportValuationHistoryJson")
+    export_end = analysis.index("function renderValuationHistoryRule")
+    assert "JSON.stringify(valuationHistoryPayload" in analysis[export_start:export_end]
+    assert 'limit: "250"' in analysis
+
+
+def test_feedback_register_classifies_external_and_user_input_with_live_evidence_corrections_and_authority_boundary() -> (  # noqa: E501
+    None
+):
+    repository_root = Path(str(files("investment_analyst"))).parent.parent
+    feedback = (
+        repository_root / "docs" / "planning_context" / "product_feedback_decisions_2026-09.md"
+    ).read_text(encoding="utf-8")
+    for marker in (
+        "## Revisión externa",
+        "## Feedback del usuario",
+        "Corregido por evidencia viva",
+        "main` remoto verificado",
+        "AGENTS.md",
+        "route_effect: NONE",
+        "ni reproduce respuestas externas completas",
+        "No se modifican backend",
+    ):
+        assert marker in feedback
+
+
+def test_hidden_review_target_expands_to_exact_id_and_filters_order_totals_truncation_known_at_and_exports_remain() -> (  # noqa: E501
+    None
+):
+    operations = _read("app-operations.js")
+    selection_start = operations.index("function reviewSelectItem")
+    selection_end = operations.index("function reviewAssetNavigationButton")
+    selection = operations[selection_start:selection_end]
+    assert "findIndex((item) => reviewItemId(family, item) === reviewSelection.id)" in selection
+    assert "progressiveCollectionVisibleCount" in selection
+    assert "renderCandidateInboxRows()" in selection
+    assert "renderAlertInboxRows()" in selection
+    assert "items[0]" not in selection
+    assert "/api/candidates?limit=50" in operations
+    assert "/api/alerts?limit=50" in operations
+    assert "payload.total" in operations
+    assert "payload.truncated" in operations
+    assert "known_at" in APP_JS
+    assert "reviewCandidateServerTruncated" in operations
+    assert "reviewAlertServerTruncated" in operations
+
+
+def test_no_visible_uuid_asset_id_or_rule_id_in_mesa_human_cards_while_navigation_keeps_canonical_id() -> (  # noqa: E501
+    None
+):
+    mesa = _read("app-mesa.js")
+    for function_name in (
+        "renderMesaAnalyticalNews",
+        "renderMesaCazatiburonesNews",
+        "renderMesaIncidents",
+    ):
+        body = _extract_js_function(mesa, function_name)
+        assert 'createElement("strong"' in body
+        assert "formatInstant" in body
+    assert "notification.rule_id" not in mesa
+    assert "assetDisplayLabel(notification.asset_id)" in mesa
+    assert "id: notification.candidate_id" in mesa
+    assert "id: notification.asset_id" in mesa
+    assert "id: event.alert_id" in mesa
+    assert "${notification.asset_id}" not in mesa
+    assert "${notification.rule_id}" not in mesa
+
+
+def test_no_hard_data_truncation_no_hidden_preference_loss_and_no_arbitrary_review_fallback() -> (
+    None
+):
+    core = _read("app-core.js")
+    operations = _read("app-operations.js")
+    caz = _read("app-cazatiburones.js")
+    preference_start = core.index("function preferenceEntriesFromForm")
+    preference_end = core.index("async function saveAssetPreferences")
+    assert ".slice(" not in core[preference_start:preference_end]
+    assert "entries: preferenceEntriesFromForm()" in core
+    assert "items.slice(0, visibleCount)" in operations
+    assert "reviewSelection.id" in operations
+    assert (
+        "items[0]"
+        not in operations[
+            operations.index("function reviewSelectItem") : operations.index(
+                "function reviewAssetNavigationButton"
+            )
+        ]
+    )
+    assert "collection.slice(0, visibleCount)" in caz
+    assert "observations.slice(0, visibleCount)" in caz
+    assert "entries.slice(0, visibleCount)" in caz
+    assert "/api/candidates?limit=50" in operations
+    assert "/api/alerts?limit=50" in operations
+    assert 'limit: "250"' in _read("app-analysis.js")

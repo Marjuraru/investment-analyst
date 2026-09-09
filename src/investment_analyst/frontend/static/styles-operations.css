@@ -72,9 +72,39 @@ section {
 }
 
 .preferences-panel {
+  overflow: hidden;
   margin-top: 0.75rem;
   border: 1px solid var(--line);
   background: var(--surface);
+}
+
+.asset-refresh-panel {
+  margin-bottom: 0.75rem;
+}
+
+.asset-refresh-panel:not([open]) > .run-form {
+  display: none;
+}
+
+.maintenance-context {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: 0.75rem;
+}
+
+.maintenance-context span {
+  color: var(--muted);
+  font-size: 0.64rem;
+}
+
+.maintenance-copy {
+  max-width: 48rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.45;
 }
 
 .preferences-panel > summary {
@@ -550,9 +580,11 @@ section {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.2rem 0.65rem;
   width: 100%;
-  padding: 0.65rem 0.7rem;
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--negative);
+  min-height: 44px;
+  padding: 0.45rem 0.55rem;
+  border-width: 0 0 1px 3px;
+  border-style: solid;
+  border-color: var(--line) var(--line) var(--line) var(--negative);
   background: var(--surface);
   color: inherit;
   text-align: left;
@@ -572,11 +604,9 @@ section {
 
 .review-master-title {
   min-width: 0;
-  overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--ink-strong);
   font-size: 0.74rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .review-master-meta {
@@ -743,4 +773,53 @@ section {
 
 .review-asset-navigation {
   margin-top: 0.75rem;
+}
+
+@media (max-width: 760px) {
+  .preferences-table {
+    overflow: hidden;
+  }
+
+  .preferences-heading,
+  .preference-row {
+    grid-template-columns: minmax(0, 1fr) repeat(3, 44px);
+    min-width: 0;
+    gap: 0.25rem;
+  }
+
+  .preferences-heading span:not(:first-child) {
+    overflow-wrap: anywhere;
+    font-size: 0;
+  }
+
+  .preferences-heading span:nth-child(2)::after,
+  .preferences-heading span:nth-child(3)::after,
+  .preferences-heading span:nth-child(4)::after {
+    font-size: 0.5rem;
+  }
+
+  .preferences-heading span:nth-child(2)::after {
+    content: "Lista";
+  }
+
+  .preferences-heading span:nth-child(3)::after {
+    content: "Fav.";
+  }
+
+  .preferences-heading span:nth-child(4)::after {
+    content: "Auto";
+  }
+
+  .preference-asset {
+    min-width: 0;
+  }
+
+  .preference-asset strong,
+  .preference-asset small {
+    overflow-wrap: anywhere;
+  }
+
+  .preference-toggle {
+    min-width: 44px;
+  }
 }

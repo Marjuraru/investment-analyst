@@ -186,6 +186,8 @@
                   </tbody>
                 </table>
               </div>
+              <p id="mesa-universe-collection-status" class="collection-status" role="status" aria-live="polite">Sin consultar.</p>
+              <div id="mesa-universe-collection-controls" class="collection-controls"></div>
               <div id="mesa-universe-legend" class="mesa-universe-legend" aria-label="Leyenda de estados de cobertura">
                 <span><span class="mesa-matrix-mark mesa-matrix-fresh" aria-hidden="true"></span>Al día</span>
                 <span><span class="mesa-matrix-mark mesa-matrix-overdue" aria-hidden="true"></span>Vencida</span>
@@ -331,63 +333,6 @@
               <button type="button" class="asset-subtab" role="tab" aria-selected="false" aria-controls="analisis" data-asset-subtab="analisis" data-complete-analysis-only>Análisis</button>
           </div>
           </div>
-          <details id="asset-refresh-panel" class="operation-panel asset-refresh-panel">
-            <summary>
-              <span>
-                <strong id="asset-refresh-title">Actualizar activo</strong>
-                <small id="run-source-label">SEC EDGAR + Alpaca Market Data IEX</small>
-              </span>
-              <span class="summary-action">Abrir</span>
-            </summary>
-            <form id="run-form" class="run-form">
-              <div class="form-grid">
-                <label class="field">
-                  <span>Inicio del histórico de mercado</span>
-                  <input id="market-start" name="market_start" type="date" value="2025-01-01" required>
-                </label>
-                <label class="field">
-                  <span>Fin del histórico de mercado</span>
-                  <input id="market-end" name="market_end" type="date" required>
-                </label>
-                <label class="field" data-fundamental-run-only>
-                  <span>Frecuencia fundamental</span>
-                  <select id="run-frequency" name="fundamental_frequency">
-                    <option value="quarterly">Trimestral</option>
-                    <option value="annual">Anual</option>
-                  </select>
-                </label>
-                <label class="field">
-                  <span>Modo de actualización</span>
-                  <select id="refresh-mode" name="refresh_mode">
-                    <option value="auto">Incremental automática</option>
-                    <option value="full">Rango completo</option>
-                  </select>
-                </label>
-              </div>
-              <label class="field">
-                <span>Corte conocido opcional</span>
-                <input
-                  id="run-known-at"
-                  name="known_at"
-                  type="text"
-                  placeholder="2026-07-16T15:46:09Z"
-                  aria-describedby="run-known-at-help"
-                >
-                <small id="run-known-at-help">Déjalo vacío para que el flujo determine el corte UTC.</small>
-              </label>
-              <label class="check-row" data-complete-run-only>
-                <input id="require-complete" name="require_complete" type="checkbox" checked>
-                <span>
-                  <strong>Exigir un resultado completo</strong>
-                  <small>La ejecución falla si no produce ambos diagnósticos independientes.</small>
-                </span>
-              </label>
-              <div class="run-actions">
-                <p id="run-note">SEC se consulta en cada ejecución, aunque el mercado ya esté actualizado.</p>
-                <button id="run-button" class="button primary" type="submit">Ejecutar actualización</button>
-              </div>
-            </form>
-          </details>
           <section id="mercado" class="market-section" aria-labelledby="mercado-titulo">
             <div class="section-intro analysis-intro">
               <div>
@@ -875,25 +820,34 @@
                   score ni recomendación.
                 </p>
               </div>
-              <div class="valuation-query-controls">
-                <label class="field">
-                  <span>Fecha de valoración</span>
-                  <input id="valuation-date" type="date" required>
-                </label>
-                <button id="query-valuation" class="button primary" type="button">
-                  Cargar valoración
-                </button>
-                <label class="field"><span>Historia desde</span><input id="valuation-history-start" type="date"></label>
-                <label class="field"><span>Historia hasta</span><input id="valuation-history-end" type="date"></label>
-                <label class="field"><span>Métrica histórica</span><select id="valuation-history-metric" disabled><option value="">Todas</option></select></label>
-                <button id="query-valuation-history" class="button secondary" type="button">Cargar historia</button>
-                <button id="export-valuation-history-json" class="data-export-button" type="button" disabled>Exportar historia</button>
-                <label class="field"><span>Métrica de regla</span><input id="valuation-rule-metric" value="valuation.corporate.price_to_book"></label>
-                <label class="field"><span>Operador</span><select id="valuation-rule-operator"><option value="at_or_below_empirical_percentile">Percentil igual o inferior</option><option value="at_or_above_empirical_percentile">Percentil igual o superior</option></select></label>
-                <label class="field"><span>Umbral Decimal (0 a 1)</span><input id="valuation-rule-threshold" value="0.50" inputmode="decimal"></label>
-                <label class="field"><span>Mínimo previo</span><input id="valuation-rule-minimum" type="number" min="3" max="250" value="3"></label>
-                <button id="query-valuation-history-rule" class="button secondary" type="button">Evaluar regla</button>
-                <button id="export-valuation-history-rule-json" class="data-export-button" type="button" disabled>Exportar regla</button>
+              <div class="valuation-control-groups">
+                <fieldset class="valuation-control-group">
+                  <legend>Valoración al corte</legend>
+                  <label class="field">
+                    <span>Fecha de valoración</span>
+                    <input id="valuation-date" type="date" required>
+                  </label>
+                  <button id="query-valuation" class="button primary" type="button">
+                    Cargar valoración
+                  </button>
+                </fieldset>
+                <fieldset class="valuation-control-group">
+                  <legend>Historia materializada</legend>
+                  <label class="field"><span>Historia desde</span><input id="valuation-history-start" type="date"></label>
+                  <label class="field"><span>Historia hasta</span><input id="valuation-history-end" type="date"></label>
+                  <label class="field"><span>Métrica histórica</span><select id="valuation-history-metric" disabled><option value="">Todas</option></select></label>
+                  <button id="query-valuation-history" class="button secondary" type="button">Cargar historia</button>
+                  <button id="export-valuation-history-json" class="data-export-button" type="button" disabled>Exportar historia</button>
+                </fieldset>
+                <fieldset class="valuation-control-group">
+                  <legend>Regla histórica explícita</legend>
+                  <label class="field"><span>Métrica de regla</span><input id="valuation-rule-metric" value="valuation.corporate.price_to_book"></label>
+                  <label class="field"><span>Operador</span><select id="valuation-rule-operator"><option value="at_or_below_empirical_percentile">Percentil igual o inferior</option><option value="at_or_above_empirical_percentile">Percentil igual o superior</option></select></label>
+                  <label class="field"><span>Umbral Decimal (0 a 1)</span><input id="valuation-rule-threshold" value="0.50" inputmode="decimal"></label>
+                  <label class="field"><span>Mínimo previo</span><input id="valuation-rule-minimum" type="number" min="3" max="250" value="3"></label>
+                  <button id="query-valuation-history-rule" class="button secondary" type="button">Evaluar regla</button>
+                  <button id="export-valuation-history-rule-json" class="data-export-button" type="button" disabled>Exportar regla</button>
+                </fieldset>
               </div>
             </div>
 
@@ -1057,31 +1011,35 @@
               </div>
             </div>
             <form id="market-comparison-form" class="comparison-controls">
-              <label class="field"><span>Referencia</span><select id="comparison-benchmark" required></select></label>
-              <div class="field comparison-asset-field">
-                <span id="comparison-assets-label">Activos (incluye la referencia; 2–5)</span>
-                <div id="comparison-asset-picker" class="comparison-asset-picker">
-                  <input
-                    id="comparison-asset-search"
-                    type="search"
-                    role="combobox"
-                    aria-labelledby="comparison-assets-label"
-                    aria-autocomplete="list"
-                    aria-controls="comparison-asset-options"
-                    aria-expanded="false"
-                    aria-describedby="comparison-selection-status"
-                    placeholder="Buscar por símbolo o nombre"
-                    autocomplete="off"
-                  >
-                  <ul id="comparison-asset-options" class="comparison-asset-options" role="listbox" hidden></ul>
+              <div class="comparison-control-group comparison-reference-group">
+                <label class="field"><span>Referencia</span><select id="comparison-benchmark" required></select></label>
+                <div class="field comparison-asset-field">
+                  <span id="comparison-assets-label">Activos (incluye la referencia; 2–5)</span>
+                  <div id="comparison-asset-picker" class="comparison-asset-picker">
+                    <input
+                      id="comparison-asset-search"
+                      type="search"
+                      role="combobox"
+                      aria-labelledby="comparison-assets-label"
+                      aria-autocomplete="list"
+                      aria-controls="comparison-asset-options"
+                      aria-expanded="false"
+                      aria-describedby="comparison-selection-status"
+                      placeholder="Buscar por símbolo o nombre"
+                      autocomplete="off"
+                    >
+                    <ul id="comparison-asset-options" class="comparison-asset-options" role="listbox" hidden></ul>
+                  </div>
+                  <div id="comparison-selected-assets" class="comparison-selected-assets" aria-label="Activos seleccionados"></div>
+                  <select id="comparison-assets" class="comparison-assets-native" multiple required aria-hidden="true" tabindex="-1"></select>
+                  <small id="comparison-selection-status" class="comparison-selection-status" aria-live="polite">Elige una referencia y al menos un segundo activo.</small>
                 </div>
-                <div id="comparison-selected-assets" class="comparison-selected-assets" aria-label="Activos seleccionados"></div>
-                <select id="comparison-assets" class="comparison-assets-native" multiple required aria-hidden="true" tabindex="-1"></select>
-                <small id="comparison-selection-status" class="comparison-selection-status" aria-live="polite">Elige una referencia y al menos un segundo activo.</small>
               </div>
-              <label class="field"><span>Inicio</span><input id="comparison-start" type="date" required></label>
-              <label class="field"><span>Fin</span><input id="comparison-end" type="date" required></label>
-              <button id="comparison-submit" class="button primary" type="submit">Comparar</button>
+              <div class="comparison-control-group comparison-period-action-group">
+                <label class="field"><span>Inicio</span><input id="comparison-start" type="date" required></label>
+                <label class="field"><span>Fin</span><input id="comparison-end" type="date" required></label>
+                <button id="comparison-submit" class="button primary" type="submit">Comparar</button>
+              </div>
             </form>
             <p id="comparison-status" class="chart-status" aria-live="polite">Selecciona dos o más activos con la misma moneda de cotización.</p>
             <div id="comparison-results" class="comparison-results hidden" aria-busy="false">
@@ -1200,6 +1158,8 @@
                     <tbody id="cazatiburones-universe-rows"></tbody>
                   </table>
                 </div>
+                <p id="cazatiburones-universe-collection-status" class="collection-status" role="status" aria-live="polite">Sin consultar.</p>
+                <div id="cazatiburones-universe-collection-controls" class="collection-controls"></div>
               </section>
 
               <div id="cazatiburones-detail-header" class="cazatiburones-detail-header hidden" aria-live="polite" hidden>
@@ -1256,6 +1216,72 @@
               </div>
             </div>
 
+            <details id="asset-refresh-panel" class="operation-panel asset-refresh-panel">
+              <summary>
+                <span>
+                  <strong>Mantenimiento manual avanzado</strong>
+                  <small>Recuperación y backfill bajo demanda</small>
+                </span>
+                <span class="summary-action">Abrir</span>
+              </summary>
+              <form id="run-form" class="run-form">
+                <p class="maintenance-context">
+                  <strong id="asset-refresh-title">Actualizar activo</strong>
+                  <span id="run-source-label">SEC EDGAR + Alpaca Market Data IEX</span>
+                </p>
+                <p class="maintenance-copy">
+                  El scheduler mantiene la frescura normal. Este formulario es una salida de recuperación
+                  o backfill manual; no implica que todas las fuentes estén siempre al día.
+                </p>
+                <div class="form-grid">
+                  <label class="field">
+                    <span>Inicio del histórico de mercado</span>
+                    <input id="market-start" name="market_start" type="date" value="2025-01-01" required>
+                  </label>
+                  <label class="field">
+                    <span>Fin del histórico de mercado</span>
+                    <input id="market-end" name="market_end" type="date" required>
+                  </label>
+                  <label class="field" data-fundamental-run-only>
+                    <span>Frecuencia fundamental</span>
+                    <select id="run-frequency" name="fundamental_frequency">
+                      <option value="quarterly">Trimestral</option>
+                      <option value="annual">Anual</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Modo de actualización</span>
+                    <select id="refresh-mode" name="refresh_mode">
+                      <option value="auto">Incremental automática</option>
+                      <option value="full">Rango completo</option>
+                    </select>
+                  </label>
+                </div>
+                <label class="field">
+                  <span>Corte conocido opcional</span>
+                  <input
+                    id="run-known-at"
+                    name="known_at"
+                    type="text"
+                    placeholder="2026-07-16T15:46:09Z"
+                    aria-describedby="run-known-at-help"
+                  >
+                  <small id="run-known-at-help">Déjalo vacío para que el flujo determine el corte UTC.</small>
+                </label>
+                <label class="check-row" data-complete-run-only>
+                  <input id="require-complete" name="require_complete" type="checkbox" checked>
+                  <span>
+                    <strong>Exigir un resultado completo</strong>
+                    <small>La ejecución falla si no produce ambos diagnósticos independientes.</small>
+                  </span>
+                </label>
+                <div class="run-actions">
+                  <p id="run-note">SEC se consulta en cada ejecución, aunque el mercado ya esté actualizado.</p>
+                  <button id="run-button" class="button primary" type="submit">Ejecutar actualización</button>
+                </div>
+              </form>
+            </details>
+
             <details id="screening-rules-panel" class="operation-panel screening-rules-panel">
               <summary>
                 <span>
@@ -1302,6 +1328,8 @@
                     <span>Programado</span>
                   </div>
                   <div id="asset-preferences-list"></div>
+                  <p id="asset-preferences-collection-status" class="collection-status" role="status" aria-live="polite">Sin consultar.</p>
+                  <div id="asset-preferences-collection-controls" class="collection-controls"></div>
                 </div>
                 <div class="preferences-actions">
                   <button id="save-asset-preferences" class="button primary compact" type="submit">

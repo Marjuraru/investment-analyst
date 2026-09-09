@@ -2,6 +2,14 @@
 
 let reviewCandidateItemsLoaded = false;
 let reviewAlertItemsLoaded = false;
+let reviewCandidateVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
+let reviewAlertVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
+let reviewCandidateServerTotal = 0;
+let reviewAlertServerTotal = 0;
+let reviewCandidateServerTruncated = false;
+let reviewAlertServerTruncated = false;
+let candidateNotificationPayload = null;
+let candidateNotificationVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
 
 function reviewFamilyIsLoaded(family) {
   return family === "candidate" ? reviewCandidateItemsLoaded : reviewAlertItemsLoaded;
@@ -192,6 +200,25 @@ function reviewSelectedItem() {
 function reviewSelectItem(family, id) {
   reviewSelection = { family, id: String(id) };
   reviewSelectionMissing = false;
+  const items = family === "candidate" ? reviewCandidateItems : reviewAlertItems;
+  const selectedIndex = items.findIndex((item) => reviewItemId(family, item) === reviewSelection.id);
+  if (selectedIndex >= 0) {
+    if (family === "candidate") {
+      reviewCandidateVisibleCount = progressiveCollectionVisibleCount(
+        items.length,
+        reviewCandidateVisibleCount,
+        selectedIndex,
+      );
+      renderCandidateInboxRows();
+    } else {
+      reviewAlertVisibleCount = progressiveCollectionVisibleCount(
+        items.length,
+        reviewAlertVisibleCount,
+        selectedIndex,
+      );
+      renderAlertInboxRows();
+    }
+  }
   renderReviewDetail();
 }
 
@@ -228,7 +255,7 @@ function reviewAssetNavigationButton(assetId) {
     { board: "activo", assetId: normalized, subtab: "mercado" },
     "button secondary compact review-asset-navigation",
   );
-  button.setAttribute("aria-label", "Abrir activo " + normalized + " en Activo");
+  button.setAttribute("aria-label", "Abrir " + assetDisplayLabel(normalized) + " en Activo");
   return button;
 }
 
@@ -258,10 +285,10 @@ function renderReviewDetail() {
   const fields = createElement("dl", "review-detail-fields");
   if (family === "candidate") {
     const { event, result } = selected;
-    const assetLabel = marketAssets[result.asset_id]?.symbol || result.asset_id;
+    const assetLabel = assetDisplayLabel(result.asset_id);
     detail.append(createElement("p", "review-detail-kicker", `${result.rule.name_es} · ${assetLabel}`));
     reviewDetailField(fields, "Estado", REVIEW_STATUS_LABELS[event.status] || event.status);
-    reviewDetailField(fields, "Activo", result.asset_id);
+    reviewDetailField(fields, "Activo", assetLabel);
     reviewDetailField(fields, "Confirmaciones", formatInteger(event.confirmations));
     reviewDetailField(fields, "Vigencia", formatCalendarDate(event.as_of));
     reviewDetailField(fields, "Espera", formatInstant(event.cooldown_until));
@@ -283,9 +310,10 @@ function renderReviewDetail() {
     if (actions.childElementCount > 0) detail.append(actions);
   } else {
     const event = selected;
+    const assetLabel = event.asset_id ? assetDisplayLabel(event.asset_id) : "No especificado";
     detail.append(createElement("p", "review-detail-kicker", event.title));
     reviewDetailField(fields, "Estado", REVIEW_STATUS_LABELS[event.status] || event.status);
-    reviewDetailField(fields, "Activo", event.asset_id || "No especificado");
+    reviewDetailField(fields, "Activo", assetLabel);
     reviewDetailField(fields, "Proveedor", event.provider);
     reviewDetailField(fields, "Dominio", event.domain);
     reviewDetailField(fields, "Última activación", formatInstant(event.last_activated_at));
@@ -330,28 +358,81 @@ function renderReviewMasterRow(family, id, title, status, meta) {
   return row;
 }
 
-function renderAlertInbox(payload) {
+function renderReviewServerCoverageNote(inbox, serverTotal, returnedCount, truncated) {
+  if (!truncated && serverTotal <= returnedCount) return;
+  inbox.append(
+    createElement(
+      "small",
+      "collection-note",
+      `Servidor: ${formatInteger(returnedCount)} de ${formatInteger(serverTotal)} elementos devueltos; resultado truncado.`,
+    ),
+  );
+}
+
+function renderAlertInboxRows() {
   const inbox = byId("alert-inbox");
-  reviewAlertItems = Array.isArray(payload.events) ? payload.events : [];
-  reviewAlertItemsLoaded = true;
-  byId("alert-inbox-summary").textContent = reviewAlertItems.length > 0
-    ? `${formatInteger(payload.total ?? reviewAlertItems.length)} registradas · separadas de candidatos`
-    : "Sin alertas operativas";
   inbox.replaceChildren();
   if (reviewAlertItems.length === 0) {
     inbox.append(createElement("p", "", "No hay alertas operativas registradas."));
-    renderReviewDetail();
     return;
   }
-  for (const event of reviewAlertItems) {
+  const selectedIndex = reviewSelection?.family === "alert"
+    ? reviewAlertItems.findIndex((item) => reviewItemId("alert", item) === reviewSelection.id)
+    : -1;
+  const visibleCount = progressiveCollectionVisibleCount(
+    reviewAlertItems.length,
+    reviewAlertVisibleCount,
+    selectedIndex,
+  );
+  reviewAlertVisibleCount = visibleCount;
+  for (const event of reviewAlertItems.slice(0, visibleCount)) {
     inbox.append(renderReviewMasterRow(
       "alert",
       event.alert_id,
-      event.title,
+      event.title || "Incidencia operativa",
       event.status,
-      `${event.asset_id || "Activo no especificado"} · ${formatInstant(event.last_activated_at)}`,
+      `${event.asset_id ? assetDisplayLabel(event.asset_id) : "Activo no especificado"} · ${formatInstant(event.last_activated_at)}`,
     ));
   }
+  const status = createElement("p", "collection-status", "");
+  const controls = createElement("div", "collection-controls");
+  inbox.append(status, controls);
+  renderProgressiveCollectionControls(
+    status,
+    controls,
+    reviewAlertItems.length,
+    visibleCount,
+    {
+      label: "alertas",
+      onMore: () => {
+        reviewAlertVisibleCount += PROGRESSIVE_COLLECTION_PAGE_SIZE;
+        renderAlertInboxRows();
+      },
+      onLess: () => {
+        reviewAlertVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
+        renderAlertInboxRows();
+      },
+    },
+  );
+  renderReviewServerCoverageNote(
+    inbox,
+    reviewAlertServerTotal,
+    reviewAlertItems.length,
+    reviewAlertServerTruncated,
+  );
+  updateReviewMasterSelection();
+}
+
+function renderAlertInbox(payload) {
+  reviewAlertItems = Array.isArray(payload.events) ? payload.events : [];
+  reviewAlertItemsLoaded = true;
+  reviewAlertVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
+  reviewAlertServerTotal = Number.isInteger(payload.total) ? payload.total : reviewAlertItems.length;
+  reviewAlertServerTruncated = Boolean(payload.truncated);
+  byId("alert-inbox-summary").textContent = reviewAlertItems.length > 0
+    ? `${formatInteger(reviewAlertServerTotal)} registradas · separadas de candidatos`
+    : "Sin alertas operativas";
+  renderAlertInboxRows();
   renderReviewDetail();
 }
 
@@ -720,22 +801,25 @@ function formatCandidateCondition(condition, definition) {
   return `${definition.label_es}: ${value}`;
 }
 
-function renderCandidateInbox(payload) {
+function renderCandidateInboxRows() {
   const inbox = byId("candidate-inbox");
-  reviewCandidateItems = Array.isArray(payload.items) ? payload.items : [];
-  reviewCandidateItemsLoaded = true;
-  byId("candidate-inbox-summary").textContent = reviewCandidateItems.length > 0
-    ? `${formatInteger(payload.total ?? reviewCandidateItems.length)} registrados · separados de alertas`
-    : "Sin candidatos analíticos";
   inbox.replaceChildren();
   if (reviewCandidateItems.length === 0) {
     inbox.append(createElement("p", "", "No hay candidatos analíticos registrados."));
-    renderReviewDetail();
     return;
   }
-  for (const itemPayload of reviewCandidateItems) {
+  const selectedIndex = reviewSelection?.family === "candidate"
+    ? reviewCandidateItems.findIndex((item) => reviewItemId("candidate", item) === reviewSelection.id)
+    : -1;
+  const visibleCount = progressiveCollectionVisibleCount(
+    reviewCandidateItems.length,
+    reviewCandidateVisibleCount,
+    selectedIndex,
+  );
+  reviewCandidateVisibleCount = visibleCount;
+  for (const itemPayload of reviewCandidateItems.slice(0, visibleCount)) {
     const { event, result } = itemPayload;
-    const assetLabel = marketAssets[result.asset_id]?.symbol || result.asset_id;
+    const assetLabel = assetDisplayLabel(result.asset_id);
     inbox.append(renderReviewMasterRow(
       "candidate",
       event.candidate_id,
@@ -744,6 +828,45 @@ function renderCandidateInbox(payload) {
       `${formatCalendarDate(event.as_of)} · ${formatInteger(event.confirmations)} confirmación${event.confirmations === 1 ? "" : "es"}`,
     ));
   }
+  const status = createElement("p", "collection-status", "");
+  const controls = createElement("div", "collection-controls");
+  inbox.append(status, controls);
+  renderProgressiveCollectionControls(
+    status,
+    controls,
+    reviewCandidateItems.length,
+    visibleCount,
+    {
+      label: "candidatos",
+      onMore: () => {
+        reviewCandidateVisibleCount += PROGRESSIVE_COLLECTION_PAGE_SIZE;
+        renderCandidateInboxRows();
+      },
+      onLess: () => {
+        reviewCandidateVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
+        renderCandidateInboxRows();
+      },
+    },
+  );
+  renderReviewServerCoverageNote(
+    inbox,
+    reviewCandidateServerTotal,
+    reviewCandidateItems.length,
+    reviewCandidateServerTruncated,
+  );
+  updateReviewMasterSelection();
+}
+
+function renderCandidateInbox(payload) {
+  reviewCandidateItems = Array.isArray(payload.items) ? payload.items : [];
+  reviewCandidateItemsLoaded = true;
+  reviewCandidateVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
+  reviewCandidateServerTotal = Number.isInteger(payload.total) ? payload.total : reviewCandidateItems.length;
+  reviewCandidateServerTruncated = Boolean(payload.truncated);
+  byId("candidate-inbox-summary").textContent = reviewCandidateItems.length > 0
+    ? `${formatInteger(reviewCandidateServerTotal)} registrados · separados de alertas`
+    : "Sin candidatos analíticos";
+  renderCandidateInboxRows();
   renderReviewDetail();
 }
 
@@ -779,40 +902,90 @@ async function loadCandidateInbox() {
   }
 }
 
-function renderCandidateNotifications(payload) {
+function candidateNotificationTitle(notification) {
+  return notification.payload?.rule_name_es
+    || notification.payload?.operating_title
+    || notification.title
+    || "Notificación analítica";
+}
+
+function renderCandidateNotificationRows() {
   const inbox = byId("candidate-notifications");
   inbox.replaceChildren();
-  if (!Array.isArray(payload.items) || payload.items.length === 0) {
+  const items = Array.isArray(candidateNotificationPayload?.items)
+    ? candidateNotificationPayload.items
+    : [];
+  if (items.length === 0) {
     inbox.append(createElement("p", "", "No hay notificaciones locales pendientes."));
     return;
   }
-  for (const view of payload.items) {
+  const visibleCount = progressiveCollectionVisibleCount(
+    items.length,
+    candidateNotificationVisibleCount,
+  );
+  candidateNotificationVisibleCount = visibleCount;
+  for (const view of items.slice(0, visibleCount)) {
     const notification = view.item;
     const item = createElement("article", "alert-inbox-item candidate-inbox-item");
+    const assetLabel = assetDisplayLabel(notification.asset_id);
     item.append(
-      createElement("strong", "", `${notification.rule_id} · ${notification.asset_id}`),
-      createElement("p", "", `Candidato local ${notification.candidate_id}`),
-      createElement("time", "", formatInstant(notification.created_at)),
-    );
-    item.append(
+      createElement("strong", "", `${candidateNotificationTitle(notification)} · ${assetLabel}`),
+      createElement(
+        "p",
+        "",
+        `Candidato analítico · ${view.status === "acknowledged" ? "Entrega confirmada" : "Pendiente"}`,
+      ),
       createElement(
         "span",
         `alert-inbox-status ${view.status}`,
         view.status === "acknowledged" ? "Entrega confirmada" : "Pendiente",
       ),
+      createElement("time", "", formatInstant(notification.created_at)),
     );
-    if (view.status === "acknowledged") {
-      inbox.append(item);
-      continue;
+    if (view.status !== "acknowledged") {
+      const button = createElement("button", "alert-action-button", "Confirmar entrega");
+      button.type = "button";
+      button.addEventListener("click", () => acknowledgeCandidateNotification(notification.notification_id, button));
+      const actions = createElement("div", "alert-inbox-actions");
+      actions.append(button);
+      item.append(actions);
     }
-    const button = createElement("button", "alert-action-button", "Confirmar entrega");
-    button.type = "button";
-    button.addEventListener("click", () => acknowledgeCandidateNotification(notification.notification_id, button));
-    const actions = createElement("div", "alert-inbox-actions");
-    actions.append(button);
-    item.append(actions);
     inbox.append(item);
   }
+  const status = createElement("p", "collection-status", "");
+  const controls = createElement("div", "collection-controls");
+  inbox.append(status, controls);
+  renderProgressiveCollectionControls(
+    status,
+    controls,
+    items.length,
+    visibleCount,
+    {
+      label: "notificaciones",
+      onMore: () => {
+        candidateNotificationVisibleCount += PROGRESSIVE_COLLECTION_PAGE_SIZE;
+        renderCandidateNotificationRows();
+      },
+      onLess: () => {
+        candidateNotificationVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
+        renderCandidateNotificationRows();
+      },
+    },
+  );
+  renderReviewServerCoverageNote(
+    inbox,
+    Number.isInteger(candidateNotificationPayload.total)
+      ? candidateNotificationPayload.total
+      : items.length,
+    items.length,
+    Boolean(candidateNotificationPayload.truncated),
+  );
+}
+
+function renderCandidateNotifications(payload) {
+  candidateNotificationPayload = payload;
+  candidateNotificationVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
+  renderCandidateNotificationRows();
 }
 
 async function acknowledgeCandidateNotification(notificationId, button) {

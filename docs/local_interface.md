@@ -144,7 +144,8 @@ de secuencia, activo local, corte y cierre descartan respuestas superadas.
 El encabezado muestra `Corte de consulta` con la misma cadena ISO válida que usan las consultas, y se
 sincroniza al iniciar, cambiar de activo y editar el control. BVL muestra `Abre en…` o `Cierra en…`
 con los dos periodos y días laborables ya declarados; no modela feriados ni sesiones especiales. El
-formulario `run-form` aparece una sola vez en un panel colapsable dentro de Activo. Sistema conserva
+formulario `run-form` aparece una sola vez en un panel colapsable de mantenimiento avanzado dentro de
+Sistema, cerrado por defecto. Sistema conserva
 la configuración global de watchlist, reglas y notificaciones, se titula `Configuración y
 automatización`, y el encabezado de marca es el control accesible del lateral; Sistema permanece
 último y separado.
@@ -291,7 +292,30 @@ documentación, pero no crean celdas ni copy operativo visible en la Mesa.
 El panel de watchlist y automatización (`asset-preferences-panel`) permanece en `sistema`: la Mesa
 se consulta, no se configura desde ella. Su formulario, sus controles y `PUT /api/v1/asset-preferences`
 no cambian. El formulario de actualización `run-form` vive una sola vez dentro de un panel
-colapsable de Activo, conservando sus IDs, endpoint y payload.
+colapsable de mantenimiento avanzado en `sistema`, conservando sus IDs, endpoint y payload; el
+activo y proveedor se muestran sólo al abrirlo.
+
+## Correcciones de densidad y colecciones (`UI-15`)
+
+UI-15 es una corrección de presentación sobre los seis tableros existentes. Las filas de Mesa,
+Revisar y las lecturas largas de Cazatiburones usan una separación de 1 px, un objetivo interactivo
+de al menos 44 px y copy humano: símbolo/nombre del catálogo, título, estado y fecha; los UUID,
+`asset_id` y `rule_id` permanecen únicamente en el dataset y los handlers de navegación.
+
+Las colecciones largas conservan el payload completo en memoria, pero comienzan con diez filas y
+muestran `Mostrando X de Y`. `Mostrar 10 más` incrementa por diez sin superar el total y `Mostrar
+menos` vuelve a diez. El cambio de filtro, activo, corte o payload reinicia la ventana; las
+colecciones vacías o de hasta diez filas no muestran controles inútiles. Mesa mantiene exactamente
+cinco novedades e incidencias por familia y Comparación conserva su muestra explícita de 2–5 activos.
+
+El formulario `run-form` aparece una sola vez bajo `Sistema > Mantenimiento manual avanzado`,
+cerrado por defecto. El resumen es genérico; al abrirlo se muestran el último activo y las fuentes.
+El copy explica que el scheduler mantiene la frescura normal y que la operación manual sirve como
+recuperación o backfill, sin prometer que todas las fuentes estén siempre al día.
+
+Valoración presenta tres grupos responsive —valoración al corte, historia materializada y regla
+histórica— y conserva la exportación del payload completo aunque la historia visible sea progresiva.
+No se modifican endpoints, límites del servidor, contratos, identidad, cálculo ni persistencia.
 
 ## Técnico y Revisar (`UI-10`)
 
@@ -301,7 +325,8 @@ símbolo o nombre, chips removibles y una muestra de dos a cinco activos de una 
 `quote_currency`. La referencia queda vacía hasta una elección explícita y la muestra exige un
 segundo activo explícito; cambiarla reconstruye de forma determinista la muestra compatible.
 Escribir, navegar por teclado, elegir o quitar un chip no consulta datos: la petición ocurre
-únicamente al enviar el formulario.
+únicamente al enviar el formulario. Los controles se agrupan en referencia/activos y período/acción,
+con columnas que pueden encogerse y envolver en pantallas de 1440, 500 y 390 px.
 
 `revisar` mantiene sus dos cargas independientes (`GET /api/candidates?limit=50` y
 `GET /api/alerts?limit=50`) y las presenta en un master-detail responsive. La lista separa
@@ -309,8 +334,11 @@ Escribir, navegar por teclado, elegir o quitar un chip no consulta datos: la pet
 no existe total, rango, score ni orden común entre familias. El detalle conserva la identidad
 estable del origen (`candidate_id` o `alert_id`) para ejecutar las mismas transiciones existentes.
 Un candidato muestra su `cooldown_until` como **Espera**; una alerta operativa no tiene cooldown y
-muestra **No aplica**. Si la identidad seleccionada desaparece tras una actualización, el detalle lo
-declara sin ejecutar una acción sobre otra fila.
+muestra **No aplica**. La lista presenta inicialmente diez filas y ofrece `Mostrar 10 más` o
+`Mostrar menos` sólo cuando hay más; mantiene el orden recibido, el total, `truncated` y la ausencia
+del servidor. La navegación a una identidad inicialmente oculta amplía hasta el elemento exacto; si
+la identidad seleccionada desaparece tras una actualización, el detalle lo declara sin ejecutar una
+acción sobre otra fila.
 
 La franja de sesiones conserva Nueva York y NYSE, y reemplaza el reloj corriente de Lima por el
 estado regular de BVL en `America/Lima`. Muestra `Abre en…` o `Cierra en…` y usa sólo días laborables y dos periodos oficiales: del
@@ -1045,6 +1073,8 @@ reciben ratios corporativos; la API puede devolver `not_applicable` sin abrir wr
 La historia materializada usa por separado `GET /api/v1/valuation-history` con corte UTC, rango
 inclusivo, base `latest_annual` y límite explícito. Sólo se solicita al pulsar «Cargar historia»:
 el panel ofrece selector de serie, resumen Decimal, tabla accesible y exportación del JSON exacto.
+La tabla empieza con diez puntos, informa `Mostrando X de Y` y amplía o contrae la vista sin
+recortar `valuationHistoryPayload` ni su exportación.
 No amplía `/api/overview`, no llama proveedores, no toma writer y no convierte fechas sin artefacto
 persistido en cero o backfill.
 

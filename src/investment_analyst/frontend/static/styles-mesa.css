@@ -263,10 +263,45 @@
 
 .mesa-contextual-item {
   width: 100%;
+  min-height: 44px;
+  padding: 0.42rem 0.45rem;
+  border-width: 0 0 1px;
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+.mesa-news-family .alert-inbox {
+  gap: 0;
+  padding: 0.2rem 0;
+}
+
+.mesa-news-family .alert-inbox-item.mesa-contextual-item,
+.mesa-incidents .alert-inbox-item.mesa-contextual-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-width: 0;
+  border-left: 0;
+  background: transparent;
+}
+
+.mesa-news-family .alert-inbox-item.mesa-contextual-item strong,
+.mesa-incidents .alert-inbox-item.mesa-contextual-item strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.mesa-news-family .alert-inbox-item.mesa-contextual-item time,
+.mesa-incidents .alert-inbox-item.mesa-contextual-item time {
+  grid-column: 1 / -1;
+}
+
+.mesa-universe > .collection-status,
+.mesa-universe > .collection-controls {
+  margin-inline: 0.1rem;
 }
 
 .mesa-contextual-item:hover,
