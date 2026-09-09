@@ -53,3 +53,13 @@ la ruta táctica y los contratos vivos del repositorio.
 `route_effect: NONE`: `LOCAL-INTERFACE` sigue `DONE` y `SEC-CORPUS` sigue siendo la única ruta
 `NEXT`. No se modifican backend, HTTP, dominio, almacenamiento, proveedores, scheduler, fórmulas,
 identidades, dependencias ni el workspace permanente.
+
+## Excepción UI-16 posterior a UI-15
+
+La indicación humana posterior autoriza únicamente una reparación geométrica observada en Mesa,
+Valoración y Comparación: retirar el nombre accesible duplicado como copy visible, separar las
+regiones de las filas contextuales, recuperar alturas naturales de los grupos de Valoración y reunir
+los dos grupos de Comparación en una superficie. No autoriza rediseñar Revisar o Cazatiburones ni
+ampliar UI, rutas, contratos, datos, endpoints, polling, persistencia, proveedores o tipografías.
+La ruta continúa con `route_effect: NONE`: `LOCAL-INTERFACE` queda `DONE` y `SEC-CORPUS` es el único
+`NEXT`.

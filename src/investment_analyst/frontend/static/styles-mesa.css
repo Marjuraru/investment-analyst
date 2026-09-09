@@ -280,23 +280,54 @@
 .mesa-news-family .alert-inbox-item.mesa-contextual-item,
 .mesa-incidents .alert-inbox-item.mesa-contextual-item {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 0.2rem;
   min-width: 0;
   border-left: 0;
   background: transparent;
 }
 
-.mesa-news-family .alert-inbox-item.mesa-contextual-item strong,
-.mesa-incidents .alert-inbox-item.mesa-contextual-item strong {
+.mesa-contextual-copy,
+.mesa-contextual-meta {
+  display: flex;
+  min-width: 0;
+}
+
+.mesa-contextual-copy {
+  flex-direction: column;
+  align-items: start;
+  gap: 0.1rem;
+}
+
+.mesa-contextual-title,
+.mesa-contextual-asset {
   min-width: 0;
   overflow-wrap: anywhere;
   white-space: normal;
 }
 
-.mesa-news-family .alert-inbox-item.mesa-contextual-item time,
-.mesa-incidents .alert-inbox-item.mesa-contextual-item time {
-  grid-column: 1 / -1;
+.mesa-contextual-asset {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.mesa-contextual-meta {
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.mesa-contextual-meta time,
+.mesa-contextual-meta .alert-inbox-status {
+  min-width: 0;
+}
+
+.mesa-contextual-meta .alert-inbox-status {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .mesa-universe > .collection-status,

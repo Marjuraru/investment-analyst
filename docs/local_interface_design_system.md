@@ -722,6 +722,23 @@ tipográfico adicional. `--font-sans` y `--figure-font` continúan usando las
 pilas del sistema ya declaradas; UI-13 ajusta tamaños y envoltura donde la
 legibilidad lo exige sin crear una dependencia tipográfica.
 
+## UI-16: anatomía observable, no maquillaje de densidad
+
+La corrección excepcional UI-16 mantiene los patrones de UI-15, pero fija una frontera más precisa
+para las filas contextuales de Mesa. Cada botón tiene una sola etiqueta accesible y exactamente dos
+regiones de presentación: `.mesa-contextual-copy` contiene título y activo opcional; `.mesa-contextual-meta`
+contiene fecha y estado. La geometría es de una columna de lectura y metadatos debajo, con
+`min-width: 0`, estado sin salto de línea y separadores internos de 1 px. No se permite resolver
+copy duplicado con `font-size: 0`, `line-clamp`, `overflow: hidden` ni una altura fija.
+
+`#valoracion > .analysis-intro` es una composición vertical: el copy se lee antes de los controles.
+Los fieldsets tienen modificadores explícitos `--snapshot`, `--history` y `--rule`; su anatomía no
+depende de su posición en el DOM. La retícula exterior conserva alturas naturales y alinea los grupos
+por arriba. Las celdas de métricas se organizan como cabecera, valor, fórmula y resumen de inputs,
+sin celdas de relleno. El formulario de Comparación es una sola superficie con un único separador
+interno responsive, no dos tarjetas contiguas. Estas reglas no cambian los datos, la muestra 2–5,
+los destinos de navegación ni el orden de los resultados.
+
 ## Qué no son estas pruebas
 
 `tests/unit/frontend/test_design_system.py` es una suite de contrato

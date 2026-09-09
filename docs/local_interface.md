@@ -317,6 +317,24 @@ Valoración presenta tres grupos responsive —valoración al corte, historia ma
 histórica— y conserva la exportación del payload completo aunque la historia visible sea progresiva.
 No se modifican endpoints, límites del servidor, contratos, identidad, cálculo ni persistencia.
 
+## Anatomía contextual y controles (`UI-16`)
+
+UI-16 es una corrección excepcional y acotada posterior a UI-15: no reabre la ruta
+`LOCAL-INTERFACE` ni cambia contratos, fuentes tipográficas, datos, endpoints, almacenamiento o
+workspace. Cada novedad e incidencia de Mesa continúa siendo un único botón que conserva el destino
+exacto (`candidate_id`, `alert_id` o `asset_id`) y el foco de teclado, pero expone sólo dos regiones
+visuales: copia (título y, cuando corresponde, activo) y metadatos (fecha y estado). El nombre
+accesible vive únicamente en `aria-label`; no se replica como texto visible. Las filas internas
+mantienen el separador de 1 px y el objetivo mínimo de 44 px sin altura fija, truncamiento ni
+ocultación de información esencial.
+
+En Valoración, la introducción ocupa primero toda la composición y los tres grupos semánticos de
+control quedan debajo, alineados por arriba: `snapshot`, `history` y `rule`. La disposición es de
+tres columnas en escritorio, dos con regla a ancho completo bajo 980 px y una bajo 600 px; los pares
+internos de historia y regla se apilan bajo 480 px. Comparación mantiene la muestra de 2–5 activos y
+las mismas solicitudes, pero su formulario usa una única superficie con un separador interno que
+pasa de vertical a horizontal bajo 900 px.
+
 ## Técnico y Revisar (`UI-10`)
 
 `tecnico` conserva `GET /api/v1/market-comparison` y sus parámetros. La referencia se elige en el

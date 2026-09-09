@@ -1965,6 +1965,16 @@ pre {
   scroll-margin-top: 1.5rem;
 }
 
+#valoracion > .analysis-intro {
+  display: grid;
+  align-items: start;
+  gap: 0.9rem;
+}
+
+.valuation-intro-copy {
+  max-width: 68ch;
+}
+
 .valuation-actions,
 .valuation-header,
 .valuation-metric-heading {
@@ -1980,14 +1990,15 @@ pre {
 .valuation-control-groups {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
   gap: 0.6rem;
   width: 100%;
 }
 
 .valuation-control-group {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
+  display: grid;
+  align-content: start;
+  align-self: start;
   gap: 0.5rem;
   min-width: 0;
   margin: 0;
@@ -1997,7 +2008,6 @@ pre {
 }
 
 .valuation-control-group legend {
-  flex: 0 0 100%;
   padding: 0 0.2rem;
   color: var(--muted-strong);
   font-size: 0.62rem;
@@ -2007,13 +2017,32 @@ pre {
 }
 
 .valuation-control-group .field {
-  flex: 1 1 8rem;
   min-width: 0;
 }
 
-.valuation-control-group .button,
-.valuation-control-group .data-export-button {
-  flex: 0 1 auto;
+.valuation-control-group--snapshot {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.valuation-control-group--history,
+.valuation-control-group--rule {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.valuation-history-metric,
+.valuation-control-actions {
+  grid-column: 1 / -1;
+}
+
+.valuation-control-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.valuation-control-actions .button,
+.valuation-control-actions .data-export-button {
   max-width: 100%;
 }
 
@@ -2056,6 +2085,8 @@ pre {
 }
 
 .valuation-metric {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-width: 0;
   padding: 1rem 1.1rem;
   border-right: 1px solid var(--line-soft);
@@ -2067,6 +2098,7 @@ pre {
 }
 
 .valuation-metric-heading {
+  align-items: baseline;
   justify-content: space-between;
   gap: 0.6rem;
 }
@@ -2076,7 +2108,7 @@ pre {
 }
 
 .valuation-metric-value {
-  margin: 0.75rem 0 0.5rem;
+  margin: 0.65rem 0 0.4rem;
   color: var(--ink-strong);
   font-size: clamp(1.15rem, 2vw, 1.65rem);
   font-weight: 650;
@@ -2100,6 +2132,7 @@ pre {
 }
 
 .valuation-input-summary {
+  align-self: end;
   margin-top: 0.45rem;
 }
 
@@ -2198,6 +2231,10 @@ pre {
   .valuation-control-groups {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .valuation-control-group--rule {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (max-width: 600px) {
@@ -2209,9 +2246,16 @@ pre {
     align-items: stretch;
   }
 
-  .valuation-control-group .button,
-  .valuation-control-group .data-export-button {
+  .valuation-control-actions .button,
+  .valuation-control-actions .data-export-button {
     width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .valuation-control-group--history,
+  .valuation-control-group--rule {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
