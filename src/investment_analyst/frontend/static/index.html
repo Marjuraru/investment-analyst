@@ -811,8 +811,8 @@
             data-valuation-only
             hidden
           >
-            <div class="section-intro analysis-intro">
-              <div>
+            <div class="section-intro analysis-intro valuation-intro">
+              <div class="valuation-intro-copy">
                 <p class="eyebrow">VALORACIÓN</p>
                 <h2 id="valoracion-titulo">Valoración corporativa point-in-time</h2>
                 <p>
@@ -821,32 +821,38 @@
                 </p>
               </div>
               <div class="valuation-control-groups">
-                <fieldset class="valuation-control-group">
+                <fieldset class="valuation-control-group valuation-control-group--snapshot">
                   <legend>Valoración al corte</legend>
                   <label class="field">
                     <span>Fecha de valoración</span>
                     <input id="valuation-date" type="date" required>
                   </label>
-                  <button id="query-valuation" class="button primary" type="button">
-                    Cargar valoración
-                  </button>
+                  <div class="valuation-control-actions">
+                    <button id="query-valuation" class="button primary" type="button">
+                      Cargar valoración
+                    </button>
+                  </div>
                 </fieldset>
-                <fieldset class="valuation-control-group">
+                <fieldset class="valuation-control-group valuation-control-group--history">
                   <legend>Historia materializada</legend>
                   <label class="field"><span>Historia desde</span><input id="valuation-history-start" type="date"></label>
                   <label class="field"><span>Historia hasta</span><input id="valuation-history-end" type="date"></label>
-                  <label class="field"><span>Métrica histórica</span><select id="valuation-history-metric" disabled><option value="">Todas</option></select></label>
-                  <button id="query-valuation-history" class="button secondary" type="button">Cargar historia</button>
-                  <button id="export-valuation-history-json" class="data-export-button" type="button" disabled>Exportar historia</button>
+                  <label class="field valuation-history-metric"><span>Métrica histórica</span><select id="valuation-history-metric" disabled><option value="">Todas</option></select></label>
+                  <div class="valuation-control-actions">
+                    <button id="query-valuation-history" class="button secondary" type="button">Cargar historia</button>
+                    <button id="export-valuation-history-json" class="data-export-button" type="button" disabled>Exportar historia</button>
+                  </div>
                 </fieldset>
-                <fieldset class="valuation-control-group">
+                <fieldset class="valuation-control-group valuation-control-group--rule">
                   <legend>Regla histórica explícita</legend>
                   <label class="field"><span>Métrica de regla</span><input id="valuation-rule-metric" value="valuation.corporate.price_to_book"></label>
                   <label class="field"><span>Operador</span><select id="valuation-rule-operator"><option value="at_or_below_empirical_percentile">Percentil igual o inferior</option><option value="at_or_above_empirical_percentile">Percentil igual o superior</option></select></label>
                   <label class="field"><span>Umbral Decimal (0 a 1)</span><input id="valuation-rule-threshold" value="0.50" inputmode="decimal"></label>
                   <label class="field"><span>Mínimo previo</span><input id="valuation-rule-minimum" type="number" min="3" max="250" value="3"></label>
-                  <button id="query-valuation-history-rule" class="button secondary" type="button">Evaluar regla</button>
-                  <button id="export-valuation-history-rule-json" class="data-export-button" type="button" disabled>Exportar regla</button>
+                  <div class="valuation-control-actions">
+                    <button id="query-valuation-history-rule" class="button secondary" type="button">Evaluar regla</button>
+                    <button id="export-valuation-history-rule-json" class="data-export-button" type="button" disabled>Exportar regla</button>
+                  </div>
                 </fieldset>
               </div>
             </div>

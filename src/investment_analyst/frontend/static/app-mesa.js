@@ -6,13 +6,24 @@
 // container, never the same DOM id as those boards.
 let mesaAnalyticalNewsRequestSequence = 0;
 
-function mesaContextualNavigationItem(className, label, request) {
+function mesaContextualNavigationItem(className, accessibleLabel, request, content) {
   const item = createContextualNavigationButton(
-    label,
+    "",
     request,
     "alert-inbox-item mesa-contextual-item " + className,
   );
-  item.setAttribute("aria-label", label);
+  item.setAttribute("aria-label", accessibleLabel);
+  const copy = createElement("span", "mesa-contextual-copy");
+  copy.append(createElement("strong", "mesa-contextual-title", content.title));
+  if (content.assetLabel) {
+    copy.append(createElement("span", "mesa-contextual-asset", content.assetLabel));
+  }
+  const meta = createElement("span", "mesa-contextual-meta");
+  meta.append(
+    createElement("time", "", content.timestamp),
+    createElement("span", `alert-inbox-status ${content.statusClass}`, content.statusLabel),
+  );
+  item.append(copy, meta);
   return item;
 }
 
@@ -50,11 +61,13 @@ function renderMesaAnalyticalNews(payload) {
       "mesa-analytical-item",
       `Abrir ${title} · ${assetLabel}`,
       { board: "revisar", family: "candidate", id: notification.candidate_id },
-    );
-    item.append(
-      createElement("strong", "", `${title} · ${assetLabel}`),
-      createElement("span", "alert-inbox-status", mesaNotificationStatusLabel(view.status)),
-      createElement("time", "", formatInstant(notification.created_at)),
+      {
+        title,
+        assetLabel,
+        statusClass: view.status,
+        statusLabel: mesaNotificationStatusLabel(view.status),
+        timestamp: formatInstant(notification.created_at),
+      },
     );
     list.append(item);
   }
@@ -118,11 +131,13 @@ function renderMesaCazatiburonesNews(family, payload) {
       "mesa-cazatiburones-" + family + "-item",
       `Abrir ${title} · ${assetLabel}`,
       { board: "cazatiburones", family, id: notification.asset_id },
-    );
-    item.append(
-      createElement("strong", "", `${title} · ${assetLabel}`),
-      createElement("span", "alert-inbox-status", mesaNotificationStatusLabel(view.status)),
-      createElement("time", "", formatInstant(notification.created_at)),
+      {
+        title,
+        assetLabel,
+        statusClass: view.status,
+        statusLabel: mesaNotificationStatusLabel(view.status),
+        timestamp: formatInstant(notification.created_at),
+      },
     );
     list.append(item);
   }
@@ -187,15 +202,13 @@ function renderMesaIncidents(payload) {
       "mesa-incident-item",
       "Abrir incidencia " + title,
       { board: "revisar", family: "alert", id: event.alert_id },
-    );
-    item.append(
-      createElement("strong", "", title),
-      createElement(
-        "span",
-        `alert-inbox-status ${event.status}`,
-        MESA_INCIDENT_STATUS_LABELS[event.status] || event.status,
-      ),
-      createElement("time", "", formatInstant(event.last_activated_at)),
+      {
+        title,
+        assetLabel: "",
+        statusClass: event.status,
+        statusLabel: MESA_INCIDENT_STATUS_LABELS[event.status] || event.status,
+        timestamp: formatInstant(event.last_activated_at),
+      },
     );
     list.append(item);
   }

@@ -5230,7 +5230,7 @@ def test_valuation_controls_have_three_semantic_responsive_groups_with_no_rigid_
     None
 ):
     valuation = _board_slices(INDEX_HTML)["activo"]
-    assert valuation.count('class="valuation-control-group"') == 3
+    assert valuation.count('class="valuation-control-group ') == 3
     for label in ("Valoración al corte", "Historia materializada", "Regla histórica explícita"):
         assert label in valuation
     analysis_css = _read("styles-analysis.css")
@@ -5239,6 +5239,47 @@ def test_valuation_controls_have_three_semantic_responsive_groups_with_no_rigid_
     assert "grid-template-columns: minmax(0, 1fr);" in analysis_css
     assert "flex-wrap: wrap;" in analysis_css
     assert ".valuation-query-controls {\n  display: block;" in analysis_css
+
+
+def test_ui16_static_contract_covers_mesa_valuation_comparison_and_forbids_hide_the_bug_shortcuts() -> (  # noqa: E501
+    None
+):
+    mesa_js = _read("app-mesa.js")
+    mesa_css = _read("styles-mesa.css")
+    valuation = _board_slices(INDEX_HTML)["activo"]
+    analysis_css = _read("styles-analysis.css")
+    technical_css = _read("styles-technical.css")
+
+    assert "function mesaContextualNavigationItem" in mesa_js
+    assert '    "",' in mesa_js
+    assert 'item.setAttribute("aria-label", accessibleLabel);' in mesa_js
+    assert 'createElement("span", "mesa-contextual-copy")' in mesa_js
+    assert 'createElement("strong", "mesa-contextual-title", content.title)' in mesa_js
+    assert 'createElement("span", "mesa-contextual-asset", content.assetLabel)' in mesa_js
+    assert 'createElement("span", "mesa-contextual-meta")' in mesa_js
+    assert "item.append(copy, meta);" in mesa_js
+    assert "mesa-contextual-copy" in mesa_css
+    assert "mesa-contextual-meta" in mesa_css
+    assert "white-space: nowrap;" in mesa_css
+
+    for modifier in ("--snapshot", "--history", "--rule"):
+        assert f"valuation-control-group{modifier}" in valuation
+    assert "valuation-control-actions" in valuation
+    assert "valuation-history-metric" in valuation
+    assert "#valoracion > .analysis-intro" in analysis_css
+    assert "align-items: start;" in analysis_css
+    assert ".valuation-control-group--rule {\n    grid-column: 1 / -1;" in analysis_css
+    assert "@media (max-width: 480px)" in analysis_css
+    assert "grid-template-rows: auto auto minmax(0, 1fr) auto;" in analysis_css
+
+    assert ".comparison-controls {" in technical_css
+    assert "border: 1px solid var(--line);" in technical_css
+    assert ".comparison-reference-group {" in technical_css
+    assert "border-right: 1px solid var(--line);" in technical_css
+    assert "border-bottom: 1px solid var(--line);" in technical_css
+    assert "font-variant-numeric: tabular-nums;" in technical_css
+    for forbidden in ("line-clamp", "font-size: 0;", "height: 112px"):
+        assert forbidden not in mesa_css
 
 
 def test_comparison_controls_preserve_two_to_five_local_assets_and_fit_1440_500_390_without_page_overflow() -> (  # noqa: E501
@@ -5379,7 +5420,7 @@ def test_no_visible_uuid_asset_id_or_rule_id_in_mesa_human_cards_while_navigatio
         "renderMesaIncidents",
     ):
         body = _extract_js_function(mesa, function_name)
-        assert 'createElement("strong"' in body
+        assert "mesaContextualNavigationItem" in body
         assert "formatInstant" in body
     assert "notification.rule_id" not in mesa
     assert "assetDisplayLabel(notification.asset_id)" in mesa
