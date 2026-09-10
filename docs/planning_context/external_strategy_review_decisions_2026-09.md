@@ -18,12 +18,22 @@ rechazos terminales versionados y declara backlog cuando el delta excede el lím
 familia 13F, la expansión de activos, cripto on-chain y BVL siguen fuera: cada una exige fuente,
 licencia/retención, identidad y contrato propios antes de cualquier BUILD.
 
+`SEC-CORPUS-27` sustituye la ausencia de un universo de gestores Form 13F por un artefacto local,
+point-in-time y reproducible (`sec-13f-manager-universe-v1`) derivado exclusivamente de los Form 13F Data
+Sets trimestrales oficiales de la SEC. Descubre gestores institucionales únicamente para CUSIP ya
+declarados en el catálogo (AAPL / `037833100`), conserva el ZIP exacto por SHA-256 en el document store
+y publica una selección determinista acotada a los 25 mayores gestores por valor reportado en el
+período más reciente del dataset (`sec-13f-manager-universe-selection-v1`). No importa todavía filings 13F,
+no declara correspondencias de clase, no altera Cazatiburones ni el catálogo y prepara la adquisición
+dirigida de `SEC-CORPUS-28`.
+
 | Recomendación | Decisión | Evidencia/razón | Ruta futura |
 | --- | --- | --- | --- |
 | Corpus reciente y auditable antes de IA | INTEGRATE | Submissions fresco y revisiones v2 verificadas | SEC-CORPUS |
 | GET dedicado de Submissions | BUILD | Evita mezclar Company Facts en el refresh documental | SEC-CORPUS-25 |
 | Adquisición automática de actividad declarada | BUILD | Importadores, normalizador y métricas existían pero sólo se invocaban a mano | SEC-CORPUS-26 |
-| 13F por gestor | DEFER | Requiere universo explícito de managers y correspondencia de instrumento | SEC-CORPUS-27 |
+| Universo oficial y acotado de gestores 13F | BUILD | Form 13F Data Sets oficiales SEC limitados a CUSIP de catálogo | SEC-CORPUS-27 |
+| Adquisición 13F por gestor y correspondencia | DEFER | Requiere Submissions por gestor, acceptance PIT, XML y correspondencia | SEC-CORPUS-28 |
 | Expansión de activos y cripto on-chain | DEFER | Faltan fuente, licencia/retención, PIT y coste por familia medidos | Plan futuro de datos |
 | UI nueva | DEFER | La capacidad opera por scheduler y la UI permanece congelada | Work Block futuro P0/P1 |
 | Backfill suplementario e histórico | DEFER | Faltan presupuesto, cobertura y licencia medidos | Plan futuro de corpus |

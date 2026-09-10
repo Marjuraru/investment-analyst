@@ -366,9 +366,11 @@ contrato on-chain. No existirá un “score de tiburones”.
 La adquisición de esa evidencia dejó de depender de una invocación manual: `SEC-CORPUS-25` programa
 documentos primarios y `SEC-CORPUS-26` programa la actividad declarada —Forms 3/4/5 y Schedules
 13D/13G— por emisor SEC seleccionado, con un GET Submissions por ejecución, límite de 25 accessions
-por familia, backlog declarado y capas 2/3 completadas al mismo corte. La familia 13F permanece
-separada: su adquisición por gestor (`SEC-CORPUS-27`) exige un universo explícito de managers y
-correspondencia de instrumento, y no se improvisa por ticker.
+por familia, backlog declarado y capas 2/3 completadas al mismo corte. La familia 13F avanza de forma
+delimitada: `SEC-CORPUS-27` construye el universo acotado y determinista de gestores a partir de los Form
+13F Data Sets oficiales de la SEC (`sec-13f-manager-universe-v1`) con un límite de 25 gestores por CUSIP
+de catálogo y `available_at = retrieved_at`, mientras que la adquisición dirigida de filings XML y
+correspondencia de instrumentos queda para `SEC-CORPUS-28`.
 
 Las anomalías se evaluarán localmente sobre features point-in-time de filings: tamaño relativo de
 una transacción, cambio de tenencia, concentración, recurrencia, enmiendas y latencia de reporte. El
@@ -636,9 +638,10 @@ sustrato institucional 13F, #140 la composición/completitud, #142 las métricas
 #153 añade una outbox local deduplicada y reanudable para candidatos elegibles de actividad e instituciones;
 #155 añade la línea temporal y búsqueda local point-in-time del corpus documental SEC (`sec-document-timeline-v1`),
 sin presentar SEC-CORPUS como completado ni como cartera efectiva: cartera efectiva, reglas complejas
-continúan siendo fronteras separadas; UI-14 ya completó la interfaz local. `SEC-CORPUS-25` y
-`SEC-CORPUS-26` añaden adquisición incremental programada —documentos primarios y actividad
-declarada en familias separadas— sin UI, endpoint, 13F ni señal. `EXTENDED-SOAK /
+continúan siendo fronteras separadas; UI-14 ya completó la interfaz local. `SEC-CORPUS-25`,
+`SEC-CORPUS-26` y `SEC-CORPUS-27` añaden adquisición incremental programada —documentos primarios,
+actividad declarada y universo oficial acotado de gestores 13F respectivamente— sin UI, endpoint ni
+señal, manteniendo `SEC-CORPUS` como único `NEXT` y preparando `SEC-CORPUS-28`. `EXTENDED-SOAK /
 DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
 Block independiente.
 
