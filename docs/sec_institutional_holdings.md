@@ -59,3 +59,23 @@ para el contrato de identidad, PIT, unidades no resueltas, consulta paginada y v
 conecta posiciones Form 13F con correspondencia CUSIP explícitamente declarada. Conserva el
 `manager_cik` y `known_at` requeridos por el corpus, no modifica reportes ni posiciones y informa
 sin enlace los períodos faltantes o las correspondencias ambiguas.
+
+## Universo oficial y acotado de gestores Form 13F
+
+La selección de gestores institucionales no se realiza a partir de listas arbitrarias o tickers libres.
+`SEC-CORPUS-27` introduce el artefacto reproducible `sec-13f-manager-universe-v1` y la política
+`sec-13f-manager-universe-selection-v1`, documentados en detalle en
+[Universo oficial de gestores SEC Form 13F](sec_institutional_manager_universe.md).
+
+Este pipeline procesa los Form 13F Data Sets trimestrales publicados oficialmente por la SEC en
+`https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets`, conserva el archivo ZIP exacto
+en el almacén documental por SHA-256 (`documents/sha256/`), y filtra determinísticamente las tablas
+as-filed contra los CUSIP activos del catálogo de activos (`equity:us:aapl` → `037833100`).
+
+Para el período de reporte más reciente del dataset, selecciona hasta 25 gestores por activo ordenados
+por valor as-filed descendente con desempate determinista por CIK y accession ascendentes, seleccionando
+para cada gestor su accession más reciente por `(filing_date, accession)`. La
+disponibilidad point-in-time conserva `available_at = retrieved_at`, dado que el dataset carece de
+marcas de tiempo de aceptación. Este artefacto sirve exclusivamente como cola de descubrimiento y
+adquisición delimitada para la posterior ingesta dirigida de filings XML por gestor en `SEC-CORPUS-28`;
+no genera observaciones de holdings, no infiere clases de acciones y no calcula métricas.

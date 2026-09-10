@@ -195,6 +195,10 @@ Esta etapa es la primera vertical porque está ligada al emisor analizado, suele
 ### Etapa T3 — posiciones institucionales
 
 - Form 13F y sus enmiendas;
+- universo oficial y reproducible de gestores institucionales: `SEC-CORPUS-27` define el artefacto
+  `sec-13f-manager-universe-v1` y la política `sec-13f-manager-universe-selection-v1` a partir de
+  los Form 13F Data Sets trimestrales de la SEC, acotado estrictamente a CUSIP de catálogo y con un
+  máximo de 25 gestores por activo;
 - importación por CIK de gestor explícitamente declarado, sin incorporarlo al catálogo de activos;
 - evidencia point-in-time integrada para `13F-HR` y `13F-HR/A` de `filings.recent`, limitada a
   portada e information table XML estructuradas;
