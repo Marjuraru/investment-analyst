@@ -1043,9 +1043,10 @@ class InvestmentAnalystApplication:
             self._runtime.provider_resolver,
             asset_id=request.asset_id,
         )
+        write_access = WorkspaceAccessMode.READ_WRITE
         with self._runtime.open_storage(
             location,
-            access_mode=WorkspaceAccessMode.READ_WRITE,
+            access_mode=write_access,
         ) as storage:
             transport = self._transport_factory()
             issuer_client = SecEdgarClient(
