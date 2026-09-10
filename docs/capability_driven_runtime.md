@@ -97,6 +97,13 @@ antes de persistir.
 
 ## Registro reconciliable
 
+Los emisores SEC seleccionados que ya declaran fundamentales reciben además el job
+`sec:<asset_id>:primary-documents`, proveedor `sec-edgar`, dominio `events`, frecuencia
+`daily-check` y offset de 60 minutos respecto de `run_at` en `America/Lima`. Llama al contrato
+aislado `sec-primary-document-refresh-v1` a través del mismo mutex writer, publica los source IDs,
+conteos, corte del snapshot y cobertura, y se agrega o retira al reconciliar preferencias. No expone
+endpoint, polling ni pantalla nueva.
+
 El registro de jobs ya no queda fijado durante todo el proceso. Las preferencias persistentes
 seleccionan activos y el scheduler publica atómicamente un nuevo tuple de jobs construido desde este
 plan y el catálogo, sin ejecutar proveedores. Cada tick conserva su snapshot; retirar un job no

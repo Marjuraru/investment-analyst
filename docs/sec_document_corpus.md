@@ -43,6 +43,32 @@ SEC. `--read-content` verifica y lee explícitamente los bytes, pero nunca los i
 conserva IDs, blobs y replay sin una segunda pasada completa: la validación documental se integra en
 el escaneo RawRecord paginado existente.
 
+## Refresh incremental de documentos primarios
+
+`sec-primary-document-refresh-v1` es un contrato de aplicación separado de los fundamentales. Su
+request estricto sólo admite `asset_id`; toma un snapshot nuevo de Submissions, evalúa en orden los
+forms declarados por `SecAssetConfiguration` (incluidos `/A`) y elige el filing más reciente de cada
+form compatible. La cobertura sólo significa que cada accession seleccionada tiene exactamente una
+revisión v2 con lineage, hash y tamaño verificados; no afirma cubrir toda la historia SEC.
+
+Antes de solicitar Archives, el pipeline busca por `asset_id` y accession. Cero revisiones permite
+un GET; una revisión compatible se verifica y reutiliza sin GET; más de una, metadata contradictoria
+o blob/lineage inválido falla cerrado. Las reruns reutilizan las accessions intactas y un snapshot
+con accession nueva sólo descarga ese delta. No produce observaciones, métricas, diagnósticos,
+screening, texto extraído, embeddings, score ni rutas HTTP/UI.
+
+La comprobación real aislada usa la identidad local, nunca la imprime ni escribe en el workspace
+permanente:
+
+```bash
+set -a; source .env; set +a
+PYTHONPATH=src .venv/bin/python scripts/smoke_sec_document_refresh.py
+```
+
+El primer refresh puede obtener documentos oficiales; el segundo debe informar
+`second_document_fetches=0`. El delta sintético equivalente se cubre por la prueba unitaria del
+contrato incremental.
+
 ## Línea temporal y búsqueda local
 
 Para la búsqueda transversal, enumeración y ordenación point-in-time de revisiones documentales

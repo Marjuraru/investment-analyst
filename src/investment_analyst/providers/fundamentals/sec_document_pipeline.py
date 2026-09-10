@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from investment_analyst.core.models import SourceDefinition, SourceType
 from investment_analyst.evidence.sec_documents.models import (
@@ -56,6 +57,9 @@ class SecDocumentImportSummary:
     blobs_created: int
     blobs_reused: int
     revisions: tuple[SecDocumentRevision, ...]
+    accessions_fetched: tuple[str, ...] = ()
+    accessions_reused: tuple[str, ...] = ()
+    document_fetch_calls: int = 0
 
     def to_json_dict(self) -> dict[str, object]:
         return {
@@ -65,6 +69,9 @@ class SecDocumentImportSummary:
             "revisions_reused": self.revisions_reused,
             "blobs_created": self.blobs_created,
             "blobs_reused": self.blobs_reused,
+            "accessions_fetched": list(self.accessions_fetched),
+            "accessions_reused": list(self.accessions_reused),
+            "document_fetch_calls": self.document_fetch_calls,
             "revisions": [
                 {
                     "accession": item.document.filing.accession,
@@ -112,8 +119,10 @@ class SecDocumentPipeline:
                 coverage_notes="Selected primary 10-K, 10-Q, 20-F, and 40-F filings only.",
             )
         )
-        created = reused = blobs_created = blobs_reused = 0
+        created = reused = blobs_created = blobs_reused = document_fetch_calls = 0
         revisions: list[SecDocumentRevision] = []
+        accessions_fetched: list[str] = []
+        accessions_reused: list[str] = []
         for metadata in filings:
             filing = SecFiling(
                 filing_id=SecFiling.expected_id(self._configuration.cik, metadata.accession_number),
@@ -132,7 +141,28 @@ class SecDocumentPipeline:
                 filing=filing,
                 name=metadata.primary_document,
             )
+            existing_candidates = repository.list_revisions(
+                asset_id=self._configuration.asset_id,
+                known_at=datetime.max.replace(tzinfo=UTC),
+                accession=metadata.accession_number,
+            )
+            if existing_candidates:
+                if len(existing_candidates) != 1:
+                    raise SecDocumentPipelineError("existing SEC document accession is ambiguous")
+                existing = existing_candidates[0]
+                if (
+                    existing.asset_id != self._configuration.asset_id
+                    or existing.document != document
+                ):
+                    raise SecDocumentPipelineError("existing SEC document revision conflicts")
+                repository.verify_revision(existing)
+                revisions.append(existing)
+                accessions_reused.append(metadata.accession_number)
+                reused += 1
+                blobs_reused += 1
+                continue
             response = self._client.fetch(document)
+            document_fetch_calls += 1
             revision_id = SecDocumentRevision.expected_id(
                 document.document_id, response.sha256, REVISION_SCHEMA_VERSION_V2
             )
@@ -146,6 +176,7 @@ class SecDocumentPipeline:
                     raise SecDocumentPipelineError("existing SEC document revision conflicts")
                 repository.verify_revision(existing)
                 revisions.append(existing)
+                accessions_reused.append(metadata.accession_number)
                 reused += 1
                 blobs_reused += 1
                 continue
@@ -166,6 +197,7 @@ class SecDocumentPipeline:
             self._storage.raw_records.save(revision_to_raw_record(revision))
             repository.verify_revision(revision)
             revisions.append(revision)
+            accessions_fetched.append(metadata.accession_number)
             created += 1
             blobs_created += int(receipt.created)
             blobs_reused += int(not receipt.created)
@@ -177,6 +209,9 @@ class SecDocumentPipeline:
             blobs_created=blobs_created,
             blobs_reused=blobs_reused,
             revisions=tuple(revisions),
+            accessions_fetched=tuple(accessions_fetched),
+            accessions_reused=tuple(accessions_reused),
+            document_fetch_calls=document_fetch_calls,
         )
 
     def _latest_submissions(self):
