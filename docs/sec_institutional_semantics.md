@@ -46,3 +46,11 @@ selección posterior (`is_amendment`, `amendment_number`, `amendment_type`, tota
 filas y `available_at`). La política `sec-13f-composition-policy-v1` los consume en modo
 read-only; no modifica esta evidencia ni convierte metadata ausente en cero. Véase
 `cazatiburones_institutional_composition.md` para sus estados y límites.
+
+## Enriquecimiento dirigido desde el universo
+
+`SEC-CORPUS-28` no cambia este contrato: reutiliza el enriquecedor existente tal como está. La
+adquisición dirigida reúne los reportes del período objetivo visibles al corte y llama al servicio en
+lotes de hasta veinte IDs por gestor, respetando el máximo que el propio contrato impone. Un artefacto
+ya enriquecido se reutiliza en lugar de reescribirse, y un rechazo permanece explícito en el resumen
+(`semantics_rejected`) sin convertirse en éxito ni en cartera efectiva.

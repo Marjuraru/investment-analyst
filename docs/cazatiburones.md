@@ -199,6 +199,10 @@ Esta etapa es la primera vertical porque está ligada al emisor analizado, suele
   `sec-13f-manager-universe-v1` y la política `sec-13f-manager-universe-selection-v1` a partir de
   los Form 13F Data Sets trimestrales de la SEC, acotado estrictamente a CUSIP de catálogo y con un
   máximo de 25 gestores por activo;
+- adquisición dirigida, paginada y reanudable desde ese universo: `SEC-CORPUS-28` define los contratos
+  `sec-institutional-holdings-directed-refresh-v1` y `sec-institutional-holdings-directed-page-v1`,
+  con un GET Submissions por gestor, acceptance-time PIT, reanudación sin volver a descargar Archives
+  de un accession ya materializado y backlog declarado;
 - importación por CIK de gestor explícitamente declarado, sin incorporarlo al catálogo de activos;
 - evidencia point-in-time integrada para `13F-HR` y `13F-HR/A` de `filings.recent`, limitada a
   portada e information table XML estructuradas;

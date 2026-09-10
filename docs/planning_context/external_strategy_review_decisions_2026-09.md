@@ -27,6 +27,16 @@ período más reciente del dataset (`sec-13f-manager-universe-selection-v1`). No
 no declara correspondencias de clase, no altera Cazatiburones ni el catálogo y prepara la adquisición
 dirigida de `SEC-CORPUS-28`.
 
+`SEC-CORPUS-28` convierte ese universo en evidencia 13F real sin ampliar la frontera: selecciona una
+página determinista de gestores ya seleccionados, realiza un único GET Submissions por gestor, importa
+sólo los `13F-HR`/`13F-HR/A` del período de reporte objetivo aceptados al corte, reutiliza sin volver a
+descargar los accessions ya materializados y enriquece la semántica integrada al mismo corte. El
+`accession` del dataset queda como lineage de descubrimiento y nunca como autoridad de importación; el
+backlog es exacto y declarado, y un fallo intermedio conserva el progreso ya persistido. La división se
+registra explícitamente: #28 adquiere y enriquece; `SEC-CORPUS-29` define la correspondencia
+verificable con provenance y la materialización de observaciones. Ninguna de las dos introduce score,
+señal, candidato ni recomendación.
+
 | Recomendación | Decisión | Evidencia/razón | Ruta futura |
 | --- | --- | --- | --- |
 | Corpus reciente y auditable antes de IA | INTEGRATE | Submissions fresco y revisiones v2 verificadas | SEC-CORPUS |
@@ -34,6 +44,8 @@ dirigida de `SEC-CORPUS-28`.
 | Adquisición automática de actividad declarada | BUILD | Importadores, normalizador y métricas existían pero sólo se invocaban a mano | SEC-CORPUS-26 |
 | Universo oficial y acotado de gestores 13F | BUILD | Form 13F Data Sets oficiales SEC limitados a CUSIP de catálogo | SEC-CORPUS-27 |
 | Adquisición 13F por gestor y correspondencia | DEFER | Requiere Submissions por gestor, acceptance PIT, XML y correspondencia | SEC-CORPUS-28 |
+| Adquisición 13F dirigida y reanudable desde el universo | BUILD | El universo ya persistido permite paginar gestores con un Submissions por gestor y reanudación exacta | SEC-CORPUS-28 |
+| Correspondencia CUSIP↔activo y observaciones 13F | DEFER | La correspondencia existente exige title-of-class y vigencia, y carece de lineage hacia la fila 13F | SEC-CORPUS-29 |
 | Expansión de activos y cripto on-chain | DEFER | Faltan fuente, licencia/retención, PIT y coste por familia medidos | Plan futuro de datos |
 | UI nueva | DEFER | La capacidad opera por scheduler y la UI permanece congelada | Work Block futuro P0/P1 |
 | Backfill suplementario e histórico | DEFER | Faltan presupuesto, cobertura y licencia medidos | Plan futuro de corpus |

@@ -92,3 +92,22 @@ Para cada activo con binding CUSIP:
 - `scripts/smoke_sec_institutional_manager_universe.py`: Verificación integral de extremo a extremo
   en un workspace temporal contra los endpoints oficiales de la SEC, validando límites de red,
   memoria RSS e idempotencia.
+
+## Consumo dirigido del snapshot (`SEC-CORPUS-28`)
+
+`SEC-CORPUS-28` consume este artefacto como cola de adquisición bajo el contrato
+`sec-institutional-holdings-directed-refresh-v1` y la política
+`sec-institutional-holdings-directed-page-v1`, documentados en
+[Posiciones institucionales SEC Form 13F](sec_institutional_holdings.md). El consumo mantiene dos
+límites explícitos que este documento no relaja:
+
+- El `accession` y el `accession_lineage` del dataset son **pistas de descubrimiento**, nunca
+  autoridad de importación. La lista exacta de filings y sus marcas de aceptación se resuelve desde un
+  GET fresco a `data.sec.gov/submissions/CIK##########.json` por gestor procesado.
+- La única marca de disponibilidad PIT del dataset sigue siendo `available_at = retrieved_at`, porque
+  el ZIP oficial carece de `acceptanceDateTime`. Para la evidencia 13F importada, en cambio, la
+  disponibilidad hereda la aceptación SEC exacta del filing.
+
+El artefacto continúa sin generar observaciones de holdings, sin inferir correspondencias de clase y
+sin calcular métricas; la correspondencia verificable y su materialización PIT pertenecen a
+`SEC-CORPUS-29`.
