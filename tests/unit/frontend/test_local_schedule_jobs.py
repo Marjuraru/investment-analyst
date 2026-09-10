@@ -15,8 +15,17 @@ from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobDomain,
     ScheduledJobFailureCategory,
     ScheduledJobInvocation,
+    ScheduledJobRunError,
 )
 from investment_analyst.application.runtime import ApplicationRuntime
+from investment_analyst.application.sec_declared_activity_refresh import (
+    SecDeclaredActivityRefreshError,
+)
+from investment_analyst.application.sec_declared_activity_refresh_models import (
+    SecDeclaredActivityFamilySummary,
+    SecDeclaredActivityRefreshRequest,
+    SecDeclaredActivityRefreshSummary,
+)
 from investment_analyst.application.sec_fundamental_refresh import (
     SecIssuerFundamentalKnownAtTooEarlyError,
 )
@@ -56,6 +65,9 @@ class _UnusedController:
     def sec_primary_document_refresh_request(self, request):
         raise AssertionError(request)
 
+    def sec_declared_activity_refresh_request(self, request):
+        raise AssertionError(request)
+
     def fred_catalog_refresh_request(self, request):
         raise AssertionError(request)
 
@@ -83,7 +95,7 @@ def test_watchlist_jobs_are_derived_by_capability_not_symbol() -> None:
 
     expected = (
         len(universe.assets)
-        + (2 * sum(item.has_fundamentals for item in universe.assets))
+        + (3 * sum(item.has_fundamentals for item in universe.assets))
         + sum(item.supports_intraday for item in universe.assets)
     )
     assert len(jobs) == expected
@@ -121,16 +133,24 @@ def test_selected_equity_and_crypto_receive_only_compatible_jobs() -> None:
         item for item in equity_jobs if item.definition.domain is ScheduledJobDomain.FUNDAMENTALS
     )
     assert fundamental.definition.data_frequency == "annual"
-    documents = next(
-        item for item in equity_jobs if item.definition.domain is ScheduledJobDomain.EVENTS
-    )
-    assert documents.definition.job_id == "sec:equity:us:tsm:primary-documents"
+    by_id = {item.definition.job_id: item for item in equity_jobs}
+    documents = by_id["sec:equity:us:tsm:primary-documents"]
     assert documents.definition.data_frequency == "daily-check"
     assert documents.definition.run_at == time(hour=8)
+    activity = by_id["sec:equity:us:tsm:declared-activity"]
+    assert activity.definition.provider == "sec-edgar"
+    assert activity.definition.domain is ScheduledJobDomain.EVENTS
+    assert activity.definition.data_frequency == "daily-check"
+    assert activity.definition.asset_id == "equity:us:tsm"
+    assert activity.definition.timezone == "America/Lima"
+    assert activity.definition.run_at == time(hour=8, minute=15)
+    assert activity.definition.run_at > documents.definition.run_at
     assert {item.definition.domain for item in crypto_jobs} == {
         ScheduledJobDomain.MARKET_DAILY,
         ScheduledJobDomain.MARKET_INTRADAY,
     }
+    crypto_job_ids = {item.definition.job_id for item in crypto_jobs}
+    assert not any(job_id.endswith(":declared-activity") for job_id in crypto_job_ids)
 
 
 def test_derivatives_job_is_capability_opt_in_offset_and_requests_rolling_90_days() -> None:
@@ -179,6 +199,136 @@ def test_derivatives_job_is_capability_opt_in_offset_and_requests_rolling_90_day
     assert execution.created_count == 7
     assert execution.reused_count == 3
     assert execution.coverage_complete is True
+
+
+def _family_summary(
+    *,
+    family: str,
+    source_id: str,
+    accessions_imported: tuple[str, ...],
+    accessions_reused: tuple[str, ...],
+) -> SecDeclaredActivityFamilySummary:
+    return SecDeclaredActivityFamilySummary(
+        family=family,
+        source_id=source_id,
+        forms_evaluated=("3", "4", "5") if family == "insider" else ("SC 13D", "SC 13G"),
+        forms_missing=(),
+        accessions_selected=(*accessions_imported, *accessions_reused),
+        accessions_imported=accessions_imported,
+        accessions_reused=accessions_reused,
+        accessions_rejected=(),
+        accessions_incomplete=(),
+        backlog_count=0,
+        statements_created=len(accessions_imported),
+        statements_reused=len(accessions_reused),
+    )
+
+
+def _declared_activity_summary(*, created: bool) -> SecDeclaredActivityRefreshSummary:
+    insider = _family_summary(
+        family="insider",
+        source_id="sec-edgar:section16-ownership",
+        accessions_imported=("0000320193-25-000001",) if created else (),
+        accessions_reused=() if created else ("0000320193-25-000001",),
+    )
+    beneficial = _family_summary(
+        family="beneficial",
+        source_id="sec-edgar:beneficial-ownership-13d-13g",
+        accessions_imported=(),
+        accessions_reused=(),
+    )
+    return SecDeclaredActivityRefreshSummary(
+        asset_id="equity:us:tsm",
+        request=SecDeclaredActivityRefreshRequest(asset_id="equity:us:tsm"),
+        submissions_source_id="sec-edgar:tsm:submissions",
+        submissions_raw_record_id="f0e0e5f4-6b1f-4d5b-9a4d-6b1f4d5b9a4d",
+        submissions_checked_at=datetime(2026, 8, 11, 13, 15, tzinfo=UTC),
+        submissions_record_available_at=datetime(2026, 8, 11, 13, 15, tzinfo=UTC),
+        submissions_created=1 if created else 0,
+        submissions_reused=0 if created else 1,
+        insider=insider,
+        beneficial=beneficial,
+        observations_created=2 if created else 0,
+        observations_reused=0 if created else 3,
+        observations_skipped=0,
+        metrics_created=1 if created else 0,
+        metrics_reused=0 if created else 1,
+        metrics_skipped=0,
+        backlog_count=0,
+        coverage_complete=True,
+        traceability_verified=True,
+    )
+
+
+def test_declared_activity_job_publishes_separated_source_counts_and_cut() -> None:
+    class _Controller(_UnusedController):
+        def __init__(self, summary: SecDeclaredActivityRefreshSummary) -> None:
+            self.requests: list[SecDeclaredActivityRefreshRequest] = []
+            self._summary = summary
+
+        def sec_declared_activity_refresh_request(self, request):
+            self.requests.append(request)
+            return self._summary
+
+    controller = _Controller(_declared_activity_summary(created=True))
+    jobs = build_local_watchlist_jobs(controller, _universe(), _config("equity:us:tsm"))
+    job = next(
+        item for item in jobs if item.definition.job_id == "sec:equity:us:tsm:declared-activity"
+    )
+    invocation = ScheduledJobInvocation(
+        definition=job.definition,
+        local_date=date(2026, 8, 11),
+        scheduled_for=job.definition.scheduled_for(date(2026, 8, 11)),
+        started_at=datetime(2026, 8, 11, 13, 15, tzinfo=UTC),
+        attempt_number=1,
+    )
+
+    execution = job.run(invocation)
+
+    assert controller.requests == [SecDeclaredActivityRefreshRequest(asset_id="equity:us:tsm")]
+    assert execution.effective_known_at == datetime(2026, 8, 11, 13, 15, tzinfo=UTC)
+    assert execution.source_ids == (
+        "sec-edgar:beneficial-ownership-13d-13g",
+        "sec-edgar:section16-ownership",
+        "sec-edgar:tsm:submissions",
+    )
+    assert execution.created_count == 1 + 1 + 2 + 1
+    assert execution.reused_count == 0
+    assert execution.evidence_changed is True
+    assert execution.coverage_complete is True
+
+    controller._summary = _declared_activity_summary(created=False)
+    unchanged = job.run(invocation)
+
+    assert unchanged.created_count == 0
+    assert unchanged.reused_count == 1 + 0 + 1 + 3 + 1
+    assert unchanged.evidence_changed is False
+
+
+def test_declared_activity_job_reports_a_typed_non_retryable_failure() -> None:
+    class _Controller(_UnusedController):
+        def sec_declared_activity_refresh_request(self, request):
+            raise SecDeclaredActivityRefreshError("refresh contract simulated-secret")
+
+    jobs = build_local_watchlist_jobs(_Controller(), _universe(), _config("equity:us:tsm"))
+    job = next(
+        item for item in jobs if item.definition.job_id == "sec:equity:us:tsm:declared-activity"
+    )
+    invocation = ScheduledJobInvocation(
+        definition=job.definition,
+        local_date=date(2026, 8, 11),
+        scheduled_for=job.definition.scheduled_for(date(2026, 8, 11)),
+        started_at=datetime(2026, 8, 11, 13, 15, tzinfo=UTC),
+        attempt_number=1,
+    )
+
+    with pytest.raises(ScheduledJobRunError) as error:
+        job.run(invocation)
+
+    failure = error.value.failure
+    assert failure.category == ScheduledJobFailureCategory.PROVIDER_CONTRACT
+    assert failure.retryable is False
+    assert "simulated-secret" not in failure.message
 
 
 def test_selected_asset_must_exist_in_visible_catalog() -> None:

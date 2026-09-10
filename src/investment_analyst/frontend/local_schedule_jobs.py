@@ -62,6 +62,13 @@ from investment_analyst.application.peru_registry import (
     BvlRegistryRefreshRequest,
     BvlRegistryRefreshSummary,
 )
+from investment_analyst.application.sec_declared_activity_refresh import (
+    SecDeclaredActivityRefreshError,
+)
+from investment_analyst.application.sec_declared_activity_refresh_models import (
+    SecDeclaredActivityRefreshRequest,
+    SecDeclaredActivityRefreshSummary,
+)
 from investment_analyst.application.sec_document_refresh import SecPrimaryDocumentRefreshError
 from investment_analyst.application.sec_document_refresh_models import (
     SecPrimaryDocumentRefreshRequest,
@@ -152,6 +159,13 @@ class _LocalScheduledOperations(Protocol):
         request: SecPrimaryDocumentRefreshRequest,
     ) -> SecPrimaryDocumentRefreshSummary:
         """Refresh one SEC issuer's selected primary documents."""
+        ...
+
+    def sec_declared_activity_refresh_request(
+        self,
+        request: SecDeclaredActivityRefreshRequest,
+    ) -> SecDeclaredActivityRefreshSummary:
+        """Refresh one SEC issuer's declared ownership activity."""
         ...
 
     def fred_catalog_refresh_request(
@@ -282,6 +296,7 @@ def build_local_watchlist_jobs(
         if descriptor.has_fundamentals:
             jobs.append(_fundamental_job(controller, descriptor, config))
             jobs.append(_primary_document_job(controller, descriptor, config))
+            jobs.append(_declared_activity_job(controller, descriptor, config))
         if descriptor.supports_intraday and config.include_intraday:
             jobs.append(_intraday_job(controller, descriptor, config))
     if config.include_smv_registry:
@@ -604,6 +619,65 @@ def _primary_document_job(
     return RegisteredScheduledJob(definition, run)
 
 
+def _declared_activity_job(
+    controller: _LocalScheduledOperations,
+    descriptor: MarketAssetDescriptor,
+    config: LocalWatchlistScheduleConfig,
+) -> RegisteredScheduledJob:
+    """Schedule declared SEC ownership activity after fundamentals and primary documents."""
+    definition = ScheduledJobDefinition(
+        job_id=f"sec:{descriptor.asset_id}:declared-activity",
+        asset_id=descriptor.asset_id,
+        provider="sec-edgar",
+        domain=ScheduledJobDomain.EVENTS,
+        data_frequency="daily-check",
+        timezone=config.timezone,
+        run_at=_offset_minute(config.run_at, 75),
+    )
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        del invocation
+        try:
+            summary = controller.sec_declared_activity_refresh_request(
+                SecDeclaredActivityRefreshRequest(asset_id=descriptor.asset_id)
+            )
+        except (SecDeclaredActivityRefreshError, StorageError, ValueError) as error:
+            raise _classified_provider_error(error) from error
+        created = (
+            summary.submissions_created
+            + summary.insider.statements_created
+            + summary.beneficial.statements_created
+            + summary.observations_created
+            + summary.metrics_created
+        )
+        reused = (
+            summary.submissions_reused
+            + summary.insider.statements_reused
+            + summary.beneficial.statements_reused
+            + summary.observations_reused
+            + summary.metrics_reused
+        )
+        return ScheduledJobExecution(
+            job_id=definition.job_id,
+            effective_known_at=summary.submissions_checked_at,
+            evidence_changed=created > 0,
+            source_ids=tuple(
+                sorted(
+                    (
+                        summary.submissions_source_id,
+                        summary.insider.source_id,
+                        summary.beneficial.source_id,
+                    )
+                )
+            ),
+            created_count=created,
+            reused_count=reused,
+            coverage_complete=summary.coverage_complete,
+        )
+
+    return RegisteredScheduledJob(definition, run)
+
+
 def _intraday_job(
     controller: _LocalScheduledOperations,
     descriptor: MarketAssetDescriptor,
@@ -861,6 +935,7 @@ def _non_http_failure(chain: tuple[BaseException, ...]) -> ScheduledJobFailure:
                 CoinbaseExchangeError,
                 DeribitError,
                 SecEdgarError,
+                SecDeclaredActivityRefreshError,
                 FredAlfredError,
                 SmvOpenDataError,
                 ListedMarketRefreshError,

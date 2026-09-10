@@ -106,7 +106,15 @@ def _statement(*, revision: SecDocumentRevision, schema_version: str, parsed_at:
     )
 
 
-def _outcome(*, filing: SecFiling, resolver_version: str, checksum: str, discovery_id):
+def _outcome(
+    *,
+    filing: SecFiling,
+    resolver_version: str,
+    checksum: str,
+    discovery_id,
+    status: str = "accepted",
+    reason_code: str = "ok",
+):
     is_v2 = resolver_version == "sec-ownership-resolver-v2"
     schema_version = (
         OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2 if is_v2 else OWNERSHIP_OUTCOME_SCHEMA_VERSION
@@ -114,7 +122,7 @@ def _outcome(*, filing: SecFiling, resolver_version: str, checksum: str, discove
     available_at = filing.accepted_at if is_v2 else filing.accepted_at + timedelta(days=1)
     retrieved_at = filing.accepted_at + timedelta(days=1)
     outcome_id = OwnershipResolutionOutcome.expected_id(
-        filing.accession, "form4.xml", checksum, "accepted", schema_version
+        filing.accession, "form4.xml", checksum, status, schema_version
     )
     return OwnershipResolutionOutcome(
         outcome_id=outcome_id,
@@ -131,8 +139,8 @@ def _outcome(*, filing: SecFiling, resolver_version: str, checksum: str, discove
         manifest_sha256=checksum,
         available_at=available_at if is_v2 else retrieved_at,
         retrieved_at=retrieved_at,
-        status="accepted",
-        reason_code="ok",
+        status=status,
+        reason_code=reason_code,
         resolver_version=resolver_version,
         schema_version=schema_version,
     )
@@ -214,6 +222,97 @@ def test_ownership_list_uses_pit_cut_on_acceptance_not_retrieval(tmp_path: Path)
             asset_id="equity:us:aapl", known_at=known_at
         )
         assert [item.statement_id for item in visible] == [visible_statement.statement_id]
+
+
+def test_typed_outcome_listing_distinguishes_terminal_and_partial_accessions(
+    tmp_path: Path,
+) -> None:
+    known_at = datetime(2025, 2, 10, tzinfo=UTC)
+    discovery_id = uuid4()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(discovery_id, known_at - timedelta(days=30)))
+        repository = OwnershipRepository(storage.raw_records)
+
+        accepted_blob = storage.documents.put(b"one!")
+        accepted_revision = _revision(
+            accession="0000320193-25-000001",
+            accepted_at=known_at - timedelta(days=3),
+            retrieved_at=known_at - timedelta(days=1),
+            checksum=accepted_blob.sha256,
+            discovery_id=discovery_id,
+        )
+        storage.raw_records.save(revision_to_raw_record(accepted_revision))
+        storage.raw_records.save(
+            statement_to_raw_record(
+                _statement(
+                    revision=accepted_revision,
+                    schema_version="sec-ownership-statement-v2",
+                    parsed_at=known_at - timedelta(days=1),
+                )
+            )
+        )
+        repository.save_outcome(
+            _outcome(
+                filing=accepted_revision.document.filing,
+                resolver_version="sec-ownership-resolver-v2",
+                checksum=accepted_revision.content_sha256,
+                discovery_id=discovery_id,
+            )
+        )
+
+        rejected_filing = _filing(
+            accession="0000320193-25-000002", accepted_at=known_at - timedelta(days=2)
+        )
+        repository.save_outcome(
+            _outcome(
+                filing=rejected_filing,
+                resolver_version="sec-ownership-resolver-v2",
+                checksum="c" * 64,
+                discovery_id=discovery_id,
+                status="rejected",
+                reason_code="not_xml",
+            )
+        )
+
+        partial_filing = _filing(
+            accession="0000320193-25-000003", accepted_at=known_at - timedelta(days=1)
+        )
+        repository.save_outcome(
+            _outcome(
+                filing=partial_filing,
+                resolver_version="sec-ownership-resolver-v2",
+                checksum="d" * 64,
+                discovery_id=discovery_id,
+            )
+        )
+
+        states = {
+            state.accession: state
+            for state in repository.list_accession_states(
+                asset_id="equity:us:aapl", known_at=known_at
+            )
+        }
+
+        assert set(states) == {
+            "0000320193-25-000001",
+            "0000320193-25-000002",
+            "0000320193-25-000003",
+        }
+        assert states["0000320193-25-000001"].resolution == "accepted"
+        assert states["0000320193-25-000001"].terminal is True
+        assert states["0000320193-25-000002"].resolution == "rejected"
+        assert states["0000320193-25-000002"].terminal is True
+        assert states["0000320193-25-000003"].resolution == "partial"
+        assert states["0000320193-25-000003"].terminal is False
+
+        # The same typed listing respects the point-in-time cut: nothing persisted after the
+        # requested instant may leak into the watermark a caller derives from it.
+        earlier = repository.list_accession_states(
+            asset_id="equity:us:aapl",
+            known_at=known_at - timedelta(days=2, seconds=1),
+        )
+        assert {state.accession for state in earlier} == {"0000320193-25-000001"}
+        assert earlier[0].resolution == "accepted"
 
 
 def test_verify_ownership_records_checks_v2_and_fails_closed_on_corruption(tmp_path: Path) -> None:

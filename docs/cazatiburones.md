@@ -76,6 +76,35 @@ Las capas previstas permanecen separadas:
    trazable, con deduplicación y cooldown) permanece pendiente;
 5. regla de screening opcional que referencia evidencia exacta.
 
+## Adquisición incremental programada
+
+La evidencia declarada deja de depender de una invocación manual. Para cada emisor SEC seleccionado
+existe un job único `sec:<asset_id>:declared-activity` (proveedor `sec-edgar`, dominio `events`,
+frecuencia `daily-check`, 08:15 `America/Lima`, después de fundamentales y documentos primarios) que
+ejecuta `sec-declared-activity-refresh-v1` bajo el mutex writer existente:
+
+- una sola comprobación fresca de Submissions por activo y ejecución, sin Company Facts;
+- selección versionada `sec-declared-activity-selection-v1` sobre las familias insider (Forms
+  3/4/5 y sus enmiendas) y beneficiaria (Schedules 13D/13G y sus enmiendas), con los formularios
+  literales ya integrados y sin aceptar formularios libres;
+- sin evidencia terminal previa, sólo el accession elegible más reciente de cada formulario exacto;
+  el baseline histórico anterior queda fuera de alcance y nunca se declara como backlog;
+- con watermark derivado de evidencia terminal persistida, sólo el delta posterior no procesado, en
+  orden de aceptación ascendente, limitado a 25 accessions por familia y ejecución;
+- `coverage_complete=false` con `backlog_count>0` cuando queda delta; la ejecución siguiente
+  continúa sin saltos;
+- un accession se completa sólo con statement verificable o con un rechazo terminal bajo una razón
+  versionada. Un locator parcial, un outcome aceptado sin statement, una excepción de parser o un
+  fallo de storage no avanzan el watermark: el accession queda declarado como incompleto y se
+  reanuda, mientras un rechazo terminal no se vuelve a descargar;
+- tras importar ambas familias se ejecutan las capas 2 y 3 ya integradas al mismo corte
+  `submissions_checked_at`, incluso sin bytes nuevos, para completar capas interrumpidas.
+
+El job publica los source IDs de ambas familias separadas, los conteos creados/reutilizados, el corte
+efectivo y la cobertura. La operación no crea eventos, candidatos, notificaciones, score ni señal, no
+toca la familia 13F y no añade endpoint, botón, preferencia ni pantalla; las lecturas actuales de
+universo y detalle reflejan los statements al invalidarse sus cachés.
+
 ## Pipeline híbrido local
 
 ```text

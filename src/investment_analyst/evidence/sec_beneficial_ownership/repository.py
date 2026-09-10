@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from investment_analyst.core.models import RawRecord, SourceReference
@@ -20,6 +22,41 @@ from investment_analyst.storage import RecordNotFoundError, StorageError
 
 class BeneficialOwnershipRepositoryError(StorageError):
     """A persisted beneficial-ownership record cannot be trusted."""
+
+
+BENEFICIAL_OWNERSHIP_TERMINAL_REJECTION_REASONS = frozenset(
+    {"forbidden_declaration", "not_xml", "unexpected_root", "no_unique_top_level_xml"}
+)
+"""Versioned resource rejections that end resolution for one accession."""
+
+
+@dataclass(frozen=True, slots=True)
+class BeneficialOwnershipAccessionState:
+    """Typed persisted resolution of one Schedule 13D/13G accession.
+
+    ``accepted`` means a statement was verified; ``rejected`` means the evaluated resource was
+    terminally rejected by a versioned reason code; ``partial`` means evidence exists without a
+    statement or a terminal rejection, so the accession must be resumed instead of skipped.
+    """
+
+    accession: str
+    form: str
+    accepted_at: datetime
+    resolution: Literal["accepted", "rejected", "partial"]
+
+    @property
+    def terminal(self) -> bool:
+        """Return whether the accession no longer requires any SEC request."""
+        return self.resolution != "partial"
+
+
+@dataclass(slots=True)
+class _BeneficialOwnershipAccumulator:
+    form: str
+    accepted_at: datetime
+    has_statement: bool = False
+    has_accepted_outcome: bool = False
+    rejected_reasons: set[str] = field(default_factory=set)
 
 
 def outcome_to_raw_record(outcome: BeneficialOwnershipResolutionOutcome) -> RawRecord:
@@ -191,6 +228,74 @@ class BeneficialOwnershipRepository:
                 str(item.statement_id),
             ),
         )
+
+    def list_accession_states(
+        self, *, asset_id: str, known_at: datetime
+    ) -> tuple[BeneficialOwnershipAccessionState, ...]:
+        """List typed per-accession resolution without downloading anything.
+
+        An accession with an accepted resource but no statement stays ``partial`` so an
+        interrupted parser or storage step is resumed instead of being mistaken for a
+        completed one.
+        """
+        accumulated: dict[str, _BeneficialOwnershipAccumulator] = {}
+        for record in self._raw_records.list(
+            asset_id=asset_id,
+            source_id=BENEFICIAL_OWNERSHIP_SOURCE_ID,
+            schema_version=BENEFICIAL_OWNERSHIP_SCHEMA_VERSION,
+            available_to=known_at,
+        ):
+            filing = statement_from_raw_record(record).document_revision.document.filing
+            entry = accumulated.get(filing.accession)
+            if entry is None:
+                entry = _BeneficialOwnershipAccumulator(
+                    form=filing.form,
+                    accepted_at=filing.accepted_at,
+                )
+                accumulated[filing.accession] = entry
+            entry.has_statement = True
+        for record in self._raw_records.list(
+            asset_id=asset_id,
+            source_id=BENEFICIAL_OWNERSHIP_SOURCE_ID,
+            schema_version=BENEFICIAL_OWNERSHIP_OUTCOME_SCHEMA_VERSION,
+            available_to=known_at,
+        ):
+            outcome = outcome_from_raw_record(record)
+            filing = outcome.filing
+            entry = accumulated.get(filing.accession)
+            if entry is None:
+                entry = _BeneficialOwnershipAccumulator(
+                    form=filing.form,
+                    accepted_at=filing.accepted_at,
+                )
+                accumulated[filing.accession] = entry
+            if outcome.status == "accepted":
+                entry.has_accepted_outcome = True
+            else:
+                entry.rejected_reasons.add(outcome.reason_code)
+        states = (
+            BeneficialOwnershipAccessionState(
+                accession=accession,
+                form=entry.form,
+                accepted_at=entry.accepted_at,
+                resolution=_resolution(entry),
+            )
+            for accession, entry in accumulated.items()
+        )
+        return tuple(sorted(states, key=lambda item: (item.accepted_at, item.accession)))
+
+
+def _resolution(
+    entry: _BeneficialOwnershipAccumulator,
+) -> Literal["accepted", "rejected", "partial"]:
+    if entry.has_statement:
+        return "accepted"
+    if (
+        not entry.has_accepted_outcome
+        and entry.rejected_reasons & BENEFICIAL_OWNERSHIP_TERMINAL_REJECTION_REASONS
+    ):
+        return "rejected"
+    return "partial"
 
 
 def verify_beneficial_ownership_records(

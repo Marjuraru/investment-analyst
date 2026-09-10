@@ -1,13 +1,16 @@
 """Coordinate a fresh SEC Submissions snapshot with primary-document reuse."""
 
-from datetime import datetime
 from typing import Protocol
 
 from investment_analyst.application.sec_document_refresh_models import (
     SecPrimaryDocumentRefreshRequest,
     SecPrimaryDocumentRefreshSummary,
 )
-from investment_analyst.core.models import Asset, RawRecord
+from investment_analyst.application.sec_submissions_refresh import (
+    SecSubmissionsRefreshError,
+    SecSubmissionsRefreshService,
+    SecSubmissionsSnapshot,
+)
 from investment_analyst.evidence.sec_documents.models import SEC_DOCUMENT_SOURCE_ID
 from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_document_pipeline import (
@@ -21,13 +24,8 @@ from investment_analyst.providers.fundamentals.sec_edgar import (
     SecEdgarDocument,
 )
 from investment_analyst.providers.fundamentals.sec_filing_index import SecFilingIndex
-from investment_analyst.providers.fundamentals.sec_raw_records import (
-    create_sec_asset,
-    create_sec_submissions_source,
-    sec_document_to_raw_record,
-)
 from investment_analyst.storage import LocalStorage
-from investment_analyst.storage.errors import RecordNotFoundError, StorageError
+from investment_analyst.storage.errors import StorageError
 
 
 class SecPrimaryDocumentRefreshError(RuntimeError):
@@ -60,7 +58,11 @@ class SecPrimaryDocumentRefreshService:
         storage.require_open()
         self._storage = storage
         self._configuration = configuration
-        self._issuer_client = issuer_client
+        self._submissions_service = SecSubmissionsRefreshService(
+            storage,
+            configuration=configuration,
+            issuer_client=issuer_client,
+        )
         self._document_pipeline = document_pipeline
 
     def run(
@@ -71,7 +73,13 @@ class SecPrimaryDocumentRefreshService:
         self._storage.require_open()
         if request.asset_id != self._configuration.asset_id:
             raise SecPrimaryDocumentRefreshError("request asset_id does not match SEC issuer")
-        submissions, checked_at, created, reused = self._persist_fresh_submissions()
+        snapshot = self._persist_fresh_submissions()
+        submissions, checked_at, created, reused = (
+            snapshot.record,
+            snapshot.checked_at,
+            snapshot.created,
+            snapshot.reused,
+        )
         index = SecFilingIndex.from_raw_record(submissions, self._configuration)
         forms = tuple(sorted(self._configuration.supported_forms))
         by_form = {form: tuple(item for item in index.all() if item.form == form) for form in forms}
@@ -132,36 +140,12 @@ class SecPrimaryDocumentRefreshService:
             traceability_verified=traceability_verified,
         )
 
-    def _persist_fresh_submissions(self) -> tuple[RawRecord, datetime, int, int]:
-        submissions_document = self._issuer_client.fetch_submissions()
-        candidate = sec_document_to_raw_record(submissions_document, self._configuration)
-        existing_asset = self._existing_asset()
-        self._storage.assets.upsert(create_sec_asset(self._configuration, existing_asset))
-        self._storage.sources.upsert(create_sec_submissions_source(self._configuration))
+    def _persist_fresh_submissions(self) -> SecSubmissionsSnapshot:
+        """Persist the current Submissions snapshot through the shared collaborator."""
         try:
-            record = self._storage.raw_records.get(candidate.record_id)
-            reused = 1
-            created = 0
-        except RecordNotFoundError:
-            self._storage.raw_records.save(candidate)
-            record = self._storage.raw_records.get(candidate.record_id)
-            created = 1
-            reused = 0
-        if (
-            record.record_id != candidate.record_id
-            or record.asset_id != candidate.asset_id
-            or record.source.source_id != candidate.source.source_id
-            or record.payload != candidate.payload
-            or record.schema_version != candidate.schema_version
-        ):
-            raise SecPrimaryDocumentRefreshError("stored Submissions snapshot conflicts")
-        return record, candidate.received_at, created, reused
-
-    def _existing_asset(self) -> Asset | None:
-        try:
-            return self._storage.assets.get(self._configuration.asset_id)
-        except RecordNotFoundError:
-            return None
+            return self._submissions_service.persist_fresh_snapshot()
+        except SecSubmissionsRefreshError as error:
+            raise SecPrimaryDocumentRefreshError(str(error)) from error
 
 
 def build_sec_primary_document_refresh_service(

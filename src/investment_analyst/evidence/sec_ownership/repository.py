@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from investment_analyst.core.models import RawRecord, SourceReference
@@ -21,6 +23,41 @@ from investment_analyst.storage import RecordNotFoundError, StorageError
 
 class OwnershipRepositoryError(StorageError):
     pass
+
+
+OWNERSHIP_TERMINAL_REJECTION_REASONS = frozenset(
+    {"forbidden_declaration", "not_xml", "incompatible_root"}
+)
+"""Versioned resource rejections that end resolution for one accession."""
+
+
+@dataclass(frozen=True, slots=True)
+class OwnershipAccessionState:
+    """Typed persisted resolution of one Section 16 accession.
+
+    ``accepted`` means a statement was verified; ``rejected`` means the evaluated resource was
+    terminally rejected by a versioned reason code; ``partial`` means evidence exists without a
+    statement or a terminal rejection, so the accession must be resumed instead of skipped.
+    """
+
+    accession: str
+    form: str
+    accepted_at: datetime
+    resolution: Literal["accepted", "rejected", "partial"]
+
+    @property
+    def terminal(self) -> bool:
+        """Return whether the accession no longer requires any SEC request."""
+        return self.resolution != "partial"
+
+
+@dataclass(slots=True)
+class _OwnershipAccumulator:
+    form: str
+    accepted_at: datetime
+    has_statement: bool = False
+    has_accepted_outcome: bool = False
+    rejected_reasons: set[str] = field(default_factory=set)
 
 
 def verify_ownership_records(records, document_repository, content_store) -> None:
@@ -189,3 +226,75 @@ class OwnershipRepository:
                 str(item.statement_id),
             ),
         )
+
+    def list_accession_states(
+        self, *, asset_id: str, known_at: datetime
+    ) -> tuple[OwnershipAccessionState, ...]:
+        """List typed per-accession resolution without downloading anything.
+
+        Statements and outcomes of both integrated schema generations are read at the same
+        point-in-time cut. An accession with an accepted resource but no statement stays
+        ``partial`` so an interrupted parser or storage step is resumed instead of being
+        mistaken for a completed one.
+        """
+        accumulated: dict[str, _OwnershipAccumulator] = {}
+        for schema_version in (OWNERSHIP_SCHEMA_VERSION, OWNERSHIP_SCHEMA_VERSION_V2):
+            for record in self._raw_records.list(
+                asset_id=asset_id,
+                source_id=OWNERSHIP_SOURCE_ID,
+                schema_version=schema_version,
+                available_to=known_at,
+            ):
+                filing = statement_from_raw_record(record).document_revision.document.filing
+                entry = accumulated.get(filing.accession)
+                if entry is None:
+                    entry = _OwnershipAccumulator(
+                        form=filing.form,
+                        accepted_at=filing.accepted_at,
+                    )
+                    accumulated[filing.accession] = entry
+                entry.has_statement = True
+        for schema_version in (
+            OWNERSHIP_OUTCOME_SCHEMA_VERSION,
+            OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2,
+        ):
+            for record in self._raw_records.list(
+                asset_id=asset_id,
+                source_id=OWNERSHIP_SOURCE_ID,
+                schema_version=schema_version,
+                available_to=known_at,
+            ):
+                outcome = outcome_from_raw_record(record)
+                filing = outcome.filing
+                entry = accumulated.get(filing.accession)
+                if entry is None:
+                    entry = _OwnershipAccumulator(
+                        form=filing.form,
+                        accepted_at=filing.accepted_at,
+                    )
+                    accumulated[filing.accession] = entry
+                if outcome.status == "accepted":
+                    entry.has_accepted_outcome = True
+                else:
+                    entry.rejected_reasons.add(outcome.reason_code)
+        states = (
+            OwnershipAccessionState(
+                accession=accession,
+                form=entry.form,
+                accepted_at=entry.accepted_at,
+                resolution=_resolution(entry),
+            )
+            for accession, entry in accumulated.items()
+        )
+        return tuple(sorted(states, key=lambda item: (item.accepted_at, item.accession)))
+
+
+def _resolution(entry: _OwnershipAccumulator) -> Literal["accepted", "rejected", "partial"]:
+    if entry.has_statement:
+        return "accepted"
+    if (
+        not entry.has_accepted_outcome
+        and entry.rejected_reasons & OWNERSHIP_TERMINAL_REJECTION_REASONS
+    ):
+        return "rejected"
+    return "partial"

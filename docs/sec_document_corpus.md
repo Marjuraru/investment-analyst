@@ -71,6 +71,34 @@ El summary conserva `submissions_checked_at` de cada comprobación fresca separa
 `second_document_fetches=0`. El delta sintético equivalente se cubre por la prueba unitaria del
 contrato incremental.
 
+## Refresh incremental de actividad declarada
+
+`sec-declared-activity-refresh-v1` comparte el mismo primitivo de snapshot que el refresh
+documental: un colaborador tipado persistente y verificado —extraído de la semántica ya integrada por
+`SEC-CORPUS-25`— hace exactamente un GET Submissions por activo y ejecución y cero GET a Company
+Facts. Sobre ese snapshot, la política `sec-declared-activity-selection-v1` elige la evidencia
+declarada pendiente de Forms 3/4/5 y Schedules 13D/13G, importa ambas familias con los pipelines
+existentes y completa las capas 2 y 3 al mismo corte.
+
+La selección es incremental y auditable: sin evidencia terminal previa sólo se selecciona el
+accession más reciente de cada formulario exacto; con watermark, sólo el delta posterior no procesado,
+en orden de aceptación ascendente y limitado a 25 accessions por familia y ejecución. El backlog se
+declara (`backlog_count`, `coverage_complete=false`) y la ejecución siguiente continúa sin saltos. Los
+rechazos terminales versionados no se vuelven a descargar; el estado parcial, un outcome aceptado sin
+statement o un fallo de parser/storage no avanzan el watermark y se reanudan, sin borrar el progreso
+ya persistido por accession.
+
+La comprobación real usa un workspace temporal y no imprime ni persiste la identidad SEC:
+
+```bash
+set -a; source .env; set +a
+PYTHONPATH=src .venv/bin/python scripts/smoke_sec_declared_activity_refresh.py
+```
+
+El smoke ejecuta el refresh dos veces sobre un activo SEC, informa un GET Submissions por ejecución,
+llamadas Archives acotadas en la primera y `archives_calls=0` en la repetición, y verifica con una
+consulta read-only que los statements persistidos son visibles en el corte declarado.
+
 ## Línea temporal y búsqueda local
 
 Para la búsqueda transversal, enumeración y ordenación point-in-time de revisiones documentales
