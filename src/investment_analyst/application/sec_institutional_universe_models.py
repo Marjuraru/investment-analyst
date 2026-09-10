@@ -39,7 +39,7 @@ class SecInstitutionalUniverseRefreshResult(_Strict):
     candidate_manager_count: int = Field(ge=0)
     selected_manager_count: int = Field(ge=0)
     unselected_manager_count: int = Field(ge=0)
-    coverage_complete: bool = True
+    coverage_complete: bool
     created: bool
 
 

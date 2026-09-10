@@ -139,6 +139,11 @@ def main(argv: list[str] | None = None) -> int:
         duration_second = time.monotonic() - start_rerun
 
         # Assertions on rerun (idempotence)
+        if first_result.coverage_complete is not False:
+            count = first_result.unselected_manager_count
+            raise RuntimeError(
+                f"Expected coverage_complete=False due to truncation ({count} unselected)"
+            )
         if second_result.created:
             raise RuntimeError("Rerun expected created=False (reusing existing blob)")
         if second_result.revision_id != first_result.revision_id:
@@ -147,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("Rerun snapshot_id mismatch")
         if second_result.candidate_manager_count != first_result.candidate_manager_count:
             raise RuntimeError("Rerun candidate count mismatch")
+        if second_result.coverage_complete != first_result.coverage_complete:
+            raise RuntimeError("Rerun coverage_complete mismatch")
 
         # Third: read-only query
         query_result = application.query(

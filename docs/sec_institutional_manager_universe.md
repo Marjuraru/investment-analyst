@@ -58,16 +58,19 @@ Para cada activo con binding CUSIP:
 2. Se agrupan las posiciones exactas de dicho período por `(asset_id, CIK, accession)`.
 3. Se suma el valor reportado (`VALUE`) utilizando aritmética `Decimal` exacta en unidades
    declaradas (`usd_thousands_as_filed`).
-4. Si un gestor presenta múltiples accessions para el mismo período (por ejemplo, enmiendas), se
-   selecciona el accession de mayor valor reportado, desempatando por accession más reciente.
-5. Los gestores candidatos se ordenan de forma determinista:
-   - Valor reportado descendente.
-   - Fecha de filing descendente.
-   - CIK normalizado ascendente.
-   - Accession number ascendente.
+4. Para cada gestor, si existen múltiples accessions para el mismo período (por ejemplo, enmiendas),
+   se selecciona el accession más reciente por `(filing_date, accession)` como prioridad operativa;
+   todos los accessions coincidentes se conservan en el linaje (`accession_lineage`) y se declara si
+   existe enmienda (`is_amendment`).
+5. Los gestores candidatos se ordenan de forma determinista para la selección:
+   - Valor reportado as-filed descendente (`-value_as_filed`).
+   - CIK normalizado ascendente (`manager_cik`).
+   - Accession number ascendente (`operational_acc`).
 6. Se trunca el universo a un máximo de 25 gestores (`max_managers_per_asset = 25`).
-7. El snapshot resultante (`sec-13f-manager-universe-snapshot-v1`) indica si hubo truncación, el total
-   de gestores disponibles y la lista ordenada de gestores seleccionados.
+7. El snapshot resultante (`sec-13f-manager-universe-v1`) declara `candidate_manager_count`,
+   `selected_manager_count`, `unselected_manager_count` y `coverage_complete` (`coverage_complete=False`
+   si existe truncación o faltan CUSIP elegibles; `True` únicamente cuando todos los candidatos fueron
+   seleccionados y todos los CUSIP elegibles del catálogo están cubiertos).
 
 ## Semántica Point-in-Time (PIT)
 
@@ -81,8 +84,11 @@ Para cada activo con binding CUSIP:
 ## Herramientas CLI
 
 - `scripts/refresh_sec_institutional_manager_universe.py`: Descarga y procesa el dataset oficial más
-  reciente o uno local proporcionado por ruta/URL, persistiendo la revisión y el snapshot.
+  reciente de la SEC utilizando la identidad en `SEC_USER_AGENT`, persistiendo la revisión en el
+  document store y el snapshot en el almacenamiento append-only del workspace.
 - `scripts/query_sec_institutional_manager_universe.py`: Consulta de solo lectura del universo
-  disponible a un corte `known_at` específico, con verificación de integridad de blob y formato JSON/humano.
+  disponible a un corte `known_at` específico (con filtros opcionales `--asset-id` y `--cik`),
+  verificando la integridad del blob y linaje, y emitiendo la salida en formato JSON estructurado.
 - `scripts/smoke_sec_institutional_manager_universe.py`: Verificación integral de extremo a extremo
-  en un workspace temporal con métricas de red, memoria RSS e idempotencia.
+  en un workspace temporal contra los endpoints oficiales de la SEC, validando límites de red,
+  memoria RSS e idempotencia.

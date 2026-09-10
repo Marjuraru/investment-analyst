@@ -125,6 +125,8 @@ def test_application_refresh_and_query_lifecycle() -> None:
         assert result.selected_manager_count == 3
         assert result.matched_asset_count == 1
         assert result.eligible_asset_count >= 1
+        assert result.unselected_manager_count == 0
+        assert result.coverage_complete is True
 
         # 2. Rerun is idempotent
         rerun_result = app.refresh(
@@ -135,6 +137,7 @@ def test_application_refresh_and_query_lifecycle() -> None:
         assert rerun_result.created is False
         assert rerun_result.revision_id == result.revision_id
         assert rerun_result.snapshot_id == result.snapshot_id
+        assert rerun_result.coverage_complete is True
 
         # 3. Read-only query
         query_result = app.query(

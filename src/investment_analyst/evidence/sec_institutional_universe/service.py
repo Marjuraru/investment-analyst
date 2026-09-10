@@ -161,7 +161,7 @@ class SecInstitutionalUniverseService:
             selected_manager_count=selected_count,
             unselected_manager_count=unselected_count,
             max_managers_per_asset=max_managers_per_asset,
-            coverage_complete=True,
+            coverage_complete=bool(unselected_count == 0 and len(missing) == 0),
             covered_cusips=covered,
             missing_cusips=missing,
             candidates=candidates,

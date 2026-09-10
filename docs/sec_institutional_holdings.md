@@ -73,7 +73,8 @@ en el almacén documental por SHA-256 (`documents/sha256/`), y filtra determiní
 as-filed contra los CUSIP activos del catálogo de activos (`equity:us:aapl` → `037833100`).
 
 Para el período de reporte más reciente del dataset, selecciona hasta 25 gestores por activo ordenados
-por valor reportado descendente con desempate determinista por fecha de filing, CIK y accession. La
+por valor as-filed descendente con desempate determinista por CIK y accession ascendentes, seleccionando
+para cada gestor su accession más reciente por `(filing_date, accession)`. La
 disponibilidad point-in-time conserva `available_at = retrieved_at`, dado que el dataset carece de
 marcas de tiempo de aceptación. Este artefacto sirve exclusivamente como cola de descubrimiento y
 adquisición delimitada para la posterior ingesta dirigida de filings XML por gestor en `SEC-CORPUS-28`;

@@ -104,6 +104,7 @@ def test_service_exact_cusip_latest_period_decimal_cap_and_ties() -> None:
     assert snapshot.unselected_manager_count == 1
     assert snapshot.covered_cusips == ("037833100",)
     assert snapshot.missing_cusips == ("111111111",)
+    assert snapshot.coverage_complete is False
 
     # Verify candidates
     candidates = snapshot.candidates
@@ -137,3 +138,38 @@ def test_service_exact_cusip_latest_period_decimal_cap_and_ties() -> None:
     assert m3.value_as_filed == Decimal("10000")
     assert m3.selection_rank is None
     assert m3.is_selected is False
+
+
+def test_service_coverage_complete_when_all_selected_and_covered() -> None:
+    zip_bytes = _build_test_zip()
+    service = SecInstitutionalUniverseService()
+
+    revision = Sec13FDataSetRevision.create(
+        dataset_url="https://www.sec.gov/files/structureddata/data/form-13f-data-sets/01mar2026-31may2026_form13f.zip",
+        period_start=date(2026, 3, 1),
+        period_end=date(2026, 5, 31),
+        content_sha256="f" * 64,
+        size_bytes=len(zip_bytes),
+        retrieved_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+    )
+
+    catalog_cusips = {
+        "037833100": "equity:us:aapl",
+    }
+
+    snapshot = service.build_universe_snapshot(
+        zip_bytes,
+        dataset_revision=revision,
+        catalog_cusips=catalog_cusips,
+        catalog_version=1,
+        max_managers_per_asset=10,
+    )
+
+    assert snapshot.eligible_asset_count == 1
+    assert snapshot.matched_asset_count == 1
+    assert snapshot.candidate_manager_count == 3
+    assert snapshot.selected_manager_count == 3
+    assert snapshot.unselected_manager_count == 0
+    assert snapshot.covered_cusips == ("037833100",)
+    assert snapshot.missing_cusips == ()
+    assert snapshot.coverage_complete is True
