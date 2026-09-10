@@ -116,6 +116,18 @@ def test_client_uses_exact_headers_two_requests_and_pause() -> None:
         assert timeout == 30.0
 
 
+def test_dedicated_submissions_check_never_fetches_companyfacts() -> None:
+    transport = QueueTransport([SUBMISSIONS])
+    sleeps: list[float] = []
+
+    document = _client(transport, sleeps=sleeps).fetch_submissions()
+
+    assert document.document_type is SecDocumentType.SUBMISSIONS
+    assert len(transport.calls) == 1
+    assert transport.calls[0][0] == f"https://data.sec.gov/submissions/CIK{APPLE_CIK}.json"
+    assert sleeps == []
+
+
 def test_client_fetches_a_second_issuer_with_isolated_paths_and_identity() -> None:
     amd_cik = "0000002488"
     amd_name = "Advanced Micro Devices, Inc."

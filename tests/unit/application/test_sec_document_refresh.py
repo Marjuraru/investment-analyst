@@ -88,8 +88,8 @@ class _IssuerClient:
     def __init__(self, result: SecIssuerFetchResult) -> None:
         self.result = result
 
-    def fetch_issuer_documents(self) -> SecIssuerFetchResult:
-        return self.result
+    def fetch_submissions(self) -> SecEdgarDocument:
+        return self.result.documents[0]
 
 
 class _DocumentClient:
@@ -137,6 +137,10 @@ def test_refresh_reuses_verified_accessions_and_fetches_only_new_delta(tmp_path:
 
     assert first.document_fetch_calls == 2
     assert second.document_fetch_calls == 0
+    assert second.submissions_checked_at == first_at
+    assert second.submissions_record_available_at == first_at
+    assert delta.submissions_checked_at == datetime(2025, 2, 3, tzinfo=UTC)
+    assert delta.submissions_record_available_at == datetime(2025, 2, 3, tzinfo=UTC)
     assert second.accessions_reused == first.accessions_selected
     assert delta.accessions_fetched == ("0000320193-25-000003",)
     assert delta.accessions_reused == ("0000320193-25-000002",)

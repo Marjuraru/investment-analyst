@@ -46,7 +46,8 @@ el escaneo RawRecord paginado existente.
 ## Refresh incremental de documentos primarios
 
 `sec-primary-document-refresh-v1` es un contrato de aplicación separado de los fundamentales. Su
-request estricto sólo admite `asset_id`; toma un snapshot nuevo de Submissions, evalúa en orden los
+request estricto sólo admite `asset_id`; hace una comprobación dedicada de Submissions, sin descargar
+Company Facts, evalúa en orden los
 forms declarados por `SecAssetConfiguration` (incluidos `/A`) y elige el filing más reciente de cada
 form compatible. La cobertura sólo significa que cada accession seleccionada tiene exactamente una
 revisión v2 con lineage, hash y tamaño verificados; no afirma cubrir toda la historia SEC.
@@ -65,7 +66,8 @@ set -a; source .env; set +a
 PYTHONPATH=src .venv/bin/python scripts/smoke_sec_document_refresh.py
 ```
 
-El primer refresh puede obtener documentos oficiales; el segundo debe informar
+El summary conserva `submissions_checked_at` de cada comprobación fresca separado de
+`submissions_record_available_at` del RawRecord que aporta lineage. El primer refresh puede obtener documentos oficiales; el segundo debe informar
 `second_document_fetches=0`. El delta sintético equivalente se cubre por la prueba unitaria del
 contrato incremental.
 

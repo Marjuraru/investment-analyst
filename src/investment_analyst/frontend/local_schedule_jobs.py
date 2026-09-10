@@ -593,7 +593,7 @@ def _primary_document_job(
         reused = summary.submissions_reused + summary.revisions_reused + summary.blobs_reused
         return ScheduledJobExecution(
             job_id=definition.job_id,
-            effective_known_at=summary.submissions_snapshot_at,
+            effective_known_at=summary.submissions_checked_at,
             evidence_changed=created > 0,
             source_ids=tuple(sorted((summary.source_id, summary.submissions_source_id))),
             created_count=created,

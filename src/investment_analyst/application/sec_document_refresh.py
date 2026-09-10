@@ -18,7 +18,7 @@ from investment_analyst.providers.fundamentals.sec_document_pipeline import (
 )
 from investment_analyst.providers.fundamentals.sec_edgar import (
     SecEdgarClient,
-    SecIssuerFetchResult,
+    SecEdgarDocument,
 )
 from investment_analyst.providers.fundamentals.sec_filing_index import SecFilingIndex
 from investment_analyst.providers.fundamentals.sec_raw_records import (
@@ -35,8 +35,8 @@ class SecPrimaryDocumentRefreshError(RuntimeError):
 
 
 class _IssuerSnapshotClient(Protocol):
-    def fetch_issuer_documents(self) -> SecIssuerFetchResult:
-        """Fetch the validated SEC issuer snapshot containing Submissions."""
+    def fetch_submissions(self) -> SecEdgarDocument:
+        """Fetch exactly one validated SEC Submissions snapshot."""
         ...
 
 
@@ -71,7 +71,7 @@ class SecPrimaryDocumentRefreshService:
         self._storage.require_open()
         if request.asset_id != self._configuration.asset_id:
             raise SecPrimaryDocumentRefreshError("request asset_id does not match SEC issuer")
-        submissions, snapshot_at, created, reused = self._persist_fresh_submissions()
+        submissions, checked_at, created, reused = self._persist_fresh_submissions()
         index = SecFilingIndex.from_raw_record(submissions, self._configuration)
         forms = tuple(sorted(self._configuration.supported_forms))
         by_form = {form: tuple(item for item in index.all() if item.form == form) for form in forms}
@@ -114,7 +114,8 @@ class SecPrimaryDocumentRefreshService:
             source_id=SEC_DOCUMENT_SOURCE_ID,
             submissions_source_id=self._configuration.submissions_source_id,
             submissions_raw_record_id=str(submissions.record_id),
-            submissions_snapshot_at=snapshot_at,
+            submissions_checked_at=checked_at,
+            submissions_record_available_at=submissions.available_at,
             forms_evaluated=forms,
             forms_missing=forms_missing,
             accessions_selected=tuple(item.accession_number for item in selected),
@@ -132,13 +133,7 @@ class SecPrimaryDocumentRefreshService:
         )
 
     def _persist_fresh_submissions(self) -> tuple[RawRecord, datetime, int, int]:
-        fetch = self._issuer_client.fetch_issuer_documents()
-        submissions_document = next(
-            (item for item in fetch.documents if item.document_type.value == "submissions"),
-            None,
-        )
-        if submissions_document is None:
-            raise SecPrimaryDocumentRefreshError("SEC snapshot omitted Submissions")
+        submissions_document = self._issuer_client.fetch_submissions()
         candidate = sec_document_to_raw_record(submissions_document, self._configuration)
         existing_asset = self._existing_asset()
         self._storage.assets.upsert(create_sec_asset(self._configuration, existing_asset))

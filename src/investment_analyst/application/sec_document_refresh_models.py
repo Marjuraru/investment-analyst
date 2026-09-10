@@ -27,7 +27,8 @@ class SecPrimaryDocumentRefreshSummary(ContractModel):
     source_id: NonEmptyStr
     submissions_source_id: NonEmptyStr
     submissions_raw_record_id: NonEmptyStr
-    submissions_snapshot_at: UTCDateTime
+    submissions_checked_at: UTCDateTime
+    submissions_record_available_at: UTCDateTime
     forms_evaluated: tuple[NonEmptyStr, ...]
     forms_missing: tuple[NonEmptyStr, ...]
     accessions_selected: tuple[NonEmptyStr, ...]

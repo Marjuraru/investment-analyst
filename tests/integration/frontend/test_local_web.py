@@ -1018,7 +1018,7 @@ class _FakeApplication:
                 {
                     "schema_version": "sec-primary-document-refresh-v1",
                     "asset_id": request.asset_id,
-                    "submissions_snapshot_at": "2026-07-16T15:47:00+00:00",
+                    "submissions_checked_at": "2026-07-16T15:47:00+00:00",
                     "coverage_complete": True,
                     "traceability_verified": True,
                 }
