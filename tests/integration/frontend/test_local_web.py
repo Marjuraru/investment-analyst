@@ -166,6 +166,10 @@ from investment_analyst.application.peru_registry import (
     BvlRegistryRefreshSummary,
 )
 from investment_analyst.application.runtime import StorageLocationRequest
+from investment_analyst.application.sec_declared_activity_refresh_models import (
+    SecDeclaredActivityRefreshRequest,
+    SecDeclaredActivityRefreshSummary,
+)
 from investment_analyst.application.sec_document_refresh_models import (
     SecPrimaryDocumentRefreshRequest,
     SecPrimaryDocumentRefreshSummary,
@@ -392,6 +396,9 @@ class _FakeApplication:
         self.primary_document_refresh_requests: list[SecPrimaryDocumentRefreshRequest] = []
         self.primary_document_refresh_locations: list[StorageLocationRequest] = []
         self.primary_document_refresh_identities: list[SecEdgarIdentity] = []
+        self.declared_activity_refresh_requests: list[SecDeclaredActivityRefreshRequest] = []
+        self.declared_activity_refresh_locations: list[StorageLocationRequest] = []
+        self.declared_activity_refresh_identities: list[SecEdgarIdentity] = []
         self.bvl_refresh_requests: list[BvlRegistryRefreshRequest] = []
         self.bvl_refresh_locations: list[StorageLocationRequest] = []
         self.valuation_requests: list[CorporateValuationRequest] = []
@@ -1025,6 +1032,29 @@ class _FakeApplication:
             ),
         )
 
+    def refresh_sec_declared_activity(
+        self,
+        request: SecDeclaredActivityRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        sec_identity: SecEdgarIdentity,
+    ) -> SecDeclaredActivityRefreshSummary:
+        self.declared_activity_refresh_requests.append(request)
+        self.declared_activity_refresh_locations.append(location)
+        self.declared_activity_refresh_identities.append(sec_identity)
+        return cast(
+            SecDeclaredActivityRefreshSummary,
+            _JsonResult(
+                {
+                    "schema_version": "sec-declared-activity-refresh-v1",
+                    "asset_id": request.asset_id,
+                    "submissions_checked_at": "2026-07-16T15:47:00+00:00",
+                    "coverage_complete": True,
+                    "traceability_verified": True,
+                }
+            ),
+        )
+
     def query_sec_document_timeline(
         self,
         query: SecDocumentTimelineQuery,
@@ -1171,6 +1201,53 @@ def test_primary_document_refresh_uses_controller_writer_without_http_route(tmp_
     assert application.primary_document_refresh_locations == [
         StorageLocationRequest(workspace=tmp_path / "workspace")
     ]
+
+
+def test_declared_activity_refresh_uses_controller_writer_and_invalidates_read_caches(
+    tmp_path: Path,
+) -> None:
+    """The internal boundary runs under the writer mutex, drops activity reads, adds no route."""
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    coverage_request = UniverseCoverageRequest(
+        known_at=datetime(2026, 7, 16, tzinfo=UTC),
+        market_start=date(2026, 1, 1),
+        market_end=date(2026, 7, 15),
+        fundamental_start=date(2020, 1, 1),
+        fundamental_end=date(2026, 7, 15),
+    )
+    activity_request = CazatiburonesUniverseActivityRequest(
+        known_at=datetime(2026, 7, 16, tzinfo=UTC),
+    )
+    controller.coverage_request(coverage_request)
+    controller.cazatiburones_universe_activity_request(activity_request)
+    assert len(application.universe_coverage_requests) == 1
+    assert len(application.universe_activity_requests) == 1
+
+    summary = controller.sec_declared_activity_refresh_request(
+        SecDeclaredActivityRefreshRequest(asset_id="equity:us:aapl")
+    )
+
+    assert summary.to_json_dict()["schema_version"] == "sec-declared-activity-refresh-v1"
+    assert application.declared_activity_refresh_requests == [
+        SecDeclaredActivityRefreshRequest(asset_id="equity:us:aapl")
+    ]
+    assert application.declared_activity_refresh_locations == [
+        StorageLocationRequest(workspace=tmp_path / "workspace")
+    ]
+    controller.coverage_request(coverage_request)
+    controller.cazatiburones_universe_activity_request(activity_request)
+    assert len(application.universe_coverage_requests) == 2
+    assert len(application.universe_activity_requests) == 2
+    with _server(AaplLocalWebApplication(controller, None)) as (_, root):
+        status, _, _ = _json_request(Request(f"{root}/api/declared-activity-refresh"))
+    assert status == 404
 
 
 def test_loopback_reads_remain_available_while_a_local_writer_is_active(tmp_path: Path) -> None:

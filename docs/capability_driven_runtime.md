@@ -104,6 +104,15 @@ aislado `sec-primary-document-refresh-v1` a través del mismo mutex writer, publ
 conteos, corte del snapshot y cobertura, y se agrega o retira al reconciliar preferencias. No expone
 endpoint, polling ni pantalla nueva.
 
+Esos mismos emisores reciben un segundo job del dominio `events`:
+`sec:<asset_id>:declared-activity`, proveedor `sec-edgar`, frecuencia `daily-check` y offset de 75
+minutos respecto de `run_at` en `America/Lima`, después de fundamentales y documentos primarios.
+Llama al contrato aislado `sec-declared-activity-refresh-v1` bajo el mismo mutex writer: un GET
+Submissions, importación acotada de Forms 3/4/5 y Schedules 13D/13G mediante los pipelines
+integrados, y capas 2/3 al mismo corte `submissions_checked_at`. Publica los source IDs de ambas
+familias separadas, conteos creados/reutilizados, `coverage_complete` y la categoría tipada de
+fallo. No crea endpoint, botón, preferencia, polling ni pantalla, y no toca la familia 13F.
+
 El registro de jobs ya no queda fijado durante todo el proceso. Las preferencias persistentes
 seleccionan activos y el scheduler publica atómicamente un nuevo tuple de jobs construido desde este
 plan y el catálogo, sin ejecutar proveedores. Cada tick conserva su snapshot; retirar un job no

@@ -9,6 +9,9 @@ from pydantic import ConfigDict, model_validator
 
 from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagnosticReport
 from investment_analyst.analytics.aapl_daily_report_service import AaplDailyReportService
+from investment_analyst.analytics.cazatiburones.activity_metric_pipeline import (
+    ActivityMetricPipeline,
+)
 from investment_analyst.analytics.cazatiburones.declared_activity_models import (
     DeclaredActivityQueryResult,
 )
@@ -184,6 +187,13 @@ from investment_analyst.application.peru_registry import (
     BvlRegistryUniverseService,
 )
 from investment_analyst.application.runtime import ApplicationRuntime, StorageLocationRequest
+from investment_analyst.application.sec_declared_activity_refresh import (
+    build_sec_declared_activity_refresh_service,
+)
+from investment_analyst.application.sec_declared_activity_refresh_models import (
+    SecDeclaredActivityRefreshRequest,
+    SecDeclaredActivityRefreshSummary,
+)
 from investment_analyst.application.sec_document_refresh import (
     build_sec_primary_document_refresh_service,
 )
@@ -201,6 +211,7 @@ from investment_analyst.application.sec_fundamental_refresh_models import (
     SecIssuerFundamentalRefreshRequest,
     SecIssuerFundamentalRefreshSummary,
 )
+from investment_analyst.application.sec_submissions_refresh import SecSubmissionsRefreshService
 from investment_analyst.application.universe_coverage import UniverseCoverageApplication
 from investment_analyst.application.universe_coverage_models import (
     UniverseCoverageRequest,
@@ -214,6 +225,9 @@ from investment_analyst.catalog.provider_configuration import (
     resolve_sec_configuration,
 )
 from investment_analyst.core.models.base import ContractModel, UTCDateTime
+from investment_analyst.evidence.sec_declared_activity_observations.service import (
+    DeclaredActivityObservationService,
+)
 from investment_analyst.evidence.sec_documents.timeline_models import (
     SecDocumentTimelineQuery,
     SecDocumentTimelineResult,
@@ -221,6 +235,9 @@ from investment_analyst.evidence.sec_documents.timeline_models import (
 from investment_analyst.evidence.sec_institutional_observations.models import (
     InstitutionalObservationQuery,
     InstitutionalObservationQueryResult,
+)
+from investment_analyst.providers.beneficial_ownership.sec_beneficial_ownership_pipeline import (
+    SecBeneficialOwnershipPipeline,
 )
 from investment_analyst.providers.crypto.coinbase_exchange import CoinbaseExchangeClient
 from investment_analyst.providers.crypto.coinbase_pipeline import (
@@ -286,6 +303,7 @@ from investment_analyst.providers.macro.fred_point_in_time import (
 )
 from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistoricalPipeline
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials, AlpacaStockClient
+from investment_analyst.providers.ownership.sec_ownership_pipeline import SecOwnershipPipeline
 from investment_analyst.providers.peru.smv_open_data import SmvOpenDataClient
 from investment_analyst.storage import LocalStorage
 from investment_analyst.workspace.models import WorkspaceAccessMode, WorkspaceInitialization
@@ -1065,6 +1083,52 @@ class InvestmentAnalystApplication:
                 configuration=configuration,
                 issuer_client=issuer_client,
                 document_pipeline=document_pipeline,
+            ).run(request)
+
+    def refresh_sec_declared_activity(
+        self,
+        request: SecDeclaredActivityRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        sec_identity: SecEdgarIdentity,
+    ) -> SecDeclaredActivityRefreshSummary:
+        """Refresh one issuer's declared Section 16 and 13D/13G activity with its layers."""
+        configuration = resolve_sec_configuration(
+            self._runtime.provider_resolver,
+            asset_id=request.asset_id,
+        )
+        write_access = WorkspaceAccessMode.READ_WRITE
+        with self._runtime.open_storage(
+            location,
+            access_mode=write_access,
+        ) as storage:
+            transport = self._transport_factory()
+            issuer_client = SecEdgarClient(
+                transport,
+                sec_identity,
+                cik=configuration.cik,
+                ticker=configuration.ticker,
+            )
+            return build_sec_declared_activity_refresh_service(
+                storage,
+                configuration=configuration,
+                submissions_service=SecSubmissionsRefreshService(
+                    storage,
+                    configuration=configuration,
+                    issuer_client=issuer_client,
+                ),
+                ownership_pipeline=SecOwnershipPipeline(
+                    storage,
+                    SecDocumentClient(transport, sec_identity),
+                    configuration=configuration,
+                ),
+                beneficial_pipeline=SecBeneficialOwnershipPipeline(
+                    storage,
+                    SecDocumentClient(transport, sec_identity),
+                    configuration=configuration,
+                ),
+                observation_service=DeclaredActivityObservationService(storage),
+                metric_pipeline=ActivityMetricPipeline(storage),
             ).run(request)
 
     def query_aapl_fundamental_trend(

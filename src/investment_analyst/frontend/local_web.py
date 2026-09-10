@@ -190,6 +190,10 @@ from investment_analyst.application.peru_registry import (
     BvlRegistryRefreshSummary,
 )
 from investment_analyst.application.runtime import ApplicationRuntimeError, StorageLocationRequest
+from investment_analyst.application.sec_declared_activity_refresh_models import (
+    SecDeclaredActivityRefreshRequest,
+    SecDeclaredActivityRefreshSummary,
+)
 from investment_analyst.application.sec_document_refresh_models import (
     SecPrimaryDocumentRefreshRequest,
     SecPrimaryDocumentRefreshSummary,
@@ -655,6 +659,16 @@ class _ApplicationOperations(Protocol):
         sec_identity: SecEdgarIdentity,
     ) -> SecPrimaryDocumentRefreshSummary:
         """Refresh one issuer's primary documents without an HTTP route."""
+        ...
+
+    def refresh_sec_declared_activity(
+        self,
+        request: SecDeclaredActivityRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        sec_identity: SecEdgarIdentity,
+    ) -> SecDeclaredActivityRefreshSummary:
+        """Refresh one issuer's declared activity without an HTTP route."""
         ...
 
     def refresh_fred_catalog_series(
@@ -1288,6 +1302,24 @@ class AaplLocalController:
                     sec_identity=self._sec_identity,
                 )
             finally:
+                self._refresh_health_snapshot()
+
+    def sec_declared_activity_refresh_request(
+        self,
+        request: SecDeclaredActivityRefreshRequest,
+    ) -> SecDeclaredActivityRefreshSummary:
+        """Execute declared-activity refresh under the writer mutex and drop read caches."""
+        with self._writer_lock:
+            try:
+                return self._application.refresh_sec_declared_activity(
+                    request,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                    sec_identity=self._sec_identity,
+                )
+            finally:
+                with self._cache_lock:
+                    self._coverage_cache.clear()
+                    self._universe_activity_cache.clear()
                 self._refresh_health_snapshot()
 
     def fred_catalog_refresh_request(
