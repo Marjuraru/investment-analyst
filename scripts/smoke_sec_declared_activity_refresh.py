@@ -89,6 +89,11 @@ def main(argv: list[str] | None = None) -> None:
         )
         first_submissions = transport.submissions_calls
         first_archives = transport.archives_calls
+        first_declared = application.query_cazatiburones_declared_activity(
+            asset_id=arguments.asset_id,
+            known_at=first.submissions_checked_at,
+            location=location,
+        )
         second = application.refresh_sec_declared_activity(
             request,
             location=location,
@@ -110,6 +115,7 @@ def main(argv: list[str] | None = None) -> None:
         first=first,
         second=second,
         declared=declared,
+        first_declared=first_declared,
         universe=universe,
         first_submissions=first_submissions,
         first_archives=first_archives,
@@ -159,7 +165,10 @@ def main(argv: list[str] | None = None) -> None:
                 "backlog": [first.backlog_count, second.backlog_count],
                 "coverage_complete": [first.coverage_complete, second.coverage_complete],
                 "traceability_verified": second.traceability_verified,
-                "read_only_statements": declared.total_statements,
+                "read_only_statements": [
+                    first_declared.total_statements,
+                    declared.total_statements,
+                ],
                 "universe_families": [
                     {
                         "asset_id": item.asset_id,
@@ -184,6 +193,7 @@ def _assert_contract(
     first,
     second,
     declared,
+    first_declared,
     universe,
     first_submissions: int,
     first_archives: int,
@@ -203,8 +213,18 @@ def _assert_contract(
         raise SystemExit("the repeat must reuse the verified Submissions snapshot")
     if second.submissions_checked_at < first.submissions_checked_at:
         raise SystemExit("the repeat cut must not move backwards")
+    # The repeat reuses every already-persisted layer-1 and layer-2 identity. Layer 3 is the
+    # only append-only layer that may add a row, and only because its integrated identity embeds
+    # the point-in-time cut: the repeat observes a later `known_at`, so it persists the metric
+    # result of that new cut instead of rewriting the previous one.
+    if second.insider.statements_created or second.beneficial.statements_created:
+        raise SystemExit("the repeat must not create declared statements")
+    if second.observations_created:
+        raise SystemExit("the repeat must reuse every declared-activity observation")
     if declared.known_at != second.submissions_checked_at:
         raise SystemExit("the read-only query must observe the declared cut")
+    if declared.total_statements != first_declared.total_statements:
+        raise SystemExit("the repeat must not change the persisted statement count")
     statements = len(first.insider.accessions_imported) + len(first.beneficial.accessions_imported)
     if declared.total_statements < statements:
         raise SystemExit("persisted statements are not visible at the declared cut")
