@@ -266,6 +266,25 @@ class SecEdgarClient:
             documents=(submissions, company_facts),
         )
 
+    def fetch_submissions(self) -> SecEdgarDocument:
+        """Fetch exactly one validated Submissions snapshot without Company Facts."""
+        submissions_path = f"/submissions/CIK{self._cik}.json"
+        submissions_url = f"{self._base_url}{submissions_path}"
+        response = self._transport.get(
+            submissions_url,
+            headers=self._headers(),
+            timeout_seconds=self._timeout_seconds,
+        )
+        return _parse_document(
+            SecDocumentType.SUBMISSIONS,
+            submissions_url,
+            response.status_code,
+            response.url,
+            response.body,
+            _utc_datetime(self._clock(), field_name="clock result"),
+            expected_cik=self._cik,
+        )
+
     def fetch_aapl_issuer_documents(self) -> SecAaplFetchResult:
         """Compatibility wrapper for the historical fixed-AAPL call."""
         if self._cik != APPLE_CIK or self._ticker != APPLE_TICKER:

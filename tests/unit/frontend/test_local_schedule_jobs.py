@@ -53,6 +53,9 @@ class _UnusedController:
     def sec_fundamental_refresh_request(self, request):
         raise AssertionError(request)
 
+    def sec_primary_document_refresh_request(self, request):
+        raise AssertionError(request)
+
     def fred_catalog_refresh_request(self, request):
         raise AssertionError(request)
 
@@ -80,7 +83,7 @@ def test_watchlist_jobs_are_derived_by_capability_not_symbol() -> None:
 
     expected = (
         len(universe.assets)
-        + sum(item.has_fundamentals for item in universe.assets)
+        + (2 * sum(item.has_fundamentals for item in universe.assets))
         + sum(item.supports_intraday for item in universe.assets)
     )
     assert len(jobs) == expected
@@ -112,11 +115,18 @@ def test_selected_equity_and_crypto_receive_only_compatible_jobs() -> None:
     assert {item.definition.domain for item in equity_jobs} == {
         ScheduledJobDomain.MARKET_DAILY,
         ScheduledJobDomain.FUNDAMENTALS,
+        ScheduledJobDomain.EVENTS,
     }
     fundamental = next(
         item for item in equity_jobs if item.definition.domain is ScheduledJobDomain.FUNDAMENTALS
     )
     assert fundamental.definition.data_frequency == "annual"
+    documents = next(
+        item for item in equity_jobs if item.definition.domain is ScheduledJobDomain.EVENTS
+    )
+    assert documents.definition.job_id == "sec:equity:us:tsm:primary-documents"
+    assert documents.definition.data_frequency == "daily-check"
+    assert documents.definition.run_at == time(hour=8)
     assert {item.definition.domain for item in crypto_jobs} == {
         ScheduledJobDomain.MARKET_DAILY,
         ScheduledJobDomain.MARKET_INTRADAY,

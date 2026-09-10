@@ -5,6 +5,10 @@ herramienta básica utilizable desde el navegador. Un scheduler derivado del cat
 actualizar la watchlist por trabajos independientes. No añade scores combinados, recomendaciones,
 Trading API ni un LLM activo.
 
+El refresh incremental de documentos SEC primarios se ejecuta sólo desde el scheduler interno bajo
+el mutex writer compartido; no añade endpoint, botón, polling ni cambios de assets. Su evidencia
+queda disponible para las lecturas documentales existentes sin mezclarla con fundamentales.
+
 ## Assets estáticos componentizados (`UI-12`)
 
 La entrega local conserva los entrypoints públicos `/assets/app.js` y

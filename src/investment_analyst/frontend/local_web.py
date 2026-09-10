@@ -190,6 +190,10 @@ from investment_analyst.application.peru_registry import (
     BvlRegistryRefreshSummary,
 )
 from investment_analyst.application.runtime import ApplicationRuntimeError, StorageLocationRequest
+from investment_analyst.application.sec_document_refresh_models import (
+    SecPrimaryDocumentRefreshRequest,
+    SecPrimaryDocumentRefreshSummary,
+)
 from investment_analyst.application.sec_document_timeline import (
     SecDocumentTimelineApplicationError,
 )
@@ -641,6 +645,16 @@ class _ApplicationOperations(Protocol):
         sec_identity: SecEdgarIdentity,
     ) -> SecIssuerFundamentalRefreshSummary:
         """Refresh one catalog-backed SEC issuer independently from market."""
+        ...
+
+    def refresh_sec_primary_documents(
+        self,
+        request: SecPrimaryDocumentRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        sec_identity: SecEdgarIdentity,
+    ) -> SecPrimaryDocumentRefreshSummary:
+        """Refresh one issuer's primary documents without an HTTP route."""
         ...
 
     def refresh_fred_catalog_series(
@@ -1259,6 +1273,21 @@ class AaplLocalController:
                     self._corporate_valuation_cache.clear()
                     self._coverage_cache.clear()
                     self._universe_activity_cache.clear()
+                self._refresh_health_snapshot()
+
+    def sec_primary_document_refresh_request(
+        self,
+        request: SecPrimaryDocumentRefreshRequest,
+    ) -> SecPrimaryDocumentRefreshSummary:
+        """Execute SEC primary-document refresh through the shared writer mutex."""
+        with self._writer_lock:
+            try:
+                return self._application.refresh_sec_primary_documents(
+                    request,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                    sec_identity=self._sec_identity,
+                )
+            finally:
                 self._refresh_health_snapshot()
 
     def fred_catalog_refresh_request(

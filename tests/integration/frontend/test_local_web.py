@@ -166,6 +166,10 @@ from investment_analyst.application.peru_registry import (
     BvlRegistryRefreshSummary,
 )
 from investment_analyst.application.runtime import StorageLocationRequest
+from investment_analyst.application.sec_document_refresh_models import (
+    SecPrimaryDocumentRefreshRequest,
+    SecPrimaryDocumentRefreshSummary,
+)
 from investment_analyst.application.sec_document_timeline import (
     SecDocumentTimelineApplicationError,
 )
@@ -385,6 +389,9 @@ class _FakeApplication:
         self.fundamental_refresh_requests: list[SecIssuerFundamentalRefreshRequest] = []
         self.fundamental_refresh_locations: list[StorageLocationRequest] = []
         self.fundamental_refresh_identities: list[SecEdgarIdentity] = []
+        self.primary_document_refresh_requests: list[SecPrimaryDocumentRefreshRequest] = []
+        self.primary_document_refresh_locations: list[StorageLocationRequest] = []
+        self.primary_document_refresh_identities: list[SecEdgarIdentity] = []
         self.bvl_refresh_requests: list[BvlRegistryRefreshRequest] = []
         self.bvl_refresh_locations: list[StorageLocationRequest] = []
         self.valuation_requests: list[CorporateValuationRequest] = []
@@ -995,6 +1002,29 @@ class _FakeApplication:
             ),
         )
 
+    def refresh_sec_primary_documents(
+        self,
+        request: SecPrimaryDocumentRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        sec_identity: SecEdgarIdentity,
+    ) -> SecPrimaryDocumentRefreshSummary:
+        self.primary_document_refresh_requests.append(request)
+        self.primary_document_refresh_locations.append(location)
+        self.primary_document_refresh_identities.append(sec_identity)
+        return cast(
+            SecPrimaryDocumentRefreshSummary,
+            _JsonResult(
+                {
+                    "schema_version": "sec-primary-document-refresh-v1",
+                    "asset_id": request.asset_id,
+                    "submissions_checked_at": "2026-07-16T15:47:00+00:00",
+                    "coverage_complete": True,
+                    "traceability_verified": True,
+                }
+            ),
+        )
+
     def query_sec_document_timeline(
         self,
         query: SecDocumentTimelineQuery,
@@ -1118,6 +1148,29 @@ class _ConcurrentReadApplication(_FakeApplication):
             asset_id=asset_id,
             location=location,
         )
+
+
+def test_primary_document_refresh_uses_controller_writer_without_http_route(tmp_path: Path) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+
+    summary = controller.sec_primary_document_refresh_request(
+        SecPrimaryDocumentRefreshRequest(asset_id="equity:us:aapl")
+    )
+
+    assert summary.to_json_dict()["schema_version"] == "sec-primary-document-refresh-v1"
+    assert application.primary_document_refresh_requests == [
+        SecPrimaryDocumentRefreshRequest(asset_id="equity:us:aapl")
+    ]
+    assert application.primary_document_refresh_locations == [
+        StorageLocationRequest(workspace=tmp_path / "workspace")
+    ]
 
 
 def test_loopback_reads_remain_available_while_a_local_writer_is_active(tmp_path: Path) -> None:

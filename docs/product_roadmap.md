@@ -111,6 +111,8 @@ pero no describen por sí solos el estado operativo actual.
 - catálogo de seis cotizaciones BVL, cliente HTTPS SMV, evidencia registral append-only,
   reconstrucción point-in-time y refresh por lote reanudable;
 - dependencias reproducibles, Ruff, Pytest, cobertura, auditoría y CI.
+- refresh incremental SEC de documentos primarios por issuer, con reuse de blobs/revisiones
+  verificados y scheduler local sin nueva superficie HTTP.
 
 ### Parcial
 

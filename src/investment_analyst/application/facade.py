@@ -184,6 +184,13 @@ from investment_analyst.application.peru_registry import (
     BvlRegistryUniverseService,
 )
 from investment_analyst.application.runtime import ApplicationRuntime, StorageLocationRequest
+from investment_analyst.application.sec_document_refresh import (
+    build_sec_primary_document_refresh_service,
+)
+from investment_analyst.application.sec_document_refresh_models import (
+    SecPrimaryDocumentRefreshRequest,
+    SecPrimaryDocumentRefreshSummary,
+)
 from investment_analyst.application.sec_document_timeline import (
     SecDocumentTimelineApplication,
 )
@@ -234,6 +241,8 @@ from investment_analyst.providers.fundamentals.sec_diagnostic_pipeline import (
 from investment_analyst.providers.fundamentals.sec_diagnostic_selection import (
     SecFundamentalDiagnosticSelector,
 )
+from investment_analyst.providers.fundamentals.sec_document_client import SecDocumentClient
+from investment_analyst.providers.fundamentals.sec_document_pipeline import SecDocumentPipeline
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarClient, SecEdgarIdentity
 from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID as APPLE_ASSET_ID
 from investment_analyst.providers.fundamentals.sec_metric_engine import (
@@ -1020,6 +1029,42 @@ class InvestmentAnalystApplication:
                     security_unit_market_adjustment=asset.security_unit_market_adjustment,
                 ),
                 valuation_pipeline=CorporateValuationPersistencePipeline(storage),
+            ).run(request)
+
+    def refresh_sec_primary_documents(
+        self,
+        request: SecPrimaryDocumentRefreshRequest,
+        *,
+        location: StorageLocationRequest,
+        sec_identity: SecEdgarIdentity,
+    ) -> SecPrimaryDocumentRefreshSummary:
+        """Refresh one issuer's primary SEC documents without analytical stages."""
+        configuration = resolve_sec_configuration(
+            self._runtime.provider_resolver,
+            asset_id=request.asset_id,
+        )
+        write_access = WorkspaceAccessMode.READ_WRITE
+        with self._runtime.open_storage(
+            location,
+            access_mode=write_access,
+        ) as storage:
+            transport = self._transport_factory()
+            issuer_client = SecEdgarClient(
+                transport,
+                sec_identity,
+                cik=configuration.cik,
+                ticker=configuration.ticker,
+            )
+            document_pipeline = SecDocumentPipeline(
+                storage,
+                SecDocumentClient(transport, sec_identity),
+                configuration=configuration,
+            )
+            return build_sec_primary_document_refresh_service(
+                storage,
+                configuration=configuration,
+                issuer_client=issuer_client,
+                document_pipeline=document_pipeline,
             ).run(request)
 
     def query_aapl_fundamental_trend(
