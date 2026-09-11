@@ -79,3 +79,55 @@ disponibilidad point-in-time conserva `available_at = retrieved_at`, dado que el
 marcas de tiempo de aceptación. Este artefacto sirve exclusivamente como cola de descubrimiento y
 adquisición delimitada para la posterior ingesta dirigida de filings XML por gestor en `SEC-CORPUS-28`;
 no genera observaciones de holdings, no infiere clases de acciones y no calcula métricas.
+
+## Adquisición dirigida y reanudable desde el universo
+
+`SEC-CORPUS-28` conecta el universo persistido con la evidencia 13F real. El contrato de request es
+`sec-institutional-holdings-directed-refresh-v1` bajo la política
+`sec-institutional-holdings-directed-page-v1`; admite exclusivamente `known_at`, `manager_offset >= 0`,
+`manager_limit` entre 1 y 25 y `accessions_per_manager` entre 1 y 10. Ningún CIK, activo, CUSIP,
+accession, formulario, URL ni período de reporte es payload libre.
+
+La ejecución resuelve el snapshot más reciente del universo disponible en `available_at <= known_at`,
+falla cerrado si no existe o si el linaje con su revisión de dataset no verifica —sin descargar ni
+refrescar el dataset implícitamente— y considera sólo candidatos `is_selected=true`. El orden es
+`(selection_rank, asset_id, manager_cik, report_period)`, la deduplicación por
+`(manager_cik, report_period)` conserva la lista de candidate IDs de origen, y `manager_offset` con
+`manager_limit` se aplican después: la paginación es un presupuesto operativo, no un ranking analítico.
+
+Para cada gestor de la página se realiza exactamente un GET fresco a
+`data.sec.gov/submissions/CIK##########.json`. La lista de filings y sus marcas de aceptación se
+resuelven siempre desde ese Submissions oficial: el accession y el `accession_lineage` del dataset son
+pistas de descubrimiento y nunca autoridad de importación. Sólo son elegibles `13F-HR` y `13F-HR/A` con
+`report_date == report_period` y `accepted_at <= known_at`, importados en orden
+`(accepted_at, accession)` para leer base y enmiendas en secuencia. Un accession duplicado incompatible,
+un `reportDate` ausente o conflictivo, una aceptación sin zona horaria o una identidad CIK divergente
+fallan cerrado; `filing_date` nunca sustituye la disponibilidad.
+
+Antes de llamar a SEC Archives se consultan los reportes ya persistidos del mismo gestor y corte. Un
+accession materializado se devuelve como `reused` y no genera ningún GET a Archives; de los pendientes
+se importan como máximo `accessions_per_manager`. El resultado declara `pending_before`, `attempted`,
+`created`, `reused`, `rejected` y `backlog_after`, de modo que un límite insuficiente es visible en
+lugar de silencioso. Los outcomes rechazados conservan sus bytes e identidad y pueden reevaluarse si el
+proveedor corrige los documentos; un fallo posterior no borra el progreso ya persistido y la ejecución
+continúa con el gestor siguiente.
+
+Tras cada intento se reúnen los reportes del período objetivo visibles al corte y se llama al
+`InstitutionalHoldingsSemanticsService` integrado en lotes de hasta veinte IDs por gestor, reutilizando
+artefactos ya enriquecidos sin cambiar parser, identidad ni repositorio semántico. El resumen estricto
+incluye snapshot y revisión usados, corte efectivo, página de gestores, lineage de candidatos,
+CIK/nombre/período, llamadas Submissions y Archives, accessions descubiertos, creados, reutilizados y
+fallidos, backlog y resultados semánticos. No persiste score, veredicto, señal ni recomendación, y no
+crea correspondencias CUSIP↔activo.
+
+```bash
+export SEC_USER_AGENT="Investment Analyst contact@example.com"
+python scripts/refresh_sec_institutional_holdings_from_universe.py --workspace /tmp/sec-13f \
+  --known-at 2026-09-01T00:00:00Z --manager-offset 0 --manager-limit 1 --accessions-per-manager 5
+```
+
+El comando no refresca el dataset del universo: si falta un snapshot falla con una instrucción
+operacional que nombra `scripts/refresh_sec_institutional_manager_universe.py`. La salida JSON es
+compacta y el exit es distinto de cero sólo ante un fallo global. La correspondencia verificable entre
+posiciones y activos, con provenance explícita y materialización de observaciones, permanece en
+`SEC-CORPUS-29`.

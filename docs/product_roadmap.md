@@ -370,7 +370,12 @@ por familia, backlog declarado y capas 2/3 completadas al mismo corte. La famili
 delimitada: `SEC-CORPUS-27` construye el universo acotado y determinista de gestores a partir de los Form
 13F Data Sets oficiales de la SEC (`sec-13f-manager-universe-v1`) con un límite de 25 gestores por CUSIP
 de catálogo y `available_at = retrieved_at`, mientras que la adquisición dirigida de filings XML y
-correspondencia de instrumentos queda para `SEC-CORPUS-28`.
+correspondencia de instrumentos queda para `SEC-CORPUS-28`. Este candidato cubre la mitad de adquisición
+de `SEC-CORPUS-28`: los gestores ya seleccionados se procesan por página determinista, con exactamente
+un GET Submissions por gestor, importación de `13F-HR`/`13F-HR/A` del período objetivo aceptados al
+corte, reutilización sin volver a descargar Archives y backlog exacto. El accession del dataset es
+lineage de descubrimiento, nunca autoridad de importación. La correspondencia CUSIP↔activo con
+provenance explícito y la materialización de observaciones quedan en `SEC-CORPUS-29`.
 
 Las anomalías se evaluarán localmente sobre features point-in-time de filings: tamaño relativo de
 una transacción, cambio de tenencia, concentración, recurrencia, enmiendas y latencia de reporte. El
@@ -641,7 +646,10 @@ sin presentar SEC-CORPUS como completado ni como cartera efectiva: cartera efect
 continúan siendo fronteras separadas; UI-14 ya completó la interfaz local. `SEC-CORPUS-25`,
 `SEC-CORPUS-26` y `SEC-CORPUS-27` añaden adquisición incremental programada —documentos primarios,
 actividad declarada y universo oficial acotado de gestores 13F respectivamente— sin UI, endpoint ni
-señal, manteniendo `SEC-CORPUS` como único `NEXT` y preparando `SEC-CORPUS-28`. `EXTENDED-SOAK /
+señal, manteniendo `SEC-CORPUS` como único `NEXT`. Este candidato avanza el mismo ítem
+(`route_effect: ADVANCES`) con la adquisición dirigida y reanudable de filings 13F desde ese universo,
+sin completarlo: `SEC-CORPUS-29` queda como la siguiente unidad registrada para correspondencia y
+observaciones. `EXTENDED-SOAK /
 DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
 Block independiente.
 
