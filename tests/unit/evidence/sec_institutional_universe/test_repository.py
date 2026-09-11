@@ -20,6 +20,7 @@ from investment_analyst.evidence.sec_institutional_universe.models import (
 )
 from investment_analyst.evidence.sec_institutional_universe.repository import (
     SecInstitutionalUniverseRepository,
+    SecInstitutionalUniverseRepositoryError,
     dataset_revision_from_raw_record,
     dataset_revision_to_raw_record,
     snapshot_from_raw_record,
@@ -189,3 +190,122 @@ def test_repository_lineage_verification_fails_if_blob_missing() -> None:
             # Finding snapshot fails because blob lineage is missing!
             with pytest.raises(DocumentContentError):
                 repo.find_latest_snapshot(known_at=t1)
+
+
+def test_find_snapshot_for_period_reuses_only_exact_verifiable_evidence() -> None:
+    with TemporaryDirectory() as temp_dir:
+        storage_paths = StoragePaths.from_root(Path(temp_dir))
+        with LocalStorage(storage_paths, read_only=False) as storage:
+            repo = SecInstitutionalUniverseRepository(storage.raw_records, storage.documents)
+
+            blob = (b"PK\x03\x04 exact dataset bytes" + b"\x00" * 5000)[:5000]
+            sha = hashlib.sha256(blob).hexdigest()
+            repo.save_blob(blob)
+            t1 = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+            revision = _make_sample_revision(sha=sha, retrieved_at=t1)
+            snapshot = _make_sample_snapshot(revision, retrieved_at=t1)
+            repo.save_dataset_revision(revision)
+            repo.save_snapshot(snapshot)
+
+            resolved = repo.find_snapshot_for_period(
+                period_start=date(2026, 3, 1),
+                period_end=date(2026, 5, 31),
+                dataset_url=revision.dataset_url,
+                known_at=t1,
+            )
+            assert resolved is not None
+            found_revision, found_snapshot = resolved
+            assert found_revision.revision_id == revision.revision_id
+            assert found_snapshot.snapshot_id == snapshot.snapshot_id
+
+            # A contradictory URL for the same period is never selected.
+            assert (
+                repo.find_snapshot_for_period(
+                    period_start=date(2026, 3, 1),
+                    period_end=date(2026, 5, 31),
+                    dataset_url=(
+                        "https://www.sec.gov/files/structureddata/data/form-13f-data-sets/"
+                        "01jun2024-31aug2024_form13f.zip"
+                    ),
+                    known_at=t1,
+                )
+                is None
+            )
+
+            # A different official period is never selected either.
+            assert (
+                repo.find_snapshot_for_period(
+                    period_start=date(2026, 3, 1),
+                    period_end=date(2026, 6, 30),
+                    dataset_url=revision.dataset_url,
+                    known_at=t1,
+                )
+                is None
+            )
+
+            # Evidence that is not yet available at the requested cut is not reused.
+            before = datetime(2026, 6, 1, 11, 0, tzinfo=UTC)
+            assert (
+                repo.find_snapshot_for_period(
+                    period_start=date(2026, 3, 1),
+                    period_end=date(2026, 5, 31),
+                    dataset_url=revision.dataset_url,
+                    known_at=before,
+                )
+                is None
+            )
+
+
+def test_find_snapshot_for_period_fails_closed_when_blob_is_missing() -> None:
+    with TemporaryDirectory() as temp_dir:
+        storage_paths = StoragePaths.from_root(Path(temp_dir))
+        with LocalStorage(storage_paths, read_only=False) as storage:
+            repo = SecInstitutionalUniverseRepository(storage.raw_records, storage.documents)
+
+            t1 = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+            revision = _make_sample_revision(sha="f" * 64, retrieved_at=t1)
+            snapshot = _make_sample_snapshot(revision, retrieved_at=t1)
+            repo.save_dataset_revision(revision)
+            repo.save_snapshot(snapshot)
+
+            with pytest.raises(DocumentContentError):
+                repo.find_snapshot_for_period(
+                    period_start=date(2026, 3, 1),
+                    period_end=date(2026, 5, 31),
+                    dataset_url=revision.dataset_url,
+                    known_at=t1,
+                )
+
+
+def test_find_snapshot_for_period_rejects_competing_revisions_at_one_cut() -> None:
+    with TemporaryDirectory() as temp_dir:
+        storage_paths = StoragePaths.from_root(Path(temp_dir))
+        with LocalStorage(storage_paths, read_only=False) as storage:
+            repo = SecInstitutionalUniverseRepository(storage.raw_records, storage.documents)
+
+            t1 = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+            first_bytes = (b"PK\x03\x04 first revision" + b"\x00" * 5000)[:5000]
+            second_bytes = (b"PK\x03\x04 second revision" + b"\x00" * 5000)[:5000]
+            repo.save_blob(first_bytes)
+            repo.save_blob(second_bytes)
+            first = _make_sample_revision(
+                sha=hashlib.sha256(first_bytes).hexdigest(), retrieved_at=t1
+            )
+            second = _make_sample_revision(
+                sha=hashlib.sha256(second_bytes).hexdigest(), retrieved_at=t1
+            )
+            repo.save_dataset_revision(first)
+            repo.save_snapshot(_make_sample_snapshot(first, retrieved_at=t1))
+            repo.save_dataset_revision(second)
+            repo.save_snapshot(_make_sample_snapshot(second, retrieved_at=t1))
+
+            with pytest.raises(
+                SecInstitutionalUniverseRepositoryError,
+                match="Incompatible competing revisions",
+            ):
+                repo.find_snapshot_for_period(
+                    period_start=date(2026, 3, 1),
+                    period_end=date(2026, 5, 31),
+                    dataset_url=first.dataset_url,
+                    known_at=t1,
+                )

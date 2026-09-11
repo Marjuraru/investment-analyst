@@ -77,3 +77,11 @@ Las familias se filtran sin mezclarse ni agregarse. El orden es determinista de 
 antiguo por `(created_at, notification_id)` y los valores `Decimal`, la procedencia y los campos
 específicos de cada vertical conservan su serialización contractual. No existe `POST` de acuse:
 el acuse sigue siendo un acto explícito de CLI.
+
+## Reconciliación dentro de la ventana de dos cierres (`SEC-CORPUS-31`)
+
+El ciclo programado `sec:institutional:13f-history` cierra la conexión de escritura y reconcilia esta
+misma outbox mediante `cazatiburones-notification-outbox-v1` en la ruta de estado resuelta por el
+workspace. El cursor del target sólo avanza tras una reconciliación exitosa: si falla, las métricas y
+los eventos ya persistidos se conservan y el reintento es idempotente, sin duplicar notificaciones ni
+acuses.

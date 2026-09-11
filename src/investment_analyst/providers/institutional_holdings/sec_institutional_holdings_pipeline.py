@@ -111,6 +111,102 @@ class SecInstitutionalHoldingsPeriodImportResult:
         return len(self.rejected_accessions) + len(self.failed_accessions)
 
 
+@dataclass(frozen=True, slots=True)
+class SecInstitutionalHoldingsPeriodsImportRequest:
+    """Bound one directed import to one or two exact report periods of the same SEC manager."""
+
+    filer_cik: str
+    report_periods: tuple[date, ...]
+    known_at: datetime
+    accessions_per_period: int = 1
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "filer_cik", normalize_cik(self.filer_cik))
+        if self.known_at.tzinfo is None or self.known_at.utcoffset() is None:
+            raise SecInstitutionalHoldingsPipelineError("known_at must include timezone")
+        object.__setattr__(self, "known_at", self.known_at.astimezone(UTC))
+        if not 1 <= len(self.report_periods) <= 2:
+            raise SecInstitutionalHoldingsPipelineError(
+                "between one and two report periods are allowed"
+            )
+        if any(isinstance(item, datetime) for item in self.report_periods):
+            raise SecInstitutionalHoldingsPipelineError("report periods must be dates")
+        if tuple(sorted(set(self.report_periods))) != tuple(self.report_periods):
+            raise SecInstitutionalHoldingsPipelineError(
+                "report periods must be unique and ordered ascending"
+            )
+        if not 1 <= self.accessions_per_period <= 10:
+            raise SecInstitutionalHoldingsPipelineError("invalid accession budget per period")
+
+
+@dataclass(frozen=True, slots=True)
+class SecInstitutionalHoldingsPeriodsImportResult:
+    """Exact, reconcilable outcome of one shared Submissions fetch across bounded periods."""
+
+    filer_cik: str
+    known_at: datetime
+    submissions_raw_record_id: UUID
+    submissions_checked_at: datetime
+    submissions_created: int
+    submissions_reused: int
+    periods: tuple[SecInstitutionalHoldingsPeriodImportResult, ...]
+
+    @property
+    def created_accessions(self) -> tuple[str, ...]:
+        return tuple(
+            accession for period in self.periods for accession in period.created_accessions
+        )
+
+    @property
+    def reused_accessions(self) -> tuple[str, ...]:
+        return tuple(accession for period in self.periods for accession in period.reused_accessions)
+
+    @property
+    def rejected_accessions(self) -> tuple[str, ...]:
+        return tuple(
+            accession for period in self.periods for accession in period.rejected_accessions
+        )
+
+    @property
+    def failed_accessions(self) -> tuple[str, ...]:
+        return tuple(accession for period in self.periods for accession in period.failed_accessions)
+
+    @property
+    def failure_codes(self) -> tuple[str, ...]:
+        return tuple(code for period in self.periods for code in period.failure_codes)
+
+    @property
+    def attempted_accessions(self) -> tuple[str, ...]:
+        return tuple(
+            accession for period in self.periods for accession in period.attempted_accessions
+        )
+
+    @property
+    def backlog_after(self) -> int:
+        return sum(period.backlog_after for period in self.periods)
+
+    @property
+    def reports(self) -> tuple[InstitutionalHoldingsReport, ...]:
+        return tuple(report for period in self.periods for report in period.reports)
+
+    def __post_init__(self) -> None:
+        if not self.periods:
+            raise SecInstitutionalHoldingsPipelineError(
+                "a period import requires at least one period"
+            )
+        if any(
+            period.submissions_raw_record_id != self.submissions_raw_record_id
+            for period in self.periods
+        ):
+            raise SecInstitutionalHoldingsPipelineError(
+                "every period must share the single Submissions revision"
+            )
+        if tuple(sorted({period.report_period for period in self.periods})) != tuple(
+            period.report_period for period in self.periods
+        ):
+            raise SecInstitutionalHoldingsPipelineError("period results must be unique and ordered")
+
+
 class SecInstitutionalHoldingsPipeline:
     def __init__(self, storage, submissions_client, document_client) -> None:
         self._storage = storage
@@ -147,11 +243,27 @@ class SecInstitutionalHoldingsPipeline:
     def run_period(
         self, request: SecInstitutionalHoldingsPeriodImportRequest
     ) -> SecInstitutionalHoldingsPeriodImportResult:
-        """Import the bounded backlog of one manager for one exact report period.
+        """Import the bounded backlog of one manager for one exact report period."""
+        result = self.run_periods(
+            SecInstitutionalHoldingsPeriodsImportRequest(
+                filer_cik=request.filer_cik,
+                report_periods=(request.report_period,),
+                known_at=request.known_at,
+                accessions_per_period=request.accessions_per_manager,
+            )
+        )
+        return result.periods[0]
+
+    def run_periods(
+        self, request: SecInstitutionalHoldingsPeriodsImportRequest
+    ) -> SecInstitutionalHoldingsPeriodsImportResult:
+        """Import the bounded backlog of one manager across one or two exact report periods.
 
         The declared accession of the discovery dataset is never used as authority: the eligible
-        filings and their acceptance timestamps always come from one fresh Submissions response.
-        Already materialized accessions are returned as reused without touching SEC Archives.
+        filings and their acceptance timestamps always come from exactly one fresh Submissions
+        response shared by every period, and each period attempts at most its declared budget of
+        pending accessions. Already materialized or terminally rejected accessions are reused
+        without touching SEC Archives.
         """
         self._storage.require_open()
         self._upsert_sources(request.filer_cik)
@@ -165,24 +277,69 @@ class SecInstitutionalHoldingsPipeline:
             submissions_created = 1
             submissions_reused = 0
         filings = institutional_holdings_filings(submissions, request.filer_cik)
-        eligible = self._period_eligible(filings, request)
         holdings = InstitutionalHoldingsRepository(self._storage.raw_records)
+        documents = SecFilerDocumentRepository(self._storage.raw_records, self._storage.documents)
+        periods = tuple(
+            self._import_period(
+                filings=filings,
+                submissions_raw_record_id=submissions.record_id,
+                submissions_checked_at=submissions.received_at,
+                submissions_created=submissions_created,
+                submissions_reused=submissions_reused,
+                report_period=report_period,
+                accessions_per_period=request.accessions_per_period,
+                known_at=request.known_at,
+                filer_cik=request.filer_cik,
+                holdings=holdings,
+                documents=documents,
+            )
+            for report_period in request.report_periods
+        )
+        return SecInstitutionalHoldingsPeriodsImportResult(
+            filer_cik=request.filer_cik,
+            known_at=request.known_at,
+            submissions_raw_record_id=submissions.record_id,
+            submissions_checked_at=submissions.received_at,
+            submissions_created=submissions_created,
+            submissions_reused=submissions_reused,
+            periods=periods,
+        )
+
+    def _import_period(
+        self,
+        *,
+        filings: tuple[InstitutionalHoldingsFiling, ...],
+        submissions_raw_record_id: UUID,
+        submissions_checked_at: datetime,
+        submissions_created: int,
+        submissions_reused: int,
+        report_period: date,
+        accessions_per_period: int,
+        known_at: datetime,
+        filer_cik: str,
+        holdings: InstitutionalHoldingsRepository,
+        documents: SecFilerDocumentRepository,
+    ) -> SecInstitutionalHoldingsPeriodImportResult:
+        """Import the bounded backlog of one period from an already persisted discovery revision."""
+        period_request = SecInstitutionalHoldingsPeriodImportRequest(
+            filer_cik=filer_cik,
+            report_period=report_period,
+            known_at=known_at,
+            accessions_per_manager=accessions_per_period,
+        )
+        eligible = self._period_eligible(filings, period_request)
         materialized = {
             report.cover_revision.document.filing.accession
-            for report in holdings.list_reports(
-                manager_cik=request.filer_cik, known_at=request.known_at
-            )
-            if report.report_period == request.report_period
+            for report in holdings.list_reports(manager_cik=filer_cik, known_at=known_at)
+            if report.report_period == report_period
         }
         terminal_rejected: set[str] = set()
-        for outcome in holdings.list_outcomes(
-            manager_cik=request.filer_cik, known_at=request.known_at
-        ):
+        for outcome in holdings.list_outcomes(manager_cik=filer_cik, known_at=known_at):
             if outcome.status != "rejected":
                 continue
-            if outcome.filing.report_date != request.report_period:
+            if outcome.filing.report_date != report_period:
                 continue
-            if outcome.available_at > request.known_at:
+            if outcome.available_at > known_at:
                 continue
             try:
                 holdings.verify_outcome_lineage(outcome)
@@ -193,8 +350,7 @@ class SecInstitutionalHoldingsPipeline:
         terminal_accessions = materialized | terminal_rejected
         reused = tuple(item.accession for item in eligible if item.accession in terminal_accessions)
         pending = tuple(item for item in eligible if item.accession not in terminal_accessions)
-        attempted = pending[: request.accessions_per_manager]
-        documents = SecFilerDocumentRepository(self._storage.raw_records, self._storage.documents)
+        attempted = pending[:accessions_per_period]
         reports: list[InstitutionalHoldingsReport] = []
         created: list[str] = []
         rejected: list[str] = []
@@ -204,8 +360,8 @@ class SecInstitutionalHoldingsPipeline:
             try:
                 report = self._import_one(
                     metadata=metadata,
-                    filer_cik=request.filer_cik,
-                    discovery_raw_record_id=submissions.record_id,
+                    filer_cik=filer_cik,
+                    discovery_raw_record_id=submissions_raw_record_id,
                     documents=documents,
                     holdings=holdings,
                 )
@@ -219,11 +375,11 @@ class SecInstitutionalHoldingsPipeline:
             created.append(metadata.accession)
             reports.append(report)
         return SecInstitutionalHoldingsPeriodImportResult(
-            filer_cik=request.filer_cik,
-            report_period=request.report_period,
-            known_at=request.known_at,
-            submissions_raw_record_id=submissions.record_id,
-            submissions_checked_at=submissions.received_at,
+            filer_cik=filer_cik,
+            report_period=report_period,
+            known_at=known_at,
+            submissions_raw_record_id=submissions_raw_record_id,
+            submissions_checked_at=submissions_checked_at,
             submissions_created=submissions_created,
             submissions_reused=submissions_reused,
             eligible_accessions=tuple(item.accession for item in eligible),

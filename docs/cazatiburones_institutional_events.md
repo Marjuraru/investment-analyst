@@ -47,3 +47,10 @@ No existen umbrales configurables por el usuario ni heurísticas probabilística
 La entrega local deduplicada de los candidatos persistidos se define en
 [`cazatiburones_notifications.md`](cazatiburones_notifications.md). Conserva la procedencia 13F
 sin mezclarla con la familia de actividad declarada.
+
+## Operación programada sobre dos cierres (`SEC-CORPUS-31`)
+
+El ciclo programado `sec:institutional:13f-history` materializa estos eventos después de completar los
+dos cierres comparables de un gestor común, reutilizando la implementación integrada y el mismo
+cooldown. La outbox local se reconcilia una vez cerrado el writer y sólo entonces avanza el cursor del
+target; una repetición no duplica eventos ni notificaciones.

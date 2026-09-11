@@ -15,3 +15,11 @@ El peso declarado dentro de un cierre efectivo se documenta y persiste separadam
 descriptivos derivados se documentan en
 [`cazatiburones_institutional_events.md`](cazatiburones_institutional_events.md). No hay
 concentración, score, señal, recomendación ni modificación de evidencia u observaciones.
+
+## Operación programada sobre dos cierres (`SEC-CORPUS-31`)
+
+La ventana de dos cierres adyacentes ejecuta esta implementación sin cambiar fórmulas, pesos ni
+umbrales: tras materializar los dos cierres comparables de un gestor común, el ciclo programado
+`sec:institutional:13f-history` crea o reutiliza las métricas ya definidas y expone los estados no
+evaluables con su motivo tipado. Si no existe una posición comparable, el resultado declara por qué y
+no fabrica evento ni notificación.

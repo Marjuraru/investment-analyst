@@ -213,8 +213,41 @@ correspondencia/observaciones) en una sola operación atómica y reanudable, baj
    - Job programado `sec:institutional:13f-cycle` (`ScheduledJobDomain.EVENTS`, `data_frequency="daily-check"`,
      `run_at = config.run_at + 105 minutos`, `asset_id=None`).
    - Se incluye automáticamente si algún activo del watchlist expone un binding `sec/cusip`.
+   - Job programado global `sec:institutional:13f-history` (`SEC-CORPUS-31`, mismo dominio y frecuencia,
+     `run_at = config.run_at + 120 minutos`, `asset_id=None`, un único job por watchlist, bajo el mismo
+     mutex de escritura del controlador local).
+
+## Ventana de dos cierres adyacentes (`SEC-CORPUS-31`)
+
+`SEC-CORPUS-31` deja de depender de una carga manual del ciclo más reciente: el contrato aislado
+`sec-institutional-history-cycle-v1` y su estado operacional `sec-institutional-history-state-v1`
+(`state/sec_institutional_history_state_v1.json`) materializan dos cierres comparables.
+
+1. **Ventana oficial mínima**:
+   - Sólo los dos períodos válidos, únicos y adyacentes más recientes del catálogo Form 13F; no existe un
+     número configurable de trimestres ni backfill anterior.
+   - Reutilización por período/URL/hash de cualquier revisión y snapshot verificables ya persistidos por
+     `SEC-CORPUS-27`/`SEC-CORPUS-30`; un ZIP faltante por intento termina la fase `preparing` y no consume
+     gestores en esa ejecución.
+   - La fase y el cursor de targets se persisten atómicamente con checksum SHA-256; un par no adyacente,
+     invertido, solapado o un cursor contradictorio fallan cerrado sin sobrescribir el archivo.
+2. **Intersección determinista**:
+   - Se intersectan los `(asset_id, manager_cik)` seleccionados de ambos cierres, derivados exclusivamente de
+     candidatos SEC/CUSIP del catálogo; los gestores presentes en un solo cierre se cuentan como excluidos y
+     nunca se transforman en un cierre previo o corriente sintético.
+   - Un target es exactamente `(older_snapshot_id, newer_snapshot_id, asset_id, manager_cik)`.
+3. **Adquisición y cadena derivada**:
+   - Un GET Submissions compartido por gestor y ejecución, con como máximo dos accessions intentados por
+     período; rechazos terminales no vuelven a Archives.
+   - Ambas páginas candidatas se materializan con su propio `snapshot_id/candidate_id/asset_id/CUSIP/report_period`
+     mediante la materialización integrada de `SEC-CORPUS-29`.
+   - Con dos cierres comparables se ejecutan las implementaciones ya integradas de métricas, pesos y eventos
+     institucionales sin cambiar fórmulas ni umbrales; si no hay posición comparable el resultado declara los
+     estados no evaluables y no fabrica evento ni notificación.
+   - El writer se cierra antes de reconciliar la outbox local `cazatiburones-notification-outbox-v1`; el cursor
+     sólo avanza tras una reconciliación exitosa y el reintento es idempotente.
 
 ```bash
 export SEC_USER_AGENT="Investment Analyst contact@example.com"
-python scripts/smoke_sec_institutional_cycle.py
+python scripts/smoke_sec_institutional_history.py
 ```

@@ -218,6 +218,13 @@ from investment_analyst.application.sec_institutional_cycle_models import (
     SecInstitutionalCycleRequest,
     SecInstitutionalCycleSummary,
 )
+from investment_analyst.application.sec_institutional_history import (
+    SecInstitutionalHistoryApplication,
+)
+from investment_analyst.application.sec_institutional_history_models import (
+    SecInstitutionalHistoryRequest,
+    SecInstitutionalHistorySummary,
+)
 from investment_analyst.application.sec_submissions_refresh import SecSubmissionsRefreshService
 from investment_analyst.application.universe_coverage import UniverseCoverageApplication
 from investment_analyst.application.universe_coverage_models import (
@@ -1165,6 +1172,27 @@ class InvestmentAnalystApplication:
             sec_identity=sec_identity,
             location=location,
             state_root=state_root,
+        )
+
+    def run_sec_institutional_history(
+        self,
+        request: SecInstitutionalHistoryRequest,
+        *,
+        sec_identity: SecEdgarIdentity,
+        location: StorageLocationRequest | None = None,
+        state_root: Path | None = None,
+        outbox_state: Path | None = None,
+    ) -> SecInstitutionalHistorySummary:
+        """Run one bounded, resumable step of the two-close Form 13F history window."""
+        return SecInstitutionalHistoryApplication(
+            self._runtime,
+            transport_factory=self._transport_factory,
+        ).run_cycle(
+            request,
+            sec_identity=sec_identity,
+            location=location,
+            state_root=state_root,
+            outbox_state=outbox_state,
         )
 
     def query_aapl_fundamental_trend(

@@ -128,3 +128,17 @@ inicializado. Sus flags públicos y su salida JSON no cambian.
   nuevo período/URL, o si expira el tiempo de vida de validación de 7 días.
 - Comparte la conexión de escritura `READ_WRITE` con las etapas de adquisición dirigida y materialización,
   eliminando aperturas redundantes del almacenamiento.
+
+## Consulta exacta de la ventana de dos cierres (`SEC-CORPUS-31`)
+
+`SEC-CORPUS-31` reutiliza el universo ya persistido sin volver a descargar evidencia:
+
+- `list_dataset_revisions(period_start, period_end, known_at)` enumera las revisiones persistidas de un
+  período oficial exacto disponibles al corte, y `find_snapshot_for_period(period_start, period_end,
+  dataset_url, known_at)` resuelve el par revisión/snapshot verificable más reciente que coincide con la
+  URL oficial del catálogo.
+- El blob debe existir y coincidir con su SHA-256; revisiones competidoras con el mismo instante de
+  recuperación y hash distinto, o snapshots competidores del mismo instante, fallan cerrado en lugar de
+  elegir arbitrariamente.
+- Una URL contradictoria o un período distinto nunca se incorporan a la ventana: la ventana queda
+  formada exclusivamente por los dos períodos adyacentes más recientes del catálogo vivo.

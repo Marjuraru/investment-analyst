@@ -542,3 +542,284 @@ def test_period_mode_terminal_rejected_outcome_is_reused_and_does_not_call_archi
         assert third.pending_before == 0
         assert third.backlog_after == 0
         assert rejecting.archives_calls == archives_before_third
+
+
+_OLDER_PERIOD = date(2025, 12, 31)
+_NEWER_PERIOD = date(2026, 3, 31)
+
+
+def _pair_cover_xml(value: int, period: date, form: str = "13F-HR") -> bytes:
+    return (
+        f"<edgarSubmission><submissionType>{form}</submissionType><filingManager>"
+        "<name>Manager LLC</name></filingManager>"
+        f"<reportCalendarOrQuarter>{period.strftime('%m-%d-%Y')}</reportCalendarOrQuarter>"
+        f"<tableEntryTotal>1</tableEntryTotal><tableValueTotal>{value}</tableValueTotal>"
+        "</edgarSubmission>"
+    ).encode()
+
+
+class _PairDocumentClient:
+    """Bounded Archives double that renders each accession with its own report period."""
+
+    def __init__(
+        self,
+        values: dict[str, int],
+        periods: dict[str, date],
+        *,
+        reject_for: tuple[str, ...] = (),
+    ) -> None:
+        self.values = values
+        self.periods = periods
+        self.reject_for = set(reject_for)
+        self.manifest_calls = 0
+        self.document_calls = 0
+
+    @property
+    def archives_calls(self) -> int:
+        return self.manifest_calls + self.document_calls
+
+    def fetch_manifest(self, document):
+        self.manifest_calls += 1
+        accession = document.filing.accession
+        entries = (
+            ("filing.htm",)
+            if accession in self.reject_for
+            else ("filing.htm", "primary_doc.xml", "infotable.xml")
+        )
+        return SecAccessionManifest(
+            entries=entries,
+            sha256="c" * 64,
+            size_bytes=10,
+            url="https://www.sec.gov/Archives/index.json",
+            retrieved_at=_RETRIEVED_AT,
+        )
+
+    def fetch(self, document):
+        self.document_calls += 1
+        accession = document.filing.accession
+        if document.name == _PRIMARY_DOCUMENT:
+            content = b"<!DOCTYPE html><html><body>declared locator</body></html>"
+        elif document.name == "primary_doc.xml":
+            content = _pair_cover_xml(
+                self.values[accession], self.periods[accession], form=document.filing.form
+            )
+        else:
+            content = _table_xml(self.values[accession])
+        return SecPrimaryDocumentResponse(
+            content=content,
+            sha256=hashlib.sha256(content).hexdigest(),
+            size_bytes=len(content),
+            url=f"https://www.sec.gov/Archives/{accession}/{document.name}",
+            retrieved_at=_RETRIEVED_AT,
+        )
+
+
+def _pair_request(
+    report_periods: tuple[date, ...],
+    accessions_per_period: int = 1,
+):
+    return sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPeriodsImportRequest(
+        filer_cik="1067983",
+        report_periods=report_periods,
+        known_at=_CUT,
+        accessions_per_period=accessions_per_period,
+    )
+
+
+def test_periods_mode_shares_one_submissions_revision_across_two_report_periods(
+    tmp_path: Path,
+) -> None:
+    filings = (
+        _filing(
+            "0000000001-26-000001",
+            accepted_at="2026-02-10T12:00:00Z",
+            report_date=_OLDER_PERIOD.isoformat(),
+            filing_date="2026-02-09",
+        ),
+        _filing("0000000002-26-000001", accepted_at="2026-05-10T12:00:00Z"),
+    )
+    periods = {
+        "0000000001-26-000001": _OLDER_PERIOD,
+        "0000000002-26-000001": _NEWER_PERIOD,
+    }
+    values = {"0000000001-26-000001": 100, "0000000002-26-000001": 200}
+    submissions_client = _PeriodSubmissionsClient(filings)
+    document_client = _PairDocumentClient(values, periods)
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline = sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipeline(
+            storage, submissions_client, document_client
+        )
+
+        first = pipeline.run_periods(_pair_request((_OLDER_PERIOD, _NEWER_PERIOD)))
+
+        assert submissions_client.calls == 1
+        assert first.submissions_created == 1 and first.submissions_reused == 0
+        assert tuple(item.report_period for item in first.periods) == (
+            _OLDER_PERIOD,
+            _NEWER_PERIOD,
+        )
+        assert {item.submissions_raw_record_id for item in first.periods} == {
+            first.submissions_raw_record_id
+        }
+        assert first.created_accessions == (
+            "0000000001-26-000001",
+            "0000000002-26-000001",
+        )
+        assert first.attempted_accessions == first.created_accessions
+        assert first.backlog_after == 0
+        assert {report.report_period for report in first.reports} == {
+            _OLDER_PERIOD,
+            _NEWER_PERIOD,
+        }
+        archives_after_first = document_client.archives_calls
+
+        second = pipeline.run_periods(_pair_request((_OLDER_PERIOD, _NEWER_PERIOD)))
+
+        assert submissions_client.calls == 2
+        assert second.submissions_created == 0 and second.submissions_reused == 1
+        assert second.created_accessions == ()
+        assert set(second.reused_accessions) == {
+            "0000000001-26-000001",
+            "0000000002-26-000001",
+        }
+        assert second.attempted_accessions == ()
+        assert second.backlog_after == 0
+        assert document_client.archives_calls == archives_after_first
+
+
+def test_periods_mode_bounds_attempts_per_period_and_preserves_backlog(tmp_path: Path) -> None:
+    filings = (
+        _filing(
+            "0000000001-26-000001",
+            accepted_at="2026-02-10T12:00:00Z",
+            report_date=_OLDER_PERIOD.isoformat(),
+            filing_date="2026-02-09",
+        ),
+        _filing("0000000002-26-000001", accepted_at="2026-05-10T12:00:00Z"),
+        _filing(
+            "0000000003-26-000001",
+            accepted_at="2026-05-12T12:00:00Z",
+            form="13F-HR/A",
+        ),
+    )
+    periods = {
+        "0000000001-26-000001": _OLDER_PERIOD,
+        "0000000002-26-000001": _NEWER_PERIOD,
+        "0000000003-26-000001": _NEWER_PERIOD,
+    }
+    values = {
+        "0000000001-26-000001": 100,
+        "0000000002-26-000001": 200,
+        "0000000003-26-000001": 300,
+    }
+    submissions_client = _PeriodSubmissionsClient(filings)
+    document_client = _PairDocumentClient(values, periods)
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline = sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipeline(
+            storage, submissions_client, document_client
+        )
+
+        first = pipeline.run_periods(_pair_request((_OLDER_PERIOD, _NEWER_PERIOD)))
+
+        assert submissions_client.calls == 1
+        assert len(first.attempted_accessions) == 2
+        older, newer = first.periods
+        assert older.attempted_accessions == ("0000000001-26-000001",)
+        assert newer.attempted_accessions == ("0000000002-26-000001",)
+        assert newer.backlog_after == 1
+        assert first.backlog_after == 1
+
+        second = pipeline.run_periods(_pair_request((_OLDER_PERIOD, _NEWER_PERIOD)))
+
+        assert submissions_client.calls == 2
+        assert second.created_accessions == ("0000000003-26-000001",)
+        assert second.reused_accessions == (
+            "0000000001-26-000001",
+            "0000000002-26-000001",
+        )
+        assert len(second.attempted_accessions) == 1
+        assert second.backlog_after == 0
+
+
+def test_periods_mode_reuses_a_terminal_rejection_without_archives(tmp_path: Path) -> None:
+    filings = (
+        _filing(
+            "0000000001-26-000001",
+            accepted_at="2026-02-10T12:00:00Z",
+            report_date=_OLDER_PERIOD.isoformat(),
+            filing_date="2026-02-09",
+        ),
+        _filing("0000000002-26-000001", accepted_at="2026-05-10T12:00:00Z"),
+    )
+    periods = {
+        "0000000001-26-000001": _OLDER_PERIOD,
+        "0000000002-26-000001": _NEWER_PERIOD,
+    }
+    values = {"0000000001-26-000001": 100, "0000000002-26-000001": 200}
+    submissions_client = _PeriodSubmissionsClient(filings)
+    document_client = _PairDocumentClient(values, periods, reject_for=("0000000001-26-000001",))
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline = sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipeline(
+            storage, submissions_client, document_client
+        )
+
+        first = pipeline.run_periods(_pair_request((_OLDER_PERIOD, _NEWER_PERIOD)))
+
+        older, newer = first.periods
+        assert older.rejected_accessions == ("0000000001-26-000001",)
+        assert older.created_accessions == ()
+        assert older.backlog_after == 1
+        assert newer.created_accessions == ("0000000002-26-000001",)
+        archives_after_first = document_client.archives_calls
+
+        second = pipeline.run_periods(_pair_request((_OLDER_PERIOD, _NEWER_PERIOD)))
+
+        older_again, newer_again = second.periods
+        assert older_again.reused_accessions == ("0000000001-26-000001",)
+        assert older_again.attempted_accessions == ()
+        assert newer_again.reused_accessions == ("0000000002-26-000001",)
+        assert second.created_accessions == ()
+        assert document_client.archives_calls == archives_after_first
+
+
+def test_periods_request_rejects_invalid_bounds() -> None:
+    request_type = sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPeriodsImportRequest
+
+    with pytest.raises(sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipelineError):
+        request_type(
+            filer_cik="1067983",
+            report_periods=(_OLDER_PERIOD, _NEWER_PERIOD, date(2026, 6, 30)),
+            known_at=_CUT,
+        )
+
+    with pytest.raises(sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipelineError):
+        request_type(
+            filer_cik="1067983",
+            report_periods=(_NEWER_PERIOD, _OLDER_PERIOD),
+            known_at=_CUT,
+        )
+
+    with pytest.raises(sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipelineError):
+        request_type(
+            filer_cik="1067983",
+            report_periods=(_OLDER_PERIOD, _OLDER_PERIOD),
+            known_at=_CUT,
+        )
+
+    with pytest.raises(sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipelineError):
+        request_type(
+            filer_cik="1067983",
+            report_periods=(_OLDER_PERIOD, _NEWER_PERIOD),
+            known_at=_CUT,
+            accessions_per_period=11,
+        )
+
+    with pytest.raises(sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipelineError):
+        request_type(
+            filer_cik="1067983",
+            report_periods=(datetime(2025, 12, 31, tzinfo=UTC), _NEWER_PERIOD),
+            known_at=_CUT,
+        )
