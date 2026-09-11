@@ -109,5 +109,13 @@ límites explícitos que este documento no relaja:
   disponibilidad hereda la aceptación SEC exacta del filing.
 
 El artefacto continúa sin generar observaciones de holdings, sin inferir correspondencias de clase y
-sin calcular métricas; la correspondencia verificable y su materialización PIT pertenecen a
-`SEC-CORPUS-29`.
+sin calcular métricas. `SEC-CORPUS-29` consume la misma página determinista de gestores —orden
+`(selection_rank, asset_id, manager_cik, report_period)` y deduplicación por
+`(manager_cik, report_period)`— para probar la correspondencia row-scoped de cada candidato y
+materializar observaciones PIT, conservando la asociación exacta entre `candidate_id` y su propio
+`(asset_id, cusip, manager_cik, report_period)` sin productos cartesianos.
+
+Los dos wrappers CLI (`refresh_sec_institutional_manager_universe.py` y
+`query_sec_institutional_manager_universe.py`) usan ahora el contrato vivo de runtime y localización:
+`ApplicationRuntime.create_default()` con `StorageLocationRequest(workspace=...)` y un workspace
+inicializado. Sus flags públicos y su salida JSON no cambian.

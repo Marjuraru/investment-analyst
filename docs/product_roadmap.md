@@ -377,6 +377,14 @@ corte, reutilización sin volver a descargar Archives y backlog exacto. El acces
 lineage de descubrimiento, nunca autoridad de importación. La correspondencia CUSIP↔activo con
 provenance explícito y la materialización de observaciones quedan en `SEC-CORPUS-29`.
 
+`SEC-CORPUS-29` completa esa costura sin inventar identidad corporativa: la coincidencia se prueba por
+fila (`sec-institutional-row-correspondence-v1`) con vigencia cerrada al período reportado y lineage
+completo hasta el snapshot de universo, y la materialización
+(`sec-institutional-observation-materialization-v1`) completa las observaciones PIT sin realizar red,
+con estados explícitos en lugar de cero sintético y con la declaración humana
+`instrument-correspondence-v1` conservada como camino compatible. La operación programada y reanudable
+del ciclo completo queda en `SEC-CORPUS-30`, que es la siguiente unidad registrada.
+
 Las anomalías se evaluarán localmente sobre features point-in-time de filings: tamaño relativo de
 una transacción, cambio de tenencia, concentración, recurrencia, enmiendas y latencia de reporte. El
 primer baseline será determinista o estadístico robusto. Un modelo XGBoost/LightGBM solo se usará

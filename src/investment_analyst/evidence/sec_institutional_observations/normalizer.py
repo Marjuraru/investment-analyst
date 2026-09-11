@@ -7,6 +7,9 @@ from decimal import Decimal
 from investment_analyst.core.models import NormalizedObservation, SourceReference
 from investment_analyst.core.models.enums import DataFrequency, DataQuality
 from investment_analyst.evidence.instrument_correspondence.models import InstrumentCorrespondence
+from investment_analyst.evidence.sec_institutional_correspondence.models import (
+    SecInstitutionalRowCorrespondence,
+)
 from investment_analyst.evidence.sec_institutional_semantics.models import (
     InstitutionalHoldingsSemantics,
     InstitutionalSemanticsRow,
@@ -19,7 +22,7 @@ from .identity import observation_id
 def normalize_row(
     item: InstitutionalHoldingsSemantics,
     row: InstitutionalSemanticsRow,
-    correspondence: InstrumentCorrespondence,
+    correspondence: InstrumentCorrespondence | SecInstitutionalRowCorrespondence,
     *,
     normalized_at: datetime,
 ) -> tuple[NormalizedObservation, ...]:

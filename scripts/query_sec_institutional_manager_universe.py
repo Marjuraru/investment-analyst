@@ -12,7 +12,6 @@ from pathlib import Path
 from investment_analyst.application.runtime import (
     ApplicationRuntime,
     StorageLocationRequest,
-    WorkspaceService,
 )
 from investment_analyst.application.sec_institutional_universe import (
     SecInstitutionalUniverseApplication,
@@ -63,13 +62,11 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write("Error: --known-at must include timezone offset (e.g. Z or +00:00)\n")
         return 1
 
-    runtime = ApplicationRuntime.create_default(
-        workspace_service=WorkspaceService(root=args.workspace) if args.workspace else None
-    )
+    runtime = ApplicationRuntime.create_default()
     application = SecInstitutionalUniverseApplication(runtime)
 
     location = (
-        StorageLocationRequest(workspace_root=args.workspace)
+        StorageLocationRequest(workspace=args.workspace)
         if args.workspace
         else StorageLocationRequest()
     )

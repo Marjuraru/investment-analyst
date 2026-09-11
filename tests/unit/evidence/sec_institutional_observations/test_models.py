@@ -1,9 +1,15 @@
 from datetime import UTC, datetime
+from typing import get_args
 
 import pytest
 
+from investment_analyst.evidence.instrument_correspondence.models import InstrumentCorrespondence
+from investment_analyst.evidence.sec_institutional_correspondence.models import (
+    SecInstitutionalRowCorrespondence,
+)
 from investment_analyst.evidence.sec_institutional_observations.models import (
     InstitutionalObservationSummary,
+    InstitutionalObservationView,
 )
 
 
@@ -39,3 +45,22 @@ def test_summary_enforces_complete_contractual_accounting() -> None:
         _summary(values_examined=1)
     with pytest.raises(ValueError, match="observation counts"):
         _summary(observations_reused=2)
+    with pytest.raises(ValueError):
+        _summary(skipped_by_reason={"missing_report": -1})
+    assert InstitutionalObservationSummary.model_fields["skipped_by_reason"].default_factory() == {}
+
+
+def test_observation_view_accepts_both_admissible_correspondence_proofs() -> None:
+    """The read model keeps the manual declaration and the row-scoped claim as a typed union."""
+    annotation = InstitutionalObservationView.model_fields["correspondence"].annotation
+    assert set(get_args(annotation)) == {
+        InstrumentCorrespondence,
+        SecInstitutionalRowCorrespondence,
+    }
+    assert set(InstitutionalObservationView.model_fields) == {
+        "observation",
+        "report",
+        "artifact",
+        "row",
+        "correspondence",
+    }

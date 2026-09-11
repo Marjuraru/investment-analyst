@@ -8,6 +8,9 @@ from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCD
 from investment_analyst.core.models.observation import NormalizedObservation
 from investment_analyst.evidence.instrument_correspondence.models import InstrumentCorrespondence
 from investment_analyst.evidence.sec_documents.models import normalize_cik
+from investment_analyst.evidence.sec_institutional_correspondence.models import (
+    SecInstitutionalRowCorrespondence,
+)
 from investment_analyst.evidence.sec_institutional_holdings.models import (
     InstitutionalHoldingsReport,
 )
@@ -91,13 +94,18 @@ class InstitutionalObservationQuery(_Strict):
 
 
 class InstitutionalObservationView(_Strict):
-    """One observation with every persisted institutional parent verified."""
+    """One observation with every persisted institutional parent verified.
+
+    ``correspondence`` is the typed union of the two admissible proofs: the manual
+    ``instrument-correspondence-v1`` declaration or the row-scoped
+    ``sec-institutional-row-correspondence-v1`` claim. Their meaning is never merged.
+    """
 
     observation: NormalizedObservation
     report: InstitutionalHoldingsReport
     artifact: InstitutionalHoldingsSemantics
     row: InstitutionalSemanticsRow
-    correspondence: InstrumentCorrespondence
+    correspondence: InstrumentCorrespondence | SecInstitutionalRowCorrespondence
 
 
 class InstitutionalObservationQueryResult(_Strict):

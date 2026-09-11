@@ -9,6 +9,12 @@ from uuid import UUID
 from investment_analyst.evidence.instrument_correspondence.repository import (
     InstrumentCorrespondenceRepository,
 )
+from investment_analyst.evidence.sec_institutional_correspondence.repository import (
+    SecInstitutionalRowCorrespondenceRepository,
+)
+from investment_analyst.evidence.sec_institutional_correspondence.service import (
+    resolve_visible_claims,
+)
 from investment_analyst.evidence.sec_institutional_holdings.repository import (
     InstitutionalHoldingsRepository,
 )
@@ -70,9 +76,9 @@ class InstitutionalObservationService:
         now = now.astimezone(UTC)
         holdings = InstitutionalHoldingsRepository(self._storage.raw_records)
         semantics = InstitutionalSemanticsRepository(self._storage.raw_records)
-        correspondences = InstrumentCorrespondenceRepository(self._storage.raw_records).list(
-            known_at=request.known_at, asset_id=request.asset_id
-        )
+        manual = InstrumentCorrespondenceRepository(self._storage.raw_records)
+        row_claims = SecInstitutionalRowCorrespondenceRepository(self._storage.raw_records)
+        correspondences = manual.list(known_at=request.known_at, asset_id=request.asset_id)
         created = reused = rows = linked = unlinked = values = generated = 0
         reports_missing = reports_not_enriched = 0
         skips: Counter[str] = Counter()
@@ -91,35 +97,47 @@ class InstitutionalObservationService:
                 reports_not_enriched += 1
                 skips["not_enriched"] += 1
                 continue
+            claims_by_row: dict[UUID, list] = {}
+            for claim in row_claims.list(known_at=request.known_at, artifact_id=item.artifact_id):
+                claims_by_row.setdefault(claim.row_id, []).append(claim)
             for row in item.rows:
                 rows += 1
                 if item.report_period is None:
                     unlinked += 1
                     skips["missing_report_period"] += 1
                     continue
-                same_cusip = [c for c in correspondences if c.cusip == row.cusip]
-                exact = [
-                    c
-                    for c in correspondences
-                    if c.cusip == row.cusip
-                    and c.title_of_class == row.title_of_class
-                    and c.is_effective_on(item.report_period)
-                ]
-                if len(exact) != 1:
-                    if len(exact) > 1:
-                        reason = "ambiguous_correspondence"
-                    elif any(c.is_effective_on(item.report_period) for c in same_cusip):
-                        reason = "class_mismatch"
-                    elif same_cusip:
-                        reason = "outside_effective_period"
-                    else:
-                        reason = "missing_correspondence"
+                resolution = resolve_visible_claims(claims_by_row.get(row.row_id, ()))
+                if resolution.state == "resolved":
+                    correspondence = resolution.correspondence
+                elif resolution.state != "absent":
                     unlinked += 1
-                    skips[reason] += 1
+                    skips[f"row_{resolution.state}"] += 1
                     continue
+                else:
+                    same_cusip = [c for c in correspondences if c.cusip == row.cusip]
+                    exact = [
+                        c
+                        for c in correspondences
+                        if c.cusip == row.cusip
+                        and c.title_of_class == row.title_of_class
+                        and c.is_effective_on(item.report_period)
+                    ]
+                    if len(exact) != 1:
+                        if len(exact) > 1:
+                            reason = "ambiguous_correspondence"
+                        elif any(c.is_effective_on(item.report_period) for c in same_cusip):
+                            reason = "class_mismatch"
+                        elif same_cusip:
+                            reason = "outside_effective_period"
+                        else:
+                            reason = "missing_correspondence"
+                        unlinked += 1
+                        skips[reason] += 1
+                        continue
+                    correspondence = exact[0]
                 linked += 1
                 values += 1
-                candidates = normalize_row(item, row, exact[0], normalized_at=now)
+                candidates = normalize_row(item, row, correspondence, normalized_at=now)
                 if not candidates:
                     skips["unsupported_row"] += 1
                 for candidate in candidates:
@@ -173,11 +191,7 @@ class InstitutionalObservationService:
             InstitutionalSemanticsRepository(self._storage.raw_records).get,
             "artifact",
         )
-        correspondences = _resolve_all(
-            correspondence_ids,
-            InstrumentCorrespondenceRepository(self._storage.raw_records).get,
-            "correspondence",
-        )
+        correspondences = self._resolve_correspondences(correspondence_ids)
         reports = _resolve_all(
             report_ids,
             InstitutionalHoldingsRepository(self._storage.raw_records).get_report,
@@ -206,6 +220,26 @@ class InstitutionalObservationService:
             total_matching=len(matching),
             truncated=query.offset + len(page) < len(matching),
         )
+
+    def _resolve_correspondences(self, ids) -> dict:
+        """Resolve each identifier against both repositories, requiring exactly one parent."""
+        manual = InstrumentCorrespondenceRepository(self._storage.raw_records)
+        row_claims = SecInstitutionalRowCorrespondenceRepository(self._storage.raw_records)
+        resolved = {}
+        for identifier in ids:
+            declared = manual.get(identifier)
+            scoped = row_claims.get(identifier)
+            if (declared is None) == (scoped is None):
+                raise InstitutionalObservationLineageError(
+                    "institutional observation correspondence parent is missing or duplicated"
+                )
+            resolved[identifier] = declared if declared is not None else scoped
+        return resolved
+
+
+def observation_lineage_key(observation) -> dict[str, str | None]:
+    """Return the canonical lineage key of one institutional observation for verification."""
+    return _record_key(observation)
 
 
 def _record_key(observation) -> dict[str, str | None]:

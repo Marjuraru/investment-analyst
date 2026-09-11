@@ -1,4 +1,5 @@
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -8,6 +9,9 @@ import pytest
 from investment_analyst.evidence.instrument_correspondence.models import InstrumentCorrespondence
 from investment_analyst.evidence.instrument_correspondence.repository import (
     InstrumentCorrespondenceRepository,
+)
+from investment_analyst.evidence.sec_institutional_correspondence.repository import (
+    SecInstitutionalRowCorrespondenceRepository,
 )
 from investment_analyst.evidence.sec_institutional_observations.models import (
     InstitutionalObservationQuery,
@@ -201,6 +205,187 @@ def test_summary_distinguishes_missing_and_not_enriched_reports(tmp_path: Path) 
     assert summary.reports_missing == summary.reports_not_enriched == 1
     assert summary.rows_examined == summary.values_examined == 0
     assert summary.skipped_by_reason == {"missing_report": 1, "not_enriched": 1}
+
+
+def _artifact_of(storage: LocalStorage, report):
+    from investment_analyst.evidence.sec_institutional_semantics.repository import (
+        InstitutionalSemanticsRepository,
+    )
+
+    return InstitutionalSemanticsRepository(storage.raw_records).get_for_parent(report)
+
+
+def _row_claim(
+    artifact,
+    row,
+    *,
+    asset_id: str = "equity:us:aapl",
+    title_of_class: str | None = None,
+    available_at: datetime | None = None,
+):
+    from investment_analyst.evidence.sec_institutional_correspondence.models import (
+        SecInstitutionalRowCorrespondence,
+    )
+
+    return SecInstitutionalRowCorrespondence.claim(
+        asset_id=asset_id,
+        cusip=row.cusip,
+        title_of_class=title_of_class or row.title_of_class,
+        report_period=artifact.report_period,
+        manager_cik=artifact.manager_cik,
+        report_id=artifact.parent_report_id,
+        artifact_id=artifact.artifact_id,
+        row_id=row.row_id,
+        universe_snapshot_id=uuid4(),
+        dataset_revision_id=uuid4(),
+        candidate_id=uuid4(),
+        available_at=available_at or max(_NOW, artifact.available_at),
+        recorded_at=_NOW,
+    )
+
+
+def test_row_scoped_claim_is_preferred_over_the_manual_declaration(tmp_path: Path) -> None:
+    root = StoragePaths.from_root(tmp_path)
+    with LocalStorage(root) as storage:
+        report, manual = _seed(storage, title_of_class="PREF")
+        artifact = _artifact_of(storage, report)
+        first_row, second_row = artifact.rows[0], artifact.rows[1]
+        repository = SecInstitutionalRowCorrespondenceRepository(storage.raw_records)
+        first_claim = _row_claim(artifact, first_row)
+        second_claim = _row_claim(
+            artifact, second_row, title_of_class="PREF", available_at=artifact.available_at
+        )
+        repository.save(first_claim)
+        repository.save(second_claim)
+
+        summary = InstitutionalObservationService(
+            storage, clock=lambda: _NOW + timedelta(days=1)
+        ).normalize(
+            InstitutionalObservationRequest(
+                asset_id="equity:us:aapl",
+                manager_cik="1067983",
+                report_ids=(report.report_id,),
+                known_at=_NOW + timedelta(days=1),
+            )
+        )
+
+    assert manual.title_of_class == "PREF"
+    assert summary.rows_examined == summary.rows_linked == 2
+    assert summary.rows_unlinked == 0
+    assert summary.observations_generated == summary.observations_created == 4
+    assert summary.skipped_by_reason == {}
+
+    with LocalStorage(root, read_only=True) as storage:
+        result = InstitutionalObservationService(storage).query(
+            InstitutionalObservationQuery(
+                asset_id="equity:us:aapl",
+                known_at=_NOW + timedelta(days=1),
+                manager_cik="1067983",
+                report_id=report.report_id,
+                limit=10,
+            )
+        )
+    assert result.total_matching == 4
+    assert {type(view.correspondence) for view in result.observations} == {
+        type(first_claim),
+        type(second_claim),
+    }
+    assert {view.correspondence.correspondence_id for view in result.observations} == {
+        first_claim.correspondence_id,
+        second_claim.correspondence_id,
+    }
+    assert all(view.row.row_id == view.correspondence.row_id for view in result.observations)
+    assert all(
+        view.correspondence.report_period == report.report_period for view in result.observations
+    )
+    assert all(view.correspondence.manager_cik == "0001067983" for view in result.observations)
+
+
+def test_conflicting_row_claims_are_reported_and_never_normalized(tmp_path: Path) -> None:
+    root = StoragePaths.from_root(tmp_path)
+    with LocalStorage(root) as storage:
+        report, _ = _seed(storage)
+        artifact = _artifact_of(storage, report)
+        row = artifact.rows[0]
+        repository = SecInstitutionalRowCorrespondenceRepository(storage.raw_records)
+        repository.save(_row_claim(artifact, row))
+        repository.save(_row_claim(artifact, row, asset_id="equity:us:msft"))
+        summary = InstitutionalObservationService(
+            storage, clock=lambda: _NOW + timedelta(days=1)
+        ).normalize(
+            InstitutionalObservationRequest(
+                asset_id="equity:us:aapl",
+                manager_cik="1067983",
+                report_ids=(report.report_id,),
+                known_at=_NOW + timedelta(days=1),
+            )
+        )
+        conflicting = InstitutionalObservationService(
+            storage, clock=lambda: _NOW + timedelta(days=1)
+        ).normalize(
+            InstitutionalObservationRequest(
+                asset_id="equity:us:msft",
+                manager_cik="1067983",
+                report_ids=(report.report_id,),
+                known_at=_NOW + timedelta(days=1),
+            )
+        )
+
+    assert summary.rows_examined == 2
+    assert summary.rows_linked == 1
+    assert summary.rows_unlinked == 1
+    assert summary.skipped_by_reason == {"row_ambiguous_asset": 1}
+    assert conflicting.rows_linked == 0
+    assert conflicting.skipped_by_reason == {
+        "row_ambiguous_asset": 1,
+        "missing_correspondence": 1,
+    }
+    assert conflicting.observations_generated == 0
+
+
+def test_query_fails_closed_when_a_correspondence_parent_is_absent(tmp_path: Path) -> None:
+    root = StoragePaths.from_root(tmp_path)
+    with LocalStorage(root) as storage:
+        report, _ = _seed(storage)
+        artifact = _artifact_of(storage, report)
+        claim = _row_claim(artifact, artifact.rows[0])
+        SecInstitutionalRowCorrespondenceRepository(storage.raw_records).save(claim)
+        InstitutionalObservationService(storage, clock=lambda: _NOW + timedelta(days=1)).normalize(
+            InstitutionalObservationRequest(
+                asset_id="equity:us:aapl",
+                manager_cik="1067983",
+                report_ids=(report.report_id,),
+                known_at=_NOW + timedelta(days=1),
+            )
+        )
+
+    with LocalStorage(root) as storage:
+        observation = storage.observations.list(asset_id="equity:us:aapl")[0]
+        key = json.loads(observation.source.record_key)
+        key["correspondence_id"] = str(uuid4())
+        storage.observations.save(
+            observation.model_copy(
+                update={
+                    "observation_id": uuid4(),
+                    "source": observation.source.model_copy(
+                        update={
+                            "record_key": json.dumps(key, sort_keys=True, separators=(",", ":"))
+                        }
+                    ),
+                }
+            )
+        )
+    with (
+        LocalStorage(root, read_only=True) as storage,
+        pytest.raises(InstitutionalObservationLineageError, match="missing or duplicated"),
+    ):
+        InstitutionalObservationService(storage).query(
+            InstitutionalObservationQuery(
+                asset_id="equity:us:aapl",
+                known_at=_NOW + timedelta(days=1),
+                manager_cik="1067983",
+            )
+        )
 
 
 def test_read_only_query_returns_verified_views_and_rejects_corruption(tmp_path: Path) -> None:
