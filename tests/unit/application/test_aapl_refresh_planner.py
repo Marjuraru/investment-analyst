@@ -22,6 +22,20 @@ from investment_analyst.providers.market.alpaca_pipeline import (
 )
 
 
+def _apple_configuration() -> AlpacaAssetConfiguration:
+    return AlpacaAssetConfiguration(
+        asset_id=ASSET_ID,
+        symbol="AAPL",
+        feed="iex",
+        adjustment="all",
+        source_id=SOURCE_ID,
+        name="Apple Inc.",
+        asset_class=AssetClass.EQUITY,
+        quote_currency="USD",
+        exchange="NASDAQ",
+    )
+
+
 class ObservationRepositoryDouble:
     """Return explicitly supplied observations without writes."""
 
@@ -187,7 +201,7 @@ def _plan(
         [*(_observation(item) for item in timestamps), *extras],
         list(receipts),
     )
-    return AaplMarketRefreshPlanner(storage).plan(
+    return AaplMarketRefreshPlanner(_apple_configuration(), storage).plan(
         requested_start=start,
         requested_end=end,
         refresh_mode=refresh_mode,
@@ -232,8 +246,8 @@ def test_planner_scopes_coverage_to_one_catalog_backed_alpaca_asset() -> None:
     )
 
     plan = AaplMarketRefreshPlanner(
+        configuration,
         storage,
-        configuration=configuration,
     ).plan(
         requested_start=date(2026, 1, 2),
         requested_end=date(2026, 1, 2),

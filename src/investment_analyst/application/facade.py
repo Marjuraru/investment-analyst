@@ -978,8 +978,8 @@ class InvestmentAnalystApplication:
             return ListedMarketRefreshPipeline(
                 configuration=configuration,
                 refresh_planner=AaplMarketRefreshPlanner(
+                    configuration,
                     storage,
-                    configuration=configuration,
                 ),
                 market_pipeline=AlpacaHistoricalPipeline(
                     storage,
@@ -1510,4 +1510,5 @@ class InvestmentAnalystApplication:
             ),
             valuation_pipeline=CorporateValuationPersistencePipeline(storage),
             consolidated_service=AaplConsolidatedDiagnosticService(storage),
+            market_configuration=alpaca_configuration,
         )

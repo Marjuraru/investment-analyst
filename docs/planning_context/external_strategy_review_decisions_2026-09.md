@@ -57,7 +57,8 @@ páginas candidatas con una única revisión Submissions compartida, ejecuta las
 institucionales ya integrados sin cambiar fórmulas y reconcilia la outbox local antes de avanzar el cursor, bajo
 el job adicional `sec:institutional:13f-history` (desfase 120 min). La retirada definitiva de los residuos de
 privilegio por ticker y la observación del runtime antes de ampliar activos o proveedores quedan en
-`RUNTIME-EFFICIENCY-1`, el siguiente ítem de `EQUITY-UNIVERSE`.
+`RUNTIME-EFFICIENCY-5`, el siguiente ítem de `EQUITY-UNIVERSE`; la retirada de los contratos Apple
+legados `aapl-market-chart-v5` y `AaplDailyRunRequestSnapshot` queda como Work Block posterior separado.
 
 | Recomendación | Decisión | Evidencia/razón | Ruta futura |
 | --- | --- | --- | --- |

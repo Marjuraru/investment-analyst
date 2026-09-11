@@ -12,7 +12,6 @@ from urllib.parse import urlencode, urlsplit
 from investment_analyst.providers.http import HttpTransport
 
 OFFICIAL_BASE_URL = "https://data.alpaca.markets"
-SUPPORTED_SYMBOL = "AAPL"
 FEED = "iex"
 ADJUSTMENT = "all"
 TIMEFRAME = "1Day"

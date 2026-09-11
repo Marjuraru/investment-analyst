@@ -441,7 +441,7 @@ Los ceros decimales innecesarios se omiten, salvo en importes monetarios. El con
 conserva el `Decimal` completo, las unidades, fórmulas, parámetros, identidades y timestamps para
 auditoría. El endpoint local `/api/market-chart` entrega `aapl-market-chart-v5` para Apple,
 `listed-market-chart-v1` para los demás activos Alpaca y `btc-market-chart-v1` para Bitcoin:
-acepta `asset_id`, `interval=auto|1d|1w|1mo`, además de
+exige `asset_id`, `interval=auto|1d|1w|1mo`, además de
 `short_sma_window`, `long_sma_window` y `third_sma_window`. La interfaz exige ventanas crecientes
 entre 2 y 400; el tercer parámetro conserva un valor predeterminado compatible para solicitudes
 anteriores,
@@ -454,7 +454,7 @@ El contrato HTTP conserva los demás rangos compatibles. Esta progresión evita 
 sesiones diarias de BTC-USD en la respuesta inicial, sin recortar la evidencia persistida ni impedir
 el acceso al historial completo.
 El endpoint separado `/api/market-intraday` entrega `btc-intraday-chart-v1` únicamente para
-`crypto:btc-usd`. Acepta los nueve intervalos fijos, consulta una ventana de 24 horas y excluye el
+`crypto:btc-usd` y exige `asset_id` explícito. Acepta los nueve intervalos fijos, consulta una ventana de 24 horas y excluye el
 minuto todavía en curso. No acepta rangos arbitrarios desde el navegador ni reutiliza el contrato
 diario. La actualización `POST /api/market-intraday-refresh` se ejecuta solo por una acción explícita,
 importa como máximo 1.440 minutos y expone conteos creados/reutilizados para auditar idempotencia.
@@ -481,10 +481,10 @@ mantienen separadas. La tabla OHLC se construye solo al abrirla para no cargar m
 El endpoint `/api/fundamental-research` entrega el contrato exacto
 `aapl-fundamental-research-v2`, incluidas fórmulas, versiones, limitaciones e identidades de inputs.
 La matriz compacta presenta el último período; su exportación conserva todos los períodos acotados
-devueltos por la consulta. Los endpoints fundamentales aceptan `asset_id`; la interfaz lo envía
+devueltos por la consulta. Los endpoints fundamentales exigen `asset_id`; la interfaz lo envía
 siempre y el servidor rechaza activos sin un pipeline fundamental completo antes de invocar los
-servicios SEC configurados. La omisión conserva AAPL como valor compatible para clientes locales
-anteriores.
+servicios SEC configurados. Omitir `asset_id` produce un rechazo acotado: ya no existe un activo
+predeterminado implícito para clientes locales anteriores.
 UI-14 conserva los dos disclosures avanzados con sus nodos, IDs, renderers, datos, endpoints y exportaciones, pero los inicia con `hidden` para que no sean visibles ni focusables; retirar el atributo los revierte.
 
 El endpoint `/api/fundamental-research-history` envuelve ese contrato sin modificarlo y añade media,

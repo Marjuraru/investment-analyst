@@ -168,7 +168,7 @@ def refresh_pipeline(storage: LocalStorage, resolved: AlpacaAssetConfiguration):
     )
     return ListedMarketRefreshPipeline(
         configuration=resolved,
-        refresh_planner=AaplMarketRefreshPlanner(storage, configuration=resolved),
+        refresh_planner=AaplMarketRefreshPlanner(resolved, storage),
         market_pipeline=AlpacaHistoricalPipeline(
             storage,
             client,
