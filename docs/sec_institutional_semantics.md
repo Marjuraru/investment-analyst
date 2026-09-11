@@ -54,3 +54,11 @@ adquisición dirigida reúne los reportes del período objetivo visibles al cort
 lotes de hasta veinte IDs por gestor, respetando el máximo que el propio contrato impone. Un artefacto
 ya enriquecido se reutiliza en lugar de reescribirse, y un rechazo permanece explícito en el resumen
 (`semantics_rejected`) sin convertirse en éxito ni en cartera efectiva.
+
+## Consumo por fila desde el universo
+
+`SEC-CORPUS-29` tampoco modifica el contrato semántico: cada fila del artefacto es la unidad que un
+claim row-scoped referencia por `artifact_id` y `row_id`, y el lineage se verifica contra el artefacto
+persistido (CUSIP y clase literales). Las filas siguen siendo as-filed y separadas: la
+materialización no compone enmiendas, no convierte una posición reportada en operación y conserva
+`value_unit` y `monetary_scale_status` tal como se declararon.

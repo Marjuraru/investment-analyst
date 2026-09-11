@@ -38,6 +38,12 @@ from investment_analyst.evidence.sec_documents.repository import (
     SecDocumentRepository,
     verify_document_records,
 )
+from investment_analyst.evidence.sec_institutional_correspondence.repository import (
+    verify_sec_institutional_row_correspondence_records,
+)
+from investment_analyst.evidence.sec_institutional_correspondence.service import (
+    SecInstitutionalRowCorrespondenceService,
+)
 from investment_analyst.evidence.sec_institutional_holdings.document_repository import (
     SecFilerDocumentRepository,
     verify_filer_document_records,
@@ -542,6 +548,10 @@ def _scan_raw_records(storage: LocalStorage) -> int:
             SecDocumentRepository(storage.raw_records, storage.documents),
         )
         verify_instrument_correspondence_records(records.values())
+        verify_sec_institutional_row_correspondence_records(
+            records.values(),
+            service=SecInstitutionalRowCorrespondenceService(storage),
+        )
         verify_ownership_records(
             records.values(),
             SecDocumentRepository(storage.raw_records, storage.documents),

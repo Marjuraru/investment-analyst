@@ -128,6 +128,57 @@ python scripts/refresh_sec_institutional_holdings_from_universe.py --workspace /
 
 El comando no refresca el dataset del universo: si falta un snapshot falla con una instrucción
 operacional que nombra `scripts/refresh_sec_institutional_manager_universe.py`. La salida JSON es
-compacta y el exit es distinto de cero sólo ante un fallo global. La correspondencia verificable entre
-posiciones y activos, con provenance explícita y materialización de observaciones, permanece en
-`SEC-CORPUS-29`.
+compacta y el exit es distinto de cero sólo ante un fallo global.
+
+## Correspondencia verificable por fila
+
+`SEC-CORPUS-29` cierra la costura evidencia 13F→activo→observación con el contrato aislado
+`sec-institutional-row-correspondence-v1`, bajo el source ID
+`sec-edgar:institutional-row-correspondence` y la política
+`sec-institutional-row-correspondence-policy-v1`. No sustituye la declaración humana
+`instrument-correspondence-v1`, que permanece intacta como camino compatible.
+
+Un claim prueba que el CUSIP exacto de **una fila** as-filed coincide con el CUSIP del candidato de
+universo ya derivado del catálogo, para el mismo período reportado, gestor y artefacto semántico. Su
+vigencia es cerrada y no configurable (`effective_from == report_period`,
+`effective_to == report_period + 1 día`), `available_at` es exactamente
+`max(snapshot.available_at, artifact.available_at)` y el `event_time` es el inicio UTC del período.
+La identidad UUID5 incorpora política/schema, snapshot y candidato, artefacto y fila, activo, CUSIP,
+clase, período y `available_at`; `recorded_at` describe cuándo se escribió la prueba y queda fuera de
+la identidad, de modo que una rematerialización equivalente reutiliza el claim persistido sin
+reescribirlo. Cualquier otra diferencia sí falla cerrado.
+
+Antes de persistir se verifica la cadena completa: snapshot y revisión de dataset existentes con hash
+y período coincidentes, candidato embebido y `is_selected=true` con CIK, activo, CUSIP y período
+exactos, reporte y artefacto semántico del mismo gestor y período, fila presente por `row_id` con CUSIP
+y clase literales, y el binding SEC/CUSIP vivo del catálogo. Si el catálogo ya no coincide, la
+operación falla cerrado: no se reconstruyen bindings históricos ni se une por ticker, nombre, FIGI,
+ISIN o similitud.
+
+Para una misma fila y activo, varias pruebas equivalentes visibles se resuelven por
+`(available_at, correspondence_id)` ascendente. Claims que difieren en activo o en contenido declarado
+permanecen ambiguos, se exponen con su razón y **no** producen observaciones; tampoco se recurre al
+camino manual para "desempatar" artificialmente. La consulta resuelve el identificador contra ambos
+repositorios, exige exactamente un padre y devuelve una unión tipada en `InstitutionalObservationView`.
+
+## Materialización dirigida de observaciones
+
+`sec-institutional-observation-materialization-v1` materializa observaciones PIT desde el universo sin
+realizar red y abriendo el workspace una sola vez. El request sólo admite `known_at`,
+`manager_offset >= 0` y `manager_limit` entre 1 y 25; ningún CIK, activo, CUSIP, accession, report ID,
+row ID, URL o período es payload libre.
+
+La página de gestores es la misma que ya integra `SEC-CORPUS-28` —orden
+`(selection_rank, asset_id, manager_cik, report_period)` y deduplicación por
+`(manager_cik, report_period)`— pero conservando la asociación exacta de cada `candidate_id` con su
+propio `(asset_id, cusip, manager_cik, report_period)`, sin formar productos cartesianos. Para cada
+candidato se leen únicamente reportes y semántica ya persistidos y visibles del mismo gestor y período;
+cada fila con CUSIP exacto crea o reutiliza un claim row-scoped. La ausencia de reporte, de semántica o
+de fila coincidente se reporta como estado explícito (`missing_report`, `not_enriched`,
+`missing_rows`), nunca como cero holdings. Un fallo por gestor se registra con su código, conserva el
+progreso ya persistido y no introduce rollback global.
+
+```bash
+python scripts/materialize_sec_institutional_observations_from_universe.py --workspace /tmp/sec-13f \
+  --known-at 2026-09-11T00:00:00Z --manager-offset 0 --manager-limit 1
+```

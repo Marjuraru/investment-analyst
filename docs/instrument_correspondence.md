@@ -29,3 +29,23 @@ la falta de período como `missing_report_period`:
   --root /ruta/al/storage --asset-id equity:us:aapl --filer-cik 0001067983 \
   --known-at 2025-02-15T00:00:00Z
 ```
+
+## Correlación automática por fila
+
+`SEC-CORPUS-29` añade un contrato **aislado** para las coincidencias que no requieren declaración
+humana: `sec-institutional-row-correspondence-v1`, bajo el source ID
+`sec-edgar:institutional-row-correspondence` y la política
+`sec-institutional-row-correspondence-policy-v1`.
+
+Este contrato **no** modifica, reemplaza ni reinterpreta `instrument-correspondence-v1`: no cambia su
+identidad, su persistencia, su procedencia ni sus consumidores. Una declaración manual sigue siendo una
+afirmación humana con ventana económica libre; el claim row-scoped prueba algo distinto y más estrecho:
+que el CUSIP exacto de **una fila** as-filed coincide con el CUSIP del candidato de universo ya derivado
+del catálogo para **ese mismo período reportado**. Nunca establece una identidad corporativa perpetua ni
+infiere por ticker, nombre de emisor, FIGI, ISIN o similitud de texto.
+
+La vigencia es cerrada y no configurable: `effective_from == report_period` y
+`effective_to == report_period + 1 día`. `available_at` es exactamente
+`max(snapshot.available_at, artifact.available_at)`, y `event_time` es el inicio UTC del período
+reportado. El detalle de identidad, lineage, resolución determinista y materialización está en
+[Posiciones institucionales SEC Form 13F](sec_institutional_holdings.md#correspondencia-verificable-por-fila).

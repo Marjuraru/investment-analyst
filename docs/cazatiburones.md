@@ -203,6 +203,11 @@ Esta etapa es la primera vertical porque está ligada al emisor analizado, suele
   `sec-institutional-holdings-directed-refresh-v1` y `sec-institutional-holdings-directed-page-v1`,
   con un GET Submissions por gestor, acceptance-time PIT, reanudación sin volver a descargar Archives
   de un accession ya materializado y backlog declarado;
+- materialización PIT desde ese universo: `SEC-CORPUS-29` define
+  `sec-institutional-row-correspondence-v1` (prueba del CUSIP exacto de cada fila contra el candidato,
+  con vigencia cerrada al período reportado) y `sec-institutional-observation-materialization-v1`
+  (página determinista, sin red, con estados explícitos en lugar de cero sintético); la declaración
+  humana `instrument-correspondence-v1` permanece como camino compatible;
 - importación por CIK de gestor explícitamente declarado, sin incorporarlo al catálogo de activos;
 - evidencia point-in-time integrada para `13F-HR` y `13F-HR/A` de `filings.recent`, limitada a
   portada e information table XML estructuradas;

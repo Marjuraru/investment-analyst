@@ -6,6 +6,22 @@ Las opciones se conservan como valor/acciones subyacentes declaradas; no son acc
 Antes del 2023-01-03 el valor 13F se multiplica exactamente por 1000; desde esa fecha se conserva
 en USD. Esta capa no compone enmiendas ni produce métricas, señales o recomendaciones.
 
+## Dos pruebas admisibles
+
+`SEC-CORPUS-29` admite dos tipos de correspondencia sin mezclar su significado:
+
+1. **Claim row-scoped** (`sec-institutional-row-correspondence-v1`): preferido cuando existe para la
+   misma `artifact_id`, `row_id` y activo visible al corte. Prueba el CUSIP exacto de esa fila contra
+   el candidato de universo, con vigencia cerrada al período reportado.
+2. **Declaración manual** (`instrument-correspondence-v1`): camino compatible que se conserva
+   literalmente cuando no existe un claim row-scoped, resolviendo por CUSIP, clase y ventana.
+
+La preferencia no es un desempate: si existe un claim row-scoped ambiguo o conflictivo, la fila queda
+explícita y sin observación (`row_ambiguous_asset`, `row_conflicting_content`) en lugar de recaer en el
+camino manual. El `correspondence_id` del claim participa en la identidad de observación existente, de
+modo que las observaciones basadas en correspondencia manual conservan sus identificadores,
+serialización y verificación.
+
 ```bash
 python scripts/normalize_sec_institutional_observations.py --workspace /tmp/sec-13f \
   --asset-id equity:us:aapl --filer-cik 1067983 --report-id <UUID> --known-at <UTC>
