@@ -105,6 +105,20 @@ efectivo y la cobertura. La operación no crea eventos, candidatos, notificacion
 toca la familia 13F y no añade endpoint, botón, preferencia ni pantalla; las lecturas actuales de
 universo y detalle reflejan los statements al invalidarse sus cachés.
 
+### Ciclo institucional 13F programado (`SEC-CORPUS-30`)
+
+Para el universo institucional Form 13F, `SEC-CORPUS-30` introduce el job `sec:institutional:13f-cycle`
+(proveedor `sec-edgar`, dominio `events`, frecuencia `daily-check`, 08:45 `America/Lima`, correspondiente a
+`run_at + 105 minutos`):
+- Se planifica automáticamente si la watchlist activa incluye al menos un activo con correspondencia
+  `sec/cusip` en el catálogo.
+- Ejecuta el ciclo coordinado (#27 universo → #28 adquisición dirigida → #29 correspondencia y observaciones)
+  bajo el mutex de escritura compartido.
+- Mantiene un cursor atómico y reanudable en `state/sec_institutional_cycle_state_v1.json`.
+- Satisface presupuestos estrictos de red oficial: sondeo diario de catálogo HTML, descarga condicional de ZIP
+  (sólo ante ausencia de snapshot, nuevo trimestre/URL o expiración de 7 días; cero GET ZIP en cache hit), y
+  reutilización de filings ya descargados y outcomes terminales de rechazo.
+
 ## Pipeline híbrido local
 
 ```text

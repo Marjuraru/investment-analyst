@@ -209,6 +209,10 @@ from investment_analyst.application.sec_fundamental_refresh_models import (
     SecIssuerFundamentalRefreshRequest,
     SecIssuerFundamentalRefreshSummary,
 )
+from investment_analyst.application.sec_institutional_cycle_models import (
+    SecInstitutionalCycleRequest,
+    SecInstitutionalCycleSummary,
+)
 from investment_analyst.application.universe_coverage_models import (
     UniverseCoverageRequest,
     UniverseCoverageResult,
@@ -1351,6 +1355,24 @@ class AaplLocalController:
                 with self._cache_lock:
                     self._coverage_cache.clear()
                     self._universe_activity_cache.clear()
+
+    def sec_institutional_cycle_request(
+        self,
+        request: SecInstitutionalCycleRequest,
+    ) -> SecInstitutionalCycleSummary:
+        """Execute one bounded scheduled step of the Form 13F cycle with shared lock."""
+        with self._writer_lock:
+            try:
+                return self._application.run_sec_institutional_cycle(
+                    request,
+                    sec_identity=self._sec_identity,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                )
+            finally:
+                with self._cache_lock:
+                    self._coverage_cache.clear()
+                    self._universe_activity_cache.clear()
+                self._refresh_health_snapshot()
 
     def fundamental_trend_request(
         self,

@@ -182,3 +182,39 @@ progreso ya persistido y no introduce rollback global.
 python scripts/materialize_sec_institutional_observations_from_universe.py --workspace /tmp/sec-13f \
   --known-at 2026-09-11T00:00:00Z --manager-offset 0 --manager-limit 1
 ```
+
+## Ciclo institucional programado y reanudable
+
+`SEC-CORPUS-30` integra las tres capas previas (#27 universo, #28 adquisición dirigida y #29
+correspondencia/observaciones) en una sola operación atómica y reanudable, bajo el contrato
+`sec-institutional-scheduled-cycle-v1` y la política `sec-institutional-cycle-policy-v1`.
+
+### Arquitectura y presupuesto de red
+
+1. **Una sola conexión writer**: El ciclo abre el workspace en modo `READ_WRITE` exactamente una vez,
+   compartiendo la conexión entre el universo, la adquisición y la materialización.
+2. **Presupuesto acotado de red**:
+   - Sondeo diario de catálogo oficial HTML (`fetch_catalog_page`, ~50 KB).
+   - Descarga de ZIP oficial (~15 MB) condicional: únicamente si no existe snapshot activo, si el
+     catálogo publica un nuevo período/URL o si han transcurrido más de 7 días desde la última
+     validación. En cache hit ordinario se realizan cero peticiones GET de ZIP.
+   - Paginación de un gestor por ejecución con `accessions_per_manager <= 2`.
+   - Máximo un GET de Submissions por gestor (`data.sec.gov/submissions/CIK##########.json`).
+   - Reutilización estricta de filings ya descargados y de outcomes rechazados verificados.
+3. **Persistencia atómica y recuperación**:
+   - Archivo de estado `state/sec_institutional_cycle_state_v1.json` con `schema_version = "sec-institutional-cycle-state-v1"`.
+   - Escritura atómica vía `os.replace` + `fsync` protegida por checksum SHA-256 del contenido canónico.
+   - Si falla la sonda del catálogo o la descarga del ZIP, el estado y el cursor no mutan.
+   - Si falla la adquisición o la materialización de un gestor, el cursor no avanza y el siguiente ciclo
+     reintenta el mismo gestor sin duplicar identidades previas.
+   - Outcomes `rejected` con linaje y período coincidentes son reconocidos como terminales reutilizados,
+     impidiendo que errores de formato en filings ajenos bloqueen indefinidamente el cursor.
+4. **Integración con el Scheduler**:
+   - Job programado `sec:institutional:13f-cycle` (`ScheduledJobDomain.EVENTS`, `data_frequency="daily-check"`,
+     `run_at = config.run_at + 105 minutos`, `asset_id=None`).
+   - Se incluye automáticamente si algún activo del watchlist expone un binding `sec/cusip`.
+
+```bash
+export SEC_USER_AGENT="Investment Analyst contact@example.com"
+python scripts/smoke_sec_institutional_cycle.py
+```

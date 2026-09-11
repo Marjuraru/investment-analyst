@@ -479,3 +479,16 @@ def test_materialization_fails_closed_without_a_visible_snapshot(tmp_path: Path)
             ),
             location=location,
         )
+
+
+def test_materialize_with_storage_reuses_single_writer_connection(tmp_path: Path) -> None:
+    location, _, known_at, _, _, _ = _prepared(tmp_path, manager_limit=1)
+    application = SecInstitutionalObservationMaterializationApplication(
+        ApplicationRuntime.create_default()
+    )
+    request = SecInstitutionalObservationMaterializationRequest(known_at=known_at, manager_limit=1)
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        result = application.materialize_with_storage(storage, request)
+        assert result.observations_created == 2
+        assert result.traceability_verified is True
+        assert storage.observations.count() == 2

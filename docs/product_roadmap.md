@@ -382,8 +382,12 @@ fila (`sec-institutional-row-correspondence-v1`) con vigencia cerrada al períod
 completo hasta el snapshot de universo, y la materialización
 (`sec-institutional-observation-materialization-v1`) completa las observaciones PIT sin realizar red,
 con estados explícitos en lugar de cero sintético y con la declaración humana
-`instrument-correspondence-v1` conservada como camino compatible. La operación programada y reanudable
-del ciclo completo queda en `SEC-CORPUS-30`, que es la siguiente unidad registrada.
+`instrument-correspondence-v1` conservada como camino compatible. `SEC-CORPUS-30` integra la operación
+programada y reanudable del ciclo completo (#27 universo → #28 adquisición dirigida → #29 correspondencia y observaciones)
+bajo el scheduler existente con una sola conexión writer, archivo de estado atómico (`sec_institutional_cycle_state_v1.json`),
+presupuesto de red acotado (sondeo diario de catálogo HTML, descarga condicional de ZIP y cero GET ZIP en cache hit ordinario),
+reutilización de outcomes terminales de rechazo y job `sec:institutional:13f-cycle`. `SEC-CORPUS-31` es la siguiente
+unidad registrada.
 
 Las anomalías se evaluarán localmente sobre features point-in-time de filings: tamaño relativo de
 una transacción, cambio de tenencia, concentración, recurrencia, enmiendas y latencia de reporte. El

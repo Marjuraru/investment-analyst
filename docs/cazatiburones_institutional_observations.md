@@ -50,3 +50,12 @@ Parámetros soportados:
 Devuelve `InstitutionalObservationQueryResult` (`observations`, `total_matching`, `truncated`), preservando la
 semántica as-filed sin alteración de valores. Cualquier parámetro adicional o activo sin configuración SEC
 se rechaza con error HTTP 400 (`invalid_request`).
+
+## Ciclo institucional programado (`SEC-CORPUS-30`)
+
+La materialización de observaciones se ejecuta automáticamente como parte del ciclo institucional programado
+`sec:institutional:13f-cycle`:
+- Cada ciclo procesa un gestor y materializa sus observaciones para todos los activos CUSIP del catálogo
+  presentes en ese gestor.
+- Si las observaciones ya existen para los mismos reportes y filas, se reutilizan de forma idempotente (`reused`).
+- El ciclo avanza el cursor atómico sólo tras verificar la trazabilidad completa de las observaciones generadas.

@@ -2,6 +2,7 @@
 
 from datetime import UTC, date, datetime, time
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 
@@ -28,6 +29,12 @@ from investment_analyst.application.sec_declared_activity_refresh_models import 
 )
 from investment_analyst.application.sec_fundamental_refresh import (
     SecIssuerFundamentalKnownAtTooEarlyError,
+)
+from investment_analyst.application.sec_institutional_cycle import (
+    SecInstitutionalCycleError,
+)
+from investment_analyst.application.sec_institutional_cycle_models import (
+    SecInstitutionalCycleSummary,
 )
 from investment_analyst.frontend.local_schedule_jobs import (
     LocalWatchlistScheduleConfig,
@@ -72,6 +79,9 @@ class _UnusedController:
         raise AssertionError(request)
 
     def bvl_registry_refresh_request(self, request):
+        raise AssertionError(request)
+
+    def sec_institutional_cycle_request(self, request):
         raise AssertionError(request)
 
 
@@ -371,6 +381,87 @@ def test_optional_macro_and_smv_jobs_have_independent_provider_scopes() -> None:
     assert all(item.definition.asset_id is None for item in infrastructure)
 
 
+def test_sec_institutional_cycle_job_composition() -> None:
+    config_without = _config("equity:us:aapl")
+    jobs_without = build_local_watchlist_jobs(_UnusedController(), _universe(), config_without)
+    assert not any(item.definition.job_id == "sec:institutional:13f-cycle" for item in jobs_without)
+
+    config_with = _config("equity:us:aapl").model_copy(
+        update={"sec_cusip_asset_ids": ("equity:us:aapl",)}
+    )
+    jobs_with = build_local_watchlist_jobs(_UnusedController(), _universe(), config_with)
+    cycle_jobs = [
+        item for item in jobs_with if item.definition.job_id == "sec:institutional:13f-cycle"
+    ]
+    assert len(cycle_jobs) == 1
+    job = cycle_jobs[0]
+    assert job.definition.asset_id is None
+    assert job.definition.provider == "sec-edgar"
+    assert job.definition.domain is ScheduledJobDomain.EVENTS
+    assert job.definition.data_frequency == "daily-check"
+    assert job.definition.run_at == time(hour=8, minute=45)
+
+
+def test_sec_institutional_cycle_job_run_success() -> None:
+    class _CycleSuccessController(_UnusedController):
+        def sec_institutional_cycle_request(self, request):
+            assert request.known_at == datetime(2026, 8, 11, 13, 45, tzinfo=UTC)
+            return SecInstitutionalCycleSummary(
+                schema_version="sec-institutional-scheduled-cycle-v1",
+                policy_version="sec-institutional-cycle-policy-v1",
+                effective_known_at=datetime(2026, 8, 11, 13, 45, tzinfo=UTC),
+                status="processed",
+                reason_code=None,
+                catalog_calls=1,
+                zip_calls=0,
+                submissions_calls=1,
+                archives_calls=2,
+                dataset_period_start=date(2026, 3, 1),
+                dataset_period_end=date(2026, 5, 31),
+                dataset_url="https://www.sec.gov/files/structureddata/data/form-13f-data-sets/01mar2026-31may2026_form13f.zip",
+                dataset_sha256="a" * 64,
+                snapshot_id=UUID("ddaf3ca6-d25a-5073-a10e-762c47abaf6d"),
+                manager_cursor_before=0,
+                manager_cursor_after=1,
+                total_managers=2,
+                coverage_complete=False,
+                manager_cik="0001067983",
+                manager_name="BERKSHIRE HATHAWAY INC",
+                report_period=date(2026, 3, 31),
+                created_accessions=("0001067983-26-000010",),
+                reused_accessions=(),
+                rejected_accessions=(),
+                failed_accessions=(),
+                backlog_after=0,
+                observations_created=1,
+                observations_reused=0,
+                traceability_verified=True,
+                source_ids=(
+                    "sec-edgar:form-13f-data-sets",
+                    "sec-edgar:institutional-holdings-13f",
+                    "sec-edgar:institutional-holdings-observations",
+                ),
+            )
+
+    config = _config("equity:us:aapl").model_copy(
+        update={"sec_cusip_asset_ids": ("equity:us:aapl",)}
+    )
+    jobs = build_local_watchlist_jobs(_CycleSuccessController(), _universe(), config)
+    job = next(item for item in jobs if item.definition.job_id == "sec:institutional:13f-cycle")
+    invocation = ScheduledJobInvocation(
+        definition=job.definition,
+        local_date=date(2026, 8, 11),
+        scheduled_for=job.definition.scheduled_for(date(2026, 8, 11)),
+        started_at=datetime(2026, 8, 11, 13, 45, tzinfo=UTC),
+        attempt_number=1,
+    )
+    execution = job.run(invocation)
+    assert execution.job_id == "sec:institutional:13f-cycle"
+    assert execution.evidence_changed is True
+    assert execution.created_count == 2
+    assert execution.coverage_complete is False
+
+
 @pytest.mark.parametrize(
     ("error", "category", "retryable"),
     [
@@ -405,6 +496,11 @@ def test_optional_macro_and_smv_jobs_have_independent_provider_scopes() -> None:
         ),
         (
             FredAlfredError("malformed payload simulated-secret"),
+            ScheduledJobFailureCategory.PROVIDER_CONTRACT,
+            False,
+        ),
+        (
+            SecInstitutionalCycleError("malformed cycle simulated-secret"),
             ScheduledJobFailureCategory.PROVIDER_CONTRACT,
             False,
         ),

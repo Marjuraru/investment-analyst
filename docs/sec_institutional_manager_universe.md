@@ -119,3 +119,12 @@ Los dos wrappers CLI (`refresh_sec_institutional_manager_universe.py` y
 `query_sec_institutional_manager_universe.py`) usan ahora el contrato vivo de runtime y localización:
 `ApplicationRuntime.create_default()` con `StorageLocationRequest(workspace=...)` y un workspace
 inicializado. Sus flags públicos y su salida JSON no cambian.
+
+## Integración en el ciclo institucional programado (`SEC-CORPUS-30`)
+
+`SEC-CORPUS-30` integra la adquisición del universo dentro del ciclo institucional automático:
+- Sondea diariamente el catálogo HTML oficial (`fetch_catalog_page`) para detectar trimestres o URLs nuevas.
+- Descarga el archivo ZIP sólo si no existe snapshot activo en el almacenamiento, si el catálogo publica un
+  nuevo período/URL, o si expira el tiempo de vida de validación de 7 días.
+- Comparte la conexión de escritura `READ_WRITE` con las etapas de adquisición dirigida y materialización,
+  eliminando aperturas redundantes del almacenamiento.

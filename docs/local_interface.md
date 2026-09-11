@@ -1078,7 +1078,8 @@ Todos permanecen dentro del workspace seleccionado:
 - `state/candidate_notification_outbox_state_v1.json`: recepciones locales inmutables y acuses
   append-only, independientes del ciclo de vida del candidato;
 - `state/analytical_rule_registry_state_v1.json`: revisiones locales completas de reglas con
-  fingerprints encadenados.
+  fingerprints encadenados;
+- `state/sec_institutional_cycle_state_v1.json`: cursor de gestores, snapshot activo y estado del ciclo institucional 13F.
 
 Los archivos de estado son contratos operativos versionados y privados. La evidencia financiera
 append-only continúa en el almacenamiento normal del workspace; las alertas no la sustituyen ni

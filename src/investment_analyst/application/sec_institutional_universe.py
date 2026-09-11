@@ -25,6 +25,7 @@ from investment_analyst.evidence.sec_institutional_universe.service import (
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
 from investment_analyst.providers.http import HttpTransport, UrlLibHttpTransport
 from investment_analyst.providers.institutional_holdings.sec_13f_data_sets import (
+    Sec13FDataSetDownload,
     Sec13FDataSetsClient,
 )
 from investment_analyst.workspace.models import WorkspaceAccessMode
@@ -73,6 +74,78 @@ class SecInstitutionalUniverseApplication:
     def create_default(cls) -> SecInstitutionalUniverseApplication:
         return cls(ApplicationRuntime.create_default())
 
+    def refresh_with_storage(
+        self,
+        storage,
+        request: SecInstitutionalUniverseRefreshRequest,
+        *,
+        sec_identity: SecEdgarIdentity,
+        download: Sec13FDataSetDownload | None = None,
+    ) -> SecInstitutionalUniverseRefreshResult:
+        """Validate, select, and persist Form 13F manager universe under an open connection."""
+        del request
+        catalog_cusips = resolve_catalog_sec_cusip_mappings(self._runtime.catalog)
+        if download is None:
+            client = Sec13FDataSetsClient(
+                identity=sec_identity,
+                transport=self._transport_factory(),
+            )
+            download = client.fetch_latest_dataset()
+
+        repository = SecInstitutionalUniverseRepository(storage.raw_records, storage.documents)
+        receipt = repository.save_blob(download.content)
+
+        from investment_analyst.evidence.sec_institutional_universe.identity import (
+            dataset_revision_id,
+        )
+
+        expected_rev_id = dataset_revision_id(
+            download.period_start,
+            download.period_end,
+            download.sha256,
+        )
+        existing_rev = repository.get_dataset_revision(expected_rev_id)
+        if existing_rev is not None:
+            revision = existing_rev
+            snapshot = self._service.build_universe_snapshot(
+                download.content,
+                dataset_revision=revision,
+                catalog_cusips=catalog_cusips,
+                catalog_version=self._runtime.catalog.catalog_version,
+            )
+            existing_snap = repository.get_snapshot(snapshot.snapshot_id)
+            if existing_snap is not None:
+                snapshot = existing_snap
+            else:
+                repository.save_snapshot(snapshot)
+        else:
+            revision, snapshot = self._service.build_universe_from_download(
+                download,
+                catalog_cusips=catalog_cusips,
+                catalog_version=self._runtime.catalog.catalog_version,
+            )
+            repository.save_dataset_revision(revision)
+            repository.save_snapshot(snapshot)
+
+        return SecInstitutionalUniverseRefreshResult(
+            revision_id=revision.revision_id,
+            snapshot_id=snapshot.snapshot_id,
+            period_start=snapshot.period_start,
+            period_end=snapshot.period_end,
+            dataset_url=download.url,
+            dataset_sha256=snapshot.dataset_sha256,
+            size_bytes=download.size_bytes,
+            retrieved_at=snapshot.retrieved_at,
+            available_at=snapshot.available_at,
+            eligible_asset_count=snapshot.eligible_asset_count,
+            matched_asset_count=snapshot.matched_asset_count,
+            candidate_manager_count=snapshot.candidate_manager_count,
+            selected_manager_count=snapshot.selected_manager_count,
+            unselected_manager_count=snapshot.unselected_manager_count,
+            coverage_complete=snapshot.coverage_complete,
+            created=receipt.created,
+        )
+
     def refresh(
         self,
         request: SecInstitutionalUniverseRefreshRequest,
@@ -82,70 +155,13 @@ class SecInstitutionalUniverseApplication:
     ) -> SecInstitutionalUniverseRefreshResult:
         """Fetch latest official SEC dataset archive, validate, select, and persist append-only."""
         storage_req = location or StorageLocationRequest()
-        catalog_cusips = resolve_catalog_sec_cusip_mappings(self._runtime.catalog)
-
-        client = Sec13FDataSetsClient(
-            identity=sec_identity,
-            transport=self._transport_factory(),
-        )
-        download = client.fetch_latest_dataset()
-
         with self._runtime.open_storage(
             storage_req, access_mode=WorkspaceAccessMode.READ_WRITE
         ) as storage:
-            repository = SecInstitutionalUniverseRepository(storage.raw_records, storage.documents)
-
-            receipt = repository.save_blob(download.content)
-
-            from investment_analyst.evidence.sec_institutional_universe.identity import (
-                dataset_revision_id,
-            )
-
-            expected_rev_id = dataset_revision_id(
-                download.period_start,
-                download.period_end,
-                download.sha256,
-            )
-            existing_rev = repository.get_dataset_revision(expected_rev_id)
-            if existing_rev is not None:
-                revision = existing_rev
-                snapshot = self._service.build_universe_snapshot(
-                    download.content,
-                    dataset_revision=revision,
-                    catalog_cusips=catalog_cusips,
-                    catalog_version=self._runtime.catalog.catalog_version,
-                )
-                existing_snap = repository.get_snapshot(snapshot.snapshot_id)
-                if existing_snap is not None:
-                    snapshot = existing_snap
-                else:
-                    repository.save_snapshot(snapshot)
-            else:
-                revision, snapshot = self._service.build_universe_from_download(
-                    download,
-                    catalog_cusips=catalog_cusips,
-                    catalog_version=self._runtime.catalog.catalog_version,
-                )
-                repository.save_dataset_revision(revision)
-                repository.save_snapshot(snapshot)
-
-            return SecInstitutionalUniverseRefreshResult(
-                revision_id=revision.revision_id,
-                snapshot_id=snapshot.snapshot_id,
-                period_start=snapshot.period_start,
-                period_end=snapshot.period_end,
-                dataset_url=download.url,
-                dataset_sha256=snapshot.dataset_sha256,
-                size_bytes=download.size_bytes,
-                retrieved_at=snapshot.retrieved_at,
-                available_at=snapshot.available_at,
-                eligible_asset_count=snapshot.eligible_asset_count,
-                matched_asset_count=snapshot.matched_asset_count,
-                candidate_manager_count=snapshot.candidate_manager_count,
-                selected_manager_count=snapshot.selected_manager_count,
-                unselected_manager_count=snapshot.unselected_manager_count,
-                coverage_complete=snapshot.coverage_complete,
-                created=receipt.created,
+            return self.refresh_with_storage(
+                storage,
+                request,
+                sec_identity=sec_identity,
             )
 
     def query(
