@@ -1265,7 +1265,10 @@ def test_loopback_reads_remain_available_while_a_local_writer_is_active(tmp_path
     try:
         with _server(AaplLocalWebApplication(controller, None)) as (_, root):
             chart_status, chart, _ = _json_request(
-                Request(f"{root}/api/market-chart?known_at=2026-07-16T15%3A46%3A09Z")
+                Request(
+                    f"{root}/api/market-chart?asset_id=equity%3Aus%3Aaapl&"
+                    "known_at=2026-07-16T15%3A46%3A09Z"
+                )
             )
             trend_status, trend, _ = _json_request(
                 Request(
@@ -1738,7 +1741,9 @@ def test_market_chart_gzip_preserves_the_exact_canonical_json() -> None:
             }
 
     with _server(_LargeChartApplication()) as (_, root):
-        request = f"{root}/api/market-chart?known_at=2026-07-16T15%3A46%3A09Z"
+        request = (
+            f"{root}/api/market-chart?asset_id=equity%3Aus%3Aaapl&known_at=2026-07-16T15%3A46%3A09Z"
+        )
         with urlopen(request, timeout=5) as response:
             canonical_body = response.read()
             canonical_headers = dict(response.headers.items())
@@ -2161,6 +2166,7 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
         report_status, report, _ = _json_request(Request(f"{root}/api/report?{parameters}"))
         chart_parameters = urlencode(
             {
+                "asset_id": "equity:us:aapl",
                 "known_at": "2026-07-16T15:46:09Z",
                 "period": "1y",
                 "interval": "1w",
@@ -2177,11 +2183,15 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
         cached_chart_status, cached_chart, _ = _json_request(
             Request(f"{root}/api/market-chart?{chart_parameters}")
         )
+        maximum_chart_parameters = urlencode(
+            {
+                "asset_id": "equity:us:aapl",
+                "known_at": "2026-07-16T15:46:09Z",
+                "period": "max",
+            }
+        )
         maximum_chart_status, maximum_chart, _ = _json_request(
-            Request(
-                f"{root}/api/market-chart?"
-                f"{urlencode({'known_at': '2026-07-16T15:46:09Z', 'period': 'max'})}"
-            )
+            Request(f"{root}/api/market-chart?{maximum_chart_parameters}")
         )
         btc_chart_parameters = urlencode(
             {
@@ -2285,47 +2295,40 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
                 method="POST",
             )
         )
+        quarterly_query = urlencode(
+            {
+                "asset_id": "equity:us:aapl",
+                "known_at": "2026-07-16T15:46:09Z",
+                "frequency": "quarterly",
+            }
+        )
+        annual_query = urlencode(
+            {
+                "asset_id": "equity:us:aapl",
+                "known_at": "2026-07-16T15:46:09Z",
+                "frequency": "annual",
+            }
+        )
         trend_status, trend, _ = _json_request(
-            Request(
-                f"{root}/api/fundamental-trend?"
-                f"{urlencode({'known_at': '2026-07-16T15:46:09Z', 'frequency': 'quarterly'})}"
-            )
+            Request(f"{root}/api/fundamental-trend?{quarterly_query}")
         )
         research_status, research, _ = _json_request(
-            Request(
-                f"{root}/api/fundamental-research?"
-                f"{urlencode({'known_at': '2026-07-16T15:46:09Z', 'frequency': 'quarterly'})}"
-            )
+            Request(f"{root}/api/fundamental-research?{quarterly_query}")
         )
         cached_research_status, cached_research, _ = _json_request(
-            Request(
-                f"{root}/api/fundamental-research?"
-                f"{urlencode({'known_at': '2026-07-16T15:46:09Z', 'frequency': 'quarterly'})}"
-            )
+            Request(f"{root}/api/fundamental-research?{quarterly_query}")
         )
         history_status, history, _ = _json_request(
-            Request(
-                f"{root}/api/fundamental-research-history?"
-                f"{urlencode({'known_at': '2026-07-16T15:46:09Z', 'frequency': 'annual'})}"
-            )
+            Request(f"{root}/api/fundamental-research-history?{annual_query}")
         )
         cached_history_status, cached_history, _ = _json_request(
-            Request(
-                f"{root}/api/fundamental-research-history?"
-                f"{urlencode({'known_at': '2026-07-16T15:46:09Z', 'frequency': 'annual'})}"
-            )
+            Request(f"{root}/api/fundamental-research-history?{annual_query}")
         )
         analysis_status, analysis, _ = _json_request(
-            Request(
-                f"{root}/api/fundamental-analysis?"
-                f"{urlencode({'known_at': '2026-07-16T15:46:09Z', 'frequency': 'quarterly'})}"
-            )
+            Request(f"{root}/api/fundamental-analysis?{quarterly_query}")
         )
         cached_analysis_status, cached_analysis, _ = _json_request(
-            Request(
-                f"{root}/api/fundamental-analysis?"
-                f"{urlencode({'known_at': '2026-07-16T15:46:09Z', 'frequency': 'quarterly'})}"
-            )
+            Request(f"{root}/api/fundamental-analysis?{quarterly_query}")
         )
 
     assert overview_status == 200
@@ -3372,22 +3375,22 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
     controller.btc_market_chart_request(btc_chart_request)
     controller.btc_intraday_chart_request(btc_intraday_chart_request)
     controller.btc_intraday_chart_request(btc_intraday_chart_request)
-    controller.fundamental_trend_request(trend_request)
-    controller.fundamental_trend_request(trend_request)
-    controller.fundamental_research_request(research_request)
-    controller.fundamental_research_request(research_request)
-    controller.fundamental_research_history_request(research_request)
-    controller.fundamental_research_history_request(research_request)
-    controller.fundamental_analysis_request(research_request)
-    controller.fundamental_analysis_request(research_request)
+    controller.fundamental_trend_request(trend_request, asset_id="equity:us:aapl")
+    controller.fundamental_trend_request(trend_request, asset_id="equity:us:aapl")
+    controller.fundamental_research_request(research_request, asset_id="equity:us:aapl")
+    controller.fundamental_research_request(research_request, asset_id="equity:us:aapl")
+    controller.fundamental_research_history_request(research_request, asset_id="equity:us:aapl")
+    controller.fundamental_research_history_request(research_request, asset_id="equity:us:aapl")
+    controller.fundamental_analysis_request(research_request, asset_id="equity:us:aapl")
+    controller.fundamental_analysis_request(research_request, asset_id="equity:us:aapl")
     controller.run_payload(run_payload)
     controller.market_chart_request(chart_request)
     controller.btc_market_chart_request(btc_chart_request)
     controller.btc_intraday_chart_request(btc_intraday_chart_request)
-    controller.fundamental_trend_request(trend_request)
-    controller.fundamental_research_request(research_request)
-    controller.fundamental_research_history_request(research_request)
-    controller.fundamental_analysis_request(research_request)
+    controller.fundamental_trend_request(trend_request, asset_id="equity:us:aapl")
+    controller.fundamental_research_request(research_request, asset_id="equity:us:aapl")
+    controller.fundamental_research_history_request(research_request, asset_id="equity:us:aapl")
+    controller.fundamental_analysis_request(research_request, asset_id="equity:us:aapl")
 
     assert len(application.chart_requests) == 2
     assert len(application.btc_chart_requests) == 1
@@ -3582,17 +3585,22 @@ def test_local_api_rejects_invalid_typed_run_without_calling_runner(tmp_path: Pa
         )
         chart_status, chart, _ = _json_request(
             Request(
-                f"{root}/api/market-chart?known_at=2026-07-16T15%3A46%3A09Z&period=6m&period=1y"
+                f"{root}/api/market-chart?asset_id=equity%3Aus%3Aaapl"
+                "&known_at=2026-07-16T15%3A46%3A09Z&period=6m&period=1y"
             )
         )
         chart_window_status, chart_window, _ = _json_request(
             Request(
-                f"{root}/api/market-chart?known_at=2026-07-16T15%3A46%3A09Z"
+                f"{root}/api/market-chart?asset_id=equity%3Aus%3Aaapl"
+                "&known_at=2026-07-16T15%3A46%3A09Z"
                 "&short_sma_window=50&long_sma_window=20"
             )
         )
         chart_interval_status, chart_interval, _ = _json_request(
-            Request(f"{root}/api/market-chart?known_at=2026-07-16T15%3A46%3A09Z&interval=1h")
+            Request(
+                f"{root}/api/market-chart?asset_id=equity%3Aus%3Aaapl"
+                "&known_at=2026-07-16T15%3A46%3A09Z&interval=1h"
+            )
         )
         chart_asset_status, chart_asset, _ = _json_request(
             Request(
@@ -3600,7 +3608,10 @@ def test_local_api_rejects_invalid_typed_run_without_calling_runner(tmp_path: Pa
             )
         )
         intraday_interval_status, intraday_interval, _ = _json_request(
-            Request(f"{root}/api/market-intraday?known_at=2026-07-16T15%3A46%3A09Z&interval=1d")
+            Request(
+                f"{root}/api/market-intraday?asset_id=crypto:btc-usd"
+                "&known_at=2026-07-16T15%3A46%3A09Z&interval=1d"
+            )
         )
         intraday_asset_status, intraday_asset, _ = _json_request(
             Request(
@@ -3618,24 +3629,26 @@ def test_local_api_rejects_invalid_typed_run_without_calling_runner(tmp_path: Pa
         )
         trend_status, trend, _ = _json_request(
             Request(
-                f"{root}/api/fundamental-trend?known_at=2026-07-16T15%3A46%3A09Z&frequency=monthly"
+                f"{root}/api/fundamental-trend?asset_id=equity%3Aus%3Aaapl"
+                "&known_at=2026-07-16T15%3A46%3A09Z&frequency=monthly"
             )
         )
         research_status, research, _ = _json_request(
             Request(
-                f"{root}/api/fundamental-research?"
-                "known_at=2026-07-16T15%3A46%3A09Z&frequency=monthly"
+                f"{root}/api/fundamental-research?asset_id=equity%3Aus%3Aaapl"
+                "&known_at=2026-07-16T15%3A46%3A09Z&frequency=monthly"
             )
         )
         history_status, history, _ = _json_request(
             Request(
-                f"{root}/api/fundamental-research-history?"
-                "known_at=2026-07-16T15%3A46%3A09Z&frequency=monthly"
+                f"{root}/api/fundamental-research-history?asset_id=equity%3Aus%3Aaapl"
+                "&known_at=2026-07-16T15%3A46%3A09Z&frequency=monthly"
             )
         )
         analysis_status, analysis, _ = _json_request(
             Request(
-                f"{root}/api/fundamental-analysis?known_at=2026-07-16T15%3A46%3A09Z&frequency=monthly"
+                f"{root}/api/fundamental-analysis?asset_id=equity%3Aus%3Aaapl"
+                "&known_at=2026-07-16T15%3A46%3A09Z&frequency=monthly"
             )
         )
         cross_asset_status, cross_asset, _ = _json_request(
@@ -3690,6 +3703,42 @@ def test_local_api_rejects_invalid_typed_run_without_calling_runner(tmp_path: Pa
     assert fundamental_refresh_status == 400
     assert fundamental_refresh["error"]["code"] == "invalid_request"
     assert runner.requests == []
+
+
+def test_omitted_asset_id_is_rejected_on_market_chart_intraday_and_fundamentals(
+    tmp_path: Path,
+) -> None:
+    controller = AaplLocalController(
+        _FakeRunner(),
+        _FakeApplication(),
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+
+    with _server(AaplLocalWebApplication(controller, None)) as (_, root):
+        requests = (
+            f"{root}/api/market-chart?known_at=2026-07-16T15%3A46%3A09Z",
+            f"{root}/api/market-intraday?known_at=2026-07-16T15%3A46%3A09Z&interval=5m",
+            f"{root}/api/fundamental-trend?known_at=2026-07-16T15%3A46%3A09Z&frequency=quarterly",
+            (
+                f"{root}/api/fundamental-research?"
+                "known_at=2026-07-16T15%3A46%3A09Z&frequency=quarterly"
+            ),
+            (
+                f"{root}/api/fundamental-research-history?"
+                "known_at=2026-07-16T15%3A46%3A09Z&frequency=annual"
+            ),
+            (
+                f"{root}/api/fundamental-analysis?"
+                "known_at=2026-07-16T15%3A46%3A09Z&frequency=quarterly"
+            ),
+        )
+        for request in requests:
+            status, payload, _ = _json_request(Request(request))
+            assert status == 400
+            assert payload["error"]["code"] == "invalid_request"
+            assert payload["error"]["message"] == "asset_id is required"
 
 
 def test_local_server_rejects_non_loopback_binding() -> None:

@@ -393,7 +393,7 @@ un ZIP faltante por intento en `sec_institutional_history_state_v1.json`, inters
 ambos cierres, materializa ambas páginas candidatas con una única revisión Submissions compartida, ejecuta las
 métricas, pesos y eventos institucionales ya integrados sin cambiar fórmulas y reconcilia la outbox local antes
 de avanzar el cursor, bajo el job `sec:institutional:13f-history` (desfase 120 min). El ítem `SEC-CORPUS` queda
-`DONE` y `EQUITY-UNIVERSE` pasa a la única ruta `NEXT`, con `RUNTIME-EFFICIENCY-1` como siguiente bloque
+`DONE` y `EQUITY-UNIVERSE` pasa a la única ruta `NEXT`, con `RUNTIME-EFFICIENCY-5` como siguiente bloque
 registrado.
 
 Las anomalías se evaluarán localmente sobre features point-in-time de filings: tamaño relativo de
@@ -461,9 +461,10 @@ atributo. No se agregan endpoints, polling, mutaciones, dependencias ni deep-lin
 
 La prioridad viva queda reconciliada: `LOCAL-INTERFACE` está `DONE`, `SEC-CORPUS` completó su ruta con
 `SEC-CORPUS-31` y `EQUITY-UNIVERSE` es el único `NEXT`, conservando las lecturas Caz ya integradas como base;
-`RUNTIME-EFFICIENCY-1` —retirada de los residuos de privilegio por ticker y observación del runtime— es el
-siguiente bloque registrado antes de ampliar cobertura; `BVL-MARKET` permanece `BLOCKED` y
-`PREDICTIVE-RESEARCH` permanece `DEFERRED`.
+`RUNTIME-EFFICIENCY-5` —retirada de la resolución implícita de activo en el camino de lectura— es el
+siguiente bloque registrado antes de ampliar cobertura; la retirada de los contratos Apple legados
+`aapl-market-chart-v5` y `AaplDailyRunRequestSnapshot` queda como bloque posterior separado.
+`BVL-MARKET` permanece `BLOCKED` y `PREDICTIVE-RESEARCH` permanece `DEFERRED`.
 
 ## Fase 12 — IA cualitativa opcional
 
@@ -673,7 +674,7 @@ sin completarlo: `SEC-CORPUS-29` queda como la siguiente unidad registrada para 
 observaciones. `SEC-CORPUS-30` integró la operación programada y reanudable del ciclo institucional
 completo bajo el job `sec:institutional:13f-cycle` y `SEC-CORPUS-31` completa la ruta con la ventana de
 dos cierres adyacentes y su cadena derivada bajo el job `sec:institutional:13f-history`; `SEC-CORPUS`
-queda `DONE`, `EQUITY-UNIVERSE` pasa a la única ruta `NEXT` y `RUNTIME-EFFICIENCY-1` es el siguiente
+queda `DONE`, `EQUITY-UNIVERSE` pasa a la única ruta `NEXT` y `RUNTIME-EFFICIENCY-5` es el siguiente
 bloque registrado. `EXTENDED-SOAK /
 DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
 Block independiente.

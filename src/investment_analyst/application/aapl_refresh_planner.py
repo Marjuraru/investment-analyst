@@ -10,8 +10,6 @@ from investment_analyst.application.aapl_bootstrap_models import (
 )
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
-from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID
-from investment_analyst.providers.market.alpaca_normalizer import SOURCE_ID
 from investment_analyst.providers.market.alpaca_pipeline import (
     ALPACA_FETCH_RECEIPT_SCHEMA,
     ALPACA_INTERVAL_SEMANTICS,
@@ -28,15 +26,14 @@ class AaplMarketRefreshPlanner:
 
     def __init__(
         self,
+        configuration: AlpacaAssetConfiguration,
         storage: LocalStorage,
-        *,
-        configuration: AlpacaAssetConfiguration | None = None,
     ) -> None:
         storage.require_open()
         self._storage = storage
-        self._asset_id = configuration.asset_id if configuration is not None else ASSET_ID
-        self._source_id = configuration.source_id if configuration is not None else SOURCE_ID
-        self._symbol = configuration.symbol if configuration is not None else "AAPL"
+        self._asset_id = configuration.asset_id
+        self._source_id = configuration.source_id
+        self._symbol = configuration.symbol
 
     def plan(
         self,

@@ -1400,7 +1400,7 @@ class AaplLocalController:
         self,
         request: AaplFundamentalTrendRequest,
         *,
-        asset_id: str = APPLE_ASSET_ID,
+        asset_id: str,
     ) -> AaplFundamentalTrend:
         """Query persisted SEC facts without providers, recomputation, or writes."""
         cache_key = (asset_id, request)
@@ -1423,7 +1423,7 @@ class AaplLocalController:
         self,
         request: AaplFundamentalResearchRequest,
         *,
-        asset_id: str = APPLE_ASSET_ID,
+        asset_id: str,
     ) -> AaplFundamentalResearchResult:
         """Calculate cached SEC research metrics without providers or writes."""
         cache_key = (asset_id, request)
@@ -1446,7 +1446,7 @@ class AaplLocalController:
         self,
         request: AaplFundamentalResearchRequest,
         *,
-        asset_id: str = APPLE_ASSET_ID,
+        asset_id: str,
     ) -> AaplFundamentalResearchHistoryResult:
         """Calculate cached historical research statistics without writes."""
         cache_key = (asset_id, request)
@@ -1471,7 +1471,7 @@ class AaplLocalController:
         self,
         request: AaplFundamentalResearchRequest,
         *,
-        asset_id: str = APPLE_ASSET_ID,
+        asset_id: str,
     ) -> AaplFundamentalAnalysisResult:
         """Return cached analytical sections without providers or writes."""
         cache_key = (asset_id, request)
@@ -1994,7 +1994,7 @@ class AaplLocalWebApplication:
         }
         if set(parameters) - allowed:
             raise ValueError("market chart query contains unsupported parameters")
-        asset_id = _one_parameter(parameters, "asset_id", required=False) or "equity:us:aapl"
+        asset_id = _one_parameter(parameters, "asset_id", required=True)
         known_at = _one_parameter(parameters, "known_at", required=True)
         period = _one_parameter(parameters, "period", required=False)
         interval = _one_parameter(parameters, "interval", required=False)
@@ -2348,7 +2348,7 @@ class AaplLocalWebApplication:
         allowed = {"asset_id", "known_at", "interval"}
         if set(parameters) - allowed:
             raise ValueError("intraday market query contains unsupported parameters")
-        asset_id = _one_parameter(parameters, "asset_id", required=False) or "crypto:btc-usd"
+        asset_id = _one_parameter(parameters, "asset_id", required=True)
         descriptor = self._market_asset(asset_id)
         if (
             descriptor.analysis.market_mode is not MarketAnalysisMode.CRYPTO_SPOT
@@ -2478,7 +2478,7 @@ class AaplLocalWebApplication:
         parameters: Mapping[str, tuple[str, ...]],
     ) -> MarketAssetDescriptor:
         """Reject fundamental queries without a configured corporate issuer."""
-        asset_id = _one_parameter(parameters, "asset_id", required=False) or APPLE_ASSET_ID
+        asset_id = _one_parameter(parameters, "asset_id", required=True)
         return self._fundamental_descriptor(asset_id)
 
     def _fundamental_descriptor(self, asset_id: object) -> MarketAssetDescriptor:

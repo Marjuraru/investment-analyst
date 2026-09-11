@@ -43,6 +43,7 @@ from investment_analyst.application.aapl_bootstrap_models import (
 )
 from investment_analyst.application.aapl_refresh_planner import AaplMarketRefreshPlanner
 from investment_analyst.core.models import DataFrequency, NormalizedObservation
+from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_diagnostic_models import (
     SecFundamentalDiagnosticRequest,
 )
@@ -186,6 +187,7 @@ class AaplWorkspaceBootstrapPipeline:
         consolidated_service: AaplConsolidatedDiagnosticService,
         valuation_service: CorporateValuationService | None = None,
         valuation_pipeline: CorporateValuationPersistencePipeline | None = None,
+        market_configuration: AlpacaAssetConfiguration | None = None,
         market_refresh_planner: AaplMarketRefreshPlanner | None = None,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
@@ -204,7 +206,12 @@ class AaplWorkspaceBootstrapPipeline:
             raise ValueError("valuation service and pipeline must be configured together")
         self._valuation_service = valuation_service
         self._valuation_pipeline = valuation_pipeline
-        self._market_refresh_planner = market_refresh_planner or AaplMarketRefreshPlanner(storage)
+        if market_refresh_planner is None:
+            # Reuse the market pipeline's resolved configuration when the caller supplies none,
+            # so planning cannot fall back to an implicit asset.
+            configuration = market_configuration or market_pipeline._configuration
+            market_refresh_planner = AaplMarketRefreshPlanner(configuration, storage)
+        self._market_refresh_planner = market_refresh_planner
         self._clock = clock
 
     def run(

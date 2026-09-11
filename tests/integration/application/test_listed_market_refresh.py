@@ -110,8 +110,8 @@ def _pipeline(
     return ListedMarketRefreshPipeline(
         configuration=_CONFIGURATION,
         refresh_planner=AaplMarketRefreshPlanner(
+            _CONFIGURATION,
             storage,
-            configuration=_CONFIGURATION,
         ),
         market_pipeline=AlpacaHistoricalPipeline(
             storage,
