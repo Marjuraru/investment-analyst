@@ -47,6 +47,8 @@ from investment_analyst.providers.http import HttpTransport, UrlLibHttpTransport
 from investment_analyst.providers.institutional_holdings.sec_institutional_holdings_pipeline import (  # noqa: E501
     SecInstitutionalHoldingsPeriodImportRequest,
     SecInstitutionalHoldingsPeriodImportResult,
+    SecInstitutionalHoldingsPeriodsImportRequest,
+    SecInstitutionalHoldingsPeriodsImportResult,
     SecInstitutionalHoldingsPipeline,
 )
 from investment_analyst.providers.institutional_holdings.sec_manager_submissions import (
@@ -169,6 +171,77 @@ def plan_directed_manager_page(
     return targets[offset : offset + limit]
 
 
+@dataclass(frozen=True, slots=True)
+class SecInstitutionalHoldingsDirectedPeriodsRefreshRequest:
+    """Bound one shared directed acquisition to two exact report periods of one manager."""
+
+    known_at: datetime
+    manager_cik: str
+    report_periods: tuple[date, date]
+    accessions_per_period: int = 1
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "manager_cik", normalize_cik(self.manager_cik))
+        if self.known_at.tzinfo is None or self.known_at.utcoffset() is None:
+            raise SecInstitutionalHoldingsDirectedRefreshError("known_at must include timezone")
+        object.__setattr__(self, "known_at", self.known_at.astimezone(UTC))
+        if len(self.report_periods) != 2 or len(set(self.report_periods)) != 2:
+            raise SecInstitutionalHoldingsDirectedRefreshError(
+                "exactly two distinct report periods are required"
+            )
+        if any(isinstance(item, datetime) for item in self.report_periods):
+            raise SecInstitutionalHoldingsDirectedRefreshError("report periods must be dates")
+        if tuple(sorted(self.report_periods)) != tuple(self.report_periods):
+            raise SecInstitutionalHoldingsDirectedRefreshError(
+                "report periods must be ordered ascending"
+            )
+        if not 1 <= self.accessions_per_period <= 2:
+            raise SecInstitutionalHoldingsDirectedRefreshError(
+                "invalid accession budget per period"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class SecInstitutionalHoldingsDirectedPeriodsRefreshSummary:
+    """Exact outcome of one shared Submissions acquisition across two report periods."""
+
+    manager_cik: str
+    report_periods: tuple[date, date]
+    state: str
+    reason_code: str | None
+    submissions_calls: int
+    archives_calls: int
+    periods: tuple[SecInstitutionalHoldingsPeriodImportResult, ...]
+    report_ids: tuple[UUID, ...]
+    semantics_examined: int
+    semantics_created: int
+    semantics_reused: int
+    semantics_not_visible: int
+    semantics_rejected: int
+    backlog_after: int
+    traceability_verified: bool
+
+    @property
+    def created_accessions(self) -> tuple[str, ...]:
+        return tuple(
+            accession for period in self.periods for accession in period.created_accessions
+        )
+
+    @property
+    def reused_accessions(self) -> tuple[str, ...]:
+        return tuple(accession for period in self.periods for accession in period.reused_accessions)
+
+    @property
+    def rejected_accessions(self) -> tuple[str, ...]:
+        return tuple(
+            accession for period in self.periods for accession in period.rejected_accessions
+        )
+
+    @property
+    def failed_accessions(self) -> tuple[str, ...]:
+        return tuple(accession for period in self.periods for accession in period.failed_accessions)
+
+
 class SecInstitutionalHoldingsDirectedRefreshApplication:
     """Isolated application edge for the directed Form 13F acquisition."""
 
@@ -285,6 +358,103 @@ class SecInstitutionalHoldingsDirectedRefreshApplication:
                 request,
                 sec_identity=sec_identity,
             )
+
+    def refresh_periods_with_storage(
+        self,
+        storage,
+        request: SecInstitutionalHoldingsDirectedPeriodsRefreshRequest,
+        *,
+        sec_identity: SecEdgarIdentity,
+    ) -> SecInstitutionalHoldingsDirectedPeriodsRefreshSummary:
+        """Acquire both sides of one manager with a single shared Submissions revision.
+
+        Exactly one Submissions GET is performed for the manager and its persisted revision is
+        reused for both report periods; each period attempts at most its declared accession budget,
+        so the total bounded attempts never exceed two per period. Terminal rejections are never
+        revisited in SEC Archives and already materialized accessions are reused locally.
+        """
+        transport = self._transport_factory()
+        counters = _ProviderCallCounters()
+        submissions_client = _CountingSubmissionsClient(
+            (
+                self._submissions_client_factory(transport, sec_identity, self._clock)
+                if self._submissions_client_factory is not None
+                else SecManagerSubmissionsClient(transport, sec_identity, clock=self._clock)
+            ),
+            counters,
+        )
+        document_client = _CountingDocumentClient(
+            (
+                self._document_client_factory(transport, sec_identity)
+                if self._document_client_factory is not None
+                else SecDocumentClient(transport, sec_identity)
+            ),
+            counters,
+        )
+        pipeline = SecInstitutionalHoldingsPipeline(storage, submissions_client, document_client)
+        holdings = InstitutionalHoldingsRepository(storage.raw_records)
+        semantics = InstitutionalHoldingsSemanticsService(storage, clock=self._clock)
+        state = "processed"
+        reason_code: str | None = None
+        result: SecInstitutionalHoldingsPeriodsImportResult | None = None
+        try:
+            result = pipeline.run_periods(
+                SecInstitutionalHoldingsPeriodsImportRequest(
+                    filer_cik=request.manager_cik,
+                    report_periods=tuple(request.report_periods),
+                    known_at=request.known_at,
+                    accessions_per_period=request.accessions_per_period,
+                )
+            )
+        except Exception as error:
+            state = "failed"
+            reason_code = _failure_code(error)
+        report_ids = (
+            ()
+            if result is None
+            else tuple(
+                report.report_id
+                for report in holdings.list_reports(
+                    manager_cik=request.manager_cik, known_at=request.known_at
+                )
+                if report.report_period in request.report_periods
+            )
+        )
+        counts = _SemanticCounts()
+        try:
+            counts = self._enrich_period(
+                semantics=semantics,
+                manager_cik=request.manager_cik,
+                report_ids=report_ids,
+                known_at=request.known_at,
+            )
+        except Exception as error:
+            if state == "processed":
+                state = "failed"
+                reason_code = _failure_code(error)
+        traceability = result is not None and _periods_traceability(
+            holdings=holdings,
+            manager_cik=request.manager_cik,
+            known_at=request.known_at,
+            periods=result.periods,
+        )
+        return SecInstitutionalHoldingsDirectedPeriodsRefreshSummary(
+            manager_cik=request.manager_cik,
+            report_periods=request.report_periods,
+            state=state,
+            reason_code=reason_code,
+            submissions_calls=counters.submissions_calls,
+            archives_calls=counters.archives_calls,
+            periods=() if result is None else result.periods,
+            report_ids=report_ids,
+            semantics_examined=counts.examined,
+            semantics_created=counts.created,
+            semantics_reused=counts.reused,
+            semantics_not_visible=counts.not_visible,
+            semantics_rejected=counts.rejected,
+            backlog_after=0 if result is None else result.backlog_after,
+            traceability_verified=traceability,
+        )
 
     def _resolve_snapshot(
         self, storage, known_at: datetime
@@ -454,10 +624,32 @@ def _failure_code(error: BaseException) -> str:
     return type(error).__name__
 
 
+def _periods_traceability(
+    *,
+    holdings: InstitutionalHoldingsRepository,
+    manager_cik: str,
+    known_at: datetime,
+    periods: tuple[SecInstitutionalHoldingsPeriodImportResult, ...],
+) -> bool:
+    """Re-read the persisted evidence and confirm every period's accession is visible at the cut."""
+    visible: dict[date, set[str]] = {}
+    for report in holdings.list_reports(manager_cik=manager_cik, known_at=known_at):
+        visible.setdefault(report.report_period, set()).add(
+            report.cover_revision.document.filing.accession
+        )
+    for period in periods:
+        expected = set(period.created_accessions) | set(period.reused_accessions)
+        if not expected.issubset(visible.get(period.report_period, set())):
+            return False
+    return True
+
+
 __all__ = [
     "MISSING_UNIVERSE_INSTRUCTION",
     "SEC_INSTITUTIONAL_HOLDINGS_DIRECTED_REFRESH_POLICY",
     "DirectedManagerTarget",
+    "SecInstitutionalHoldingsDirectedPeriodsRefreshRequest",
+    "SecInstitutionalHoldingsDirectedPeriodsRefreshSummary",
     "SecInstitutionalHoldingsDirectedRefreshApplication",
     "SecInstitutionalHoldingsDirectedRefreshError",
     "SecInstitutionalHoldingsDirectedRefreshRequest",

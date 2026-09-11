@@ -49,6 +49,16 @@ atómico con checksum SHA-256 (`sec_institutional_cycle_state_v1.json`), presupu
 de catálogo HTML, descarga ZIP sólo ante snapshot ausente, período/URL nuevo o expiración de 7 días; cero GET ZIP
 en cache hit ordinario), outcomes rechazados terminales reutilizados y scheduler job `sec:institutional:13f-cycle`.
 
+`SEC-CORPUS-31` cierra la profundidad histórica mínima sin autorizar backfill abierto: la ventana de dos cierres
+adyacentes (`sec-institutional-history-cycle-v1` y `sec-institutional-history-state-v1`) selecciona exactamente
+los dos períodos oficiales más recientes, persiste como máximo un ZIP faltante por intento en
+`sec_institutional_history_state_v1.json`, intersecta los gestores comunes de ambos cierres, materializa ambas
+páginas candidatas con una única revisión Submissions compartida, ejecuta las métricas, pesos y eventos
+institucionales ya integrados sin cambiar fórmulas y reconcilia la outbox local antes de avanzar el cursor, bajo
+el job adicional `sec:institutional:13f-history` (desfase 120 min). La retirada definitiva de los residuos de
+privilegio por ticker y la observación del runtime antes de ampliar activos o proveedores quedan en
+`RUNTIME-EFFICIENCY-1`, el siguiente ítem de `EQUITY-UNIVERSE`.
+
 | Recomendación | Decisión | Evidencia/razón | Ruta futura |
 | --- | --- | --- | --- |
 | Corpus reciente y auditable antes de IA | INTEGRATE | Submissions fresco y revisiones v2 verificadas | SEC-CORPUS |
@@ -59,6 +69,7 @@ en cache hit ordinario), outcomes rechazados terminales reutilizados y scheduler
 | Adquisición 13F dirigida y reanudable desde el universo | BUILD | El universo ya persistido permite paginar gestores con un Submissions por gestor y reanudación exacta | SEC-CORPUS-28 |
 | Correspondencia CUSIP↔activo y observaciones 13F | BUILD | La coincidencia exacta de CUSIP por fila permite una prueba aislada sin inventar vigencia corporativa | SEC-CORPUS-29 |
 | Operación programada del ciclo institucional | BUILD | Opera en background bajo el scheduler existente con una sola conexión writer y progreso atómico | SEC-CORPUS-30 |
+| Ventana de dos cierres adyacentes y cadena derivada | BUILD | La operación manual del cierre más reciente impedía materializar métricas, eventos y outbox comparables | SEC-CORPUS-31 |
 | Expansión de activos y cripto on-chain | DEFER | Faltan fuente, licencia/retención, PIT y coste por familia medidos | Plan futuro de datos |
 | UI nueva | DEFER | La capacidad opera por scheduler y la UI permanece congelada | Work Block futuro P0/P1 |
 | Backfill suplementario e histórico | DEFER | Faltan presupuesto, cobertura y licencia medidos | Plan futuro de corpus |

@@ -1591,9 +1591,11 @@ def _check_route_declares_local_interface_planned_and_sec_corpus_next(doc_text: 
     assert re.search(r"\|\s*`LOCAL-INTERFACE`\s*\|\s*`DONE`\s*\|", doc_text), (
         "the route table must declare LOCAL-INTERFACE as DONE"
     )
-    assert re.search(r"\|\s*`SEC-CORPUS`\s*\|\s*`NEXT`\s*\|", doc_text), (
-        "SEC-CORPUS must remain the sole NEXT candidate; this block advances a new row, "
-        "it does not complete anything"
+    assert re.search(r"\|\s*`SEC-CORPUS`\s*\|\s*`DONE`\s*\|", doc_text), (
+        "SEC-CORPUS completes its route in this block"
+    )
+    assert re.search(r"\|\s*`EQUITY-UNIVERSE`\s*\|\s*`NEXT`\s*\|", doc_text), (
+        "EQUITY-UNIVERSE must be the sole NEXT candidate"
     )
 
 
@@ -1916,10 +1918,10 @@ def test_design_system_documentation_declares_the_canvas_convergence() -> None:
 
 def _check_route_registers_canvas_convergence_and_reassigns_cazatiburones(doc_text: str) -> None:
     assert re.search(r"\|\s*`LOCAL-INTERFACE`\s*\|\s*`DONE`\s*\|", doc_text), (
-        "LOCAL-INTERFACE must remain DONE; this block advances evidence, completes nothing"
+        "LOCAL-INTERFACE must remain DONE"
     )
-    assert re.search(r"\|\s*`SEC-CORPUS`\s*\|\s*`NEXT`\s*\|", doc_text), (
-        "SEC-CORPUS must remain the sole NEXT candidate"
+    assert re.search(r"\|\s*`EQUITY-UNIVERSE`\s*\|\s*`NEXT`\s*\|", doc_text), (
+        "EQUITY-UNIVERSE must be the sole NEXT candidate"
     )
     normalized = re.sub(r"\s+", " ", doc_text).lower()
     assert "cazatiburones" in normalized and "ui-4" in normalized, (
@@ -2168,8 +2170,8 @@ def test_route_registers_the_connected_cazatiburones_board() -> None:
 
 def _check_route_keeps_sec_corpus_as_the_single_next(doc_text: str) -> None:
     next_rows = re.findall(r"\|\s*`([A-Z-]+)`\s*\|\s*`NEXT`\s*\|", doc_text)
-    assert next_rows == ["SEC-CORPUS"], (
-        f"expected exactly one NEXT row (SEC-CORPUS), found {next_rows}"
+    assert next_rows == ["EQUITY-UNIVERSE"], (
+        f"expected exactly one NEXT row (EQUITY-UNIVERSE), found {next_rows}"
     )
 
 
@@ -4564,7 +4566,8 @@ def _check_ui8_composition_is_documented(design_doc: str, local_doc: str, plan_d
     assert "`UI-8` mueve la identidad y el selector del activo" in plan_doc
     assert "`UI-13`" in local_doc
     assert "`UI-13`" in plan_doc
-    assert "`SEC-CORPUS` permanece como la única ruta `NEXT`" in plan_doc
+    assert "`SEC-CORPUS` completó su ruta" in plan_doc
+    assert "`EQUITY-UNIVERSE` queda como la única ruta `NEXT`" in plan_doc
 
 
 def test_ui8_composition_and_route_are_documented() -> None:
@@ -4984,7 +4987,8 @@ def test_docs_state_technical_review_bvl_and_clean_ui_boundaries() -> None:
         assert "09:30–15:50" in document
         assert "master-detail" in document
     assert "Anexo2TextodcRentaFija.pdf" in local_doc
-    assert "`SEC-CORPUS` permanece como la única ruta `NEXT`" in plan_doc
+    assert "`SEC-CORPUS` completó su ruta" in plan_doc
+    assert "`EQUITY-UNIVERSE` queda como la única ruta `NEXT`" in plan_doc
     assert "UI-11" in plan_doc
 
 
@@ -5108,7 +5112,8 @@ def test_canonical_roadmap_reflects_live_sec_caz_ui12_runtime_efficiency_and_pri
     )
     roadmap = (repository_root / "docs" / "product_roadmap.md").read_text(encoding="utf-8")
     assert "LOCAL-INTERFACE" in release_plan and "DONE" in release_plan
-    assert "SEC-CORPUS" in release_plan and "NEXT" in release_plan
+    assert "SEC-CORPUS" in release_plan and "DONE" in release_plan
+    assert "EQUITY-UNIVERSE" in release_plan and "NEXT" in release_plan
     assert "BVL-MARKET" in release_plan and "BLOCKED" in release_plan
     assert "PREDICTIVE-RESEARCH" in release_plan and "DEFERRED" in release_plan
     assert "UI-14/#202" in release_plan + roadmap

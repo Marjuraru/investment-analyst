@@ -213,6 +213,10 @@ from investment_analyst.application.sec_institutional_cycle_models import (
     SecInstitutionalCycleRequest,
     SecInstitutionalCycleSummary,
 )
+from investment_analyst.application.sec_institutional_history_models import (
+    SecInstitutionalHistoryRequest,
+    SecInstitutionalHistorySummary,
+)
 from investment_analyst.application.universe_coverage_models import (
     UniverseCoverageRequest,
     UniverseCoverageResult,
@@ -1364,6 +1368,24 @@ class AaplLocalController:
         with self._writer_lock:
             try:
                 return self._application.run_sec_institutional_cycle(
+                    request,
+                    sec_identity=self._sec_identity,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                )
+            finally:
+                with self._cache_lock:
+                    self._coverage_cache.clear()
+                    self._universe_activity_cache.clear()
+                self._refresh_health_snapshot()
+
+    def sec_institutional_history_request(
+        self,
+        request: SecInstitutionalHistoryRequest,
+    ) -> SecInstitutionalHistorySummary:
+        """Execute one bounded two-close 13F history step with the shared writer lock."""
+        with self._writer_lock:
+            try:
+                return self._application.run_sec_institutional_history(
                     request,
                     sec_identity=self._sec_identity,
                     location=StorageLocationRequest(workspace=self._workspace),

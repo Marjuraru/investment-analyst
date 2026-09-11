@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -155,6 +155,28 @@ def snapshot_from_raw_record(record: RawRecord) -> Sec13FManagerUniverseSnapshot
     return snapshot
 
 
+def _dataset_revision_payload(record: RawRecord) -> dict[str, object] | None:
+    if not isinstance(record.payload, dict):
+        return None
+    if record.payload.get("kind") != "sec_13f_data_set_revision":
+        return None
+    revision = record.payload.get("revision")
+    return revision if isinstance(revision, dict) else None
+
+
+def _is_dataset_revision_payload(record: RawRecord) -> bool:
+    return _dataset_revision_payload(record) is not None
+
+
+def _snapshot_payload(record: RawRecord) -> dict[str, object] | None:
+    if not isinstance(record.payload, dict):
+        return None
+    if record.payload.get("kind") != "sec_13f_manager_universe_snapshot":
+        return None
+    snapshot = record.payload.get("snapshot")
+    return snapshot if isinstance(snapshot, dict) else None
+
+
 class SecInstitutionalUniverseRepository:
     """Repository managing dataset archives, revisions, and universe snapshots."""
 
@@ -265,6 +287,109 @@ class SecInstitutionalUniverseRepository:
         except RecordNotFoundError:
             return None
         return snapshot_from_raw_record(record)
+
+    def list_dataset_revisions(
+        self, *, period_start: date, period_end: date, known_at: datetime
+    ) -> tuple[Sec13FDataSetRevision, ...]:
+        """List every persisted revision of one exact official period available at the cut."""
+        if known_at.tzinfo is None or known_at.utcoffset() is None:
+            raise SecInstitutionalUniverseRepositoryError(
+                "known_at must be a timezone-aware UTC datetime"
+            )
+
+        records = self._raw_records.list(
+            source_id=SEC_13F_MANAGER_UNIVERSE_SOURCE_ID,
+            available_to=known_at,
+        )
+        revisions: list[Sec13FDataSetRevision] = []
+        for record in records:
+            if not _is_dataset_revision_payload(record):
+                continue
+            revision = dataset_revision_from_raw_record(record)
+            if (revision.period_start, revision.period_end) != (period_start, period_end):
+                continue
+            if revision.available_at > known_at:
+                continue
+            revisions.append(revision)
+        return tuple(revisions)
+
+    def find_snapshot_for_period(
+        self,
+        *,
+        period_start: date,
+        period_end: date,
+        dataset_url: str,
+        known_at: datetime,
+    ) -> tuple[Sec13FDataSetRevision, Sec13FManagerUniverseSnapshot] | None:
+        """Resolve the newest verifiable revision and snapshot of one exact period and URL.
+
+        Only evidence already persisted by the integrated universe pipeline is reused; the resolved
+        revision must match the exact official URL of the catalog link, the dataset blob must exist
+        and match its SHA-256, and the snapshot must be available at the requested cut. A
+        contradictory or unverifiable store fails closed instead of silently selecting a competitor.
+        """
+        revisions = self.list_dataset_revisions(
+            period_start=period_start, period_end=period_end, known_at=known_at
+        )
+        matching = tuple(item for item in revisions if item.dataset_url == dataset_url)
+        if not matching:
+            return None
+
+        newest = max(matching, key=lambda item: (item.retrieved_at, str(item.revision_id)))
+        for other in matching:
+            if (
+                other.retrieved_at == newest.retrieved_at
+                and other.content_sha256 != newest.content_sha256
+            ):
+                raise SecInstitutionalUniverseRepositoryError(
+                    f"Incompatible competing revisions for period "
+                    f"{period_start}..{period_end} at the same retrieval time"
+                )
+
+        snapshot = self._newest_snapshot_for_revision(newest.revision_id, known_at=known_at)
+        if snapshot is None:
+            return None
+        if snapshot.dataset_sha256 != newest.content_sha256:
+            raise SecInstitutionalUniverseRepositoryError(
+                "manager universe snapshot lineage does not verify against its revision"
+            )
+        if (snapshot.period_start, snapshot.period_end) != (period_start, period_end):
+            raise SecInstitutionalUniverseRepositoryError(
+                "manager universe snapshot period conflicts with its dataset revision"
+            )
+        self.verify_blob(snapshot.dataset_sha256, size_bytes=newest.size_bytes)
+        return newest, snapshot
+
+    def _newest_snapshot_for_revision(
+        self, revision_id: UUID, *, known_at: datetime
+    ) -> Sec13FManagerUniverseSnapshot | None:
+        records = self._raw_records.list(
+            source_id=SEC_13F_MANAGER_UNIVERSE_SOURCE_ID,
+            available_to=known_at,
+        )
+        candidates: list[Sec13FManagerUniverseSnapshot] = []
+        for record in records:
+            raw_snapshot = _snapshot_payload(record)
+            if raw_snapshot is None:
+                continue
+            if str(raw_snapshot.get("dataset_revision_id")) != str(revision_id):
+                continue
+            snapshot = snapshot_from_raw_record(record)
+            if snapshot.available_at > known_at:
+                continue
+            candidates.append(snapshot)
+        if not candidates:
+            return None
+        newest = max(candidates, key=lambda item: (item.retrieved_at, str(item.snapshot_id)))
+        for other in candidates:
+            if (
+                other.retrieved_at == newest.retrieved_at
+                and other.snapshot_id != newest.snapshot_id
+            ):
+                raise SecInstitutionalUniverseRepositoryError(
+                    "competing manager universe snapshots share one retrieval time"
+                )
+        return newest
 
     def find_latest_snapshot(self, *, known_at: datetime) -> Sec13FManagerUniverseSnapshot | None:
         """Find the latest point-in-time snapshot strictly available at known_at."""

@@ -7,8 +7,11 @@ persiste la capa 2 —observación normalizada point-in-time— para Forms 3/4/5
 (ver `docs/cazatiburones_activity_observations.md`), y persiste la capa 3 —métrica descriptiva
 versionada— para el delta de tenencia declarada de insiders y el delta de propiedad beneficiaria
 13D/13G, calculada exclusivamente sobre esa capa 2; ver `docs/cazatiburones_activity_metrics.md`.
-Form 13F permanece sin normalizar mientras sus posiciones carezcan de `asset_id` verificado, y por
-tanto sin métrica persistida. El dominio no calcula diagnósticos, señales ni recomendaciones.
+Form 13F se normaliza desde `SEC-CORPUS-29`: cada fila as-filed se corresponde con un `asset_id`
+verificado por el CUSIP exacto del catálogo, se persiste como capa 2 y `SEC-CORPUS-30`/`SEC-CORPUS-31`
+operan la capa 3 —métricas, pesos, eventos y candidatos locales— sobre cierres adyacentes
+comparables. Una posición sin correspondencia verificable nunca se convierte en observación ni en
+tenencia cero. El dominio no calcula diagnósticos, señales ni recomendaciones.
 
 ## Evidencia admisible
 
@@ -118,6 +121,25 @@ Para el universo institucional Form 13F, `SEC-CORPUS-30` introduce el job `sec:i
 - Satisface presupuestos estrictos de red oficial: sondeo diario de catálogo HTML, descarga condicional de ZIP
   (sólo ante ausencia de snapshot, nuevo trimestre/URL o expiración de 7 días; cero GET ZIP en cache hit), y
   reutilización de filings ya descargados y outcomes terminales de rechazo.
+
+### Ventana de dos cierres adyacentes (`SEC-CORPUS-31`)
+
+`SEC-CORPUS-31` añade el job global `sec:institutional:13f-history` (proveedor `sec-edgar`, dominio
+`events`, frecuencia `daily-check`, 09:00 `America/Lima`, correspondiente a `run_at + 120 minutos`),
+que convive con el ciclo anterior y comparte su mutex de escritura:
+
+- Selecciona exactamente los dos períodos oficiales adyacentes más recientes del catálogo Form 13F, sin
+  backfill anterior ni número configurable de trimestres, y persiste como máximo un ZIP faltante por
+  intento en `state/sec_institutional_history_state_v1.json`.
+- Reutiliza por período/URL/hash cualquier revisión y snapshot verificables ya persistidos; una repetición
+  no redescarga el ZIP.
+- Intersecta los `(asset_id, manager_cik)` seleccionados presentes en ambos cierres y declara los gestores
+  excluidos; un gestor presente en un solo cierre nunca produce un cierre previo o corriente sintético.
+- Procesa un gestor común por intento con una única revisión Submissions compartida por los dos períodos
+  (como máximo dos accessions por período), materializa ambas páginas candidatas exactas y ejecuta las
+  implementaciones ya integradas de métricas, pesos y eventos institucionales sin cambiar fórmulas.
+- Cierra el writer y reconcilia la outbox local `cazatiburones-notification-outbox-v1` antes de avanzar
+  el cursor; un fallo de outbox conserva métricas y eventos y deja el target reanudable.
 
 ## Pipeline híbrido local
 

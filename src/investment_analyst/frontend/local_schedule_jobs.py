@@ -89,6 +89,13 @@ from investment_analyst.application.sec_institutional_cycle_models import (
     SecInstitutionalCycleRequest,
     SecInstitutionalCycleSummary,
 )
+from investment_analyst.application.sec_institutional_history import (
+    SecInstitutionalHistoryError,
+)
+from investment_analyst.application.sec_institutional_history_models import (
+    SecInstitutionalHistoryRequest,
+    SecInstitutionalHistorySummary,
+)
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
 from investment_analyst.providers.asset_config import ProviderConfigurationError
@@ -194,6 +201,13 @@ class _LocalScheduledOperations(Protocol):
         request: SecInstitutionalCycleRequest,
     ) -> SecInstitutionalCycleSummary:
         """Run one bounded scheduled step of the Form 13F cycle."""
+        ...
+
+    def sec_institutional_history_request(
+        self,
+        request: SecInstitutionalHistoryRequest,
+    ) -> SecInstitutionalHistorySummary:
+        """Run one bounded scheduled step of the two-close Form 13F history window."""
         ...
 
 
@@ -316,6 +330,7 @@ def build_local_watchlist_jobs(
             jobs.append(_intraday_job(controller, descriptor, config))
     if any(item.asset_id in config.sec_cusip_asset_ids for item in descriptors):
         jobs.append(_sec_institutional_cycle_job(controller, config))
+        jobs.append(_sec_institutional_history_job(controller, config))
     if config.include_smv_registry:
         jobs.append(_smv_registry_job(controller, config))
     if config.include_macro:
@@ -416,6 +431,68 @@ def _sec_institutional_cycle_job(
             )
         created = len(summary.created_accessions) + summary.observations_created
         reused = len(summary.reused_accessions) + summary.observations_reused
+        return ScheduledJobExecution(
+            job_id=definition.job_id,
+            effective_known_at=summary.effective_known_at,
+            evidence_changed=created > 0,
+            source_ids=summary.source_ids,
+            created_count=created,
+            reused_count=reused,
+            coverage_complete=summary.coverage_complete,
+        )
+
+    return RegisteredScheduledJob(definition, run)
+
+
+def _sec_institutional_history_job(
+    controller: _LocalScheduledOperations,
+    config: LocalWatchlistScheduleConfig,
+) -> RegisteredScheduledJob:
+    definition = ScheduledJobDefinition(
+        job_id="sec:institutional:13f-history",
+        provider="sec-edgar",
+        domain=ScheduledJobDomain.EVENTS,
+        data_frequency="daily-check",
+        timezone=config.timezone,
+        run_at=_offset_minute(config.run_at, 120),
+        freshness_threshold_seconds=604_800,
+    )
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        try:
+            summary = controller.sec_institutional_history_request(
+                SecInstitutionalHistoryRequest(
+                    known_at=invocation.scheduled_for.astimezone(UTC),
+                )
+            )
+        except (SecInstitutionalHistoryError, StorageError, ValueError, OSError) as error:
+            raise _classified_provider_error(error) from error
+        if summary.status == "failed":
+            raise ScheduledJobRunError(
+                scheduled_job_failure(
+                    ScheduledJobFailureCategory.PROVIDER_CONTRACT,
+                    f"scheduled 13F history step failed: {summary.reason_code}",
+                )
+            )
+        created = summary.notifications_created
+        reused = summary.notifications_reused
+        if summary.target is not None:
+            target = summary.target
+            created += (
+                len(target.created_accessions)
+                + target.older_observations_created
+                + target.newer_observations_created
+                + target.metrics_created
+                + target.weights_created
+                + target.events_created
+            )
+            reused += (
+                len(target.reused_accessions)
+                + target.older_observations_reused
+                + target.newer_observations_reused
+                + target.metrics_reused
+                + target.weights_reused
+            )
         return ScheduledJobExecution(
             job_id=definition.job_id,
             effective_known_at=summary.effective_known_at,
@@ -1001,6 +1078,7 @@ def _non_http_failure(chain: tuple[BaseException, ...]) -> ScheduledJobFailure:
                 FredAlfredError,
                 SmvOpenDataError,
                 SecInstitutionalCycleError,
+                SecInstitutionalHistoryError,
                 ListedMarketRefreshError,
                 BtcMarketRefreshError,
                 BtcIntradayRefreshError,

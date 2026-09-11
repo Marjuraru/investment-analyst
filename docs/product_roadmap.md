@@ -386,8 +386,15 @@ con estados explícitos en lugar de cero sintético y con la declaración humana
 programada y reanudable del ciclo completo (#27 universo → #28 adquisición dirigida → #29 correspondencia y observaciones)
 bajo el scheduler existente con una sola conexión writer, archivo de estado atómico (`sec_institutional_cycle_state_v1.json`),
 presupuesto de red acotado (sondeo diario de catálogo HTML, descarga condicional de ZIP y cero GET ZIP en cache hit ordinario),
-reutilización de outcomes terminales de rechazo y job `sec:institutional:13f-cycle`. `SEC-CORPUS-31` es la siguiente
-unidad registrada.
+reutilización de outcomes terminales de rechazo y job `sec:institutional:13f-cycle`. `SEC-CORPUS-31` completa
+la ruta: la ventana de dos cierres adyacentes (`sec-institutional-history-cycle-v1` y
+`sec-institutional-history-state-v1`) selecciona los dos períodos oficiales más recientes, persiste como máximo
+un ZIP faltante por intento en `sec_institutional_history_state_v1.json`, intersecta los gestores comunes de
+ambos cierres, materializa ambas páginas candidatas con una única revisión Submissions compartida, ejecuta las
+métricas, pesos y eventos institucionales ya integrados sin cambiar fórmulas y reconcilia la outbox local antes
+de avanzar el cursor, bajo el job `sec:institutional:13f-history` (desfase 120 min). El ítem `SEC-CORPUS` queda
+`DONE` y `EQUITY-UNIVERSE` pasa a la única ruta `NEXT`, con `RUNTIME-EFFICIENCY-1` como siguiente bloque
+registrado.
 
 Las anomalías se evaluarán localmente sobre features point-in-time de filings: tamaño relativo de
 una transacción, cambio de tenencia, concentración, recurrencia, enmiendas y latencia de reporte. El
@@ -452,9 +459,10 @@ Las dos tablas avanzadas de datos permanecen en el DOM con sus IDs, renderers, c
 exportaciones, pero parten ocultas y no focusables mediante `hidden`; la reversión es retirar ese
 atributo. No se agregan endpoints, polling, mutaciones, dependencias ni deep-links públicos.
 
-La prioridad viva queda reconciliada: `LOCAL-INTERFACE` está `DONE`, `SEC-CORPUS` es el único
-`NEXT` y conserva las lecturas Caz ya integradas como base; `RUNTIME-EFFICIENCY` y la observación
-de jobs siguen antes de ampliar cobertura; `BVL-MARKET` permanece `BLOCKED` y
+La prioridad viva queda reconciliada: `LOCAL-INTERFACE` está `DONE`, `SEC-CORPUS` completó su ruta con
+`SEC-CORPUS-31` y `EQUITY-UNIVERSE` es el único `NEXT`, conservando las lecturas Caz ya integradas como base;
+`RUNTIME-EFFICIENCY-1` —retirada de los residuos de privilegio por ticker y observación del runtime— es el
+siguiente bloque registrado antes de ampliar cobertura; `BVL-MARKET` permanece `BLOCKED` y
 `PREDICTIVE-RESEARCH` permanece `DEFERRED`.
 
 ## Fase 12 — IA cualitativa opcional
@@ -647,7 +655,8 @@ observer read-only registra GET loopback, `systemctl show` y `/proc/<MainPID>/st
 son nuevas capacidades de análisis, no acceden al workspace ni ejecutan providers o scheduler, y no
 atribuyen causalidad de memoria. La duración de la captura es finita y explícita, sin duración mínima
 ni número mínimo de muestras, sesiones o ciclos como gate. `RELEASE-ACCEPTANCE` fue reconciliada
-HUMAN como `RELEASE-ACCEPTANCE DONE → EQUITY-UNIVERSE NEXT → SEC-CORPUS PLANNED`.
+HUMAN como `RELEASE-ACCEPTANCE DONE → EQUITY-UNIVERSE NEXT → SEC-CORPUS PLANNED`; esa secuencia quedó
+consumida y hoy la ruta viva es `LOCAL-INTERFACE DONE` y `SEC-CORPUS DONE` con `EQUITY-UNIVERSE NEXT`.
 La transición integrada es `EQUITY-UNIVERSE DONE → SEC-CORPUS NEXT`; #134/#135 integraron el
 sustrato institucional 13F, #140 la composición/completitud, #142 las métricas de cambio reportado,
 #144 el peso declarado y #146 la concentración efímera. #151 añade eventos institucionales descriptivos persistidos
@@ -661,7 +670,11 @@ actividad declarada y universo oficial acotado de gestores 13F respectivamente�
 señal, manteniendo `SEC-CORPUS` como único `NEXT`. Este candidato avanza el mismo ítem
 (`route_effect: ADVANCES`) con la adquisición dirigida y reanudable de filings 13F desde ese universo,
 sin completarlo: `SEC-CORPUS-29` queda como la siguiente unidad registrada para correspondencia y
-observaciones. `EXTENDED-SOAK /
+observaciones. `SEC-CORPUS-30` integró la operación programada y reanudable del ciclo institucional
+completo bajo el job `sec:institutional:13f-cycle` y `SEC-CORPUS-31` completa la ruta con la ventana de
+dos cierres adyacentes y su cadena derivada bajo el job `sec:institutional:13f-history`; `SEC-CORPUS`
+queda `DONE`, `EQUITY-UNIVERSE` pasa a la única ruta `NEXT` y `RUNTIME-EFFICIENCY-1` es el siguiente
+bloque registrado. `EXTENDED-SOAK /
 DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
 Block independiente.
 

@@ -36,6 +36,13 @@ from investment_analyst.application.sec_institutional_cycle import (
 from investment_analyst.application.sec_institutional_cycle_models import (
     SecInstitutionalCycleSummary,
 )
+from investment_analyst.application.sec_institutional_history import (
+    SecInstitutionalHistoryError,
+)
+from investment_analyst.application.sec_institutional_history_models import (
+    SecInstitutionalHistorySummary,
+    SecInstitutionalHistoryTargetSummary,
+)
 from investment_analyst.frontend.local_schedule_jobs import (
     LocalWatchlistScheduleConfig,
     build_local_watchlist_jobs,
@@ -82,6 +89,9 @@ class _UnusedController:
         raise AssertionError(request)
 
     def sec_institutional_cycle_request(self, request):
+        raise AssertionError(request)
+
+    def sec_institutional_history_request(self, request):
         raise AssertionError(request)
 
 
@@ -505,6 +515,11 @@ def test_sec_institutional_cycle_job_run_success() -> None:
             False,
         ),
         (
+            SecInstitutionalHistoryError("malformed history simulated-secret"),
+            ScheduledJobFailureCategory.PROVIDER_CONTRACT,
+            False,
+        ),
+        (
             ListedMarketKnownAtTooEarlyError("invalid cut simulated-secret"),
             ScheduledJobFailureCategory.VALIDATION,
             False,
@@ -567,6 +582,142 @@ def test_provider_failure_classification_is_structured_bounded_and_secret_safe(
     assert failure.retryable is retryable
     assert len(failure.message) <= 500
     assert "simulated-secret" not in failure.message
+
+
+def test_sec_institutional_history_job_composition() -> None:
+    config_without = _config("equity:us:aapl")
+    jobs_without = build_local_watchlist_jobs(_UnusedController(), _universe(), config_without)
+    assert not any(
+        item.definition.job_id == "sec:institutional:13f-history" for item in jobs_without
+    )
+
+    config_with = _config("equity:us:aapl").model_copy(
+        update={"sec_cusip_asset_ids": ("equity:us:aapl",)}
+    )
+    jobs_with = build_local_watchlist_jobs(_UnusedController(), _universe(), config_with)
+    history_jobs = [
+        item for item in jobs_with if item.definition.job_id == "sec:institutional:13f-history"
+    ]
+    cycle_jobs = [
+        item for item in jobs_with if item.definition.job_id == "sec:institutional:13f-cycle"
+    ]
+
+    assert len(history_jobs) == 1
+    assert len(cycle_jobs) == 1
+    job = history_jobs[0]
+    assert job.definition.asset_id is None
+    assert job.definition.provider == "sec-edgar"
+    assert job.definition.domain is ScheduledJobDomain.EVENTS
+    assert job.definition.data_frequency == "daily-check"
+    assert job.definition.run_at == time(hour=9)
+    assert job.definition.run_at == schedule_jobs_module._offset_minute(config_with.run_at, 120)
+    assert cycle_jobs[0].definition.run_at == time(hour=8, minute=45)
+
+
+def test_sec_institutional_history_job_reports_terminal_telemetry() -> None:
+    class _HistoryController(_UnusedController):
+        def sec_institutional_history_request(self, request):
+            assert request.known_at == datetime(2026, 8, 11, 14, 0, tzinfo=UTC)
+            assert request.accessions_per_period == 2
+            return SecInstitutionalHistorySummary(
+                effective_known_at=datetime(2026, 8, 11, 14, 0, tzinfo=UTC),
+                status="processed",
+                phase="ready",
+                catalog_calls=1,
+                zip_calls=0,
+                submissions_calls=1,
+                archives_calls=4,
+                total_targets=2,
+                target_cursor_before=0,
+                target_cursor_after=1,
+                manager_cik="0001067983",
+                manager_name="BERKSHIRE HATHAWAY INC",
+                target=SecInstitutionalHistoryTargetSummary(
+                    asset_id="equity:us:aapl",
+                    manager_cik="0001067983",
+                    manager_name="BERKSHIRE HATHAWAY INC",
+                    older_report_period=date(2025, 12, 31),
+                    newer_report_period=date(2026, 3, 31),
+                    state="processed",
+                    created_accessions=("0001067983-26-000001", "0001067983-26-000010"),
+                    older_observations_created=1,
+                    newer_observations_created=1,
+                    metrics_created=3,
+                    weights_created=1,
+                    events_created=2,
+                    traceability_verified=True,
+                ),
+                notifications_created=2,
+                notifications_reused=1,
+                source_ids=(
+                    "sec-edgar:form-13f-data-sets",
+                    "sec-edgar:institutional-holdings-13f",
+                    "sec-edgar:institutional-holdings-observations",
+                ),
+            )
+
+    config = _config("equity:us:aapl").model_copy(
+        update={"sec_cusip_asset_ids": ("equity:us:aapl",)}
+    )
+    jobs = build_local_watchlist_jobs(_HistoryController(), _universe(), config)
+    job = next(item for item in jobs if item.definition.job_id == "sec:institutional:13f-history")
+    invocation = ScheduledJobInvocation(
+        definition=job.definition,
+        local_date=date(2026, 8, 11),
+        scheduled_for=job.definition.scheduled_for(date(2026, 8, 11)),
+        started_at=datetime(2026, 8, 11, 14, 0, tzinfo=UTC),
+        attempt_number=1,
+    )
+
+    execution = job.run(invocation)
+
+    assert execution.job_id == "sec:institutional:13f-history"
+    assert execution.evidence_changed is True
+    assert execution.effective_known_at == datetime(2026, 8, 11, 14, 0, tzinfo=UTC)
+    assert execution.created_count == 2 + 1 + 1 + 3 + 1 + 2 + 2
+    assert execution.reused_count == 1
+    assert execution.coverage_complete is False
+    assert set(execution.source_ids) == {
+        "sec-edgar:form-13f-data-sets",
+        "sec-edgar:institutional-holdings-13f",
+        "sec-edgar:institutional-holdings-observations",
+    }
+
+
+def test_sec_institutional_history_job_fails_safely_on_failed_summary() -> None:
+    class _HistoryFailureController(_UnusedController):
+        def sec_institutional_history_request(self, request):
+            del request
+            return SecInstitutionalHistorySummary(
+                effective_known_at=datetime(2026, 8, 11, 14, 0, tzinfo=UTC),
+                status="failed",
+                phase="ready",
+                reason_code="DatasetArchiveError",
+                total_targets=2,
+                target_cursor_before=0,
+                target_cursor_after=0,
+            )
+
+    config = _config("equity:us:aapl").model_copy(
+        update={"sec_cusip_asset_ids": ("equity:us:aapl",)}
+    )
+    jobs = build_local_watchlist_jobs(_HistoryFailureController(), _universe(), config)
+    job = next(item for item in jobs if item.definition.job_id == "sec:institutional:13f-history")
+    invocation = ScheduledJobInvocation(
+        definition=job.definition,
+        local_date=date(2026, 8, 11),
+        scheduled_for=job.definition.scheduled_for(date(2026, 8, 11)),
+        started_at=datetime(2026, 8, 11, 14, 0, tzinfo=UTC),
+        attempt_number=1,
+    )
+
+    with pytest.raises(ScheduledJobRunError) as raised:
+        job.run(invocation)
+
+    failure = raised.value.failure
+    assert failure.category == ScheduledJobFailureCategory.PROVIDER_CONTRACT
+    assert failure.retryable is False
+    assert "DatasetArchiveError" in failure.message
 
 
 def test_provider_failure_classification_does_not_parse_free_text() -> None:

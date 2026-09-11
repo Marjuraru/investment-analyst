@@ -12,6 +12,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from investment_analyst.application.runtime import ApplicationRuntime, StorageLocationRequest
 from investment_analyst.application.sec_institutional_holdings_refresh import (
+    SecInstitutionalHoldingsDirectedPeriodsRefreshRequest,
     SecInstitutionalHoldingsDirectedRefreshApplication,
 )
 from investment_analyst.application.sec_institutional_holdings_refresh_models import (
@@ -494,3 +495,185 @@ def test_refresh_with_storage_reuses_single_writer_connection(tmp_path: Path) ->
             storage.raw_records.count(schema_version=INSTITUTIONAL_HOLDINGS_REPORT_SCHEMA_VERSION)
             == 1
         )
+
+
+_OLDER_PERIOD = date(2025, 12, 31)
+_NEWER_PERIOD = date(2026, 3, 31)
+_OLDER_ACCESSION = "0001067983-26-000001"
+_NEWER_ACCESSION = "0001067983-26-000010"
+
+
+def _pair_filing(
+    accession: str, *, accepted_at: datetime, report_period: date, form: str = "13F-HR"
+) -> dict[str, str]:
+    return {
+        "accession": accession,
+        "form": form,
+        "report_date": report_period.isoformat(),
+        "filing_date": "2026-04-14",
+        "accepted_at": accepted_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+    }
+
+
+class _PeriodDocumentClient:
+    """Archives double that renders each accession with its own report period."""
+
+    def __init__(self, periods: dict[str, date]) -> None:
+        self.periods = periods
+        self.manifest_calls = 0
+        self.document_calls = 0
+
+    @property
+    def archives_calls(self) -> int:
+        return self.manifest_calls + self.document_calls
+
+    def fetch_manifest(self, document):
+        from investment_analyst.providers.fundamentals.sec_document_client import (
+            SecAccessionManifest,
+        )
+
+        self.manifest_calls += 1
+        del document
+        return SecAccessionManifest(
+            entries=("filing.htm", "primary_doc.xml", "infotable.xml"),
+            sha256="c" * 64,
+            size_bytes=10,
+            url="https://www.sec.gov/Archives/index.json",
+            retrieved_at=datetime(2026, 5, 1, tzinfo=UTC),
+        )
+
+    def fetch(self, document):
+        from investment_analyst.providers.fundamentals.sec_document_client import (
+            SecPrimaryDocumentResponse,
+        )
+
+        self.document_calls += 1
+        accession = document.filing.accession
+        period = self.periods[accession]
+        if document.name == _PRIMARY_DOCUMENT:
+            content = b"<!DOCTYPE html><html><body>declared locator</body></html>"
+        elif document.name == "primary_doc.xml":
+            content = (
+                f"<edgarSubmission><submissionType>{document.filing.form}</submissionType>"
+                "<filingManager><name>Manager LLC</name></filingManager>"
+                f"<reportCalendarOrQuarter>{period.strftime('%m-%d-%Y')}</reportCalendarOrQuarter>"
+                "<tableEntryTotal>1</tableEntryTotal><tableValueTotal>100</tableValueTotal>"
+                "</edgarSubmission>"
+            ).encode()
+        else:
+            content = (
+                b"<informationTable><infoTable><nameOfIssuer>APPLE INC</nameOfIssuer>"
+                b"<titleOfClass>COM</titleOfClass><cusip>037833100</cusip><value>100</value>"
+                b"<shrsOrPrnAmt><sshPrnamt>10</sshPrnamt><sshPrnamtType>SH</sshPrnamtType>"
+                b"</shrsOrPrnAmt></infoTable></informationTable>"
+            )
+        return SecPrimaryDocumentResponse(
+            content=content,
+            sha256=hashlib.sha256(content).hexdigest(),
+            size_bytes=len(content),
+            url=f"https://www.sec.gov/Archives/{accession}/{document.name}",
+            retrieved_at=document.filing.accepted_at,
+        )
+
+
+def test_directed_periods_refresh_shares_one_submissions_for_both_periods(
+    tmp_path: Path,
+) -> None:
+    location = StorageLocationRequest(legacy_root=tmp_path)
+    universe = _materialize_universe(location)
+    newer_accepted = universe.available_at - timedelta(days=1)
+    older_accepted = newer_accepted - timedelta(days=90)
+    known_at = universe.available_at + timedelta(days=1)
+    filings = {
+        "0001067983": (
+            _pair_filing(_OLDER_ACCESSION, accepted_at=older_accepted, report_period=_OLDER_PERIOD),
+            _pair_filing(_NEWER_ACCESSION, accepted_at=newer_accepted, report_period=_NEWER_PERIOD),
+        )
+    }
+    submissions = _ManagerSubmissionsClient(filings)
+    documents = _PeriodDocumentClient(
+        {_OLDER_ACCESSION: _OLDER_PERIOD, _NEWER_ACCESSION: _NEWER_PERIOD}
+    )
+    app = _application(submissions, documents)
+    request = SecInstitutionalHoldingsDirectedPeriodsRefreshRequest(
+        known_at=known_at,
+        manager_cik="1067983",
+        report_periods=(_OLDER_PERIOD, _NEWER_PERIOD),
+        accessions_per_period=1,
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        first = app.refresh_periods_with_storage(storage, request, sec_identity=_IDENTITY)
+
+        assert submissions.calls == ["0001067983"]
+        assert first.submissions_calls == 1
+        assert first.state == "processed" and first.reason_code is None
+        assert first.created_accessions == (_OLDER_ACCESSION, _NEWER_ACCESSION)
+        assert first.failed_accessions == ()
+        assert first.backlog_after == 0
+        assert {period.report_period for period in first.periods} == {
+            _OLDER_PERIOD,
+            _NEWER_PERIOD,
+        }
+        assert {period.submissions_raw_record_id for period in first.periods} == {
+            first.periods[0].submissions_raw_record_id
+        }
+        assert first.semantics_created == 2
+        assert first.traceability_verified is True
+        assert len(first.report_ids) == 2
+        archives_after_first = documents.archives_calls
+        assert archives_after_first > 0
+
+        second = app.refresh_periods_with_storage(storage, request, sec_identity=_IDENTITY)
+
+        assert submissions.calls == ["0001067983", "0001067983"]
+        assert second.submissions_calls == 1
+        assert second.created_accessions == ()
+        assert set(second.reused_accessions) == {_OLDER_ACCESSION, _NEWER_ACCESSION}
+        assert second.semantics_created == 0 and second.semantics_reused == 2
+        assert documents.archives_calls == archives_after_first
+        assert second.traceability_verified is True
+        assert (
+            storage.raw_records.count(schema_version=INSTITUTIONAL_HOLDINGS_REPORT_SCHEMA_VERSION)
+            == 2
+        )
+
+
+def test_directed_periods_refresh_respects_the_cut_per_period(tmp_path: Path) -> None:
+    location = StorageLocationRequest(legacy_root=tmp_path)
+    universe = _materialize_universe(location)
+    newer_accepted = universe.available_at - timedelta(days=1)
+    known_at = universe.available_at + timedelta(days=1)
+    filings = {
+        "0001067983": (
+            _pair_filing(
+                _OLDER_ACCESSION,
+                accepted_at=known_at + timedelta(days=30),
+                report_period=_OLDER_PERIOD,
+            ),
+            _pair_filing(_NEWER_ACCESSION, accepted_at=newer_accepted, report_period=_NEWER_PERIOD),
+        )
+    }
+    submissions = _ManagerSubmissionsClient(filings)
+    documents = _PeriodDocumentClient(
+        {_OLDER_ACCESSION: _OLDER_PERIOD, _NEWER_ACCESSION: _NEWER_PERIOD}
+    )
+    app = _application(submissions, documents)
+    request = SecInstitutionalHoldingsDirectedPeriodsRefreshRequest(
+        known_at=known_at,
+        manager_cik="1067983",
+        report_periods=(_OLDER_PERIOD, _NEWER_PERIOD),
+        accessions_per_period=1,
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        summary = app.refresh_periods_with_storage(storage, request, sec_identity=_IDENTITY)
+
+        older, newer = summary.periods
+        assert older.eligible_accessions == ()
+        assert older.attempted_accessions == ()
+        assert newer.eligible_accessions == (_NEWER_ACCESSION,)
+        assert newer.created_accessions == (_NEWER_ACCESSION,)
+        assert summary.created_accessions == (_NEWER_ACCESSION,)
+        assert summary.submissions_calls == 1
+        assert summary.traceability_verified is True
