@@ -93,6 +93,7 @@ class SecInstitutionalCycleState(_Strict):
                 for item in (
                     self.dataset_period_start,
                     self.dataset_period_end,
+                    self.dataset_url,
                     self.dataset_sha256,
                     self.dataset_last_validated_at,
                 )
@@ -104,6 +105,7 @@ class SecInstitutionalCycleState(_Strict):
                 for item in (
                     self.dataset_period_start,
                     self.dataset_period_end,
+                    self.dataset_url,
                     self.dataset_sha256,
                     self.dataset_last_validated_at,
                 )
@@ -113,6 +115,7 @@ class SecInstitutionalCycleState(_Strict):
             assert self.dataset_period_end is not None
             if self.dataset_period_start > self.dataset_period_end:
                 raise ValueError("dataset period start must precede period end")
+
             if self.total_managers is not None and self.manager_cursor > self.total_managers:
                 raise ValueError("manager cursor cannot exceed total managers in snapshot")
         if self.checksum_sha256 is not None:

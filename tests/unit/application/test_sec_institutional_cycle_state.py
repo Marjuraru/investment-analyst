@@ -152,6 +152,7 @@ def test_contradictory_snapshot_cursor_fails_closed() -> None:
             "snapshot_id": str(uuid4()),
             "dataset_period_start": "2026-04-01",
             "dataset_period_end": "2026-06-30",
+            "dataset_url": "https://example.com/dataset.zip",
             "dataset_sha256": "c" * 64,
             "dataset_last_validated_at": now.isoformat(),
             "manager_cursor": 15,
@@ -160,5 +161,19 @@ def test_contradictory_snapshot_cursor_fails_closed() -> None:
         state_path.write_text(json.dumps(bad_state_3), encoding="utf-8")
         with pytest.raises(
             SecInstitutionalCycleStateError, match="manager cursor cannot exceed total managers"
+        ):
+            store.load()
+
+        # Case 4: dataset_url present but snapshot is None
+        bad_state_4 = {
+            "schema_version": "sec-institutional-cycle-state-v1",
+            "updated_at": now.isoformat(),
+            "snapshot_id": None,
+            "manager_cursor": 0,
+            "dataset_url": "https://example.com/dataset.zip",
+        }
+        state_path.write_text(json.dumps(bad_state_4), encoding="utf-8")
+        with pytest.raises(
+            SecInstitutionalCycleStateError, match="dataset metadata must be absent"
         ):
             store.load()

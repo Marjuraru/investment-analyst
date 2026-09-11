@@ -426,3 +426,67 @@ def test_cycle_failure_preserves_cursor_and_repeats_page() -> None:
         assert summary_fixed.manager_cursor_before == 0
         assert summary_fixed.manager_cursor_after == 1
         assert state_store.load().manager_cursor == 1
+
+
+def test_cycle_new_period_or_url_forces_zip_download_and_resets_cursor() -> None:
+    zip_data = _universe_zip(period_str="31-MAR-2026")
+    zip_data_new = _universe_zip(period_str="30-JUN-2026")
+    transport = _MockHttpTransport(zip_data, catalog_zip_url=_ZIP_URL)
+    subs_client = _MockSubmissionsClient()
+    doc_client = _MockDocumentClient()
+
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        workspace = temp_path / "workspace"
+        state_root = temp_path / "state"
+        location = StorageLocationRequest(legacy_root=workspace)
+
+        runtime = ApplicationRuntime.create_default()
+        state_store = SecInstitutionalCycleStateStore(
+            state_root / "sec_institutional_cycle_state_v1.json"
+        )
+        now1 = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+        app = SecInstitutionalCycleApplication(
+            runtime,
+            transport_factory=lambda: transport,
+            submissions_client_factory=lambda *a, **k: subs_client,
+            document_client_factory=lambda *a, **k: doc_client,
+            state_store=state_store,
+            clock=lambda: now1,
+        )
+
+        # First run: acquires _ZIP_URL, processes first manager (cursor 0 -> 1)
+        summary1 = app.run_cycle(
+            SecInstitutionalCycleRequest(known_at=now1),
+            sec_identity=_IDENTITY,
+            location=location,
+        )
+        assert summary1.status == "processed"
+        assert summary1.zip_calls == 1
+        assert summary1.manager_cursor_before == 0
+        assert summary1.manager_cursor_after == 1
+        assert state_store.load().manager_cursor == 1
+
+        # Now simulate catalog update to a new quarter / dataset URL: _ZIP_URL_NEW
+        transport.catalog_zip_url = _ZIP_URL_NEW
+        transport.zip_bytes = zip_data_new
+        now2 = now1 + timedelta(days=1)  # under 7 days, but new URL/period forces zip download!
+
+        summary2 = app.run_cycle(
+            SecInstitutionalCycleRequest(known_at=now2),
+            sec_identity=_IDENTITY,
+            location=location,
+        )
+
+        # Acceptance 2: new period / URL forces ZIP download and resets manager cursor to 0
+        assert summary2.status == "processed"
+        assert summary2.catalog_calls == 1
+        assert summary2.zip_calls == 1  # ZIP downloaded for new URL despite cache < 7 days
+        assert summary2.manager_cursor_before == 0  # Reset to 0 for new snapshot
+        assert summary2.manager_cursor_after == 1  # Advanced from 0 to 1
+        assert summary2.dataset_url == _ZIP_URL_NEW
+
+        persisted = state_store.load()
+        assert persisted.manager_cursor == 1
+        assert persisted.dataset_url == _ZIP_URL_NEW
+        assert persisted.snapshot_id == summary2.snapshot_id

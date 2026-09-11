@@ -108,9 +108,13 @@ class SecInstitutionalCycleApplication:
                 state_root / SEC_INSTITUTIONAL_CYCLE_STATE_FILE_NAME
             )
         storage_req = location or StorageLocationRequest()
-        paths = self._runtime.workspace_service.resolve(storage_req.workspace)
+        if storage_req.legacy_root is not None:
+            resolved_state_root = storage_req.legacy_root / "state"
+        else:
+            paths = self._runtime.workspace_service.resolve(storage_req.workspace)
+            resolved_state_root = paths.state_root
         return SecInstitutionalCycleStateStore(
-            paths.state_root / SEC_INSTITUTIONAL_CYCLE_STATE_FILE_NAME
+            resolved_state_root / SEC_INSTITUTIONAL_CYCLE_STATE_FILE_NAME
         )
 
     def run_cycle(

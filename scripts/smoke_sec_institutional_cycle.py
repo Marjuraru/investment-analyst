@@ -191,6 +191,8 @@ def main() -> int:
                 )
             )
             aapl_observations_count = len(obs_result.observations)
+        if aapl_observations_count == 0:
+            raise RuntimeError("Step 1 expected AAPL observations visible > 0, got 0")
 
         # Step 2: Object recreation and second execution
         runtime_2 = ApplicationRuntime.create_default()
@@ -231,6 +233,24 @@ def main() -> int:
         persisted_2 = state_store_2.load()
         if persisted_2.manager_cursor != 2 or persisted_2.last_status != "success":
             raise RuntimeError(f"Step 2 persisted state invalid: {persisted_2}")
+
+        # Verify observations in storage after step 2 and assert non-duplication
+        with LocalStorage(StoragePaths.from_root(workspace), read_only=True) as storage:
+            obs_service_2 = InstitutionalObservationService(storage)
+            obs_result_2 = obs_service_2.query(
+                InstitutionalObservationQuery(
+                    asset_id="equity:us:aapl", known_at=summary_2.effective_known_at
+                )
+            )
+            aapl_observations_count_2 = len(obs_result_2.observations)
+            obs_identities = [obs.observation.observation_id for obs in obs_result_2.observations]
+            if len(obs_identities) != len(set(obs_identities)):
+                raise RuntimeError("Duplicate observation IDs detected after step 2")
+            if aapl_observations_count_2 < aapl_observations_count:
+                raise RuntimeError(
+                    f"Step 2 AAPL observations decreased: "
+                    f"{aapl_observations_count_2} < {aapl_observations_count}"
+                )
 
         telemetry = {
             "status": "ok",
