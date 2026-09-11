@@ -82,6 +82,13 @@ from investment_analyst.application.sec_fundamental_refresh_models import (
     SecIssuerFundamentalRefreshRequest,
     SecIssuerFundamentalRefreshSummary,
 )
+from investment_analyst.application.sec_institutional_cycle import (
+    SecInstitutionalCycleError,
+)
+from investment_analyst.application.sec_institutional_cycle_models import (
+    SecInstitutionalCycleRequest,
+    SecInstitutionalCycleSummary,
+)
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
 from investment_analyst.providers.asset_config import ProviderConfigurationError
@@ -182,6 +189,13 @@ class _LocalScheduledOperations(Protocol):
         """Refresh official SMV registry evidence."""
         ...
 
+    def sec_institutional_cycle_request(
+        self,
+        request: SecInstitutionalCycleRequest,
+    ) -> SecInstitutionalCycleSummary:
+        """Run one bounded scheduled step of the Form 13F cycle."""
+        ...
+
 
 class LocalWatchlistScheduleConfig(ContractModel):
     """Explicit scope shared by every catalog-derived scheduled job."""
@@ -200,6 +214,7 @@ class LocalWatchlistScheduleConfig(ContractModel):
     include_smv_registry: bool = False
     include_macro: bool = False
     crypto_derivatives_asset_ids: tuple[NonEmptyStr, ...] = ()
+    sec_cusip_asset_ids: tuple[NonEmptyStr, ...] = ()
 
     @field_validator("market_start", mode="before")
     @classmethod
@@ -299,6 +314,8 @@ def build_local_watchlist_jobs(
             jobs.append(_declared_activity_job(controller, descriptor, config))
         if descriptor.supports_intraday and config.include_intraday:
             jobs.append(_intraday_job(controller, descriptor, config))
+    if any(item.asset_id in config.sec_cusip_asset_ids for item in descriptors):
+        jobs.append(_sec_institutional_cycle_job(controller, config))
     if config.include_smv_registry:
         jobs.append(_smv_registry_job(controller, config))
     if config.include_macro:
@@ -362,6 +379,51 @@ def _smv_registry_job(
             source_ids=source_ids,
             created_count=summary.raw_records_created,
             reused_count=summary.raw_records_reused,
+        )
+
+    return RegisteredScheduledJob(definition, run)
+
+
+def _sec_institutional_cycle_job(
+    controller: _LocalScheduledOperations,
+    config: LocalWatchlistScheduleConfig,
+) -> RegisteredScheduledJob:
+    definition = ScheduledJobDefinition(
+        job_id="sec:institutional:13f-cycle",
+        provider="sec-edgar",
+        domain=ScheduledJobDomain.EVENTS,
+        data_frequency="daily-check",
+        timezone=config.timezone,
+        run_at=_offset_minute(config.run_at, 105),
+        freshness_threshold_seconds=604_800,
+    )
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        try:
+            summary = controller.sec_institutional_cycle_request(
+                SecInstitutionalCycleRequest(
+                    known_at=invocation.scheduled_for.astimezone(UTC),
+                )
+            )
+        except (SecInstitutionalCycleError, StorageError, ValueError, OSError) as error:
+            raise _classified_provider_error(error) from error
+        if summary.status == "failed":
+            raise ScheduledJobRunError(
+                scheduled_job_failure(
+                    ScheduledJobFailureCategory.PROVIDER_CONTRACT,
+                    f"scheduled 13F cycle step failed: {summary.reason_code}",
+                )
+            )
+        created = len(summary.created_accessions) + summary.observations_created
+        reused = len(summary.reused_accessions) + summary.observations_reused
+        return ScheduledJobExecution(
+            job_id=definition.job_id,
+            effective_known_at=summary.effective_known_at,
+            evidence_changed=created > 0,
+            source_ids=summary.source_ids,
+            created_count=created,
+            reused_count=reused,
+            coverage_complete=summary.coverage_complete,
         )
 
     return RegisteredScheduledJob(definition, run)
@@ -938,6 +1000,7 @@ def _non_http_failure(chain: tuple[BaseException, ...]) -> ScheduledJobFailure:
                 SecDeclaredActivityRefreshError,
                 FredAlfredError,
                 SmvOpenDataError,
+                SecInstitutionalCycleError,
                 ListedMarketRefreshError,
                 BtcMarketRefreshError,
                 BtcIntradayRefreshError,

@@ -297,6 +297,7 @@ def _serve_after_lock(
         include_smv_registry=not arguments.no_schedule_smv,
         include_macro=fred_api_key is not None and not arguments.no_schedule_macro,
         crypto_derivatives_asset_ids=application.list_crypto_derivatives_assets(),
+        sec_cusip_asset_ids=application.list_sec_cusip_assets(),
     )
     preference_store = AssetPreferencesStore(state_root / _ASSET_PREFERENCES_STATE_FILE)
     preference_seed = cli_seed_asset_preferences(

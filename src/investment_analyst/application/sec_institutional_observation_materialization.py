@@ -138,6 +138,77 @@ class SecInstitutionalObservationMaterializationApplication:
     def create_default(cls) -> SecInstitutionalObservationMaterializationApplication:
         return cls(ApplicationRuntime.create_default())
 
+    def materialize_with_storage(
+        self,
+        storage,
+        request: SecInstitutionalObservationMaterializationRequest,
+        *,
+        snapshot: Sec13FManagerUniverseSnapshot | None = None,
+        revision: Sec13FDataSetRevision | None = None,
+    ) -> SecInstitutionalObservationMaterializationSummary:
+        """Materialize claims and observations for one page under an open storage connection."""
+        catalog_cusips = resolve_catalog_sec_cusip_mappings(self._runtime.catalog)
+        if snapshot is None or revision is None:
+            snapshot, revision = _resolve_snapshot(storage, request.known_at)
+        targets = plan_materialization_page(
+            snapshot, offset=request.manager_offset, limit=request.manager_limit
+        )
+        correspondences = SecInstitutionalRowCorrespondenceService(storage)
+        repository = SecInstitutionalRowCorrespondenceRepository(storage.raw_records)
+        holdings = InstitutionalHoldingsRepository(storage.raw_records)
+        semantics = InstitutionalSemanticsRepository(storage.raw_records)
+        observations = InstitutionalObservationService(storage, clock=self._clock)
+        recorded_at = self._now()
+        candidates: list[SecInstitutionalMaterializationCandidateSummary] = []
+        runs: list[SecInstitutionalMaterializationRunSummary] = []
+        for target in targets:
+            target_candidates, target_runs = self._run_target(
+                target=target,
+                request=request,
+                snapshot_id=snapshot.snapshot_id,
+                dataset_revision_id=revision.revision_id,
+                snapshot_available_at=snapshot.available_at,
+                holdings=holdings,
+                semantics=semantics,
+                repository=repository,
+                correspondences=correspondences,
+                observations=observations,
+                catalog_cusips=catalog_cusips,
+                recorded_at=recorded_at,
+            )
+            candidates.extend(target_candidates)
+            runs.extend(target_runs)
+        return SecInstitutionalObservationMaterializationSummary(
+            request=request,
+            effective_known_at=request.known_at,
+            snapshot_id=snapshot.snapshot_id,
+            snapshot_raw_record_id=snapshot.raw_record_id,
+            dataset_revision_id=revision.revision_id,
+            dataset_sha256=snapshot.dataset_sha256,
+            snapshot_period_start=snapshot.period_start,
+            snapshot_period_end=snapshot.period_end,
+            snapshot_available_at=snapshot.available_at,
+            universe_selected_manager_count=snapshot.selected_manager_count,
+            universe_coverage_complete=snapshot.coverage_complete,
+            page_manager_count=len(targets),
+            candidate_count=len(candidates),
+            candidates=tuple(candidates),
+            runs=tuple(runs),
+            claims_created=sum(item.claims_created for item in candidates),
+            claims_reused=sum(item.claims_reused for item in candidates),
+            claims_ambiguous=sum(item.claims_ambiguous for item in candidates),
+            observations_created=sum(item.observations_created for item in runs),
+            observations_reused=sum(item.observations_reused for item in runs),
+            failed_candidates=sum(item.state == "failed" for item in candidates),
+            failed_runs=sum(item.state == "failed" for item in runs),
+            traceability_verified=_verify_traceability(
+                repository=repository,
+                storage=storage,
+                candidates=tuple(candidates),
+                known_at=request.known_at,
+            ),
+        )
+
     def materialize(
         self,
         request: SecInstitutionalObservationMaterializationRequest,
@@ -146,68 +217,12 @@ class SecInstitutionalObservationMaterializationApplication:
     ) -> SecInstitutionalObservationMaterializationSummary:
         """Materialize claims and observations for one bounded page under a single writer."""
         storage_request = location or StorageLocationRequest()
-        catalog_cusips = resolve_catalog_sec_cusip_mappings(self._runtime.catalog)
         with self._runtime.open_storage(
             storage_request, access_mode=WorkspaceAccessMode.READ_WRITE
         ) as storage:
-            snapshot, revision = _resolve_snapshot(storage, request.known_at)
-            targets = plan_materialization_page(
-                snapshot, offset=request.manager_offset, limit=request.manager_limit
-            )
-            correspondences = SecInstitutionalRowCorrespondenceService(storage)
-            repository = SecInstitutionalRowCorrespondenceRepository(storage.raw_records)
-            holdings = InstitutionalHoldingsRepository(storage.raw_records)
-            semantics = InstitutionalSemanticsRepository(storage.raw_records)
-            observations = InstitutionalObservationService(storage, clock=self._clock)
-            recorded_at = self._now()
-            candidates: list[SecInstitutionalMaterializationCandidateSummary] = []
-            runs: list[SecInstitutionalMaterializationRunSummary] = []
-            for target in targets:
-                target_candidates, target_runs = self._run_target(
-                    target=target,
-                    request=request,
-                    snapshot_id=snapshot.snapshot_id,
-                    dataset_revision_id=revision.revision_id,
-                    snapshot_available_at=snapshot.available_at,
-                    holdings=holdings,
-                    semantics=semantics,
-                    repository=repository,
-                    correspondences=correspondences,
-                    observations=observations,
-                    catalog_cusips=catalog_cusips,
-                    recorded_at=recorded_at,
-                )
-                candidates.extend(target_candidates)
-                runs.extend(target_runs)
-            return SecInstitutionalObservationMaterializationSummary(
-                request=request,
-                effective_known_at=request.known_at,
-                snapshot_id=snapshot.snapshot_id,
-                snapshot_raw_record_id=snapshot.raw_record_id,
-                dataset_revision_id=revision.revision_id,
-                dataset_sha256=snapshot.dataset_sha256,
-                snapshot_period_start=snapshot.period_start,
-                snapshot_period_end=snapshot.period_end,
-                snapshot_available_at=snapshot.available_at,
-                universe_selected_manager_count=snapshot.selected_manager_count,
-                universe_coverage_complete=snapshot.coverage_complete,
-                page_manager_count=len(targets),
-                candidate_count=len(candidates),
-                candidates=tuple(candidates),
-                runs=tuple(runs),
-                claims_created=sum(item.claims_created for item in candidates),
-                claims_reused=sum(item.claims_reused for item in candidates),
-                claims_ambiguous=sum(item.claims_ambiguous for item in candidates),
-                observations_created=sum(item.observations_created for item in runs),
-                observations_reused=sum(item.observations_reused for item in runs),
-                failed_candidates=sum(item.state == "failed" for item in candidates),
-                failed_runs=sum(item.state == "failed" for item in runs),
-                traceability_verified=_verify_traceability(
-                    repository=repository,
-                    storage=storage,
-                    candidates=tuple(candidates),
-                    known_at=request.known_at,
-                ),
+            return self.materialize_with_storage(
+                storage,
+                request,
             )
 
     def _run_target(

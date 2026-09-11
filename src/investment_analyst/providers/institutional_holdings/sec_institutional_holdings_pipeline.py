@@ -174,8 +174,25 @@ class SecInstitutionalHoldingsPipeline:
             )
             if report.report_period == request.report_period
         }
-        reused = tuple(item.accession for item in eligible if item.accession in materialized)
-        pending = tuple(item for item in eligible if item.accession not in materialized)
+        terminal_rejected: set[str] = set()
+        for outcome in holdings.list_outcomes(
+            manager_cik=request.filer_cik, known_at=request.known_at
+        ):
+            if outcome.status != "rejected":
+                continue
+            if outcome.filing.report_date != request.report_period:
+                continue
+            if outcome.available_at > request.known_at:
+                continue
+            try:
+                holdings.verify_outcome_lineage(outcome)
+            except Exception:
+                continue
+            terminal_rejected.add(outcome.filing.accession)
+
+        terminal_accessions = materialized | terminal_rejected
+        reused = tuple(item.accession for item in eligible if item.accession in terminal_accessions)
+        pending = tuple(item for item in eligible if item.accession not in terminal_accessions)
         attempted = pending[: request.accessions_per_manager]
         documents = SecFilerDocumentRepository(self._storage.raw_records, self._storage.documents)
         reports: list[InstitutionalHoldingsReport] = []

@@ -255,10 +255,12 @@ class _PeriodDocumentClient:
         *,
         forms: dict[str, str] | None = None,
         fail_for: tuple[str, ...] = (),
+        reject_for: tuple[str, ...] = (),
     ) -> None:
         self.values = values
         self.forms = forms or {}
         self.fail_for = set(fail_for)
+        self.reject_for = set(reject_for)
         self.manifest_calls = 0
         self.document_calls = 0
 
@@ -268,8 +270,14 @@ class _PeriodDocumentClient:
 
     def fetch_manifest(self, document):
         self.manifest_calls += 1
+        accession = document.filing.accession
+        entries = (
+            ("filing.htm",)
+            if accession in self.reject_for
+            else ("filing.htm", "primary_doc.xml", "infotable.xml")
+        )
         return SecAccessionManifest(
-            entries=("filing.htm", "primary_doc.xml", "infotable.xml"),
+            entries=entries,
             sha256="c" * 64,
             size_bytes=10,
             url="https://www.sec.gov/Archives/index.json",
@@ -483,3 +491,54 @@ def test_period_mode_records_a_failed_accession_and_preserves_progress(
             storage.raw_records.count(schema_version=INSTITUTIONAL_HOLDINGS_REPORT_SCHEMA_VERSION)
             == 2
         )
+
+
+def test_period_mode_terminal_rejected_outcome_is_reused_and_does_not_call_archives(
+    tmp_path: Path,
+) -> None:
+    filings = (
+        _filing("0000000001-26-000001", accepted_at="2026-04-15T12:00:00Z"),
+        _filing("0000000002-26-000001", accepted_at="2026-04-16T12:00:00Z"),
+    )
+    values = {"0000000001-26-000001": 100, "0000000002-26-000001": 200}
+    rejecting = _PeriodDocumentClient(values, reject_for=("0000000001-26-000001",))
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        # Step 1: Run 1 accession - filing 1 is rejected
+        pipeline_1 = sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipeline(
+            storage, _PeriodSubmissionsClient(filings), rejecting
+        )
+        first = pipeline_1.run_period(_period_request(accessions_per_manager=1))
+        assert first.attempted_accessions == ("0000000001-26-000001",)
+        assert first.created_accessions == ()
+        assert first.rejected_accessions == ("0000000001-26-000001",)
+        assert first.pending_before == 2
+        assert first.backlog_after == 2
+        assert len(first.reports) == 0
+        assert (
+            storage.raw_records.count(schema_version=INSTITUTIONAL_HOLDINGS_OUTCOME_SCHEMA_VERSION)
+            >= 1
+        )
+
+        # Step 2: Run 1 accession - filing 1 is recognized as terminal-rejected (reused),
+        # so filing 2 is attempted without calling Archives for filing 1!
+        second = pipeline_1.run_period(_period_request(accessions_per_manager=1))
+        assert second.reused_accessions == ("0000000001-26-000001",)
+        assert second.attempted_accessions == ("0000000002-26-000001",)
+        assert second.created_accessions == ("0000000002-26-000001",)
+        assert second.rejected_accessions == ()
+        assert second.pending_before == 1
+        assert second.backlog_after == 0
+        assert len(second.reports) == 1
+
+        # Step 3: Run again - both filings are terminal, backlog is 0, zero Archives calls!
+        archives_before_third = rejecting.archives_calls
+        third = pipeline_1.run_period(_period_request(accessions_per_manager=1))
+        assert set(third.reused_accessions) == {
+            "0000000001-26-000001",
+            "0000000002-26-000001",
+        }
+        assert third.attempted_accessions == ()
+        assert third.pending_before == 0
+        assert third.backlog_after == 0
+        assert rejecting.archives_calls == archives_before_third

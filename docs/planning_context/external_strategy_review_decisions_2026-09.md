@@ -41,7 +41,13 @@ infiere por ticker, nombre de emisor, FIGI, ISIN ni similitud, no se extiende la
 trimestre y no se inventa un fallback: la ausencia y la ambigüedad se declaran. La declaración humana
 `instrument-correspondence-v1` se conserva como camino compatible, y la materialización
 (`sec-institutional-observation-materialization-v1`) no realiza red y reporta estados explícitos en
-lugar de cero sintético. La operación programada del ciclo queda en `SEC-CORPUS-30`.
+lugar de cero sintético.
+
+`SEC-CORPUS-30` integra la operación programada y reanudable del ciclo institucional Form 13F (#27 universo →
+#28 adquisición dirigida → #29 correspondencia y observaciones) con una sola conexión writer, archivo de estado
+atómico con checksum SHA-256 (`sec_institutional_cycle_state_v1.json`), presupuesto de red estricto (sondeo diario
+de catálogo HTML, descarga ZIP sólo ante snapshot ausente, período/URL nuevo o expiración de 7 días; cero GET ZIP
+en cache hit ordinario), outcomes rechazados terminales reutilizados y scheduler job `sec:institutional:13f-cycle`.
 
 | Recomendación | Decisión | Evidencia/razón | Ruta futura |
 | --- | --- | --- | --- |
@@ -52,7 +58,7 @@ lugar de cero sintético. La operación programada del ciclo queda en `SEC-CORPU
 | Adquisición 13F por gestor y correspondencia | DEFER | Requiere Submissions por gestor, acceptance PIT, XML y correspondencia | SEC-CORPUS-28 |
 | Adquisición 13F dirigida y reanudable desde el universo | BUILD | El universo ya persistido permite paginar gestores con un Submissions por gestor y reanudación exacta | SEC-CORPUS-28 |
 | Correspondencia CUSIP↔activo y observaciones 13F | BUILD | La coincidencia exacta de CUSIP por fila permite una prueba aislada sin inventar vigencia corporativa | SEC-CORPUS-29 |
-| Operación programada del ciclo institucional | DEFER | Requiere cerrar primero identidad, PIT y backup del camino local | SEC-CORPUS-30 |
+| Operación programada del ciclo institucional | BUILD | Opera en background bajo el scheduler existente con una sola conexión writer y progreso atómico | SEC-CORPUS-30 |
 | Expansión de activos y cripto on-chain | DEFER | Faltan fuente, licencia/retención, PIT y coste por familia medidos | Plan futuro de datos |
 | UI nueva | DEFER | La capacidad opera por scheduler y la UI permanece congelada | Work Block futuro P0/P1 |
 | Backfill suplementario e histórico | DEFER | Faltan presupuesto, cobertura y licencia medidos | Plan futuro de corpus |

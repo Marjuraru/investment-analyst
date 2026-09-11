@@ -191,6 +191,83 @@ class SecInstitutionalHoldingsDirectedRefreshApplication:
     def create_default(cls) -> SecInstitutionalHoldingsDirectedRefreshApplication:
         return cls(ApplicationRuntime.create_default())
 
+    def refresh_with_storage(
+        self,
+        storage,
+        request: SecInstitutionalHoldingsDirectedRefreshRequest,
+        *,
+        sec_identity: SecEdgarIdentity,
+        snapshot: Sec13FManagerUniverseSnapshot | None = None,
+        revision: Sec13FDataSetRevision | None = None,
+    ) -> SecInstitutionalHoldingsDirectedRefreshSummary:
+        """Acquire one bounded page of pending Form 13F filings under an open storage connection."""
+        if snapshot is None or revision is None:
+            snapshot, revision = self._resolve_snapshot(storage, request.known_at)
+        targets = plan_directed_manager_page(
+            snapshot, offset=request.manager_offset, limit=request.manager_limit
+        )
+        transport = self._transport_factory()
+        counters = _ProviderCallCounters()
+        submissions_client = _CountingSubmissionsClient(
+            (
+                self._submissions_client_factory(transport, sec_identity, self._clock)
+                if self._submissions_client_factory is not None
+                else SecManagerSubmissionsClient(transport, sec_identity, clock=self._clock)
+            ),
+            counters,
+        )
+        document_client = _CountingDocumentClient(
+            (
+                self._document_client_factory(transport, sec_identity)
+                if self._document_client_factory is not None
+                else SecDocumentClient(transport, sec_identity)
+            ),
+            counters,
+        )
+        pipeline = SecInstitutionalHoldingsPipeline(storage, submissions_client, document_client)
+        holdings = InstitutionalHoldingsRepository(storage.raw_records)
+        semantics = InstitutionalHoldingsSemanticsService(storage, clock=self._clock)
+        managers = tuple(
+            self._run_manager(
+                pipeline=pipeline,
+                holdings=holdings,
+                semantics=semantics,
+                counters=counters,
+                target=target,
+                request=request,
+            )
+            for target in targets
+        )
+        traceability = self._verify_traceability(
+            holdings=holdings, managers=managers, known_at=request.known_at
+        )
+        return SecInstitutionalHoldingsDirectedRefreshSummary(
+            request=request,
+            effective_known_at=request.known_at,
+            snapshot_id=snapshot.snapshot_id,
+            snapshot_raw_record_id=snapshot.raw_record_id,
+            dataset_revision_id=revision.revision_id,
+            dataset_sha256=snapshot.dataset_sha256,
+            snapshot_period_start=snapshot.period_start,
+            snapshot_period_end=snapshot.period_end,
+            snapshot_available_at=snapshot.available_at,
+            universe_selected_manager_count=snapshot.selected_manager_count,
+            universe_coverage_complete=snapshot.coverage_complete,
+            page_manager_count=len(managers),
+            managers=managers,
+            submissions_calls=counters.submissions_calls,
+            archives_calls=counters.archives_calls,
+            created=sum(len(item.created_accessions) for item in managers),
+            reused=sum(len(item.reused_accessions) for item in managers),
+            rejected_or_failed=sum(
+                len(item.rejected_accessions) + len(item.failed_accessions) for item in managers
+            ),
+            backlog_after=sum(item.backlog_after for item in managers),
+            semantics_created=sum(item.semantics_created for item in managers),
+            semantics_reused=sum(item.semantics_reused for item in managers),
+            traceability_verified=traceability,
+        )
+
     def refresh(
         self,
         request: SecInstitutionalHoldingsDirectedRefreshRequest,
@@ -203,72 +280,10 @@ class SecInstitutionalHoldingsDirectedRefreshApplication:
         with self._runtime.open_storage(
             storage_request, access_mode=WorkspaceAccessMode.READ_WRITE
         ) as storage:
-            snapshot, revision = self._resolve_snapshot(storage, request.known_at)
-            targets = plan_directed_manager_page(
-                snapshot, offset=request.manager_offset, limit=request.manager_limit
-            )
-            transport = self._transport_factory()
-            counters = _ProviderCallCounters()
-            submissions_client = _CountingSubmissionsClient(
-                (
-                    self._submissions_client_factory(transport, sec_identity, self._clock)
-                    if self._submissions_client_factory is not None
-                    else SecManagerSubmissionsClient(transport, sec_identity, clock=self._clock)
-                ),
-                counters,
-            )
-            document_client = _CountingDocumentClient(
-                (
-                    self._document_client_factory(transport, sec_identity)
-                    if self._document_client_factory is not None
-                    else SecDocumentClient(transport, sec_identity)
-                ),
-                counters,
-            )
-            pipeline = SecInstitutionalHoldingsPipeline(
-                storage, submissions_client, document_client
-            )
-            holdings = InstitutionalHoldingsRepository(storage.raw_records)
-            semantics = InstitutionalHoldingsSemanticsService(storage, clock=self._clock)
-            managers = tuple(
-                self._run_manager(
-                    pipeline=pipeline,
-                    holdings=holdings,
-                    semantics=semantics,
-                    counters=counters,
-                    target=target,
-                    request=request,
-                )
-                for target in targets
-            )
-            traceability = self._verify_traceability(
-                holdings=holdings, managers=managers, known_at=request.known_at
-            )
-            return SecInstitutionalHoldingsDirectedRefreshSummary(
-                request=request,
-                effective_known_at=request.known_at,
-                snapshot_id=snapshot.snapshot_id,
-                snapshot_raw_record_id=snapshot.raw_record_id,
-                dataset_revision_id=revision.revision_id,
-                dataset_sha256=snapshot.dataset_sha256,
-                snapshot_period_start=snapshot.period_start,
-                snapshot_period_end=snapshot.period_end,
-                snapshot_available_at=snapshot.available_at,
-                universe_selected_manager_count=snapshot.selected_manager_count,
-                universe_coverage_complete=snapshot.coverage_complete,
-                page_manager_count=len(managers),
-                managers=managers,
-                submissions_calls=counters.submissions_calls,
-                archives_calls=counters.archives_calls,
-                created=sum(len(item.created_accessions) for item in managers),
-                reused=sum(len(item.reused_accessions) for item in managers),
-                rejected_or_failed=sum(
-                    len(item.rejected_accessions) + len(item.failed_accessions) for item in managers
-                ),
-                backlog_after=sum(item.backlog_after for item in managers),
-                semantics_created=sum(item.semantics_created for item in managers),
-                semantics_reused=sum(item.semantics_reused for item in managers),
-                traceability_verified=traceability,
+            return self.refresh_with_storage(
+                storage,
+                request,
+                sec_identity=sec_identity,
             )
 
     def _resolve_snapshot(

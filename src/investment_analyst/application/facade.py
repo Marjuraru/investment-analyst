@@ -211,6 +211,13 @@ from investment_analyst.application.sec_fundamental_refresh_models import (
     SecIssuerFundamentalRefreshRequest,
     SecIssuerFundamentalRefreshSummary,
 )
+from investment_analyst.application.sec_institutional_cycle import (
+    SecInstitutionalCycleApplication,
+)
+from investment_analyst.application.sec_institutional_cycle_models import (
+    SecInstitutionalCycleRequest,
+    SecInstitutionalCycleSummary,
+)
 from investment_analyst.application.sec_submissions_refresh import SecSubmissionsRefreshService
 from investment_analyst.application.universe_coverage import UniverseCoverageApplication
 from investment_analyst.application.universe_coverage_models import (
@@ -778,6 +785,16 @@ class InvestmentAnalystApplication:
         )
         return tuple(sorted(item.asset_id for item in configured))
 
+    def list_sec_cusip_assets(self) -> tuple[str, ...]:
+        """Return assets exposing an active sec/cusip provider binding."""
+        assets: list[str] = []
+        for asset in self._runtime.catalog.list_assets():
+            for binding in asset.provider_bindings:
+                if binding.provider == "sec" and binding.namespace == "cusip":
+                    assets.append(asset.asset_id)
+                    break
+        return tuple(sorted(assets))
+
     def refresh_crypto_derivatives(
         self,
         request: CryptoDerivativesRefreshRequest,
@@ -1130,6 +1147,25 @@ class InvestmentAnalystApplication:
                 observation_service=DeclaredActivityObservationService(storage),
                 metric_pipeline=ActivityMetricPipeline(storage),
             ).run(request)
+
+    def run_sec_institutional_cycle(
+        self,
+        request: SecInstitutionalCycleRequest,
+        *,
+        sec_identity: SecEdgarIdentity,
+        location: StorageLocationRequest | None = None,
+        state_root: Path | None = None,
+    ) -> SecInstitutionalCycleSummary:
+        """Run one bounded, resumable step of the scheduled Form 13F cycle."""
+        return SecInstitutionalCycleApplication(
+            self._runtime,
+            transport_factory=self._transport_factory,
+        ).run_cycle(
+            request,
+            sec_identity=sec_identity,
+            location=location,
+            state_root=state_root,
+        )
 
     def query_aapl_fundamental_trend(
         self,

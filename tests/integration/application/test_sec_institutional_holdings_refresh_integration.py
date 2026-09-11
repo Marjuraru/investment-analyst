@@ -469,3 +469,28 @@ def test_directed_refresh_continues_after_a_manager_failure_and_preserves_progre
             storage.raw_records.count(schema_version=INSTITUTIONAL_HOLDINGS_REPORT_SCHEMA_VERSION)
             == 3
         )
+
+
+def test_refresh_with_storage_reuses_single_writer_connection(tmp_path: Path) -> None:
+    location = StorageLocationRequest(legacy_root=tmp_path)
+    universe = _materialize_universe(location)
+    accepted_at = universe.available_at - timedelta(days=1)
+    known_at = universe.available_at + timedelta(days=1)
+    submissions = _ManagerSubmissionsClient(_one_filing_per_manager(accepted_at))
+    documents = _DocumentClient()
+    app = _application(submissions, documents)
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        result = app.refresh_with_storage(
+            storage,
+            SecInstitutionalHoldingsDirectedRefreshRequest(
+                known_at=known_at, manager_limit=1, accessions_per_manager=1
+            ),
+            sec_identity=_IDENTITY,
+        )
+        assert result.created == 1
+        assert result.traceability_verified is True
+        assert (
+            storage.raw_records.count(schema_version=INSTITUTIONAL_HOLDINGS_REPORT_SCHEMA_VERSION)
+            == 1
+        )

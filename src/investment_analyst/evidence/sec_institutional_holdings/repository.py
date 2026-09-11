@@ -277,6 +277,26 @@ class InstitutionalHoldingsRepository:
             ),
         )
 
+    def list_outcomes(
+        self, *, manager_cik: str, known_at: datetime
+    ) -> list[InstitutionalHoldingsResolutionOutcome]:
+        return sorted(
+            (
+                outcome
+                for record in self._raw_records.list(
+                    source_id=INSTITUTIONAL_HOLDINGS_SOURCE_ID,
+                    schema_version=INSTITUTIONAL_HOLDINGS_OUTCOME_SCHEMA_VERSION,
+                    available_to=known_at,
+                )
+                if (outcome := outcome_from_raw_record(record)).filing.filer_cik == manager_cik
+            ),
+            key=lambda item: (
+                item.available_at,
+                item.filing.accession,
+                str(item.outcome_id),
+            ),
+        )
+
     def list_positions(
         self, *, report_ids: set[UUID], known_at: datetime
     ) -> list[InstitutionalHoldingPosition]:
