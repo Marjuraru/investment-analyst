@@ -422,9 +422,8 @@ un ZIP faltante por intento en `sec_institutional_history_state_v1.json`, inters
 ambos cierres, materializa ambas páginas candidatas con una única revisión Submissions compartida, ejecuta las
 métricas, pesos y eventos institucionales ya integrados sin cambiar fórmulas y reconcilia la outbox local antes
 de avanzar el cursor, bajo el job `sec:institutional:13f-history` (desfase 120 min). El ítem `SEC-CORPUS` queda
-`DONE`; `EQUITY-UNIVERSE` pasa a la única ruta `NEXT` y sus bloques `RUNTIME-EFFICIENCY-5`/#223 y
-`RUNTIME-EFFICIENCY-6` ya están integrados sin cerrarla, con `RUNTIME-EFFICIENCY-7` como siguiente bloque
-registrado.
+`DONE`; `EQUITY-UNIVERSE` quedó cerrado por `RUNTIME-EFFICIENCY-7` (integrado en `a56f851`), dejando a
+`FUNDAMENTALS-COVERAGE` como el único ítem `NEXT`.
 
 Las anomalías se evaluarán localmente sobre features point-in-time de filings: tamaño relativo de
 una transacción, cambio de tenencia, concentración, recurrencia, enmiendas y latencia de reporte. El
@@ -494,10 +493,11 @@ La prioridad viva queda reconciliada: `LOCAL-INTERFACE` está `DONE`, `SEC-CORPU
 `RUNTIME-EFFICIENCY-5`/#223 ya está integrado —retiró la resolución implícita de activo del camino de
 lectura— y `RUNTIME-EFFICIENCY-6` retira los contratos Apple productivos `aapl-market-chart-v5` y
 `AaplDailyRunRequestSnapshot`, dejando a Apple como un valor y no como una categoría del sistema de tipos,
-con un adaptador de compatibilidad versionado para el estado operativo ya persistido. El siguiente bloque
-registrado es `RUNTIME-EFFICIENCY-7`, que retira los contratos cripto legados y los defaults Apple de los
-resolvers del catálogo; sólo después `EQUITY-UNIVERSE` puede cerrar y `FUNDAMENTALS-COVERAGE` pasa a único
-`NEXT`. `BVL-MARKET` permanece `BLOCKED` y `PREDICTIVE-RESEARCH` permanece `DEFERRED`.
+con un adaptador de compatibilidad versionado para el estado operativo ya persistido. `RUNTIME-EFFICIENCY-7`
+ya quedó integrado en `a56f851`, retirando los contratos cripto legados y los defaults Apple de los resolvers del
+catálogo y cerrando `EQUITY-UNIVERSE`. `FUNDAMENTALS-COVERAGE` es el único `NEXT`, avanzado por
+`FUNDAMENTALS-COVERAGE-1`/#228 (acciones ordinarias y frescura honesta). `BVL-MARKET` permanece `BLOCKED` y
+`PREDICTIVE-RESEARCH` permanece `DEFERRED`.
 
 ## Fase 12 — IA cualitativa opcional
 
@@ -671,12 +671,9 @@ La ruta crítica vigente se mantiene en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md). Su orden es:
 
 1. estabilizar el runtime por capacidades y observar los jobs de la watchlist persistente;
-2. cerrar `EQUITY-UNIVERSE` retirando los residuos de privilegio por activo que quedan tras
-   `RUNTIME-EFFICIENCY-6`: los contratos cripto legados frente a su hermano genérico ya existente y
-   los defaults Apple de los resolvers del catálogo (`RUNTIME-EFFICIENCY-7`). Ya están integrados
-   `RUNTIME-EFFICIENCY-5`/#223 —resolución explícita de activo en el camino de lectura— y
-   `RUNTIME-EFFICIENCY-6` —retirada de los contratos Apple productivos con un adaptador de
-   compatibilidad versionado que no reescribe el estado persistido—;
+2. cerrar `EQUITY-UNIVERSE` retirando los residuos de privilegio por activo (cerrado por
+   `RUNTIME-EFFICIENCY-7` en `a56f851` tras integrar `RUNTIME-EFFICIENCY-5`/#223 y `RUNTIME-EFFICIENCY-6`),
+   y avanzar `FUNDAMENTALS-COVERAGE` (`FUNDAMENTALS-COVERAGE-1`/#228);
 3. integrar OPS-8 tras su aceptación HUMAN, conservar los fallos clasificados visibles y medir por
    job el peak global no atribuido antes de fijar un presupuesto de memoria;
 4. desacoplar lecturas de refresh largos, compactar la API operativa y medir presupuestos;
@@ -712,9 +709,9 @@ sin completarlo: `SEC-CORPUS-29` queda como la siguiente unidad registrada para 
 observaciones. `SEC-CORPUS-30` integró la operación programada y reanudable del ciclo institucional
 completo bajo el job `sec:institutional:13f-cycle` y `SEC-CORPUS-31` completa la ruta con la ventana de
 dos cierres adyacentes y su cadena derivada bajo el job `sec:institutional:13f-history`; `SEC-CORPUS`
-queda `DONE`, `EQUITY-UNIVERSE` pasa a la única ruta `NEXT`, `RUNTIME-EFFICIENCY-5`/#223 y
-`RUNTIME-EFFICIENCY-6` quedan integrados sobre esa fila sin cerrarla y `RUNTIME-EFFICIENCY-7` es el
-siguiente bloque registrado. `EXTENDED-SOAK /
+y `EQUITY-UNIVERSE` quedan `DONE` (`EQUITY-UNIVERSE` completado por `RUNTIME-EFFICIENCY-7` en `a56f851`),
+y `FUNDAMENTALS-COVERAGE` pasa a ser la única ruta `NEXT`, avanzada por `FUNDAMENTALS-COVERAGE-1`/#228.
+`EXTENDED-SOAK /
 DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
 Block independiente.
 
