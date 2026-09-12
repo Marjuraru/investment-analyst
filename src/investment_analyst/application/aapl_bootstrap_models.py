@@ -200,6 +200,7 @@ class AaplWorkspaceBootstrapRequest(ContractModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
+    asset_id: NonEmptyStr = ASSET_ID
     market_start: date
     market_end: date
     fundamental_frequency: DataFrequency
@@ -233,7 +234,9 @@ class AaplWorkspaceBootstrapRequest(ContractModel):
 
     @model_validator(mode="after")
     def validate_scope(self) -> "AaplWorkspaceBootstrapRequest":
-        """Validate the exclusive market range and fixed fundamental frequency."""
+        """Validate the explicit asset, the exclusive market range, and the frequency."""
+        if self.asset_id != ASSET_ID:
+            raise ValueError("workspace bootstrap is not enabled for a non-Apple asset")
         if self.market_start >= self.market_end:
             raise ValueError("market_start must be earlier than market_end")
         if self.fundamental_frequency not in _ALLOWED_FREQUENCIES:
@@ -243,7 +246,7 @@ class AaplWorkspaceBootstrapRequest(ContractModel):
     def to_json_dict(self) -> dict[str, object]:
         """Return an explicit compact JSON-compatible request."""
         return {
-            "asset_id": ASSET_ID,
+            "asset_id": self.asset_id,
             "market_start": self.market_start.isoformat(),
             "market_end": self.market_end.isoformat(),
             "fundamental_frequency": self.fundamental_frequency.value,

@@ -69,14 +69,17 @@ Las capas previstas permanecen separadas:
 
 1. documento y revisión SEC como `RawRecord`;
 2. observación normalizada de tenencia, propiedad o transacción — integrada para Forms 3/4/5 e
-   insiders y Schedules 13D/13G de propiedad beneficiaria; Form 13F queda bloqueado hasta que exista
-   correspondencia de instrumento generalizada;
+   insiders, Schedules 13D/13G de propiedad beneficiaria y filas as-filed de Form 13F con
+   correspondencia de instrumento verificada por CUSIP (`SEC-CORPUS-29`); una fila sin
+   correspondencia inequívoca no se normaliza y nunca se materializa como tenencia cero;
 3. métrica descriptiva versionada — integrada como `MetricResult` de categoría `cazatiburones` para
-   el delta de tenencia declarada de insiders y el delta de propiedad beneficiaria 13D/13G, sobre la
-   capa 2 ya integrada; Form 13F y las features sin respaldo en capa 2 permanecen fuera de esta capa;
-   ver `docs/cazatiburones_activity_metrics.md`;
+   el delta de tenencia declarada de insiders, el delta de propiedad beneficiaria 13D/13G, y las
+   métricas de cambio reportado, peso declarado y concentración efímera de Form 13F, siempre sobre la
+   capa 2 ya integrada; ver `docs/cazatiburones_activity_metrics.md`;
 4. evento descriptivo del dominio Cazatiburones — la capa 4 persistida conserva candidatos
-   trazable, con deduplicación y cooldown) permanece pendiente;
+   trazable, con deduplicación y cooldown); `SEC-CORPUS-30` y `SEC-CORPUS-31` ejecutan esa capa
+   sobre cierres trimestrales adyacentes ya comparables, y la notificación local deduplicada y
+   reanudable permanece separada de cualquier señal;
 5. regla de screening opcional que referencia evidencia exacta.
 
 ## Adquisición incremental programada
@@ -247,11 +250,13 @@ Esta etapa es la primera vertical porque está ligada al emisor analizado, suele
 - importación por CIK de gestor explícitamente declarado, sin incorporarlo al catálogo de activos;
 - evidencia point-in-time integrada para `13F-HR` y `13F-HR/A` de `filings.recent`, limitada a
   portada e information table XML estructuradas;
-- posiciones por trimestre, clase, CUSIP y valor reportado, conservadas sin correspondencia a
-  `asset_id`;
-- entradas, salidas y variaciones entre dos cierres, pendientes de una correspondencia verificada;
-- concentración descriptiva por posición y cartera, pendiente de la misma correspondencia;
-- demora del reporte claramente visible.
+- posiciones por trimestre, clase, CUSIP y valor reportado, conservadas as-filed y ligadas a un
+  `asset_id` sólo cuando la correspondencia de esa fila está verificada;
+- entradas, salidas y variaciones entre dos cierres comparables, ya calculadas sobre esa
+  correspondencia verificada;
+- concentración descriptiva por posición y cartera, ya calculada sobre la misma evidencia;
+- ausencia de una fila en un cierre es ausencia de evidencia, nunca una tenencia cero;
+- demora del reporte —de hasta un trimestre— claramente visible.
 
 Una variación trimestral no se presenta como operación fechada ni se compara con precio sin alinear
 el corte point-in-time.
@@ -271,8 +276,9 @@ posiciones institucionales existentes hacia un activo ya catalogado, pero no cam
 ni instrucción de ejecución.
 
 Los cambios institucionales descriptivos comparan cierres 13F del mismo gestor sin persistir
-resultados. Exponen deltas y concentración con `Decimal`, pero no umbrales, anomalías, eventos ni
-candidatos.
+resultados. Exponen deltas y concentración con `Decimal`; los eventos y candidatos descriptivos ya
+integrados se proyectan en una capa separada, con deduplicación y cooldown, y no producen umbrales,
+anomalías, señales ni recomendaciones.
 
 La cartera pública efectiva 13F es una proyección efímera distinta: parte del cierre seleccionado,
 un `RESTATEMENT` reemplaza su conjunto y `NEW HOLDINGS` posterior lo suplementa bajo la política

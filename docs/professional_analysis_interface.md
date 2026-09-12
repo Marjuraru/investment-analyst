@@ -50,7 +50,8 @@ es una estimación intradía ni una recomendación de riesgo.
 
 ## Historial completo e intervalos implementados
 
-El contrato `aapl-market-chart-v5` permite pedir explícitamente 1 día, 1 semana o 1 mes y tres
+El contrato `listed-market-chart-v1` —el mismo que usan los demás activos Alpaca, con `asset_id` y
+`source_id` explícitos— permite pedir explícitamente 1 día, 1 semana o 1 mes y tres
 ventanas SMA. La interfaz inicia con el último año en resolución diaria, amplía a cinco años al
 elegir semana y solicita todo el histórico local solo al elegir mes. Los rangos anteriores permanecen
 disponibles en el endpoint por compatibilidad. Nunca reescribe ni persiste nuevas barras: agrega en

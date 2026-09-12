@@ -13,7 +13,6 @@ from investment_analyst.analytics.market.bar_models import (
 )
 from investment_analyst.analytics.market.bar_schemas import ALPACA_SOURCE_ID, COINBASE_SOURCE_ID
 from investment_analyst.analytics.market.chart_models import (
-    AaplMarketChart,
     AaplMarketChartBollinger,
     AaplMarketChartCoverage,
     AaplMarketChartInterval,
@@ -131,7 +130,6 @@ class BtcMarketChartQueryError(RuntimeError):
 
 _ChartResult = TypeVar(
     "_ChartResult",
-    AaplMarketChart,
     BtcMarketChart,
     CryptoSpotDailyMarketChart,
     ListedMarketChart,
@@ -165,7 +163,7 @@ class AaplMarketChartService:
         self._history = history
         self._statistics = statistics
 
-    def query(self, request: AaplMarketChartRequest) -> AaplMarketChart:
+    def query(self, request: AaplMarketChartRequest) -> ListedMarketChart:
         """Return a bounded chart at the deterministic resolution for its range."""
         return self._query_scoped(
             request,
@@ -173,7 +171,7 @@ class AaplMarketChartService:
             source_id=ALPACA_SOURCE_ID,
             volume_unit="shares",
             source_limitation=_AAPL_SOURCE_LIMITATION,
-            result_model=AaplMarketChart,
+            result_model=ListedMarketChart,
         )
 
     def _query_scoped(

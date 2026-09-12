@@ -72,7 +72,6 @@ from investment_analyst.analytics.listed_company_report_models import (
     ListedCompanyReportRequest,
 )
 from investment_analyst.analytics.market.chart_models import (
-    AaplMarketChart,
     AaplMarketChartInterval,
     AaplMarketChartPeriod,
     AaplMarketChartRequest,
@@ -176,9 +175,9 @@ from investment_analyst.application.operational_alerts import (
     OperationalAlertStateStore,
 )
 from investment_analyst.application.operational_models import (
-    AaplDailyRunRequestSnapshot,
     AaplDailyRunState,
     AaplOperationalHealth,
+    LegacyCompleteRefreshSnapshotAdapter,
 )
 from investment_analyst.application.operational_state import (
     AaplDailyRunAlreadyRunningError,
@@ -424,15 +423,6 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> ListedCompanyDiagnosticReport:
         """Query one generic persisted listed-company report."""
-        ...
-
-    def query_aapl_market_chart(
-        self,
-        request: AaplMarketChartRequest,
-        *,
-        location: StorageLocationRequest,
-    ) -> AaplMarketChart:
-        """Query one bounded persisted market chart."""
         ...
 
     def query_market_comparison(
@@ -875,7 +865,6 @@ class AaplLocalController:
         self._writer_lock = threading.RLock()
         self._cache_lock = threading.RLock()
         self._state_lock = threading.RLock()
-        self._market_chart_cache: dict[AaplMarketChartRequest, AaplMarketChart] = {}
         self._btc_market_chart_cache: dict[BtcMarketChartRequest, BtcMarketChart] = {}
         self._crypto_spot_daily_chart_cache: dict[
             CryptoSpotDailyMarketChartRequest, CryptoSpotDailyMarketChart
@@ -944,8 +933,8 @@ class AaplLocalController:
         return self._runtime_capabilities
 
     def run_payload(self, payload: dict[str, object]) -> AaplDailyRunState:
-        """Validate the stable request snapshot and execute it once."""
-        snapshot = AaplDailyRunRequestSnapshot.model_validate(payload)
+        """Adapt the stored request snapshot and execute it once."""
+        snapshot = LegacyCompleteRefreshSnapshotAdapter.adapt(payload)
         return self.run_request(snapshot.to_request())
 
     def run_request(self, request: AaplWorkspaceBootstrapRequest) -> AaplDailyRunState:
@@ -1020,22 +1009,6 @@ class AaplLocalController:
             request,
             location=StorageLocationRequest(workspace=self._workspace),
         )
-
-    def market_chart_request(self, request: AaplMarketChartRequest) -> AaplMarketChart:
-        """Query persisted market bars and indicators without providers or writes."""
-        with self._cache_lock:
-            cached = self._market_chart_cache.get(request)
-            if cached is not None:
-                return cached
-        chart = self._application.query_aapl_market_chart(
-            request,
-            location=StorageLocationRequest(workspace=self._workspace),
-        )
-        with self._cache_lock:
-            if len(self._market_chart_cache) >= _MAX_READ_CACHE_ENTRIES:
-                self._market_chart_cache.pop(next(iter(self._market_chart_cache)))
-            self._market_chart_cache[request] = chart
-        return chart
 
     def market_comparison_request(
         self,
@@ -1493,7 +1466,6 @@ class AaplLocalController:
     def _invalidate_aapl_refresh_caches(self) -> None:
         """Invalidate only read models refreshed by a completed Apple bootstrap."""
         with self._cache_lock:
-            self._market_chart_cache.clear()
             self._drop_asset_cache_entries(self._listed_market_chart_cache, APPLE_ASSET_ID)
             self._drop_valuation_cache_entries(APPLE_ASSET_ID)
             self._drop_asset_cache_entries(self._fundamental_trend_cache, APPLE_ASSET_ID)
@@ -2036,9 +2008,6 @@ class AaplLocalWebApplication:
             except InvalidOperation as error:
                 raise ValueError("bollinger_multiplier must be an exact decimal") from error
         descriptor = self._market_asset(asset_id)
-        if descriptor.asset_id == APPLE_ASSET_ID:
-            request = AaplMarketChartRequest.model_validate(request_parameters)
-            return self._controller.market_chart_request(request).to_json_dict()
         if (
             descriptor.analysis.market_mode is MarketAnalysisMode.CRYPTO_SPOT
             and descriptor.provider == "coinbase"

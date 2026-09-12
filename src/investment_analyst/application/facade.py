@@ -66,7 +66,6 @@ from investment_analyst.analytics.listed_company_report_models import (
 from investment_analyst.analytics.listed_company_report_service import ListedCompanyReportService
 from investment_analyst.analytics.market.bar_schemas import get_market_bar_schema
 from investment_analyst.analytics.market.chart_models import (
-    AaplMarketChart,
     AaplMarketChartRequest,
     BtcMarketChart,
     BtcMarketChartRequest,
@@ -541,7 +540,7 @@ class InvestmentAnalystApplication:
         request: AaplMarketChartRequest,
         *,
         location: StorageLocationRequest,
-    ) -> AaplMarketChart:
+    ) -> ListedMarketChart:
         """Return a bounded point-in-time market chart without writes or providers."""
         with self._runtime.open_storage(
             location,

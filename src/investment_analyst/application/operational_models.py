@@ -1,9 +1,10 @@
-"""Strict contracts for one operational Apple refresh execution."""
+"""Strict contracts for one operational refresh execution."""
 
+from collections.abc import Mapping
 from datetime import date, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 from uuid import UUID
 
 from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_validator
@@ -78,12 +79,12 @@ class AaplDailyRunFailure(ContractModel):
         return {"category": self.category, "message": self.message}
 
 
-class AaplDailyRunRequestSnapshot(ContractModel):
-    """Round-trippable operational snapshot of the fixed Apple bootstrap request."""
+class OperationalRefreshRequestSnapshot(ContractModel):
+    """Round-trippable operational snapshot of one explicit-asset refresh request."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    asset_id: Literal["equity:us:aapl"] = ASSET_ID
+    asset_id: NonEmptyStr
     market_start: date
     market_end: date
     fundamental_frequency: DataFrequency
@@ -115,9 +116,13 @@ class AaplDailyRunRequestSnapshot(ContractModel):
         return value
 
     @classmethod
-    def from_request(cls, request: AaplWorkspaceBootstrapRequest) -> "AaplDailyRunRequestSnapshot":
+    def from_request(
+        cls,
+        request: AaplWorkspaceBootstrapRequest,
+    ) -> "OperationalRefreshRequestSnapshot":
         """Copy one validated bootstrap request without introducing free-form fields."""
         return cls(
+            asset_id=request.asset_id,
             market_start=request.market_start,
             market_end=request.market_end,
             fundamental_frequency=request.fundamental_frequency,
@@ -143,12 +148,44 @@ class AaplDailyRunRequestSnapshot(ContractModel):
     def to_request(self) -> AaplWorkspaceBootstrapRequest:
         """Rebuild the existing bootstrap request without changing its public contract."""
         return AaplWorkspaceBootstrapRequest(
+            asset_id=self.asset_id,
             market_start=self.market_start,
             market_end=self.market_end,
             fundamental_frequency=self.fundamental_frequency,
             refresh_mode=self.refresh_mode,
             requested_known_at=self.requested_known_at,
             require_complete=self.require_complete,
+        )
+
+
+_LEGACY_COMPLETE_REFRESH_ASSET_ID = ASSET_ID
+
+
+class LegacyCompleteRefreshSnapshotAdapter:
+    """Read-only compatibility adapter for persisted ``COMPLETE_REFRESH`` payloads.
+
+    The retired ``AaplDailyRunRequestSnapshot`` contract fixed the asset identity in
+    its type, so a payload persisted by it without an ``asset_id`` key was Apple by
+    contract. This versioned adapter resolves exactly that legacy shape to the Apple
+    identity it already carried and never rewrites the persisted bytes: the stored
+    payload, its operation identity, and its deduplication fingerprint are preserved.
+
+    Any payload that does carry an ``asset_id`` is handed to the strict generic
+    snapshot untouched. An unusable, ambiguous, or foreign identity therefore fails
+    closed instead of being silently replaced by a default asset.
+    """
+
+    schema_version: ClassVar[Literal["legacy-complete-refresh-snapshot-adapter-v1"]] = (
+        "legacy-complete-refresh-snapshot-adapter-v1"
+    )
+
+    @classmethod
+    def adapt(cls, payload: Mapping[str, object]) -> OperationalRefreshRequestSnapshot:
+        """Return the generic snapshot for one persisted payload without mutating it."""
+        if "asset_id" in payload:
+            return OperationalRefreshRequestSnapshot.model_validate(dict(payload))
+        return OperationalRefreshRequestSnapshot.model_validate(
+            {**payload, "asset_id": _LEGACY_COMPLETE_REFRESH_ASSET_ID}
         )
 
 
@@ -162,7 +199,7 @@ class AaplDailyRunState(ContractModel):
     status: AaplDailyRunStatus
     workspace_root: Path
     workspace_id: UUID | None = None
-    request: AaplDailyRunRequestSnapshot
+    request: OperationalRefreshRequestSnapshot
     started_at: UTCDateTime
     completed_at: UTCDateTime | None = None
     effective_known_at: UTCDateTime | None = None
@@ -189,7 +226,7 @@ class AaplDailyRunState(ContractModel):
     def snapshot_request(cls, value: object) -> object:
         """Convert only the existing typed bootstrap request at the application boundary."""
         if isinstance(value, AaplWorkspaceBootstrapRequest):
-            return AaplDailyRunRequestSnapshot.from_request(value)
+            return OperationalRefreshRequestSnapshot.from_request(value)
         return value
 
     @field_validator("traceability_verified", mode="before")

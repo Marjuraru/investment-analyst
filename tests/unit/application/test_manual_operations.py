@@ -1,5 +1,7 @@
 """Regression tests for durable queued manual operations."""
 
+import hashlib
+import json
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -171,6 +173,48 @@ def test_payload_is_strictly_validated_for_operation_before_persistence(
         ManualOperationRequest(operation_kind=operation_kind, payload=payload)
 
     assert not state_path.exists()
+
+
+def test_complete_refresh_accepts_persisted_legacy_and_explicit_identity_payloads_unchanged() -> (
+    None
+):
+    legacy_payload = {
+        "market_start": "2026-07-01",
+        "market_end": "2026-07-02",
+        "fundamental_frequency": "quarterly",
+        "refresh_mode": "auto",
+        "requested_known_at": "2026-07-03T00:00:00Z",
+        "require_complete": True,
+    }
+
+    request = ManualOperationRequest(
+        operation_kind=ManualOperationKind.COMPLETE_REFRESH,
+        payload=legacy_payload,
+    )
+    repeated = ManualOperationRequest(
+        operation_kind=ManualOperationKind.COMPLETE_REFRESH,
+        payload=dict(legacy_payload),
+    )
+    explicit = ManualOperationRequest(
+        operation_kind=ManualOperationKind.COMPLETE_REFRESH,
+        payload={**legacy_payload, "asset_id": "equity:us:aapl"},
+    )
+
+    assert request.payload == legacy_payload
+    assert "asset_id" not in request.payload
+    assert explicit.payload["asset_id"] == "equity:us:aapl"
+    assert request.fingerprint == repeated.fingerprint
+    assert request.fingerprint == _fingerprint_of(request.model_dump(mode="json"))
+
+
+def _fingerprint_of(document: dict[str, object]) -> str:
+    encoded = json.dumps(
+        document,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def test_worker_survives_decreasing_clock_and_completes_later_work(tmp_path: Path) -> None:
