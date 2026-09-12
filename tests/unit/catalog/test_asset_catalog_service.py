@@ -365,3 +365,17 @@ def test_service_exposes_tuples_without_mutable_internal_lists() -> None:
     assert isinstance(assets, tuple)
     assert isinstance(assets[0].aliases, tuple)
     assert isinstance(assets[0].provider_bindings, tuple)
+
+
+def test_default_catalog_security_unit_basis_for_equities() -> None:
+    service = AssetCatalogService.load_default()
+    with_basis = [
+        asset.asset_id
+        for asset in service.list_assets(asset_type=AssetClass.EQUITY)
+        if asset.security_unit_basis is not None
+    ]
+    assert len(with_basis) == 18
+    for asset_id in with_basis:
+        asset = service.get(asset_id)
+        assert asset.security_unit_basis == "reported_common_share"
+        assert asset.security_unit_factor == 1

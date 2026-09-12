@@ -240,6 +240,7 @@ async function loadMesaIncidents() {
 // reuses that same 365-day span: `present` evidence within it renders "Al
 // día", anything older (or of unknown age) renders "Vencida".
 const MESA_COVERAGE_WINDOW_DAYS = 365;
+const MESA_FUNDAMENTAL_COVERAGE_WINDOW_DAYS = 3660;
 let mesaUniverseCoverageRequestSequence = 0;
 let mesaUniverseCoveragePayload = null;
 let mesaUniverseVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
@@ -248,8 +249,13 @@ function mesaCoverageWindowFromKnownAt(knownAtIso) {
   const cut = new Date(knownAtIso);
   const endMs = Date.UTC(cut.getUTCFullYear(), cut.getUTCMonth(), cut.getUTCDate()) - 86_400_000;
   const startMs = endMs - MESA_COVERAGE_WINDOW_DAYS * 86_400_000;
+  const fundamentalStartMs = endMs - MESA_FUNDAMENTAL_COVERAGE_WINDOW_DAYS * 86_400_000;
   const toDateString = (ms) => new Date(ms).toISOString().slice(0, 10);
-  return { start: toDateString(startMs), end: toDateString(endMs) };
+  return {
+    start: toDateString(startMs),
+    end: toDateString(endMs),
+    fundamentalStart: toDateString(fundamentalStartMs),
+  };
 }
 
 function renderMesaUniverseWindow(coverageWindow) {
@@ -487,7 +493,7 @@ async function loadMesaUniverseCoverage() {
     known_at: knownAt,
     market_start: coverageWindow.start,
     market_end: coverageWindow.end,
-    fundamental_start: coverageWindow.start,
+    fundamental_start: coverageWindow.fundamentalStart,
     fundamental_end: coverageWindow.end,
     frequency: "annual",
   });

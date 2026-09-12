@@ -143,6 +143,13 @@ def test_security_unit_contract_is_exact_complete_and_equity_only() -> None:
             security_unit_basis_version="security-unit-basis-v1",
             security_unit_market_adjustment="raw",
         )
+    with pytest.raises(ValidationError):
+        _asset(
+            security_unit_factor="1",
+            security_unit_basis="unknown_basis",
+            security_unit_basis_version="security-unit-basis-v1",
+            security_unit_market_adjustment="all",
+        )
 
 
 def test_document_rejects_external_binding_shared_by_different_assets() -> None:

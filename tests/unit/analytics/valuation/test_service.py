@@ -737,3 +737,35 @@ def test_crypto_asset_is_not_applicable_without_reading_price() -> None:
     assert {item.reason_code for item in snapshot.metrics} == {
         ValuationReasonCode.ASSET_NOT_APPLICABLE
     }
+
+
+@pytest.mark.parametrize("asset_id", ["equity:us:bvn", "equity:us:tsm"])
+def test_adr_issuers_remain_not_evaluable_with_share_basis_unavailable(asset_id: str) -> None:
+    catalog = AssetCatalogService.load_default()
+    asset = catalog.get(asset_id)
+    assert asset.security_unit_basis is None
+    assert asset.security_unit_factor is None
+    service = CorporateValuationService(
+        _Storage([]),
+        capabilities=analysis_capabilities_for(asset),
+        market_source_id=f"alpaca-market-data:iex:{asset.symbol.lower()}:daily-bars:adjustment-all",
+        fundamental_source_id=f"sec-edgar:{asset.symbol.lower()}:companyfacts",
+        price_currency="USD",
+        security_unit_factor=asset.security_unit_factor,
+        security_unit_basis=asset.security_unit_basis,
+        security_unit_basis_version=asset.security_unit_basis_version,
+        security_unit_market_adjustment=asset.security_unit_market_adjustment,
+    )
+    snapshot = service.query(
+        CorporateValuationRequest(
+            asset_id=asset_id,
+            known_at=_KNOWN_AT,
+            valuation_date=_KNOWN_AT.date(),
+        ),
+        computed_at=_KNOWN_AT,
+    )
+    assert snapshot.status is ValuationSnapshotStatus.NOT_EVALUABLE
+    assert snapshot.security_basis is None
+    assert {item.reason_code for item in snapshot.metrics} == {
+        ValuationReasonCode.SHARE_BASIS_UNAVAILABLE
+    }

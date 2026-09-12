@@ -59,3 +59,37 @@ def test_default_query_keeps_bvl_identities_when_market_is_not_configured(tmp_pa
     assert bvl.market.capability is CoverageCapability.NOT_CONFIGURED
     assert bvl.bvl_registry.capability is CoverageCapability.SUPPORTED
     assert bvl.bvl_registry.evidence is EvidenceState.MISSING
+
+
+def test_valuation_reasons_distinguish_common_shares_from_adr_in_coverage(tmp_path) -> None:
+    workspace = WorkspaceService().initialize(tmp_path / "workspace").paths.root
+    request = UniverseCoverageRequest(
+        known_at=datetime(2026, 8, 29, tzinfo=UTC),
+        market_start=date(2026, 8, 1),
+        market_end=date(2026, 8, 28),
+        fundamental_start=date(2020, 1, 1),
+        fundamental_end=date(2026, 8, 28),
+        asset_ids=(
+            "equity:us:aapl",
+            "equity:us:amd",
+            "equity:us:bvn",
+            "equity:us:msft",
+            "equity:us:tsm",
+        ),
+    )
+
+    result = UniverseCoverageApplication.create_default().query(
+        StorageLocationRequest(workspace=workspace),
+        request,
+    )
+
+    assets_by_id = {item.asset_id: item for item in result.assets}
+    for common_id in ("equity:us:aapl", "equity:us:amd", "equity:us:msft"):
+        cov = assets_by_id[common_id].corporate_valuation
+        assert cov.capability is CoverageCapability.SUPPORTED
+        assert "share_basis_unavailable" not in cov.reason_codes
+
+    for adr_id in ("equity:us:bvn", "equity:us:tsm"):
+        cov = assets_by_id[adr_id].corporate_valuation
+        assert cov.capability is CoverageCapability.SUPPORTED
+        assert "share_basis_unavailable" in cov.reason_codes

@@ -692,6 +692,10 @@
         "sec_cik": "0001018724"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "AMZN"
     },
     {
@@ -756,6 +760,10 @@
         "sec_cik": "0000756894"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "B"
     },
     {
@@ -867,6 +875,10 @@
         "sec_cik": "0000018230"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "CAT"
     },
     {
@@ -922,6 +934,10 @@
         "sec_cik": "0000215466"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "CDE"
     },
     {
@@ -977,6 +993,10 @@
         "sec_cik": "0000093410"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "CVX"
     },
     {
@@ -1032,6 +1052,10 @@
         "sec_cik": "0001718405"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "HYMC"
     },
     {
@@ -1087,6 +1111,10 @@
         "sec_cik": "0000050863"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "INTC"
     },
     {
@@ -1142,6 +1170,10 @@
         "sec_cik": "0000200406"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "JNJ"
     },
     {
@@ -1197,6 +1229,10 @@
         "sec_cik": "0000789019"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "MSFT"
     },
     {
@@ -1253,6 +1289,10 @@
         "sec_cik": "0001050446"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "MSTR"
     },
     {
@@ -1309,6 +1349,10 @@
         "sec_cik": "0000723125"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "MU"
     },
     {
@@ -1365,6 +1409,10 @@
         "sec_cik": "0000314203"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "MUX"
     },
     {
@@ -1420,6 +1468,10 @@
         "sec_cik": "0001164727"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "NEM"
     },
     {
@@ -1475,6 +1527,10 @@
         "sec_cik": "0001045810"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "NVDA"
     },
     {
@@ -1530,6 +1586,10 @@
         "sec_cik": "0001321655"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "PLTR"
     },
     {
@@ -1585,6 +1645,10 @@
         "sec_cik": "0001001838"
       },
       "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
       "symbol": "SCCO"
     },
     {

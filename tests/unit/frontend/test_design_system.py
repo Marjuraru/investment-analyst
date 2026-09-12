@@ -3096,10 +3096,15 @@ def test_universe_matrix_covers_exactly_the_four_queried_capabilities() -> None:
 
 
 def _check_queried_window_is_derived_from_the_cut_and_shown(app_js: str) -> None:
+    assert "const MESA_FUNDAMENTAL_COVERAGE_WINDOW_DAYS = 3660;" in app_js
     window_body = _extract_js_function(app_js, "mesaCoverageWindowFromKnownAt")
     assert "MESA_COVERAGE_WINDOW_DAYS * 86_400_000" in window_body
+    assert "MESA_FUNDAMENTAL_COVERAGE_WINDOW_DAYS * 86_400_000" in window_body
     assert "- 86_400_000" in window_body
+    assert "fundamentalStart: toDateString(fundamentalStartMs)" in window_body
     load_body = _extract_js_function(app_js, "loadMesaUniverseCoverage")
+    assert "market_start: coverageWindow.start" in load_body
+    assert "fundamental_start: coverageWindow.fundamentalStart" in load_body
     window_call_pos = load_body.index("renderMesaUniverseWindow(coverageWindow);")
     api_pos = load_body.index("await api(")
     assert window_call_pos < api_pos, (
@@ -4304,6 +4309,20 @@ def test_probe_query_window_rule_catches_a_hidden_window() -> None:
         1,
     )
     assert corrupted_body != without_call
+    corrupted = APP_JS.replace(original_body, corrupted_body, 1)
+    with pytest.raises(AssertionError):
+        _check_queried_window_is_derived_from_the_cut_and_shown(corrupted)
+
+
+def test_probe_query_window_rule_catches_missing_fundamental_start_parameter() -> None:
+    _check_queried_window_is_derived_from_the_cut_and_shown(APP_JS)  # baseline: clean
+    original_body = _extract_js_function(APP_JS, "loadMesaUniverseCoverage")
+    corrupted_body = original_body.replace(
+        "fundamental_start: coverageWindow.fundamentalStart,",
+        "fundamental_start: coverageWindow.start,",
+        1,
+    )
+    assert corrupted_body != original_body
     corrupted = APP_JS.replace(original_body, corrupted_body, 1)
     with pytest.raises(AssertionError):
         _check_queried_window_is_derived_from_the_cut_and_shown(corrupted)
