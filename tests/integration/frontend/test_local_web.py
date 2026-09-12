@@ -76,7 +76,6 @@ from investment_analyst.analytics.listed_company_report_models import (
     ListedCompanyReportRequest,
 )
 from investment_analyst.analytics.market.chart_models import (
-    AaplMarketChart,
     AaplMarketChartRequest,
     BtcMarketChart,
     BtcMarketChartRequest,
@@ -136,6 +135,7 @@ from investment_analyst.application.manual_operations import (
     ManualOperationKind,
     ManualOperationQueue,
     ManualOperationStateStore,
+    ManualOperationStatus,
 )
 from investment_analyst.application.market_universe import (
     MarketAssetUniverse,
@@ -202,6 +202,7 @@ from investment_analyst.evidence.sec_institutional_observations.models import (
     InstitutionalObservationQuery,
     InstitutionalObservationQueryResult,
 )
+from investment_analyst.frontend import local_web as local_web_module
 from investment_analyst.frontend.local_web import (
     _ASSETS,
     _MAX_READ_CACHE_ENTRIES,
@@ -360,8 +361,6 @@ class _FakeApplication:
         self.locations: list[StorageLocationRequest] = []
         self.listed_company_report_requests: list[ListedCompanyReportRequest] = []
         self.listed_company_report_locations: list[StorageLocationRequest] = []
-        self.chart_requests: list[AaplMarketChartRequest] = []
-        self.chart_locations: list[StorageLocationRequest] = []
         self.btc_chart_requests: list[BtcMarketChartRequest] = []
         self.btc_chart_locations: list[StorageLocationRequest] = []
         self.crypto_chart_requests: list[CryptoSpotDailyMarketChartRequest] = []
@@ -532,26 +531,6 @@ class _FakeApplication:
             limitations=request.rule.limitations,
         )
 
-    def query_aapl_market_chart(
-        self,
-        request: AaplMarketChartRequest,
-        *,
-        location: StorageLocationRequest,
-    ) -> AaplMarketChart:
-        self.chart_requests.append(request)
-        self.chart_locations.append(location)
-        return cast(
-            AaplMarketChart,
-            _JsonResult(
-                {
-                    "schema_version": "aapl-market-chart-v5",
-                    "period": request.period.value,
-                    "interval": request.interval.value,
-                    "points": [],
-                }
-            ),
-        )
-
     def query_market_comparison(
         self,
         request: MarketComparisonRequest,
@@ -686,6 +665,7 @@ class _FakeApplication:
                         f"alpaca-market-data:iex:{asset_id.rsplit(':', 1)[-1]}:"
                         "daily-bars:adjustment-all"
                     ),
+                    "volume_unit": "shares",
                     "period": request.period.value,
                     "interval": request.interval.value,
                     "points": [],
@@ -1156,14 +1136,19 @@ class _ConcurrentReadApplication(_FakeApplication):
                 "SELECT metadata_value FROM storage_metadata WHERE metadata_key = 'schema_version'"
             ).fetchone() == ("1",)
 
-    def query_aapl_market_chart(
+    def query_listed_market_chart(
         self,
         request: AaplMarketChartRequest,
         *,
+        asset_id: str,
         location: StorageLocationRequest,
-    ) -> AaplMarketChart:
+    ) -> ListedMarketChart:
         self._read_committed_schema()
-        return super().query_aapl_market_chart(request, location=location)
+        return super().query_listed_market_chart(
+            request,
+            asset_id=asset_id,
+            location=location,
+        )
 
     def query_sec_fundamental_trend(
         self,
@@ -1281,10 +1266,11 @@ def test_loopback_reads_remain_available_while_a_local_writer_is_active(tmp_path
         writer.close()
 
     assert chart_status == 200
-    assert chart["schema_version"] == "aapl-market-chart-v5"
+    assert chart["schema_version"] == "listed-market-chart-v1"
+    assert chart["asset_id"] == "equity:us:aapl"
     assert trend_status == 200
     assert trend["schema_version"] == "aapl-fundamental-trend-v1"
-    assert len(application.chart_requests) == 1
+    assert len(application.listed_chart_requests) == 1
     assert len(application.trend_requests) == 1
 
 
@@ -2369,25 +2355,29 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert application.requests[0].known_at.isoformat() == "2026-07-16T15:46:09+00:00"
     assert application.locations[0].workspace == workspace.resolve()
     assert chart_status == 200
-    assert chart["schema_version"] == "aapl-market-chart-v5"
+    assert chart["schema_version"] == "listed-market-chart-v1"
+    assert chart["asset_id"] == "equity:us:aapl"
     assert chart["period"] == "1y"
-    assert application.chart_requests[0].known_at.isoformat() == "2026-07-16T15:46:09+00:00"
-    assert application.chart_requests[0].session_limit == 260
-    assert application.chart_requests[0].interval.value == "1w"
-    assert application.chart_requests[0].resolution.value == "weekly"
-    assert application.chart_requests[0].short_sma_window == 10
-    assert application.chart_requests[0].long_sma_window == 50
-    assert application.chart_requests[0].third_sma_window == 100
-    assert application.chart_requests[0].bollinger_window == 30
-    assert application.chart_requests[0].bollinger_multiplier == Decimal("2.5")
-    assert application.chart_locations[0].workspace == workspace.resolve()
+    assert application.listed_chart_requests[0][0] == "equity:us:aapl"
+    assert application.listed_chart_requests[0][1].known_at.isoformat() == (
+        "2026-07-16T15:46:09+00:00"
+    )
+    assert application.listed_chart_requests[0][1].session_limit == 260
+    assert application.listed_chart_requests[0][1].interval.value == "1w"
+    assert application.listed_chart_requests[0][1].resolution.value == "weekly"
+    assert application.listed_chart_requests[0][1].short_sma_window == 10
+    assert application.listed_chart_requests[0][1].long_sma_window == 50
+    assert application.listed_chart_requests[0][1].third_sma_window == 100
+    assert application.listed_chart_requests[0][1].bollinger_window == 30
+    assert application.listed_chart_requests[0][1].bollinger_multiplier == Decimal("2.5")
+    assert application.listed_chart_locations[0].workspace == workspace.resolve()
     assert cached_chart_status == 200
     assert cached_chart == chart
     assert maximum_chart_status == 200
     assert maximum_chart["period"] == "max"
-    assert application.chart_requests[1].interval.value == "auto"
-    assert application.chart_requests[1].session_limit == 20_000
-    assert len(application.chart_requests) == 2
+    assert application.listed_chart_requests[1][1].interval.value == "auto"
+    assert application.listed_chart_requests[1][1].session_limit == 20_000
+    assert len(application.listed_chart_requests) == 3
     assert btc_chart_status == 200
     assert btc_chart["schema_version"] == "btc-market-chart-v1"
     assert btc_chart["asset_id"] == "crypto:btc-usd"
@@ -2400,8 +2390,8 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert listed_chart_status == 200
     assert listed_chart["schema_version"] == "listed-market-chart-v1"
     assert listed_chart["asset_id"] == "equity:us:bvn"
-    assert application.listed_chart_requests[0][0] == "equity:us:bvn"
-    assert application.listed_chart_locations[0].workspace == workspace.resolve()
+    assert application.listed_chart_requests[2][0] == "equity:us:bvn"
+    assert application.listed_chart_locations[2].workspace == workspace.resolve()
     assert btc_intraday_status == 200
     assert btc_intraday["schema_version"] == "btc-intraday-chart-v1"
     assert btc_intraday["interval"] == "5m"
@@ -3369,8 +3359,8 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
         "require_complete": True,
     }
 
-    controller.market_chart_request(chart_request)
-    controller.market_chart_request(chart_request)
+    controller.listed_market_chart_request("equity:us:aapl", chart_request)
+    controller.listed_market_chart_request("equity:us:aapl", chart_request)
     controller.btc_market_chart_request(btc_chart_request)
     controller.btc_market_chart_request(btc_chart_request)
     controller.btc_intraday_chart_request(btc_intraday_chart_request)
@@ -3384,7 +3374,7 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
     controller.fundamental_analysis_request(research_request, asset_id="equity:us:aapl")
     controller.fundamental_analysis_request(research_request, asset_id="equity:us:aapl")
     controller.run_payload(run_payload)
-    controller.market_chart_request(chart_request)
+    controller.listed_market_chart_request("equity:us:aapl", chart_request)
     controller.btc_market_chart_request(btc_chart_request)
     controller.btc_intraday_chart_request(btc_intraday_chart_request)
     controller.fundamental_trend_request(trend_request, asset_id="equity:us:aapl")
@@ -3392,7 +3382,7 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
     controller.fundamental_research_history_request(research_request, asset_id="equity:us:aapl")
     controller.fundamental_analysis_request(research_request, asset_id="equity:us:aapl")
 
-    assert len(application.chart_requests) == 2
+    assert len(application.listed_chart_requests) == 2
     assert len(application.btc_chart_requests) == 1
     assert len(application.btc_intraday_chart_requests) == 1
     assert len(application.trend_requests) == 2
@@ -3854,6 +3844,139 @@ def test_versioned_manual_operation_api_enqueues_deduplicates_and_reports_status
     assert status_code == 200
     assert status["status"] == "succeeded"
     assert status["result"]["traceability_verified"] is True
+
+
+def test_bootstrap_identity_is_explicit_and_queue_keeps_idempotence_dedup_recovery_and_one_writer(
+    tmp_path: Path,
+) -> None:
+    runner = _FakeRunner()
+    controller = AaplLocalController(
+        runner,
+        _FakeApplication(),
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    state_path = tmp_path / "manual-operations.json"
+    store = ManualOperationStateStore(state_path)
+    queue = ManualOperationQueue(store, web.execute_manual_operation)
+    web.set_manual_operations(queue)
+    body = json.dumps(
+        {
+            "schema_version": "manual-operation-request-v1",
+            "operation_kind": "complete_refresh",
+            "payload": {
+                "asset_id": "equity:us:aapl",
+                "market_start": "2025-01-01",
+                "market_end": "2026-07-15",
+                "fundamental_frequency": "quarterly",
+                "refresh_mode": "auto",
+                "requested_known_at": None,
+                "require_complete": True,
+            },
+        }
+    ).encode()
+
+    with _server(web) as (_, root):
+        first_status, first, _ = _json_request(
+            Request(
+                f"{root}/api/v1/manual-operations",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        second_status, second, _ = _json_request(
+            Request(
+                f"{root}/api/v1/manual-operations",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert first_status == second_status == 202
+    assert first["operation_id"] == second["operation_id"]
+    assert first["request"]["payload"]["asset_id"] == "equity:us:aapl"
+    assert queue.snapshot().queued_count == 1
+    assert runner.requests == []
+
+    queued = store.load().operations[0]
+    interrupted = queued.model_copy(
+        update={"status": ManualOperationStatus.RUNNING, "started_at": queued.submitted_at}
+    )
+    store.write(interrupted)
+
+    resumed = ManualOperationQueue(
+        ManualOperationStateStore(state_path),
+        web.execute_manual_operation,
+    )
+    recovered = store.load().operations[0]
+    completed = resumed.run_next()
+
+    assert recovered.status is ManualOperationStatus.QUEUED
+    assert recovered.recovery_count == 1
+    assert completed is not None and completed.status is ManualOperationStatus.SUCCEEDED
+    assert completed.operation_id == queued.operation_id
+    assert completed.request.payload["asset_id"] == "equity:us:aapl"
+    assert [request.asset_id for request in runner.requests] == ["equity:us:aapl"]
+    assert len(store.load().operations) == 1
+    assert resumed.run_next() is None
+    assert len(runner.requests) == 1
+
+
+def test_complete_refresh_for_a_non_apple_asset_fails_closed_at_the_local_seam(
+    tmp_path: Path,
+) -> None:
+    runner = _FakeRunner()
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        runner,
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    state_path = tmp_path / "manual-operations.json"
+    store = ManualOperationStateStore(state_path)
+    queue = ManualOperationQueue(store, web.execute_manual_operation)
+    web.set_manual_operations(queue)
+    foreign_body = json.dumps(
+        {
+            "schema_version": "manual-operation-request-v1",
+            "operation_kind": "complete_refresh",
+            "payload": {
+                "asset_id": "equity:us:amd",
+                "market_start": "2025-01-01",
+                "market_end": "2026-07-15",
+                "fundamental_frequency": "quarterly",
+                "refresh_mode": "auto",
+                "require_complete": True,
+            },
+        }
+    ).encode()
+
+    with _server(web) as (_, root):
+        enqueue_status, enqueued, _ = _json_request(
+            Request(
+                f"{root}/api/v1/manual-operations",
+                data=foreign_body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+
+    assert enqueue_status == 202
+    assert enqueued["request"]["payload"]["asset_id"] == "equity:us:amd"
+    completed = queue.run_next()
+
+    assert completed is not None and completed.status is ManualOperationStatus.FAILED
+    assert runner.requests == []
+    assert len(store.load().operations) == 1
+    assert store.load().operations[0].failure is not None
+    assert application.requests == []
 
 
 def test_manual_result_preserves_aapl_schema_counts_and_only_explicit_evidence() -> None:
@@ -5367,3 +5490,81 @@ def test_probe_universe_coverage_extra_endpoint_fails(tmp_path: Path) -> None:
             status, resp, _ = _json_request(Request(f"{root}{unapproved_path}"))
             assert status == 404
             assert resp["error"]["code"] == "not_found"
+
+
+def test_chart_read_path_covers_aapl_amd_tsm_spy_and_btc_without_a_per_asset_branch(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    descriptors = {item.asset_id: item for item in controller.market_assets().assets}
+    listed_asset_ids = ("equity:us:aapl", "equity:us:amd", "equity:us:tsm", "etf:us:spy")
+
+    with _server(AaplLocalWebApplication(controller, None)) as (_, root):
+        for asset_id in (*listed_asset_ids, "crypto:btc-usd"):
+            descriptor = descriptors[asset_id]
+            status, chart, _ = _json_request(
+                Request(
+                    f"{root}/api/market-chart?"
+                    + urlencode({"asset_id": asset_id, "known_at": "2026-07-16T15:46:09Z"})
+                )
+            )
+            assert status == 200
+            assert chart["asset_id"] == asset_id
+            assert chart["schema_version"] == descriptor.chart_schema_version
+            if asset_id != "crypto:btc-usd":
+                assert chart["source_id"] == descriptor.source_id
+                assert chart["volume_unit"] == descriptor.volume_unit == "shares"
+
+    assert descriptors["equity:us:aapl"].chart_schema_version == "listed-market-chart-v1"
+    assert [asset_id for asset_id, _ in application.listed_chart_requests] == list(listed_asset_ids)
+    assert application.crypto_chart_requests == []
+    assert len(application.btc_chart_requests) == 1
+    assert not hasattr(AaplLocalController, "market_chart_request")
+
+
+def test_static_ui_is_byte_identical_and_descriptor_and_response_schema_versions_still_agree(
+    tmp_path: Path,
+) -> None:
+    static_dir = Path(local_web_module.__file__).resolve().parent / "static"
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    descriptors = {item.asset_id: item for item in controller.market_assets().assets}
+
+    with _server(AaplLocalWebApplication(controller, None)) as (_, root):
+        for route, (filename, _) in _ASSETS.items():
+            with urlopen(f"{root}{route}", timeout=5) as response:
+                assert response.read() == (static_dir / filename).read_bytes()
+        for asset_id in (
+            "equity:us:aapl",
+            "equity:us:amd",
+            "equity:us:tsm",
+            "etf:us:spy",
+            "crypto:btc-usd",
+        ):
+            status, chart, _ = _json_request(
+                Request(
+                    f"{root}/api/market-chart?"
+                    + urlencode({"asset_id": asset_id, "known_at": "2026-07-16T15:46:09Z"})
+                )
+            )
+            assert status == 200
+            assert chart["schema_version"] == descriptors[asset_id].chart_schema_version
+
+    analysis_javascript = (static_dir / "app-analysis.js").read_text(encoding="utf-8")
+    assert "chart.schema_version !== expectedSchemaVersion" in analysis_javascript
+    assert "chart.schema_version," in analysis_javascript
+    for filename, _ in _ASSETS.values():
+        assert "aapl-market-chart-v5" not in (static_dir / filename).read_text(encoding="utf-8")

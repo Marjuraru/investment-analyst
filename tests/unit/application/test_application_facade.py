@@ -198,6 +198,61 @@ def test_valuation_history_query_is_empty_and_read_only(tmp_path: Path) -> None:
     assert storage_paths.database_path.read_bytes() == database_before
 
 
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+
+_RETAINED_TEST_IDS: dict[str, tuple[str, ...]] = {
+    "tests/unit/analytics/market/test_chart_service.py": (
+        "test_daily_chart_is_bounded_exact_and_uses_resolution_sma",
+        "test_chart_preserves_warmup_and_empty_history_semantics",
+        "test_maximum_drawdown_tracks_ordered_peak_and_trough_and_rejects_tampering",
+        "test_listed_chart_uses_explicit_catalog_scope_without_new_service_class_per_asset",
+        "test_chart_request_rejects_unsupported_cut_and_period",
+    ),
+    "tests/integration/frontend/test_local_web.py": (
+        "test_loopback_reads_remain_available_while_a_local_writer_is_active",
+        "test_versioned_manual_operation_api_enqueues_deduplicates_and_reports_status",
+        "test_read_caches_are_bounded_to_data_before_the_next_run_attempt",
+    ),
+    "tests/unit/application/test_manual_operations.py": (
+        "test_equivalent_active_requests_are_deduplicated_and_then_can_repeat",
+        "test_running_operation_is_requeued_and_recovered_after_restart",
+        "test_worker_survives_decreasing_clock_and_completes_later_work",
+    ),
+    "tests/unit/application/test_operational_models.py": (
+        "test_state_contract_serializes_running_success_and_failure",
+        "test_state_contract_rejects_incoherent_lifecycle_and_boolean_counts",
+    ),
+    "tests/unit/application/test_application_facade.py": (
+        "test_query_returns_versioned_report_without_writes_or_providers",
+        "test_chart_query_is_empty_bounded_and_read_only",
+        "test_btc_chart_query_is_empty_bounded_and_read_only",
+        "test_query_missing_workspace_fails_without_creating_it",
+    ),
+    "tests/unit/application/test_aapl_bootstrap_models.py": (),
+    "tests/integration/application/test_aapl_workspace_bootstrap_integration.py": (),
+}
+
+_MINIMUM_TEST_COUNTS: dict[str, int] = {
+    "tests/unit/analytics/market/test_chart_service.py": 12,
+    "tests/integration/frontend/test_local_web.py": 67,
+    "tests/unit/application/test_manual_operations.py": 6,
+    "tests/unit/application/test_operational_models.py": 2,
+    "tests/unit/application/test_application_facade.py": 15,
+    "tests/unit/application/test_aapl_bootstrap_models.py": 3,
+    "tests/integration/application/test_aapl_workspace_bootstrap_integration.py": 7,
+}
+
+
+def test_no_existing_test_is_removed_or_weakened_without_an_equivalent_assertion() -> None:
+    for relative_path, identifiers in _RETAINED_TEST_IDS.items():
+        source = (_REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+        for identifier in identifiers:
+            assert f"def {identifier}(" in source, (relative_path, identifier)
+    for relative_path, minimum in _MINIMUM_TEST_COUNTS.items():
+        source = (_REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+        assert source.count("\ndef test_") >= minimum, relative_path
+
+
 def test_chart_query_is_empty_bounded_and_read_only(tmp_path: Path) -> None:
     root = tmp_path / "legacy-chart"
     storage_paths = StoragePaths.from_root(root)
@@ -210,7 +265,10 @@ def test_chart_query_is_empty_bounded_and_read_only(tmp_path: Path) -> None:
         location=StorageLocationRequest(legacy_root=root),
     )
 
-    assert chart.schema_version == "aapl-market-chart-v5"
+    assert chart.schema_version == "listed-market-chart-v1"
+    assert chart.asset_id == "equity:us:aapl"
+    assert chart.source_id == "alpaca-market-data:iex:aapl:daily-bars:adjustment-all"
+    assert chart.volume_unit == "shares"
     assert chart.points == ()
     assert chart.session_limit == 132
     assert chart.traceability_verified

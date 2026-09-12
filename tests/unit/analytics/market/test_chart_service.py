@@ -1,7 +1,8 @@
-"""Tests for the bounded read-only Apple market-chart service."""
+"""Tests for the bounded read-only market-chart service."""
 
 from datetime import UTC, datetime, timedelta
 from decimal import Context, Decimal, localcontext
+from typing import Literal, get_args, get_origin
 from uuid import UUID
 
 import pytest
@@ -15,14 +16,16 @@ from investment_analyst.analytics.market.bar_models import (
 )
 from investment_analyst.analytics.market.bar_schemas import ALPACA_SOURCE_ID, COINBASE_SOURCE_ID
 from investment_analyst.analytics.market.chart_models import (
-    AaplMarketChart,
     AaplMarketChartInterval,
     AaplMarketChartPeriod,
     AaplMarketChartRequest,
     AaplMarketChartResolution,
     AaplMarketChartSma,
+    BtcMarketChart,
     BtcMarketChartRequest,
+    CryptoSpotDailyMarketChart,
     ListedMarketChart,
+    MarketChart,
 )
 from investment_analyst.analytics.market.chart_service import (
     AaplMarketChartService,
@@ -190,7 +193,8 @@ def test_daily_chart_is_bounded_exact_and_uses_resolution_sma() -> None:
         )
     )
 
-    assert chart.schema_version == "aapl-market-chart-v5"
+    assert chart.schema_version == "listed-market-chart-v1"
+    assert chart.asset_id == "equity:us:aapl"
     assert chart.source_id == ALPACA_SOURCE_ID
     assert chart.session_limit == 22
     assert chart.resolution is AaplMarketChartResolution.DAILY
@@ -481,7 +485,7 @@ def test_maximum_drawdown_tracks_ordered_peak_and_trough_and_rejects_tampering()
     payload = chart.model_dump(mode="json")
     payload["range_statistics"]["maximum_drawdown_rate"] = "-0.5"
     with pytest.raises(ValidationError, match="do not match displayed evidence"):
-        AaplMarketChart.model_validate(payload)
+        ListedMarketChart.model_validate(payload)
 
 
 def test_weekly_aggregation_preserves_exact_ohlcv_and_daily_latest_session() -> None:
@@ -538,7 +542,7 @@ def test_weekly_aggregation_preserves_exact_ohlcv_and_daily_latest_session() -> 
     payload = chart.model_dump(mode="json")
     payload["points"][0]["source_session_count"] = 4
     with pytest.raises(ValidationError, match="evidence must cover every source session"):
-        AaplMarketChart.model_validate(payload)
+        ListedMarketChart.model_validate(payload)
 
 
 def test_aggregation_does_not_invent_incomplete_optional_values() -> None:
@@ -563,6 +567,46 @@ def test_aggregation_does_not_invent_incomplete_optional_values() -> None:
     assert chart.latest_session is not None
     assert chart.latest_session.trade_count is None
     assert chart.latest_session.vwap is None
+
+
+def test_pit_known_at_decimal_utc_deterministic_identity_append_only_and_traceability_are_unchanged() -> (  # noqa: E501
+    None
+):
+    known_at = datetime(2026, 1, 1, tzinfo=UTC)
+    request = AaplMarketChartRequest(known_at=known_at, period=AaplMarketChartPeriod.ONE_MONTH)
+
+    first = AaplMarketChartService(_FakeHistory(30), MarketStatisticsEngine()).query(request)
+    second = AaplMarketChartService(_FakeHistory(30), MarketStatisticsEngine()).query(request)
+
+    assert first.model_dump(mode="json") == second.model_dump(mode="json")
+
+    assert first.known_at == known_at
+    assert first.known_at.utcoffset() == timedelta(0)
+    assert all(point.timestamp.utcoffset() == timedelta(0) for point in first.points)
+    assert all(point.timestamp < known_at for point in first.points)
+    assert all(point.bar_available_at <= known_at for point in first.points)
+
+    point = first.points[-1]
+    assert isinstance(point.close, Decimal) and point.close == Decimal("129.001")
+    assert isinstance(point.volume, Decimal) and point.volume == Decimal("1000029")
+    assert first.points[0].close == Decimal("108.001")
+    assert isinstance(first.range_statistics.return_rate, Decimal)
+    with localcontext(Context(prec=34)):
+        assert first.range_statistics.return_rate == (
+            Decimal("129.001") / Decimal("108.001") - Decimal("1")
+        )
+
+    assert first.traceability_verified is True
+    assert point.close_observation_id == UUID(int=29 * 10 + 5)
+    assert point.volume_input_observation_ids == (UUID(int=29 * 10 + 6),)
+
+    with pytest.raises(ValidationError):
+        first.points = ()
+
+    with pytest.raises(ValidationError, match="bar timestamp is outside the query range"):
+        AaplMarketChartService(_FakeHistory(30), MarketStatisticsEngine()).query(
+            AaplMarketChartRequest(known_at=datetime(2024, 12, 31, tzinfo=UTC))
+        )
 
 
 def test_chart_request_rejects_unsupported_cut_and_period() -> None:
@@ -659,3 +703,85 @@ def test_chart_sma_rejects_invalid_values(value: Decimal, message: str) -> None:
             input_observation_ids=tuple(UUID(int=index + 1) for index in range(5)),
             algorithm_version="market-chart-sma-v2-decimal34",
         )
+
+
+def test_aapl_market_chart_v5_is_not_emitted_and_apple_uses_listed_market_chart_v1_equivalently() -> (  # noqa: E501
+    None
+):
+    request = AaplMarketChartRequest(
+        known_at=datetime(2026, 1, 1, tzinfo=UTC),
+        period=AaplMarketChartPeriod.ONE_YEAR,
+    )
+
+    apple = AaplMarketChartService(_FakeHistory(270), MarketStatisticsEngine()).query(request)
+    listed = ListedMarketChartService(_FakeHistory(270), MarketStatisticsEngine()).query(
+        request,
+        asset_id="equity:us:aapl",
+        source_id=ALPACA_SOURCE_ID,
+    )
+
+    assert isinstance(apple, ListedMarketChart)
+    assert apple.schema_version == "listed-market-chart-v1"
+    assert apple.asset_id == "equity:us:aapl"
+    assert apple.source_id == ALPACA_SOURCE_ID
+    assert apple.volume_unit == "shares"
+    assert "aapl-market-chart-v5" not in apple.model_dump_json()
+
+    assert apple.model_dump(mode="json") == listed.model_dump(mode="json")
+    assert apple.points == listed.points
+    assert apple.latest_session == listed.latest_session
+    assert apple.sma_windows == listed.sma_windows
+    assert apple.bollinger_window == listed.bollinger_window
+    assert apple.bollinger_multiplier == listed.bollinger_multiplier
+    assert apple.range_statistics == listed.range_statistics
+    assert apple.latest_statistics == listed.latest_statistics
+    assert apple.coverage == listed.coverage
+    assert apple.traceability_verified is True
+    assert apple.limitations == listed.limitations
+
+
+def test_generic_base_carries_no_privileged_schema_asset_or_source_and_siblings_keep_their_literals() -> (  # noqa: E501
+    None
+):
+    assert "schema_version" not in MarketChart.model_fields
+    for field_name in ("asset_id", "source_id", "volume_unit"):
+        field = MarketChart.model_fields[field_name]
+        assert field.is_required()
+        assert get_origin(field.annotation) is not Literal
+
+    assert get_args(BtcMarketChart.model_fields["schema_version"].annotation) == (
+        "btc-market-chart-v1",
+    )
+    assert get_args(BtcMarketChart.model_fields["asset_id"].annotation) == ("crypto:btc-usd",)
+    assert get_args(BtcMarketChart.model_fields["source_id"].annotation) == (
+        "coinbase-exchange:btc-usd:daily-candles",
+    )
+    assert get_args(CryptoSpotDailyMarketChart.model_fields["schema_version"].annotation) == (
+        "crypto-spot-daily-market-chart-v1",
+    )
+    assert get_args(ListedMarketChart.model_fields["schema_version"].annotation) == (
+        "listed-market-chart-v1",
+    )
+    declared = {
+        get_args(model.model_fields["schema_version"].annotation)[0]
+        for model in (BtcMarketChart, CryptoSpotDailyMarketChart, ListedMarketChart)
+    }
+    assert "aapl-market-chart-v5" not in declared
+
+    chart = AaplMarketChartService(_FakeHistory(30), MarketStatisticsEngine()).query(
+        AaplMarketChartRequest(known_at=datetime(2026, 1, 1, tzinfo=UTC))
+    )
+    foreign_source = chart.model_dump(mode="json")
+    foreign_source["source_id"] = "coinbase-exchange:btc-usd:daily-candles"
+    for statistic in foreign_source["latest_statistics"]:
+        statistic["source_id"] = "coinbase-exchange:btc-usd:daily-candles"
+    with pytest.raises(ValidationError, match="requires an Alpaca IEX daily-bar source"):
+        ListedMarketChart.model_validate(foreign_source)
+
+    crypto_payload = chart.model_dump(mode="json")
+    crypto_payload["schema_version"] = "crypto-spot-daily-market-chart-v1"
+    crypto_payload["source_id"] = ALPACA_SOURCE_ID
+    for statistic in crypto_payload["latest_statistics"]:
+        statistic["source_id"] = ALPACA_SOURCE_ID
+    with pytest.raises(ValidationError, match="requires a Coinbase daily-candle source"):
+        CryptoSpotDailyMarketChart.model_validate(crypto_payload)

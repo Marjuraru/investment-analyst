@@ -19,7 +19,7 @@ from investment_analyst.application.btc_intraday_models import BtcIntradayRefres
 from investment_analyst.application.btc_refresh_models import BtcMarketRefreshRequest
 from investment_analyst.application.crypto_spot_daily_models import CryptoSpotDailyRefreshRequest
 from investment_analyst.application.listed_market_refresh_models import ListedMarketRefreshRequest
-from investment_analyst.application.operational_models import AaplDailyRunRequestSnapshot
+from investment_analyst.application.operational_models import LegacyCompleteRefreshSnapshotAdapter
 from investment_analyst.application.operational_state import AaplOperationalStateError
 from investment_analyst.application.sec_fundamental_refresh_models import (
     SecIssuerFundamentalRefreshRequest,
@@ -78,7 +78,7 @@ class ManualOperationRequest(ContractModel):
     def validate_payload_for_operation(self) -> ManualOperationRequest:
         """Reject payloads that do not match the selected public operation contract."""
         if self.operation_kind is ManualOperationKind.COMPLETE_REFRESH:
-            AaplDailyRunRequestSnapshot.model_validate(self.payload)
+            LegacyCompleteRefreshSnapshotAdapter.adapt(self.payload)
         elif self.operation_kind is ManualOperationKind.MARKET_DAILY:
             if self.payload.get("asset_id") == "crypto:btc-usd":
                 BtcMarketRefreshRequest.model_validate(self.payload)

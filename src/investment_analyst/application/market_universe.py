@@ -26,7 +26,6 @@ from investment_analyst.catalog.provider_context import (
 from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.core.models import AssetClass, DataFrequency
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
-from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID as APPLE_ASSET_ID
 
 _ALPACA_HISTORY_START = date(2016, 1, 1)
 _COINBASE_HISTORY_START = date(2015, 7, 20)
@@ -193,11 +192,7 @@ def _descriptor(
             provider=binding.provider,
             provider_identifier=configuration.symbol,
             source_id=configuration.source_id,
-            chart_schema_version=(
-                "aapl-market-chart-v5"
-                if asset.asset_id == APPLE_ASSET_ID
-                else "listed-market-chart-v1"
-            ),
+            chart_schema_version="listed-market-chart-v1",
             volume_unit="shares",
             default_market_start=max(
                 _ALPACA_HISTORY_START,

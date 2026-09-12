@@ -439,14 +439,17 @@ redondeo únicamente para presentación:
 
 Los ceros decimales innecesarios se omiten, salvo en importes monetarios. El contrato JSON desplegable
 conserva el `Decimal` completo, las unidades, fórmulas, parámetros, identidades y timestamps para
-auditoría. El endpoint local `/api/market-chart` entrega `aapl-market-chart-v5` para Apple,
-`listed-market-chart-v1` para los demás activos Alpaca y `btc-market-chart-v1` para Bitcoin:
-exige `asset_id`, `interval=auto|1d|1w|1mo`, además de
+auditoría. El endpoint local `/api/market-chart` entrega `listed-market-chart-v1` para todo activo
+Alpaca —incluida Apple, que ya no tiene un `schema_version` propio—, `btc-market-chart-v1` para
+Bitcoin y `crypto-spot-daily-market-chart-v1` para el resto de cripto spot: exige `asset_id`,
+`interval=auto|1d|1w|1mo`, además de
 `short_sma_window`, `long_sma_window` y `third_sma_window`. La interfaz exige ventanas crecientes
 entre 2 y 400; el tercer parámetro conserva un valor predeterminado compatible para solicitudes
 anteriores,
 mantiene los
 decimales como cadenas exactas y separa días fuente de puntos diarios, semanales o mensuales.
+La primera columna del CSV de mercado exportado es `schema_version` y ahora vale
+`listed-market-chart-v1` también para Apple; el resto de columnas, decimales y unidades no cambia.
 La interfaz limita la carga inicial a `period=1y`, tanto en modo automático como con intervalo
 diario. Al seleccionar una semana amplía la consulta a `period=5y`; el intervalo mensual es la
 acción explícita que solicita `period=max` y permite cargar todo el histórico local disponible.

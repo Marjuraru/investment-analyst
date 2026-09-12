@@ -1,5 +1,27 @@
 # Hoja de ruta estratégica del producto
 
+## Tres conceptos que no deben confundirse
+
+Esta hoja de ruta usa tres conceptos distintos y no intercambiables. La confusión entre ellos es la
+principal fuente de alcance falso.
+
+1. **Producto actual: asistencia descriptiva y auditable.** Todo lo integrado hoy recolecta,
+   normaliza, relaciona, calcula y explica información de inversión con evidencia trazable. Produce
+   diagnósticos y candidatos para un analista humano; no produce señales operativas, recomendaciones
+   personalizadas, instrucciones de broker ni puntuaciones agregadas. Es local-first, determinista,
+   point-in-time y funciona sin LLM ni consumo de tokens.
+2. **Meta estratégica: señales o predicciones cuantitativas validadas con alertas accionables no
+   personalizadas.** Es el objetivo de producto a largo plazo, no una capacidad presente ni una
+   autorización implícita. Cada paso de esa meta exige evidencia PIT, un objetivo/etiqueta
+   versionado, líneas base, validación temporal fuera de muestra, explicación, shadow mode y
+   rollback, más un Work Block explícito y su Capability Boundary Declaration. Una alerta accionable
+   futura será explícita, no personalizada, versionada y trazable, y seguirá siendo descriptiva para
+   el analista humano; nunca será una recomendación personalizada ni una orden.
+3. **LLM: interpretación opcional de evidencia o de predicciones ya calculadas.** Un LLM puede
+   redactar, resumir o explicar artefactos que el núcleo determinista ya produjo. Nunca es autoridad
+   predictiva, nunca calcula los números que explica y nunca es dependencia del núcleo analítico ni
+   de la ejecución normal del producto.
+
 ## Propósito y definición de producto completo
 
 UNIVERSE-COVERAGE-1 amplía el catálogo y entrega una consulta local de cobertura; no añade
@@ -393,7 +415,8 @@ un ZIP faltante por intento en `sec_institutional_history_state_v1.json`, inters
 ambos cierres, materializa ambas páginas candidatas con una única revisión Submissions compartida, ejecuta las
 métricas, pesos y eventos institucionales ya integrados sin cambiar fórmulas y reconcilia la outbox local antes
 de avanzar el cursor, bajo el job `sec:institutional:13f-history` (desfase 120 min). El ítem `SEC-CORPUS` queda
-`DONE` y `EQUITY-UNIVERSE` pasa a la única ruta `NEXT`, con `RUNTIME-EFFICIENCY-5` como siguiente bloque
+`DONE`; `EQUITY-UNIVERSE` pasa a la única ruta `NEXT` y sus bloques `RUNTIME-EFFICIENCY-5`/#223 y
+`RUNTIME-EFFICIENCY-6` ya están integrados sin cerrarla, con `RUNTIME-EFFICIENCY-7` como siguiente bloque
 registrado.
 
 Las anomalías se evaluarán localmente sobre features point-in-time de filings: tamaño relativo de
@@ -460,11 +483,14 @@ exportaciones, pero parten ocultas y no focusables mediante `hidden`; la reversi
 atributo. No se agregan endpoints, polling, mutaciones, dependencias ni deep-links públicos.
 
 La prioridad viva queda reconciliada: `LOCAL-INTERFACE` está `DONE`, `SEC-CORPUS` completó su ruta con
-`SEC-CORPUS-31` y `EQUITY-UNIVERSE` es el único `NEXT`, conservando las lecturas Caz ya integradas como base;
-`RUNTIME-EFFICIENCY-5` —retirada de la resolución implícita de activo en el camino de lectura— es el
-siguiente bloque registrado antes de ampliar cobertura; la retirada de los contratos Apple legados
-`aapl-market-chart-v5` y `AaplDailyRunRequestSnapshot` queda como bloque posterior separado.
-`BVL-MARKET` permanece `BLOCKED` y `PREDICTIVE-RESEARCH` permanece `DEFERRED`.
+`SEC-CORPUS-31` y `EQUITY-UNIVERSE` es el único `NEXT`, conservando las lecturas Caz ya integradas como base.
+`RUNTIME-EFFICIENCY-5`/#223 ya está integrado —retiró la resolución implícita de activo del camino de
+lectura— y `RUNTIME-EFFICIENCY-6` retira los contratos Apple productivos `aapl-market-chart-v5` y
+`AaplDailyRunRequestSnapshot`, dejando a Apple como un valor y no como una categoría del sistema de tipos,
+con un adaptador de compatibilidad versionado para el estado operativo ya persistido. El siguiente bloque
+registrado es `RUNTIME-EFFICIENCY-7`, que retira los contratos cripto legados y los defaults Apple de los
+resolvers del catálogo; sólo después `EQUITY-UNIVERSE` puede cerrar y `FUNDAMENTALS-COVERAGE` pasa a único
+`NEXT`. `BVL-MARKET` permanece `BLOCKED` y `PREDICTIVE-RESEARCH` permanece `DEFERRED`.
 
 ## Fase 12 — IA cualitativa opcional
 
@@ -638,7 +664,12 @@ La ruta crítica vigente se mantiene en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md). Su orden es:
 
 1. estabilizar el runtime por capacidades y observar los jobs de la watchlist persistente;
-2. eliminar el centralismo heredado de AAPL mediante contratos genéricos y adaptadores compatibles;
+2. cerrar `EQUITY-UNIVERSE` retirando los residuos de privilegio por activo que quedan tras
+   `RUNTIME-EFFICIENCY-6`: los contratos cripto legados frente a su hermano genérico ya existente y
+   los defaults Apple de los resolvers del catálogo (`RUNTIME-EFFICIENCY-7`). Ya están integrados
+   `RUNTIME-EFFICIENCY-5`/#223 —resolución explícita de activo en el camino de lectura— y
+   `RUNTIME-EFFICIENCY-6` —retirada de los contratos Apple productivos con un adaptador de
+   compatibilidad versionado que no reescribe el estado persistido—;
 3. integrar OPS-8 tras su aceptación HUMAN, conservar los fallos clasificados visibles y medir por
    job el peak global no atribuido antes de fijar un presupuesto de memoria;
 4. desacoplar lecturas de refresh largos, compactar la API operativa y medir presupuestos;
@@ -674,8 +705,9 @@ sin completarlo: `SEC-CORPUS-29` queda como la siguiente unidad registrada para 
 observaciones. `SEC-CORPUS-30` integró la operación programada y reanudable del ciclo institucional
 completo bajo el job `sec:institutional:13f-cycle` y `SEC-CORPUS-31` completa la ruta con la ventana de
 dos cierres adyacentes y su cadena derivada bajo el job `sec:institutional:13f-history`; `SEC-CORPUS`
-queda `DONE`, `EQUITY-UNIVERSE` pasa a la única ruta `NEXT` y `RUNTIME-EFFICIENCY-5` es el siguiente
-bloque registrado. `EXTENDED-SOAK /
+queda `DONE`, `EQUITY-UNIVERSE` pasa a la única ruta `NEXT`, `RUNTIME-EFFICIENCY-5`/#223 y
+`RUNTIME-EFFICIENCY-6` quedan integrados sobre esa fila sin cerrarla y `RUNTIME-EFFICIENCY-7` es el
+siguiente bloque registrado. `EXTENDED-SOAK /
 DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
 Block independiente.
 

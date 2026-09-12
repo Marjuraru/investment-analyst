@@ -1,4 +1,4 @@
-"""Tests for versioned Apple operational state contracts."""
+"""Tests for versioned operational state contracts."""
 
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from investment_analyst.analytics.consolidated_diagnostic_models import (
     ConsolidatedDiagnosticStatus,
 )
+from investment_analyst.application import operational_models
 from investment_analyst.application.aapl_bootstrap_models import (
     AaplMarketRefreshMode,
     AaplWorkspaceBootstrapRequest,
@@ -19,8 +20,10 @@ from investment_analyst.application.operational_models import (
     AaplDailyRunFailure,
     AaplDailyRunState,
     AaplDailyRunStatus,
+    OperationalRefreshRequestSnapshot,
 )
 from investment_analyst.core.models import DataFrequency
+from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID
 
 
 def _request() -> AaplWorkspaceBootstrapRequest:
@@ -103,3 +106,70 @@ def test_state_contract_rejects_incoherent_lifecycle_and_boolean_counts(tmp_path
     values["raw_records_created"] = True
     with pytest.raises(ValidationError, match="must be integers"):
         AaplDailyRunCounts(**values)
+
+
+def test_generic_operational_snapshot_carries_explicit_identity_and_replaces_the_apple_contract() -> (  # noqa: E501
+    None
+):
+    assert not hasattr(operational_models, "AaplDailyRunRequestSnapshot")
+
+    request = _request()
+    snapshot = OperationalRefreshRequestSnapshot.from_request(request)
+
+    assert snapshot.asset_id == request.asset_id == ASSET_ID
+    assert snapshot.to_json_dict()["asset_id"] == ASSET_ID
+    assert snapshot.to_request() == request
+
+    payload = dict(snapshot.to_json_dict())
+    assert OperationalRefreshRequestSnapshot.model_validate(payload) == snapshot
+
+    without_identity = dict(payload)
+    without_identity.pop("asset_id")
+    with pytest.raises(ValidationError, match="asset_id"):
+        OperationalRefreshRequestSnapshot.model_validate(without_identity)
+
+    for unusable in ("", None, 7, {"asset_id": "equity:us:aapl"}):
+        with pytest.raises(ValidationError, match="asset_id"):
+            OperationalRefreshRequestSnapshot.model_validate({**payload, "asset_id": unusable})
+
+    explicit_other = OperationalRefreshRequestSnapshot.model_validate(
+        {**payload, "asset_id": "equity:us:amd"}
+    )
+    assert explicit_other.asset_id == "equity:us:amd"
+    with pytest.raises(ValidationError, match="not enabled for a non-Apple asset"):
+        explicit_other.to_request()
+
+
+def test_apple_bootstrap_request_keeps_explicit_identity_within_its_capability(
+    tmp_path: Path,
+) -> None:
+    explicit = AaplWorkspaceBootstrapRequest(
+        asset_id=ASSET_ID,
+        market_start=date(2025, 1, 1),
+        market_end=date(2026, 7, 15),
+        fundamental_frequency=DataFrequency.QUARTERLY,
+    )
+    assert explicit.to_json_dict()["asset_id"] == ASSET_ID
+    assert explicit == AaplWorkspaceBootstrapRequest(
+        market_start=date(2025, 1, 1),
+        market_end=date(2026, 7, 15),
+        fundamental_frequency=DataFrequency.QUARTERLY,
+    )
+
+    with pytest.raises(ValidationError, match="not enabled for a non-Apple asset"):
+        AaplWorkspaceBootstrapRequest(
+            asset_id="equity:us:amd",
+            market_start=date(2025, 1, 1),
+            market_end=date(2026, 7, 15),
+            fundamental_frequency=DataFrequency.QUARTERLY,
+        )
+
+    state = AaplDailyRunState(
+        run_id=uuid4(),
+        status=AaplDailyRunStatus.RUNNING,
+        workspace_root=tmp_path,
+        request=explicit,
+        started_at=datetime(2026, 7, 16, 15, tzinfo=UTC),
+    )
+    assert state.request.asset_id == ASSET_ID
+    assert state.to_json_dict()["request"]["asset_id"] == ASSET_ID

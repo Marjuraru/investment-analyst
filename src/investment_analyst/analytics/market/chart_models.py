@@ -1,4 +1,4 @@
-"""Strict point-in-time contracts for bounded Apple and Bitcoin market charts."""
+"""Strict point-in-time contracts for bounded market charts over any asset."""
 
 import re
 from datetime import UTC, datetime
@@ -559,16 +559,19 @@ class AaplMarketChartCoverage(ContractModel):
         return self
 
 
-class AaplMarketChart(ContractModel):
-    """Versioned exact-data contract consumed by the local market chart."""
+class MarketChart(ContractModel):
+    """Shared shape of a bounded point-in-time market chart.
+
+    The base declares only the fields every chart carries as data: the explicit
+    asset and source identity travel as values, never as a privileged literal or
+    schema version owned by one asset. Each concrete contract declares its own
+    ``schema_version`` and narrows the identity it can represent.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
-    schema_version: Literal["aapl-market-chart-v5"] = "aapl-market-chart-v5"
-    asset_id: Literal["equity:us:aapl"] = "equity:us:aapl"
-    source_id: Literal["alpaca-market-data:iex:aapl:daily-bars:adjustment-all"] = (
-        "alpaca-market-data:iex:aapl:daily-bars:adjustment-all"
-    )
+    asset_id: NonEmptyStr
+    source_id: NonEmptyStr
     known_at: UTCDateTime
     period: AaplMarketChartPeriod
     interval: AaplMarketChartInterval
@@ -579,7 +582,7 @@ class AaplMarketChart(ContractModel):
     )
     price_field: Literal["close"] = "close"
     price_unit: Literal["USD"] = "USD"
-    volume_unit: Literal["shares"] = "shares"
+    volume_unit: NonEmptyStr
     sma_windows: tuple[int, int, int] = (5, 20, 50)
     bollinger_window: int = Field(default=20, ge=2, le=400)
     bollinger_multiplier: FinancialDecimal = Field(default=Decimal("2"), gt=0, le=100)
@@ -602,7 +605,7 @@ class AaplMarketChart(ContractModel):
         return value
 
     @model_validator(mode="after")
-    def validate_chart(self) -> "AaplMarketChart":
+    def validate_chart(self) -> "MarketChart":
         """Validate order, scope, boundedness, availability, and coverage."""
         if self.session_limit != _SESSION_LIMITS[self.period]:
             raise ValueError("session_limit does not match the requested period")
@@ -812,7 +815,7 @@ class AaplMarketChart(ContractModel):
         return self.model_dump(mode="json")
 
 
-class BtcMarketChart(AaplMarketChart):
+class BtcMarketChart(MarketChart):
     """Versioned BTC-USD chart contract over Coinbase Exchange daily candles."""
 
     schema_version: Literal["btc-market-chart-v1"] = "btc-market-chart-v1"
@@ -823,7 +826,7 @@ class BtcMarketChart(AaplMarketChart):
     volume_unit: Literal["BTC"] = "BTC"
 
 
-class CryptoSpotDailyMarketChart(AaplMarketChart):
+class CryptoSpotDailyMarketChart(MarketChart):
     """Explicit daily Coinbase chart for a non-legacy crypto spot asset."""
 
     schema_version: Literal["crypto-spot-daily-market-chart-v1"] = (
@@ -843,7 +846,7 @@ class CryptoSpotDailyMarketChart(AaplMarketChart):
         return self
 
 
-class ListedMarketChart(AaplMarketChart):
+class ListedMarketChart(MarketChart):
     """Versioned chart contract for a catalog-backed Alpaca listed asset."""
 
     schema_version: Literal["listed-market-chart-v1"] = "listed-market-chart-v1"
