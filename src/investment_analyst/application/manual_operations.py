@@ -15,8 +15,7 @@ from uuid import UUID, uuid4
 
 from pydantic import ConfigDict, Field, JsonValue, field_validator, model_validator
 
-from investment_analyst.application.btc_intraday_models import BtcIntradayRefreshRequest
-from investment_analyst.application.btc_refresh_models import BtcMarketRefreshRequest
+from investment_analyst.application.btc_intraday_models import CryptoSpotIntradayRefreshRequest
 from investment_analyst.application.crypto_spot_daily_models import CryptoSpotDailyRefreshRequest
 from investment_analyst.application.listed_market_refresh_models import ListedMarketRefreshRequest
 from investment_analyst.application.operational_models import LegacyCompleteRefreshSnapshotAdapter
@@ -80,14 +79,13 @@ class ManualOperationRequest(ContractModel):
         if self.operation_kind is ManualOperationKind.COMPLETE_REFRESH:
             LegacyCompleteRefreshSnapshotAdapter.adapt(self.payload)
         elif self.operation_kind is ManualOperationKind.MARKET_DAILY:
-            if self.payload.get("asset_id") == "crypto:btc-usd":
-                BtcMarketRefreshRequest.model_validate(self.payload)
-            elif self.payload.get("asset_id") == "crypto:eth-usd":
+            asset_id = self.payload.get("asset_id")
+            if isinstance(asset_id, str) and asset_id.startswith("crypto:"):
                 CryptoSpotDailyRefreshRequest.model_validate(self.payload)
             else:
                 ListedMarketRefreshRequest.model_validate(self.payload)
         elif self.operation_kind is ManualOperationKind.MARKET_INTRADAY:
-            BtcIntradayRefreshRequest.model_validate(self.payload)
+            CryptoSpotIntradayRefreshRequest.model_validate(self.payload)
         else:
             SecIssuerFundamentalRefreshRequest.model_validate(self.payload)
         return self

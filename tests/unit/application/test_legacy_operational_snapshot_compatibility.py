@@ -8,13 +8,12 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from investment_analyst.analytics.market import chart_models as chart_models_module
 from investment_analyst.analytics.market.chart_models import (
-    BtcMarketChart,
     CryptoSpotDailyMarketChart,
     ListedMarketChart,
 )
 from investment_analyst.analytics.market.chart_service import (
-    BtcMarketChartService,
     CryptoSpotDailyMarketChartService,
     ListedMarketChartService,
 )
@@ -212,14 +211,12 @@ def test_complete_refresh_is_not_enabled_for_a_non_apple_asset_and_crypto_legacy
     assert len(store.load().operations) == 1
     assert store.load().operations[0].failure is not None
 
-    assert BtcMarketChart.model_fields["schema_version"].default == "btc-market-chart-v1"
+    assert not hasattr(chart_models_module, "BtcMarketChart")
     assert (
         CryptoSpotDailyMarketChart.model_fields["schema_version"].default
         == "crypto-spot-daily-market-chart-v1"
     )
     assert ListedMarketChart.model_fields["schema_version"].default == "listed-market-chart-v1"
-    assert not issubclass(BtcMarketChart, ListedMarketChart)
     assert not issubclass(CryptoSpotDailyMarketChart, ListedMarketChart)
-    assert not issubclass(ListedMarketChart, BtcMarketChart)
-    assert BtcMarketChartService.query is not ListedMarketChartService.query
+    assert not issubclass(ListedMarketChart, CryptoSpotDailyMarketChart)
     assert CryptoSpotDailyMarketChartService.query is not ListedMarketChartService.query

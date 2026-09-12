@@ -8,7 +8,6 @@ from pydantic import ConfigDict, Field, model_validator
 from investment_analyst.application.analysis_capabilities import (
     AssetAnalysisCapabilities,
     AssetAnalysisFamily,
-    CryptoAnalyticalProfile,
     FundamentalAnalysisMode,
     analysis_capabilities_for,
 )
@@ -242,11 +241,7 @@ def _descriptor(
             provider=binding.provider,
             provider_identifier=daily.product_id,
             source_id=daily.source_id,
-            chart_schema_version=(
-                "btc-market-chart-v1"
-                if analysis.crypto_profile is CryptoAnalyticalProfile.BITCOIN
-                else "crypto-spot-daily-market-chart-v1"
-            ),
+            chart_schema_version="crypto-spot-daily-market-chart-v1",
             volume_unit=daily.base_unit,
             default_market_start=max(
                 _COINBASE_HISTORY_START,
@@ -260,7 +255,9 @@ def _descriptor(
             supports_intraday=supports_intraday,
             supports_crypto_derivatives=supports_crypto_derivatives,
             intraday_source_id=intraday.source_id if intraday is not None else None,
-            intraday_schema_version=("btc-intraday-chart-v1" if intraday is not None else None),
+            intraday_schema_version=(
+                "crypto-spot-intraday-chart-v1" if intraday is not None else None
+            ),
         )
 
     raise ValueError(

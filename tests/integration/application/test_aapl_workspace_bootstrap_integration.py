@@ -299,8 +299,10 @@ def _build_pipeline(
     *,
     execution_offset: timedelta = timedelta(),
 ):
-    sec_configuration = resolve_sec_configuration(runtime.provider_resolver)
-    alpaca_configuration = resolve_alpaca_configuration(runtime.provider_resolver)
+    sec_configuration = resolve_sec_configuration(runtime.provider_resolver, asset_id=ASSET_ID)
+    alpaca_configuration = resolve_alpaca_configuration(
+        runtime.provider_resolver, asset_id=ASSET_ID
+    )
     sec_client = SecEdgarClient(
         transport,
         SecEdgarIdentity("Investment Analyst integration@example.com"),

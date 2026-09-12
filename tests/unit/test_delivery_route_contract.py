@@ -1,5 +1,6 @@
 """Contract checks for the compact, non-authorizing delivery route."""
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -116,7 +117,7 @@ def test_route_is_compact_non_authorizing_and_reconciles_mkt3() -> None:
     assert "`VALUATION-HISTORY` | `DONE`" in release_plan
     assert "`INDICATORS-AND-OUTBOX` | `DONE`" in release_plan
     assert "`SEC-CORPUS` | `DONE`" in release_plan
-    assert "`EQUITY-UNIVERSE` | `NEXT`" in release_plan
+    assert "`EQUITY-UNIVERSE` | `DONE`" in release_plan
     assert "cuatro reglas analíticas empaquetadas" in release_plan
     assert "comparación normalizada de varios activos" not in roadmap
     assert "beta y correlación frente a un benchmark identificado" not in roadmap
@@ -279,10 +280,37 @@ def test_route_completes_local_interface_and_preserves_live_priority_state() -> 
     release_plan = (ROOT / "docs/basic_functional_release_plan.md").read_text(encoding="utf-8")
     roadmap = (ROOT / "docs/product_roadmap.md").read_text(encoding="utf-8")
     assert "LOCAL-INTERFACE" in release_plan and "DONE" in release_plan
-    assert "EQUITY-UNIVERSE" in release_plan and "NEXT" in release_plan
+    assert "`EQUITY-UNIVERSE` | `DONE`" in release_plan
+    assert "`FUNDAMENTALS-COVERAGE` | `NEXT`" in release_plan
     assert "BVL-MARKET" in release_plan and "BLOCKED" in release_plan
     assert "PREDICTIVE-RESEARCH" in release_plan and "DEFERRED" in release_plan
     assert "UI-14/#202" in release_plan + roadmap
     assert "COMPLETES" in release_plan
     assert "Cazatiburones" in roadmap
     assert "RUNTIME-EFFICIENCY" in roadmap
+
+
+_BASE_ROUTE_ASSERTION_COUNTS = {
+    "tests/unit/frontend/test_design_system.py": 1021,
+    "tests/unit/test_delivery_route_contract.py": 57,
+}
+
+
+def test_route_pinning_assertions_track_the_new_single_next_after_equity_universe_closes() -> None:
+    release_plan = (ROOT / "docs/basic_functional_release_plan.md").read_text(encoding="utf-8")
+
+    items = _route_items(release_plan)
+    _validate(items)
+    assert _route_status(items, "EQUITY-UNIVERSE") == "DONE"
+    assert _route_status(items, "FUNDAMENTALS-COVERAGE") == "NEXT"
+    next_rows = re.findall(r"\|\s*`([A-Z-]+)`\s*\|\s*`NEXT`\s*\|", release_plan)
+    assert next_rows == ["FUNDAMENTALS-COVERAGE"]
+
+
+def test_no_unrelated_assertion_in_the_two_route_pinning_test_files_is_removed_weakened_or_rewritten() -> (  # noqa: E501
+    None
+):
+    for path, base_count in _BASE_ROUTE_ASSERTION_COUNTS.items():
+        text = (ROOT / path).read_text(encoding="utf-8")
+        count = sum(1 for line in text.splitlines() if line.strip().startswith("assert "))
+        assert count >= base_count, path

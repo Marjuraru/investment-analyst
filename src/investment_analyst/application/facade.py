@@ -67,15 +67,12 @@ from investment_analyst.analytics.listed_company_report_service import ListedCom
 from investment_analyst.analytics.market.bar_schemas import get_market_bar_schema
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
-    BtcMarketChart,
-    BtcMarketChartRequest,
     CryptoSpotDailyMarketChart,
     CryptoSpotDailyMarketChartRequest,
     ListedMarketChart,
 )
 from investment_analyst.analytics.market.chart_service import (
     AaplMarketChartService,
-    BtcMarketChartService,
     CryptoSpotDailyMarketChartService,
     ListedMarketChartService,
 )
@@ -121,20 +118,12 @@ from investment_analyst.application.btc_intraday import (
     refresh_btc_intraday,
 )
 from investment_analyst.application.btc_intraday_models import (
-    BtcIntradayChart,
-    BtcIntradayChartRequest,
-    BtcIntradayRefreshRequest,
-    BtcIntradayRefreshSummary,
+    CryptoSpotIntradayChart,
+    CryptoSpotIntradayChartRequest,
+    CryptoSpotIntradayRefreshRequest,
+    CryptoSpotIntradayRefreshSummary,
 )
-from investment_analyst.application.btc_refresh import (
-    BtcMarketExecutionClock,
-    BtcMarketRefreshPipeline,
-)
-from investment_analyst.application.btc_refresh_models import (
-    BtcMarketRefreshRequest,
-    BtcMarketRefreshSummary,
-)
-from investment_analyst.application.btc_refresh_planner import BtcMarketRefreshPlanner
+from investment_analyst.application.btc_refresh import BtcMarketExecutionClock
 from investment_analyst.application.cazatiburones_declared_activity import (
     CazatiburonesDeclaredActivityApplication,
 )
@@ -585,19 +574,12 @@ class InvestmentAnalystApplication:
 
     def query_btc_market_chart(
         self,
-        request: BtcMarketChartRequest,
+        request: CryptoSpotDailyMarketChartRequest,
         *,
         location: StorageLocationRequest,
-    ) -> BtcMarketChart:
-        """Return a bounded point-in-time Coinbase BTC-USD chart without writes."""
-        with self._runtime.open_storage(
-            location,
-            access_mode=WorkspaceAccessMode.READ_ONLY,
-        ) as storage:
-            return BtcMarketChartService(
-                HistoricalMarketDataService(storage),
-                MarketStatisticsEngine(),
-            ).query(request)
+    ) -> CryptoSpotDailyMarketChart:
+        """Return one read-only Coinbase crypto spot daily chart."""
+        return self.query_crypto_spot_daily_market_chart(request, location=location)
 
     def query_crypto_spot_daily_market_chart(
         self,
@@ -611,7 +593,7 @@ class InvestmentAnalystApplication:
             asset_id=request.asset_id,
         )
         with self._runtime.open_storage(
-            location, access_mode=WorkspaceAccessMode("read_only")
+            location, access_mode=WorkspaceAccessMode.READ_ONLY
         ) as storage:
             return CryptoSpotDailyMarketChartService(
                 HistoricalMarketDataService(storage),
@@ -649,25 +631,32 @@ class InvestmentAnalystApplication:
 
     def query_btc_intraday_chart(
         self,
-        request: BtcIntradayChartRequest,
+        request: CryptoSpotIntradayChartRequest,
         *,
         location: StorageLocationRequest,
-    ) -> BtcIntradayChart:
-        """Return the latest bounded point-in-time BTC-USD intraday chart."""
+    ) -> CryptoSpotIntradayChart:
+        """Return the latest bounded point-in-time crypto spot intraday chart."""
+        configuration = resolve_coinbase_intraday_configuration(
+            self._runtime.provider_resolver,
+            asset_id=request.asset_id,
+        )
         with self._runtime.open_storage(
             location,
             access_mode=WorkspaceAccessMode.READ_ONLY,
         ) as storage:
-            return query_btc_intraday_chart(storage, request)
+            return query_btc_intraday_chart(storage, request, source_id=configuration.source_id)
 
     def refresh_btc_intraday(
         self,
-        request: BtcIntradayRefreshRequest,
+        request: CryptoSpotIntradayRefreshRequest,
         *,
         location: StorageLocationRequest,
-    ) -> BtcIntradayRefreshSummary:
+    ) -> CryptoSpotIntradayRefreshSummary:
         """Import one explicit 24-hour minute window without daily analytics."""
-        configuration = resolve_coinbase_intraday_configuration(self._runtime.provider_resolver)
+        configuration = resolve_coinbase_intraday_configuration(
+            self._runtime.provider_resolver,
+            asset_id=request.asset_id,
+        )
         with self._runtime.open_storage(
             location,
             access_mode=WorkspaceAccessMode.READ_WRITE,
@@ -684,43 +673,12 @@ class InvestmentAnalystApplication:
 
     def refresh_btc_market(
         self,
-        request: BtcMarketRefreshRequest,
+        request: CryptoSpotDailyRefreshRequest,
         *,
         location: StorageLocationRequest,
-    ) -> BtcMarketRefreshSummary:
-        """Incrementally update Coinbase BTC-USD and persist independent market analytics."""
-        configuration = resolve_coinbase_configuration(self._runtime.provider_resolver)
-        with self._runtime.open_storage(
-            location,
-            access_mode=WorkspaceAccessMode.READ_WRITE,
-        ) as storage:
-            execution_clock = BtcMarketExecutionClock()
-            history = HistoricalMarketDataService(storage)
-            return BtcMarketRefreshPipeline(
-                refresh_planner=BtcMarketRefreshPlanner(storage),
-                market_pipeline=CoinbaseHistoricalPipeline(
-                    storage,
-                    CoinbaseExchangeClient(
-                        self._transport_factory(),
-                        clock=execution_clock,
-                    ),
-                    configuration=configuration,
-                    clock=execution_clock,
-                ),
-                statistics_pipeline=MarketStatisticsPipeline(
-                    storage,
-                    history,
-                    MarketStatisticsEngine(),
-                    clock=execution_clock,
-                ),
-                diagnostic_pipeline=MarketDiagnosticPipeline(
-                    storage,
-                    MarketDiagnosticMetricSelector(storage),
-                    MarketDiagnosticEngine(),
-                    clock=execution_clock,
-                ),
-                clock=execution_clock,
-            ).run(request)
+    ) -> CryptoSpotDailyRefreshSummary:
+        """Refresh one catalog-scoped Coinbase daily source without BTC fallback."""
+        return self.refresh_crypto_spot_daily(request, location=location)
 
     def refresh_crypto_spot_daily(
         self,
@@ -734,7 +692,7 @@ class InvestmentAnalystApplication:
             asset_id=request.asset_id,
         )
         with self._runtime.open_storage(
-            location, access_mode=WorkspaceAccessMode("read_write")
+            location, access_mode=WorkspaceAccessMode.READ_WRITE
         ) as storage:
             execution_clock = BtcMarketExecutionClock()
             history = HistoricalMarketDataService(storage)
@@ -1447,8 +1405,14 @@ class InvestmentAnalystApplication:
         alpaca_credentials: AlpacaCredentials,
         sec_identity: SecEdgarIdentity,
     ) -> AaplWorkspaceBootstrapPipeline:
-        alpaca_configuration = resolve_alpaca_configuration(self._runtime.provider_resolver)
-        sec_configuration = resolve_sec_configuration(self._runtime.provider_resolver)
+        alpaca_configuration = resolve_alpaca_configuration(
+            self._runtime.provider_resolver,
+            asset_id=APPLE_ASSET_ID,
+        )
+        sec_configuration = resolve_sec_configuration(
+            self._runtime.provider_resolver,
+            asset_id=APPLE_ASSET_ID,
+        )
         transport = self._transport_factory()
         sec_client = SecEdgarClient(
             transport,

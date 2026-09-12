@@ -169,10 +169,6 @@ class AaplMarketChartRequest(ContractModel):
         return _chart_resolution(self.period, self.interval)
 
 
-class BtcMarketChartRequest(AaplMarketChartRequest):
-    """Request one bounded BTC-USD chart at an explicit point-in-time cut."""
-
-
 class CryptoSpotDailyMarketChartRequest(AaplMarketChartRequest):
     """Request one bounded chart for an explicit catalog-scoped Coinbase daily asset."""
 
@@ -815,19 +811,8 @@ class MarketChart(ContractModel):
         return self.model_dump(mode="json")
 
 
-class BtcMarketChart(MarketChart):
-    """Versioned BTC-USD chart contract over Coinbase Exchange daily candles."""
-
-    schema_version: Literal["btc-market-chart-v1"] = "btc-market-chart-v1"
-    asset_id: Literal["crypto:btc-usd"] = "crypto:btc-usd"
-    source_id: Literal["coinbase-exchange:btc-usd:daily-candles"] = (
-        "coinbase-exchange:btc-usd:daily-candles"
-    )
-    volume_unit: Literal["BTC"] = "BTC"
-
-
 class CryptoSpotDailyMarketChart(MarketChart):
-    """Explicit daily Coinbase chart for a non-legacy crypto spot asset."""
+    """Explicit daily Coinbase chart for one catalog-scoped crypto spot asset."""
 
     schema_version: Literal["crypto-spot-daily-market-chart-v1"] = (
         "crypto-spot-daily-market-chart-v1"

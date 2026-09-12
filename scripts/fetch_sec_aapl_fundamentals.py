@@ -44,7 +44,10 @@ def main() -> int:
 
     try:
         runtime = ApplicationRuntime.create_default()
-        configuration = resolve_sec_configuration(runtime.provider_resolver)
+        configuration = resolve_sec_configuration(
+            runtime.provider_resolver,
+            asset_id="equity:us:aapl",
+        )
         identity = SecEdgarIdentity(user_agent=user_agent)
         client = SecEdgarClient(
             UrlLibHttpTransport(),

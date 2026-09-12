@@ -9,16 +9,13 @@ from pydantic import ConfigDict, ValidationError, field_validator, model_validat
 from investment_analyst.application.aapl_bootstrap_models import AaplRefreshMode
 from investment_analyst.application.btc_intraday import BtcIntradayRefreshError
 from investment_analyst.application.btc_intraday_models import (
-    BtcIntradayRefreshRequest,
-    BtcIntradayRefreshSummary,
+    CryptoSpotIntradayRefreshRequest,
+    CryptoSpotIntradayRefreshSummary,
 )
 from investment_analyst.application.btc_refresh import (
-    BtcMarketKnownAtTooEarlyError,
     BtcMarketRefreshError,
 )
 from investment_analyst.application.btc_refresh_models import (
-    BtcMarketRefreshRequest,
-    BtcMarketRefreshSummary,
     BtcRefreshMode,
 )
 from investment_analyst.application.crypto_derivatives import (
@@ -29,7 +26,10 @@ from investment_analyst.application.crypto_derivatives_models import (
     CryptoDerivativesRefreshRequest,
     CryptoDerivativesRefreshSummary,
 )
-from investment_analyst.application.crypto_spot_daily import CryptoSpotDailyRefreshError
+from investment_analyst.application.crypto_spot_daily import (
+    CryptoSpotDailyKnownAtTooEarlyError,
+    CryptoSpotDailyRefreshError,
+)
 from investment_analyst.application.crypto_spot_daily_models import (
     CryptoSpotDailyRefreshRequest,
     CryptoSpotDailyRefreshSummary,
@@ -133,13 +133,6 @@ class _LocalScheduledOperations(Protocol):
         """Refresh one Alpaca market asset."""
         ...
 
-    def btc_market_refresh_request(
-        self,
-        request: BtcMarketRefreshRequest,
-    ) -> BtcMarketRefreshSummary:
-        """Refresh the Coinbase daily market source."""
-        ...
-
     def crypto_spot_daily_refresh_request(
         self,
         request: CryptoSpotDailyRefreshRequest,
@@ -156,8 +149,8 @@ class _LocalScheduledOperations(Protocol):
 
     def btc_intraday_refresh_request(
         self,
-        request: BtcIntradayRefreshRequest,
-    ) -> BtcIntradayRefreshSummary:
+        request: CryptoSpotIntradayRefreshRequest,
+    ) -> CryptoSpotIntradayRefreshSummary:
         """Refresh the bounded Coinbase minute source."""
         ...
 
@@ -587,16 +580,6 @@ def _market_job(
                     if config.refresh_mode is AaplRefreshMode.FULL
                     else BtcRefreshMode.AUTO
                 )
-                if descriptor.asset_id == "crypto:btc-usd":
-                    summary = controller.btc_market_refresh_request(
-                        BtcMarketRefreshRequest(
-                            asset_id=descriptor.asset_id,
-                            market_start=market_start,
-                            market_end=market_end,
-                            refresh_mode=mode,
-                        )
-                    )
-                    return _btc_market_execution(definition.job_id, summary)
                 summary = controller.crypto_spot_daily_refresh_request(
                     CryptoSpotDailyRefreshRequest(
                         asset_id=descriptor.asset_id,
@@ -838,7 +821,7 @@ def _intraday_job(
         requested_end = invocation.started_at.replace(second=0, microsecond=0)
         try:
             summary = controller.btc_intraday_refresh_request(
-                BtcIntradayRefreshRequest(
+                CryptoSpotIntradayRefreshRequest(
                     asset_id=descriptor.asset_id,
                     requested_end=requested_end,
                 )
@@ -874,32 +857,6 @@ def _listed_market_execution(
         summary.raw_records_reused
         + summary.observations_reused
         + summary.coverage_receipts_reused
-        + summary.metric_results_reused
-        + summary.diagnostics_reused
-    )
-    return ScheduledJobExecution(
-        job_id=job_id,
-        effective_known_at=summary.effective_known_at,
-        evidence_changed=created > 0,
-        source_ids=(summary.source_id,),
-        created_count=created,
-        reused_count=reused,
-    )
-
-
-def _btc_market_execution(
-    job_id: str,
-    summary: BtcMarketRefreshSummary,
-) -> ScheduledJobExecution:
-    created = (
-        summary.raw_records_created
-        + summary.observations_created
-        + summary.metric_results_created
-        + summary.diagnostics_created
-    )
-    reused = (
-        summary.raw_records_reused
-        + summary.observations_reused
         + summary.metric_results_reused
         + summary.diagnostics_reused
     )
@@ -1048,7 +1005,7 @@ def _non_http_failure(chain: tuple[BaseException, ...]) -> ScheduledJobFailure:
             item,
             (
                 ListedMarketKnownAtTooEarlyError,
-                BtcMarketKnownAtTooEarlyError,
+                CryptoSpotDailyKnownAtTooEarlyError,
                 SecIssuerFundamentalKnownAtTooEarlyError,
                 ValidationError,
             ),
@@ -1081,6 +1038,7 @@ def _non_http_failure(chain: tuple[BaseException, ...]) -> ScheduledJobFailure:
                 SecInstitutionalHistoryError,
                 ListedMarketRefreshError,
                 BtcMarketRefreshError,
+                CryptoSpotDailyRefreshError,
                 BtcIntradayRefreshError,
                 ValueError,
             ),

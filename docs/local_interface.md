@@ -440,8 +440,8 @@ redondeo únicamente para presentación:
 Los ceros decimales innecesarios se omiten, salvo en importes monetarios. El contrato JSON desplegable
 conserva el `Decimal` completo, las unidades, fórmulas, parámetros, identidades y timestamps para
 auditoría. El endpoint local `/api/market-chart` entrega `listed-market-chart-v1` para todo activo
-Alpaca —incluida Apple, que ya no tiene un `schema_version` propio—, `btc-market-chart-v1` para
-Bitcoin y `crypto-spot-daily-market-chart-v1` para el resto de cripto spot: exige `asset_id`,
+Alpaca —incluida Apple, que ya no tiene un `schema_version` propio— y
+`crypto-spot-daily-market-chart-v1` para todo cripto spot, incluido Bitcoin: exige `asset_id`,
 `interval=auto|1d|1w|1mo`, además de
 `short_sma_window`, `long_sma_window` y `third_sma_window`. La interfaz exige ventanas crecientes
 entre 2 y 400; el tercer parámetro conserva un valor predeterminado compatible para solicitudes
@@ -456,8 +456,9 @@ acción explícita que solicita `period=max` y permite cargar todo el histórico
 El contrato HTTP conserva los demás rangos compatibles. Esta progresión evita incluir miles de
 sesiones diarias de BTC-USD en la respuesta inicial, sin recortar la evidencia persistida ni impedir
 el acceso al historial completo.
-El endpoint separado `/api/market-intraday` entrega `btc-intraday-chart-v1` únicamente para
-`crypto:btc-usd` y exige `asset_id` explícito. Acepta los nueve intervalos fijos, consulta una ventana de 24 horas y excluye el
+El endpoint separado `/api/market-intraday` entrega `crypto-spot-intraday-chart-v1` con la identidad
+explícita solicitada y está habilitado únicamente para `crypto:btc-usd` por `market.minute_bars` del
+catálogo. Acepta los nueve intervalos fijos, consulta una ventana de 24 horas y excluye el
 minuto todavía en curso. No acepta rangos arbitrarios desde el navegador ni reutiliza el contrato
 diario. La actualización `POST /api/market-intraday-refresh` se ejecuta solo por una acción explícita,
 importa como máximo 1.440 minutos y expone conteos creados/reutilizados para auditar idempotencia.
@@ -663,7 +664,7 @@ La sección Operación cambia al flujo BTC-USD y ofrece actualización increment
 completo. El rango público es inclusivo y solo admite días UTC terminados. El plan automático detecta
 únicamente prefijos y sufijos fuera de las velas persistidas; no inventa huecos internos. Después de
 importar conserva `RawRecord`, observaciones, métricas y diagnóstico de mercado independientes y
-devuelve `btc-market-refresh-v1` con conteos, corte efectivo y trazabilidad. El scheduler crea para
+devuelve `crypto-spot-daily-market-refresh-v1` con conteos, corte efectivo y trazabilidad. El scheduler crea para
 Bitcoin trabajos separados de mercado diario e intradía; ninguno inventa fundamentales
 corporativos ni reutiliza identidades de acciones.
 

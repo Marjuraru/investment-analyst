@@ -1,5 +1,6 @@
 """Tests for the bounded read-only market-chart service."""
 
+import pathlib
 from datetime import UTC, datetime, timedelta
 from decimal import Context, Decimal, localcontext
 from typing import Literal, get_args, get_origin
@@ -8,6 +9,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from investment_analyst.analytics.market import chart_models as chart_models_module
 from investment_analyst.analytics.market.bar_models import (
     HistoricalBarQuery,
     MarketBar,
@@ -21,15 +23,14 @@ from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
     AaplMarketChartResolution,
     AaplMarketChartSma,
-    BtcMarketChart,
-    BtcMarketChartRequest,
     CryptoSpotDailyMarketChart,
+    CryptoSpotDailyMarketChartRequest,
     ListedMarketChart,
     MarketChart,
 )
 from investment_analyst.analytics.market.chart_service import (
     AaplMarketChartService,
-    BtcMarketChartService,
+    CryptoSpotDailyMarketChartService,
     ListedMarketChartService,
 )
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
@@ -37,7 +38,10 @@ from investment_analyst.analytics.market.statistics_models import (
     MarketStatisticsComputation,
     MarketStatisticsRequest,
 )
+from investment_analyst.application import btc_intraday_models as intraday_models_module
+from investment_analyst.application import crypto_spot_daily_models as daily_models_module
 from investment_analyst.core.models import DataFrequency, DataQuality
+from investment_analyst.core.models.base import ContractModel
 
 
 class _FakeHistory:
@@ -257,18 +261,23 @@ def test_daily_chart_is_bounded_exact_and_uses_resolution_sma() -> None:
     assert statistics.series_counts == [21]
 
 
-def test_btc_chart_uses_coinbase_scope_without_changing_apple_contract() -> None:
+def test_btc_market_chart_v1_is_not_emitted_and_btc_uses_crypto_spot_daily_market_chart_v1_equivalently() -> (  # noqa: E501
+    None
+):
     history = _FakeHistory(270, discarded_revisions=2)
     known_at = datetime(2026, 1, 1, tzinfo=UTC)
 
-    chart = BtcMarketChartService(history, MarketStatisticsEngine()).query(
-        BtcMarketChartRequest(
+    chart = CryptoSpotDailyMarketChartService(history, MarketStatisticsEngine()).query(
+        CryptoSpotDailyMarketChartRequest(
+            asset_id="crypto:btc-usd",
             known_at=known_at,
             period=AaplMarketChartPeriod.ONE_MONTH,
-        )
+        ),
+        source_id=COINBASE_SOURCE_ID,
+        volume_unit="BTC",
     )
 
-    assert chart.schema_version == "btc-market-chart-v1"
+    assert chart.schema_version == "crypto-spot-daily-market-chart-v1"
     assert chart.asset_id == "crypto:btc-usd"
     assert chart.source_id == COINBASE_SOURCE_ID
     assert chart.volume_unit == "BTC"
@@ -749,13 +758,6 @@ def test_generic_base_carries_no_privileged_schema_asset_or_source_and_siblings_
         assert field.is_required()
         assert get_origin(field.annotation) is not Literal
 
-    assert get_args(BtcMarketChart.model_fields["schema_version"].annotation) == (
-        "btc-market-chart-v1",
-    )
-    assert get_args(BtcMarketChart.model_fields["asset_id"].annotation) == ("crypto:btc-usd",)
-    assert get_args(BtcMarketChart.model_fields["source_id"].annotation) == (
-        "coinbase-exchange:btc-usd:daily-candles",
-    )
     assert get_args(CryptoSpotDailyMarketChart.model_fields["schema_version"].annotation) == (
         "crypto-spot-daily-market-chart-v1",
     )
@@ -764,9 +766,11 @@ def test_generic_base_carries_no_privileged_schema_asset_or_source_and_siblings_
     )
     declared = {
         get_args(model.model_fields["schema_version"].annotation)[0]
-        for model in (BtcMarketChart, CryptoSpotDailyMarketChart, ListedMarketChart)
+        for model in (CryptoSpotDailyMarketChart, ListedMarketChart)
     }
-    assert "aapl-market-chart-v5" not in declared
+    assert declared == {"crypto-spot-daily-market-chart-v1", "listed-market-chart-v1"}
+    assert not hasattr(chart_models_module, "BtcMarketChart")
+    assert not hasattr(chart_models_module, "BtcMarketChartRequest")
 
     chart = AaplMarketChartService(_FakeHistory(30), MarketStatisticsEngine()).query(
         AaplMarketChartRequest(known_at=datetime(2026, 1, 1, tzinfo=UTC))
@@ -785,3 +789,46 @@ def test_generic_base_carries_no_privileged_schema_asset_or_source_and_siblings_
         statistic["source_id"] = ALPACA_SOURCE_ID
     with pytest.raises(ValidationError, match="requires a Coinbase daily-candle source"):
         CryptoSpotDailyMarketChart.model_validate(crypto_payload)
+
+
+def test_no_market_contract_declares_asset_id_as_a_literal() -> None:
+    retired_schemas = {
+        "btc-market-chart-v1",
+        "btc-market-refresh-v1",
+        "btc-intraday-chart-v1",
+        "btc-intraday-refresh-v1",
+    }
+    observed_schemas: set[str] = set()
+    for module in (chart_models_module, intraday_models_module, daily_models_module):
+        for name, candidate in vars(module).items():
+            if not (isinstance(candidate, type) and issubclass(candidate, ContractModel)):
+                continue
+            asset_field = candidate.model_fields.get("asset_id")
+            if asset_field is not None:
+                assert get_origin(asset_field.annotation) is not Literal, (
+                    f"{module.__name__}.{name} declares a literal asset_id"
+                )
+            schema_field = candidate.model_fields.get("schema_version")
+            if schema_field is not None:
+                observed_schemas.update(get_args(schema_field.annotation))
+    assert observed_schemas
+    assert not observed_schemas & retired_schemas
+
+
+def test_no_repository_document_claims_a_retired_btc_contract() -> None:
+    repository_root = pathlib.Path(__file__).resolve().parents[4]
+    retired = (
+        "btc-market-chart-v1",
+        "btc-market-refresh-v1",
+        "btc-intraday-chart-v1",
+        "btc-intraday-refresh-v1",
+    )
+    for document in sorted((repository_root / "docs").rglob("*.md")):
+        for number, line in enumerate(document.read_text(encoding="utf-8").splitlines(), start=1):
+            for schema in retired:
+                if schema not in line:
+                    continue
+                assert "RUNTIME-EFFICIENCY-7" in line, (
+                    f"{document.relative_to(repository_root)}:{number} states a retired contract "
+                    "outside its dated retirement history"
+                )

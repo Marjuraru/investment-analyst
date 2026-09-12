@@ -134,7 +134,11 @@ pero no describen por sí solos el estado operativo actual.
   reconstrucción point-in-time y refresh por lote reanudable;
 - dependencias reproducibles, Ruff, Pytest, cobertura, auditoría y CI.
 - refresh incremental SEC de documentos primarios por issuer, con reuse de blobs/revisiones
-  verificados y scheduler local sin nueva superficie HTTP.
+  verificados y scheduler local sin nueva superficie HTTP;
+- Cazatiburones SEC implementado y operando: Forms 3/4/5, Schedules 13D/13G y Form 13F as-filed con
+  evidencia PIT, tablero local conectado por `UI-4` y evidencia viva en 19 de 20 activos; las
+  limitaciones reales se conservan (retraso real entre evento, filing y disponibilidad; `beneficial`
+  sin evidencia; ausencia distinta de cero).
 
 ### Parcial
 
@@ -151,16 +155,19 @@ pero no describen por sí solos el estado operativo actual.
 - fundamentales de red para cripto;
 - catálogo macro y workspace de historia larga;
 - corpus y búsqueda de noticias;
-- dominio Cazatiburones;
 - IA cualitativa opcional y laboratorio predictivo;
 - autenticación o exposición remota segura.
 
 ## Alcance inicial de activos
 
-El catálogo actual cubre mercado estadounidense para AAPL, AMD, Barrick (`B`), BVN, CDE, HYMC,
-INTC, MSTR, MU, MUX, NEM, PLTR, SCCO, TSM, GBTC, GLD e IBIT, además de BTC-USD y ETH-USD. La
-cobertura fundamental no es igual para todos; los dos criptoactivos solo tienen el dominio de
-mercado spot diario y BTC conserva, además, un contrato intradía separado.
+El catálogo actual cubre mercado estadounidense para AAPL, AMD, AMZN, Barrick (`B`), BVN, CAT, CDE,
+CVX, HYMC, INTC, JNJ, MSTR, MSFT, MU, MUX, NEM, NVDA, PLTR, QQQ, SCCO, SPY, TLT, TSM, GBTC, GLD e
+IBIT, además de BTC-USD, ETH-USD, ADA-USD, LINK-USD y SOL-USD. La cobertura fundamental no es igual
+para todos; los cinco criptoactivos solo tienen el dominio de mercado spot diario y BTC conserva,
+además, un contrato intradía separado, hoy generalizado como `crypto-spot-intraday-chart-v1` y
+habilitado únicamente para él por `market.minute_bars` del catálogo. Ninguna de las 12 identidades
+añadidas introduce una capacidad nueva: las cripto solo declaran mercado spot diario, los ETF no
+declaran fundamentales y los emisores corporativos ya participan del pipeline fundamental genérico.
 
 El catálogo BVL ya separa `CVERDEC1`, `BVN`, `SCCO`, `VOLCABC1`, `MINSURI1` y `POMALCC1` de los
 instrumentos estadounidenses. “FCA” permanece sin mapear. `ABX` debe tratarse como alias histórico

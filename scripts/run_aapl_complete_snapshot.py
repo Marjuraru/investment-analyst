@@ -122,7 +122,10 @@ def _build_pipeline(
     credentials: AlpacaCredentials,
     runtime: ApplicationRuntime,
 ):
-    configuration = resolve_alpaca_configuration(runtime.provider_resolver)
+    configuration = resolve_alpaca_configuration(
+        runtime.provider_resolver,
+        asset_id="equity:us:aapl",
+    )
     transport = UrlLibHttpTransport()
     client = AlpacaStockClient(transport, credentials)
     market_pipeline = AlpacaHistoricalPipeline(
