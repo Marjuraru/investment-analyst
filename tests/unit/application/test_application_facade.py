@@ -14,7 +14,7 @@ from investment_analyst.analytics.fundamentals.research_models import (
 )
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
-    BtcMarketChartRequest,
+    CryptoSpotDailyMarketChartRequest,
 )
 from investment_analyst.analytics.market.intraday_models import IntradayInterval
 from investment_analyst.analytics.valuation import (
@@ -23,7 +23,7 @@ from investment_analyst.analytics.valuation import (
     ValuationReasonCode,
     ValuationSnapshotStatus,
 )
-from investment_analyst.application.btc_intraday_models import BtcIntradayChartRequest
+from investment_analyst.application.btc_intraday_models import CryptoSpotIntradayChartRequest
 from investment_analyst.application.crypto_derivatives_models import (
     CryptoDerivativesQueryRequest,
 )
@@ -283,11 +283,14 @@ def test_btc_chart_query_is_empty_bounded_and_read_only(tmp_path: Path) -> None:
     database_before = storage_paths.database_path.read_bytes()
 
     chart = _application(tmp_path).query_btc_market_chart(
-        BtcMarketChartRequest(known_at=datetime(2026, 7, 14, 4, 41, 55, tzinfo=UTC)),
+        CryptoSpotDailyMarketChartRequest(
+            asset_id="crypto:btc-usd",
+            known_at=datetime(2026, 7, 14, 4, 41, 55, tzinfo=UTC),
+        ),
         location=StorageLocationRequest(legacy_root=root),
     )
 
-    assert chart.schema_version == "btc-market-chart-v1"
+    assert chart.schema_version == "crypto-spot-daily-market-chart-v1"
     assert chart.asset_id == "crypto:btc-usd"
     assert chart.source_id == "coinbase-exchange:btc-usd:daily-candles"
     assert chart.volume_unit == "BTC"
@@ -304,14 +307,15 @@ def test_btc_intraday_chart_query_is_empty_bounded_and_read_only(tmp_path: Path)
     database_before = storage_paths.database_path.read_bytes()
 
     chart = _application(tmp_path).query_btc_intraday_chart(
-        BtcIntradayChartRequest(
+        CryptoSpotIntradayChartRequest(
+            asset_id="crypto:btc-usd",
             known_at=datetime(2026, 7, 14, 4, 41, 55, tzinfo=UTC),
             interval=IntradayInterval.MINUTE_5,
         ),
         location=StorageLocationRequest(legacy_root=root),
     )
 
-    assert chart.schema_version == "btc-intraday-chart-v1"
+    assert chart.schema_version == "crypto-spot-intraday-chart-v1"
     assert chart.asset_id == "crypto:btc-usd"
     assert chart.source_id == "coinbase-exchange:btc-usd:minute-1-candles"
     assert chart.interval is IntradayInterval.MINUTE_5

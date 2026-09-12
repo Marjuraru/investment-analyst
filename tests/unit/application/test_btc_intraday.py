@@ -1,4 +1,4 @@
-"""Tests for bounded BTC-USD intraday application contracts."""
+"""Tests for bounded crypto spot intraday application contracts."""
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -18,10 +18,10 @@ from investment_analyst.application.btc_intraday import (
     refresh_btc_intraday,
 )
 from investment_analyst.application.btc_intraday_models import (
-    BtcIntradayChart,
-    BtcIntradayChartRequest,
-    BtcIntradayRefreshRequest,
-    BtcIntradayRefreshSummary,
+    CryptoSpotIntradayChart,
+    CryptoSpotIntradayChartRequest,
+    CryptoSpotIntradayRefreshRequest,
+    CryptoSpotIntradayRefreshSummary,
 )
 from investment_analyst.core.models import DataQuality
 from investment_analyst.providers.crypto.coinbase_pipeline import (
@@ -45,13 +45,15 @@ def _import_summary(
     requested_end: datetime,
     raw_records_created: int,
     raw_records_reused: int,
+    asset_id: str = "crypto:btc-usd",
 ) -> CoinbaseImportSummary:
     requested_start = requested_end - timedelta(hours=24)
     candle = requested_start
     missing = tuple(requested_start + timedelta(minutes=index) for index in range(1, 1_440))
+    product = asset_id.removeprefix("crypto:")
     return CoinbaseImportSummary(
-        asset_id="crypto:btc-usd",
-        source_id="coinbase-exchange:btc-usd:minute-1-candles",
+        asset_id=asset_id,
+        source_id=f"coinbase-exchange:{product}:minute-1-candles",
         requested_start=requested_start,
         requested_end=requested_end,
         retrieved_at=requested_end + timedelta(seconds=15),
@@ -69,11 +71,13 @@ def _import_summary(
 
 
 def test_chart_request_uses_latest_24_complete_minutes() -> None:
-    request = BtcIntradayChartRequest(
+    request = CryptoSpotIntradayChartRequest(
+        asset_id="crypto:btc-usd",
         known_at=datetime(2026, 7, 25, 15, 42, 59, 123456, tzinfo=UTC),
         interval=IntradayInterval.MINUTE_15,
     )
 
+    assert request.asset_id == "crypto:btc-usd"
     assert request.query_end == datetime(2026, 7, 25, 15, 42, tzinfo=UTC)
     assert request.query_start == datetime(2026, 7, 24, 15, 42, tzinfo=UTC)
     assert request.lookback_hours == 24
@@ -107,7 +111,9 @@ def test_chart_accepts_a_fixed_bucket_that_overlaps_the_window_edge() -> None:
         volume_input_observation_ids=volume_ids,
     )
 
-    chart = BtcIntradayChart(
+    chart = CryptoSpotIntradayChart(
+        asset_id="crypto:btc-usd",
+        source_id="coinbase-exchange:btc-usd:minute-1-candles",
         known_at=start + timedelta(days=1, minutes=5),
         start=start,
         end=start + timedelta(days=1),
@@ -118,6 +124,7 @@ def test_chart_accepts_a_fixed_bucket_that_overlaps_the_window_edge() -> None:
         incomplete_interval_count=1,
     )
 
+    assert chart.schema_version == "crypto-spot-intraday-chart-v1"
     assert chart.bars == (bar,)
     assert chart.incomplete_interval_count == 1
 
@@ -131,7 +138,10 @@ def test_refresh_summary_exposes_idempotent_reuse_counts() -> None:
             raw_records_reused=1,
         )
     )
-    request = BtcIntradayRefreshRequest(requested_end=requested_end)
+    request = CryptoSpotIntradayRefreshRequest(
+        asset_id="crypto:btc-usd",
+        requested_end=requested_end,
+    )
 
     first = refresh_btc_intraday(
         cast(CoinbaseIntradayPipeline, pipeline),
@@ -145,7 +155,9 @@ def test_refresh_summary_exposes_idempotent_reuse_counts() -> None:
     )
 
     assert first == second
-    assert first.schema_version == "btc-intraday-refresh-v1"
+    assert first.schema_version == "crypto-spot-intraday-refresh-v1"
+    assert first.asset_id == "crypto:btc-usd"
+    assert first.source_id == "coinbase-exchange:btc-usd:minute-1-candles"
     assert first.raw_records_created == 0
     assert first.raw_records_reused == 1
     assert first.observations_created == 0
@@ -170,11 +182,15 @@ def test_refresh_rejects_future_or_misaligned_ranges() -> None:
     with pytest.raises(BtcIntradayRefreshError, match="must not be in the future"):
         refresh_btc_intraday(
             cast(CoinbaseIntradayPipeline, pipeline),
-            BtcIntradayRefreshRequest(requested_end=requested_end),
+            CryptoSpotIntradayRefreshRequest(
+                asset_id="crypto:btc-usd",
+                requested_end=requested_end,
+            ),
             now=requested_end - timedelta(minutes=1),
         )
     with pytest.raises(ValidationError, match="whole UTC minute"):
-        BtcIntradayRefreshRequest(
+        CryptoSpotIntradayRefreshRequest(
+            asset_id="crypto:btc-usd",
             requested_end=requested_end + timedelta(seconds=1),
         )
 
@@ -190,4 +206,49 @@ def test_refresh_summary_rejects_unaccounted_source_minutes() -> None:
     invalid = replace(summary, missing_intervals=())
 
     with pytest.raises(ValidationError, match="coverage does not match"):
-        BtcIntradayRefreshSummary.from_import(invalid)
+        CryptoSpotIntradayRefreshSummary.from_import(invalid)
+
+
+def test_refresh_rejects_an_import_summary_for_a_different_asset() -> None:
+    requested_end = datetime(2026, 7, 25, 16, 0, tzinfo=UTC)
+    pipeline = _FakePipeline(
+        _import_summary(
+            requested_end=requested_end,
+            raw_records_created=1,
+            raw_records_reused=0,
+            asset_id="crypto:eth-usd",
+        )
+    )
+
+    with pytest.raises(BtcIntradayRefreshError, match="returned a different asset"):
+        refresh_btc_intraday(
+            cast(CoinbaseIntradayPipeline, pipeline),
+            CryptoSpotIntradayRefreshRequest(
+                asset_id="crypto:btc-usd",
+                requested_end=requested_end,
+            ),
+            now=requested_end,
+        )
+
+
+def test_crypto_spot_intraday_contracts_replace_btc_intraday_and_carry_explicit_asset_identity() -> (  # noqa: E501
+    None
+):
+    with pytest.raises(ValidationError, match="asset_id"):
+        CryptoSpotIntradayChartRequest(  # type: ignore[call-arg]
+            known_at=datetime(2026, 7, 25, 15, 42, tzinfo=UTC),
+            interval=IntradayInterval.MINUTE_15,
+        )
+    with pytest.raises(ValidationError, match="minute-candle source"):
+        CryptoSpotIntradayChart(
+            asset_id="crypto:btc-usd",
+            source_id="alpaca-market-data:iex:btc:daily-bars:adjustment-all",
+            known_at=datetime(2026, 7, 25, 15, 42, tzinfo=UTC),
+            start=datetime(2026, 7, 24, 15, 42, tzinfo=UTC),
+            end=datetime(2026, 7, 25, 15, 42, tzinfo=UTC),
+            interval=IntradayInterval.MINUTE_15,
+            bars=(),
+            source_bar_count=0,
+            complete_interval_count=0,
+            incomplete_interval_count=0,
+        )

@@ -1594,8 +1594,8 @@ def _check_route_declares_local_interface_planned_and_sec_corpus_next(doc_text: 
     assert re.search(r"\|\s*`SEC-CORPUS`\s*\|\s*`DONE`\s*\|", doc_text), (
         "SEC-CORPUS completes its route in this block"
     )
-    assert re.search(r"\|\s*`EQUITY-UNIVERSE`\s*\|\s*`NEXT`\s*\|", doc_text), (
-        "EQUITY-UNIVERSE must be the sole NEXT candidate"
+    assert re.search(r"\|\s*`FUNDAMENTALS-COVERAGE`\s*\|\s*`NEXT`\s*\|", doc_text), (
+        "FUNDAMENTALS-COVERAGE must be the sole NEXT candidate"
     )
 
 
@@ -1920,8 +1920,8 @@ def _check_route_registers_canvas_convergence_and_reassigns_cazatiburones(doc_te
     assert re.search(r"\|\s*`LOCAL-INTERFACE`\s*\|\s*`DONE`\s*\|", doc_text), (
         "LOCAL-INTERFACE must remain DONE"
     )
-    assert re.search(r"\|\s*`EQUITY-UNIVERSE`\s*\|\s*`NEXT`\s*\|", doc_text), (
-        "EQUITY-UNIVERSE must be the sole NEXT candidate"
+    assert re.search(r"\|\s*`FUNDAMENTALS-COVERAGE`\s*\|\s*`NEXT`\s*\|", doc_text), (
+        "FUNDAMENTALS-COVERAGE must be the sole NEXT candidate"
     )
     normalized = re.sub(r"\s+", " ", doc_text).lower()
     assert "cazatiburones" in normalized and "ui-4" in normalized, (
@@ -2168,20 +2168,22 @@ def test_route_registers_the_connected_cazatiburones_board() -> None:
     _check_route_registers_the_connected_cazatiburones_board(doc_path.read_text(encoding="utf-8"))
 
 
-def _check_route_keeps_sec_corpus_as_the_single_next(doc_text: str) -> None:
+def _check_route_keeps_fundamentals_coverage_as_the_single_next(doc_text: str) -> None:
     next_rows = re.findall(r"\|\s*`([A-Z-]+)`\s*\|\s*`NEXT`\s*\|", doc_text)
-    assert next_rows == ["EQUITY-UNIVERSE"], (
-        f"expected exactly one NEXT row (EQUITY-UNIVERSE), found {next_rows}"
+    assert next_rows == ["FUNDAMENTALS-COVERAGE"], (
+        f"expected exactly one NEXT row (FUNDAMENTALS-COVERAGE), found {next_rows}"
     )
 
 
-def test_route_keeps_sec_corpus_as_the_single_next() -> None:
+def test_route_keeps_fundamentals_coverage_as_the_single_next() -> None:
     doc_path = (
         Path(str(files("investment_analyst"))).parent.parent
         / "docs"
         / "basic_functional_release_plan.md"
     )
-    _check_route_keeps_sec_corpus_as_the_single_next(doc_path.read_text(encoding="utf-8"))
+    _check_route_keeps_fundamentals_coverage_as_the_single_next(
+        doc_path.read_text(encoding="utf-8")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4567,7 +4569,7 @@ def _check_ui8_composition_is_documented(design_doc: str, local_doc: str, plan_d
     assert "`UI-13`" in local_doc
     assert "`UI-13`" in plan_doc
     assert "`SEC-CORPUS` completó su ruta" in plan_doc
-    assert "`EQUITY-UNIVERSE` queda como la única ruta `NEXT`" in plan_doc
+    assert "`FUNDAMENTALS-COVERAGE` queda como la única ruta `NEXT`" in plan_doc
 
 
 def test_ui8_composition_and_route_are_documented() -> None:
@@ -4988,7 +4990,7 @@ def test_docs_state_technical_review_bvl_and_clean_ui_boundaries() -> None:
         assert "master-detail" in document
     assert "Anexo2TextodcRentaFija.pdf" in local_doc
     assert "`SEC-CORPUS` completó su ruta" in plan_doc
-    assert "`EQUITY-UNIVERSE` queda como la única ruta `NEXT`" in plan_doc
+    assert "`FUNDAMENTALS-COVERAGE` queda como la única ruta `NEXT`" in plan_doc
     assert "UI-11" in plan_doc
 
 
@@ -5113,7 +5115,8 @@ def test_canonical_roadmap_reflects_live_sec_caz_ui12_runtime_efficiency_and_pri
     roadmap = (repository_root / "docs" / "product_roadmap.md").read_text(encoding="utf-8")
     assert "LOCAL-INTERFACE" in release_plan and "DONE" in release_plan
     assert "SEC-CORPUS" in release_plan and "DONE" in release_plan
-    assert "EQUITY-UNIVERSE" in release_plan and "NEXT" in release_plan
+    assert "`EQUITY-UNIVERSE` | `DONE`" in release_plan
+    assert "`FUNDAMENTALS-COVERAGE` | `NEXT`" in release_plan
     assert "BVL-MARKET" in release_plan and "BLOCKED" in release_plan
     assert "PREDICTIVE-RESEARCH" in release_plan and "DEFERRED" in release_plan
     assert "UI-14/#202" in release_plan + roadmap

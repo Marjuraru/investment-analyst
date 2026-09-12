@@ -64,10 +64,12 @@ def _resolver() -> ProviderAssetContextResolver:
 
 
 def test_factories_preserve_current_provider_and_persisted_identities() -> None:
-    alpaca = resolve_alpaca_configuration(_resolver())
-    coinbase = resolve_coinbase_configuration(_resolver())
-    coinbase_intraday = resolve_coinbase_intraday_configuration(_resolver())
-    sec = resolve_sec_configuration(_resolver())
+    alpaca = resolve_alpaca_configuration(_resolver(), asset_id=APPLE_ASSET_ID)
+    coinbase = resolve_coinbase_configuration(_resolver(), asset_id=COINBASE_ASSET_ID)
+    coinbase_intraday = resolve_coinbase_intraday_configuration(
+        _resolver(), asset_id=COINBASE_ASSET_ID
+    )
+    sec = resolve_sec_configuration(_resolver(), asset_id=APPLE_ASSET_ID)
 
     assert alpaca == AlpacaAssetConfiguration(
         asset_id=APPLE_ASSET_ID,
@@ -118,7 +120,7 @@ def test_factories_preserve_current_provider_and_persisted_identities() -> None:
         exchange="NASDAQ",
     )
     assert len(sec.cik) == 10
-    assert resolve_sec_cusip_binding(_resolver()) == "037833100"
+    assert resolve_sec_cusip_binding(_resolver(), asset_id=APPLE_ASSET_ID) == "037833100"
 
 
 def test_alpaca_configuration_scales_from_catalog_without_changing_apple_identity() -> None:
@@ -169,7 +171,7 @@ def test_coinbase_altcoin_history_start_is_explicit_and_btc_is_unchanged() -> No
     resolver = _resolver()
 
     solana = resolve_coinbase_configuration(resolver, asset_id="crypto:sol-usd")
-    bitcoin = resolve_coinbase_configuration(resolver)
+    bitcoin = resolve_coinbase_configuration(resolver, asset_id=COINBASE_ASSET_ID)
 
     assert solana.history_start == date(2025, 1, 1)
     assert solana.source_id == "coinbase-exchange:sol-usd:daily-candles"
@@ -219,7 +221,7 @@ def test_alpaca_configuration_validates_optional_history_start() -> None:
 
 
 def test_configurations_are_strict_frozen_and_preserve_identifier_text() -> None:
-    configuration = resolve_sec_configuration(_resolver())
+    configuration = resolve_sec_configuration(_resolver(), asset_id=APPLE_ASSET_ID)
 
     with pytest.raises(ValidationError):
         configuration.cik = "1"

@@ -1,5 +1,6 @@
-"""Strict application contracts for bounded BTC-USD intraday workflows."""
+"""Strict application contracts for bounded crypto spot intraday workflows."""
 
+import re
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -10,28 +11,28 @@ from investment_analyst.analytics.market.intraday_models import (
     IntradayAggregationSeries,
     IntradayInterval,
 )
-from investment_analyst.core.models.base import ContractModel, UTCDateTime
-from investment_analyst.providers.crypto.coinbase_intraday_normalizer import (
-    SOURCE_ID as INTRADAY_SOURCE_ID,
-)
-from investment_analyst.providers.crypto.coinbase_normalizer import ASSET_ID
+from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 from investment_analyst.providers.crypto.coinbase_pipeline import CoinbaseImportSummary
 
 BTC_INTRADAY_LOOKBACK_HOURS = 24
 MAX_BTC_INTRADAY_CHART_BARS = 1_440
+_COINBASE_MINUTE_SOURCE_PATTERN = re.compile(
+    r"^coinbase-exchange:[a-z0-9]+-[a-z0-9]+:minute-1-candles$"
+)
 
 
-class BtcIntradayChartRequest(ContractModel):
-    """Request the latest bounded local intraday window at one explicit cut."""
+class CryptoSpotIntradayChartRequest(ContractModel):
+    """Request the latest bounded local intraday window for one explicit asset."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    asset_id: NonEmptyStr
     known_at: UTCDateTime
     interval: IntradayInterval
     lookback_hours: Literal[24] = BTC_INTRADAY_LOOKBACK_HOURS
 
     @model_validator(mode="after")
-    def validate_query_horizon(self) -> "BtcIntradayChartRequest":
+    def validate_query_horizon(self) -> "CryptoSpotIntradayChartRequest":
         """Require enough post-epoch history for the fixed lookback."""
         if self.query_end.timestamp() < self.lookback_hours * 3_600:
             raise ValueError("known_at is too early for the intraday lookback")
@@ -48,14 +49,14 @@ class BtcIntradayChartRequest(ContractModel):
         return self.query_end - timedelta(hours=self.lookback_hours)
 
 
-class BtcIntradayChart(ContractModel):
-    """Versioned web projection of locally aggregated one-minute evidence."""
+class CryptoSpotIntradayChart(ContractModel):
+    """Versioned web projection of locally aggregated crypto spot minute evidence."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["btc-intraday-chart-v1"] = "btc-intraday-chart-v1"
-    asset_id: Literal["crypto:btc-usd"] = ASSET_ID
-    source_id: Literal["coinbase-exchange:btc-usd:minute-1-candles"] = INTRADAY_SOURCE_ID
+    schema_version: Literal["crypto-spot-intraday-chart-v1"] = "crypto-spot-intraday-chart-v1"
+    asset_id: NonEmptyStr
+    source_id: NonEmptyStr
     known_at: UTCDateTime
     start: UTCDateTime
     end: UTCDateTime
@@ -67,14 +68,26 @@ class BtcIntradayChart(ContractModel):
     incomplete_interval_count: int = Field(ge=0, le=MAX_BTC_INTRADAY_CHART_BARS)
     traceability_verified: Literal[True] = True
 
+    @field_validator("source_id")
+    @classmethod
+    def validate_coinbase_minute_source(cls, value: str) -> str:
+        """Accept only the Coinbase one-minute candle source family."""
+        if not _COINBASE_MINUTE_SOURCE_PATTERN.fullmatch(value):
+            raise ValueError("intraday chart requires a Coinbase minute-candle source")
+        return value
+
     @classmethod
     def from_series(
         cls,
-        request: BtcIntradayChartRequest,
+        request: CryptoSpotIntradayChartRequest,
         series: IntradayAggregationSeries,
-    ) -> "BtcIntradayChart":
+    ) -> "CryptoSpotIntradayChart":
         """Build the stable projection without dropping aggregation evidence."""
+        if series.request.query.asset_id != request.asset_id:
+            raise ValueError("intraday aggregation series does not match the requested asset")
         return cls(
+            asset_id=request.asset_id,
+            source_id=series.request.query.source_id,
             known_at=request.known_at,
             start=request.query_start,
             end=request.query_end,
@@ -86,7 +99,7 @@ class BtcIntradayChart(ContractModel):
         )
 
     @model_validator(mode="after")
-    def validate_projection(self) -> "BtcIntradayChart":
+    def validate_projection(self) -> "CryptoSpotIntradayChart":
         """Keep range, counts, scope, and evidence internally aligned."""
         if self.end - self.start != timedelta(hours=self.lookback_hours):
             raise ValueError("intraday chart range does not match its lookback")
@@ -113,12 +126,12 @@ class BtcIntradayChart(ContractModel):
         return self.model_dump(mode="json")
 
 
-class BtcIntradayRefreshRequest(ContractModel):
+class CryptoSpotIntradayRefreshRequest(ContractModel):
     """Request one explicit, bounded refresh of recent one-minute evidence."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    asset_id: Literal["crypto:btc-usd"] = ASSET_ID
+    asset_id: NonEmptyStr
     hours: Literal[24] = BTC_INTRADAY_LOOKBACK_HOURS
     requested_end: UTCDateTime | None = None
 
@@ -131,14 +144,14 @@ class BtcIntradayRefreshRequest(ContractModel):
         return value
 
 
-class BtcIntradayRefreshSummary(ContractModel):
+class CryptoSpotIntradayRefreshSummary(ContractModel):
     """Compact, versioned outcome of one append-only intraday import."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["btc-intraday-refresh-v1"] = "btc-intraday-refresh-v1"
-    asset_id: Literal["crypto:btc-usd"] = ASSET_ID
-    source_id: Literal["coinbase-exchange:btc-usd:minute-1-candles"] = INTRADAY_SOURCE_ID
+    schema_version: Literal["crypto-spot-intraday-refresh-v1"] = "crypto-spot-intraday-refresh-v1"
+    asset_id: NonEmptyStr
+    source_id: NonEmptyStr
     requested_start: UTCDateTime
     requested_end: UTCDateTime
     retrieved_at: UTCDateTime
@@ -153,13 +166,21 @@ class BtcIntradayRefreshSummary(ContractModel):
     latest_candle: UTCDateTime | None = None
     traceability_verified: Literal[True] = True
 
+    @field_validator("source_id")
     @classmethod
-    def from_import(cls, summary: CoinbaseImportSummary) -> "BtcIntradayRefreshSummary":
+    def validate_coinbase_minute_source(cls, value: str) -> str:
+        """Accept only the Coinbase one-minute candle source family."""
+        if not _COINBASE_MINUTE_SOURCE_PATTERN.fullmatch(value):
+            raise ValueError("intraday refresh requires a Coinbase minute-candle source")
+        return value
+
+    @classmethod
+    def from_import(cls, summary: CoinbaseImportSummary) -> "CryptoSpotIntradayRefreshSummary":
         """Convert the provider result into the stable application contract."""
         return cls(**summary.to_json_dict())
 
     @model_validator(mode="after")
-    def validate_refresh(self) -> "BtcIntradayRefreshSummary":
+    def validate_refresh(self) -> "CryptoSpotIntradayRefreshSummary":
         """Verify fixed duration, persistence counts, and returned coverage."""
         if self.requested_end - self.requested_start != timedelta(hours=24):
             raise ValueError("intraday refresh must cover exactly 24 hours")

@@ -64,8 +64,8 @@ def _resolver() -> ProviderAssetContextResolver:
 
 
 def test_catalog_resolved_market_paths_preserve_urls_and_deterministic_ids(tmp_path) -> None:
-    alpaca_configuration = resolve_alpaca_configuration(_resolver())
-    coinbase_configuration = resolve_coinbase_configuration(_resolver())
+    alpaca_configuration = resolve_alpaca_configuration(_resolver(), asset_id="equity:us:aapl")
+    coinbase_configuration = resolve_coinbase_configuration(_resolver(), asset_id="crypto:btc-usd")
     alpaca_transport = FixtureTransport("alpaca")
     coinbase_transport = FixtureTransport("coinbase")
     alpaca_client = AlpacaStockClient(
@@ -118,7 +118,7 @@ def test_catalog_resolved_market_paths_preserve_urls_and_deterministic_ids(tmp_p
 
 
 def test_catalog_resolved_sec_path_preserves_urls_headers_and_idempotence(tmp_path) -> None:
-    configuration = resolve_sec_configuration(_resolver())
+    configuration = resolve_sec_configuration(_resolver(), asset_id="equity:us:aapl")
     identity = SecEdgarIdentity("Investment Analyst integration@example.com")
 
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
@@ -170,8 +170,8 @@ def test_catalog_resolved_sec_path_preserves_urls_headers_and_idempotence(tmp_pa
 
 
 def test_catalog_and_legacy_paths_produce_identical_persisted_identities(tmp_path) -> None:
-    alpaca_configuration = resolve_alpaca_configuration(_resolver())
-    coinbase_configuration = resolve_coinbase_configuration(_resolver())
+    alpaca_configuration = resolve_alpaca_configuration(_resolver(), asset_id="equity:us:aapl")
+    coinbase_configuration = resolve_coinbase_configuration(_resolver(), asset_id="crypto:btc-usd")
 
     def import_market(root: Path, *, configured: bool) -> tuple[set[object], set[object]]:
         alpaca_transport = FixtureTransport("alpaca")

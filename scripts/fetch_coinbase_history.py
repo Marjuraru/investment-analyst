@@ -56,7 +56,10 @@ def main() -> int:
 
     try:
         runtime = ApplicationRuntime.create_default()
-        configuration = resolve_coinbase_configuration(runtime.provider_resolver)
+        configuration = resolve_coinbase_configuration(
+            runtime.provider_resolver,
+            asset_id="crypto:btc-usd",
+        )
         client = CoinbaseExchangeClient(UrlLibHttpTransport())
         with runtime.open_storage(
             storage_location_from_namespace(arguments),

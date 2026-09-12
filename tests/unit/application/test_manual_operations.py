@@ -37,7 +37,7 @@ def _request(*, market_end: str = "2026-07-02") -> ManualOperationRequest:
 
 def _result() -> ManualOperationResult:
     return ManualOperationResult(
-        result_schema_version="btc-market-refresh-v1",
+        result_schema_version="crypto-spot-daily-market-refresh-v1",
         effective_known_at=datetime(2026, 7, 3, tzinfo=UTC),
         created_count=2,
         reused_count=0,

@@ -1,4 +1,4 @@
-"""Bounded application services for local BTC-USD intraday data."""
+"""Bounded application services for local crypto spot intraday data."""
 
 from datetime import UTC, datetime, timedelta
 
@@ -13,14 +13,12 @@ from investment_analyst.analytics.market.intraday_service import (
     IntradayAggregationService,
 )
 from investment_analyst.application.btc_intraday_models import (
-    BtcIntradayChart,
-    BtcIntradayChartRequest,
-    BtcIntradayRefreshRequest,
-    BtcIntradayRefreshSummary,
+    CryptoSpotIntradayChart,
+    CryptoSpotIntradayChartRequest,
+    CryptoSpotIntradayRefreshRequest,
+    CryptoSpotIntradayRefreshSummary,
 )
 from investment_analyst.providers.crypto.coinbase_exchange import CoinbaseExchangeError
-from investment_analyst.providers.crypto.coinbase_intraday_normalizer import SOURCE_ID
-from investment_analyst.providers.crypto.coinbase_normalizer import ASSET_ID
 from investment_analyst.providers.crypto.coinbase_pipeline import CoinbaseIntradayPipeline
 from investment_analyst.storage import LocalStorage, StorageError
 
@@ -35,12 +33,14 @@ class BtcIntradayRefreshError(RuntimeError):
 
 def query_btc_intraday_chart(
     storage: LocalStorage,
-    request: BtcIntradayChartRequest,
-) -> BtcIntradayChart:
+    request: CryptoSpotIntradayChartRequest,
+    *,
+    source_id: str,
+) -> CryptoSpotIntradayChart:
     """Reconstruct and aggregate a fixed 24-hour point-in-time window."""
     query = HistoricalBarQuery(
-        asset_id=ASSET_ID,
-        source_id=SOURCE_ID,
+        asset_id=request.asset_id,
+        source_id=source_id,
         start=request.query_start,
         end=request.query_end,
         known_at=request.known_at,
@@ -52,19 +52,19 @@ def query_btc_intraday_chart(
     try:
         minute_series = HistoricalMarketDataService(storage).query(query)
         series = IntradayAggregationService().aggregate(minute_series, aggregation_request)
-        return BtcIntradayChart.from_series(request, series)
+        return CryptoSpotIntradayChart.from_series(request, series)
     except (IntradayAggregationError, MarketHistoryError, StorageError, ValueError) as error:
         raise BtcIntradayChartQueryError(
-            "stored BTC-USD minute evidence could not form the requested chart"
+            "stored crypto spot minute evidence could not form the requested chart"
         ) from error
 
 
 def refresh_btc_intraday(
     pipeline: CoinbaseIntradayPipeline,
-    request: BtcIntradayRefreshRequest,
+    request: CryptoSpotIntradayRefreshRequest,
     *,
     now: datetime | None = None,
-) -> BtcIntradayRefreshSummary:
+) -> CryptoSpotIntradayRefreshSummary:
     """Import exactly the latest requested 24 whole UTC hours append-only."""
     current = (now or datetime.now(UTC)).astimezone(UTC).replace(second=0, microsecond=0)
     end = request.requested_end or current
@@ -72,6 +72,9 @@ def refresh_btc_intraday(
         raise BtcIntradayRefreshError("requested intraday end must not be in the future")
     start = end - timedelta(hours=request.hours)
     try:
-        return BtcIntradayRefreshSummary.from_import(pipeline.run(start, end))
+        summary = CryptoSpotIntradayRefreshSummary.from_import(pipeline.run(start, end))
     except (CoinbaseExchangeError, StorageError, ValueError) as error:
         raise BtcIntradayRefreshError("Coinbase intraday refresh did not complete") from error
+    if summary.asset_id != request.asset_id:
+        raise BtcIntradayRefreshError("Coinbase intraday refresh returned a different asset")
+    return summary

@@ -79,11 +79,11 @@ incompletos, las barras solicitadas y `traceability_verified: true`.
 La interfaz de BTC expone los nueve intervalos intradía sobre una ventana fija de las últimas 24
 horas. La consulta `GET /api/market-intraday` es de solo lectura, acepta `known_at` e `interval`,
 excluye el minuto fuente aún en curso y devuelve como máximo 1.440 velas. La respuesta versionada
-`btc-intraday-chart-v1` conserva completitud, calidad, conteos y toda la evidencia de agregación.
+`crypto-spot-intraday-chart-v1` conserva completitud, calidad, conteos y toda la evidencia de agregación.
 
 Cuando está seleccionado un intervalo intradía, la acción manual de actualización ejecuta primero
 el flujo diario existente y luego `POST /api/market-intraday-refresh`. Esta segunda operación importa
-exactamente 24 horas de minutos completos y devuelve `btc-intraday-refresh-v1` con registros y
+exactamente 24 horas de minutos completos y devuelve `crypto-spot-intraday-refresh-v1` con registros y
 observaciones creados o reutilizados. Si falla, no revierte el progreso diario ya persistido.
 
 La selección de intervalo no contacta al proveedor ni escribe en el workspace. Los datos intradía

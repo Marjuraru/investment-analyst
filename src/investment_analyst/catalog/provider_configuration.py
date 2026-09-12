@@ -17,10 +17,6 @@ from investment_analyst.providers.crypto.coinbase_exchange import (
     DAILY_GRANULARITY_SECONDS,
     MINUTE_GRANULARITY_SECONDS,
 )
-from investment_analyst.providers.crypto.coinbase_normalizer import (
-    ASSET_ID as COINBASE_ASSET_ID,
-)
-from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID as APPLE_ASSET_ID
 from investment_analyst.providers.market.alpaca_normalizer import alpaca_source_id
 from investment_analyst.providers.market.alpaca_stock import ADJUSTMENT, FEED
 from investment_analyst.providers.peru.asset_config import SmvBvlAssetConfiguration
@@ -29,7 +25,7 @@ from investment_analyst.providers.peru.asset_config import SmvBvlAssetConfigurat
 def resolve_alpaca_configuration(
     resolver: ProviderAssetContextResolver,
     *,
-    asset_id: str = APPLE_ASSET_ID,
+    asset_id: str,
 ) -> AlpacaAssetConfiguration:
     """Resolve one catalog-backed Alpaca IEX configuration."""
     context = resolver.resolve(
@@ -66,7 +62,7 @@ def resolve_alpaca_configuration(
 def resolve_coinbase_configuration(
     resolver: ProviderAssetContextResolver,
     *,
-    asset_id: str = COINBASE_ASSET_ID,
+    asset_id: str,
 ) -> CoinbaseAssetConfiguration:
     """Resolve the current Coinbase daily-candle configuration once."""
     context = resolver.resolve(
@@ -107,7 +103,7 @@ def resolve_coinbase_configuration(
 def resolve_coinbase_intraday_configuration(
     resolver: ProviderAssetContextResolver,
     *,
-    asset_id: str = COINBASE_ASSET_ID,
+    asset_id: str,
 ) -> CoinbaseAssetConfiguration:
     """Resolve the separate Coinbase one-minute candle configuration."""
     context = resolver.resolve(
@@ -174,7 +170,7 @@ def resolve_deribit_configuration(
 def resolve_sec_configuration(
     resolver: ProviderAssetContextResolver,
     *,
-    asset_id: str = APPLE_ASSET_ID,
+    asset_id: str,
 ) -> SecAssetConfiguration:
     """Resolve one catalog-backed SEC corporate issuer configuration."""
     context = resolver.resolve(
@@ -202,9 +198,7 @@ def resolve_sec_configuration(
     )
 
 
-def resolve_sec_cusip_binding(
-    resolver: ProviderAssetContextResolver, *, asset_id: str = APPLE_ASSET_ID
-) -> str:
+def resolve_sec_cusip_binding(resolver: ProviderAssetContextResolver, *, asset_id: str) -> str:
     context = resolver.resolve(
         asset_id,
         provider="sec",

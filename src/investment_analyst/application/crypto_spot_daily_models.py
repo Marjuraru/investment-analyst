@@ -50,7 +50,7 @@ class CryptoSpotDailyRefreshRequest(ContractModel):
 
 
 class CryptoSpotDailyRefreshSummary(ContractModel):
-    """Traceable market-only outcome for one non-BTC Coinbase daily source."""
+    """Traceable market-only outcome for one catalog-scoped Coinbase daily source."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 

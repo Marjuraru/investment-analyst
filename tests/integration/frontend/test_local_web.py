@@ -77,8 +77,6 @@ from investment_analyst.analytics.listed_company_report_models import (
 )
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
-    BtcMarketChart,
-    BtcMarketChartRequest,
     CryptoSpotDailyMarketChart,
     CryptoSpotDailyMarketChartRequest,
     ListedMarketChart,
@@ -106,14 +104,10 @@ from investment_analyst.application.asset_preferences import (
     cli_seed_asset_preferences,
 )
 from investment_analyst.application.btc_intraday_models import (
-    BtcIntradayChart,
-    BtcIntradayChartRequest,
-    BtcIntradayRefreshRequest,
-    BtcIntradayRefreshSummary,
-)
-from investment_analyst.application.btc_refresh_models import (
-    BtcMarketRefreshRequest,
-    BtcMarketRefreshSummary,
+    CryptoSpotIntradayChart,
+    CryptoSpotIntradayChartRequest,
+    CryptoSpotIntradayRefreshRequest,
+    CryptoSpotIntradayRefreshSummary,
 )
 from investment_analyst.application.cazatiburones_universe_activity_models import (
     CazatiburonesUniverseActivityAsset,
@@ -361,16 +355,12 @@ class _FakeApplication:
         self.locations: list[StorageLocationRequest] = []
         self.listed_company_report_requests: list[ListedCompanyReportRequest] = []
         self.listed_company_report_locations: list[StorageLocationRequest] = []
-        self.btc_chart_requests: list[BtcMarketChartRequest] = []
-        self.btc_chart_locations: list[StorageLocationRequest] = []
         self.crypto_chart_requests: list[CryptoSpotDailyMarketChartRequest] = []
         self.crypto_chart_locations: list[StorageLocationRequest] = []
-        self.btc_intraday_chart_requests: list[BtcIntradayChartRequest] = []
+        self.btc_intraday_chart_requests: list[CryptoSpotIntradayChartRequest] = []
         self.btc_intraday_chart_locations: list[StorageLocationRequest] = []
-        self.btc_intraday_refresh_requests: list[BtcIntradayRefreshRequest] = []
+        self.btc_intraday_refresh_requests: list[CryptoSpotIntradayRefreshRequest] = []
         self.btc_intraday_refresh_locations: list[StorageLocationRequest] = []
-        self.btc_refresh_requests: list[BtcMarketRefreshRequest] = []
-        self.btc_refresh_locations: list[StorageLocationRequest] = []
         self.crypto_refresh_requests: list[CryptoSpotDailyRefreshRequest] = []
         self.crypto_refresh_locations: list[StorageLocationRequest] = []
         self.listed_chart_requests: list[tuple[str, AaplMarketChartRequest]] = []
@@ -552,27 +542,6 @@ class _FakeApplication:
             ),
         )
 
-    def query_btc_market_chart(
-        self,
-        request: BtcMarketChartRequest,
-        *,
-        location: StorageLocationRequest,
-    ) -> BtcMarketChart:
-        self.btc_chart_requests.append(request)
-        self.btc_chart_locations.append(location)
-        return cast(
-            BtcMarketChart,
-            _JsonResult(
-                {
-                    "schema_version": "btc-market-chart-v1",
-                    "asset_id": "crypto:btc-usd",
-                    "period": request.period.value,
-                    "interval": request.interval.value,
-                    "points": [],
-                }
-            ),
-        )
-
     def query_crypto_spot_daily_market_chart(
         self,
         request: CryptoSpotDailyMarketChartRequest,
@@ -673,29 +642,6 @@ class _FakeApplication:
             ),
         )
 
-    def refresh_btc_market(
-        self,
-        request: BtcMarketRefreshRequest,
-        *,
-        location: StorageLocationRequest,
-    ) -> BtcMarketRefreshSummary:
-        self.btc_refresh_requests.append(request)
-        self.btc_refresh_locations.append(location)
-        return cast(
-            BtcMarketRefreshSummary,
-            _JsonResult(
-                {
-                    "schema_version": "btc-market-refresh-v1",
-                    "asset_id": "crypto:btc-usd",
-                    "effective_known_at": "2026-07-16T15:47:00+00:00",
-                    "refresh_plan": {"mode": "incremental"},
-                    "candles_received": 1,
-                    "metric_results_created": 7,
-                    "traceability_verified": True,
-                }
-            ),
-        )
-
     def refresh_crypto_spot_daily(
         self,
         request: CryptoSpotDailyRefreshRequest,
@@ -767,18 +713,18 @@ class _FakeApplication:
 
     def query_btc_intraday_chart(
         self,
-        request: BtcIntradayChartRequest,
+        request: CryptoSpotIntradayChartRequest,
         *,
         location: StorageLocationRequest,
-    ) -> BtcIntradayChart:
+    ) -> CryptoSpotIntradayChart:
         self.btc_intraday_chart_requests.append(request)
         self.btc_intraday_chart_locations.append(location)
         return cast(
-            BtcIntradayChart,
+            CryptoSpotIntradayChart,
             _JsonResult(
                 {
-                    "schema_version": "btc-intraday-chart-v1",
-                    "asset_id": "crypto:btc-usd",
+                    "schema_version": "crypto-spot-intraday-chart-v1",
+                    "asset_id": request.asset_id,
                     "source_id": "coinbase-exchange:btc-usd:minute-1-candles",
                     "known_at": request.known_at.isoformat(),
                     "start": request.query_start.isoformat(),
@@ -796,18 +742,18 @@ class _FakeApplication:
 
     def refresh_btc_intraday(
         self,
-        request: BtcIntradayRefreshRequest,
+        request: CryptoSpotIntradayRefreshRequest,
         *,
         location: StorageLocationRequest,
-    ) -> BtcIntradayRefreshSummary:
+    ) -> CryptoSpotIntradayRefreshSummary:
         self.btc_intraday_refresh_requests.append(request)
         self.btc_intraday_refresh_locations.append(location)
         return cast(
-            BtcIntradayRefreshSummary,
+            CryptoSpotIntradayRefreshSummary,
             _JsonResult(
                 {
-                    "schema_version": "btc-intraday-refresh-v1",
-                    "asset_id": "crypto:btc-usd",
+                    "schema_version": "crypto-spot-intraday-refresh-v1",
+                    "asset_id": request.asset_id,
                     "source_id": "coinbase-exchange:btc-usd:minute-1-candles",
                     "requested_start": "2026-07-15T15:46:00+00:00",
                     "requested_end": "2026-07-16T15:46:00+00:00",
@@ -2379,21 +2325,23 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     assert application.listed_chart_requests[1][1].session_limit == 20_000
     assert len(application.listed_chart_requests) == 3
     assert btc_chart_status == 200
-    assert btc_chart["schema_version"] == "btc-market-chart-v1"
+    assert btc_chart["schema_version"] == "crypto-spot-daily-market-chart-v1"
     assert btc_chart["asset_id"] == "crypto:btc-usd"
     assert cached_btc_chart_status == 200
     assert cached_btc_chart == btc_chart
-    assert len(application.btc_chart_requests) == 1
-    assert application.btc_chart_requests[0].interval.value == "1d"
-    assert application.btc_chart_requests[0].session_limit == 20_000
-    assert application.btc_chart_locations[0].workspace == workspace.resolve()
+    assert len(application.crypto_chart_requests) == 1
+    assert application.crypto_chart_requests[0].asset_id == "crypto:btc-usd"
+    assert application.crypto_chart_requests[0].interval.value == "1d"
+    assert application.crypto_chart_requests[0].session_limit == 20_000
+    assert application.crypto_chart_locations[0].workspace == workspace.resolve()
     assert listed_chart_status == 200
     assert listed_chart["schema_version"] == "listed-market-chart-v1"
     assert listed_chart["asset_id"] == "equity:us:bvn"
     assert application.listed_chart_requests[2][0] == "equity:us:bvn"
     assert application.listed_chart_locations[2].workspace == workspace.resolve()
     assert btc_intraday_status == 200
-    assert btc_intraday["schema_version"] == "btc-intraday-chart-v1"
+    assert btc_intraday["schema_version"] == "crypto-spot-intraday-chart-v1"
+    assert btc_intraday["asset_id"] == "crypto:btc-usd"
     assert btc_intraday["interval"] == "5m"
     assert cached_btc_intraday_status == 200
     assert cached_btc_intraday == btc_intraday
@@ -2404,24 +2352,28 @@ def test_local_api_validates_and_delegates_run_report_and_overview(tmp_path: Pat
     )
     assert application.btc_intraday_chart_locations[0].workspace == workspace.resolve()
     assert btc_refresh_status == 200
-    assert btc_refresh["schema_version"] == "btc-market-refresh-v1"
+    assert btc_refresh["schema_version"] == "crypto-spot-daily-market-refresh-v1"
+    assert btc_refresh["asset_id"] == "crypto:btc-usd"
     assert btc_refresh["traceability_verified"] is True
-    assert application.btc_refresh_requests == [
-        BtcMarketRefreshRequest(
+    assert application.crypto_refresh_requests == [
+        CryptoSpotDailyRefreshRequest(
+            asset_id="crypto:btc-usd",
             market_start=date(2015, 7, 20),
             market_end=date(2026, 7, 15),
         )
     ]
-    assert application.btc_refresh_locations[0].workspace == workspace.resolve()
+    assert application.crypto_refresh_locations[0].workspace == workspace.resolve()
     assert listed_refresh_status == 200
     assert listed_refresh["schema_version"] == "listed-market-refresh-v1"
     assert application.listed_refresh_requests[0].asset_id == "equity:us:bvn"
     assert application.listed_refresh_locations[0].workspace == workspace.resolve()
     assert btc_intraday_refresh_status == 200
-    assert btc_intraday_refresh["schema_version"] == "btc-intraday-refresh-v1"
+    assert btc_intraday_refresh["schema_version"] == "crypto-spot-intraday-refresh-v1"
+    assert btc_intraday_refresh["asset_id"] == "crypto:btc-usd"
     assert btc_intraday_refresh["traceability_verified"] is True
     assert application.btc_intraday_refresh_requests == [
-        BtcIntradayRefreshRequest(
+        CryptoSpotIntradayRefreshRequest(
+            asset_id="crypto:btc-usd",
             requested_end=datetime(2026, 7, 16, 15, 46, tzinfo=UTC),
         )
     ]
@@ -2643,7 +2595,7 @@ def test_asset_preferences_get_put_conflict_and_invalid_payload_are_provider_fre
     state = store.load()
     assert state is not None
     assert len(state.revisions) == 1
-    assert application.btc_refresh_requests == []
+    assert application.crypto_refresh_requests == []
     assert application.listed_refresh_requests == []
     assert application.fundamental_refresh_requests == []
 
@@ -3334,8 +3286,12 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
         sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
     )
     chart_request = AaplMarketChartRequest(known_at=datetime(2026, 7, 16, tzinfo=UTC))
-    btc_chart_request = BtcMarketChartRequest(known_at=datetime(2026, 7, 16, tzinfo=UTC))
-    btc_intraday_chart_request = BtcIntradayChartRequest(
+    btc_chart_request = CryptoSpotDailyMarketChartRequest(
+        asset_id="crypto:btc-usd",
+        known_at=datetime(2026, 7, 16, tzinfo=UTC),
+    )
+    btc_intraday_chart_request = CryptoSpotIntradayChartRequest(
+        asset_id="crypto:btc-usd",
         known_at=datetime(2026, 7, 16, tzinfo=UTC),
         interval=IntradayInterval.MINUTE_5,
     )
@@ -3361,8 +3317,8 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
 
     controller.listed_market_chart_request("equity:us:aapl", chart_request)
     controller.listed_market_chart_request("equity:us:aapl", chart_request)
-    controller.btc_market_chart_request(btc_chart_request)
-    controller.btc_market_chart_request(btc_chart_request)
+    controller.crypto_spot_daily_market_chart_request(btc_chart_request)
+    controller.crypto_spot_daily_market_chart_request(btc_chart_request)
     controller.btc_intraday_chart_request(btc_intraday_chart_request)
     controller.btc_intraday_chart_request(btc_intraday_chart_request)
     controller.fundamental_trend_request(trend_request, asset_id="equity:us:aapl")
@@ -3375,7 +3331,7 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
     controller.fundamental_analysis_request(research_request, asset_id="equity:us:aapl")
     controller.run_payload(run_payload)
     controller.listed_market_chart_request("equity:us:aapl", chart_request)
-    controller.btc_market_chart_request(btc_chart_request)
+    controller.crypto_spot_daily_market_chart_request(btc_chart_request)
     controller.btc_intraday_chart_request(btc_intraday_chart_request)
     controller.fundamental_trend_request(trend_request, asset_id="equity:us:aapl")
     controller.fundamental_research_request(research_request, asset_id="equity:us:aapl")
@@ -3383,7 +3339,7 @@ def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: P
     controller.fundamental_analysis_request(research_request, asset_id="equity:us:aapl")
 
     assert len(application.listed_chart_requests) == 2
-    assert len(application.btc_chart_requests) == 1
+    assert len(application.crypto_chart_requests) == 1
     assert len(application.btc_intraday_chart_requests) == 1
     assert len(application.trend_requests) == 2
     assert len(application.research_requests) == 2
@@ -3744,15 +3700,15 @@ def test_compact_overview_does_not_wait_for_blocked_provider_writer(tmp_path: Pa
     release = threading.Event()
 
     class _BlockedApplication(_FakeApplication):
-        def refresh_btc_market(
+        def refresh_crypto_spot_daily(
             self,
-            request: BtcMarketRefreshRequest,
+            request: CryptoSpotDailyRefreshRequest,
             *,
             location: StorageLocationRequest,
-        ) -> BtcMarketRefreshSummary:
+        ) -> CryptoSpotDailyRefreshSummary:
             entered.set()
             assert release.wait(timeout=2)
-            return super().refresh_btc_market(request, location=location)
+            return super().refresh_crypto_spot_daily(request, location=location)
 
     controller = AaplLocalController(
         _FakeRunner(),
@@ -3761,12 +3717,13 @@ def test_compact_overview_does_not_wait_for_blocked_provider_writer(tmp_path: Pa
         alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
         sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
     )
-    request = BtcMarketRefreshRequest(
+    request = CryptoSpotDailyRefreshRequest(
+        asset_id="crypto:btc-usd",
         market_start=date(2026, 7, 1),
         market_end=date(2026, 7, 2),
         requested_known_at=datetime(2026, 7, 3, tzinfo=UTC),
     )
-    worker = threading.Thread(target=controller.btc_market_refresh_request, args=(request,))
+    worker = threading.Thread(target=controller.crypto_spot_daily_refresh_request, args=(request,))
     worker.start()
     assert entered.wait(timeout=2)
 
@@ -5019,8 +4976,12 @@ def test_endpoint_serves_from_the_bounded_cache_and_invalidates_with_coverage(
 
     assert first_status == second_status == 200
     assert len(application.universe_activity_requests) == 1
-    controller.btc_market_refresh_request(
-        BtcMarketRefreshRequest(market_start=date(2026, 7, 1), market_end=date(2026, 7, 15))
+    controller.crypto_spot_daily_refresh_request(
+        CryptoSpotDailyRefreshRequest(
+            asset_id="crypto:btc-usd",
+            market_start=date(2026, 7, 1),
+            market_end=date(2026, 7, 15),
+        )
     )
     controller.cazatiburones_universe_activity_request(request)
     assert len(application.universe_activity_requests) == 2
@@ -5330,8 +5291,12 @@ def test_universe_coverage_cache_is_invalidated_after_any_domain_refresh(tmp_pat
         fundamental_end=date(2026, 7, 15),
     )
     refreshers = (
-        lambda: controller.btc_market_refresh_request(
-            BtcMarketRefreshRequest(market_start=date(2026, 6, 1), market_end=date(2026, 6, 30))
+        lambda: controller.crypto_spot_daily_refresh_request(
+            CryptoSpotDailyRefreshRequest(
+                asset_id="crypto:btc-usd",
+                market_start=date(2026, 6, 1),
+                market_end=date(2026, 6, 30),
+            )
         ),
         lambda: controller.crypto_spot_daily_refresh_request(
             CryptoSpotDailyRefreshRequest(
@@ -5373,8 +5338,7 @@ def test_universe_coverage_cache_is_invalidated_after_any_domain_refresh(tmp_pat
         expected_backend_calls += 1
         assert len(application.universe_coverage_requests) == expected_backend_calls
 
-    assert len(application.btc_refresh_requests) == 1
-    assert len(application.crypto_refresh_requests) == 1
+    assert len(application.crypto_refresh_requests) == 2
     assert len(application.listed_refresh_requests) == 1
     assert len(application.fundamental_refresh_requests) == 1
     assert len(application.bvl_refresh_requests) == 1
@@ -5453,7 +5417,6 @@ def test_probe_universe_coverage_read_write_path_reachability_fails(tmp_path: Pa
     assert len(application.fundamental_refresh_requests) == 0
     assert len(application.listed_refresh_requests) == 0
     assert len(application.crypto_refresh_requests) == 0
-    assert len(application.btc_refresh_requests) == 0
 
     with _server(web) as (_, root):
         status, payload, _ = _json_request(
@@ -5524,9 +5487,48 @@ def test_chart_read_path_covers_aapl_amd_tsm_spy_and_btc_without_a_per_asset_bra
 
     assert descriptors["equity:us:aapl"].chart_schema_version == "listed-market-chart-v1"
     assert [asset_id for asset_id, _ in application.listed_chart_requests] == list(listed_asset_ids)
-    assert application.crypto_chart_requests == []
-    assert len(application.btc_chart_requests) == 1
+    assert len(application.crypto_chart_requests) == 1
+    assert application.crypto_chart_requests[0].asset_id == "crypto:btc-usd"
+    assert not hasattr(AaplLocalController, "btc_market_chart_request")
     assert not hasattr(AaplLocalController, "market_chart_request")
+
+
+def test_intraday_read_path_forwards_the_validated_asset_id_instead_of_discarding_it(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    payload = web.market_intraday(
+        {
+            "asset_id": ("crypto:btc-usd",),
+            "known_at": ("2026-07-16T15:46:00Z",),
+            "interval": ("5m",),
+        }
+    )
+
+    assert application.btc_intraday_chart_requests[0].asset_id == "crypto:btc-usd"
+    assert payload["asset_id"] == "crypto:btc-usd"
+    assert payload["schema_version"] == "crypto-spot-intraday-chart-v1"
+
+
+def test_coinbase_scheduler_has_no_per_asset_branch_and_routes_btc_through_the_generic_path() -> (
+    None
+):
+    source = (
+        Path(local_web_module.__file__).resolve().parent / "local_schedule_jobs.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'descriptor.asset_id == "crypto:btc-usd"' not in source
+    assert "btc_market_refresh_request" not in source
+    assert "crypto_spot_daily_refresh_request" in source
 
 
 def test_static_ui_is_byte_identical_and_descriptor_and_response_schema_versions_still_agree(
