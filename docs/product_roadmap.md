@@ -709,8 +709,12 @@ sin completarlo: `SEC-CORPUS-29` queda como la siguiente unidad registrada para 
 observaciones. `SEC-CORPUS-30` integró la operación programada y reanudable del ciclo institucional
 completo bajo el job `sec:institutional:13f-cycle` y `SEC-CORPUS-31` completa la ruta con la ventana de
 dos cierres adyacentes y su cadena derivada bajo el job `sec:institutional:13f-history`; `SEC-CORPUS`
-y `EQUITY-UNIVERSE` quedan `DONE` (`EQUITY-UNIVERSE` completado por `RUNTIME-EFFICIENCY-7` en `a56f851`),
-y `FUNDAMENTALS-COVERAGE` pasa a ser la única ruta `NEXT`, avanzada por `FUNDAMENTALS-COVERAGE-1`/#228.
+y `EQUITY-UNIVERSE` quedan `DONE` (`EQUITY-UNIVERSE` completado por `RUNTIME-EFFICIENCY-7` en `a56f851`).
+`FUNDAMENTALS-COVERAGE-1`/#228 (#229) integró la base de acciones ordinarias en `b0c41cd` y la fila pasa a
+`PLANNED` por priorización humana explícita del 2026-09-12 ante la criticidad del almacenamiento físico.
+La fase vigente es `DATA-CHASSIS` (`DATA-CHASSIS-0`/#230, `ADVANCES`), que queda como la única ruta `NEXT`:
+durante toda la fase no hay desarrollo de UI salvo un indicador operativo estrictamente necesario, no se
+amplían activos del catálogo y no se re-descarga evidencia histórica.
 `EXTENDED-SOAK /
 DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
 Block independiente.
