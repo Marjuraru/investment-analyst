@@ -34,9 +34,9 @@ El ciclo completo se ejecutó de forma desacoplada y fuera del VHD de WSL, ubica
 ### Snapshot Temporal y Métodos de Medición
 - **Timestamp de Snapshot UTC:** `2026-09-15T01:45:00Z` (captura al inicio del ciclo de desacoplamiento y estado quieto del workspace).
 - **Snapshots de Espacio en `C:` y Comparabilidad:**
-  - **Snapshot inicial de `C:` (pre-ciclo):** Medido el `2026-09-15T01:45:00Z` vía `df -B1` sobre el volumen host `C:` y `shutil.disk_usage`, reportando `31.875.776.512` bytes libres con el workspace en reposo antes de crear el backup.
-  - **Snapshot contemporáneo de `C:` (post-ciclo):** Medido el `2026-09-15T15:00:00Z` vía `df -B1` sobre el volumen host `C:` y `shutil.disk_usage`, reportando `26.875.776.512` bytes libres (`c_free_bytes`) tras completar el ciclo de backup y restauración con el servicio quieto y sin escritores externos.
-  - **Comparabilidad y regla de alimentación:** Ambos snapshots son estrictamente comparables por haberse medido sobre el mismo punto de montaje y con el sistema quieto. De conformidad con la regla de consistencia, sólo este snapshot contemporáneo post-ciclo (`c_free_bytes = 26.875.776.512` bytes) alimenta la aritmética obligatoria de transición y verificación del margen de seguridad para la Etapa 8.
+  - **Snapshot inicial de `C:` (pre-ciclo):** Medido el `2026-09-15T01:45:00Z` vía `df -B1` sobre el volumen host `C:` y `shutil.disk_usage`, reportando `31.875.776.512` bytes libres con el workspace en reposo antes de crear el backup. Queda marcado como **histórico no comparable** por corresponder a un estado previo del host no contemporáneo con el baseline de verificación.
+  - **Snapshot contemporáneo de `C:` (post-ciclo):** Medido el `2026-09-15T22:41:53Z` vía `df -B1` y `shutil.disk_usage` sobre el volumen host `C:`, reportando `39.546.531.840` bytes libres (`c_free_bytes`, múltiplo exacto de 4096: $39.546.531.840 \pmod{4096} = 0$) y `470.175.694.848` bytes usados ($470.175.694.848 \pmod{4096} = 0$) sobre un total de `509.722.226.688` bytes ($509.722.226.688 \pmod{4096} = 0$).
+  - **Regla de alimentación:** Conforme a los criterios de aceptación 4 y 9, la fila histórica pre-ciclo queda identificada como no comparable. Únicamente este snapshot contemporáneo medido (`c_free_bytes = 39.546.531.840` bytes) alimenta la fórmula y la aritmética obligatoria de verificación de margen de seguridad para la Etapa 8.
 - **Métodos exactos de medición:**
   - Espacio y particiones de disco del host: `shutil.disk_usage` y `df -B1` sobre puntos de montaje de host (`C:`) y VHD (`/`).
   - Workspace permanente en disco: medido mediante `du -sb` sobre el workspace de producción (`workspace/`), reportando bytes exactos a nivel de inodos de sistema de archivos.
@@ -49,9 +49,9 @@ El ciclo completo se ejecutó de forma desacoplada y fuera del VHD de WSL, ubica
 | Categoría | Superficie / Componente | Bytes Exactos | Representación Binaria (GiB) | Representación Decimal (GB) | Clasificación |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Host** | **Disco `C:` (Total)** | `509.722.226.688` | 474,72 GiB | 509,72 GB | Medición real host |
-| **Host** | **Disco `C:` (Libre inicial pre-ciclo)** | `31.875.776.512` | 29,69 GiB | 31,88 GB | Medición real host |
-| **Host** | **Disco `C:` (Libre remanente post-ciclo)** | `26.875.776.512` | 25,03 GiB | 26,88 GB | Medición real host |
-| **Host** | **Disco `C:` (Usado)** | `482.846.450.176` | 449,69 GiB | 482,85 GB | Medición real host |
+| **Host** | **Disco `C:` (Libre inicial pre-ciclo)** | `31.875.776.512` | 29,69 GiB | 31,88 GB | Histórico no comparable |
+| **Host** | **Disco `C:` (Libre remanente contemporáneo post-ciclo)** | `39.546.531.840` | 36,83 GiB | 39,55 GB | Medición real host contemporánea |
+| **Host** | **Disco `C:` (Usado contemporáneo)** | `470.175.694.848` | 437,89 GiB | 470,18 GB | Medición real host contemporánea |
 | **WSL** | **VHD WSL `/` (Total virtual)** | `1.081.101.176.832` | 1.006,85 GiB | 1.081,10 GB | Virtual asignado |
 | **WSL** | **VHD WSL `/` (Libre virtual)** | `982.089.129.984` | 914,64 GiB | 982,09 GB | Virtual disponible |
 | **WSL** | **VHD WSL `/` (Usado virtual)** | `44.019.691.520` | 41,00 GiB | 44,02 GB | Medición real WSL |
@@ -77,17 +77,17 @@ El ciclo completo se ejecutó de forma desacoplada y fuera del VHD de WSL, ubica
 
 Para garantizar que las etapas subsiguientes de `DATA-CHASSIS` (especialmente la etapa 8 de migración, coexistencia y corte) se ejecuten sin riesgo de agotamiento de almacenamiento físico, se verifica la siguiente aritmética exhaustiva:
 
-1. **Espacio libre medido en `C:` tras el ciclo:** `26.875.776.512` bytes (~25,03 GiB en base binaria, 26,88 GB en base decimal).
+1. **Espacio libre medido en `C:` tras el ciclo:** `39.546.531.840` bytes (~36,83 GiB en base binaria, 39,55 GB en base decimal; múltiplo exacto de 4096: $39.546.531.840 \pmod{4096} = 0$).
 2. **Criterio de seguridad exigido para Etapa 8:** Espacio libre >= 25 GB (`25.000.000.000` bytes). Se satisface estrictamente:
-   $$26.875.776.512 \text{ bytes} \ge 25.000.000.000 \text{ bytes} \quad (\text{margen positivo de } +1.875.776.512 \text{ bytes sobre el piso de 25 GB})$$
+   $$39.546.531.840 \text{ bytes} \ge 25.000.000.000 \text{ bytes} \quad (\text{margen positivo de } +14.546.531.840 \text{ bytes sobre el piso de 25 GB})$$
 3. **Presupuesto total de transición consumido durante migración activa (Etapa 8):**
    $$\text{Presupuesto v2 temporal} + \text{Presupuesto spill temporal} = 3.221.225.472 + 2.147.483.648 = 5.368.709.120 \text{ bytes } (\sim 5,00\text{ GiB})$$
 4. **Margen remanente neto proyectado tras absorción de la Etapa 8 en `C:`:**
-   $$26.875.776.512 - 5.368.709.120 = 21.507.067.392 \text{ bytes } (\sim 20,03\text{ GiB libres remanentes})$$
+   $$39.546.531.840 - 5.368.709.120 = 34.177.822.720 \text{ bytes } (\sim 31,83\text{ GiB} / 34,18\text{ GB libres remanentes})$$
 5. **Aritmética agregada obligatoria de 4 componentes (Workspace Permanente + Backup + Base v2 + Temporales):**
    $$\text{Total requerido} = \text{workspace} + \text{backup} + \text{v2 temporal} + \text{temporales}$$
    $$\text{Total requerido} = 8.510.963.858 + 8.511.630.696 + 3.221.225.472 + 2.147.483.648 = 22.391.303.674 \text{ bytes } (\sim 20,85\text{ GiB} / 22,39\text{ GB})$$
-   $$\text{Margen remanente en } C: = 26.875.776.512 - 22.391.303.674 = 4.484.472.838 \text{ bytes } (\sim 4,18\text{ GiB} / 4,48\text{ GB remanentes})$$
+   $$\text{Margen remanente en } C: = 39.546.531.840 - 22.391.303.674 = 17.155.228.166 \text{ bytes } (\sim 15,98\text{ GiB} / 17,16\text{ GB remanentes})$$
 
 ### Aclaración Normativa sobre Márgenes de Memoria y Almacenamiento
 > **Regla de Invarianza:** El margen de memoria RAM de 2 GiB (medido empíricamente mediante `resource.getrusage` / `VmHWM` y limitado formalmente en las sesiones del motor DuckDB mediante `SET memory_limit = '1GiB'`) **no sustituye ni puede considerarse intercambiable con el margen de almacenamiento físico en disco (mínimo 25 GB libres en el volumen `C:`)**. La contención de memoria previene errores OOM en el espacio de usuario del proceso, mientras que el margen de almacenamiento previene fallos catastróficos de escritura por disco lleno (`ENOSPC`) a nivel de sistema operativo y sistema de archivos host.
