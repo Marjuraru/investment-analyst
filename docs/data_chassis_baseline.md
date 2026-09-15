@@ -34,10 +34,10 @@ El ciclo completo se ejecutó de forma desacoplada y fuera del VHD de WSL:
 ### Snapshot Temporal y Métodos de Medición
 - **Timestamp de Snapshot UTC:** `2026-09-15T01:45:00Z` (captura al inicio del ciclo de desacoplamiento y estado quieto del workspace).
 - **Métodos exactos de medición:**
-  - Espacio y particiones de disco del host: `shutil.disk_usage` y `df -B1` sobre puntos de montaje `/mnt/c` y `/`.
-  - Workspace permanente en disco: `du -sb /home/marjuraru/projects/investment-analyst/workspace` (reporte directo a nivel de inodos de sistema de archivos).
-  - Backup verificado en destino externo: `du -sb /mnt/c/temp/data_chassis_0_backup` (recorrido exhaustivo de bytes en volumen externo).
-  - Copia restaurada temporal en destino externo: `du -sb /mnt/c/temp/data_chassis_0_restored`.
+  - Espacio y particiones de disco del host: `shutil.disk_usage` y `df -B1` sobre puntos de montaje de host (`C:`) y VHD (`/`).
+  - Workspace permanente en disco: medido mediante `du -sb` sobre el workspace de producción (`workspace/`), reportando bytes exactos a nivel de inodos de sistema de archivos.
+  - Backup verificado en destino externo: medido mediante `du -sb` sobre el destino externo de backup (`data_chassis_0_backup`), realizando un recorrido exhaustivo de bytes.
+  - Copia restaurada temporal en destino externo: medido mediante `du -sb` sobre el destino temporal restaurado (`data_chassis_0_restored`).
   - Base de datos DuckDB: `os.path.getsize` y consulta SQL `PRAGMA database_size` sobre `investment_analyst.duckdb` e `investment_analyst.duckdb.wal`.
 
 ### Inventario de Almacenamiento: Mediciones Reales vs. Presupuestos de Transición
@@ -61,20 +61,29 @@ El ciclo completo se ejecutó de forma desacoplada y fuera del VHD de WSL:
 
 *Nota sobre almacenamiento físico:* El VHD de WSL reporta un espacio disponible virtual no respaldado físicamente en disco; el límite restrictivo real del host es el espacio libre del volumen físico `C:`.
 
+### Declaración de Fuente y Justificación de Presupuestos de Transición
+1. **Presupuesto base v2 temporal (`3.221.225.472` bytes = 3,00 GiB / 3,22 GB):**
+   - **Fuente:** Plan táctico de particionado vertical y temporal de `DATA-CHASSIS-1` a `DATA-CHASSIS-7` formalizado en `docs/data_chassis.md`.
+   - **Justificación:** La arquitectura de datos v2 elimina el 94,71 % de filas redundantes generadas por cortes temporales `known_at` en `metric_results` (sección 6) y sustituye la lista repetida de UUIDs de funding en `input_observation_ids` (que consume el 84,3 % del volumen de métricas, sección 5) por mapeos compactos. El volumen métrico se reduce de 5,14 GB a ~1,2 GB, proyectando un tamaño total para la nueva base DuckDB v2 inferior a 3 GiB durante la fase de coexistencia paralela y verificación de la etapa 8 antes de retirar la base previa.
+2. **Presupuesto de archivos temporales / spill (`2.147.483.648` bytes = 2,00 GiB / 2,15 GB):**
+   - **Fuente:** Directiva de contención de memoria de sesión DuckDB (`SET memory_limit = '1GiB'`) y directorio de derrame temporal fuera del VHD (`temp_directory = '.duckdb_spill_*'`).
+   - **Justificación:** Reserva 2 GiB de espacio en disco para soportar el desbordamiento de operadores de ordenamiento, hash joins y unnest masivo durante la migración y carga masiva de la etapa 8, garantizando que DuckDB opere de forma continua sin provocar OOM en el sistema ni fallar por contención de almacenamiento.
+
 ### Aritmética Reproducible del Margen Remanente en Disco `C:`
 
-Para garantizar que las etapas subsiguientes de `DATA-CHASSIS` (especialmente la etapa 8 de migración y corte) se ejecuten sin riesgo de agotamiento de almacenamiento físico, se verifica la siguiente aritmética:
+Para garantizar que las etapas subsiguientes de `DATA-CHASSIS` (especialmente la etapa 8 de migración, coexistencia y corte) se ejecuten sin riesgo de agotamiento de almacenamiento físico, se verifica la siguiente aritmética exhaustiva:
 
-1. **Espacio libre medido en `C:`:** `26.875.776.512` bytes (~25,03 GiB en base binaria, 26,88 GB en base decimal).
+1. **Espacio libre medido en `C:` tras el ciclo:** `26.875.776.512` bytes (~25,03 GiB en base binaria, 26,88 GB en base decimal).
 2. **Criterio de seguridad exigido para Etapa 8:** Espacio libre >= 25 GB (`25.000.000.000` bytes). Se satisface estrictamente:
    $$26.875.776.512 \text{ bytes} \ge 25.000.000.000 \text{ bytes} \quad (\text{margen positivo de } +1.875.776.512 \text{ bytes sobre el piso de 25 GB})$$
 3. **Presupuesto total de transición consumido durante migración activa (Etapa 8):**
    $$\text{Presupuesto v2 temporal} + \text{Presupuesto spill temporal} = 3.221.225.472 + 2.147.483.648 = 5.368.709.120 \text{ bytes } (\sim 5,00\text{ GiB})$$
 4. **Margen remanente neto proyectado tras absorción de la Etapa 8 en `C:`:**
    $$26.875.776.512 - 5.368.709.120 = 21.507.067.392 \text{ bytes } (\sim 20,03\text{ GiB libres remanentes})$$
-5. **Margen remanente frente a la suma total de componentes (Backup + Presupuesto v2 + Presupuesto temporales):**
-   $$\text{Total requerido} = 8.511.630.696 + 3.221.225.472 + 2.147.483.648 = 13.880.339.816 \text{ bytes } (\sim 12,93\text{ GiB})$$
-   $$\text{Margen en } C: = 26.875.776.512 - 13.880.339.816 = 12.995.436.696 \text{ bytes } (\sim 12,10\text{ GiB remanentes})$$
+5. **Aritmética agregada obligatoria de 4 componentes (Workspace Permanente + Backup + Base v2 + Temporales):**
+   $$\text{Total requerido} = \text{workspace} + \text{backup} + \text{v2 temporal} + \text{temporales}$$
+   $$\text{Total requerido} = 8.510.963.858 + 8.511.630.696 + 3.221.225.472 + 2.147.483.648 = 22.391.303.674 \text{ bytes } (\sim 20,85\text{ GiB} / 22,39\text{ GB})$$
+   $$\text{Margen remanente en } C: = 26.875.776.512 - 22.391.303.674 = 4.484.472.838 \text{ bytes } (\sim 4,18\text{ GiB} / 4,48\text{ GB remanentes})$$
 
 ### Aclaración Normativa sobre Márgenes de Memoria y Almacenamiento
 > **Regla de Invarianza:** El margen de memoria RAM de 2 GiB (medido empíricamente mediante `resource.getrusage` / `VmHWM` y limitado formalmente en las sesiones del motor DuckDB mediante `SET memory_limit = '1GiB'`) **no sustituye ni puede considerarse intercambiable con el margen de almacenamiento físico en disco (mínimo 25 GB libres en el volumen `C:`)**. La contención de memoria previene errores OOM en el espacio de usuario del proceso, mientras que el margen de almacenamiento previene fallos catastróficos de escritura por disco lleno (`ENOSPC`) a nivel de sistema operativo y sistema de archivos host.
@@ -187,7 +196,7 @@ Resultados:
 
 ## 8. Planes y Perfiles de Ejecución `EXPLAIN ANALYZE` de Linaje Relacional
 
-Las 4 consultas canónicas de verificación de linaje relacional fueron ejecutadas y perfiladas mediante `EXPLAIN ANALYZE` directamente sobre la copia restaurada temporal en volumen externo (`/mnt/c/temp/data_chassis_0_restored/storage/data/processed/investment_analyst.duckdb`) bajo las condiciones formales del verificador:
+Las 4 consultas canónicas de verificación de linaje relacional fueron ejecutadas y perfiladas mediante `EXPLAIN ANALYZE` directamente sobre la copia restaurada temporal en volumen externo (`data_chassis_0_restored`, base `investment_analyst.duckdb`) bajo las condiciones formales del verificador:
 - **DuckDB Version:** `1.5.4`
 - **Timestamp UTC de Ejecución:** `2026-09-15T19:00:50Z`
 - **Parámetros de Sesión:** `read_only=True`, `SET memory_limit = '1GiB'`, `SET threads = 1`

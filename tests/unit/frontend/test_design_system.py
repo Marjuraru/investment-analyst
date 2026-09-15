@@ -1599,11 +1599,6 @@ def _check_route_declares_completed_dependencies_and_data_chassis_next(doc_text:
     )
 
 
-_check_route_declares_local_interface_planned_and_sec_corpus_next = (
-    _check_route_declares_completed_dependencies_and_data_chassis_next
-)
-
-
 def test_route_declares_completed_dependencies_and_data_chassis_next() -> None:
     doc_path = (
         Path(str(files("investment_analyst"))).parent.parent
@@ -1613,11 +1608,6 @@ def test_route_declares_completed_dependencies_and_data_chassis_next() -> None:
     _check_route_declares_completed_dependencies_and_data_chassis_next(
         doc_path.read_text(encoding="utf-8")
     )
-
-
-test_route_declares_local_interface_planned_and_sec_corpus_next = (
-    test_route_declares_completed_dependencies_and_data_chassis_next
-)
 
 
 def _check_not_built_grammar_is_isolated_from_absence_marks(styles_css: str, app_js: str) -> None:
@@ -2185,11 +2175,6 @@ def _check_route_keeps_data_chassis_as_the_single_next(doc_text: str) -> None:
     )
 
 
-_check_route_keeps_fundamentals_coverage_as_the_single_next = (
-    _check_route_keeps_data_chassis_as_the_single_next
-)
-
-
 def test_route_keeps_data_chassis_as_the_single_next() -> None:
     doc_path = (
         Path(str(files("investment_analyst"))).parent.parent
@@ -2197,11 +2182,6 @@ def test_route_keeps_data_chassis_as_the_single_next() -> None:
         / "basic_functional_release_plan.md"
     )
     _check_route_keeps_data_chassis_as_the_single_next(doc_path.read_text(encoding="utf-8"))
-
-
-test_route_keeps_fundamentals_coverage_as_the_single_next = (
-    test_route_keeps_data_chassis_as_the_single_next
-)
 
 
 # ---------------------------------------------------------------------------
@@ -4606,7 +4586,7 @@ def _check_ui8_composition_is_documented(design_doc: str, local_doc: str, plan_d
     assert "`UI-13`" in local_doc
     assert "`UI-13`" in plan_doc
     assert "`SEC-CORPUS` completó su ruta" in plan_doc
-    assert "`FUNDAMENTALS-COVERAGE` queda como la única ruta `NEXT`" in plan_doc
+    assert "`DATA-CHASSIS` queda como la única ruta `NEXT`" in plan_doc
 
 
 def test_ui8_composition_and_route_are_documented() -> None:
@@ -5027,7 +5007,7 @@ def test_docs_state_technical_review_bvl_and_clean_ui_boundaries() -> None:
         assert "master-detail" in document
     assert "Anexo2TextodcRentaFija.pdf" in local_doc
     assert "`SEC-CORPUS` completó su ruta" in plan_doc
-    assert "`FUNDAMENTALS-COVERAGE` queda como la única ruta `NEXT`" in plan_doc
+    assert "`DATA-CHASSIS` queda como la única ruta `NEXT`" in plan_doc
     assert "UI-11" in plan_doc
 
 
