@@ -281,7 +281,7 @@ def test_route_completes_local_interface_and_preserves_live_priority_state() -> 
     roadmap = (ROOT / "docs/product_roadmap.md").read_text(encoding="utf-8")
     assert "LOCAL-INTERFACE" in release_plan and "DONE" in release_plan
     assert "`EQUITY-UNIVERSE` | `DONE`" in release_plan
-    assert "`FUNDAMENTALS-COVERAGE` | `NEXT`" in release_plan
+    assert "`DATA-CHASSIS` | `NEXT`" in release_plan
     assert "BVL-MARKET" in release_plan and "BLOCKED" in release_plan
     assert "PREDICTIVE-RESEARCH" in release_plan and "DEFERRED" in release_plan
     assert "UI-14/#202" in release_plan + roadmap
@@ -302,9 +302,9 @@ def test_route_pinning_assertions_track_the_new_single_next_after_equity_univers
     items = _route_items(release_plan)
     _validate(items)
     assert _route_status(items, "EQUITY-UNIVERSE") == "DONE"
-    assert _route_status(items, "FUNDAMENTALS-COVERAGE") == "NEXT"
+    assert _route_status(items, "DATA-CHASSIS") == "NEXT"
     next_rows = re.findall(r"\|\s*`([A-Z-]+)`\s*\|\s*`NEXT`\s*\|", release_plan)
-    assert next_rows == ["FUNDAMENTALS-COVERAGE"]
+    assert next_rows == ["DATA-CHASSIS"]
 
 
 def test_no_unrelated_assertion_in_the_two_route_pinning_test_files_is_removed_weakened_or_rewritten() -> (  # noqa: E501

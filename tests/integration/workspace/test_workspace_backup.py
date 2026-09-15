@@ -684,44 +684,44 @@ def test_backup_restore_never_materializes_full_history_and_keeps_structural_bou
     primary_page_sizes: list[int] = []
     document_page_sizes: list[int] = []
     get_many_sizes: list[int] = []
-    reference_chunk_sizes: list[int] = []
-    original_primary_page = backup_module._load_primary_id_page
-    original_document_page = backup_module._load_document_page
+    original_primary_page = backup_module._load_raw_record_ids_page
+    original_document_page = backup_module._load_document_rowid_page
     original_get_many = JsonRawRecordRepository.get_many
-    original_fetch_existing = backup_module._fetch_existing_ids
 
     def tracked_primary_page(
         connection: DuckDBPyConnection,
         *,
-        first_query: str,
-        next_query: str,
-        after_id: str | None,
+        start_rowid: int,
+        end_rowid: int,
     ) -> tuple[str, ...]:
         page = original_primary_page(
             connection,
-            first_query=first_query,
-            next_query=next_query,
-            after_id=after_id,
+            start_rowid=start_rowid,
+            end_rowid=end_rowid,
         )
-        primary_page_sizes.append(len(page))
+        if page:
+            primary_page_sizes.append(len(page))
         return page
 
     def tracked_document_page(
         connection: DuckDBPyConnection,
         *,
-        first_query: str,
-        next_query: str,
-        after_id: str | None,
+        table: str,
+        primary_id: str,
+        start_rowid: int,
+        end_rowid: int,
         model_type: type[BaseModel],
     ) -> tuple[tuple[str, BaseModel], ...]:
         page = original_document_page(
             connection,
-            first_query=first_query,
-            next_query=next_query,
-            after_id=after_id,
+            table=table,
+            primary_id=primary_id,
+            start_rowid=start_rowid,
+            end_rowid=end_rowid,
             model_type=model_type,
         )
-        document_page_sizes.append(len(page))
+        if page:
+            document_page_sizes.append(len(page))
         return page
 
     def tracked_get_many(
@@ -730,21 +730,6 @@ def test_backup_restore_never_materializes_full_history_and_keeps_structural_bou
     ) -> dict[UUID, RawRecord]:
         get_many_sizes.append(len(record_ids))
         return original_get_many(repository, record_ids)
-
-    def tracked_fetch_existing(
-        connection: DuckDBPyConnection,
-        *,
-        table: str,
-        primary_id: str,
-        references: tuple[UUID, ...],
-    ) -> set[UUID]:
-        reference_chunk_sizes.append(len(references))
-        return original_fetch_existing(
-            connection,
-            table=table,
-            primary_id=primary_id,
-            references=references,
-        )
 
     active_models = 0
     maximum_active_models = 0
@@ -764,10 +749,9 @@ def test_backup_restore_never_materializes_full_history_and_keeps_structural_bou
         weakref.finalize(model, release_model)
         return model
 
-    monkeypatch.setattr(backup_module, "_load_primary_id_page", tracked_primary_page)
-    monkeypatch.setattr(backup_module, "_load_document_page", tracked_document_page)
+    monkeypatch.setattr(backup_module, "_load_raw_record_ids_page", tracked_primary_page)
+    monkeypatch.setattr(backup_module, "_load_document_rowid_page", tracked_document_page)
     monkeypatch.setattr(JsonRawRecordRepository, "get_many", tracked_get_many)
-    monkeypatch.setattr(backup_module, "_fetch_existing_ids", tracked_fetch_existing)
     monkeypatch.setattr(backup_module, "model_from_json", tracked_model_from_json)
     monkeypatch.setattr(raw_records_module, "model_from_json", tracked_model_from_json)
 
@@ -789,7 +773,6 @@ def test_backup_restore_never_materializes_full_history_and_keeps_structural_bou
     assert max(primary_page_sizes) <= batch_size
     assert max(document_page_sizes) <= batch_size
     assert max(get_many_sizes) <= batch_size
-    assert max(reference_chunk_sizes) <= batch_size
     assert count % batch_size in primary_page_sizes
     assert count % batch_size in document_page_sizes
     assert maximum_active_models <= batch_size + 1
@@ -846,28 +829,287 @@ def test_changed_count_and_incomplete_keyset_scan_fail_before_promotion(
     assert not changed_destination.exists()
 
     monkeypatch.setattr(DuckDBObservationRepository, "count", original_count)
-    original_page = backup_module._load_document_page
+    original_page = backup_module._load_document_rowid_page
 
     def incomplete_page(
         connection: DuckDBPyConnection,
         *,
-        first_query: str,
-        next_query: str,
-        after_id: str | None,
+        table: str,
+        primary_id: str,
+        start_rowid: int,
+        end_rowid: int,
         model_type: type[BaseModel],
     ) -> tuple[tuple[str, BaseModel], ...]:
-        if first_query == backup_module._OBSERVATION_FIRST_PAGE and after_id is not None:
+        if table == "normalized_observations" and start_rowid > 0:
             return ()
         return original_page(
             connection,
-            first_query=first_query,
-            next_query=next_query,
-            after_id=after_id,
+            table=table,
+            primary_id=primary_id,
+            start_rowid=start_rowid,
+            end_rowid=end_rowid,
             model_type=model_type,
         )
 
-    monkeypatch.setattr(backup_module, "_load_document_page", incomplete_page)
+    monkeypatch.setattr(backup_module, "_load_document_rowid_page", incomplete_page)
     incomplete_destination = tmp_path / "incomplete-scan"
     with pytest.raises(WorkspaceBackupError, match="traceability could not be verified"):
         service.create(source, incomplete_destination)
     assert not incomplete_destination.exists()
+
+
+def test_metric_observation_lineage_rejects_missing_reference_at_tail_of_oversized_array(
+    tmp_path: Path,
+) -> None:
+    workspace_service, service, source = _service(tmp_path)
+    window_size = backup_module._TRACEABILITY_BATCH_SIZE
+    ref_count = window_size + 10
+    raw_ids = tuple(UUID(int=index + 1) for index in range(ref_count))
+    obs_ids = tuple(UUID(int=100_000 + index) for index in range(ref_count))
+    metric_id = UUID(int=200_001)
+    timestamp = datetime(2026, 8, 1, tzinfo=UTC)
+
+    writer = workspace_service.open_storage(
+        workspace_service.resolve(source),
+        WorkspaceAccessMode.READ_WRITE,
+    )
+    try:
+        for index in range(ref_count):
+            ref = SourceReference(
+                source_id="test:workspace",
+                record_key=f"tail-{index}",
+                retrieved_at=timestamp,
+            )
+            writer.raw_records.save(
+                RawRecord(
+                    record_id=raw_ids[index],
+                    asset_id="equity:us:aapl",
+                    source=ref,
+                    event_time=timestamp,
+                    available_at=timestamp,
+                    received_at=timestamp,
+                    payload={"value": str(index)},
+                    schema_version="backup-tail-test-v1",
+                )
+            )
+            if index < ref_count - 1:
+                writer.observations.save(
+                    NormalizedObservation(
+                        observation_id=obs_ids[index],
+                        raw_record_id=raw_ids[index],
+                        asset_id="equity:us:aapl",
+                        field_name="close",
+                        value=Decimal(index),
+                        unit="USD",
+                        frequency=DataFrequency.DAY_1,
+                        observed_at=timestamp,
+                        available_at=timestamp,
+                        normalized_at=timestamp,
+                        source=ref,
+                        quality=DataQuality.VALID,
+                        transformation_version="backup-tail-test-v1",
+                    )
+                )
+
+        writer.metric_results.save(
+            MetricResult(
+                result_id=metric_id,
+                asset_id="equity:us:aapl",
+                metric_key="market.technical.ema",
+                value=Decimal("100"),
+                unit="USD",
+                as_of=timestamp,
+                available_at=timestamp,
+                computed_at=timestamp,
+                parameters={"known_at": timestamp.isoformat()},
+                input_observation_ids=list(obs_ids),
+                input_metric_result_ids=[],
+                algorithm_version="market-ema-v1-decimal34",
+                quality=DataQuality.VALID,
+            )
+        )
+    finally:
+        writer.close()
+
+    destination = tmp_path / "not-published"
+    with pytest.raises(
+        WorkspaceBackupError,
+        match="workspace contains a metric without its observations",
+    ):
+        service.create(source, destination)
+    assert not destination.exists()
+
+
+def test_lineage_verification_query_count_is_not_proportional_to_row_count(
+    tmp_path: Path,
+) -> None:
+    workspace_service, _, source = _service(tmp_path)
+    count = 100
+    _seed_traceable_layers(workspace_service, source, count=count)
+
+    paths = workspace_service.resolve(source)
+    storage = workspace_service.open_storage(paths, WorkspaceAccessMode.READ_ONLY)
+    try:
+
+        class ConnectionProxy:
+            def __init__(self, target: DuckDBPyConnection) -> None:
+                self._target = target
+                self.query_count = 0
+
+            def execute(self, *args: object, **kwargs: object) -> DuckDBPyConnection:
+                self.query_count += 1
+                return self._target.execute(*args, **kwargs)
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._target, name)
+
+        proxy = ConnectionProxy(storage.store.connection)
+        backup_module._verify_observation_raw_lineage(proxy)  # type: ignore[arg-type]
+        assert proxy.query_count == 1
+
+        backup_module._verify_metric_observation_lineage(proxy)  # type: ignore[arg-type]
+        assert proxy.query_count == 2
+
+        backup_module._verify_metric_metric_lineage(proxy)  # type: ignore[arg-type]
+        assert proxy.query_count == 3
+
+        backup_module._verify_diagnostic_metric_lineage(proxy)  # type: ignore[arg-type]
+        assert proxy.query_count == 4
+    finally:
+        storage.close()
+
+
+def test_traceability_scan_handles_rowid_gaps(tmp_path: Path) -> None:
+    workspace_service, service, source = _service(tmp_path)
+    count = 20
+    raw_ids, obs_ids, metric_ids, diag_ids = _seed_traceable_layers(
+        workspace_service,
+        source,
+        count=count,
+    )
+    writer = workspace_service.open_storage(
+        workspace_service.resolve(source),
+        WorkspaceAccessMode.READ_WRITE,
+    )
+    try:
+        for table, pid, val in (
+            ("diagnostic_results", "diagnostic_id", str(diag_ids[5])),
+            ("metric_results", "result_id", str(metric_ids[5])),
+            ("normalized_observations", "observation_id", str(obs_ids[5])),
+            ("raw_record_index", "record_id", str(raw_ids[5])),
+        ):
+            writer.store.connection.execute(
+                f"DELETE FROM {table} WHERE {pid} = ?",
+                [val],  # noqa: S608
+            )
+    finally:
+        writer.close()
+
+    destination = tmp_path / "gap-backup"
+    manifest = service.create(source, destination)
+    restored = service.restore(destination, tmp_path / "gap-restored")
+    assert manifest.counts.raw_records == count - 1
+    assert manifest.counts.observations == count - 1
+    assert manifest.counts.metric_results == count - 1
+    assert manifest.counts.diagnostic_results == count - 1
+    assert restored.raw_record_count == count - 1
+
+
+def test_traceability_scan_uses_bounded_rowid_ranges_without_uuid_top_n(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_service, _, source = _service(tmp_path)
+    _seed_traceable_layers(workspace_service, source, count=10)
+
+    paths = workspace_service.resolve(source)
+    storage = workspace_service.open_storage(paths, WorkspaceAccessMode.READ_ONLY)
+    try:
+        queries: list[str] = []
+
+        class QueryTrackingProxy:
+            def __init__(self, target: DuckDBPyConnection) -> None:
+                self._target = target
+
+            def execute(self, query: str, *args: object, **kwargs: object) -> DuckDBPyConnection:
+                queries.append(query)
+                return self._target.execute(query, *args, **kwargs)
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._target, name)
+
+        proxy = QueryTrackingProxy(storage.store.connection)
+        monkeypatch.setattr(storage.store, "_connection", proxy)
+        backup_module._scan_raw_records(storage)
+        backup_module._scan_documents(
+            proxy,  # type: ignore[arg-type]
+            table="normalized_observations",
+            primary_id="observation_id",
+            model_type=NormalizedObservation,
+        )
+        backup_module._scan_documents(
+            proxy,  # type: ignore[arg-type]
+            table="metric_results",
+            primary_id="result_id",
+            model_type=MetricResult,
+        )
+        backup_module._scan_documents(
+            proxy,  # type: ignore[arg-type]
+            table="diagnostic_results",
+            primary_id="diagnostic_id",
+            model_type=DiagnosticResult,
+        )
+
+        assert len(queries) > 0
+        for query in queries:
+            normalized = query.upper()
+            assert "ORDER BY" not in normalized
+            assert "OFFSET" not in normalized
+            assert "LIMIT" not in normalized
+            assert "TOP_N" not in normalized
+    finally:
+        storage.close()
+
+
+test_document_and_raw_scans_contain_no_top_n_or_keyset_queries = (
+    test_traceability_scan_uses_bounded_rowid_ranges_without_uuid_top_n
+)
+
+
+def test_lineage_queries_are_constant_and_use_direct_unnest() -> None:
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE raw_record_index (record_id VARCHAR PRIMARY KEY)")
+    con.execute(
+        "CREATE TABLE normalized_observations ("
+        "observation_id VARCHAR PRIMARY KEY, raw_record_id VARCHAR NOT NULL)"
+    )
+    con.execute(
+        "CREATE TABLE metric_results ("
+        "result_id VARCHAR PRIMARY KEY, document_json VARCHAR NOT NULL)"
+    )
+    con.execute(
+        "CREATE TABLE diagnostic_results ("
+        "diagnostic_id VARCHAR PRIMARY KEY, document_json VARCHAR NOT NULL)"
+    )
+
+    for query in (
+        backup_module._OBSERVATION_RAW_QUERY,
+        backup_module._METRIC_OBSERVATION_QUERY,
+        backup_module._METRIC_METRIC_QUERY,
+        backup_module._DIAGNOSTIC_METRIC_QUERY,
+    ):
+        plan = con.execute(f"EXPLAIN {query}").fetchall()[0][1]
+        assert "DELIM_JOIN" not in plan
+        assert "LEFT_DELIM_JOIN" not in plan
+        assert "LATERAL" not in plan
+        assert "GROUP_BY" not in plan
+        assert "ANTI" in plan
+        if query != backup_module._OBSERVATION_RAW_QUERY:
+            assert "UNNEST" in plan
+
+
+test_lineage_queries_use_direct_unnest_without_delim_join = (
+    test_lineage_queries_are_constant_and_use_direct_unnest
+)
