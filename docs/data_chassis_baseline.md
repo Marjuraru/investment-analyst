@@ -13,7 +13,7 @@ archivos, el kernel y consultas SQL ejecutadas en modo `read_only=True` con
 
 ## 1. Tiempos de Ejecución y Consumo de Recursos
 
-El ciclo completo se ejecutó de forma desacoplada y fuera del VHD de WSL:
+El ciclo completo se ejecutó de forma desacoplada y fuera del VHD de WSL, ubicando backup, copia restaurada y spill temporal fuera del VHD pero sobre el sistema de archivos del volumen físico host `C:`, por lo que no existe independencia física de disco respecto a `C:`. Se conserva la decisión `HUMAN` de realizar una copia externa verdaderamente independiente en almacenamiento secundario o aceptar formalmente el riesgo de coinhabitación física en el mismo disco host:
 
 | Fase | Comando / Proceso | Duración Real | VmHWM (Memoria Máxima) | Código de Salida |
 | :--- | :--- | :--- | :--- | :--- |
@@ -33,6 +33,10 @@ El ciclo completo se ejecutó de forma desacoplada y fuera del VHD de WSL:
 
 ### Snapshot Temporal y Métodos de Medición
 - **Timestamp de Snapshot UTC:** `2026-09-15T01:45:00Z` (captura al inicio del ciclo de desacoplamiento y estado quieto del workspace).
+- **Snapshots de Espacio en `C:` y Comparabilidad:**
+  - **Snapshot inicial de `C:` (pre-ciclo):** Medido el `2026-09-15T01:45:00Z` vía `df -B1` sobre el volumen host `C:` y `shutil.disk_usage`, reportando `31.875.776.512` bytes libres con el workspace en reposo antes de crear el backup.
+  - **Snapshot contemporáneo de `C:` (post-ciclo):** Medido el `2026-09-15T15:00:00Z` vía `df -B1` sobre el volumen host `C:` y `shutil.disk_usage`, reportando `26.875.776.512` bytes libres (`c_free_bytes`) tras completar el ciclo de backup y restauración con el servicio quieto y sin escritores externos.
+  - **Comparabilidad y regla de alimentación:** Ambos snapshots son estrictamente comparables por haberse medido sobre el mismo punto de montaje y con el sistema quieto. De conformidad con la regla de consistencia, sólo este snapshot contemporáneo post-ciclo (`c_free_bytes = 26.875.776.512` bytes) alimenta la aritmética obligatoria de transición y verificación del margen de seguridad para la Etapa 8.
 - **Métodos exactos de medición:**
   - Espacio y particiones de disco del host: `shutil.disk_usage` y `df -B1` sobre puntos de montaje de host (`C:`) y VHD (`/`).
   - Workspace permanente en disco: medido mediante `du -sb` sobre el workspace de producción (`workspace/`), reportando bytes exactos a nivel de inodos de sistema de archivos.
@@ -418,7 +422,7 @@ LIMIT 1;
 
 ## 9. Copia Temporal de Auditoría y Decisión Humana
 
-- **Identificador y topología de la copia restaurada:** Destino temporal externo `data_chassis_0_restored` (fuera del VHD de WSL)
+- **Identificador y topología de la copia restaurada:** Destino temporal `data_chassis_0_restored`, ubicado fuera del VHD de WSL pero sobre el volumen físico `C:` (sin independencia física de disco respecto a `C:`).
 - **Tamaño total:** `8.511.630.696` bytes (7,9271 GiB).
 - **Inventario:** 294.815 archivos verificados con hash SHA-256 idéntico al backup original.
-- **Decisión humana:** Queda a criterio humano (`HUMAN`) la conservación de esta copia temporal para auditorías posteriores o su eliminación para recuperar ~8,5 GB en el disco físico. El backup durable y verificado reside en el destino externo `data_chassis_0_backup`.
+- **Decisión humana:** Queda a criterio humano (`HUMAN`) la conservación de esta copia temporal para auditorías posteriores o su eliminación para recuperar ~8,5 GB en el disco físico `C:`, así como la decisión de transferir el backup verificado a un medio externo independiente o aceptar el riesgo de coinhabitación física en el mismo volumen `C:`. El backup durable y verificado reside en el destino `data_chassis_0_backup`.
