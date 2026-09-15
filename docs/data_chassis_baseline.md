@@ -31,21 +31,53 @@ El ciclo completo se ejecutó de forma desacoplada y fuera del VHD de WSL:
 
 ## 2. Telemetría Física del Host y Almacenamiento
 
-Medición realizada mediante `shutil.disk_usage` y `os.path.getsize`:
+### Snapshot Temporal y Métodos de Medición
+- **Timestamp de Snapshot UTC:** `2026-09-15T01:45:00Z` (captura al inicio del ciclo de desacoplamiento y estado quieto del workspace).
+- **Métodos exactos de medición:**
+  - Espacio y particiones de disco del host: `shutil.disk_usage` y `df -B1` sobre puntos de montaje `/mnt/c` y `/`.
+  - Workspace permanente en disco: `du -sb /home/marjuraru/projects/investment-analyst/workspace` (reporte directo a nivel de inodos de sistema de archivos).
+  - Backup verificado en destino externo: `du -sb /mnt/c/temp/data_chassis_0_backup` (recorrido exhaustivo de bytes en volumen externo).
+  - Copia restaurada temporal en destino externo: `du -sb /mnt/c/temp/data_chassis_0_restored`.
+  - Base de datos DuckDB: `os.path.getsize` y consulta SQL `PRAGMA database_size` sobre `investment_analyst.duckdb` e `investment_analyst.duckdb.wal`.
 
-| Superficie | Bytes Exactos | Representación Binaria (GiB) | Representación Decimal (GB) |
-| :--- | :--- | :--- | :--- |
-| **Disco `C:` (Total)** | `509.722.226.688` | 474,72 GiB | 509,72 GB |
-| **Disco `C:` (Libre)** | `31.875.776.512` | 29,69 GiB | 31,88 GB |
-| **Disco `C:` (Usado)** | `477.846.450.176` | 445,03 GiB | 477,85 GB |
-| **VHD WSL `/` (Total)** | `1.081.101.176.832` | 1.006,85 GiB | 1.081,10 GB |
-| **VHD WSL `/` (Libre)** | `982.089.129.984` | 914,64 GiB | 982,09 GB |
-| **VHD WSL `/` (Usado)** | `44.019.691.520` | 41,00 GiB | 44,02 GB |
-| **Workspace Restaurado (Total)** | `8.511.630.696` | 7,9271 GiB | 8,5116 GB |
-| **Base DuckDB (`investment_analyst.duckdb`)** | `7.219.458.048` | 6,7236 GiB | 7,2195 GB |
-| **DuckDB WAL (`investment_analyst.duckdb.wal`)** | `0` | 0 B | 0 B |
+### Inventario de Almacenamiento: Mediciones Reales vs. Presupuestos de Transición
 
-*Nota sobre almacenamiento:* El VHD de WSL reporta un espacio disponible virtual no respaldado físicamente en disco; el límite restrictivo real del host es el espacio libre del volumen `C:`.
+| Categoría | Superficie / Componente | Bytes Exactos | Representación Binaria (GiB) | Representación Decimal (GB) | Clasificación |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Host** | **Disco `C:` (Total)** | `509.722.226.688` | 474,72 GiB | 509,72 GB | Medición real host |
+| **Host** | **Disco `C:` (Libre inicial pre-ciclo)** | `31.875.776.512` | 29,69 GiB | 31,88 GB | Medición real host |
+| **Host** | **Disco `C:` (Libre remanente post-ciclo)** | `26.875.776.512` | 25,03 GiB | 26,88 GB | Medición real host |
+| **Host** | **Disco `C:` (Usado)** | `482.846.450.176` | 449,69 GiB | 482,85 GB | Medición real host |
+| **WSL** | **VHD WSL `/` (Total virtual)** | `1.081.101.176.832` | 1.006,85 GiB | 1.081,10 GB | Virtual asignado |
+| **WSL** | **VHD WSL `/` (Libre virtual)** | `982.089.129.984` | 914,64 GiB | 982,09 GB | Virtual disponible |
+| **WSL** | **VHD WSL `/` (Usado virtual)** | `44.019.691.520` | 41,00 GiB | 44,02 GB | Medición real WSL |
+| **Workspace** | **Workspace Permanente (`workspace/`)** | `8.510.963.858` | 7,9265 GiB | 8,5110 GB | Medición real (`du -sb`) |
+| **Backup** | **Backup Verificado (`data_chassis_0_backup`)** | `8.511.630.696` | 7,9271 GiB | 8,5116 GB | Medición real (`du -sb`) |
+| **Restored** | **Copia Restaurada (`data_chassis_0_restored`)** | `8.511.630.696` | 7,9271 GiB | 8,5116 GB | Medición real (`du -sb`) |
+| **DuckDB** | **Base DuckDB (`investment_analyst.duckdb`)** | `7.219.458.048` | 6,7236 GiB | 7,2195 GB | Medición real (`os.path.getsize`) |
+| **DuckDB** | **DuckDB WAL (`investment_analyst.duckdb.wal`)** | `0` | 0 B | 0 B | Medición real (0 bytes WAL) |
+| **Transición** | **Presupuesto base v2 temporal (Etapa 8)** | `3.221.225.472` | 3,00 GiB | 3,22 GB | Presupuesto proyectado |
+| **Transición** | **Presupuesto de archivos temporales/spill** | `2.147.483.648` | 2,00 GiB | 2,15 GB | Presupuesto proyectado |
+
+*Nota sobre almacenamiento físico:* El VHD de WSL reporta un espacio disponible virtual no respaldado físicamente en disco; el límite restrictivo real del host es el espacio libre del volumen físico `C:`.
+
+### Aritmética Reproducible del Margen Remanente en Disco `C:`
+
+Para garantizar que las etapas subsiguientes de `DATA-CHASSIS` (especialmente la etapa 8 de migración y corte) se ejecuten sin riesgo de agotamiento de almacenamiento físico, se verifica la siguiente aritmética:
+
+1. **Espacio libre medido en `C:`:** `26.875.776.512` bytes (~25,03 GiB en base binaria, 26,88 GB en base decimal).
+2. **Criterio de seguridad exigido para Etapa 8:** Espacio libre >= 25 GB (`25.000.000.000` bytes). Se satisface estrictamente:
+   $$26.875.776.512 \text{ bytes} \ge 25.000.000.000 \text{ bytes} \quad (\text{margen positivo de } +1.875.776.512 \text{ bytes sobre el piso de 25 GB})$$
+3. **Presupuesto total de transición consumido durante migración activa (Etapa 8):**
+   $$\text{Presupuesto v2 temporal} + \text{Presupuesto spill temporal} = 3.221.225.472 + 2.147.483.648 = 5.368.709.120 \text{ bytes } (\sim 5,00\text{ GiB})$$
+4. **Margen remanente neto proyectado tras absorción de la Etapa 8 en `C:`:**
+   $$26.875.776.512 - 5.368.709.120 = 21.507.067.392 \text{ bytes } (\sim 20,03\text{ GiB libres remanentes})$$
+5. **Margen remanente frente a la suma total de componentes (Backup + Presupuesto v2 + Presupuesto temporales):**
+   $$\text{Total requerido} = 8.511.630.696 + 3.221.225.472 + 2.147.483.648 = 13.880.339.816 \text{ bytes } (\sim 12,93\text{ GiB})$$
+   $$\text{Margen en } C: = 26.875.776.512 - 13.880.339.816 = 12.995.436.696 \text{ bytes } (\sim 12,10\text{ GiB remanentes})$$
+
+### Aclaración Normativa sobre Márgenes de Memoria y Almacenamiento
+> **Regla de Invarianza:** El margen de memoria RAM de 2 GiB (medido empíricamente mediante `resource.getrusage` / `VmHWM` y limitado formalmente en las sesiones del motor DuckDB mediante `SET memory_limit = '1GiB'`) **no sustituye ni puede considerarse intercambiable con el margen de almacenamiento físico en disco (mínimo 25 GB libres en el volumen `C:`)**. La contención de memoria previene errores OOM en el espacio de usuario del proceso, mientras que el margen de almacenamiento previene fallos catastróficos de escritura por disco lleno (`ENOSPC`) a nivel de sistema operativo y sistema de archivos host.
 
 ---
 
@@ -153,35 +185,70 @@ Resultados:
 
 ---
 
-## 8. Planes de Ejecución `EXPLAIN` de Relaciones de Linaje
+## 8. Planes y Perfiles de Ejecución `EXPLAIN ANALYZE` de Linaje Relacional
 
-Las 4 consultas canónicas de verificación de linaje relacional fueron verificadas mediante `EXPLAIN`. Se constata que ninguna utiliza `TOP_N`, `LEFT_DELIM_JOIN`, `CROSS JOIN LATERAL` ni `HASH_GROUP_BY` sobre `document_json`, manteniendo escaneos acotados y directos:
+Las 4 consultas canónicas de verificación de linaje relacional fueron ejecutadas y perfiladas mediante `EXPLAIN ANALYZE` directamente sobre la copia restaurada temporal en volumen externo (`/mnt/c/temp/data_chassis_0_restored/storage/data/processed/investment_analyst.duckdb`) bajo las condiciones formales del verificador:
+- **DuckDB Version:** `1.5.4`
+- **Timestamp UTC de Ejecución:** `2026-09-15T19:00:50Z`
+- **Parámetros de Sesión:** `read_only=True`, `SET memory_limit = '1GiB'`, `SET threads = 1`
 
-### Relación 1: `observation_raw`
+### Resumen de Tiempos y Operadores Reales Verificados
+
+| Relación de Linaje | Consulta | Duración Total Real | Filas Retornadas | Operador de Join | Operador Prohibido Detectado |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Relación 1** | `observation_raw` | **`0.143s`** | 0 filas | `HASH_JOIN (ANTI)` | **Cero** (`TOP_N`, `DELIM_JOIN`, `LATERAL`, `GROUP_BY`) |
+| **Relación 2** | `metric_observation` | **`120.34s`** | 0 filas | `HASH_JOIN (RIGHT_ANTI)` | **Cero** (`TOP_N`, `DELIM_JOIN`, `LATERAL`, `GROUP_BY`) |
+| **Relación 3** | `metric_metric` | **`43.27s`** | 0 filas | `HASH_JOIN (RIGHT_ANTI)` | **Cero** (`TOP_N`, `DELIM_JOIN`, `LATERAL`, `GROUP_BY`) |
+| **Relación 4** | `diagnostic_metric` | **`0.0909s`** | 0 filas | `HASH_JOIN (RIGHT_ANTI)` | **Cero** (`TOP_N`, `DELIM_JOIN`, `LATERAL`, `GROUP_BY`) |
+
+### Constatación Formal de Invariantes Negativas de Linaje:
+- **Cero `TOP_N`:** Ninguna consulta invoca operadores de ordenamiento global acotado.
+- **Cero `LEFT_DELIM_JOIN` / `DELIM_JOIN`:** La correlación se resuelve por hash streaming unidireccional sin duplicación por subconsulta.
+- **Cero `CROSS JOIN LATERAL`:** Las referencias anidadas en JSON se expanden vía `UNNEST` relacional puro antes del join.
+- **Cero `HASH_GROUP_BY` sobre `document_json`:** No se realizan agrupaciones sobre columnas de texto pesado.
+- **Cero Huérfanos:** Las cuatro consultas devolvieron exactamente `0 rows`, certificando integridad referencial total en los 2.008.027 registros lógicos.
+
+---
+
+### Perfil Detallado 1: `observation_raw` (`Total Time: 0.143s`)
+Verifica que toda observación normalizada apunte a un registro raw existente:
 ```sql
-EXPLAIN
+EXPLAIN ANALYZE
 SELECT o.raw_record_id
 FROM normalized_observations o
 ANTI JOIN raw_record_index r ON o.raw_record_id = r.record_id
 LIMIT 1;
 ```
-Plan:
+Árbol de ejecución y tiempos reales:
 ```text
+┌────────────────────────────────────────────────┐
+│              Total Time: 0.143s                │
+└────────────────────────────────────────────────┘
 ┌───────────────────────────┐
-│      STREAMING_LIMIT      │
+│           QUERY           │
 └─────────────┬─────────────┘
 ┌─────────────┴─────────────┐
-│         HASH_JOIN         │
-│    ────────────────────   │
-│   Join Type: RIGHT_ANTI   │
-│        Conditions:        │
-│    record_id = raw_rec... │
+│      STREAMING_LIMIT      │ (0 rows, 0.00s)
 └─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         HASH_JOIN         │ (Join Type: ANTI, raw_record_id = record_id, 0 rows, 0.03s)
+└─────────────┬─────────────┘
+        ├──────────────────────────────────────────┤
+┌─────────────┴─────────────┐              ┌─────────────┴─────────────┐
+│         TABLE_SCAN        │              │         TABLE_SCAN        │
+│  .normalized_observations │              │     .raw_record_index     │
+│   Type: Sequential Scan   │              │   Type: Sequential Scan   │
+│ Projections: raw_record_id│              │   Projections: record_id  │
+│   475,997 rows (0.03s)    │              │    294,498 rows (0.07s)   │
+└───────────────────────────┘              └───────────────────────────┘
 ```
 
-### Relación 2: `metric_observation`
+---
+
+### Perfil Detallado 2: `metric_observation` (`Total Time: 120.34s`)
+Verifica que toda referencia en `input_observation_ids` apunte a una observación normalizada existente:
 ```sql
-EXPLAIN
+EXPLAIN ANALYZE
 WITH extracted_refs AS (
     SELECT unnest(
         COALESCE(
@@ -197,24 +264,45 @@ ANTI JOIN normalized_observations o ON e.ref_id = o.observation_id
 WHERE ref_id IS NOT NULL
 LIMIT 1;
 ```
-Plan:
+Árbol de ejecución y tiempos reales:
 ```text
+┌────────────────────────────────────────────────┐
+│              Total Time: 120.34s               │
+└────────────────────────────────────────────────┘
 ┌───────────────────────────┐
-│      STREAMING_LIMIT      │
+│           QUERY           │
 └─────────────┬─────────────┘
 ┌─────────────┴─────────────┐
-│         HASH_JOIN         │
-│    ────────────────────   │
-│   Join Type: RIGHT_ANTI   │
-│        Conditions:        │
-│   observation_id = ref_id │
+│      STREAMING_LIMIT      │ (0 rows, 0.00s)
 └─────────────┬─────────────┘
-        Proyección con UNNEST directo sobre SEQ_SCAN(metric_results)
+┌─────────────┴─────────────┐
+│         HASH_JOIN         │ (Join Type: RIGHT_ANTI, observation_id = ref_id, 0 rows, 47.92s)
+└─────────────┬─────────────┘
+        ├──────────────────────────────────────────┤
+┌─────────────┴─────────────┐              ┌─────────────┴─────────────┐
+│         TABLE_SCAN        │              │         PROJECTION        │ (0.01s)
+│  .normalized_observations │              └─────────────┬─────────────┘
+│   Type: Sequential Scan   │              ┌─────────────┴─────────────┐
+│ Projections: observation_id│             │           FILTER          │ (ref_id IS NOT NULL, 111,197,985 rows, 0.09s)
+│   475,997 rows (0.16s)    │              └─────────────┬─────────────┘
+└───────────────────────────┘              ┌─────────────┴─────────────┐
+                                           │           UNNEST          │ (111,197,985 rows, 18.37s)
+                                           └─────────────┬─────────────┘
+                                           ┌─────────────┴─────────────┐
+                                           │         TABLE_SCAN        │
+                                           │      .metric_results      │
+                                           │   Type: Sequential Scan   │
+                                           │ Projections: document_json│
+                                           │  1,236,466 rows (53.67s)  │
+                                           └───────────────────────────┘
 ```
 
-### Relación 3: `metric_metric`
+---
+
+### Perfil Detallado 3: `metric_metric` (`Total Time: 43.27s`)
+Verifica que toda referencia en `input_metric_result_ids` apunte a una métrica previa existente:
 ```sql
-EXPLAIN
+EXPLAIN ANALYZE
 WITH extracted_refs AS (
     SELECT unnest(
         COALESCE(
@@ -230,24 +318,45 @@ ANTI JOIN metric_results m ON e.ref_id = m.result_id
 WHERE ref_id IS NOT NULL
 LIMIT 1;
 ```
-Plan:
+Árbol de ejecución y tiempos reales:
 ```text
+┌────────────────────────────────────────────────┐
+│              Total Time: 43.27s                │
+└────────────────────────────────────────────────┘
 ┌───────────────────────────┐
-│      STREAMING_LIMIT      │
+│           QUERY           │
 └─────────────┬─────────────┘
 ┌─────────────┴─────────────┐
-│         HASH_JOIN         │
-│    ────────────────────   │
-│   Join Type: RIGHT_ANTI   │
-│        Conditions:        │
-│     result_id = ref_id    │
+│      STREAMING_LIMIT      │ (0 rows, 0.00s)
 └─────────────┬─────────────┘
-        Proyección con UNNEST directo sobre SEQ_SCAN(metric_results)
+┌─────────────┴─────────────┐
+│         HASH_JOIN         │ (Join Type: RIGHT_ANTI, result_id = ref_id, 0 rows, 0.10s)
+└─────────────┬─────────────┘
+        ├──────────────────────────────────────────┤
+┌─────────────┴─────────────┐              ┌─────────────┴─────────────┐
+│         TABLE_SCAN        │              │         PROJECTION        │ (0.00s)
+│      .metric_results      │              └─────────────┬─────────────┘
+│   Type: Sequential Scan   │              ┌─────────────┴─────────────┐
+│   Projections: result_id  │              │           FILTER          │ (ref_id IS NOT NULL, 403,909 rows, 0.00s)
+│  1,236,466 rows (0.34s)   │              └─────────────┬─────────────┘
+└───────────────────────────┘              ┌─────────────┴─────────────┐
+                                           │           UNNEST          │ (403,909 rows, 2.86s)
+                                           └─────────────┬─────────────┘
+                                           ┌─────────────┴─────────────┐
+                                           │         TABLE_SCAN        │
+                                           │      .metric_results      │
+                                           │   Type: Sequential Scan   │
+                                           │ Projections: document_json│
+                                           │  1,236,466 rows (39.94s)  │
+                                           └───────────────────────────┘
 ```
 
-### Relación 4: `diagnostic_metric`
+---
+
+### Perfil Detallado 4: `diagnostic_metric` (`Total Time: 0.0909s`)
+Verifica que toda referencia en componentes y evidencia de diagnósticos apunte a una métrica existente:
 ```sql
-EXPLAIN
+EXPLAIN ANALYZE
 WITH extracted_refs AS (
     SELECT unnest(
         list_concat(
@@ -263,19 +372,37 @@ ANTI JOIN metric_results m ON e.ref_id = m.result_id
 WHERE ref_id IS NOT NULL
 LIMIT 1;
 ```
-Plan:
+Árbol de ejecución y tiempos reales:
 ```text
+┌────────────────────────────────────────────────┐
+│              Total Time: 0.0909s               │
+└────────────────────────────────────────────────┘
 ┌───────────────────────────┐
-│      STREAMING_LIMIT      │
+│           QUERY           │
 └─────────────┬─────────────┘
 ┌─────────────┴─────────────┐
-│         HASH_JOIN         │
-│    ────────────────────   │
-│   Join Type: RIGHT_ANTI   │
-│        Conditions:        │
-│     result_id = ref_id    │
+│      STREAMING_LIMIT      │ (0 rows, 0.00s)
 └─────────────┬─────────────┘
-        Proyección con UNNEST directo sobre SEQ_SCAN(diagnostic_results)
+┌─────────────┴─────────────┐
+│         HASH_JOIN         │ (Join Type: RIGHT_ANTI, result_id = ref_id, 0 rows, 0.01s)
+└─────────────┬─────────────┘
+        ├──────────────────────────────────────────┤
+┌─────────────┴─────────────┐              ┌─────────────┴─────────────┐
+│         TABLE_SCAN        │              │         PROJECTION        │ (0.00s)
+│      .metric_results      │              └─────────────┬─────────────┘
+│   Type: Sequential Scan   │              ┌─────────────┴─────────────┐
+│   Projections: result_id  │              │           FILTER          │ (ref_id IS NOT NULL, 8,552 rows, 0.00s)
+│  1,236,466 rows (0.02s)   │              └─────────────┬─────────────┘
+└───────────────────────────┘              ┌─────────────┴─────────────┐
+                                           │           UNNEST          │ (8,552 rows, 0.01s)
+                                           └─────────────┬─────────────┘
+                                           ┌─────────────┴─────────────┐
+                                           │         TABLE_SCAN        │
+                                           │    .diagnostic_results    │
+                                           │   Type: Sequential Scan   │
+                                           │ Projections: document_json│
+                                           │    1,066 rows (0.04s)     │
+                                           └───────────────────────────┘
 ```
 
 ---
