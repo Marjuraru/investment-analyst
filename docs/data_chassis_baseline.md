@@ -2,7 +2,7 @@
 
 Este documento registra el baseline técnico y la telemetría física y lógica de almacenamiento
 obtenida tras completar con éxito el ciclo de backup y restauración sobre la copia restaurada
-`/mnt/c/temp/data_chassis_0_restored`, de conformidad con los criterios de aceptación del Work Block
+temporal en volumen externo (`data_chassis_0_restored`), de conformidad con los criterios de aceptación del Work Block
 `DATA-CHASSIS-0` (Issue #230).
 
 Ninguna cifra es estimada: todos los valores provienen de mediciones directas sobre el sistema de
@@ -25,7 +25,7 @@ El ciclo completo se ejecutó de forma desacoplada y fuera del VHD de WSL:
 ### Margen de Memoria y Contención
 - Memoria disponible en el host antes del ciclo: `MemAvailable` > 4,3 GiB.
 - Margen verificado: `VmHWM_bytes + 2.147.483.648 <= MemAvailable_before_bytes` (se respetó el margen de 2 GiB).
-- Limpieza de derrame (*spill*): Durante la fase de resolución relacional en DuckDB, el motor utilizó almacenamiento temporal particionado en `/mnt/c/temp/.duckdb_spill_*` sin exceder 1 GiB de buffer pool en RAM y limpió completamente el directorio temporal al finalizar. Cero señales de OOM y cero residuos en disco.
+- Limpieza de derrame (*spill*): Durante la fase de resolución relacional en DuckDB, el motor utilizó almacenamiento temporal particionado fuera del VHD (`.duckdb_spill_*`) sin exceder 1 GiB de buffer pool en RAM y limpió completamente el directorio temporal al finalizar. Cero señales de OOM y cero residuos en disco.
 
 ---
 
@@ -71,7 +71,7 @@ SELECT count(*), sum(strlen(document_json)) FROM <tabla>;
 
 Consulta SQL ejecutada:
 ```sql
-SELECT 
+SELECT
     split_part(metric_key, '.', 1) AS family,
     count(*) AS cnt,
     sum(strlen(document_json)) AS total_doc_bytes,
@@ -97,7 +97,7 @@ Resultados exactos:
 
 Consulta SQL ejecutada:
 ```sql
-SELECT 
+SELECT
     metric_key,
     count(*) AS cnt,
     sum(strlen(document_json)) AS total_doc_bytes,
@@ -159,10 +159,10 @@ Las 4 consultas canónicas de verificación de linaje relacional fueron verifica
 
 ### Relación 1: `observation_raw`
 ```sql
-EXPLAIN 
-SELECT o.raw_record_id 
-FROM normalized_observations o 
-ANTI JOIN raw_record_index r ON o.raw_record_id = r.record_id 
+EXPLAIN
+SELECT o.raw_record_id
+FROM normalized_observations o
+ANTI JOIN raw_record_index r ON o.raw_record_id = r.record_id
 LIMIT 1;
 ```
 Plan:
@@ -181,20 +181,20 @@ Plan:
 
 ### Relación 2: `metric_observation`
 ```sql
-EXPLAIN 
+EXPLAIN
 WITH extracted_refs AS (
     SELECT unnest(
         COALESCE(
             from_json(json_extract(document_json, '$.input_observation_ids'), '["VARCHAR"]'),
             []
         )
-    ) AS ref_id 
+    ) AS ref_id
     FROM metric_results
-) 
-SELECT ref_id 
-FROM extracted_refs e 
-ANTI JOIN normalized_observations o ON e.ref_id = o.observation_id 
-WHERE ref_id IS NOT NULL 
+)
+SELECT ref_id
+FROM extracted_refs e
+ANTI JOIN normalized_observations o ON e.ref_id = o.observation_id
+WHERE ref_id IS NOT NULL
 LIMIT 1;
 ```
 Plan:
@@ -214,20 +214,20 @@ Plan:
 
 ### Relación 3: `metric_metric`
 ```sql
-EXPLAIN 
+EXPLAIN
 WITH extracted_refs AS (
     SELECT unnest(
         COALESCE(
             from_json(json_extract(document_json, '$.input_metric_result_ids'), '["VARCHAR"]'),
             []
         )
-    ) AS ref_id 
+    ) AS ref_id
     FROM metric_results
-) 
-SELECT ref_id 
-FROM extracted_refs e 
-ANTI JOIN metric_results m ON e.ref_id = m.result_id 
-WHERE ref_id IS NOT NULL 
+)
+SELECT ref_id
+FROM extracted_refs e
+ANTI JOIN metric_results m ON e.ref_id = m.result_id
+WHERE ref_id IS NOT NULL
 LIMIT 1;
 ```
 Plan:
@@ -247,20 +247,20 @@ Plan:
 
 ### Relación 4: `diagnostic_metric`
 ```sql
-EXPLAIN 
+EXPLAIN
 WITH extracted_refs AS (
     SELECT unnest(
         list_concat(
             COALESCE(from_json(json_extract(document_json, '$.components[*].metric_result_ids[*]'), '["VARCHAR"]'), []),
             COALESCE(from_json(json_extract(document_json, '$.evidence[*].metric_result_id'), '["VARCHAR"]'), [])
         )
-    ) AS ref_id 
+    ) AS ref_id
     FROM diagnostic_results
-) 
-SELECT ref_id 
-FROM extracted_refs e 
-ANTI JOIN metric_results m ON e.ref_id = m.result_id 
-WHERE ref_id IS NOT NULL 
+)
+SELECT ref_id
+FROM extracted_refs e
+ANTI JOIN metric_results m ON e.ref_id = m.result_id
+WHERE ref_id IS NOT NULL
 LIMIT 1;
 ```
 Plan:
@@ -282,7 +282,7 @@ Plan:
 
 ## 9. Copia Temporal de Auditoría y Decisión Humana
 
-- **Ubicación de la copia restaurada:** `/mnt/c/temp/data_chassis_0_restored`
+- **Identificador y topología de la copia restaurada:** Destino temporal externo `data_chassis_0_restored` (fuera del VHD de WSL)
 - **Tamaño total:** `8.511.630.696` bytes (7,9271 GiB).
 - **Inventario:** 294.815 archivos verificados con hash SHA-256 idéntico al backup original.
-- **Decisión humana:** Queda a criterio humano (`HUMAN`) la conservación de esta copia temporal para auditorías posteriores o su eliminación para recuperar ~8,5 GB en el disco `C:`. El backup permanente e inmutable reside en `/mnt/c/temp/data_chassis_0_backup`.
+- **Decisión humana:** Queda a criterio humano (`HUMAN`) la conservación de esta copia temporal para auditorías posteriores o su eliminación para recuperar ~8,5 GB en el disco físico. El backup durable y verificado reside en el destino externo `data_chassis_0_backup`.

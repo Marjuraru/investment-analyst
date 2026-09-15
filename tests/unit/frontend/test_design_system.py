@@ -1587,27 +1587,37 @@ def test_design_system_documentation_declares_the_board_shell() -> None:
     )
 
 
-def _check_route_declares_local_interface_planned_and_sec_corpus_next(doc_text: str) -> None:
+def _check_route_declares_completed_dependencies_and_data_chassis_next(doc_text: str) -> None:
     assert re.search(r"\|\s*`LOCAL-INTERFACE`\s*\|\s*`DONE`\s*\|", doc_text), (
         "the route table must declare LOCAL-INTERFACE as DONE"
     )
     assert re.search(r"\|\s*`SEC-CORPUS`\s*\|\s*`DONE`\s*\|", doc_text), (
         "SEC-CORPUS completes its route in this block"
     )
-    assert re.search(r"\|\s*`FUNDAMENTALS-COVERAGE`\s*\|\s*`NEXT`\s*\|", doc_text), (
-        "FUNDAMENTALS-COVERAGE must be the sole NEXT candidate"
+    assert re.search(r"\|\s*`DATA-CHASSIS`\s*\|\s*`NEXT`\s*\|", doc_text), (
+        "DATA-CHASSIS must be the sole NEXT candidate"
     )
 
 
-def test_route_declares_local_interface_planned_and_sec_corpus_next() -> None:
+_check_route_declares_local_interface_planned_and_sec_corpus_next = (
+    _check_route_declares_completed_dependencies_and_data_chassis_next
+)
+
+
+def test_route_declares_completed_dependencies_and_data_chassis_next() -> None:
     doc_path = (
         Path(str(files("investment_analyst"))).parent.parent
         / "docs"
         / "basic_functional_release_plan.md"
     )
-    _check_route_declares_local_interface_planned_and_sec_corpus_next(
+    _check_route_declares_completed_dependencies_and_data_chassis_next(
         doc_path.read_text(encoding="utf-8")
     )
+
+
+test_route_declares_local_interface_planned_and_sec_corpus_next = (
+    test_route_declares_completed_dependencies_and_data_chassis_next
+)
 
 
 def _check_not_built_grammar_is_isolated_from_absence_marks(styles_css: str, app_js: str) -> None:
@@ -1920,8 +1930,8 @@ def _check_route_registers_canvas_convergence_and_reassigns_cazatiburones(doc_te
     assert re.search(r"\|\s*`LOCAL-INTERFACE`\s*\|\s*`DONE`\s*\|", doc_text), (
         "LOCAL-INTERFACE must remain DONE"
     )
-    assert re.search(r"\|\s*`FUNDAMENTALS-COVERAGE`\s*\|\s*`NEXT`\s*\|", doc_text), (
-        "FUNDAMENTALS-COVERAGE must be the sole NEXT candidate"
+    assert re.search(r"\|\s*`DATA-CHASSIS`\s*\|\s*`NEXT`\s*\|", doc_text), (
+        "DATA-CHASSIS must be the sole NEXT candidate"
     )
     normalized = re.sub(r"\s+", " ", doc_text).lower()
     assert "cazatiburones" in normalized and "ui-4" in normalized, (
@@ -2168,22 +2178,30 @@ def test_route_registers_the_connected_cazatiburones_board() -> None:
     _check_route_registers_the_connected_cazatiburones_board(doc_path.read_text(encoding="utf-8"))
 
 
-def _check_route_keeps_fundamentals_coverage_as_the_single_next(doc_text: str) -> None:
+def _check_route_keeps_data_chassis_as_the_single_next(doc_text: str) -> None:
     next_rows = re.findall(r"\|\s*`([A-Z-]+)`\s*\|\s*`NEXT`\s*\|", doc_text)
-    assert next_rows == ["FUNDAMENTALS-COVERAGE"], (
-        f"expected exactly one NEXT row (FUNDAMENTALS-COVERAGE), found {next_rows}"
+    assert next_rows == ["DATA-CHASSIS"], (
+        f"expected exactly one NEXT row (DATA-CHASSIS), found {next_rows}"
     )
 
 
-def test_route_keeps_fundamentals_coverage_as_the_single_next() -> None:
+_check_route_keeps_fundamentals_coverage_as_the_single_next = (
+    _check_route_keeps_data_chassis_as_the_single_next
+)
+
+
+def test_route_keeps_data_chassis_as_the_single_next() -> None:
     doc_path = (
         Path(str(files("investment_analyst"))).parent.parent
         / "docs"
         / "basic_functional_release_plan.md"
     )
-    _check_route_keeps_fundamentals_coverage_as_the_single_next(
-        doc_path.read_text(encoding="utf-8")
-    )
+    _check_route_keeps_data_chassis_as_the_single_next(doc_path.read_text(encoding="utf-8"))
+
+
+test_route_keeps_fundamentals_coverage_as_the_single_next = (
+    test_route_keeps_data_chassis_as_the_single_next
+)
 
 
 # ---------------------------------------------------------------------------
@@ -3732,11 +3750,11 @@ def test_probe_route_local_interface_rule_catches_a_missing_row() -> None:
         / "basic_functional_release_plan.md"
     )
     text = doc_path.read_text(encoding="utf-8")
-    _check_route_declares_local_interface_planned_and_sec_corpus_next(text)  # baseline: clean
+    _check_route_declares_completed_dependencies_and_data_chassis_next(text)  # baseline: clean
     corrupted = re.sub(r"\| `LOCAL-INTERFACE` \| `DONE` \|.*\|\n", "", text, count=1)
     assert corrupted != text, "probe fixture did not remove the LOCAL-INTERFACE row"
     with pytest.raises(AssertionError):
-        _check_route_declares_local_interface_planned_and_sec_corpus_next(corrupted)
+        _check_route_declares_completed_dependencies_and_data_chassis_next(corrupted)
 
 
 def test_probe_not_built_isolation_rule_catches_reuse_as_a_sixth_absence_mark() -> None:
@@ -5135,7 +5153,7 @@ def test_canonical_roadmap_reflects_live_sec_caz_ui12_runtime_efficiency_and_pri
     assert "LOCAL-INTERFACE" in release_plan and "DONE" in release_plan
     assert "SEC-CORPUS" in release_plan and "DONE" in release_plan
     assert "`EQUITY-UNIVERSE` | `DONE`" in release_plan
-    assert "`FUNDAMENTALS-COVERAGE` | `NEXT`" in release_plan
+    assert "`DATA-CHASSIS` | `NEXT`" in release_plan
     assert "BVL-MARKET" in release_plan and "BLOCKED" in release_plan
     assert "PREDICTIVE-RESEARCH" in release_plan and "DEFERRED" in release_plan
     assert "UI-14/#202" in release_plan + roadmap

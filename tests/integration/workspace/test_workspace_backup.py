@@ -1015,7 +1015,7 @@ def test_traceability_scan_handles_rowid_gaps(tmp_path: Path) -> None:
     assert restored.raw_record_count == count - 1
 
 
-def test_document_and_raw_scans_contain_no_top_n_or_keyset_queries(
+def test_traceability_scan_uses_bounded_rowid_ranges_without_uuid_top_n(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1071,7 +1071,12 @@ def test_document_and_raw_scans_contain_no_top_n_or_keyset_queries(
         storage.close()
 
 
-def test_lineage_queries_use_direct_unnest_without_delim_join() -> None:
+test_document_and_raw_scans_contain_no_top_n_or_keyset_queries = (
+    test_traceability_scan_uses_bounded_rowid_ranges_without_uuid_top_n
+)
+
+
+def test_lineage_queries_are_constant_and_use_direct_unnest() -> None:
     import duckdb
 
     con = duckdb.connect()
@@ -1103,3 +1108,8 @@ def test_lineage_queries_use_direct_unnest_without_delim_join() -> None:
         assert "ANTI" in plan
         if query != backup_module._OBSERVATION_RAW_QUERY:
             assert "UNNEST" in plan
+
+
+test_lineage_queries_use_direct_unnest_without_delim_join = (
+    test_lineage_queries_are_constant_and_use_direct_unnest
+)
