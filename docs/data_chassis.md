@@ -93,10 +93,11 @@ consumidor.
 
 Después de la fase: `CRYPTO-DATA-DISCOVERY` / `ASSET-EXPANSION` → `PREDICTIVE-RESEARCH` → LLM cualitativo opcional.
 
-## Etapa 1 entregada: instrumento y lectura (`DATA-CHASSIS-1`, `DATA-CHASSIS-2`)
+## Etapa 1 entregada: instrumento, lectura y cableado (`DATA-CHASSIS-1`, `DATA-CHASSIS-2`, `DATA-CHASSIS-3`)
 
-La etapa 1 queda entregada por dos bloques: `DATA-CHASSIS-1` aportó el instrumento y `DATA-CHASSIS-2`
-la lectura. El siguiente bloque es `DATA-CHASSIS-3` (etapa 2 — persistencia y verificación por lotes).
+La etapa 1 queda entregada por tres bloques: `DATA-CHASSIS-1` aportó el instrumento, `DATA-CHASSIS-2`
+la lectura y `DATA-CHASSIS-3` el cableado en la composición de producción. El siguiente bloque es
+`DATA-CHASSIS-4` (etapa 2 — persistencia y verificación por lotes).
 El artefacto es **aditivo y operacional**: cuelga de `state_root` como `storage_observability_v1.jsonl`
 y no toca `StoragePaths`, el layout de `storage/`, el schema DuckDB ni ningún contrato persistido
 existente más allá de sus propios campos opcionales.
@@ -129,7 +130,8 @@ existente más allá de sus propios campos opcionales.
   scheduler y su cableado operativo queda pendiente. `DATA-CHASSIS-2` cierra la etapa 1 con la lectura
   de ese artefacto, pero tampoco toca la composición: el runtime desplegado sigue por detrás de `main`
   (cuatro merges al publicar este bloque), el artefacto tiene cero instancias persistidas y el cableado
-  es una acción operativa separada, no un criterio de esta ruta.
+  es una acción operativa separada, no un criterio de esta ruta. **Cerrado por `DATA-CHASSIS-3`:** la
+  composición ya inyecta el colector; desplegar el runtime sigue siendo una acción operativa del humano.
 
 ### Lectura (`DATA-CHASSIS-2`)
 
@@ -173,9 +175,33 @@ existente más allá de sus propios campos opcionales.
   árbol de decisión de dos familias (`raw_record_index`/`normalized_observations` frente a
   `metric_results`/`diagnostic_results`) es explícito y el resto de las tablas medidas queda en la
   cuenta de filas fuera de familia.
-- **Gate de etapa todavía provisional:** con el instrumento y la lectura ya entregados, las metas de
-  contención siguen sin fijarse como gates definitivos porque el artefacto no tiene instancias
-  persistidas en el runtime desplegado; se fijarán con telemetría real, no con supuestos.
+- **Gate de etapa todavía provisional:** con el instrumento, la lectura y el cableado ya entregados,
+  las metas de contención siguen sin fijarse como gates definitivos porque el artefacto no tiene
+  instancias persistidas en el runtime desplegado; se fijarán con telemetría real, no con supuestos.
+
+### Cableado en la composición de producción (`DATA-CHASSIS-3`)
+
+`DATA-CHASSIS-3` es el bloque de composición que activa el instrumento ya auditado. No modifica el
+colector, el informe ni el scheduler: **usa** lo entregado.
+
+- **Punto de inyección existente:** `MultiAssetScheduler(storage_observability=...)` ya existía desde
+  `DATA-CHASSIS-1` y permanece opcional e intacto; el bloque sólo lo provee desde la composición.
+- **Rutas ya resueltas:** la composición resuelve `WorkspacePaths` una sola vez y propaga a
+  `_serve_after_lock` el `state_root` y el `storage_root` que ya obtenía; el `database_path` se deriva
+  con `StoragePaths.from_root`, el mismo camino que usan el runtime y el servicio de workspace. No se
+  introduce una resolución de rutas nueva ni se duplica el layout en el script.
+- **Artefacto:** el colector escribe `storage_observability_v1.jsonl` bajo el `state_root` declarado,
+  con ruta absoluta derivada de ese `state_root`, de modo que el destino no depende del directorio de
+  trabajo. Un arranque no escribe nada: el registro aparece cuando un job se ejecuta.
+- **Sin colector y con colector fallido:** el scheduler compuesto sin colector sigue siendo válido y no
+  escribe artefacto, y un fallo del colector no impide el arranque ni altera el resultado del job; se
+  registra como issue operativo del scheduler.
+- **Alcance estricto:** una sola ruta de `scripts/`, una prueba de integración nueva y los dos
+  documentos de ruta. Cero cambios en `src/investment_analyst/`, cero dependencias, cero cambios de
+  schema, migraciones, identidades, fórmulas o contratos de salida.
+- **Secuencia, no preferencia:** el cableado va antes de la etapa 2 porque el gate `−80 % real en jobs
+  de reutilización` exige una línea base medida antes del cambio de persistencia; sin el cableado esa
+  línea base no llega a existir. La etapa 2 pasa a `DATA-CHASSIS-4`.
 
 ## Durabilidad inmediata
 
