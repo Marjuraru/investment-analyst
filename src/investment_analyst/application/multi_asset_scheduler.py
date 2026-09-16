@@ -18,6 +18,11 @@ from investment_analyst.application.job_memory_budget import (
     JobMemoryWatchdog,
 )
 from investment_analyst.application.operational_state import AaplOperationalStateError
+from investment_analyst.application.storage_observability import (
+    ScheduledJobObservation,
+    StorageObservabilityCollector,
+    StorageObservationHandle,
+)
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 from investment_analyst.core.operation_control import (
     OperationCancelledError,
@@ -746,6 +751,7 @@ class MultiAssetScheduler:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         attempt_id_factory: Callable[[], UUID] = uuid4,
         memory_ceiling_bytes: int | None = None,
+        storage_observability: StorageObservabilityCollector | None = None,
     ) -> None:
         if not jobs:
             raise ValueError("multi-asset scheduler requires at least one job")
@@ -762,6 +768,8 @@ class MultiAssetScheduler:
         self._tick_lock = threading.Lock()
         self._active_job_id: str | None = None
         self._observer_issue: str | None = None
+        self._storage_observability = storage_observability
+        self._storage_observability_issue: str | None = None
         self._pending_notifications: dict[UUID, ScheduledJobAttempt] = {}
 
     def status(self) -> MultiAssetSchedulerStatus:
@@ -875,6 +883,7 @@ class MultiAssetScheduler:
             started_at=now,
         )
         state = self._store.write_attempt_from_state(state, running)
+        storage_observation = self._begin_storage_observation(definition.job_id, attempt_id)
         memory_watchdog: JobMemoryWatchdog | None = None
         if operation_control is None and self._memory_budget.ceiling_bytes is not None:
             operation_control = OperationControl()
@@ -976,6 +985,7 @@ class MultiAssetScheduler:
                 )
             }
         )
+        self._complete_storage_observation(storage_observation, completed)
         state = self._store.write_attempt_from_state(state, completed)
         self._notify(completed)
         return completed, state
@@ -1020,6 +1030,8 @@ class MultiAssetScheduler:
         issues = tuple(issue for item in statuses for issue in item.issues)
         if self._observer_issue is not None:
             issues = (*issues, self._observer_issue)
+        if self._storage_observability_issue is not None:
+            issues = (*issues, self._storage_observability_issue)
         return MultiAssetSchedulerStatus(
             jobs=statuses,
             due_count=sum(item.due for item in statuses),
@@ -1177,6 +1189,50 @@ class MultiAssetScheduler:
         for attempt in tuple(self._pending_notifications.values()):
             self._notify(attempt)
 
+    def _begin_storage_observation(
+        self,
+        job_id: str,
+        attempt_id: UUID,
+    ) -> StorageObservationHandle | None:
+        """Open one storage observation without ever disturbing the measured job."""
+        if self._storage_observability is None:
+            return None
+        try:
+            return self._storage_observability.begin_attempt(job_id=job_id, attempt_id=attempt_id)
+        except Exception:  # noqa: BLE001
+            self._storage_observability_issue = (
+                "storage observability could not open its measurement"
+            )
+            return None
+
+    def _complete_storage_observation(
+        self,
+        handle: StorageObservationHandle | None,
+        attempt: ScheduledJobAttempt,
+    ) -> None:
+        """Close one storage observation without ever disturbing the measured job."""
+        if handle is None or self._storage_observability is None:
+            return
+        execution = attempt.execution
+        try:
+            self._storage_observability.complete_attempt(
+                handle,
+                ScheduledJobObservation(
+                    attempt_id=attempt.attempt_id,
+                    job_id=attempt.definition.job_id,
+                    attempt_number=attempt.attempt_number,
+                    local_date=attempt.local_date,
+                    attempt_status=attempt.status.value,
+                    evidence_changed=execution.evidence_changed if execution else None,
+                    rows_created=execution.created_count if execution else None,
+                    rows_reused=execution.reused_count if execution else None,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            self._storage_observability_issue = "storage observability could not record its result"
+        else:
+            self._storage_observability_issue = None
+
     @staticmethod
     def _attempts_for(
         state: MultiAssetScheduleState,
@@ -1274,7 +1330,9 @@ __all__ = [
     "ScheduledJobFreshness",
     "ScheduledJobHealth",
     "ScheduledJobInvocation",
+    "ScheduledJobObservation",
     "ScheduledJobRunError",
     "ScheduledJobStatus",
+    "StorageObservabilityCollector",
     "scheduled_job_failure",
 ]

@@ -7,11 +7,14 @@ from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from uuid import UUID
 
+import duckdb
 import pytest
 
 from investment_analyst.application.multi_asset_scheduler import (
     MultiAssetScheduler,
+    MultiAssetScheduleState,
     MultiAssetScheduleStateStore,
+    ProviderJobTelemetry,
     RegisteredScheduledJob,
     ScheduledJobAttempt,
     ScheduledJobAttemptStatus,
@@ -25,6 +28,10 @@ from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobInvocation,
     ScheduledJobRunError,
     scheduled_job_failure,
+)
+from investment_analyst.application.storage_observability import (
+    StorageObservabilityCollector,
+    StorageObservabilityState,
 )
 from investment_analyst.core.operation_control import current_operation_control
 
@@ -650,3 +657,134 @@ def test_scheduler_cancellation_marks_active_job_interrupted_and_skips_remaining
     assert attempts[0].failure is not None
     assert attempts[0].failure.category is ScheduledJobFailureCategory.INTERRUPTED
     assert current_operation_control() is None
+
+
+def test_scheduler_emits_storage_observability_without_changing_persisted_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "investment_analyst.application.job_memory_budget.read_process_rss_kb",
+        lambda: 4242,
+    )
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    definition = _definition("observability-market")
+    attempt_id = UUID("00000000-0000-4000-8000-0000000000a1")
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        return _execution(invocation, created=2)
+
+    def schedule(store_path: Path) -> bytes:
+        store = MultiAssetScheduleStateStore(store_path)
+        scheduler = MultiAssetScheduler(
+            (RegisteredScheduledJob(definition, run),),
+            store,
+            clock=lambda: now,
+            attempt_id_factory=lambda: attempt_id,
+        )
+        completed = scheduler.tick()
+        assert completed[0].status is ScheduledJobAttemptStatus.SUCCEEDED
+        return store_path.read_bytes()
+
+    baseline = schedule(tmp_path / "baseline.json")
+
+    database = tmp_path / "storage" / "data" / "processed" / "investment_analyst.duckdb"
+    database.parent.mkdir(parents=True)
+    connection = duckdb.connect(str(database))
+    try:
+        connection.execute("CREATE TABLE metric_results (result_id VARCHAR, document_json VARCHAR)")
+        connection.execute("INSERT INTO metric_results VALUES ('a', '{\"x\": 1}')")
+    finally:
+        connection.close()
+    collector = StorageObservabilityCollector(
+        state_root=tmp_path / "state",
+        database_path=database,
+        clock=lambda: now,
+    )
+    store_path = tmp_path / "observed.json"
+    store = MultiAssetScheduleStateStore(store_path)
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(definition, run),),
+        store,
+        storage_observability=collector,
+        clock=lambda: now,
+        attempt_id_factory=lambda: attempt_id,
+    )
+
+    completed = scheduler.tick()
+
+    assert completed[0].attempt_id == attempt_id
+    assert store.load().attempts[0].status is ScheduledJobAttemptStatus.SUCCEEDED
+    assert store_path.read_bytes() == baseline
+    assert scheduler.status().issues == ()
+
+    state = collector.state()
+    assert isinstance(state, StorageObservabilityState)
+    assert len(state.records) == 1
+    record = state.records[0]
+    assert record.attempt_id == attempt_id
+    assert record.job_id == definition.job_id
+    assert record.attempt_status == "succeeded"
+    assert record.rows_created == 2
+    assert record.rows_reused == 0
+    assert record.evidence_changed is True
+    assert record.database_delta_bytes == 0
+    assert tuple(item.table_name for item in record.table_bytes) == ("metric_results",)
+    assert record.table_bytes[0].row_count == 1
+    assert record.durations.total_ms == 0
+
+
+def test_persisted_scheduler_contracts_remain_unchanged(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    store = MultiAssetScheduleStateStore(tmp_path / "persisted.json")
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(_definition("persisted-contracts"), _execution),),
+        store,
+        clock=lambda: now,
+        attempt_id_factory=iter((UUID("00000000-0000-4000-8000-0000000000b1"),)).__next__,
+    )
+
+    completed = scheduler.tick()[0]
+
+    assert tuple(ProviderJobTelemetry.model_fields) == (
+        "schema_version",
+        "job_id",
+        "provider",
+        "domain",
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "provider_call_count",
+        "response_bytes",
+        "created_count",
+        "reused_count",
+        "coverage_complete",
+        "failure_category",
+        "peak_rss_kb",
+    )
+    assert tuple(ScheduledJobAttempt.model_fields) == (
+        "schema_version",
+        "attempt_id",
+        "definition",
+        "local_date",
+        "scheduled_for",
+        "attempt_number",
+        "status",
+        "started_at",
+        "completed_at",
+        "execution",
+        "failure",
+        "telemetry",
+    )
+    assert tuple(MultiAssetScheduleState.model_fields) == (
+        "schema_version",
+        "attempts",
+    )
+    assert completed.schema_version == "scheduled-job-attempt-v1"
+    assert completed.telemetry is not None
+    assert completed.telemetry.schema_version == "provider-job-telemetry-v1"
+    assert tuple(completed.telemetry.model_dump(mode="json")) == tuple(
+        ProviderJobTelemetry.model_fields
+    )
+    assert tuple(completed.to_json_dict()) == tuple(ScheduledJobAttempt.model_fields)
+    assert tuple(store.load().to_json_dict()) == ("schema_version", "attempts")
