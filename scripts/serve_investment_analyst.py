@@ -65,6 +65,7 @@ from investment_analyst.application.runtime import (
 )
 from investment_analyst.application.runtime_lifecycle import notify_ready, wait_for_overview_ready
 from investment_analyst.application.scheduled_observers import ScheduledJobObserverChain
+from investment_analyst.application.storage_observability import StorageObservabilityCollector
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.frontend.local_schedule_jobs import (
     LocalWatchlistScheduleConfig,
@@ -78,7 +79,7 @@ from investment_analyst.frontend.local_web import (
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
 from investment_analyst.providers.macro.fred_alfred import FredApiKey
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
-from investment_analyst.storage import StorageError
+from investment_analyst.storage import StorageError, StoragePaths
 from investment_analyst.workspace.service import WorkspaceError
 
 _SCHEDULE_STATE_FILE = "multi_asset_schedule_state_v1.json"
@@ -234,6 +235,7 @@ def _serve(
             credentials,
             runtime,
             workspace_root=paths.root,
+            storage_root=paths.storage_root,
             state_root=paths.state_root,
         )
 
@@ -244,6 +246,7 @@ def _serve_after_lock(
     runtime: ApplicationRuntime,
     *,
     workspace_root: Path,
+    storage_root: Path,
     state_root: Path,
 ) -> int:
     application = InvestmentAnalystApplication(runtime)
@@ -344,6 +347,10 @@ def _serve_after_lock(
         analytical_monitor.reconcile(schedule_attempts)
         notification_monitor = CandidateNotificationMonitor(notification_store, analytical_store)
         notification_monitor.reconcile()
+        storage_observability = StorageObservabilityCollector(
+            state_root=state_root,
+            database_path=StoragePaths.from_root(storage_root).database_path,
+        )
         scheduler = MultiAssetScheduler(
             jobs,
             schedule_store,
@@ -359,6 +366,7 @@ def _serve_after_lock(
                 if arguments.memory_ceiling_mb is not None
                 else None
             ),
+            storage_observability=storage_observability,
         )
 
     preference_service = AssetPreferencesService(
