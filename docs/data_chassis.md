@@ -93,11 +93,17 @@ consumidor.
 
 Después de la fase: `CRYPTO-DATA-DISCOVERY` / `ASSET-EXPANSION` → `PREDICTIVE-RESEARCH` → LLM cualitativo opcional.
 
-## Instrumentación entregada de la etapa 1 (`DATA-CHASSIS-1`)
+## Etapa 1 entregada: instrumento y lectura (`DATA-CHASSIS-1`, `DATA-CHASSIS-2`)
 
-`DATA-CHASSIS-1` entrega la mitad medible de la etapa 1: el instrumento, no el informe. El artefacto
-es **aditivo y operacional**: cuelga de `state_root` como `storage_observability_v1.jsonl` y no toca
-`StoragePaths`, el layout de `storage/`, el schema DuckDB ni ningún contrato persistido existente.
+La etapa 1 queda entregada por dos bloques: `DATA-CHASSIS-1` aportó el instrumento y `DATA-CHASSIS-2`
+la lectura. El siguiente bloque es `DATA-CHASSIS-3` (etapa 2 — persistencia y verificación por lotes).
+El artefacto es **aditivo y operacional**: cuelga de `state_root` como `storage_observability_v1.jsonl`
+y no toca `StoragePaths`, el layout de `storage/`, el schema DuckDB ni ningún contrato persistido
+existente más allá de sus propios campos opcionales.
+
+### Instrumento (`DATA-CHASSIS-1`)
+
+`DATA-CHASSIS-1` entrega la mitad medible de la etapa 1: el instrumento, no el informe.
 
 - **Contrato aislado nuevo:** `storage-observability-v1` (registro por intento) y
   `storage-observability-daily-snapshot-v1` (agregado diario compacto), tipados, `frozen`,
@@ -120,8 +126,56 @@ es **aditivo y operacional**: cuelga de `state_root` como `storage_observability
   sin instrumentar los pipelines, que este bloque no toca.
 - **Cableado pendiente:** la allowlist estricta del bloque no incluye la composición de producción
   (`scripts/serve_investment_analyst.py`), de modo que el colector se inyecta explícitamente en el
-  scheduler y su cableado operativo junto con el informe, las ventanas 7/30 días y la alerta de
-  presupuesto corresponden a `DATA-CHASSIS-2`.
+  scheduler y su cableado operativo queda pendiente. `DATA-CHASSIS-2` cierra la etapa 1 con la lectura
+  de ese artefacto, pero tampoco toca la composición: el runtime desplegado sigue por detrás de `main`
+  (cuatro merges al publicar este bloque), el artefacto tiene cero instancias persistidas y el cableado
+  es una acción operativa separada, no un criterio de esta ruta.
+
+### Lectura (`DATA-CHASSIS-2`)
+
+- **Clasificación del crecimiento:** cada registro clasifica las filas creadas por el intento en
+  evidencia nueva (`raw_record_index`, `normalized_observations`), derivados (`metric_results`,
+  `diagnostic_results`) y revisiones, más las filas observadas fuera de esas dos familias. La partición
+  es exacta y verificable: las cuatro cuentas suman las filas creadas que el intento reportó. El
+  colector mide el conteo exacto de filas por tabla antes de la ejecución y al cerrarla, con el motor
+  en `read_only=True`. Una revisión es una fila creada que reescribió una identidad sin agregar fila
+  alguna; por eso se captura al escribir y no se reconstruye después en el informe. Si el intento no
+  reporta filas creadas, o si las tablas crecieron más de lo que el intento declara haber creado, la
+  clasificación **se omite** en vez de inventarse.
+- **Overhead propio medido:** `collector_overhead_ms` registra, en milisegundos y con el mismo reloj
+  único, la parte de la ventana medida que consumió el propio instrumento (lectura, compactación y
+  verificación), separada de `network_ms`, que mide la ejecución del job. La relación
+  `collector_overhead_ms + network_ms == total_ms` se valida en el contrato.
+- **Campos opcionales:** la extensión de `storage-observability-v1` es aditiva y con valor por
+  defecto; un registro escrito sin ellos sigue parseando sin error. El contrato diario
+  `storage-observability-daily-snapshot-v1` conserva exactamente sus campos.
+- **Informe read-only:** `storage-observability-report-v1` es tipado, `frozen`, `extra="forbid"`, con
+  `schema_version` literal y sin `Any`. Calcula ventanas inclusivas de 7 y 30 días sobre los snapshots
+  diarios ya persistidos y declara de forma explícita cada día sin snapshot: nunca interpola, nunca
+  rellena con cero y nunca promedia sobre días inexistentes (`mean_daily_bytes_delta` es `None` cuando
+  la ventana no tiene días declarados).
+- **Alerta de presupuesto operacional:** compara el crecimiento diario medido (bytes físicos del
+  DuckDB más WAL) contra un umbral configurable — 30.000.000 bytes por defecto, la meta provisional de
+  este documento — sobre los días declarados de la ventana corta, e identifica los días excedidos y el
+  pico medido. Es un umbral operacional: no crea candidato, no toca la outbox, no produce señal ni
+  recomendación y no alimenta el motor de alertas de producto.
+- **CLI read-only:** `scripts/report_storage_observability.py` acepta `--workspace`, `--as-of` y
+  `--budget-bytes-per-day`, imprime JSON por stdout, no escribe nada en el workspace y devuelve `0`
+  dentro de presupuesto, `3` con presupuesto excedido y `2` ante entrada inválida o artefacto
+  inutilizable.
+- **Sin motor:** el informe no abre DuckDB en ningún modo; sólo lee el artefacto JSONL bajo el
+  `state_root` declarado. Por eso funciona igual contra el `state_root` del writer o contra el de una
+  copia restaurada, y no depende del directorio de trabajo.
+- **Límites declarados:** el día abierto todavía no es un snapshot diario, de modo que aparece como
+  ausencia declarada hasta que cierra, y `unfolded_record_count` informa cuántos registros esperan
+  plegarse; la clasificación del crecimiento vive en el registro por intento y **no** se pliega en el
+  agregado diario, de modo que su lectura histórica por ventanas queda para un bloque posterior; el
+  árbol de decisión de dos familias (`raw_record_index`/`normalized_observations` frente a
+  `metric_results`/`diagnostic_results`) es explícito y el resto de las tablas medidas queda en la
+  cuenta de filas fuera de familia.
+- **Gate de etapa todavía provisional:** con el instrumento y la lectura ya entregados, las metas de
+  contención siguen sin fijarse como gates definitivos porque el artefacto no tiene instancias
+  persistidas en el runtime desplegado; se fijarán con telemetría real, no con supuestos.
 
 ## Durabilidad inmediata
 
