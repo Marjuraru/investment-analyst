@@ -93,6 +93,36 @@ consumidor.
 
 Después de la fase: `CRYPTO-DATA-DISCOVERY` / `ASSET-EXPANSION` → `PREDICTIVE-RESEARCH` → LLM cualitativo opcional.
 
+## Instrumentación entregada de la etapa 1 (`DATA-CHASSIS-1`)
+
+`DATA-CHASSIS-1` entrega la mitad medible de la etapa 1: el instrumento, no el informe. El artefacto
+es **aditivo y operacional**: cuelga de `state_root` como `storage_observability_v1.jsonl` y no toca
+`StoragePaths`, el layout de `storage/`, el schema DuckDB ni ningún contrato persistido existente.
+
+- **Contrato aislado nuevo:** `storage-observability-v1` (registro por intento) y
+  `storage-observability-daily-snapshot-v1` (agregado diario compacto), tipados, `frozen`,
+  `extra="forbid"` y sin `Any`. La correlación con la historia existente usa `attempt_id` y `job_id`;
+  las filas creadas/reutilizadas se copian por referencia desde la ejecución del intento y **no**
+  redefinen `created_count`/`reused_count` de `provider-job-telemetry-v1`.
+- **Hechos medidos por job:** bytes físicos del DuckDB y del WAL antes y después, medidos sobre el
+  sistema de archivos como enteros exactos; bytes lógicos por tabla con el motor abierto en
+  `read_only=True` y `octet_length(encode(document_json))` (bytes UTF-8 exactos; el baseline publicó
+  `strlen`, equivalente para documentos ASCII); y el desglose de duración en
+  red/consulta/cálculo/persistencia/verificación, medido con **un solo reloj** y reconciliado de forma
+  exacta con la duración total del ciclo.
+- **Cota explícita:** 90 snapshots diarios retenidos. Los registros del día abierto se anexan sin
+  reescribir el archivo completo y sólo se pliegan al snapshot compacto cuando el día UTC cierra.
+- **No intrusivo:** el colector abre el motor únicamente en `read_only=True`, no introduce una
+  segunda conexión de escritura y un fallo suyo nunca degrada ni aborta el job medido: se registra
+  como issue operativo del scheduler.
+- **Límite de atribución declarado:** `network_ms` mide la ventana de ejecución del callable del job,
+  donde ocurre el trabajo de transporte; una llamada opaca no es sub-atribuible desde esta superficie
+  sin instrumentar los pipelines, que este bloque no toca.
+- **Cableado pendiente:** la allowlist estricta del bloque no incluye la composición de producción
+  (`scripts/serve_investment_analyst.py`), de modo que el colector se inyecta explícitamente en el
+  scheduler y su cableado operativo junto con el informe, las ventanas 7/30 días y la alerta de
+  presupuesto corresponden a `DATA-CHASSIS-2`.
+
 ## Durabilidad inmediata
 
 Hoy no existe copia durable fuera del equipo y la etapa 10 llega al final. La etapa 0 exige registrar la
