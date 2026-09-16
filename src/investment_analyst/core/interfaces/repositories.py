@@ -5,8 +5,11 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
+from pydantic import model_validator
+
 from investment_analyst.core.models import (
     Asset,
+    ContractModel,
     DataFrequency,
     DiagnosticMode,
     DiagnosticResult,
@@ -16,6 +19,53 @@ from investment_analyst.core.models import (
     RawRecord,
     SourceDefinition,
 )
+
+
+class BatchWriteReceipt(ContractModel):
+    """Typed in-memory receipt for batch persistence operations."""
+
+    created_ids: tuple[UUID, ...] = ()
+    reused_ids: tuple[UUID, ...] = ()
+    conflicting_ids: tuple[UUID, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_fields(cls, data: object) -> object:
+        if isinstance(data, dict):
+            payload = dict(data)
+            for prefix in ("created", "reused", "conflicting"):
+                if prefix in payload and f"{prefix}_ids" not in payload:
+                    payload[f"{prefix}_ids"] = payload.pop(prefix)
+            return payload
+        return data
+
+    @property
+    def created(self) -> tuple[UUID, ...]:
+        return self.created_ids
+
+    @property
+    def reused(self) -> tuple[UUID, ...]:
+        return self.reused_ids
+
+    @property
+    def conflicting(self) -> tuple[UUID, ...]:
+        return self.conflicting_ids
+
+    @property
+    def created_count(self) -> int:
+        return len(self.created_ids)
+
+    @property
+    def reused_count(self) -> int:
+        return len(self.reused_ids)
+
+    @property
+    def conflicting_count(self) -> int:
+        return len(self.conflicting_ids)
+
+    @property
+    def total_count(self) -> int:
+        return len(self.created_ids) + len(self.reused_ids) + len(self.conflicting_ids)
 
 
 class AssetRepository(Protocol):
@@ -64,7 +114,11 @@ class ObservationRepository(Protocol):
 
     def save(self, observation: NormalizedObservation) -> NormalizedObservation: ...
 
+    def save_many(self, observations: Collection[NormalizedObservation]) -> BatchWriteReceipt: ...
+
     def get(self, observation_id: UUID) -> NormalizedObservation: ...
+
+    def get_many(self, observation_ids: Collection[UUID]) -> dict[UUID, NormalizedObservation]: ...
 
     def list(
         self,
@@ -93,7 +147,11 @@ class MetricResultRepository(Protocol):
 
     def save(self, result: MetricResult) -> MetricResult: ...
 
+    def save_many(self, results: Collection[MetricResult]) -> BatchWriteReceipt: ...
+
     def get(self, result_id: UUID) -> MetricResult: ...
+
+    def get_many(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]: ...
 
     def list(
         self,
@@ -111,7 +169,11 @@ class DiagnosticResultRepository(Protocol):
 
     def save(self, result: DiagnosticResult) -> DiagnosticResult: ...
 
+    def save_many(self, results: Collection[DiagnosticResult]) -> BatchWriteReceipt: ...
+
     def get(self, diagnostic_id: UUID) -> DiagnosticResult: ...
+
+    def get_many(self, diagnostic_ids: Collection[UUID]) -> dict[UUID, DiagnosticResult]: ...
 
     def list(
         self,

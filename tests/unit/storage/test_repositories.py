@@ -1,13 +1,20 @@
 """Tests for typed DuckDB repositories and deterministic filters."""
 
+import inspect
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
+from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import DataFrequency, DiagnosticMode
-from investment_analyst.storage import RecordConflictError
+from investment_analyst.storage import (
+    LocalStorage,
+    RecordConflictError,
+    RecordNotFoundError,
+    StoragePaths,
+)
 
 from .conftest import (
     make_asset,
@@ -467,3 +474,453 @@ def test_metric_result_key_projection_rejects_conflicting_singular_filter(storag
             metric_key="metric:a",
             metric_keys=("metric:a",),
         )
+
+
+def test_batch_read_contract_matches_raw_record_shape(storage) -> None:
+    raw_sig = inspect.signature(storage.raw_records.get_many)
+    raw_params = list(raw_sig.parameters.keys())
+    assert len(raw_params) == 1
+
+    obs_sig = inspect.signature(storage.observations.get_many)
+    metric_sig = inspect.signature(storage.metric_results.get_many)
+    diag_sig = inspect.signature(storage.diagnostics.get_many)
+
+    assert len(obs_sig.parameters) == 1
+    assert len(metric_sig.parameters) == 1
+    assert len(diag_sig.parameters) == 1
+
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+    obs = make_observation(raw_record_id=raw_record.record_id)
+    metric = make_metric_result(observation_id=obs.observation_id)
+    diag = make_diagnostic_result(metric_result_id=metric.result_id)
+
+    storage.observations.save_many([obs])
+    storage.metric_results.save_many([metric])
+    storage.diagnostics.save_many([diag])
+
+    raw_res = storage.raw_records.get_many([raw_record.record_id])
+    obs_res = storage.observations.get_many([obs.observation_id])
+    metric_res = storage.metric_results.get_many([metric.result_id])
+    diag_res = storage.diagnostics.get_many([diag.diagnostic_id])
+
+    assert isinstance(raw_res, dict)
+    assert isinstance(obs_res, dict)
+    assert isinstance(metric_res, dict)
+    assert isinstance(diag_res, dict)
+
+    assert obs_res[obs.observation_id] == obs
+    assert metric_res[metric.result_id] == metric
+    assert diag_res[diag.diagnostic_id] == diag
+
+
+class _QueryCountingConnection:
+    def __init__(self, target) -> None:
+        self._target = target
+        self.execute_count = 0
+
+    def execute(self, *args, **kwargs):
+        self.execute_count += 1
+        return self._target.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        self.execute_count += 1
+        return self._target.executemany(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._target, name)
+
+
+def test_batch_read_uses_a_bounded_query_count(storage) -> None:
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+
+    observations = [
+        make_observation(raw_record_id=raw_record.record_id, observation_id=uuid4())
+        for _ in range(10)
+    ]
+    metrics = [
+        make_metric_result(observation_id=obs.observation_id, result_id=uuid4())
+        for obs in observations
+    ]
+    diagnostics = [
+        make_diagnostic_result(metric_result_id=metric.result_id, diagnostic_id=uuid4())
+        for metric in metrics
+    ]
+
+    storage.observations.save_many(observations)
+    storage.metric_results.save_many(metrics)
+    storage.diagnostics.save_many(diagnostics)
+
+    wrapper = _QueryCountingConnection(storage.observations._connection)
+    storage.observations._connection = wrapper
+    storage.metric_results._connection = wrapper
+    storage.diagnostics._connection = wrapper
+
+    wrapper.execute_count = 0
+    obs_ids = [obs.observation_id for obs in observations]
+    res_obs = storage.observations.get_many(obs_ids)
+    assert len(res_obs) == 10
+    assert wrapper.execute_count == 1
+
+    wrapper.execute_count = 0
+    metric_ids = [m.result_id for m in metrics]
+    res_metrics = storage.metric_results.get_many(metric_ids)
+    assert len(res_metrics) == 10
+    assert wrapper.execute_count == 1
+
+    wrapper.execute_count = 0
+    diag_ids = [d.diagnostic_id for d in diagnostics]
+    res_diags = storage.diagnostics.get_many(diag_ids)
+    assert len(res_diags) == 10
+    assert wrapper.execute_count == 1
+
+    # Bounded query count independent of set size: querying 3 items also takes 1 query
+    wrapper.execute_count = 0
+    res_subset = storage.observations.get_many(obs_ids[:3])
+    assert len(res_subset) == 3
+    assert wrapper.execute_count == 1
+
+
+def test_batch_read_matches_per_row_get_and_declares_absence(storage) -> None:
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+
+    obs = make_observation(raw_record_id=raw_record.record_id)
+    metric = make_metric_result(observation_id=obs.observation_id)
+    diag = make_diagnostic_result(metric_result_id=metric.result_id)
+
+    storage.observations.save_many([obs])
+    storage.metric_results.save_many([metric])
+    storage.diagnostics.save_many([diag])
+
+    assert storage.observations.get_many([obs.observation_id])[
+        obs.observation_id
+    ] == storage.observations.get(obs.observation_id)
+    assert storage.metric_results.get_many([metric.result_id])[
+        metric.result_id
+    ] == storage.metric_results.get(metric.result_id)
+    assert storage.diagnostics.get_many([diag.diagnostic_id])[
+        diag.diagnostic_id
+    ] == storage.diagnostics.get(diag.diagnostic_id)
+
+    absent_obs_id = uuid4()
+    with pytest.raises(RecordNotFoundError):
+        storage.observations.get(absent_obs_id)
+    with pytest.raises(RecordNotFoundError):
+        storage.observations.get_many([absent_obs_id])
+
+    absent_metric_id = uuid4()
+    with pytest.raises(RecordNotFoundError):
+        storage.metric_results.get(absent_metric_id)
+    with pytest.raises(RecordNotFoundError):
+        storage.metric_results.get_many([absent_metric_id])
+
+    absent_diag_id = uuid4()
+    with pytest.raises(RecordNotFoundError):
+        storage.diagnostics.get(absent_diag_id)
+    with pytest.raises(RecordNotFoundError):
+        storage.diagnostics.get_many([absent_diag_id])
+
+
+def test_batch_write_preserves_every_validation_and_identity(storage) -> None:
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+
+    obs1 = make_observation(
+        raw_record_id=raw_record.record_id, observation_id=uuid4(), value=Decimal("100.25")
+    )
+    obs2 = make_observation(
+        raw_record_id=raw_record.record_id, observation_id=uuid4(), value=Decimal("200.75")
+    )
+
+    receipt = storage.observations.save_many([obs1, obs2])
+    assert receipt.created_count == 2
+    assert receipt.created_ids == (obs1.observation_id, obs2.observation_id)
+
+    recovered1 = storage.observations.get(obs1.observation_id)
+    recovered2 = storage.observations.get(obs2.observation_id)
+
+    assert recovered1 == obs1
+    assert recovered2 == obs2
+    assert recovered1.value == Decimal("100.25")
+    assert recovered2.value == Decimal("200.75")
+    assert recovered1.observation_id == obs1.observation_id
+    assert recovered2.observation_id == obs2.observation_id
+
+
+def test_in_memory_conflict_detection_fails_before_touching_the_engine(storage) -> None:
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+
+    shared_id = uuid4()
+    obs_a = make_observation(
+        raw_record_id=raw_record.record_id, observation_id=shared_id, value=Decimal("100.00")
+    )
+    obs_b = make_observation(
+        raw_record_id=raw_record.record_id, observation_id=shared_id, value=Decimal("999.00")
+    )
+
+    wrapper = _QueryCountingConnection(storage.observations._connection)
+    storage.observations._connection = wrapper
+
+    with pytest.raises(RecordConflictError, match="different content"):
+        storage.observations.save_many([obs_a, obs_b])
+
+    assert wrapper.execute_count == 0
+
+
+def test_batch_write_returns_typed_receipt_of_created_reused_and_conflicting(storage) -> None:
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+
+    obs1 = make_observation(raw_record_id=raw_record.record_id, observation_id=uuid4())
+    obs2 = make_observation(raw_record_id=raw_record.record_id, observation_id=uuid4())
+    obs3 = make_observation(raw_record_id=raw_record.record_id, observation_id=uuid4())
+
+    r1 = storage.observations.save_many([obs1, obs2])
+    assert isinstance(r1, BatchWriteReceipt)
+    assert r1.created_ids == (obs1.observation_id, obs2.observation_id)
+    assert r1.reused_ids == ()
+    assert r1.conflicting_ids == ()
+    assert r1.created == (obs1.observation_id, obs2.observation_id)
+    assert r1.reused == ()
+    assert r1.conflicting == ()
+    assert r1.created_count == 2
+    assert r1.reused_count == 0
+    assert r1.conflicting_count == 0
+    assert r1.total_count == 2
+
+    r2 = storage.observations.save_many([obs1, obs3])
+    assert isinstance(r2, BatchWriteReceipt)
+    assert r2.created_ids == (obs3.observation_id,)
+    assert r2.reused_ids == (obs1.observation_id,)
+    assert r2.conflicting_ids == ()
+    assert r2.created_count == 1
+    assert r2.reused_count == 1
+    assert r2.conflicting_count == 0
+    assert r2.total_count == 2
+
+    c_id = uuid4()
+    custom_receipt = BatchWriteReceipt(
+        created_ids=(obs1.observation_id,),
+        reused_ids=(obs2.observation_id,),
+        conflicting_ids=(c_id,),
+    )
+    assert custom_receipt.conflicting == (c_id,)
+    assert custom_receipt.conflicting_count == 1
+    assert custom_receipt.total_count == 3
+
+
+def test_failed_batch_preserves_previously_committed_batches(storage) -> None:
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+
+    obs1 = make_observation(raw_record_id=raw_record.record_id, observation_id=uuid4())
+    obs2 = make_observation(raw_record_id=raw_record.record_id, observation_id=uuid4())
+    obs3 = make_observation(raw_record_id=raw_record.record_id, observation_id=uuid4())
+
+    r1 = storage.observations.save_many([obs1, obs2])
+    assert r1.created_count == 2
+    assert storage.observations.get(obs1.observation_id) == obs1
+    assert storage.observations.get(obs2.observation_id) == obs2
+
+    conflicting_obs1 = obs1.model_copy(update={"value": Decimal("9999.99")})
+    with pytest.raises(RecordConflictError):
+        storage.observations.save_many([obs3, conflicting_obs1])
+
+    assert storage.observations.get(obs1.observation_id) == obs1
+    assert storage.observations.get(obs2.observation_id) == obs2
+    with pytest.raises(RecordNotFoundError):
+        storage.observations.get(obs3.observation_id)
+
+
+def test_batch_path_issues_at_least_ten_times_fewer_queries(tmp_path) -> None:
+    raw_record = make_raw_record()
+    observations = [
+        make_observation(
+            raw_record_id=raw_record.record_id,
+            observation_id=uuid4(),
+            value=Decimal(f"{100 + i}.00"),
+        )
+        for i in range(20)
+    ]
+    obs_ids = [obs.observation_id for obs in observations]
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "row")) as storage_row:
+        storage_row.raw_records.save(raw_record)
+        row_wrapper = _QueryCountingConnection(storage_row.observations._connection)
+        storage_row.observations._connection = row_wrapper
+
+        for obs in observations:
+            storage_row.observations.save(obs)
+        for obs_id in obs_ids:
+            storage_row.observations.get(obs_id)
+        row_queries = row_wrapper.execute_count
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "batch")) as storage_batch:
+        storage_batch.raw_records.save(raw_record)
+        batch_wrapper = _QueryCountingConnection(storage_batch.observations._connection)
+        storage_batch.observations._connection = batch_wrapper
+
+        storage_batch.observations.save_many(observations)
+        storage_batch.observations.get_many(obs_ids)
+        batch_queries = batch_wrapper.execute_count
+
+    assert batch_queries > 0
+    assert row_queries >= 10 * batch_queries, (
+        f"Expected >= 10x fewer queries, got row={row_queries} vs batch={batch_queries}"
+    )
+
+
+def test_existing_single_row_methods_are_unchanged(storage) -> None:
+    raw_record = make_raw_record()
+    obs = make_observation(raw_record_id=raw_record.record_id)
+    metric = make_metric_result(observation_id=obs.observation_id)
+    diag = make_diagnostic_result(metric_result_id=metric.result_id)
+
+    assert storage.observations.save(obs) == obs
+    assert storage.metric_results.save(metric) == metric
+    assert storage.diagnostics.save(diag) == diag
+
+    assert storage.observations.get(obs.observation_id) == obs
+    assert storage.metric_results.get(metric.result_id) == metric
+    assert storage.diagnostics.get(diag.diagnostic_id) == diag
+
+    assert storage.observations.list(asset_id=obs.asset_id) == [obs]
+    assert storage.metric_results.list(asset_id=metric.asset_id) == [metric]
+    assert storage.diagnostics.list(asset_id=diag.asset_id) == [diag]
+
+    assert storage.metric_results.count(asset_id=metric.asset_id) == 1
+    assert storage.diagnostics.count(asset_id=diag.asset_id) == 1
+
+
+def test_batch_paths_create_no_schema_object_or_migration(storage) -> None:
+    tables_query = (
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = 'main' ORDER BY table_name"
+    )
+    initial_tables = storage.store.connection.execute(tables_query).fetchall()
+
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+    obs = make_observation(raw_record_id=raw_record.record_id)
+    metric = make_metric_result(observation_id=obs.observation_id)
+    diag = make_diagnostic_result(metric_result_id=metric.result_id)
+
+    storage.observations.save_many([obs])
+    storage.metric_results.save_many([metric])
+    storage.diagnostics.save_many([diag])
+
+    storage.observations.get_many([obs.observation_id])
+    storage.metric_results.get_many([metric.result_id])
+    storage.diagnostics.get_many([diag.diagnostic_id])
+
+    after_tables = storage.store.connection.execute(tables_query).fetchall()
+
+    assert initial_tables == after_tables
+
+
+def test_batch_write_uses_a_single_writer_connection(storage, monkeypatch) -> None:
+    import duckdb
+
+    def fail_connect(*args, **kwargs):
+        raise RuntimeError("No new connection allowed")
+
+    monkeypatch.setattr(duckdb, "connect", fail_connect)
+
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+    obs = make_observation(raw_record_id=raw_record.record_id)
+    metric = make_metric_result(observation_id=obs.observation_id)
+    diag = make_diagnostic_result(metric_result_id=metric.result_id)
+
+    storage.observations.save_many([obs])
+    storage.metric_results.save_many([metric])
+    storage.diagnostics.save_many([diag])
+
+
+def test_result_order_never_defines_semantics(storage) -> None:
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+
+    obs_a = make_observation(
+        raw_record_id=raw_record.record_id, observation_id=uuid4(), value=Decimal("10.00")
+    )
+    obs_b = make_observation(
+        raw_record_id=raw_record.record_id, observation_id=uuid4(), value=Decimal("20.00")
+    )
+
+    storage.observations.save_many([obs_a, obs_b])
+
+    res_forward = storage.observations.get_many([obs_a.observation_id, obs_b.observation_id])
+    res_reverse = storage.observations.get_many([obs_b.observation_id, obs_a.observation_id])
+
+    assert res_forward == res_reverse
+    assert res_forward[obs_a.observation_id] == obs_a
+    assert res_forward[obs_b.observation_id] == obs_b
+
+
+def test_decimal_utc_and_available_at_are_preserved_in_batches(storage) -> None:
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+
+    utc_avail = datetime(2026, 7, 10, 16, 0, tzinfo=UTC)
+    obs = make_observation(
+        raw_record_id=raw_record.record_id,
+        observation_id=uuid4(),
+        value=Decimal("123.456700"),
+        available_at=utc_avail,
+    )
+    metric = make_metric_result(
+        observation_id=obs.observation_id,
+        result_id=uuid4(),
+    ).model_copy(
+        update={
+            "value": Decimal("987.654321"),
+            "available_at": utc_avail,
+            "computed_at": utc_avail + timedelta(minutes=5),
+        }
+    )
+    diag = make_diagnostic_result(
+        metric_result_id=metric.result_id,
+        diagnostic_id=uuid4(),
+    ).model_copy(
+        update={
+            "available_at": utc_avail,
+            "computed_at": utc_avail + timedelta(minutes=5),
+        }
+    )
+
+    storage.observations.save_many([obs])
+    storage.metric_results.save_many([metric])
+    storage.diagnostics.save_many([diag])
+
+    rec_obs = storage.observations.get_many([obs.observation_id])[obs.observation_id]
+    rec_metric = storage.metric_results.get_many([metric.result_id])[metric.result_id]
+    rec_diag = storage.diagnostics.get_many([diag.diagnostic_id])[diag.diagnostic_id]
+
+    assert rec_obs.value == Decimal("123.456700")
+    assert isinstance(rec_obs.value, Decimal)
+    assert rec_obs.available_at == utc_avail
+    assert rec_obs.available_at.tzinfo is UTC
+
+    assert rec_metric.value == Decimal("987.654321")
+    assert isinstance(rec_metric.value, Decimal)
+    assert rec_metric.available_at == utc_avail
+    assert rec_metric.available_at.tzinfo is UTC
+
+    assert rec_diag.final_score == Decimal("80")
+    assert isinstance(rec_diag.final_score, Decimal)
+    assert rec_diag.available_at == utc_avail
+    assert rec_diag.available_at.tzinfo is UTC
+
+
+def test_no_validation_becomes_optional_sampled_or_configurable(storage) -> None:
+    for repo in (storage.observations, storage.metric_results, storage.diagnostics):
+        save_params = inspect.signature(repo.save_many).parameters
+        get_params = inspect.signature(repo.get_many).parameters
+        assert len(save_params) == 1
+        assert len(get_params) == 1
+        param_name = next(iter(save_params.keys()))
+        assert param_name in {"observations", "results"}
