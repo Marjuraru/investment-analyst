@@ -22,7 +22,16 @@ into the five durations of the storage observability contract:
   five stages reconcile exactly.
 
 Every duration comes from one clock and the five stages reconcile exactly with ``total_ms``,
-so no second clock can disagree with the recorded breakdown.
+so no second clock can disagree with the recorded breakdown. ``collector_overhead_ms`` records,
+separately from the measured job stage, the share of that same window the instrument itself
+consumed, so the cost of observing one attempt never hides inside the cost of running it.
+
+The same window also classifies the row growth the attempt produced. The collector measures the
+exact row count per document table before the execution and again when it closes, and partitions
+the created rows the attempt reports into new evidence rows, revisions and derived rows, with the
+growth observed outside those two families left explicitly unclassified. Rewriting one identity
+in place adds no row, so the part of the created count that no table gained is reported as a
+revision instead of being inferred from the tables afterwards.
 """
 
 from __future__ import annotations
@@ -48,6 +57,13 @@ _MAX_RETAINED_DAYS = 90
 _DOCUMENT_COLUMN = "document_json"
 _TABLE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MICROSECONDS_PER_MILLISECOND = 1_000
+_EVIDENCE_TABLES = frozenset({"raw_record_index", "normalized_observations"})
+_DERIVED_TABLES = frozenset({"metric_results", "diagnostic_results"})
+
+
+def storage_observability_artifact_path(state_root: Path) -> Path:
+    """Return the bounded artifact location under one declared state root."""
+    return Path(state_root).expanduser().resolve(strict=False) / _ARTIFACT_FILE_NAME
 
 
 class StorageObservabilityError(RuntimeError):
@@ -148,6 +164,55 @@ def _require_coherent_evidence(
         raise ValueError("evidence_changed must match whether rows were created")
 
 
+class StorageObservabilityGrowthClassification(ContractModel):
+    """How the rows one attempt created split across the observed table roles.
+
+    The four counts partition the created rows the attempt reported. ``new_evidence_rows`` and
+    ``derived_rows`` are the rows the evidence and the derived tables actually gained during the
+    window; ``revision_rows`` are the created rows that replaced an identity instead of adding
+    one, so no table grew for them; ``unclassified_rows`` is the observed growth in any other
+    measured table, kept explicit instead of being absorbed into another category.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    new_evidence_rows: int | None = Field(default=None, ge=0)
+    revision_rows: int | None = Field(default=None, ge=0)
+    derived_rows: int | None = Field(default=None, ge=0)
+    unclassified_rows: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_classification(self) -> StorageObservabilityGrowthClassification:
+        """Keep the four counts either absent or reported together."""
+        reported = (
+            self.new_evidence_rows is not None,
+            self.revision_rows is not None,
+            self.derived_rows is not None,
+            self.unclassified_rows is not None,
+        )
+        if any(reported) and not all(reported):
+            raise ValueError("growth classification must be reported as a whole")
+        return self
+
+    @property
+    def classified_rows(self) -> int | None:
+        """Return the created rows accounted for by the classification."""
+        if self.new_evidence_rows is None:
+            return None
+        return (
+            self.new_evidence_rows + self.revision_rows + self.derived_rows + self.unclassified_rows
+        )
+
+    def to_json_dict(self) -> dict[str, object]:
+        """Return explicit JSON primitives for persistence."""
+        return {
+            "new_evidence_rows": self.new_evidence_rows,
+            "revision_rows": self.revision_rows,
+            "derived_rows": self.derived_rows,
+            "unclassified_rows": self.unclassified_rows,
+        }
+
+
 class StorageObservabilityRecord(ContractModel):
     """Operational storage and duration facts observed for one scheduled attempt."""
 
@@ -168,6 +233,8 @@ class StorageObservabilityRecord(ContractModel):
     wal_bytes_before: int = Field(ge=0)
     wal_bytes_after: int = Field(ge=0)
     table_bytes: tuple[StorageObservabilityTableBytes, ...] = ()
+    growth: StorageObservabilityGrowthClassification | None = None
+    collector_overhead_ms: int | None = Field(default=None, ge=0)
     durations: StorageObservabilityDurations
 
     @model_validator(mode="after")
@@ -179,6 +246,16 @@ class StorageObservabilityRecord(ContractModel):
         names = tuple(item.table_name for item in self.table_bytes)
         if names != tuple(sorted(set(names))):
             raise ValueError("table bytes must be unique and sorted by table name")
+        if self.growth is not None:
+            if self.rows_created is None:
+                raise ValueError("growth classification requires the created rows of the attempt")
+            if self.growth.classified_rows != self.rows_created:
+                raise ValueError("growth classification must account for every created row")
+        if (
+            self.collector_overhead_ms is not None
+            and self.collector_overhead_ms + self.durations.network_ms != self.durations.total_ms
+        ):
+            raise ValueError("collector overhead must be separate from the measured job stage")
         return self
 
     @property
@@ -209,6 +286,8 @@ class StorageObservabilityRecord(ContractModel):
             "wal_bytes_before": self.wal_bytes_before,
             "wal_bytes_after": self.wal_bytes_after,
             "table_bytes": [item.to_json_dict() for item in self.table_bytes],
+            "growth": None if self.growth is None else self.growth.to_json_dict(),
+            "collector_overhead_ms": self.collector_overhead_ms,
             "durations": self.durations.to_json_dict(),
         }
 
@@ -343,6 +422,59 @@ def parse_storage_observability_state(text: str) -> StorageObservabilityState:
     )
 
 
+def _document_table_names(connection: duckdb.DuckDBPyConnection) -> tuple[str, ...]:
+    """List the document tables the engine reports, rejecting an unusable identifier."""
+    names = connection.execute(
+        "SELECT table_name FROM information_schema.columns"
+        " WHERE column_name = ? ORDER BY table_name",
+        [_DOCUMENT_COLUMN],
+    ).fetchall()
+    resolved: list[str] = []
+    for (name,) in names:
+        if not isinstance(name, str) or not _TABLE_IDENTIFIER.fullmatch(name):
+            raise StorageObservabilityError("engine reported an unsupported table name")
+        resolved.append(name)
+    return tuple(resolved)
+
+
+def _table_row_count(connection: duckdb.DuckDBPyConnection, table_name: str) -> int:
+    """Return the exact row count of one already validated document table."""
+    row = connection.execute(f'SELECT count(*) FROM "{table_name}"').fetchone()
+    if row is None:
+        raise StorageObservabilityError("engine did not return a table measurement")
+    return int(row[0])
+
+
+def _growth_classification(
+    observation: ScheduledJobObservation,
+    *,
+    rows_before: tuple[tuple[str, int], ...],
+    table_bytes: tuple[StorageObservabilityTableBytes, ...],
+) -> StorageObservabilityGrowthClassification | None:
+    """Partition the created rows of one attempt, or decline when it cannot be observed."""
+    if observation.rows_created is None or not table_bytes:
+        return None
+    before = dict(rows_before)
+    added = tuple(
+        (item.table_name, item.row_count - before.get(item.table_name, item.row_count))
+        for item in table_bytes
+    )
+    observed_added = sum(count for _, count in added if count > 0)
+    new_evidence_rows = sum(
+        count for name, count in added if count > 0 and name in _EVIDENCE_TABLES
+    )
+    derived_rows = sum(count for name, count in added if count > 0 and name in _DERIVED_TABLES)
+    revision_rows = observation.rows_created - observed_added
+    if revision_rows < 0:
+        return None
+    return StorageObservabilityGrowthClassification(
+        new_evidence_rows=new_evidence_rows,
+        revision_rows=revision_rows,
+        derived_rows=derived_rows,
+        unclassified_rows=observed_added - new_evidence_rows - derived_rows,
+    )
+
+
 def _file_bytes(path: Path) -> int:
     """Measure one file exactly, treating an absent file as zero bytes."""
     try:
@@ -372,6 +504,7 @@ class StorageObservationHandle:
     execution_started_at: datetime
     database_bytes_before: int
     wal_bytes_before: int
+    table_rows_before: tuple[tuple[str, int], ...] = ()
     completed: bool = field(default=False)
 
 
@@ -385,7 +518,7 @@ class StorageObservabilityCollector:
         database_path: Path,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
-        self._state_root = Path(state_root).expanduser().resolve(strict=False)
+        self._artifact_path = storage_observability_artifact_path(state_root)
         self._database_path = Path(database_path).expanduser().resolve(strict=False)
         self._wal_path = Path(f"{self._database_path}.wal")
         self._clock = clock
@@ -394,7 +527,7 @@ class StorageObservabilityCollector:
     @property
     def artifact_path(self) -> Path:
         """Return the bounded artifact location under the declared state root."""
-        return self._state_root / _ARTIFACT_FILE_NAME
+        return self._artifact_path
 
     def state(self) -> StorageObservabilityState:
         """Load and validate the persisted artifact without creating it."""
@@ -409,6 +542,7 @@ class StorageObservabilityCollector:
             verified_at = self._now()
             database_bytes_before = _file_bytes(self._database_path)
             wal_bytes_before = _file_bytes(self._wal_path)
+            table_rows_before = self._measure_table_row_counts()
             return StorageObservationHandle(
                 job_id=job_id,
                 attempt_id=attempt_id,
@@ -417,6 +551,7 @@ class StorageObservabilityCollector:
                 execution_started_at=self._now(),
                 database_bytes_before=database_bytes_before,
                 wal_bytes_before=wal_bytes_before,
+                table_rows_before=table_rows_before,
             )
 
     def complete_attempt(
@@ -440,6 +575,14 @@ class StorageObservabilityCollector:
             self._compact(state, execution_completed_at.date())
             persisted_at = self._now()
             calculated_at = self._now()
+            durations = self._durations(
+                handle,
+                execution_completed_at=execution_completed_at,
+                measured_at=measured_at,
+                queried_at=queried_at,
+                persisted_at=persisted_at,
+                calculated_at=calculated_at,
+            )
             record = StorageObservabilityRecord(
                 observed_at=execution_completed_at,
                 attempt_id=observation.attempt_id,
@@ -455,14 +598,13 @@ class StorageObservabilityCollector:
                 wal_bytes_before=handle.wal_bytes_before,
                 wal_bytes_after=wal_bytes_after,
                 table_bytes=table_bytes,
-                durations=self._durations(
-                    handle,
-                    execution_completed_at=execution_completed_at,
-                    measured_at=measured_at,
-                    queried_at=queried_at,
-                    persisted_at=persisted_at,
-                    calculated_at=calculated_at,
+                growth=_growth_classification(
+                    observation,
+                    rows_before=handle.table_rows_before,
+                    table_bytes=table_bytes,
                 ),
+                collector_overhead_ms=durations.total_ms - durations.network_ms,
+                durations=durations,
             )
             self._append_line(record)
             handle.completed = True
@@ -502,25 +644,13 @@ class StorageObservabilityCollector:
         )
 
     def _measure_table_bytes(self) -> tuple[StorageObservabilityTableBytes, ...]:
-        """Measure exact document bytes per table with the engine opened read-only."""
+        """Measure exact document bytes and rows per table with a read-only engine."""
         if not self._database_path.exists():
             return ()
+        connection = self._open_read_only_engine()
         try:
-            connection = duckdb.connect(str(self._database_path), read_only=True)
-        except duckdb.Error as error:
-            raise StorageObservabilityError(
-                "read-only engine measurement is unavailable"
-            ) from error
-        try:
-            names = connection.execute(
-                "SELECT table_name FROM information_schema.columns"
-                " WHERE column_name = ? ORDER BY table_name",
-                [_DOCUMENT_COLUMN],
-            ).fetchall()
             measured: list[StorageObservabilityTableBytes] = []
-            for (name,) in names:
-                if not isinstance(name, str) or not _TABLE_IDENTIFIER.fullmatch(name):
-                    raise StorageObservabilityError("engine reported an unsupported table name")
+            for name in _document_table_names(connection):
                 row = connection.execute(
                     f'SELECT count(*), coalesce(sum(octet_length(encode("{_DOCUMENT_COLUMN}"))), 0)'
                     f' FROM "{name}"'
@@ -538,7 +668,32 @@ class StorageObservabilityCollector:
             raise StorageObservabilityError("read-only engine measurement failed") from error
         finally:
             connection.close()
-        return tuple(sorted(measured, key=lambda item: item.table_name))
+        return tuple(measured)
+
+    def _measure_table_row_counts(self) -> tuple[tuple[str, int], ...]:
+        """Measure the exact row count per table with a read-only engine."""
+        if not self._database_path.exists():
+            return ()
+        connection = self._open_read_only_engine()
+        try:
+            measured = tuple(
+                (name, _table_row_count(connection, name))
+                for name in _document_table_names(connection)
+            )
+        except duckdb.Error as error:
+            raise StorageObservabilityError("read-only engine measurement failed") from error
+        finally:
+            connection.close()
+        return measured
+
+    def _open_read_only_engine(self) -> duckdb.DuckDBPyConnection:
+        """Open the engine read-only so no measurement can ever write."""
+        try:
+            return duckdb.connect(str(self._database_path), read_only=True)
+        except duckdb.Error as error:
+            raise StorageObservabilityError(
+                "read-only engine measurement is unavailable"
+            ) from error
 
     def _compact(self, state: StorageObservabilityState, record_day: date) -> None:
         """Fold every closed UTC day once, keeping the retained history bounded."""
@@ -574,13 +729,13 @@ class StorageObservabilityCollector:
 
     def _append_line(self, record: StorageObservabilityRecord) -> None:
         """Append one compact line without rewriting the retained history."""
-        self._state_root.mkdir(parents=True, exist_ok=True)
+        self._artifact_path.parent.mkdir(parents=True, exist_ok=True)
         with self.artifact_path.open("a", encoding="utf-8") as stream:
             stream.write(f"{_line(record.to_json_dict())}\n")
 
     def _rewrite(self, lines: Sequence[str]) -> None:
         """Replace the bounded artifact atomically after a closed day is folded."""
-        self._state_root.mkdir(parents=True, exist_ok=True)
+        self._artifact_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.artifact_path.with_name(f"{self.artifact_path.name}.tmp")
         try:
             temporary.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
@@ -648,9 +803,11 @@ __all__ = [
     "StorageObservabilityDailySnapshot",
     "StorageObservabilityDurations",
     "StorageObservabilityError",
+    "StorageObservabilityGrowthClassification",
     "StorageObservabilityRecord",
     "StorageObservabilityState",
     "StorageObservabilityTableBytes",
     "StorageObservationHandle",
     "parse_storage_observability_state",
+    "storage_observability_artifact_path",
 ]

@@ -23,9 +23,11 @@ from investment_analyst.application.storage_observability import (
     ScheduledJobObservation,
     StorageObservabilityCollector,
     StorageObservabilityDurations,
+    StorageObservabilityGrowthClassification,
     StorageObservabilityRecord,
     StorageObservabilityState,
     StorageObservabilityTableBytes,
+    parse_storage_observability_state,
 )
 
 _BASE = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
@@ -63,6 +65,34 @@ def _create_database(path: Path) -> None:
         )
         connection.execute("CREATE TABLE metric_results (result_id VARCHAR, document_json VARCHAR)")
         connection.execute("INSERT INTO metric_results VALUES ('a', '{\"x\": 1}'), ('b', 'hola')")
+    finally:
+        connection.close()
+
+
+def _create_classification_database(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = duckdb.connect(str(path))
+    try:
+        connection.execute(
+            "CREATE TABLE raw_record_index (record_id VARCHAR, document_json VARCHAR)"
+        )
+        connection.execute(
+            "CREATE TABLE normalized_observations (observation_id VARCHAR, document_json VARCHAR)"
+        )
+        connection.execute("CREATE TABLE metric_results (result_id VARCHAR, document_json VARCHAR)")
+        connection.execute(
+            "CREATE TABLE diagnostic_results (diagnostic_id VARCHAR, document_json VARCHAR)"
+        )
+        connection.execute("CREATE TABLE assets (asset_id VARCHAR, document_json VARCHAR)")
+    finally:
+        connection.close()
+
+
+def _insert(database: Path, statements: tuple[str, ...]) -> None:
+    connection = duckdb.connect(str(database))
+    try:
+        for statement in statements:
+            connection.execute(statement)
     finally:
         connection.close()
 
@@ -128,6 +158,7 @@ def test_storage_observability_contract_is_frozen_and_versioned(tmp_path: Path) 
     for model in (
         ScheduledJobObservation,
         StorageObservabilityDurations,
+        StorageObservabilityGrowthClassification,
         StorageObservabilityRecord,
         StorageObservabilityTableBytes,
         StorageObservabilityState,
@@ -253,6 +284,137 @@ def test_rows_created_versus_reused_correlate_with_attempt_id(tmp_path: Path) ->
     assert failed.rows_created is None and failed.rows_reused is None
 
 
+def test_growth_is_classified_into_new_revision_and_derived(tmp_path: Path) -> None:
+    database = _database_path(tmp_path)
+    _create_classification_database(database)
+    collector = _collector(tmp_path)
+    handle = collector.begin_attempt(job_id=_JOB_ID, attempt_id=_ATTEMPT_ID)
+
+    _insert(
+        database,
+        (
+            "INSERT INTO raw_record_index VALUES ('r1', '{\"x\": 1}'), ('r2', '{\"x\": 2}')",
+            "INSERT INTO metric_results VALUES ('m1', '{\"y\": 1}')",
+            "INSERT INTO assets VALUES ('equity:us:aapl', '{\"z\": 1}')",
+        ),
+    )
+    record = collector.complete_attempt(
+        handle,
+        _observation(evidence_changed=True, rows_created=7, rows_reused=4),
+    )
+
+    growth = record.growth
+    assert growth is not None
+    assert growth.new_evidence_rows == 2
+    assert growth.derived_rows == 1
+    assert growth.unclassified_rows == 1
+    assert growth.revision_rows == 3
+    assert growth.classified_rows == record.rows_created == 7
+    assert record.to_json_dict()["growth"] == {
+        "new_evidence_rows": 2,
+        "revision_rows": 3,
+        "derived_rows": 1,
+        "unclassified_rows": 1,
+    }
+    assert {item.table_name: item.row_count for item in record.table_bytes} == {
+        "assets": 1,
+        "diagnostic_results": 0,
+        "metric_results": 1,
+        "normalized_observations": 0,
+        "raw_record_index": 2,
+    }
+
+
+def test_growth_classification_declines_when_the_attempt_does_not_report_rows(
+    tmp_path: Path,
+) -> None:
+    database = _database_path(tmp_path)
+    _create_classification_database(database)
+    collector = _collector(tmp_path)
+    handle = collector.begin_attempt(job_id=_JOB_ID, attempt_id=_ATTEMPT_ID)
+
+    _insert(
+        database,
+        ("INSERT INTO normalized_observations VALUES ('o1', '{\"x\": 1}')",),
+    )
+    contradicted = collector.complete_attempt(
+        handle,
+        _observation(evidence_changed=False, rows_created=0, rows_reused=1),
+    )
+
+    failed_collector = _collector(tmp_path / "failed")
+    failed = failed_collector.complete_attempt(
+        failed_collector.begin_attempt(job_id=_JOB_ID, attempt_id=_ATTEMPT_ID),
+        _observation(
+            attempt_status="failed",
+            evidence_changed=None,
+            rows_created=None,
+            rows_reused=None,
+        ),
+    )
+    unmeasured = _record(tmp_path / "unmeasured")
+
+    assert contradicted.growth is None
+    assert failed.growth is None
+    assert unmeasured.growth is None
+    assert unmeasured.collector_overhead_ms is not None
+
+
+def test_collector_records_its_own_overhead_separately(tmp_path: Path) -> None:
+    _create_database(_database_path(tmp_path))
+    record = _record(tmp_path, _ScriptedClock(_BASE))
+
+    durations = record.durations
+    assert record.collector_overhead_ms == 6000
+    assert durations.network_ms == 1000
+    assert durations.total_ms == 7000
+    assert record.collector_overhead_ms + durations.network_ms == durations.total_ms
+    assert record.collector_overhead_ms == (
+        durations.query_ms
+        + durations.calculation_ms
+        + durations.persistence_ms
+        + durations.verification_ms
+    )
+    assert "collector_overhead_ms" in record.to_json_dict()
+    with pytest.raises(ValidationError, match="separate"):
+        StorageObservabilityRecord(**{**record.model_dump(), "collector_overhead_ms": 5000})
+
+
+def test_added_classification_fields_are_optional_and_backward_readable(tmp_path: Path) -> None:
+    _create_database(_database_path(tmp_path))
+    record = _record(tmp_path)
+    legacy = record.to_json_dict()
+    del legacy["growth"]
+    del legacy["collector_overhead_ms"]
+
+    parsed = parse_storage_observability_state(f"{json.dumps(legacy)}\n")
+
+    assert len(parsed.records) == 1
+    assert parsed.records[0].growth is None
+    assert parsed.records[0].collector_overhead_ms is None
+    assert parsed.records[0].rows_created == record.rows_created
+    assert not StorageObservabilityGrowthClassification.model_fields[
+        "new_evidence_rows"
+    ].is_required()
+    assert StorageObservabilityGrowthClassification().to_json_dict() == {
+        "new_evidence_rows": None,
+        "revision_rows": None,
+        "derived_rows": None,
+        "unclassified_rows": None,
+    }
+    with pytest.raises(ValidationError, match="as a whole"):
+        StorageObservabilityGrowthClassification(new_evidence_rows=1)
+    with pytest.raises(ValidationError, match="created rows"):
+        StorageObservabilityRecord(
+            **{
+                **record.model_dump(),
+                "evidence_changed": None,
+                "rows_created": None,
+                "rows_reused": None,
+            }
+        )
+
+
 def test_daily_snapshot_is_compact_and_bounded(tmp_path: Path) -> None:
     database = _database_path(tmp_path)
     _create_database(database)
@@ -368,6 +530,8 @@ def test_record_is_operational_and_never_analytical_evidence(tmp_path: Path) -> 
         "wal_bytes_before",
         "wal_bytes_after",
         "table_bytes",
+        "growth",
+        "collector_overhead_ms",
         "durations",
     )
     assert "storage" not in (tmp_path / "state").parts
@@ -416,22 +580,24 @@ def test_collector_uses_a_single_writer_and_read_only_measurement(
 
     record = _record(tmp_path)
 
-    assert opened == [True]
+    assert opened == [True, True]
     assert database.read_bytes() == original
     assert record.table_bytes
     assert sorted(item.name for item in (tmp_path / "state").iterdir()) == [_ARTIFACT_NAME]
 
 
 def test_collector_failure_never_degrades_the_measured_job(tmp_path: Path) -> None:
-    _create_database(_database_path(tmp_path))
+    database = _database_path(tmp_path)
+    _create_database(database)
     blocked_root = tmp_path / "blocked"
     (blocked_root / "state").mkdir(parents=True)
     (blocked_root / "state" / _ARTIFACT_NAME).mkdir()
-    blocked = _collector(blocked_root, database_path=_database_path(tmp_path))
+    blocked = _collector(blocked_root, database_path=database)
 
-    broken_root = tmp_path / "broken"
-    _database_path(broken_root).mkdir(parents=True)
-    unreadable = _collector(broken_root)
+    unwritable_root = tmp_path / "unwritable"
+    unwritable_root.mkdir()
+    (unwritable_root / "state").write_text("", encoding="utf-8")
+    unwritable = _collector(unwritable_root, database_path=database)
 
     now = _BASE + timedelta(minutes=5)
 
@@ -459,7 +625,7 @@ def test_collector_failure_never_degrades_the_measured_job(tmp_path: Path) -> No
 
     scenarios = (
         (blocked, "blocked", "storage observability could not open its measurement"),
-        (unreadable, "unreadable", "storage observability could not record its result"),
+        (unwritable, "unwritable", "storage observability could not record its result"),
     )
     for collector, label, expected_issue in scenarios:
         store = MultiAssetScheduleStateStore(tmp_path / f"schedule-{label}.json")
