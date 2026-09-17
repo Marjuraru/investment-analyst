@@ -213,7 +213,7 @@ particionada en dos bloques por decisión de PLAN verificada en vivo:
    tipados de escritura `BatchWriteReceipt`) en `ObservationRepository`, `MetricResultRepository` y
    `DiagnosticResultRepository`, sin modificar ningún llamador ni doble de test y dejando `analytics/**`
    intacto.
-2. **`DATA-CHASSIS-5` (este bloque):** adopción de la API por lotes en `analytics/crypto/derivatives_pipeline.py` y
+2. **`DATA-CHASSIS-5`:** adopción de la API por lotes en `analytics/crypto/derivatives_pipeline.py` y
    `analytics/market/statistics_pipeline.py`, eliminación del `get` posterior a `save`, memoización del
    grafo de dependencias por corrida, verificación profunda sólo de filas nuevas o conflictivas mediante
    `BatchWriteReceipt` y migración de los dobles de prueba en los tests que consumen esos contratos. Con esto
@@ -227,6 +227,21 @@ producción sobre el scheduler compuesto, ningún diff ni suite de CI puede sati
 aislada en el repositorio; se verificará con `scripts/report_storage_observability.py` comparando
 las ventanas antes y después de desplegar `DATA-CHASSIS-5`. La etapa 2 no se declarará cerrada hasta
 dicha verificación.
+
+## Etapa 3: Identidad de métrica v2 y adaptador de resolución (`DATA-CHASSIS-6`)
+
+`DATA-CHASSIS-6` (este bloque) abre la etapa 3 definiendo la regla canónica de identidad de métrica v2 y su adaptador de resolución v1/v2 como contrato puro, aislado y disjunto, sin llamador en producción y preservando intactos los siete módulos de identidad vigentes, los motores y los pipelines.
+
+### Evaluación y rechazo de la extensión de `DiagnosticResult`
+
+PLAN evaluó sobre `core/models/diagnostic.py` si `DiagnosticResult` podía extenderse como manifiesto de referencias por corte antes de crear un contrato aislado:
+- `DiagnosticResult` impone `final_score: Decimal` en `[0, 100]`, `confidence: Decimal` en `[0, 1]`, `verdict: DiagnosticVerdict` y `summary: NonEmptyStr`, con validadores estrictos que exigen que los pesos sumen 1 y que el score sea la suma ponderada.
+- Un snapshot analítico es un manifiesto descriptivo de corte: no emite veredicto ni juicio de scoring agregado. Forzarlo a declarar un veredicto o score compuesto violaría el principio permanente de `AGENTS.md` que prohíbe colapsar análisis en scores agregados arbitrarios.
+- La extensión queda rechazada por razones de contrato.
+
+### Separación de `AnalysisSnapshot` por ausencia de runner de migración
+
+`AnalysisSnapshot` requiere una tabla física nueva en DuckDB. La capa de almacenamiento actual (`storage/duckdb_store.py`) define `SCHEMA_VERSION = 1`, apertura fija contra `001_initial.sql` con igualdad estricta y sin runner de migración. Modificar el schema en este momento rompería la apertura del workspace permanente y violaría la restricción 5 de la ruta (no mezclar migración física con cambios de identidad/fórmulas). Por decisión humana explícita del 2026-09-17, el snapshot se separa de esta etapa y se abordará cuando se introduzca un runner de migración o en la versión nueva de workspace de la etapa 7.
 
 ## Durabilidad inmediata
 
