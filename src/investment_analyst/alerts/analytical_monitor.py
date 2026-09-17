@@ -19,6 +19,7 @@ from investment_analyst.alerts.analytical_state import (
     AnalyticalScreeningReconciliation,
     AnalyticalScreeningStateStore,
 )
+from investment_analyst.analytics.metric_identity_cut import metric_cut_eligibility
 from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobAttempt,
     ScheduledJobAttemptStatus,
@@ -47,7 +48,6 @@ class AnalyticalMetricSnapshotSelector:
         if known_at.tzinfo is None or known_at.utcoffset() is None:
             raise ValueError("known_at must be timezone-aware")
         known_at = known_at.astimezone(UTC)
-        expected_cut = known_at.isoformat()
         by_key: dict[str, tuple[MetricResult, ...]] = {}
         for condition in rule.conditions:
             by_key[condition.metric_key] = tuple(
@@ -61,7 +61,7 @@ class AnalyticalMetricSnapshotSelector:
                 and item.parameters.get("source_id") == source_id
                 and (
                     rule.domain is AnalyticalScreeningDomain.FUNDAMENTALS
-                    or item.parameters.get("known_at") == expected_cut
+                    or metric_cut_eligibility(item, known_at).eligible
                 )
                 and all(
                     item.parameters.get(name) == expected

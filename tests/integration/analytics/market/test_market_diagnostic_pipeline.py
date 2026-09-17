@@ -16,6 +16,7 @@ from investment_analyst.analytics.market.diagnostic_models import MarketDiagnost
 from investment_analyst.analytics.market.diagnostic_pipeline import MarketDiagnosticPipeline
 from investment_analyst.analytics.market.diagnostic_rules import MarketDiagnosticEngine
 from investment_analyst.analytics.market.diagnostic_selection import MarketDiagnosticMetricSelector
+from investment_analyst.analytics.metric_identity_v2 import metric_result_id_v2
 from investment_analyst.core.models import (
     Asset,
     AssetClass,
@@ -238,6 +239,23 @@ def run_pipeline(storage: LocalStorage, request: MarketDiagnosticRequest, clock:
     ).run(request)
 
 
+def _as_v2(metric: MetricResult) -> MetricResult:
+    """Return the semantic v2 replacement of one persisted v1 market metric."""
+    parameters = {key: value for key, value in metric.parameters.items() if key != "known_at"}
+    identifier = metric_result_id_v2(
+        asset_id=metric.asset_id,
+        metric_key=metric.metric_key,
+        input_observation_ids=metric.input_observation_ids,
+        algorithm_version=metric.algorithm_version,
+        as_of=metric.as_of,
+        available_at=metric.available_at,
+        unit=metric.unit,
+        quality=metric.quality,
+        parameters=parameters,
+    )
+    return metric.model_copy(update={"result_id": identifier, "parameters": parameters})
+
+
 def test_btc_diagnostic_is_valid_traceable_and_idempotent(tmp_path) -> None:
     paths = StoragePaths.from_root(tmp_path)
     with LocalStorage(paths) as storage:
@@ -283,6 +301,32 @@ def test_btc_diagnostic_is_valid_traceable_and_idempotent(tmp_path) -> None:
             timestamp.tzinfo is UTC
             for timestamp in (diagnostic.as_of, diagnostic.available_at, diagnostic.computed_at)
         )
+
+
+def test_market_diagnostic_resolves_a_v2_metric_cut(tmp_path) -> None:
+    """A7: the pipeline resolves a v2 cut and prefers it over the legacy v1 row."""
+    paths = StoragePaths.from_root(tmp_path)
+    with LocalStorage(paths) as storage:
+        legacy = seed_snapshot(
+            storage,
+            asset_id=BTC_ASSET,
+            source_id=BTC_SOURCE,
+            quality=DataQuality.VALID,
+        )
+        semantic = tuple(_as_v2(metric) for metric in legacy)
+        for metric in semantic:
+            storage.metric_results.save(metric)
+        summary = run_pipeline(storage, make_request(BTC_ASSET, BTC_SOURCE))
+        diagnostic = storage.diagnostics.list(asset_id=BTC_ASSET)[0]
+
+    assert summary.verdict is DiagnosticVerdict.POSITIVE
+    assert summary.diagnostics_created == 1
+    assert set(summary.selected_metric_result_ids) == {item.result_id for item in semantic}
+    assert set(item.metric_result_id for item in diagnostic.evidence) == {
+        item.result_id for item in semantic
+    }
+    assert all(item.result_id.version == 8 for item in semantic)
+    assert all("known_at" not in item.parameters for item in semantic)
 
 
 def test_aapl_partial_quality_caps_confidence_and_assets_do_not_mix(tmp_path) -> None:

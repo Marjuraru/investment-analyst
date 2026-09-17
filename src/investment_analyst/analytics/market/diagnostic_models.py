@@ -1,6 +1,5 @@
 """Strict models for point-in-time market diagnostics."""
 
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
@@ -8,6 +7,11 @@ from uuid import UUID
 from pydantic import BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
+from investment_analyst.analytics.metric_identity_cut import (
+    LegacyKnownAtState,
+    MetricCutEligibility,
+    metric_cut_eligibility,
+)
 from investment_analyst.core.models import (
     DataQuality,
     DiagnosticResult,
@@ -49,18 +53,18 @@ def _parameter_int(result: MetricResult, name: str) -> int:
     return value
 
 
-def _parameter_known_at(result: MetricResult) -> datetime:
-    value = result.parameters.get("known_at")
-    if not isinstance(value, str):
-        raise ValueError("metric parameter 'known_at' must be an ISO-8601 string")
-    normalized = f"{value[:-1]}+00:00" if value.endswith(("Z", "z")) else value
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as error:
-        raise ValueError("metric parameter 'known_at' is not valid ISO-8601") from error
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
+def _raise_invalid_legacy_known_at(
+    eligibility: MetricCutEligibility,
+) -> None:
+    """Preserve the exact legacy errors for malformed v1 point-in-time context."""
+    legacy = eligibility.legacy
+    if legacy is None or legacy.state is LegacyKnownAtState.VALUE:
+        return
+    if legacy.state is LegacyKnownAtState.NAIVE:
         raise ValueError("metric parameter 'known_at' must include timezone information")
-    return parsed.astimezone(UTC)
+    if legacy.state is LegacyKnownAtState.UNPARSEABLE:
+        raise ValueError("metric parameter 'known_at' is not valid ISO-8601")
+    raise ValueError("metric parameter 'known_at' must be an ISO-8601 string")
 
 
 class MarketDiagnosticRequest(ContractModel):
@@ -140,7 +144,9 @@ class MarketMetricSnapshot(ContractModel):
                 raise ValueError("snapshot metric has an unexpected unit")
             if result.parameters.get("source_id") != self.source_id:
                 raise ValueError("snapshot metric source_id does not match")
-            if _parameter_known_at(result) != self.known_at:
+            eligibility = metric_cut_eligibility(result, self.known_at)
+            if not eligibility.eligible:
+                _raise_invalid_legacy_known_at(eligibility)
                 raise ValueError("snapshot metric known_at does not match")
 
         short_window = _parameter_int(self.short_sma, "window")

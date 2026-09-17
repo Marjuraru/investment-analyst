@@ -1,7 +1,7 @@
 """Read-only point-in-time replay for analytical screening rules."""
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
 from typing import Literal
@@ -23,6 +23,13 @@ from investment_analyst.alerts.analytical_monitor import (
 )
 from investment_analyst.alerts.analytical_rule_registry import (
     AnalyticalRuleRegistryStore,
+)
+from investment_analyst.analytics.metric_identity_cut import (
+    CutIdentityVersion,
+    LegacyKnownAtState,
+    probe_legacy_known_at,
+    require_absent_legacy_cut_parameter,
+    resolve_cut_identity_version,
 )
 from investment_analyst.application.runtime import (
     ApplicationRuntime,
@@ -311,11 +318,7 @@ class AnalyticalBacktestService:
     ) -> tuple[datetime, ...]:
         if rule.domain is AnalyticalScreeningDomain.FUNDAMENTALS:
             return tuple(sorted({item.available_at for item in metrics}))
-        return tuple(
-            sorted(
-                {parsed for item in metrics if (parsed := _known_at_parameter(item)) is not None}
-            )
-        )
+        return tuple(sorted(_market_metric_cuts(metrics)))
 
     def _evaluate_cuts(
         self,
@@ -355,20 +358,28 @@ class AnalyticalBacktestService:
         return tuple(results)
 
 
-def _known_at_parameter(metric: MetricResult) -> datetime | None:
-    value = metric.parameters.get("known_at")
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise AnalyticalBacktestError("market metric known_at parameter is invalid")
-    normalized = f"{value[:-1]}+00:00" if value.endswith(("Z", "z")) else value
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as error:
-        raise AnalyticalBacktestError("market metric known_at parameter is invalid") from error
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise AnalyticalBacktestError("market metric known_at parameter must include timezone")
-    return parsed.astimezone(UTC)
+def _market_metric_cuts(metrics: tuple[MetricResult, ...]) -> set[datetime]:
+    """Derive the cut of each market metric, preserving the legacy parameter rule.
+
+    A v2 row carries no legacy cut parameter: its earliest eligible cut is its own
+    ``available_at``. A v1 row keeps contributing the exact ``known_at`` parameter
+    it was persisted with, with the same legacy errors and skips as before.
+    """
+    cuts: set[datetime] = set()
+    for metric in metrics:
+        if resolve_cut_identity_version(metric) is CutIdentityVersion.V2:
+            require_absent_legacy_cut_parameter(metric)
+            cuts.add(metric.available_at)
+            continue
+        legacy = probe_legacy_known_at(metric)
+        if legacy.state is LegacyKnownAtState.ABSENT:
+            continue
+        if legacy.state is LegacyKnownAtState.NAIVE:
+            raise AnalyticalBacktestError("market metric known_at parameter must include timezone")
+        if legacy.value is None:
+            raise AnalyticalBacktestError("market metric known_at parameter is invalid")
+        cuts.add(legacy.value)
+    return cuts
 
 
 def _simulate_lifecycle(
