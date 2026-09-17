@@ -7,6 +7,7 @@ from uuid import UUID
 from duckdb import DuckDBPyConnection
 from pydantic import BaseModel
 
+from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import (
     Asset,
     DataFrequency,
@@ -37,6 +38,31 @@ def _get_document[ModelT: BaseModel](
     if row is None:
         raise RecordNotFoundError(f"{table} record {identifier!r} was not found")
     return model_from_json(model_type, row[0])
+
+
+def _get_many_documents[ModelT: BaseModel](
+    connection: DuckDBPyConnection,
+    *,
+    table: str,
+    key_column: str,
+    identifiers: Collection[UUID],
+    model_type: type[ModelT],
+) -> dict[UUID, ModelT]:
+    ordered_ids = tuple(sorted(set(identifiers), key=str))
+    if not ordered_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in ordered_ids)
+    rows = connection.execute(
+        f"SELECT {key_column}, document_json FROM {table} WHERE {key_column} IN ({placeholders})",  # noqa: S608
+        [str(identifier) for identifier in ordered_ids],
+    ).fetchall()
+    indexed = {UUID(row[0]): row[1] for row in rows}
+    missing = [identifier for identifier in ordered_ids if identifier not in indexed]
+    if missing:
+        raise RecordNotFoundError(f"{table} record {str(missing[0])!r} was not found")
+    return {
+        identifier: model_from_json(model_type, indexed[identifier]) for identifier in ordered_ids
+    }
 
 
 def _list_documents[ModelT: BaseModel](
@@ -236,6 +262,100 @@ class DuckDBObservationRepository:
             identifier=str(observation_id),
             model_type=NormalizedObservation,
         )
+
+    def get_many(self, observation_ids: Collection[UUID]) -> dict[UUID, NormalizedObservation]:
+        return _get_many_documents(
+            self._connection,
+            table="normalized_observations",
+            key_column="observation_id",
+            identifiers=observation_ids,
+            model_type=NormalizedObservation,
+        )
+
+    def save_many(self, observations: Collection[NormalizedObservation]) -> BatchWriteReceipt:
+        if not observations:
+            return BatchWriteReceipt()
+
+        seen_in_batch: dict[str, str] = {}
+        for obs in observations:
+            doc = canonical_json_text(obs)
+            key = str(obs.observation_id)
+            if key in seen_in_batch:
+                if seen_in_batch[key] != doc:
+                    raise RecordConflictError(
+                        f"normalized_observations identifier {key!r} already has different content"
+                    )
+            else:
+                seen_in_batch[key] = doc
+
+        ordered_keys = tuple(sorted(seen_in_batch.keys()))
+        placeholders = ", ".join("?" for _ in ordered_keys)
+        query = (
+            "SELECT observation_id, document_json FROM normalized_observations "
+            f"WHERE observation_id IN ({placeholders})"
+        )
+        rows = self._connection.execute(query, list(ordered_keys)).fetchall()  # noqa: S608
+        existing = {row[0]: row[1] for row in rows}
+
+        created_ids: list[UUID] = []
+        reused_ids: list[UUID] = []
+        items_to_insert: list[NormalizedObservation] = []
+        seen_keys: set[str] = set()
+
+        for obs in observations:
+            key = str(obs.observation_id)
+            doc = seen_in_batch[key]
+            if key in existing:
+                if existing[key] != doc:
+                    raise RecordConflictError(
+                        f"normalized_observations identifier {key!r} already has different content"
+                    )
+                if key not in seen_keys:
+                    reused_ids.append(obs.observation_id)
+                    seen_keys.add(key)
+            else:
+                if key not in seen_keys:
+                    created_ids.append(obs.observation_id)
+                    items_to_insert.append(obs)
+                    seen_keys.add(key)
+                else:
+                    reused_ids.append(obs.observation_id)
+
+        if items_to_insert:
+            columns = (
+                "observation_id, raw_record_id, asset_id, field_name, frequency, "
+                "observed_at, period_end, available_at, quality, document_json"
+            )
+            row_placeholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            values_clause = ", ".join(row_placeholder for _ in items_to_insert)
+            params: list[object] = []
+            for obs in items_to_insert:
+                params.extend(
+                    [
+                        str(obs.observation_id),
+                        str(obs.raw_record_id),
+                        obs.asset_id,
+                        obs.field_name,
+                        obs.frequency.value,
+                        obs.observed_at,
+                        obs.period_end,
+                        obs.available_at,
+                        obs.quality.value,
+                        seen_in_batch[str(obs.observation_id)],
+                    ]
+                )
+            self._connection.execute(
+                f"INSERT INTO normalized_observations ({columns}) VALUES {values_clause}",
+                params,
+            )
+
+        return BatchWriteReceipt(
+            created_ids=tuple(created_ids),
+            reused_ids=tuple(reused_ids),
+            conflicting_ids=(),
+        )
+
+    save_batch = save_many
 
     def _build_filter_clauses(
         self,
@@ -591,6 +711,98 @@ class DuckDBMetricResultRepository:
             model_type=MetricResult,
         )
 
+    def get_many(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]:
+        return _get_many_documents(
+            self._connection,
+            table="metric_results",
+            key_column="result_id",
+            identifiers=result_ids,
+            model_type=MetricResult,
+        )
+
+    def save_many(self, results: Collection[MetricResult]) -> BatchWriteReceipt:
+        if not results:
+            return BatchWriteReceipt()
+
+        seen_in_batch: dict[str, str] = {}
+        for result in results:
+            doc = canonical_json_text(result)
+            key = str(result.result_id)
+            if key in seen_in_batch:
+                if seen_in_batch[key] != doc:
+                    raise RecordConflictError(
+                        f"metric_results identifier {key!r} already has different content"
+                    )
+            else:
+                seen_in_batch[key] = doc
+
+        ordered_keys = tuple(sorted(seen_in_batch.keys()))
+        placeholders = ", ".join("?" for _ in ordered_keys)
+        query = (
+            "SELECT result_id, document_json FROM metric_results "
+            f"WHERE result_id IN ({placeholders})"
+        )
+        rows = self._connection.execute(query, list(ordered_keys)).fetchall()  # noqa: S608
+        existing = {row[0]: row[1] for row in rows}
+
+        created_ids: list[UUID] = []
+        reused_ids: list[UUID] = []
+        items_to_insert: list[MetricResult] = []
+        seen_keys: set[str] = set()
+
+        for result in results:
+            key = str(result.result_id)
+            doc = seen_in_batch[key]
+            if key in existing:
+                if existing[key] != doc:
+                    raise RecordConflictError(
+                        f"metric_results identifier {key!r} already has different content"
+                    )
+                if key not in seen_keys:
+                    reused_ids.append(result.result_id)
+                    seen_keys.add(key)
+            else:
+                if key not in seen_keys:
+                    created_ids.append(result.result_id)
+                    items_to_insert.append(result)
+                    seen_keys.add(key)
+                else:
+                    reused_ids.append(result.result_id)
+
+        if items_to_insert:
+            columns = (
+                "result_id, asset_id, metric_key, as_of, available_at, "
+                "computed_at, quality, document_json"
+            )
+            row_placeholder = "(?, ?, ?, ?, ?, ?, ?, ?)"
+            values_clause = ", ".join(row_placeholder for _ in items_to_insert)
+            params: list[object] = []
+            for item in items_to_insert:
+                params.extend(
+                    [
+                        str(item.result_id),
+                        item.asset_id,
+                        item.metric_key,
+                        item.as_of,
+                        item.available_at,
+                        item.computed_at,
+                        item.quality.value,
+                        seen_in_batch[str(item.result_id)],
+                    ]
+                )
+            self._connection.execute(
+                f"INSERT INTO metric_results ({columns}) VALUES {values_clause}",
+                params,
+            )
+
+        return BatchWriteReceipt(
+            created_ids=tuple(created_ids),
+            reused_ids=tuple(reused_ids),
+            conflicting_ids=(),
+        )
+
+    save_batch = save_many
+
     def _build_filter_clauses(
         self,
         *,
@@ -717,6 +929,99 @@ class DuckDBDiagnosticResultRepository:
             identifier=str(diagnostic_id),
             model_type=DiagnosticResult,
         )
+
+    def get_many(self, diagnostic_ids: Collection[UUID]) -> dict[UUID, DiagnosticResult]:
+        return _get_many_documents(
+            self._connection,
+            table="diagnostic_results",
+            key_column="diagnostic_id",
+            identifiers=diagnostic_ids,
+            model_type=DiagnosticResult,
+        )
+
+    def save_many(self, results: Collection[DiagnosticResult]) -> BatchWriteReceipt:
+        if not results:
+            return BatchWriteReceipt()
+
+        seen_in_batch: dict[str, str] = {}
+        for result in results:
+            doc = canonical_json_text(result)
+            key = str(result.diagnostic_id)
+            if key in seen_in_batch:
+                if seen_in_batch[key] != doc:
+                    raise RecordConflictError(
+                        f"diagnostic_results identifier {key!r} already has different content"
+                    )
+            else:
+                seen_in_batch[key] = doc
+
+        ordered_keys = tuple(sorted(seen_in_batch.keys()))
+        placeholders = ", ".join("?" for _ in ordered_keys)
+        query = (
+            "SELECT diagnostic_id, document_json FROM diagnostic_results "
+            f"WHERE diagnostic_id IN ({placeholders})"
+        )
+        rows = self._connection.execute(query, list(ordered_keys)).fetchall()  # noqa: S608
+        existing = {row[0]: row[1] for row in rows}
+
+        created_ids: list[UUID] = []
+        reused_ids: list[UUID] = []
+        items_to_insert: list[DiagnosticResult] = []
+        seen_keys: set[str] = set()
+
+        for result in results:
+            key = str(result.diagnostic_id)
+            doc = seen_in_batch[key]
+            if key in existing:
+                if existing[key] != doc:
+                    raise RecordConflictError(
+                        f"diagnostic_results identifier {key!r} already has different content"
+                    )
+                if key not in seen_keys:
+                    reused_ids.append(result.diagnostic_id)
+                    seen_keys.add(key)
+            else:
+                if key not in seen_keys:
+                    created_ids.append(result.diagnostic_id)
+                    items_to_insert.append(result)
+                    seen_keys.add(key)
+                else:
+                    reused_ids.append(result.diagnostic_id)
+
+        if items_to_insert:
+            columns = (
+                "diagnostic_id, asset_id, mode, verdict, as_of, available_at, "
+                "computed_at, quality, document_json"
+            )
+            row_placeholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            values_clause = ", ".join(row_placeholder for _ in items_to_insert)
+            params: list[object] = []
+            for item in items_to_insert:
+                params.extend(
+                    [
+                        str(item.diagnostic_id),
+                        item.asset_id,
+                        item.mode.value,
+                        item.verdict.value,
+                        item.as_of,
+                        item.available_at,
+                        item.computed_at,
+                        item.quality.value,
+                        seen_in_batch[str(item.diagnostic_id)],
+                    ]
+                )
+            self._connection.execute(
+                f"INSERT INTO diagnostic_results ({columns}) VALUES {values_clause}",
+                params,
+            )
+
+        return BatchWriteReceipt(
+            created_ids=tuple(created_ids),
+            reused_ids=tuple(reused_ids),
+            conflicting_ids=(),
+        )
+
+    save_batch = save_many
 
     def _build_filter_clauses(
         self,

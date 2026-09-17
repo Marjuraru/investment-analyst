@@ -81,7 +81,7 @@ consumidor.
 | --- | --- | --- | --- | --- |
 | 0 | Contención y baseline | Backup OPS-8 verificado y restaurado; baseline en bytes sobre la copia restaurada; espacio físico; copia de auditoría; registro de ruta. | Restore correcto con hashes y conteos; baseline reproducible; margen registrado. | HUMAN |
 | 1 | Observabilidad de almacenamiento | Por job: bytes físicos antes/después, bytes lógicos por tabla, filas creadas/reutilizadas, WAL, duración de red/consulta/cálculo/persistencia/verificación; ventanas 7/30 días; nuevos vs revisiones vs derivados; alerta de presupuesto; informe read-only reproducible desde writer o backup. Sin cambios de identidad, borrado, fórmulas, UI ni schema. | Ningún delta desconocido si el transporte puede medirlo; etapas reconciliables con duración total; lógico y físico separados; overhead medido; snapshot diario compacto. | STANDARD/AUTO sólo si la telemetría es un artefacto aditivo separado; HUMAN si añade campos a un contrato persistido existente (p. ej. estado del scheduler). |
-| 2 | Persistencia y verificación por lotes | `get_many`; conflictos en memoria; inserción por lotes acotados; eliminar el `get` posterior a `save`; observaciones y dependencias por lote; grafo memoizado por corrida; verificación profunda sólo de filas nuevas o conflictivas; recibos de escritura en vez de conteos globales; commits por etapa o chunk. Se conservan todas las validaciones (activo, fuente, tipos, UTC, Decimal, `available_at <= known_at`, identidad, dependencias, DAG, conflicto por mismo ID con contenido distinto). | Resultados, IDs y diagnósticos idénticos a v1; cero cambio de schema o algoritmo; ≥10× en fixture; −80 % real en jobs de reutilización; un lote fallido no elimina lotes previos válidos. | STANDARD, strict allowlist (storage). |
+| 2 | Persistencia y verificación por lotes | Particionada en dos bloques: `DATA-CHASSIS-4` (capa de acceso y persistencia por lotes con recibos) y `DATA-CHASSIS-5` (adopción en pipelines y migración de dobles). `get_many`; conflictos en memoria; inserción por lotes acotados; recibos de escritura en vez de conteos globales. Se conservan todas las validaciones (activo, fuente, tipos, UTC, Decimal, `available_at <= known_at`, identidad, dependencias, DAG, conflicto por mismo ID con contenido distinto). | Resultados, IDs y diagnósticos idénticos a v1; cero cambio de schema o algoritmo; ≥10× en fixture; un lote fallido no elimina lotes previos válidos. El gate de −80 % real en jobs de reutilización queda reasignado a verificación post-despliegue por decisión humana explícita del 2026-09-16. | STANDARD, strict allowlist (storage). |
 | 3 | Identidad de métrica v2 y `AnalysisSnapshot` | `result_id` v2 = UUID5 de activo, `metric_key`, `as_of`, `available_at`, `algorithm_version`, parámetros semánticos, `input_observation_ids`, `input_metric_result_ids`, unidad y calidad; excluye `known_at`, `computed_at`, parámetros de ejecución e identificadores de job. `value` fuera de la identidad: mismo ID con otro valor es conflicto/no determinismo. Snapshot: `snapshot_id`, activo o `universe_snapshot_id`, dominio, `known_at`, `evidence_set_hash`, `metric_result_ids`, `diagnostic_result_ids`, `policy_version`, `created_at`. v1 intacto, adaptador de lectura, sin reasignar IDs. | Mismos inputs → mismo ID; revisión → resultado nuevo; snapshots resuelven sus métricas; PIT reconstruible; referencias desde alertas, diagnósticos, valoración y backtests probadas. El gate "nuevo `known_at` sin evidencia nueva crea cero métricas" aplica a métricas de ventana finita y derivados; para EMA/RSI/ATR/MACD sólo se cumple tras la etapa 5. `known_at` debe salir también de `parameters` (caso Deribit). El PLAN de esta etapa evalúa primero si `DiagnosticResult`, que ya es un manifiesto por corte con `metric_result_ids`, puede extenderse antes de crear un contrato aislado. | HUMAN |
 | 4 | Lineage compartido de derivados (`EvidenceSet`) | Primera vertical funding Deribit: `evidence_set_id`, `canonical_hash`, `ordered_input_ids`, `input_count`, primera/última observación, `source_id`, `available_at`; ventanas 24/168/720 almacenadas una vez y compartidas por sum y mean y entre cortes; segmentos o árboles de hashes opcionales si se materializan y verifican todos los inputs; contrato preparado para otras métricas rolling. | Mismos Decimal, `as_of` y `available_at`; lineage completo recuperable; −90 % bytes funding; ningún array de 720 UUID repetido; corrupción detectada por hash; diagnóstico Deribit idéntico. | HUMAN |
 | 5 | Indicadores incrementales | Semilla canónica por activo, fuente, frecuencia y versión; estado recursivo persistible; checkpoints con hash del prefijo; continuación desde el último checkpoint válido; corrección histórica invalida checkpoints posteriores; ventanas finitas recalculan sólo el rango afectado; nuevo `algorithm_version`, v1 no se reescribe. Casos: completo vs incremental, distintos `start`, barra nueva, corrección histórica, split/ajuste retroactivo, calendarios irregulares, equity/ETF/cripto, interrupción, Decimal. | Igualdad exacta full vs incremental v2; valor estable sin evidencia nueva; ≤20–30 resultados nuevos por activo/día; revisión recalcula sólo lo dependiente; ningún v1 presentado como v2. El lineage de indicadores recursivos se expresa como checkpoint + delta (reutilizando `EvidenceSet`), no como lista O(n) de todo el prefijo. | HUMAN |
@@ -203,7 +203,32 @@ colector, el informe ni el scheduler: **usa** lo entregado.
   de reutilización` exige una línea base medida antes del cambio de persistencia; sin el cableado esa
   línea base no llega a existir. La etapa 2 pasa a `DATA-CHASSIS-4`.
 
+## Etapa 2: Persistencia y verificación por lotes (`DATA-CHASSIS-4` y `DATA-CHASSIS-5`)
+
+La etapa 2 ataca el patrón de persistencia no batcheado identificado en el baseline. Se entrega
+particionada en dos bloques por decisión de PLAN verificada en vivo:
+
+1. **`DATA-CHASSIS-4` (este bloque):** construye la capa de acceso y persistencia por lotes en la
+   capa de almacenamiento (`get_many`, `save_many`, detección de conflictos en memoria y recibos
+   tipados de escritura `BatchWriteReceipt`) en `ObservationRepository`, `MetricResultRepository` y
+   `DiagnosticResultRepository`, sin modificar ningún llamador ni doble de test y dejando `analytics/**`
+   intacto.
+2. **`DATA-CHASSIS-5`:** adopción de la API por lotes en `analytics/crypto/derivatives_pipeline.py` y
+   `analytics/market/statistics_pipeline.py`, eliminación del `get` posterior a `save`, memoización del
+   grafo de dependencias por corrida, verificación profunda sólo de filas nuevas o conflictivas y
+   migración de los dobles de prueba en los tests que consumen esos contratos.
+
+### Reasignación del gate `−80 % real`
+
+Por decisión humana explícita del 2026-09-16, el gate de `−80 % real en jobs de reutilización` de la
+etapa 2 queda **reasignado a verificación post-despliegue**. Al ser una observación empírica de
+producción sobre el scheduler compuesto, ningún diff ni suite de CI puede satisfacerla de forma
+aislada en el repositorio; se verificará con `scripts/report_storage_observability.py` comparando
+las ventanas antes y después de desplegar `DATA-CHASSIS-5`. La etapa 2 no se declarará cerrada hasta
+dicha verificación.
+
 ## Durabilidad inmediata
+
 
 Hoy no existe copia durable fuera del equipo y la etapa 10 llega al final. La etapa 0 exige registrar la
 independencia física del backup; si comparte disco con `C:`, el humano copia el backup verificado a un
