@@ -10,9 +10,10 @@ from investment_analyst.analytics.crypto.derivatives_engine import (
 from investment_analyst.analytics.crypto.derivatives_models import (
     CryptoDerivativesMetricPersistenceSummary,
 )
+from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import MetricResult
 from investment_analyst.storage import LocalStorage
-from investment_analyst.storage.errors import RecordNotFoundError, StorageError
+from investment_analyst.storage.errors import StorageError
 
 
 class CryptoDerivativesMetricPipeline:
@@ -60,21 +61,40 @@ class CryptoDerivativesMetricPipeline:
         )
         for definition in METRIC_DEFINITIONS:
             self._storage.metric_definitions.upsert(definition)
+
+        as_of_values = [candidate.as_of for candidate in computation.results]
+        if as_of_values:
+            existing_metrics = self._storage.metric_results.list(
+                asset_id=asset_id,
+                as_of_from=min(as_of_values),
+                as_of_to=max(as_of_values),
+            )
+            existing_results = {result.result_id: result for result in existing_metrics}
+        else:
+            existing_results = {}
+
         created = 0
         reused = 0
+        to_save: list[MetricResult] = []
         persisted: list[MetricResult] = []
+
         for candidate in computation.results:
-            try:
-                existing = self._storage.metric_results.get(candidate.result_id)
+            existing = existing_results.get(candidate.result_id)
+            if existing is not None:
                 _verify_equivalent(existing, candidate)
-                stored = existing
+                persisted.append(existing)
                 reused += 1
-            except RecordNotFoundError:
-                self._storage.metric_results.save(candidate)
-                stored = self._storage.metric_results.get(candidate.result_id)
+            else:
+                to_save.append(candidate)
+                persisted.append(candidate)
                 created += 1
-            persisted.append(stored)
-        self._verify_traceability(persisted)
+
+        if to_save:
+            receipt = self._storage.metric_results.save_many(to_save)
+        else:
+            receipt = BatchWriteReceipt()
+
+        self._verify_traceability(persisted, receipt)
         return CryptoDerivativesMetricPersistenceSummary(
             results=tuple(persisted),
             results_created=created,
@@ -83,23 +103,35 @@ class CryptoDerivativesMetricPipeline:
             traceability_verified=True,
         )
 
-    def _verify_traceability(self, results: list[MetricResult]) -> None:
+    def _verify_traceability(
+        self,
+        results: list[MetricResult],
+        receipt: BatchWriteReceipt,
+    ) -> None:
+        new_ids = set(receipt.created_ids)
+        if not new_ids:
+            return
+
+        new_results = [result for result in results if result.result_id in new_ids]
         observation_ids = {
-            observation_id for result in results for observation_id in result.input_observation_ids
+            observation_id
+            for result in new_results
+            for observation_id in result.input_observation_ids
         }
-        observations = {
-            observation_id: self._storage.observations.get(observation_id)
-            for observation_id in observation_ids
-        }
+        observations = (
+            self._storage.observations.get_many(observation_ids) if observation_ids else {}
+        )
         raw_ids = {item.raw_record_id for item in observations.values()}
-        raw_records = self._storage.raw_records.get_many(raw_ids)
-        for result in results:
-            if self._storage.metric_results.get(result.result_id) != result:
-                raise StorageError("Deribit metric round-trip verification failed")
+        raw_records = self._storage.raw_records.get_many(raw_ids) if raw_ids else {}
+        for result in new_results:
             if result.available_at > result.computed_at:
                 raise StorageError("Deribit metric uses inputs after computed_at")
             for observation_id in result.input_observation_ids:
+                if observation_id not in observations:
+                    raise StorageError("Deribit metric input traceability failed")
                 observation = observations[observation_id]
+                if observation.raw_record_id not in raw_records:
+                    raise StorageError("Deribit metric input traceability failed")
                 raw = raw_records[observation.raw_record_id]
                 if (
                     observation.asset_id != result.asset_id

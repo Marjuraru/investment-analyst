@@ -208,15 +208,16 @@ colector, el informe ni el scheduler: **usa** lo entregado.
 La etapa 2 ataca el patrón de persistencia no batcheado identificado en el baseline. Se entrega
 particionada en dos bloques por decisión de PLAN verificada en vivo:
 
-1. **`DATA-CHASSIS-4` (este bloque):** construye la capa de acceso y persistencia por lotes en la
+1. **`DATA-CHASSIS-4`:** construyó la capa de acceso y persistencia por lotes en la
    capa de almacenamiento (`get_many`, `save_many`, detección de conflictos en memoria y recibos
    tipados de escritura `BatchWriteReceipt`) en `ObservationRepository`, `MetricResultRepository` y
    `DiagnosticResultRepository`, sin modificar ningún llamador ni doble de test y dejando `analytics/**`
    intacto.
-2. **`DATA-CHASSIS-5`:** adopción de la API por lotes en `analytics/crypto/derivatives_pipeline.py` y
+2. **`DATA-CHASSIS-5` (este bloque):** adopción de la API por lotes en `analytics/crypto/derivatives_pipeline.py` y
    `analytics/market/statistics_pipeline.py`, eliminación del `get` posterior a `save`, memoización del
-   grafo de dependencias por corrida, verificación profunda sólo de filas nuevas o conflictivas y
-   migración de los dobles de prueba en los tests que consumen esos contratos.
+   grafo de dependencias por corrida, verificación profunda sólo de filas nuevas o conflictivas mediante
+   `BatchWriteReceipt` y migración de los dobles de prueba en los tests que consumen esos contratos. Con esto
+   concluye el trabajo de código de la etapa 2.
 
 ### Reasignación del gate `−80 % real`
 
