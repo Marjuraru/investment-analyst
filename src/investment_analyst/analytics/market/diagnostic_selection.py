@@ -1,11 +1,18 @@
 """Point-in-time selection of persisted market-statistics snapshots."""
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 
 from investment_analyst.analytics.market.diagnostic_models import (
     MarketDiagnosticRequest,
     MarketMetricSnapshot,
+)
+from investment_analyst.analytics.metric_identity_cut import (
+    CutIdentityVersion,
+    LegacyKnownAtState,
+    MetricCutEligibility,
+    metric_cut_eligibility,
+    resolve_cut_identity_version,
 )
 from investment_analyst.core.models import MetricResult
 from investment_analyst.storage import LocalStorage
@@ -51,24 +58,21 @@ class InvalidMetricContextError(MarketDiagnosticSelectionError):
     """Raised when a required persisted metric has malformed point-in-time context."""
 
 
-def _known_at_parameter(result: MetricResult) -> datetime:
-    value = result.parameters.get("known_at")
-    if not isinstance(value, str):
-        raise InvalidMetricContextError(
-            f"metric result {result.result_id} has an invalid known_at parameter"
-        )
-    normalized = f"{value[:-1]}+00:00" if value.endswith(("Z", "z")) else value
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as error:
-        raise InvalidMetricContextError(
-            f"metric result {result.result_id} has an invalid known_at parameter"
-        ) from error
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
+def _raise_invalid_legacy_known_at(
+    result: MetricResult,
+    eligibility: MetricCutEligibility,
+) -> None:
+    """Preserve the exact legacy errors for malformed v1 point-in-time context."""
+    legacy = eligibility.legacy
+    if legacy is None or legacy.state is LegacyKnownAtState.VALUE:
+        return
+    if legacy.state is LegacyKnownAtState.NAIVE:
         raise InvalidMetricContextError(
             f"metric result {result.result_id} has a naive known_at parameter"
         )
-    return parsed.astimezone(UTC)
+    raise InvalidMetricContextError(
+        f"metric result {result.result_id} has an invalid known_at parameter"
+    )
 
 
 def _window_parameter(result: MetricResult) -> int:
@@ -165,7 +169,9 @@ class MarketDiagnosticMetricSelector:
                 )
             if source_id != request.query.source_id:
                 continue
-            if _known_at_parameter(result) != request.query.known_at:
+            eligibility = metric_cut_eligibility(result, request.query.known_at)
+            if not eligibility.eligible:
+                _raise_invalid_legacy_known_at(result, eligibility)
                 continue
             if _slot(result, request) is None:
                 continue
@@ -228,14 +234,22 @@ class MarketDiagnosticMetricSelector:
         as_of: datetime,
         slot: str,
     ) -> MetricResult:
+        """Select the latest revision, preferring v2 over v1 on an availability tie."""
         latest_available_at = max(result.available_at for result in revisions)
         latest = [result for result in revisions if result.available_at == latest_available_at]
-        if len(latest) != 1:
-            raise AmbiguousMetricRevisionError(
-                f"ambiguous revisions for {slot} at {as_of.isoformat()} and "
-                f"available_at {latest_available_at.isoformat()}"
-            )
-        return latest[0]
+        if len(latest) == 1:
+            return latest[0]
+        v2_revisions = [
+            result
+            for result in latest
+            if resolve_cut_identity_version(result) is CutIdentityVersion.V2
+        ]
+        if len(v2_revisions) == 1:
+            return v2_revisions[0]
+        raise AmbiguousMetricRevisionError(
+            f"ambiguous revisions for {slot} at {as_of.isoformat()} and "
+            f"available_at {latest_available_at.isoformat()}"
+        )
 
     @staticmethod
     def _verify_request_windows(

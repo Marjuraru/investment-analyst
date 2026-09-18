@@ -22,6 +22,7 @@ from investment_analyst.alerts.analytical_state import (
     AnalyticalScreeningState,
     AnalyticalScreeningStateStore,
 )
+from investment_analyst.analytics.metric_identity_v2 import metric_result_id_v2
 from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobAttempt,
     ScheduledJobAttemptStatus,
@@ -69,6 +70,48 @@ def _metric(
             else {"source_id": _SOURCE_ID, "kind": "noise"}
         ),
         input_observation_ids=[UUID(f"71000000-0000-4000-8000-{identifier:012d}")],
+        algorithm_version=_METRIC_ALGORITHM if is_relevant else "unused-v1",
+        quality=DataQuality.PARTIAL,
+    )
+
+
+def _v2_metric(
+    value: str,
+    *,
+    identifier: int,
+    as_of: datetime,
+    known_at: datetime,
+    metric_key: str = _METRIC_KEY,
+) -> MetricResult:
+    """Build a v2 market row: semantic identity without the legacy known_at parameter."""
+    is_relevant = metric_key == _METRIC_KEY
+    input_observation_ids = [UUID(f"71000000-0000-4000-8000-{identifier:012d}")]
+    parameters: dict[str, object] = (
+        {"source_id": _SOURCE_ID, "window": 20}
+        if is_relevant
+        else {"source_id": _SOURCE_ID, "kind": "noise"}
+    )
+    return MetricResult(
+        result_id=metric_result_id_v2(
+            asset_id=_ASSET_ID,
+            metric_key=metric_key,
+            input_observation_ids=input_observation_ids,
+            algorithm_version=_METRIC_ALGORITHM if is_relevant else "unused-v1",
+            as_of=as_of,
+            available_at=known_at,
+            unit="ratio",
+            quality=DataQuality.PARTIAL,
+            parameters=parameters,
+        ),
+        asset_id=_ASSET_ID,
+        metric_key=metric_key,
+        value=Decimal(value),
+        unit="ratio",
+        as_of=as_of,
+        available_at=known_at,
+        computed_at=known_at,
+        parameters=parameters,
+        input_observation_ids=input_observation_ids,
         algorithm_version=_METRIC_ALGORITHM if is_relevant else "unused-v1",
         quality=DataQuality.PARTIAL,
     )
@@ -312,3 +355,55 @@ def test_bounded_backtest_query_reduces_rows_without_changing_cuts_or_source(
     assert bounded_rows < baseline_rows
     assert bounded_rows == 4
     assert bounded == baseline
+
+
+def test_bounded_reads_keep_v2_rows_reachable_for_monitor_and_backtest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A8/A9: the bounded projection keeps version-aware v2 rows reachable end to end."""
+    known_at = datetime(2026, 7, 29, 12, tzinfo=UTC)
+    metrics = (
+        _v2_metric(
+            "1.8",
+            identifier=1,
+            as_of=datetime(2026, 7, 28, tzinfo=UTC),
+            known_at=known_at,
+        ),
+        _v2_metric(
+            "9.0",
+            identifier=2,
+            as_of=datetime(2026, 7, 27, tzinfo=UTC),
+            known_at=known_at,
+            metric_key="market.unused",
+        ),
+    )
+
+    bounded, bounded_rows = _run_monitor(
+        tmp_path / "monitor-bounded",
+        metrics,
+        monkeypatch,
+        unbounded=False,
+    )
+    baseline, baseline_rows = _run_monitor(
+        tmp_path / "monitor-unbounded",
+        metrics,
+        monkeypatch,
+        unbounded=True,
+    )
+
+    assert bounded_rows == 1 < baseline_rows
+    assert bounded == baseline
+    assert len(bounded.results) == 1
+    assert bounded.results[0].conditions[0].metric_result_id == metrics[0].result_id
+
+    replayed, backtest_rows = _run_backtest(
+        tmp_path / "backtest-bounded",
+        metrics,
+        monkeypatch,
+        unbounded=False,
+    )
+
+    assert backtest_rows == 1
+    assert replayed.total_available_cuts == 1
+    assert replayed.evaluations[0].result.conditions[0].metric_result_id == metrics[0].result_id

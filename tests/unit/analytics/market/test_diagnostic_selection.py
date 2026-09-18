@@ -14,6 +14,8 @@ from investment_analyst.analytics.market.diagnostic_selection import (
     MarketDiagnosticMetricSelector,
     describe_missing_requirements,
 )
+from investment_analyst.analytics.metric_identity_cut import MetricCutContractError
+from investment_analyst.analytics.metric_identity_v2 import metric_result_id_v2
 from investment_analyst.core.models import DataQuality, MetricResult
 from investment_analyst.storage import LocalStorage, StoragePaths
 
@@ -94,6 +96,73 @@ def complete_metrics(*, as_of: datetime = AS_OF) -> tuple[MetricResult, ...]:
         make_metric("market.history.sma", window=3, as_of=as_of, value=Decimal("100")),
         make_metric("market.history.rolling_daily_volatility", window=2, as_of=as_of),
         make_metric("market.history.relative_volume", window=2, as_of=as_of),
+    )
+
+
+def _metric_unit(metric_key: str) -> str:
+    return "USD" if metric_key == "market.history.sma" else "ratio"
+
+
+def make_v2_metric(
+    metric_key: str,
+    *,
+    window: int | None = None,
+    as_of: datetime = AS_OF,
+    available_at: datetime | None = None,
+    source_id: str = SOURCE_ID,
+    value: Decimal = Decimal("1"),
+    observations: tuple = (),
+    extra_parameters: dict[str, object] | None = None,
+) -> MetricResult:
+    """Build a synthetic v2 row: semantic identity without the legacy known_at parameter."""
+    algorithms = {
+        "market.history.simple_return_1d": "market-simple-return-1d-v1-decimal34",
+        "market.history.sma": "market-sma-v1-decimal34",
+        "market.history.rolling_daily_volatility": ("market-rolling-daily-volatility-v1-decimal34"),
+        "market.history.relative_volume": "market-relative-volume-v1-decimal34",
+    }
+    input_observation_ids = list(observations) or [uuid4()]
+    parameters: dict[str, object] = {"source_id": source_id}
+    if window is not None:
+        parameters["window"] = window
+    if extra_parameters is not None:
+        parameters.update(extra_parameters)
+    available = available_at or as_of + timedelta(hours=1)
+    unit = _metric_unit(metric_key)
+    identifier = metric_result_id_v2(
+        asset_id=ASSET_ID,
+        metric_key=metric_key,
+        input_observation_ids=input_observation_ids,
+        algorithm_version=algorithms[metric_key],
+        as_of=as_of,
+        available_at=available,
+        unit=unit,
+        quality=DataQuality.VALID,
+        parameters=parameters,
+    )
+    return MetricResult(
+        result_id=identifier,
+        asset_id=ASSET_ID,
+        metric_key=metric_key,
+        value=value,
+        unit=unit,
+        as_of=as_of,
+        available_at=available,
+        computed_at=max(available, KNOWN_AT),
+        parameters=parameters,
+        input_observation_ids=input_observation_ids,
+        algorithm_version=algorithms[metric_key],
+        quality=DataQuality.VALID,
+    )
+
+
+def complete_v2_metrics(*, as_of: datetime = AS_OF) -> tuple[MetricResult, ...]:
+    return (
+        make_v2_metric("market.history.simple_return_1d", as_of=as_of),
+        make_v2_metric("market.history.sma", window=2, as_of=as_of, value=Decimal("102")),
+        make_v2_metric("market.history.sma", window=3, as_of=as_of, value=Decimal("100")),
+        make_v2_metric("market.history.rolling_daily_volatility", window=2, as_of=as_of),
+        make_v2_metric("market.history.relative_volume", window=2, as_of=as_of),
     )
 
 
@@ -335,3 +404,79 @@ def test_selector_ignores_demonstrative_and_wrong_algorithm_metrics(tmp_path) ->
         item.result_id not in {demo.result_id, wrong_algorithm.result_id} for item in candidates
     )
     assert candidates == repeated
+
+
+def test_selector_accepts_v2_rows_without_a_known_at_parameter(tmp_path) -> None:
+    """A5: v2 rows are selectable, keeping the source filter and the window verification."""
+    metrics = complete_v2_metrics()
+    ignored = (
+        make_v2_metric("market.history.relative_volume", window=2, source_id="other:source"),
+        make_v2_metric(
+            "market.history.simple_return_1d",
+            available_at=KNOWN_AT + timedelta(seconds=1),
+        ),
+        make_v2_metric("market.history.sma", window=9),
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        save_all(storage, metrics + ignored)
+        selector = MarketDiagnosticMetricSelector(storage)
+        snapshot = selector.select(make_request())
+        candidates = selector.candidates(make_request())
+
+    assert snapshot is not None
+    assert snapshot.as_of == AS_OF
+    assert set(snapshot.metric_result_ids()) == {item.result_id for item in metrics}
+    assert {item.result_id for item in candidates} == {item.result_id for item in metrics}
+    assert all(item.result_id.version == 8 for item in snapshot.metric_results())
+    assert all("known_at" not in item.parameters for item in snapshot.metric_results())
+
+
+def test_v2_is_preferred_over_v1_for_the_same_slot_and_same_version_ties_stay_ambiguous(
+    tmp_path,
+) -> None:
+    """A6: a v1/v2 tie prefers v2 deterministically; same-version ties stay ambiguous."""
+    base = list(complete_metrics())
+    legacy_return = base[0]
+    semantic_return = make_v2_metric(
+        "market.history.simple_return_1d",
+        available_at=legacy_return.available_at,
+    )
+
+    for order, rows in (
+        ("legacy-first", (*base, semantic_return)),
+        ("v2-first", (semantic_return, *base)),
+    ):
+        with LocalStorage(StoragePaths.from_root(tmp_path / order)) as storage:
+            save_all(storage, rows)
+            snapshot = MarketDiagnosticMetricSelector(storage).select(make_request())
+
+        assert snapshot is not None
+        assert snapshot.simple_return.result_id == semantic_return.result_id
+
+    duplicate_v2 = (
+        make_v2_metric("market.history.simple_return_1d", available_at=legacy_return.available_at),
+        make_v2_metric(
+            "market.history.simple_return_1d",
+            available_at=legacy_return.available_at,
+            observations=(uuid4(),),
+        ),
+    )
+    assert duplicate_v2[0].result_id != duplicate_v2[1].result_id
+    with LocalStorage(StoragePaths.from_root(tmp_path / "duplicate-v2")) as storage:
+        save_all(storage, (*base, *duplicate_v2))
+
+        with pytest.raises(AmbiguousMetricRevisionError):
+            MarketDiagnosticMetricSelector(storage).select(make_request())
+
+
+def test_selector_fails_closed_on_a_v2_row_that_carries_known_at(tmp_path) -> None:
+    """A4: a v2 row carrying the legacy parameter is a contract violation, not a match."""
+    violation = make_v2_metric(
+        "market.history.simple_return_1d",
+        extra_parameters={"known_at": KNOWN_AT.isoformat()},
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        save_all(storage, (violation,))
+
+        with pytest.raises(MetricCutContractError, match="under metric identity v2"):
+            MarketDiagnosticMetricSelector(storage).candidates(make_request())

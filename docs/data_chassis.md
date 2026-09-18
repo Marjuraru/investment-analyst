@@ -228,7 +228,7 @@ aislada en el repositorio; se verificará con `scripts/report_storage_observabil
 las ventanas antes y después de desplegar `DATA-CHASSIS-5`. La etapa 2 no se declarará cerrada hasta
 dicha verificación.
 
-## Etapa 3: Identidad de métrica v2 y adaptador de resolución (`DATA-CHASSIS-6`)
+## Etapa 3: Identidad de métrica v2 y adaptador de resolución (`DATA-CHASSIS-6` y `DATA-CHASSIS-7`)
 
 `DATA-CHASSIS-6` (este bloque) abre la etapa 3 definiendo la regla canónica de identidad de métrica v2 y su adaptador de resolución v1/v2 como contrato puro, aislado y disjunto, sin llamador en producción y preservando intactos los siete módulos de identidad vigentes, los motores y los pipelines.
 
@@ -242,6 +242,48 @@ PLAN evaluó sobre `core/models/diagnostic.py` si `DiagnosticResult` podía exte
 ### Separación de `AnalysisSnapshot` por ausencia de runner de migración
 
 `AnalysisSnapshot` requiere una tabla física nueva en DuckDB. La capa de almacenamiento actual (`storage/duckdb_store.py`) define `SCHEMA_VERSION = 1`, apertura fija contra `001_initial.sql` con igualdad estricta y sin runner de migración. Modificar el schema en este momento rompería la apertura del workspace permanente y violaría la restricción 5 de la ruta (no mezclar migración física con cambios de identidad/fórmulas). Por decisión humana explícita del 2026-09-17, el snapshot se separa de esta etapa y se abordará cuando se introduzca un runner de migración o en la versión nueva de workspace de la etapa 7.
+
+### Adaptador de lectura consciente de versión (`DATA-CHASSIS-7`)
+
+`DATA-CHASSIS-7` entrega la mitad de **lectura** de la etapa 3 y no emite una sola identidad v2. Retirar
+`known_at` de `parameters` —requisito ineludible de la adopción, porque si no la fila v2 cambia de
+contenido entre cortes conservando el mismo identificador— rompe **cinco** puntos de lectura en tres
+subsistemas, y dos de ellos fallan **en silencio**:
+
+| # | Sitio | Efecto con una fila v2 |
+| --- | --- | --- |
+| 1 | `analytics/market/diagnostic_selection.py` | `InvalidMetricContextError`; además es hoy el único deduplicador de revisiones v1. |
+| 2 | `analytics/market/diagnostic_models.py` | `ValueError`. |
+| 3 | `analytics/market/diagnostic_pipeline.py` | `MarketDiagnosticTraceabilityError`. |
+| 4 | `alerts/analytical_monitor.py` | **Silencioso:** la métrica se descarta sin error y la alerta de mercado deja de emitirse. |
+| 5 | `alerts/analytical_backtest.py` | **Silencioso:** el conjunto de cortes de mercado queda vacío y el backtest produce cero resultados. |
+
+- **Contrato aislado nuevo:** `analytics/metric_identity_cut.py` responde exactamente una pregunta —dado
+  un `MetricResult` y un `known_at`, ¿es elegible para ese corte, y bajo qué versión de identidad?— con
+  una función pura, total y sin E/S. `metric_identity_v2.py` se **consume tal cual** y queda fijado por
+  hash: el bloque usa la regla v2 auditada, no la redefine.
+- **Identidad del dominio:** la versión se resuelve sólo desde el `result_id` (UUID5 → v1, UUID8 → v2) y
+  cualquier otro UUID degrada a la regla legada sin lanzar, de modo que ninguna fila histórica de otro
+  dominio se vuelve ilegible.
+- **Reglas:** v1 conserva `parameters["known_at"]` obligatorio con las mismas clases de error y los
+  mismos mensajes; v2 es elegible por `available_at <= known_at` —la regla que el dominio fundamental ya
+  aplicaba— y una fila v2 que todavía contenga `known_at` en `parameters` falla cerrado.
+- **Desambiguación:** ante una revisión v1 y una v2 del mismo corte y la misma `available_at` se prefiere
+  v2 de forma determinista y probada; dos candidatos de la misma versión con la misma `available_at`
+  siguen siendo `AmbiguousMetricRevisionError`.
+- **Alcance:** cero tablas, índices, migraciones o bump de `SCHEMA_VERSION`; cero reescritura de filas;
+  cero cambios en el motor, el pipeline y los módulos de identidad de mercado y cripto; la regla no se
+  amplía a cripto, fundamentales, valoración ni cazatiburones.
+- **Semántica PIT que habilita:** bajo v2, un corte antiguo `K` puede seleccionar una fila cuya evidencia
+  estaba disponible (`available_at <= K`) aunque se calculara después; `AGENTS.md` lo autoriza de forma
+  explícita.
+
+El orden no es preferencia: la puerta de un solo sentido —escribir identificadores que no se pueden
+reescribir— se cruza con el lector ya preparado y probado, exactamente como el gate de la etapa exige
+con «v1 intacto, adaptador de lectura, sin reasignar IDs». El siguiente bloque es `DATA-CHASSIS-8`:
+adopción de la identidad v2 en el camino de **escritura** de mercado (`statistics_identity` y
+`statistics_engine` emiten v2, `known_at` sale de `_common_parameters` y se reemplazan las comprobaciones
+de `statistics_pipeline.py`), seguido de la adopción en derivados.
 
 ## Durabilidad inmediata
 

@@ -3,13 +3,14 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import pytest
 from pydantic import ValidationError
 
 from investment_analyst.alerts.analytical_backtest import (
     AnalyticalBacktestAmbiguousSourceError,
+    AnalyticalBacktestError,
     AnalyticalBacktestRequest,
     AnalyticalBacktestService,
     AnalyticalBacktestUnavailableError,
@@ -19,6 +20,7 @@ from investment_analyst.alerts.analytical_rule_catalog import INITIAL_ANALYTICAL
 from investment_analyst.alerts.analytical_rule_registry import (
     AnalyticalRuleRegistryStore,
 )
+from investment_analyst.analytics.metric_identity_v2 import metric_result_id_v2
 from investment_analyst.application.runtime import ApplicationRuntime
 from investment_analyst.core.models import DataQuality, MetricResult
 from investment_analyst.storage.repositories import DuckDBMetricResultRepository
@@ -30,6 +32,7 @@ _SOURCE_ID = "alpaca-market-data:iex:aapl:daily-bars:adjustment-all"
 _MARKET_RULE_ID = "market.activity.relative-volume-review"
 _FUNDAMENTAL_RULE_ID = "fundamentals.quarterly-balance-growth-review"
 _FUNDAMENTAL_SOURCE_ID = "sec-edgar:aapl:companyfacts"
+_V2_OBSERVATION_NAMESPACE = UUID("6b000000-0000-4000-8000-000000000001")
 
 
 def _market_metric(
@@ -89,6 +92,41 @@ def _fundamental_metric(
         input_observation_ids=[UUID(f"63000000-0000-4000-8000-{identifier:012d}")],
         algorithm_version=algorithms[metric_key],
         quality=DataQuality.VALID,
+    )
+
+
+def _v2_market_metric(
+    value: str,
+    *,
+    as_of: datetime,
+    available_at: datetime,
+) -> MetricResult:
+    """Build a v2 market row: semantic identity without the legacy known_at parameter."""
+    input_observation_ids = [uuid5(_V2_OBSERVATION_NAMESPACE, as_of.isoformat())]
+    parameters = {"source_id": _SOURCE_ID, "window": 20}
+    return MetricResult(
+        result_id=metric_result_id_v2(
+            asset_id=_ASSET_ID,
+            metric_key="market.history.relative_volume",
+            input_observation_ids=input_observation_ids,
+            algorithm_version="market-relative-volume-v1-decimal34",
+            as_of=as_of,
+            available_at=available_at,
+            unit="ratio",
+            quality=DataQuality.PARTIAL,
+            parameters=parameters,
+        ),
+        asset_id=_ASSET_ID,
+        metric_key="market.history.relative_volume",
+        value=Decimal(value),
+        unit="ratio",
+        as_of=as_of,
+        available_at=available_at,
+        computed_at=available_at,
+        parameters=parameters,
+        input_observation_ids=input_observation_ids,
+        algorithm_version="market-relative-volume-v1-decimal34",
+        quality=DataQuality.PARTIAL,
     )
 
 
@@ -364,3 +402,70 @@ def test_backtest_request_rejects_boolean_or_unbounded_limits() -> None:
     for value in (True, 19, 501):
         with pytest.raises(ValidationError):
             AnalyticalBacktestRequest.model_validate({**base, "max_cuts": value})
+
+
+def test_market_cuts_are_derived_from_v2_rows_without_an_empty_cut_set(tmp_path: Path) -> None:
+    """A9: v2 market rows produce cuts from available_at and the replay emits results."""
+    start = datetime(2026, 7, 20, tzinfo=UTC)
+    values = ("1.6", "1.7", "1.3", "1.1")
+    metrics = tuple(
+        _v2_market_metric(
+            value,
+            as_of=start + timedelta(days=index),
+            available_at=start + timedelta(days=index, hours=12),
+        )
+        for index, value in enumerate(values)
+    )
+
+    result = _service(tmp_path, metrics).run(
+        AnalyticalBacktestRequest(
+            rule_id=_MARKET_RULE_ID,
+            asset_id=_ASSET_ID,
+            max_cuts=20,
+        )
+    )
+
+    assert result.total_available_cuts == 4
+    assert len(result.evaluations) == 4
+    assert result.first_known_at == start + timedelta(hours=12)
+    assert result.last_known_at == start + timedelta(days=3, hours=12)
+    assert result.matched_count == 2
+    assert result.evaluations[0].result.conditions[0].metric_result_id == metrics[0].result_id
+
+
+@pytest.mark.parametrize(
+    ("known_at_parameter", "message"),
+    [
+        ("not-a-timestamp", "market metric known_at parameter is invalid"),
+        ("2026-07-20T00:00:00", "market metric known_at parameter must include timezone"),
+    ],
+)
+def test_market_backtest_preserves_legacy_known_at_parameter_errors(
+    tmp_path: Path,
+    known_at_parameter: str,
+    message: str,
+) -> None:
+    """A3: the legacy v1 cut errors survive the version-aware cut derivation."""
+    start = datetime(2026, 7, 20, tzinfo=UTC)
+    metric = _market_metric(
+        "1.6",
+        identifier=51,
+        as_of=start,
+        known_at=start + timedelta(hours=12),
+    ).model_copy(
+        update={
+            "parameters": {
+                "source_id": _SOURCE_ID,
+                "known_at": known_at_parameter,
+                "window": 20,
+            }
+        }
+    )
+
+    with pytest.raises(AnalyticalBacktestError, match=message):
+        _service(tmp_path, (metric,)).run(
+            AnalyticalBacktestRequest(
+                rule_id=_MARKET_RULE_ID,
+                asset_id=_ASSET_ID,
+            )
+        )

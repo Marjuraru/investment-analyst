@@ -29,6 +29,7 @@ from investment_analyst.alerts.analytical_state import (
     AnalyticalMonitorReceiptStatus,
     AnalyticalScreeningStateStore,
 )
+from investment_analyst.analytics.metric_identity_v2 import metric_result_id_v2
 from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobAttempt,
     ScheduledJobAttemptStatus,
@@ -72,6 +73,42 @@ def _metric(
             "window": 20,
         },
         input_observation_ids=[UUID(f"10000000-0000-4000-8000-{identifier:012d}")],
+        algorithm_version="market-relative-volume-v1-decimal34",
+        quality=DataQuality.PARTIAL,
+    )
+
+
+def _v2_metric(
+    value: str,
+    *,
+    identifier: int,
+    as_of: datetime,
+    known_at: datetime,
+) -> MetricResult:
+    """Build a v2 market row: semantic identity without the legacy known_at parameter."""
+    input_observation_ids = [UUID(f"10000000-0000-4000-8000-{identifier:012d}")]
+    parameters = {"source_id": _SOURCE_ID, "window": 20}
+    return MetricResult(
+        result_id=metric_result_id_v2(
+            asset_id=_ASSET_ID,
+            metric_key="market.history.relative_volume",
+            input_observation_ids=input_observation_ids,
+            algorithm_version="market-relative-volume-v1-decimal34",
+            as_of=as_of,
+            available_at=known_at,
+            unit="ratio",
+            quality=DataQuality.PARTIAL,
+            parameters=parameters,
+        ),
+        asset_id=_ASSET_ID,
+        metric_key="market.history.relative_volume",
+        value=Decimal(value),
+        unit="ratio",
+        as_of=as_of,
+        available_at=known_at,
+        computed_at=known_at,
+        parameters=parameters,
+        input_observation_ids=input_observation_ids,
         algorithm_version="market-relative-volume-v1-decimal34",
         quality=DataQuality.PARTIAL,
     )
@@ -374,6 +411,87 @@ def test_selector_uses_latest_available_fundamental_revision_without_cut_paramet
         margin.result_id,
         growth.result_id,
     }
+
+
+def test_monitor_selects_a_v2_market_metric_instead_of_dropping_it_silently(
+    tmp_path: Path,
+) -> None:
+    """A8: the legacy rule drops a v2 market metric silently; the new rule selects it."""
+    known_at = datetime(2026, 7, 29, 12, tzinfo=UTC)
+    metric = _v2_metric(
+        "1.8",
+        identifier=41,
+        as_of=datetime(2026, 7, 28, tzinfo=UTC),
+        known_at=known_at,
+    )
+    assert metric.result_id.version == 8
+    assert metric.parameters.get("known_at") != known_at.isoformat()
+    assert AnalyticalMetricSnapshotSelector().select(
+        rule=INITIAL_MARKET_ACTIVITY_RULE,
+        metrics=(metric,),
+        source_id=_SOURCE_ID,
+        known_at=known_at,
+    ) == (metric,)
+
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    workspace = service.initialize(tmp_path / "workspace").paths
+    writer = service.open_storage(workspace, WorkspaceAccessMode.READ_WRITE)
+    try:
+        writer.metric_results.save(metric)
+    finally:
+        writer.close()
+    runtime = ApplicationRuntime.create_default(workspace_service=service)
+    store = AnalyticalScreeningStateStore(workspace.state_root / "analytical.json")
+    rule = INITIAL_MARKET_ACTIVITY_RULE.model_copy(update={"confirmations_required": 1})
+    monitor = AnalyticalScreeningMonitor(
+        store,
+        runtime,
+        workspace.root,
+        (rule,),
+        clock=lambda: datetime(2026, 7, 29, 12, 3, tzinfo=UTC),
+    )
+
+    monitor(
+        _attempt(
+            attempt_id=UUID("30000000-0000-4000-8000-000000000041"),
+            known_at=known_at,
+        )
+    )
+
+    state = store.load()
+    assert [item.status for item in state.receipts] == [AnalyticalMonitorReceiptStatus.SCREENED]
+    assert len(state.results) == 1
+    assert state.results[0].conditions[0].metric_result_id == metric.result_id
+    assert state.results[0].as_of == metric.as_of
+
+
+def test_selector_still_drops_malformed_legacy_market_rows_without_raising() -> None:
+    """A3: the legacy read path keeps dropping malformed v1 cut parameters without raising."""
+    known_at = datetime(2026, 7, 29, 12, tzinfo=UTC)
+    malformed = _metric(
+        "1.8",
+        identifier=42,
+        as_of=datetime(2026, 7, 28, tzinfo=UTC),
+        known_at=known_at,
+    ).model_copy(
+        update={
+            "parameters": {
+                "source_id": _SOURCE_ID,
+                "known_at": "not-a-timestamp",
+                "window": 20,
+            }
+        }
+    )
+
+    assert (
+        AnalyticalMetricSnapshotSelector().select(
+            rule=INITIAL_MARKET_ACTIVITY_RULE,
+            metrics=(malformed,),
+            source_id=_SOURCE_ID,
+            known_at=known_at,
+        )
+        == ()
+    )
 
 
 def _definition() -> ScheduledJobDefinition:

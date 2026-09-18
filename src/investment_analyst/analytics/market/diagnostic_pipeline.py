@@ -18,6 +18,12 @@ from investment_analyst.analytics.market.diagnostic_selection import (
     MarketDiagnosticMetricSelector,
     describe_missing_requirements,
 )
+from investment_analyst.analytics.metric_identity_cut import (
+    CutIdentityVersion,
+    LegacyKnownAtState,
+    MetricCutEligibility,
+    metric_cut_eligibility,
+)
 from investment_analyst.core.models import (
     DataQuality,
     DiagnosticResult,
@@ -68,18 +74,14 @@ def _without_computed_at(result: DiagnosticResult) -> dict[str, object]:
     return result.model_dump(mode="python", exclude={"computed_at"})
 
 
-def _metric_known_at(result: MetricResult) -> datetime:
-    value = result.parameters.get("known_at")
-    if not isinstance(value, str):
-        raise MarketDiagnosticTraceabilityError("metric known_at parameter is invalid")
-    normalized = f"{value[:-1]}+00:00" if value.endswith(("Z", "z")) else value
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as error:
-        raise MarketDiagnosticTraceabilityError("metric known_at parameter is invalid") from error
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
+def _raise_invalid_legacy_known_at(eligibility: MetricCutEligibility) -> None:
+    """Preserve the exact legacy errors for malformed v1 point-in-time context."""
+    legacy = eligibility.legacy
+    if legacy is None or legacy.state is LegacyKnownAtState.VALUE:
+        return
+    if legacy.state is LegacyKnownAtState.NAIVE:
         raise MarketDiagnosticTraceabilityError("metric known_at parameter is naive")
-    return parsed.astimezone(UTC)
+    raise MarketDiagnosticTraceabilityError("metric known_at parameter is invalid")
 
 
 class MarketDiagnosticPipeline:
@@ -325,8 +327,16 @@ class MarketDiagnosticPipeline:
                 raise MarketDiagnosticTraceabilityError("selected metric mixes assets")
             if result.parameters.get("source_id") != request.query.source_id:
                 raise MarketDiagnosticTraceabilityError("selected metric mixes sources")
-            if _metric_known_at(result) != request.query.known_at:
-                raise MarketDiagnosticTraceabilityError("selected metric mixes known_at contexts")
+            eligibility = metric_cut_eligibility(result, request.query.known_at)
+            if not eligibility.eligible:
+                if eligibility.version is CutIdentityVersion.V1:
+                    _raise_invalid_legacy_known_at(eligibility)
+                    raise MarketDiagnosticTraceabilityError(
+                        "selected metric mixes known_at contexts"
+                    )
+                raise MarketDiagnosticTraceabilityError(
+                    "selected metric was unavailable at known_at"
+                )
             if result.available_at > request.query.known_at:
                 raise MarketDiagnosticTraceabilityError(
                     "selected metric was unavailable at known_at"

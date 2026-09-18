@@ -13,6 +13,8 @@ from investment_analyst.analytics.market.diagnostic_models import (
     MarketDiagnosticRunSummary,
     MarketMetricSnapshot,
 )
+from investment_analyst.analytics.metric_identity_cut import MetricCutContractError
+from investment_analyst.analytics.metric_identity_v2 import metric_result_id_v2
 from investment_analyst.core.models import DataQuality, DiagnosticVerdict, MetricResult
 
 KNOWN_AT = datetime(2026, 7, 20, tzinfo=UTC)
@@ -78,6 +80,57 @@ def make_metric(
         computed_at=as_of + timedelta(hours=2),
         parameters=parameters,
         input_observation_ids=[uuid4()],
+        algorithm_version=algorithms[metric_key],
+        quality=DataQuality.VALID,
+    )
+
+
+def make_v2_metric(
+    metric_key: str,
+    *,
+    value: Decimal,
+    unit: str,
+    window: int | None = None,
+    as_of: datetime = AS_OF,
+    available_at: datetime | None = None,
+    extra_parameters: dict[str, object] | None = None,
+) -> MetricResult:
+    """Build a synthetic v2 row: semantic identity without the legacy known_at parameter."""
+    algorithms = {
+        "market.history.simple_return_1d": "market-simple-return-1d-v1-decimal34",
+        "market.history.sma": "market-sma-v1-decimal34",
+        "market.history.rolling_daily_volatility": ("market-rolling-daily-volatility-v1-decimal34"),
+        "market.history.relative_volume": "market-relative-volume-v1-decimal34",
+    }
+    parameters: dict[str, object] = {"source_id": SOURCE_ID}
+    if window is not None:
+        parameters["window"] = window
+    if extra_parameters is not None:
+        parameters.update(extra_parameters)
+    available = available_at or as_of + timedelta(hours=1)
+    input_observation_ids = [uuid4()]
+    identifier = metric_result_id_v2(
+        asset_id=ASSET_ID,
+        metric_key=metric_key,
+        input_observation_ids=input_observation_ids,
+        algorithm_version=algorithms[metric_key],
+        as_of=as_of,
+        available_at=available,
+        unit=unit,
+        quality=DataQuality.VALID,
+        parameters=parameters,
+    )
+    return MetricResult(
+        result_id=identifier,
+        asset_id=ASSET_ID,
+        metric_key=metric_key,
+        value=value,
+        unit=unit,
+        as_of=as_of,
+        available_at=available,
+        computed_at=max(available, KNOWN_AT),
+        parameters=parameters,
+        input_observation_ids=input_observation_ids,
         algorithm_version=algorithms[metric_key],
         quality=DataQuality.VALID,
     )
@@ -270,3 +323,56 @@ def test_run_summary_serializes_to_json() -> None:
 
     assert document["final_score"] == "70"
     assert document["known_at"].endswith("Z")
+
+
+def test_snapshot_accepts_v2_metrics_without_a_known_at_parameter() -> None:
+    """A7: a v2 cut resolves in the snapshot without the legacy known_at parameter."""
+    snapshot = make_snapshot(
+        simple_return=make_v2_metric(
+            "market.history.simple_return_1d",
+            value=Decimal("0.02"),
+            unit="ratio",
+        ),
+        short_sma=make_v2_metric(
+            "market.history.sma",
+            value=Decimal("102"),
+            unit="USD",
+            window=2,
+        ),
+        long_sma=make_v2_metric(
+            "market.history.sma",
+            value=Decimal("100"),
+            unit="USD",
+            window=3,
+        ),
+        rolling_volatility=make_v2_metric(
+            "market.history.rolling_daily_volatility",
+            value=Decimal("0.03"),
+            unit="ratio",
+            window=2,
+        ),
+        relative_volume=make_v2_metric(
+            "market.history.relative_volume",
+            value=Decimal("1.5"),
+            unit="ratio",
+            window=2,
+        ),
+    )
+
+    assert all(result.result_id.version == 8 for result in snapshot.metric_results())
+    assert all("known_at" not in result.parameters for result in snapshot.metric_results())
+    assert all(result.available_at <= snapshot.known_at for result in snapshot.metric_results())
+
+
+def test_snapshot_fails_closed_on_a_v2_metric_that_carries_known_at() -> None:
+    """A4: a v2 row carrying the legacy parameter violates its identity contract."""
+    with pytest.raises(MetricCutContractError, match="under metric identity v2"):
+        make_snapshot(
+            short_sma=make_v2_metric(
+                "market.history.sma",
+                value=Decimal("102"),
+                unit="USD",
+                window=2,
+                extra_parameters={"known_at": KNOWN_AT.isoformat()},
+            )
+        )
