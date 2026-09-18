@@ -13,11 +13,12 @@ import hashlib
 import importlib.util
 import json
 from dataclasses import dataclass
-from datetime import time
+from datetime import UTC, datetime, time
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import duckdb
 import pytest
@@ -51,6 +52,9 @@ _SCRIPT = _ROOT / "scripts" / "serve_investment_analyst.py"
 _ARTIFACT_NAME = "storage_observability_v1.jsonl"
 _SCHEDULE_STATE_FILE = "multi_asset_schedule_state_v1.json"
 _JOB_ID = "composition:market-daily"
+_JOB_TIMEZONE = "America/Lima"
+_FIXED_CLOCK = datetime(2026, 9, 18, 12, 30, tzinfo=UTC)
+_WALL_CLOCK_INSIDE_THE_GAP = datetime(2026, 9, 18, 6, 0, tzinfo=UTC)
 _COLLECTOR_WIRED = "wired"
 _COLLECTOR_ABSENT = "absent"
 _COLLECTOR_FAILING = "failing"
@@ -213,10 +217,10 @@ def _compose(
 
     class _RecordingScheduler(MultiAssetScheduler):
         def __init__(self, *args: object, **kwargs: object) -> None:
-            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
             scheduler_args.append(args)
             scheduler_kwargs.append(dict(kwargs))
             schedulers.append(self)
+            super().__init__(*args, clock=lambda: _FIXED_CLOCK, **kwargs)  # type: ignore[arg-type]
 
         def run_forever(
             self,
@@ -504,6 +508,48 @@ def test_wiring_creates_no_duckdb_object_or_migration(
         _ROOT / "src" / "investment_analyst" / "storage" / "migrations" / "001_initial.sql"
     ).is_file()
     assert not tuple(composed.workspace_root.rglob("*.sql"))
+
+
+class _WallClockMeta(type):
+    """Keep isinstance checks and delegate every other datetime attribute to the real class."""
+
+    def __instancecheck__(cls, instance: object) -> bool:
+        return isinstance(instance, datetime)
+
+    def __getattr__(cls, name: str) -> object:
+        return getattr(datetime, name)
+
+
+class _WallClockDatetime(metaclass=_WallClockMeta):
+    """datetime stand-in whose now() is fixed inside the 05:00-12:00 UTC gap."""
+
+    @staticmethod
+    def now(tz: object = None) -> datetime:
+        del tz
+        return _WALL_CLOCK_INSIDE_THE_GAP
+
+
+def test_composition_is_independent_of_the_wall_clock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A12: a wall clock inside the 05:00-12:00 UTC gap no longer changes the outcome."""
+    inside_gap = _WALL_CLOCK_INSIDE_THE_GAP
+    local = inside_gap.astimezone(ZoneInfo(_JOB_TIMEZONE))
+
+    assert 5 <= inside_gap.hour < 12
+    assert local.hour < 7, "the registered job is not due under this wall clock"
+
+    monkeypatch.setattr(
+        "investment_analyst.application.multi_asset_scheduler.datetime",
+        _WallClockDatetime,
+    )
+    composed = _compose(tmp_path, monkeypatch)
+    completed = composed.scheduler().tick()
+
+    assert [item.status for item in completed] == [ScheduledJobAttemptStatus.SUCCEEDED]
+    assert composed.job_runs == [_JOB_ID]
+    assert composed.records()[0]["job_id"] == _JOB_ID
 
 
 def test_artifact_path_is_independent_of_the_working_directory(
