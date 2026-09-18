@@ -414,9 +414,12 @@ def test_decimal_and_utc_are_preserved_in_the_preimage() -> None:
 
 
 def test_no_production_caller_invokes_the_v2_rule() -> None:
-    """A10: exactly one production caller consumes the audited v2 rule."""
+    """A9: exactly two production callers consume the audited v2 rule."""
     src_dir = Path("src/investment_analyst")
-    allowed_callers = {"src/investment_analyst/analytics/market/statistics_identity.py"}
+    allowed_callers = {
+        "src/investment_analyst/analytics/crypto/derivatives_identity.py",
+        "src/investment_analyst/analytics/market/statistics_identity.py",
+    }
     violating_files: list[str] = []
 
     for path in src_dir.rglob("*.py"):

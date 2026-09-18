@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
+from pydantic import JsonValue
+
 from investment_analyst.analytics.crypto.derivatives_engine import (
     DVOL_CHANGE_KEY,
     FUNDING_SUM_KEY,
@@ -12,7 +14,10 @@ from investment_analyst.analytics.crypto.derivatives_engine import (
     CryptoDerivativesMetricEngine,
     select_latest_revisions,
 )
-from investment_analyst.analytics.crypto.derivatives_identity import diagnostic_id
+from investment_analyst.analytics.crypto.derivatives_identity import (
+    diagnostic_id,
+    metric_result_id,
+)
 from investment_analyst.analytics.crypto.derivatives_models import (
     CryptoDerivativeMetricValue,
     CryptoDerivativeObservationValue,
@@ -81,7 +86,9 @@ class CryptoDerivativesService:
             as_of_before=end_utc,
         )
         metrics = _latest_metric_slots(
-            tuple(self._reuse_persisted_metric(item) for item in computation.results)
+            tuple(
+                self._reuse_persisted_metric(item, known_at=known) for item in computation.results
+            )
         )
         expected_sources = {
             "funding_interest_1h": funding_source_id,
@@ -235,17 +242,24 @@ class CryptoDerivativesService:
             traceability_verified=True,
         )
 
-    def _reuse_persisted_metric(self, candidate: MetricResult) -> MetricResult:
+    def _reuse_persisted_metric(
+        self, candidate: MetricResult, *, known_at: datetime
+    ) -> MetricResult:
+        """Prefer the persisted v2 row, then the v1 row of this cut, then the memory candidate."""
         try:
             existing = self._storage.metric_results.get(candidate.result_id)
         except RecordNotFoundError:
+            pass
+        else:
+            return _verified_persisted(existing, candidate)
+        legacy = _legacy_candidate(candidate, known_at=known_at)
+        if legacy is None:
             return candidate
-        if existing.model_dump(mode="python", exclude={"computed_at"}) != candidate.model_dump(
-            mode="python",
-            exclude={"computed_at"},
-        ):
-            raise StorageError("derivatives query metric identity is semantically inconsistent")
-        return existing
+        try:
+            persisted = self._storage.metric_results.get(legacy.result_id)
+        except RecordNotFoundError:
+            return candidate
+        return _verified_persisted(persisted, legacy)
 
     def _verify_traceability(
         self,
@@ -265,6 +279,39 @@ class CryptoDerivativesService:
             if any(identifier not in observations for identifier in metric.input_observation_ids):
                 raise StorageError("derivatives query metric input is not traceable")
         return raw_ids
+
+
+def _verified_persisted(persisted: MetricResult, expected: MetricResult) -> MetricResult:
+    """Fail closed when a reused row is semantically inconsistent with its identity."""
+    if persisted.model_dump(mode="python", exclude={"computed_at"}) != expected.model_dump(
+        mode="python",
+        exclude={"computed_at"},
+    ):
+        raise StorageError("derivatives query metric identity is semantically inconsistent")
+    return persisted
+
+
+def _legacy_candidate(candidate: MetricResult, *, known_at: datetime) -> MetricResult | None:
+    """Rebuild the v1 identity of one in-memory candidate for the requested cut."""
+    if "known_at" in candidate.parameters:
+        return None
+    parameters: dict[str, JsonValue] = {
+        **candidate.parameters,
+        "known_at": known_at.isoformat(),
+    }
+    identifier = metric_result_id(
+        asset_id=candidate.asset_id,
+        metric_key=candidate.metric_key,
+        input_observation_ids=tuple(candidate.input_observation_ids),
+        parameters=parameters,
+        algorithm_version=candidate.algorithm_version,
+        as_of=candidate.as_of,
+        available_at=candidate.available_at,
+        value=candidate.value,
+        unit=candidate.unit,
+        quality=candidate.quality,
+    )
+    return candidate.model_copy(update={"result_id": identifier, "parameters": parameters})
 
 
 def _latest_metric_slots(results: tuple[MetricResult, ...]) -> tuple[MetricResult, ...]:

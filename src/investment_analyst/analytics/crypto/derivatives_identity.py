@@ -7,6 +7,9 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import JsonValue
 
+from investment_analyst.analytics.metric_identity_v2 import (
+    metric_result_id_v2 as audited_metric_result_id_v2,
+)
 from investment_analyst.core.models import DataQuality
 
 
@@ -37,6 +40,45 @@ def metric_result_id(
         "value": str(value),
     }
     return _identity(preimage)
+
+
+def semantic_metric_result_id(
+    *,
+    asset_id: str,
+    metric_key: str,
+    input_observation_ids: tuple[UUID, ...],
+    parameters: dict[str, JsonValue],
+    algorithm_version: str,
+    as_of: datetime,
+    available_at: datetime,
+    unit: str,
+    quality: DataQuality,
+    value: Decimal | None = None,
+    known_at: datetime | None = None,
+    computed_at: datetime | None = None,
+    **execution_kwargs: object,
+) -> UUID:
+    """Return the UUID8 semantic identity of one derivatives metric.
+
+    Delegates to the audited v2 rule, which deliberately excludes the cut
+    (``known_at``), the clock (``computed_at``), ``value`` and execution
+    parameters from the semantic coordinate.
+    """
+    return audited_metric_result_id_v2(
+        asset_id=asset_id,
+        metric_key=metric_key,
+        input_observation_ids=input_observation_ids,
+        algorithm_version=algorithm_version,
+        as_of=as_of,
+        available_at=available_at,
+        unit=unit,
+        quality=quality,
+        parameters=parameters,
+        value=value,
+        known_at=known_at,
+        computed_at=computed_at,
+        **execution_kwargs,
+    )
 
 
 def diagnostic_id(
