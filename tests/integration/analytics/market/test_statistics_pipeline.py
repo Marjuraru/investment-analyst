@@ -15,8 +15,12 @@ from investment_analyst.analytics.market.statistics_definitions import (
     RSI_KEY,
 )
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
-from investment_analyst.analytics.market.statistics_identity import metric_result_id
+from investment_analyst.analytics.market.statistics_identity import (
+    metric_result_id,
+    semantic_metric_result_id,
+)
 from investment_analyst.analytics.market.statistics_models import (
+    MarketStatisticsComputation,
     MarketStatisticsRequest,
     MarketStatisticsRunSummary,
     MetricCalculation,
@@ -26,7 +30,7 @@ from investment_analyst.analytics.market.statistics_pipeline import (
     MarketStatisticsPipelineError,
     MetricIdentityConflictError,
 )
-from investment_analyst.core.models import DataQuality
+from investment_analyst.core.models import DataQuality, MetricResult
 from investment_analyst.providers.crypto.coinbase_exchange import CoinbaseCandle
 from investment_analyst.providers.crypto.coinbase_normalizer import (
     candle_to_observations,
@@ -138,6 +142,20 @@ def _request(asset_id: str, source_id: str, start: datetime, end: datetime, know
     )
 
 
+class _StubEngine:
+    """Engine double returning one prepared computation without recomputing bars."""
+
+    def __init__(self, computation: MarketStatisticsComputation) -> None:
+        self._computation = computation
+
+    def compute(
+        self,
+        series,
+        request: MarketStatisticsRequest,
+    ) -> MarketStatisticsComputation:
+        return self._computation
+
+
 def test_btc_and_aapl_statistics_are_persisted_with_quality_and_idempotency(tmp_path) -> None:
     fixed_clock = datetime(2026, 3, 1, tzinfo=UTC)
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
@@ -235,7 +253,9 @@ def test_technical_indicator_lineage_is_persisted_and_reused(tmp_path) -> None:
         assert second.results_reused == second.results_generated
 
 
-def test_known_at_is_part_of_result_identity_and_computed_at_is_preserved(tmp_path) -> None:
+def test_new_known_at_without_new_bars_reuses_v2_rows_and_preserves_computed_at(
+    tmp_path,
+) -> None:
     first_clock = datetime(2026, 3, 1, tzinfo=UTC)
     second_clock = datetime(2026, 3, 2, tzinfo=UTC)
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
@@ -256,16 +276,24 @@ def test_known_at_is_part_of_result_identity_and_computed_at_is_preserved(tmp_pa
         reused = storage.metric_results.list(asset_id="crypto:btc-usd")
         assert {item.result_id: item.computed_at for item in reused} == original_computed
 
-        later_request = _request(
-            "crypto:btc-usd",
-            COINBASE_SOURCE_ID,
-            start,
-            end,
-            first_clock + timedelta(hours=1),
-        )
-        second_pipeline.run(later_request)
+        later_known_at = first_clock + timedelta(hours=1)
+        later_request = _request("crypto:btc-usd", COINBASE_SOURCE_ID, start, end, later_known_at)
+        later_summary = second_pipeline.run(later_request)
         later_results = storage.metric_results.list(asset_id="crypto:btc-usd")
-        assert len(later_results) == len(first_results) * 2
+
+        # The legacy UUID5 identity moved with known_at; the semantic v2 identity does not.
+        computation = MarketStatisticsEngine().compute(
+            history.query(later_request.query), later_request
+        )
+        assert computation.calculations
+        assert all(
+            metric_result_id(calculation, later_known_at)
+            != metric_result_id(calculation, first_clock)
+            for calculation in computation.calculations
+        )
+        assert later_summary.results_created == 0
+        assert later_summary.results_reused == later_summary.results_generated
+        assert len(later_results) == len(first_results)
 
 
 def test_statistics_cardinality_checks_do_not_materialize_global_lists(
@@ -395,8 +423,7 @@ def test_batch_path_produces_identical_results_ids_and_decimals(
         summary = pipeline.run(request)
 
         expected_by_id = {
-            metric_result_id(calc, request.query.known_at): calc
-            for calc in computation.calculations
+            semantic_metric_result_id(calc): calc for calc in computation.calculations
         }
         stored = storage.metric_results.list(asset_id="crypto:btc-usd")
         assert len(stored) == len(expected_by_id) > 0
@@ -471,11 +498,11 @@ def test_dependency_graph_is_memoized_without_changing_dag_semantics(
             quality=DataQuality.VALID,
         )
         monkeypatch.setattr(
-            "investment_analyst.analytics.market.statistics_pipeline.metric_result_id",
-            lambda calc, known_at: c1_id if calc is c1 else c2_id,
+            "investment_analyst.analytics.market.statistics_pipeline.semantic_metric_result_id",
+            lambda calc: c1_id if calc is c1 else c2_id,
         )
         with pytest.raises(MarketStatisticsPipelineError, match="cycle"):
-            pipeline._topologically_order((c1, c2), fixed_clock)
+            pipeline._topologically_order((c1, c2))
 
 
 def test_deep_verification_covers_new_and_conflicting_rows_only(
@@ -622,7 +649,7 @@ def test_every_existing_validation_is_preserved(tmp_path) -> None:
         with pytest.raises(
             MarketStatisticsPipelineError, match="derived metric dependency is missing"
         ):
-            pipeline._topologically_order((calc_missing_dep,), fixed_clock)
+            pipeline._topologically_order((calc_missing_dep,))
 
         # 4. Self dependency
         dep_id = uuid4()
@@ -642,13 +669,63 @@ def test_every_existing_validation_is_preserved(tmp_path) -> None:
         )
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
-                "investment_analyst.analytics.market.statistics_pipeline.metric_result_id",
-                lambda calc, known_at: dep_id,
+                "investment_analyst.analytics.market.statistics_pipeline.semantic_metric_result_id",
+                lambda calc: dep_id,
             )
             with pytest.raises(
                 MarketStatisticsPipelineError, match="metric result cannot depend on itself"
             ):
-                pipeline._topologically_order((calc_self_dep,), fixed_clock)
+                pipeline._topologically_order((calc_self_dep,))
+
+
+def test_pipeline_rejects_a_mixed_v1_v2_dependency_chain(tmp_path) -> None:
+    """A4: a legacy UUID5 dependency inside a v2 chain fails closed."""
+    fixed_clock = datetime(2026, 3, 1, tzinfo=UTC)
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        start, end = _store_coinbase(storage, count=5)
+        history = HistoricalMarketDataService(storage)
+        request = _request("crypto:btc-usd", COINBASE_SOURCE_ID, start, end, fixed_clock)
+        computation = MarketStatisticsEngine().compute(history.query(request.query), request)
+        ema = [item for item in computation.calculations if item.metric_key == EMA_KEY]
+        seed, successor = ema[0], ema[1]
+
+        # The same evidence under the legacy identity: a real v1 row carries known_at.
+        legacy_id = metric_result_id(seed, request.query.known_at)
+        storage.metric_results.save(
+            MetricResult(
+                result_id=legacy_id,
+                asset_id=seed.asset_id,
+                metric_key=seed.metric_key,
+                value=seed.value,
+                unit=seed.unit,
+                as_of=seed.as_of,
+                available_at=seed.available_at,
+                computed_at=fixed_clock,
+                parameters={
+                    **seed.parameters,
+                    "known_at": request.query.known_at.isoformat(),
+                },
+                input_observation_ids=list(seed.input_observation_ids),
+                input_metric_result_ids=list(seed.input_metric_result_ids),
+                algorithm_version=seed.algorithm_version,
+                quality=seed.quality,
+            )
+        )
+        assert legacy_id.version == 5
+
+        mixed = successor.model_copy(update={"input_metric_result_ids": (legacy_id,)})
+        pipeline = MarketStatisticsPipeline(
+            storage,
+            history,
+            _StubEngine(computation.model_copy(update={"calculations": (mixed,)})),
+            clock=lambda: fixed_clock,
+        )
+
+        with pytest.raises(
+            MarketStatisticsPipelineError,
+            match="derived metric dependency does not carry a semantic v2 identity",
+        ):
+            pipeline.run(request)
 
 
 def test_public_run_signature_and_result_models_are_unchanged() -> None:

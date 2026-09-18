@@ -228,7 +228,7 @@ aislada en el repositorio; se verificará con `scripts/report_storage_observabil
 las ventanas antes y después de desplegar `DATA-CHASSIS-5`. La etapa 2 no se declarará cerrada hasta
 dicha verificación.
 
-## Etapa 3: Identidad de métrica v2 y adaptador de resolución (`DATA-CHASSIS-6` y `DATA-CHASSIS-7`)
+## Etapa 3: Identidad de métrica v2 y adaptador de resolución (`DATA-CHASSIS-6`, `DATA-CHASSIS-7` y `DATA-CHASSIS-8`)
 
 `DATA-CHASSIS-6` (este bloque) abre la etapa 3 definiendo la regla canónica de identidad de métrica v2 y su adaptador de resolución v1/v2 como contrato puro, aislado y disjunto, sin llamador en producción y preservando intactos los siete módulos de identidad vigentes, los motores y los pipelines.
 
@@ -280,10 +280,42 @@ subsistemas, y dos de ellos fallan **en silencio**:
 
 El orden no es preferencia: la puerta de un solo sentido —escribir identificadores que no se pueden
 reescribir— se cruza con el lector ya preparado y probado, exactamente como el gate de la etapa exige
-con «v1 intacto, adaptador de lectura, sin reasignar IDs». El siguiente bloque es `DATA-CHASSIS-8`:
-adopción de la identidad v2 en el camino de **escritura** de mercado (`statistics_identity` y
-`statistics_engine` emiten v2, `known_at` sale de `_common_parameters` y se reemplazan las comprobaciones
-de `statistics_pipeline.py`), seguido de la adopción en derivados.
+con «v1 intacto, adaptador de lectura, sin reasignar IDs».
+
+### Adopción de escritura en mercado (`DATA-CHASSIS-8`)
+
+`DATA-CHASSIS-8` cruza esa puerta en mercado: el camino de escritura emite identidades v2 y ningún
+lector tuvo que ajustarse a posteriori.
+
+- **Extensión acotada de contrato:** `statistics_identity.py` gana el punto de entrada v2 para
+  `MetricCalculation`, que delega en la regla auditada y **falla cerrado** si
+  `parameters["source_id"]` no coincide con la fuente de la métrica. Las funciones v1
+  (`canonical_identity`, `metric_result_id`) quedan byte a byte idénticas y siguen verificando filas
+  históricas.
+- **Escritura:** `_common_parameters` deja de inyectar `known_at` y las identidades de dependencia de
+  EMA/RSI/ATR/MACD se calculan con la regla semántica. Ninguna fila v1 se reasigna, recalcula ni
+  reescribe: el espacio v2 es disjunto por construcción (UUID8 frente a UUID5).
+- **Pipeline:** las comprobaciones basadas en `known_at` se reemplazan por comprobaciones de versión de
+  identidad y PIT, y una cadena mixta v1/v2 falla cerrado.
+- **Sexto lector normalizado:** el digest semántico de `consolidated_diagnostic_service.py` traducía el
+  parámetro de corte v1 a `effective_inputs`; ahora lo omite en ambas versiones, de modo que v1 y v2 de
+  la misma coordenada comparten identidad y `_select_revision` no lanza
+  `AmbiguousStoredDiagnosticRevisionError` el día de la transición. Ninguna clase de equivalencia v1–v1
+  cambia: los inputs efectivos ya forman parte del documento.
+- **Guarda estrechada:** `test_no_production_caller_invokes_the_v2_rule` pasa de prohibir toda
+  referencia de producción a una allowlist exacta de un llamador —`analytics/market/statistics_identity.py`—
+  y sigue rechazando cualquier otro, incluidos los cinco lectores de `DATA-CHASSIS-7`.
+- **Límite declarado:** EMA/RSI/ATR/MACD dependen de `analytics_start = max(start, end − N días)`, de
+  modo que la semilla se desplaza cada día y esas cadenas siguen creando filas nuevas hasta la etapa 5.
+  El gate «nuevo `known_at` sin evidencia nueva crea cero métricas» ya se cumple para ventana finita.
+- **Precondición operativa (HUMAN, fuera de los gates de BUILD):** el primer despliegue que ejecute
+  este código escribe identificadores UUID8 en el workspace permanente y esa escritura es append-only;
+  se recomienda un backup verificado OPS-8 inmediatamente antes. El rollback es revertir el código: los
+  lectores de `DATA-CHASSIS-7` resuelven ambas versiones y ninguna fila requiere acción.
+
+El siguiente bloque de la etapa es `DATA-CHASSIS-9`: adopción de v2 en derivados Deribit, que retira
+`known_at` de `parameters` en `derivatives_engine.py` y cubre el 38 % restante de la amplificación
+medida.
 
 ## Durabilidad inmediata
 

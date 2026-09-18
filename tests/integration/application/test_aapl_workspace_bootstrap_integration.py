@@ -498,6 +498,11 @@ def test_two_automatic_bootstraps_with_distinct_clocks_keep_stable_representativ
         metric_ids_after_first = {
             item.result_id for item in storage.metric_results.list(asset_id=ASSET_ID)
         }
+        market_ids_after_first = {
+            item.result_id
+            for item in storage.metric_results.list(asset_id=ASSET_ID)
+            if item.metric_key.startswith("market.")
+        }
         diagnostic_ids_after_first = {
             item.diagnostic_id for item in storage.diagnostics.list(asset_id=ASSET_ID)
         }
@@ -513,6 +518,11 @@ def test_two_automatic_bootstraps_with_distinct_clocks_keep_stable_representativ
         ).run(request)
         metric_ids_after_second = {
             item.result_id for item in storage.metric_results.list(asset_id=ASSET_ID)
+        }
+        market_ids_after_second = {
+            item.result_id
+            for item in storage.metric_results.list(asset_id=ASSET_ID)
+            if item.metric_key.startswith("market.")
         }
         diagnostic_ids_after_second = {
             item.diagnostic_id for item in storage.diagnostics.list(asset_id=ASSET_ID)
@@ -535,12 +545,17 @@ def test_two_automatic_bootstraps_with_distinct_clocks_keep_stable_representativ
     assert second_market_stage.status is AaplBootstrapStageStatus.SKIPPED
     assert len(transport.alpaca_calls) == alpaca_calls_after_first == 1
     assert len(transport.sec_calls) == 4
-    assert second.metric_results_created > 0
+    second_market_statistics = next(
+        item for item in second.stages if item.stage is AaplBootstrapStage.MARKET_STATISTICS
+    )
+    assert second_market_statistics.created == 0
+    assert second_market_statistics.reused == second_market_statistics.generated > 0
     assert second.diagnostics_created > 0
     assert counts_after_second[:2] == counts_after_first[:2]
-    assert counts_after_second[2] > counts_after_first[2]
+    assert counts_after_second[2] == counts_after_first[2]
     assert counts_after_second[3] > counts_after_first[3]
-    assert metric_ids_after_first < metric_ids_after_second
+    assert metric_ids_after_first == metric_ids_after_second
+    assert market_ids_after_first == market_ids_after_second
     assert diagnostic_ids_after_first < diagnostic_ids_after_second
     assert second.traceability_verified is True
     assert second.consolidated.traceability_verified is True

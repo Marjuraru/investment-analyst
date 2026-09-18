@@ -21,6 +21,11 @@ from investment_analyst.analytics.market.statistics_pipeline import (
     MarketStatisticsPipeline,
     MarketStatisticsPipelineError,
 )
+from investment_analyst.analytics.metric_identity_cut import (
+    CutIdentityVersion,
+    metric_cut_eligibility,
+    resolve_cut_identity_version,
+)
 from investment_analyst.application.cli import (
     add_storage_location_arguments,
     storage_location_from_namespace,
@@ -134,12 +139,20 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _matches_request(result, request: MarketStatisticsRequest) -> bool:
+def _matches_request(result, request: MarketStatisticsRequest, *, seed_start: str | None) -> bool:
     if result.metric_key not in _METRIC_KEYS:
         return False
     if result.parameters.get("source_id") != request.query.source_id:
         return False
-    if result.parameters.get("known_at") != request.query.known_at.isoformat():
+    # The identity version comes from the cut rule, never from the presence of the
+    # legacy parameter: a v1 row keeps today's exact filter, and a v2 row is eligible
+    # at this cut and belongs to this run's seed.
+    if resolve_cut_identity_version(result) is CutIdentityVersion.V2:
+        if not metric_cut_eligibility(result, request.query.known_at).eligible:
+            return False
+        if result.parameters.get("seed_start", seed_start) != seed_start:
+            return False
+    elif result.parameters.get("known_at") != request.query.known_at.isoformat():
         return False
     if not request.query.start <= result.as_of < request.query.end:
         return False
@@ -204,10 +217,12 @@ def main() -> int:
             history = HistoricalMarketDataService(storage)
             pipeline = MarketStatisticsPipeline(storage, history, MarketStatisticsEngine())
             summary = pipeline.run(request)
+            series = history.query(request.query)
+            seed_start = series.bars[0].timestamp.isoformat() if series.bars else None
             results = [
                 item
                 for item in storage.metric_results.list(asset_id=request.query.asset_id)
-                if _matches_request(item, request)
+                if _matches_request(item, request, seed_start=seed_start)
             ]
         results.sort(
             key=lambda item: (

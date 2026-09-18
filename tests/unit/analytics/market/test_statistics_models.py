@@ -8,11 +8,17 @@ import pytest
 from pydantic import ValidationError
 
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
-from investment_analyst.analytics.market.statistics_identity import metric_result_id
+from investment_analyst.analytics.market.statistics_identity import (
+    MarketStatisticsIdentityError,
+    canonical_identity,
+    metric_result_id,
+    semantic_metric_result_id,
+)
 from investment_analyst.analytics.market.statistics_models import (
     MarketStatisticsRequest,
     MetricCalculation,
 )
+from investment_analyst.analytics.metric_identity_v2 import metric_result_id_v2
 from investment_analyst.core.models import DataQuality
 
 
@@ -142,3 +148,84 @@ def test_legacy_metric_identity_excludes_empty_derived_lineage() -> None:
     identifier = metric_result_id(calculation, datetime(2026, 2, 2, tzinfo=UTC))
 
     assert str(identifier) == "c8efc255-3d61-5de2-a718-324fbf2ed57d"
+
+
+def test_v1_identity_functions_are_unchanged() -> None:
+    """A2: the legacy UUID5 preimage and identifier stay exactly as they were."""
+    calculation = _calculation(
+        input_observation_ids=(
+            UUID("11111111-1111-1111-1111-111111111111"),
+            UUID("22222222-2222-2222-2222-222222222222"),
+        ),
+        algorithm_version="market-simple-return-1d-v1-decimal34",
+    )
+    known_at = datetime(2026, 2, 2, tzinfo=UTC)
+
+    assert canonical_identity(calculation, known_at) == (
+        '{"algorithm_version":"market-simple-return-1d-v1-decimal34",'
+        '"as_of":"2026-01-02T00:00:00+00:00",'
+        '"asset_id":"crypto:btc-usd",'
+        '"available_at":"2026-01-02T01:00:00+00:00",'
+        '"input_observation_ids":["11111111-1111-1111-1111-111111111111",'
+        '"22222222-2222-2222-2222-222222222222"],'
+        '"known_at":"2026-02-02T00:00:00+00:00",'
+        '"metric_key":"market.history.simple_return_1d",'
+        '"parameters":{"periods":1},'
+        '"quality":"valid",'
+        '"source_id":"coinbase-exchange:btc-usd:daily-candles",'
+        '"unit":"ratio",'
+        '"value":"0.01"}'
+    )
+    identifier = metric_result_id(calculation, known_at)
+    assert str(identifier) == "c8efc255-3d61-5de2-a718-324fbf2ed57d"
+    assert identifier.version == 5
+
+
+def test_v2_entrypoint_delegates_to_the_audited_rule_and_rejects_a_source_mismatch() -> None:
+    """A1: the v2 entry point consumes the audited rule and fails closed on a source mismatch."""
+    identifiers = (
+        UUID("11111111-1111-1111-1111-111111111111"),
+        UUID("22222222-2222-2222-2222-222222222222"),
+    )
+    calculation = _calculation(
+        parameters={"periods": 1, "source_id": "coinbase-exchange:btc-usd:daily-candles"},
+        input_observation_ids=identifiers,
+        algorithm_version="market-simple-return-1d-v1-decimal34",
+    )
+    expected = metric_result_id_v2(
+        asset_id=calculation.asset_id,
+        metric_key=calculation.metric_key,
+        input_observation_ids=calculation.input_observation_ids,
+        input_metric_result_ids=calculation.input_metric_result_ids,
+        algorithm_version=calculation.algorithm_version,
+        as_of=calculation.as_of,
+        available_at=calculation.available_at,
+        unit=calculation.unit,
+        quality=calculation.quality,
+        parameters=calculation.parameters,
+    )
+
+    identifier = semantic_metric_result_id(calculation)
+
+    assert identifier == expected
+    assert identifier.version == 8
+    assert str(identifier) == "f96d3926-6218-87a8-a6c9-1f4bcbe83013"
+
+    with_execution_parameter = _calculation(
+        parameters={
+            "periods": 1,
+            "source_id": "coinbase-exchange:btc-usd:daily-candles",
+            "known_at": "2026-02-02T00:00:00+00:00",
+        },
+        input_observation_ids=identifiers,
+        algorithm_version="market-simple-return-1d-v1-decimal34",
+    )
+    assert semantic_metric_result_id(with_execution_parameter) == identifier
+
+    mismatched = _calculation(
+        parameters={"periods": 1, "source_id": "other:source"},
+        input_observation_ids=identifiers,
+        algorithm_version="market-simple-return-1d-v1-decimal34",
+    )
+    with pytest.raises(MarketStatisticsIdentityError, match="source_id"):
+        semantic_metric_result_id(mismatched)
