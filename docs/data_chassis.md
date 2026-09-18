@@ -342,6 +342,45 @@ Con esta adopción, la etapa 3 queda pendiente de una decisión viva de PLAN ent
 ruta ya nombra: cerrarla con `AnalysisSnapshot` (separado por falta de runner de migración) o abrir la
 etapa 4 con el `EvidenceSet` de funding (−90 % bytes), que retira el lineage de 720 UUID.
 
+## Etapa 4: Lineage compartido de derivados (`EvidenceSet`) (`DATA-CHASSIS-10`)
+
+`DATA-CHASSIS-10` abre la etapa 4 con **la representación** del lineage compartido como contrato puro,
+determinista y probado, **sin persistirlo y sin llamador**: el mismo patrón de `DATA-CHASSIS-6`, porque la
+representación de lineage es una puerta de un solo sentido.
+
+- **Decisión humana del 2026-09-18:** el bloque entrega `EvidenceSet` **sin persistir**. Los dos
+  candidatos que dejó abiertos `DATA-CHASSIS-9` (`AnalysisSnapshot` y `EvidenceSet` persistido) requieren
+  almacenamiento nuevo y no existe camino para crearlo: `SCHEMA_VERSION = 1` con una única migración,
+  validación por igualdad estricta y ningún runner, además de la restricción de no tocar el workspace
+  permanente y la exigencia de no migrar in-place. La persistencia llega con el workspace v2 de la etapa 7;
+  este bloque **no reduce bytes reales todavía**.
+- **Segmento (`EvidenceSegment`):** bloque inmutable y direccionado por contenido con los 24
+  identificadores de un día UTC completo de una serie horaria, en el orden canónico del motor. Sólo existe
+  para días completos. La política `evidence-segmentation-v1` (horaria → día UTC) es explícita y
+  versionada; cualquier otra frecuencia falla cerrado y el punto de extensión queda declarado, no
+  implementado.
+- **Conjunto (`EvidenceSet`):** lineage de una ventana como lista ordenada de referencias a segmentos de
+  día completo, más un desplazamiento de cabeza dentro del primer segmento y `input_count`. Los bordes no
+  se copian: son recortes de segmentos completos. Sólo las observaciones del día UTC final incompleto van
+  en línea (≤ 23 identificadores). Declara activo, fuente, campo, primera y última observación,
+  `available_at` y `canonical_hash`.
+- **Hash e identidades:** `canonical_hash` es SHA-256 de la secuencia ordenada completa y no depende de la
+  segmentación; `segment_id` y `evidence_set_id` son UUID8 de dominio propio (`evidence-segment-v1`,
+  `evidence-set-v1`). El preimage del conjunto excluye `metric_key` —de modo que suma y media de la misma
+  ventana comparten conjunto— y excluye corte, reloj, valor y ventana.
+- **Verificación:** resolver exige exactamente la secuencia ordenada original; verificar recalcula cada
+  segmento y el hash, y comprueba cardinalidad, orden estricto, unicidad, alcance único, contigüidad
+  horaria y `available_at`. Toda discrepancia falla cerrado con error tipado; nunca repara ni infiere.
+- **Sin persistencia ni adopción:** cero tablas, índices, vistas, archivos, migraciones o bump de
+  `SCHEMA_VERSION`; ningún módulo de producción importa el contrato y ninguna fila cambia. La adopción
+  persistida queda **condicionada al workspace v2 de la etapa 7** y no puede adelantarse sin enmendar la
+  ruta.
+- **Desviación declarada:** la etapa preveía ventanas «almacenadas una vez»; este bloque entrega la
+  representación sin almacenarla. La segmentación, marcada como «opcional» en la etapa, pasa a ser
+  obligatoria en el contrato: sin ella, compartir sólo suma y media reduce el lineage un 50 % y no el
+  −90 % del gate. Sobre 45–60 días horarios la representación ocupa ≈ 5–6 % de los bytes de las listas
+  repetidas actuales (la variante con bordes en línea, 9,8 %, se descartó por quedar en el límite).
+
 ## Durabilidad inmediata
 
 
