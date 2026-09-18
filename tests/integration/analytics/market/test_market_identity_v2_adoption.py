@@ -476,7 +476,7 @@ def test_existing_v1_rows_are_never_rewritten_or_reassigned(tmp_path) -> None:
         )
 
 
-def test_pit_checks_still_reject_inputs_and_dependencies_after_known_at(tmp_path) -> None:
+def test_pit_checks_still_reject_inputs_after_known_at(tmp_path) -> None:
     """N2: no input and no dependency unavailable at known_at can be persisted."""
     clock = datetime(2026, 2, 1, tzinfo=UTC)
     with LocalStorage(StoragePaths.from_root(tmp_path / "input")) as storage:
