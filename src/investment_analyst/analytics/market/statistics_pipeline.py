@@ -17,11 +17,15 @@ from investment_analyst.analytics.market.statistics_definitions import (
     get_market_statistics_definitions,
 )
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
-from investment_analyst.analytics.market.statistics_identity import metric_result_id
+from investment_analyst.analytics.market.statistics_identity import semantic_metric_result_id
 from investment_analyst.analytics.market.statistics_models import (
     MarketStatisticsRequest,
     MarketStatisticsRunSummary,
     MetricCalculation,
+)
+from investment_analyst.analytics.metric_identity_cut import (
+    CutIdentityVersion,
+    resolve_cut_identity_version,
 )
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import DataQuality, MetricResult
@@ -92,10 +96,7 @@ class MarketStatisticsPipeline:
             raise MarketStatisticsPipelineError("clock must return a timezone-aware datetime")
         computed_at = computed_at.astimezone(UTC)
 
-        ordered_calculations = self._topologically_order(
-            computation.calculations,
-            request.query.known_at,
-        )
+        ordered_calculations = self._topologically_order(computation.calculations)
         for calculation in ordered_calculations:
             if calculation.available_at > computed_at:
                 raise MarketStatisticsPipelineError(
@@ -103,7 +104,7 @@ class MarketStatisticsPipeline:
                 )
 
         calc_entries = [
-            (calculation, metric_result_id(calculation, request.query.known_at))
+            (calculation, semantic_metric_result_id(calculation))
             for calculation in ordered_calculations
         ]
         as_of_values = [calculation.as_of for calculation, _ in calc_entries]
@@ -214,11 +215,10 @@ class MarketStatisticsPipeline:
     def _topologically_order(
         self,
         calculations: tuple[MetricCalculation, ...],
-        known_at: datetime,
     ) -> tuple[MetricCalculation, ...]:
         """Order generated derived metrics after their same-run dependencies."""
         entries = tuple(
-            (calculation, metric_result_id(calculation, known_at)) for calculation in calculations
+            (calculation, semantic_metric_result_id(calculation)) for calculation in calculations
         )
         identifiers = [identifier for _, identifier in entries]
         if len(set(identifiers)) != len(identifiers):
@@ -284,9 +284,13 @@ class MarketStatisticsPipeline:
                 raise MarketStatisticsPipelineError(
                     "result source parameter does not match request"
                 )
-            if result.parameters.get("known_at") != request.query.known_at.isoformat():
+            if resolve_cut_identity_version(result) is not CutIdentityVersion.V2:
                 raise MarketStatisticsPipelineError(
-                    "result known_at parameter does not match request"
+                    "new market result does not carry a semantic v2 identity"
+                )
+            if "known_at" in result.parameters:
+                raise MarketStatisticsPipelineError(
+                    "v2 market result must not carry the legacy known_at parameter"
                 )
 
         needed_observation_ids = {
@@ -395,7 +399,6 @@ class MarketStatisticsPipeline:
                 raise MarketStatisticsPipelineError("EMA derived dependency is incompatible")
             for parameter in (
                 "source_id",
-                "known_at",
                 "window",
                 "alpha",
                 "seed_method",
@@ -407,9 +410,9 @@ class MarketStatisticsPipeline:
                     )
         if dependency.parameters.get("source_id") != request.query.source_id:
             raise MarketStatisticsPipelineError("derived metric dependency mixes sources")
-        if dependency.parameters.get("known_at") != request.query.known_at.isoformat():
+        if resolve_cut_identity_version(dependency) is not CutIdentityVersion.V2:
             raise MarketStatisticsPipelineError(
-                "derived metric dependency uses a different known_at"
+                "derived metric dependency does not carry a semantic v2 identity"
             )
         same_time = {
             ATR_KEY,

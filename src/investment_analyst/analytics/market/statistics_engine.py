@@ -26,7 +26,7 @@ from investment_analyst.analytics.market.statistics_definitions import (
     TRUE_RANGE_KEY,
     VOLATILITY_KEY,
 )
-from investment_analyst.analytics.market.statistics_identity import metric_result_id
+from investment_analyst.analytics.market.statistics_identity import semantic_metric_result_id
 from investment_analyst.analytics.market.statistics_models import (
     MarketStatisticsComputation,
     MarketStatisticsRequest,
@@ -90,7 +90,6 @@ def _ids(bars: tuple[MarketBar, ...], field_name: str) -> tuple[UUID, ...]:
 def _common_parameters(series: MarketBarSeries) -> dict[str, object]:
     return {
         "source_id": series.query.source_id,
-        "known_at": series.query.known_at.isoformat(),
     }
 
 
@@ -467,7 +466,7 @@ class MarketStatisticsEngine:
                 available_at=max(current.available_at, previous.available_at),
                 parameters=parameters,
                 input_observation_ids=_ids((current,), "close"),
-                input_metric_result_ids=(metric_result_id(previous, series.query.known_at),),
+                input_metric_result_ids=(semantic_metric_result_id(previous),),
                 algorithm_version=_EMA_ALGORITHM,
                 quality=_quality((current.quality, previous.quality)),
             )
@@ -509,9 +508,7 @@ class MarketStatisticsEngine:
                 loss = ((Decimal(window - 1) * loss) + max(-change, Decimal("0"))) / Decimal(window)
             inputs = bars[: index + 1] if index == window else (current,)
             dependency_ids = (
-                ()
-                if previous_gain is None
-                else (metric_result_id(previous_gain, series.query.known_at),)
+                () if previous_gain is None else (semantic_metric_result_id(previous_gain),)
             )
             gain_result = MetricCalculation(
                 asset_id=current.asset_id,
@@ -547,7 +544,7 @@ class MarketStatisticsEngine:
                 input_observation_ids=_ids(inputs, "close"),
                 input_metric_result_ids=()
                 if previous_loss is None
-                else (metric_result_id(previous_loss, series.query.known_at),),
+                else (semantic_metric_result_id(previous_loss),),
                 algorithm_version=_RSI_ALGORITHM,
                 quality=_quality(
                     tuple(bar.quality for bar in inputs)
@@ -579,8 +576,8 @@ class MarketStatisticsEngine:
                         parameters=parameters,
                         input_observation_ids=_ids((current,), "close"),
                         input_metric_result_ids=(
-                            metric_result_id(gain_result, series.query.known_at),
-                            metric_result_id(loss_result, series.query.known_at),
+                            semantic_metric_result_id(gain_result),
+                            semantic_metric_result_id(loss_result),
                         ),
                         algorithm_version=_RSI_ALGORITHM,
                         quality=_quality((gain_result.quality, loss_result.quality)),
@@ -656,14 +653,8 @@ class MarketStatisticsEngine:
                     else max(item.available_at for item in ranges[:window]),
                     parameters=parameters,
                     input_observation_ids=_ids(observations, "close"),
-                    input_metric_result_ids=(
-                        metric_result_id(current_range, series.query.known_at),
-                    )
-                    + (
-                        ()
-                        if previous_atr is None
-                        else (metric_result_id(previous_atr, series.query.known_at),)
-                    ),
+                    input_metric_result_ids=(semantic_metric_result_id(current_range),)
+                    + (() if previous_atr is None else (semantic_metric_result_id(previous_atr),)),
                     algorithm_version=_ATR_ALGORITHM,
                     quality=_quality(
                         (current_range.quality,)
@@ -706,8 +697,8 @@ class MarketStatisticsEngine:
                     parameters=parameters,
                     input_observation_ids=fast_item.input_observation_ids,
                     input_metric_result_ids=(
-                        metric_result_id(fast_item, series.query.known_at),
-                        metric_result_id(slow_item, series.query.known_at),
+                        semantic_metric_result_id(fast_item),
+                        semantic_metric_result_id(slow_item),
                     ),
                     algorithm_version=_MACD_ALGORITHM,
                     quality=_quality((fast_item.quality, slow_item.quality)),
@@ -740,10 +731,8 @@ class MarketStatisticsEngine:
                 else max(item.available_at for item in lines[: request.macd_signal_window]),
                 parameters={**parameters, "alpha": str(alpha)},
                 input_observation_ids=line.input_observation_ids,
-                input_metric_result_ids=(metric_result_id(line, series.query.known_at),)
-                + (
-                    () if previous is None else (metric_result_id(previous, series.query.known_at),)
-                ),
+                input_metric_result_ids=(semantic_metric_result_id(line),)
+                + (() if previous is None else (semantic_metric_result_id(previous),)),
                 algorithm_version=_MACD_ALGORITHM,
                 quality=_quality(
                     (line.quality,) if previous is None else (line.quality, previous.quality)
@@ -763,8 +752,8 @@ class MarketStatisticsEngine:
                         parameters=parameters,
                         input_observation_ids=line.input_observation_ids,
                         input_metric_result_ids=(
-                            metric_result_id(line, series.query.known_at),
-                            metric_result_id(signal_item, series.query.known_at),
+                            semantic_metric_result_id(line),
+                            semantic_metric_result_id(signal_item),
                         ),
                         algorithm_version=_MACD_ALGORITHM,
                         quality=_quality((line.quality, signal_item.quality)),

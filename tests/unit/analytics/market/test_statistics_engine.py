@@ -28,7 +28,7 @@ from investment_analyst.analytics.market.statistics_engine import (
     MarketStatisticsEngine,
     MarketStatisticsTraceabilityError,
 )
-from investment_analyst.analytics.market.statistics_identity import metric_result_id
+from investment_analyst.analytics.market.statistics_identity import semantic_metric_result_id
 from investment_analyst.analytics.market.statistics_models import MarketStatisticsRequest
 from investment_analyst.core.models import DataFrequency, DataQuality
 
@@ -245,8 +245,8 @@ def test_ema_uses_in_query_sma_seed_and_linear_derived_lineage() -> None:
     )
     assert ema[0].input_metric_result_ids == ()
     assert ema[1].input_observation_ids == (series.bars[3].observation_ids["close"],)
-    assert ema[1].input_metric_result_ids == (metric_result_id(ema[0], series.query.known_at),)
-    assert ema[2].input_metric_result_ids == (metric_result_id(ema[1], series.query.known_at),)
+    assert ema[1].input_metric_result_ids == (semantic_metric_result_id(ema[0]),)
+    assert ema[2].input_metric_result_ids == (semantic_metric_result_id(ema[1]),)
     assert ema[0].parameters["alpha"] == "0.5"
     assert ema[0].parameters["seed_start"] == series.query.start.isoformat()
     assert result.warmup_counts[f"{EMA_KEY}:3"] == 2
@@ -320,3 +320,66 @@ def test_mismatched_query_is_rejected() -> None:
                 relative_volume_window=1,
             ),
         )
+
+
+def test_engine_emits_v2_identities_without_known_at_and_with_unchanged_values() -> None:
+    """A3: every emitted metric is a semantic v2 identity with the same analytical values."""
+    series = _series(("100", "110", "99"), volumes=("100", "200", "300"))
+    result = MarketStatisticsEngine().compute(series, _request(series))
+
+    assert result.calculations
+    assert all("known_at" not in item.parameters for item in result.calculations)
+    assert all(
+        item.parameters.get("source_id") == series.query.source_id for item in result.calculations
+    )
+    assert all(semantic_metric_result_id(item).version == 8 for item in result.calculations)
+
+    returns = _items(result, SIMPLE_RETURN_KEY)
+    assert [item.value for item in returns] == [Decimal("0.1"), Decimal("-0.1")]
+    assert returns[0].as_of == series.bars[1].timestamp
+    assert returns[0].available_at == series.bars[1].available_at
+    assert returns[0].unit == "ratio"
+    assert [item.value for item in _items(result, RELATIVE_VOLUME_KEY)] == [Decimal("2")]
+    sma_three = [item for item in _items(result, SMA_KEY) if item.parameters["window"] == 3]
+    assert sma_three[0].value == Decimal("103")
+    assert _items(result, VOLATILITY_KEY)[0].value == Decimal(
+        "0.1414213562373095048801688724209698"
+    )
+
+
+def test_market_algorithm_versions_are_unchanged() -> None:
+    """X6: the identity adoption never changes a market algorithm version."""
+    series = _series(tuple(str(100 + index) for index in range(40)))
+    result = MarketStatisticsEngine().compute(
+        series,
+        MarketStatisticsRequest(
+            query=series.query,
+            sma_windows=(2,),
+            volatility_window=2,
+            relative_volume_window=2,
+            bollinger_window=2,
+            ema_windows=(2,),
+        ),
+    )
+
+    observed = {item.metric_key: item.algorithm_version for item in result.calculations}
+
+    assert observed == {
+        "market.history.relative_volume": "market-relative-volume-v1-decimal34",
+        "market.history.rolling_daily_volatility": ("market-rolling-daily-volatility-v1-decimal34"),
+        "market.history.simple_return_1d": "market-simple-return-1d-v1-decimal34",
+        "market.history.sma": "market-sma-v1-decimal34",
+        "market.technical.atr": "market-atr-wilder-v1-decimal34",
+        "market.technical.bollinger.bandwidth": "market-bollinger-bands-v1-decimal34",
+        "market.technical.bollinger.lower": "market-bollinger-bands-v1-decimal34",
+        "market.technical.bollinger.percent_b": "market-bollinger-bands-v1-decimal34",
+        "market.technical.bollinger.upper": "market-bollinger-bands-v1-decimal34",
+        "market.technical.ema": "market-ema-v1-decimal34",
+        "market.technical.macd.histogram": "market-macd-v1-decimal34",
+        "market.technical.macd.line": "market-macd-v1-decimal34",
+        "market.technical.macd.signal": "market-macd-v1-decimal34",
+        "market.technical.rsi": "market-rsi-wilder-v1-decimal34",
+        "market.technical.rsi.average_gain": "market-rsi-wilder-v1-decimal34",
+        "market.technical.rsi.average_loss": "market-rsi-wilder-v1-decimal34",
+        "market.technical.true_range": "market-atr-wilder-v1-decimal34",
+    }

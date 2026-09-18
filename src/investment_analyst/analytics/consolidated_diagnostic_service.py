@@ -293,7 +293,9 @@ class _SemanticTraceabilityResolver:
                         raise ConsolidatedDiagnosticTraceabilityError(
                             f"metric result {result.result_id} uses an input after known_at"
                         )
-                    parameters[key] = {"effective_inputs": sorted(observation_identities.values())}
+                    # The legacy cut parameter is execution state, not semantics: its
+                    # effective inputs are exactly the ``input_observations`` recorded
+                    # below, so v1 and v2 rows of one coordinate share a single identity.
                     continue
             parameters[key] = _canonical_parameter_value(value, observation_identities)
         document: dict[str, JsonValue] = {

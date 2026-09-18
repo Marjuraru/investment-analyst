@@ -414,8 +414,9 @@ def test_decimal_and_utc_are_preserved_in_the_preimage() -> None:
 
 
 def test_no_production_caller_invokes_the_v2_rule() -> None:
-    """X4: Zero production callers invoke metric_identity_v2 in this Work Block."""
+    """A10: exactly one production caller consumes the audited v2 rule."""
     src_dir = Path("src/investment_analyst")
+    allowed_callers = {"src/investment_analyst/analytics/market/statistics_identity.py"}
     violating_files: list[str] = []
 
     for path in src_dir.rglob("*.py"):
@@ -425,6 +426,6 @@ def test_no_production_caller_invokes_the_v2_rule() -> None:
         if "metric_identity_v2" in content or "metric_result_id_v2" in content:
             violating_files.append(str(path))
 
-    assert violating_files == [], (
+    assert sorted(violating_files) == sorted(allowed_callers), (
         f"Production files unexpectedly reference metric_identity_v2: {violating_files}"
     )

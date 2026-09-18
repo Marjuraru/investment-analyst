@@ -554,6 +554,59 @@ def test_equivalent_recomputations_select_earliest_computed_revision(tmp_path) -
         assert len(storage.diagnostics.list(asset_id=AAPL_ASSET_ID)) == 2
 
 
+def test_v1_and_v2_revisions_of_the_same_metric_share_one_semantic_identity(tmp_path) -> None:
+    """A8: the legacy cut parameter is execution state, so both revisions converge."""
+    as_of = datetime(2026, 7, 10, tzinfo=UTC)
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        observation = _persist_observation(storage, as_of=as_of)
+        legacy_metric = _metric(
+            key=SIMPLE_RETURN_KEY,
+            as_of=as_of,
+            computed_at=datetime(2026, 7, 12, tzinfo=UTC),
+            parameters={
+                "known_at": datetime(2026, 7, 13, tzinfo=UTC).isoformat(),
+                "periods": 1,
+                "source_id": AAPL_SOURCE_ID,
+            },
+            input_observation_ids=(observation.observation_id,),
+        )
+        semantic_metric = _metric(
+            key=SIMPLE_RETURN_KEY,
+            as_of=as_of,
+            computed_at=datetime(2026, 7, 13, tzinfo=UTC),
+            parameters={"periods": 1, "source_id": AAPL_SOURCE_ID},
+            input_observation_ids=(observation.observation_id,),
+        )
+        first_diagnostic = _diagnostic(
+            mode=DiagnosticMode.MARKET,
+            metric_id=legacy_metric.result_id,
+            as_of=as_of,
+            algorithm=MARKET_ALGORITHM_VERSION,
+            diagnostic_id=UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+            computed_at=datetime(2026, 7, 20, tzinfo=UTC),
+        )
+        second_diagnostic = _diagnostic(
+            mode=DiagnosticMode.MARKET,
+            metric_id=semantic_metric.result_id,
+            as_of=as_of,
+            algorithm=MARKET_ALGORITHM_VERSION,
+            diagnostic_id=UUID("00000000-0000-0000-0000-000000000002"),
+            computed_at=datetime(2026, 7, 21, tzinfo=UTC),
+        )
+        storage.metric_results.save(legacy_metric)
+        storage.metric_results.save(semantic_metric)
+        storage.diagnostics.save(first_diagnostic)
+        storage.diagnostics.save(second_diagnostic)
+
+        view = _query(storage)
+
+        assert view.market.diagnostic == first_diagnostic
+        assert view.market.selected_metric_result_ids == (legacy_metric.result_id,)
+        assert view.market.revisions_superseded == 1
+        assert len(storage.metric_results.list(asset_id=AAPL_ASSET_ID)) == 2
+        assert len(storage.diagnostics.list(asset_id=AAPL_ASSET_ID)) == 2
+
+
 def test_equivalent_recomputations_break_computed_at_tie_by_diagnostic_id(tmp_path) -> None:
     as_of = datetime(2026, 7, 10, tzinfo=UTC)
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
