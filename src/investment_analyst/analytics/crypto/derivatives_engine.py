@@ -8,7 +8,9 @@ from uuid import UUID
 
 from pydantic import JsonValue
 
-from investment_analyst.analytics.crypto.derivatives_identity import metric_result_id
+from investment_analyst.analytics.crypto.derivatives_identity import (
+    semantic_metric_result_id,
+)
 from investment_analyst.analytics.crypto.derivatives_models import (
     CryptoDerivativesMetricComputation,
     observation_time,
@@ -146,7 +148,6 @@ class CryptoDerivativesMetricEngine:
                 funding,
                 asset_id=asset_id,
                 source_id=funding_source_id,
-                known_at=known,
                 computed_at=computed,
                 window=window,
                 as_of_from=lower,
@@ -162,7 +163,6 @@ class CryptoDerivativesMetricEngine:
                 dvol,
                 asset_id=asset_id,
                 source_id=dvol_source_id,
-                known_at=known,
                 computed_at=computed,
                 window=window,
                 as_of_from=lower,
@@ -176,7 +176,6 @@ class CryptoDerivativesMetricEngine:
             selected,
             asset_id=asset_id,
             source_id=summary_source_id,
-            known_at=known,
             computed_at=computed,
             as_of_from=lower,
             as_of_before=upper,
@@ -200,7 +199,6 @@ class CryptoDerivativesMetricEngine:
         *,
         asset_id: str,
         source_id: str,
-        known_at: datetime,
         computed_at: datetime,
         window: int,
         as_of_from: datetime | None,
@@ -225,7 +223,6 @@ class CryptoDerivativesMetricEngine:
                 "asset_id": asset_id,
                 "inputs": inputs,
                 "source_ids": (source_id,),
-                "known_at": known_at,
                 "computed_at": computed_at,
                 "window": window,
                 "as_of": as_of,
@@ -256,7 +253,6 @@ class CryptoDerivativesMetricEngine:
         *,
         asset_id: str,
         source_id: str,
-        known_at: datetime,
         computed_at: datetime,
         window: int,
         as_of_from: datetime | None,
@@ -282,7 +278,6 @@ class CryptoDerivativesMetricEngine:
                     unit="dvol_index_points",
                     inputs=inputs,
                     source_ids=(source_id,),
-                    known_at=known_at,
                     computed_at=computed_at,
                     window=window,
                     as_of=as_of,
@@ -297,7 +292,6 @@ class CryptoDerivativesMetricEngine:
         *,
         asset_id: str,
         source_id: str,
-        known_at: datetime,
         computed_at: datetime,
         as_of_from: datetime | None,
         as_of_before: datetime | None,
@@ -330,7 +324,6 @@ class CryptoDerivativesMetricEngine:
                     unit="basis_points",
                     inputs=inputs,
                     source_ids=(source_id,),
-                    known_at=known_at,
                     computed_at=computed_at,
                     window=1,
                     as_of=as_of,
@@ -377,7 +370,6 @@ def _metric_result(
     unit: str,
     inputs: tuple[NormalizedObservation, ...],
     source_ids: tuple[str, ...],
-    known_at: datetime,
     computed_at: datetime,
     window: int,
     as_of: datetime,
@@ -387,12 +379,11 @@ def _metric_result(
     available_at = max(item.available_at for item in inputs)
     parameters: dict[str, JsonValue] = {
         "formula": formula,
-        "known_at": known_at.isoformat(),
         "source_ids": list(source_ids),
         "window": window,
     }
     quality = DataQuality.VALID
-    identifier = metric_result_id(
+    identifier = semantic_metric_result_id(
         asset_id=asset_id,
         metric_key=metric_key,
         input_observation_ids=input_ids,
@@ -400,7 +391,6 @@ def _metric_result(
         algorithm_version=ALGORITHM_VERSION,
         as_of=as_of,
         available_at=available_at,
-        value=value,
         unit=unit,
         quality=quality,
     )

@@ -228,7 +228,7 @@ aislada en el repositorio; se verificará con `scripts/report_storage_observabil
 las ventanas antes y después de desplegar `DATA-CHASSIS-5`. La etapa 2 no se declarará cerrada hasta
 dicha verificación.
 
-## Etapa 3: Identidad de métrica v2 y adaptador de resolución (`DATA-CHASSIS-6`, `DATA-CHASSIS-7` y `DATA-CHASSIS-8`)
+## Etapa 3: Identidad de métrica v2 y adaptador de resolución (`DATA-CHASSIS-6`, `DATA-CHASSIS-7`, `DATA-CHASSIS-8` y `DATA-CHASSIS-9`)
 
 `DATA-CHASSIS-6` (este bloque) abre la etapa 3 definiendo la regla canónica de identidad de métrica v2 y su adaptador de resolución v1/v2 como contrato puro, aislado y disjunto, sin llamador en producción y preservando intactos los siete módulos de identidad vigentes, los motores y los pipelines.
 
@@ -313,9 +313,34 @@ lector tuvo que ajustarse a posteriori.
   se recomienda un backup verificado OPS-8 inmediatamente antes. El rollback es revertir el código: los
   lectores de `DATA-CHASSIS-7` resuelven ambas versiones y ninguna fila requiere acción.
 
-El siguiente bloque de la etapa es `DATA-CHASSIS-9`: adopción de v2 en derivados Deribit, que retira
-`known_at` de `parameters` en `derivatives_engine.py` y cubre el 38 % restante de la amplificación
-medida.
+### Adopción de escritura en derivados Deribit (`DATA-CHASSIS-9`)
+
+`DATA-CHASSIS-9` cierra la adopción de escritura de la etapa para las dos familias que concentran el
+99,75 % de `metric_results`.
+
+- **Extensión acotada de contrato:** `derivatives_identity.py` gana un punto de entrada v2 que delega en
+  la regla auditada y excluye `known_at`, `computed_at` y `value`. `metric_result_id` (v1) y
+  `diagnostic_id` quedan byte a byte idénticos: el v1 sigue resolviendo filas históricas.
+- **Escritura:** `_metric_result` deja de inyectar `known_at` en `parameters` de las cuatro familias
+  (funding sum/mean, DVOL y spread). El corte ya no fluye al camino de escritura: la elegibilidad PIT se
+  decide antes, al seleccionar observaciones.
+- **Replay histórico:** el servicio read-only resuelve primero la fila v2 persistida, después la v1 del
+  mismo corte —identidad v1 recalculada con el `known_at` de la consulta— y por último el candidato en
+  memoria. Un corte anterior al despliegue devuelve exactamente las filas v1 persistidas y conserva su
+  `diagnostic_id`; el fallo cerrado por contenido semántico distinto se mantiene.
+- **Guarda estrechada:** `test_no_production_caller_invokes_the_v2_rule` admite exactamente dos
+  llamadores de producción declarados: `analytics/market/statistics_identity.py` y
+  `analytics/crypto/derivatives_identity.py`.
+- **Sin cambios:** `derivatives_pipeline.py` se consume tal cual, sin `ALGORITHM_VERSION` nuevo, sin
+  tablas, migraciones ni schema, y sin adoptar v2 en cazatiburones, valoración ni fundamentales.
+- **Precondición operativa (HUMAN, fuera de los gates de BUILD):** el primer despliegue que ejecute este
+  código escribe identificadores UUID8 de derivados en el workspace permanente, de forma append-only; se
+  recomienda un backup verificado OPS-8 inmediatamente antes. El rollback es revertir el código: el
+  replay resuelve ambas versiones y ninguna fila requiere acción.
+
+Con esta adopción, la etapa 3 queda pendiente de una decisión viva de PLAN entre dos candidatos que la
+ruta ya nombra: cerrarla con `AnalysisSnapshot` (separado por falta de runner de migración) o abrir la
+etapa 4 con el `EvidenceSet` de funding (−90 % bytes), que retira el lineage de 720 UUID.
 
 ## Durabilidad inmediata
 
