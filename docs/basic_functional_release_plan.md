@@ -140,6 +140,9 @@ la etapa preveía ventanas «almacenadas una vez», pero la adopción persistida
 workspace v2 de la etapa 7 porque no existe runner de migración, de modo que este bloque no reduce bytes
 reales todavía.
 Transición de ruta propuesta: route_transition:DATA-CHASSIS:ADVANCES.
+Este candidato (`DATA-CHASSIS-11`/#252) propone route_effect: ADVANCES sobre `DATA-CHASSIS`: corrige el defecto operacional de consumo de memoria y CPU revelado por el primer ciclo en producción (release `2563fad`) que reinició la máquina virtual WSL. Acota DuckDBStore (writer y reader) a memory_limit ≤ 2 GB y threads ≤ 2, acota el motor de medición del colector de observabilidad a memory_limit ≤ 256 MB y threads = 1, retira el escaneo de bytes de documento por intento restringiéndolo a como máximo una vez por día UTC en el primer intento completado del día, y mantiene la clasificación del crecimiento en cada intento calculada exclusivamente desde conteos de filas. La verificación de las etapas 2 y 3 permanece pendiente post-despliegue mediante `scripts/report_storage_observability.py`.
+Transición de ruta propuesta: route_transition:DATA-CHASSIS:ADVANCES.
+
 
 Condición viva conocida, registrada y fuera de alcance de este bloque: `sec:equity:us:b:declared-activity`
 falló con `storage_state_error` no reintentable (`retryable: false`, intento completado

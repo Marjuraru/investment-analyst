@@ -381,7 +381,22 @@ representación de lineage es una puerta de un solo sentido.
   −90 % del gate. Sobre 45–60 días horarios la representación ocupa ≈ 5–6 % de los bytes de las listas
   repetidas actuales (la variante con bordes en línea, 9,8 %, se descartó por quedar en el límite).
 
+## Contención operacional de recursos y colector acotado (`DATA-CHASSIS-11`)
+
+El primer ciclo en producción del chasis desplegado (2026-09-19, release `2563fad`) agotó la memoria de la máquina virtual WSL y la reinició (`VmHWM` de 6,76 GB en VM de 7,8 GB). El análisis de código aisló dos causas:
+
+1. **Escaneo completo por intento en el colector:** `StorageObservabilityCollector` abría un motor DuckDB propio sin límites antes y después de cada intento, recorriendo `octet_length(encode(document_json))` en todas las tablas de documentos. En 28 intentos, el colector consumió 566 s frente a 404 s de trabajo real (12–29 s por intento).
+2. **DuckDBStore sin límites:** Ni el writer ni el reader declaraban límites de memoria ni de hilos, permitiendo que DuckDB asignara por defecto hasta el 80 % de la RAM del sistema a cada conexión.
+
+`DATA-CHASSIS-11` resuelve ambas causas sin modificar schemas, migraciones, identidades ni contratos públicos:
+
+- **Motor de medición acotado:** `_open_read_only_engine` ejecuta `SET memory_limit = '256MB'` y `SET threads = 1` inmediatamente tras conectar y antes de cualquier consulta.
+- **Filas por intento, documentos una vez por día UTC:** Cada intento mide sólo `count(*)` por tabla antes y después; la clasificación del crecimiento (`new_evidence_rows`, `revision_rows`, `derived_rows`, `unclassified_rows`) se calcula en cada intento a partir de esos conteos de filas. El escaneo de bytes de documento (`table_bytes`) se ejecuta como máximo una vez por día UTC, en el primer `complete_attempt` del día cuyo artefacto todavía no contiene un registro del día con `table_bytes` no vacío. El resto de registros del día llevan `table_bytes=()`.
+- **DuckDBStore acotado:** `DuckDBStore.open` ejecuta `SET memory_limit = '2GB'` y `SET threads = 2` inmediatamente tras conectar, tanto para el writer como para el store de lectura que comparte proceso, antes de inicializar o validar el schema.
+- **Contención externa:** Se mantiene el override de systemd (`MemoryHigh=3G`, `MemoryMax=4G`, `CPUQuota=200%`, `Nice=10`) aplicado fuera de repo por el operador humano como red de seguridad permanente.
+
 ## Durabilidad inmediata
+
 
 
 Hoy no existe copia durable fuera del equipo y la etapa 10 llega al final. La etapa 0 exige registrar la

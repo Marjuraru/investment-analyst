@@ -59,6 +59,8 @@ _TABLE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MICROSECONDS_PER_MILLISECOND = 1_000
 _EVIDENCE_TABLES = frozenset({"raw_record_index", "normalized_observations"})
 _DERIVED_TABLES = frozenset({"metric_results", "diagnostic_results"})
+_COLLECTOR_MEMORY_LIMIT = "256MB"
+_COLLECTOR_THREADS = 1
 
 
 def storage_observability_artifact_path(state_root: Path) -> Path:
@@ -449,16 +451,15 @@ def _growth_classification(
     observation: ScheduledJobObservation,
     *,
     rows_before: tuple[tuple[str, int], ...],
-    table_bytes: tuple[StorageObservabilityTableBytes, ...],
+    rows_after: tuple[tuple[str, int], ...] = (),
+    table_bytes: tuple[StorageObservabilityTableBytes, ...] = (),
 ) -> StorageObservabilityGrowthClassification | None:
     """Partition the created rows of one attempt, or decline when it cannot be observed."""
-    if observation.rows_created is None or not table_bytes:
+    resolved_after = rows_after or tuple((item.table_name, item.row_count) for item in table_bytes)
+    if observation.rows_created is None or not resolved_after:
         return None
     before = dict(rows_before)
-    added = tuple(
-        (item.table_name, item.row_count - before.get(item.table_name, item.row_count))
-        for item in table_bytes
-    )
+    added = tuple((name, count - before.get(name, count)) for name, count in resolved_after)
     observed_added = sum(count for _, count in added if count > 0)
     new_evidence_rows = sum(
         count for name, count in added if count > 0 and name in _EVIDENCE_TABLES
@@ -569,10 +570,20 @@ class StorageObservabilityCollector:
             database_bytes_after = _file_bytes(self._database_path)
             wal_bytes_after = _file_bytes(self._wal_path)
             measured_at = self._now()
-            table_bytes = self._measure_table_bytes()
-            queried_at = self._now()
             state = self._load_state()
-            self._compact(state, execution_completed_at.date())
+            record_day = execution_completed_at.date()
+            has_table_bytes_today = any(
+                record.observed_at.date() == record_day and bool(record.table_bytes)
+                for record in state.records
+            )
+            if not has_table_bytes_today:
+                table_bytes = self._measure_table_bytes()
+                table_rows_after = tuple((item.table_name, item.row_count) for item in table_bytes)
+            else:
+                table_bytes = ()
+                table_rows_after = self._measure_table_row_counts()
+            queried_at = self._now()
+            self._compact(state, record_day)
             persisted_at = self._now()
             calculated_at = self._now()
             durations = self._durations(
@@ -601,6 +612,7 @@ class StorageObservabilityCollector:
                 growth=_growth_classification(
                     observation,
                     rows_before=handle.table_rows_before,
+                    rows_after=table_rows_after,
                     table_bytes=table_bytes,
                 ),
                 collector_overhead_ms=durations.total_ms - durations.network_ms,
@@ -689,7 +701,14 @@ class StorageObservabilityCollector:
     def _open_read_only_engine(self) -> duckdb.DuckDBPyConnection:
         """Open the engine read-only so no measurement can ever write."""
         try:
-            return duckdb.connect(str(self._database_path), read_only=True)
+            connection = duckdb.connect(str(self._database_path), read_only=True)
+            try:
+                connection.execute(f"SET memory_limit = '{_COLLECTOR_MEMORY_LIMIT}'")
+                connection.execute(f"SET threads = {_COLLECTOR_THREADS}")
+            except Exception:
+                connection.close()
+                raise
+            return connection
         except duckdb.Error as error:
             raise StorageObservabilityError(
                 "read-only engine measurement is unavailable"
