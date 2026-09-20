@@ -112,3 +112,27 @@ def test_read_only_store_shares_a_process_writer_snapshot_and_rejects_mutation(t
             assert after_commit.connection.execute(
                 "SELECT value FROM concurrent_read_test ORDER BY value"
             ).fetchall() == [(1,), (2,)]
+
+
+def test_store_bounds_engine_memory_and_threads(tmp_path) -> None:
+    paths = StoragePaths.from_root(tmp_path)
+    with DuckDBStore(paths) as writer:
+        writer_threads = writer.connection.execute("SELECT current_setting('threads')").fetchone()
+        writer_memory = writer.connection.execute(
+            "SELECT current_setting('memory_limit')"
+        ).fetchone()
+        assert writer_threads == (2,)
+        assert writer_memory in (("1.8 GiB",), ("2GB",), ("2.0 GiB",))
+
+        reader = DuckDBStore(paths, read_only=True).open()
+        try:
+            reader_threads = reader.connection.execute(
+                "SELECT current_setting('threads')"
+            ).fetchone()
+            reader_memory = reader.connection.execute(
+                "SELECT current_setting('memory_limit')"
+            ).fetchone()
+            assert reader_threads == (2,)
+            assert reader_memory in (("1.8 GiB",), ("2GB",), ("2.0 GiB",))
+        finally:
+            reader.close()

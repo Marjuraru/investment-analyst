@@ -643,3 +643,119 @@ def test_collector_failure_never_degrades_the_measured_job(tmp_path: Path) -> No
         assert store.load().attempts[0].status is ScheduledJobAttemptStatus.SUCCEEDED
         assert scheduler.status().issues == (expected_issue,)
         assert not collector.artifact_path.is_file()
+
+
+def test_measurement_engine_is_bounded_in_memory_and_threads(tmp_path: Path) -> None:
+    database = _database_path(tmp_path)
+    _create_database(database)
+    collector = _collector(tmp_path, database_path=database)
+    connection = collector._open_read_only_engine()
+    try:
+        threads = connection.execute("SELECT current_setting('threads')").fetchone()
+        memory_limit = connection.execute("SELECT current_setting('memory_limit')").fetchone()
+        assert threads == (1,)
+        assert memory_limit in (("244.1 MiB",), ("256MB",), ("256.0 MB",))
+    finally:
+        connection.close()
+
+
+def test_document_bytes_are_measured_at_most_once_per_utc_day(tmp_path: Path) -> None:
+    database = _database_path(tmp_path)
+    _create_classification_database(database)
+    clock = _ScriptedClock(_BASE)
+    collector = _collector(tmp_path, database_path=database, clock=clock)
+
+    # Attempt 1 on day 1: document bytes are measured
+    id1 = UUID("00000000-0000-4000-8000-000000000001")
+    handle1 = collector.begin_attempt(job_id=_JOB_ID, attempt_id=id1)
+    record1 = collector.complete_attempt(
+        handle1,
+        _observation(attempt_id=id1, evidence_changed=True, rows_created=1, rows_reused=0),
+    )
+    assert len(record1.table_bytes) > 0
+
+    # Attempt 2 on day 1 (same UTC day): document bytes are skipped, table_bytes is empty
+    id2 = UUID("00000000-0000-4000-8000-000000000002")
+    handle2 = collector.begin_attempt(job_id=_JOB_ID, attempt_id=id2)
+    record2 = collector.complete_attempt(
+        handle2,
+        _observation(attempt_id=id2, evidence_changed=False, rows_created=0, rows_reused=1),
+    )
+    assert record2.table_bytes == ()
+
+    # Attempt 3 on day 1 (same UTC day): document bytes are skipped again
+    id3 = UUID("00000000-0000-4000-8000-000000000003")
+    handle3 = collector.begin_attempt(job_id=_JOB_ID, attempt_id=id3)
+    record3 = collector.complete_attempt(
+        handle3,
+        _observation(attempt_id=id3, evidence_changed=False, rows_created=0, rows_reused=1),
+    )
+    assert record3.table_bytes == ()
+
+    # Attempt 4 on day 2 (next UTC day): document bytes are measured again
+    next_day = _BASE + timedelta(days=1)
+    clock.advance_to(next_day)
+    id4 = UUID("00000000-0000-4000-8000-000000000004")
+    handle4 = collector.begin_attempt(job_id=_JOB_ID, attempt_id=id4)
+    record4 = collector.complete_attempt(
+        handle4,
+        _observation(
+            attempt_id=id4,
+            evidence_changed=False,
+            rows_created=0,
+            rows_reused=1,
+            local_date=next_day.date(),
+        ),
+    )
+    assert len(record4.table_bytes) > 0
+
+
+def test_growth_classification_uses_row_counts_on_every_attempt(tmp_path: Path) -> None:
+    database = _database_path(tmp_path)
+    _create_classification_database(database)
+    collector = _collector(tmp_path)
+
+    # Attempt 1: first attempt of day, table_bytes is measured
+    id1 = UUID("00000000-0000-4000-8000-000000000001")
+    handle1 = collector.begin_attempt(job_id=_JOB_ID, attempt_id=id1)
+    _insert(
+        database,
+        (
+            "INSERT INTO raw_record_index VALUES ('r1', '{\"x\": 1}'), ('r2', '{\"x\": 2}')",
+            "INSERT INTO metric_results VALUES ('m1', '{\"y\": 1}')",
+            "INSERT INTO assets VALUES ('equity:us:aapl', '{\"z\": 1}')",
+        ),
+    )
+    record1 = collector.complete_attempt(
+        handle1,
+        _observation(attempt_id=id1, evidence_changed=True, rows_created=7, rows_reused=4),
+    )
+    assert record1.table_bytes != ()
+    assert record1.growth is not None
+    assert record1.growth.new_evidence_rows == 2
+    assert record1.growth.derived_rows == 1
+    assert record1.growth.unclassified_rows == 1
+    assert record1.growth.revision_rows == 3
+    assert record1.growth.classified_rows == record1.rows_created == 7
+
+    # Attempt 2: second attempt of the same day, table_bytes is empty ()
+    id2 = UUID("00000000-0000-4000-8000-000000000002")
+    handle2 = collector.begin_attempt(job_id=_JOB_ID, attempt_id=id2)
+    _insert(
+        database,
+        (
+            "INSERT INTO raw_record_index VALUES ('r3', '{\"x\": 3}')",
+            "INSERT INTO diagnostic_results VALUES ('d1', '{\"w\": 1}')",
+        ),
+    )
+    record2 = collector.complete_attempt(
+        handle2,
+        _observation(attempt_id=id2, evidence_changed=True, rows_created=5, rows_reused=2),
+    )
+    assert record2.table_bytes == ()
+    assert record2.growth is not None
+    assert record2.growth.new_evidence_rows == 1
+    assert record2.growth.derived_rows == 1
+    assert record2.growth.unclassified_rows == 0
+    assert record2.growth.revision_rows == 3
+    assert record2.growth.classified_rows == record2.rows_created == 5

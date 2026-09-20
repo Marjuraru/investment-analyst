@@ -10,6 +10,8 @@ from investment_analyst.storage.errors import StorageError, StorageSchemaError
 from investment_analyst.storage.paths import StoragePaths
 
 SCHEMA_VERSION = 1
+DEFAULT_MEMORY_LIMIT = "2GB"
+DEFAULT_THREADS = 2
 
 
 class DuckDBStore:
@@ -46,6 +48,8 @@ class DuckDBStore:
         # read-only capability through a transaction before any reader query or validation.
         self._connection = duckdb.connect(str(self.paths.database_path), read_only=False)
         try:
+            self.connection.execute(f"SET memory_limit = '{DEFAULT_MEMORY_LIMIT}'")
+            self.connection.execute(f"SET threads = {DEFAULT_THREADS}")
             if self.read_only:
                 self.connection.execute("BEGIN TRANSACTION READ ONLY")
                 self._validate_schema()
