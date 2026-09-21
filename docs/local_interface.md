@@ -80,8 +80,8 @@ La página permite:
 - seleccionar desde un combobox único agrupado por clase de activo (Acciones, ETF, Cripto), buscando por ticker o nombre;
 - explorar el histórico point-in-time de cada activo con OHLC, VWAP cuando la fuente lo entrega,
   operaciones, tres SMA configurables y volumen;
-- usar en BTC-USD el histórico diario persistido de Coinbase Exchange o una ventana intradía local
-  de 24 horas con OHLC y volumen en BTC;
+- usar en BTC-USD el histórico diario persistido de Coinbase Exchange (las ventanas intradía locales
+  quedan retiradas de la superficie del gráfico en favor de una cadencia diaria única);
 - consultar en la misma vista el retorno diario, volatilidad diaria de 20 días con datos, volumen
   relativo de 20 días, distancias a las SMA, extremos, retorno, CAGR y máximo drawdown del rango
   consultado;
@@ -90,8 +90,8 @@ La página permite:
 - alternar el eje de precios entre escala lineal y logarítmica sin volver a consultar el workspace;
 - alternar entre línea de cierre y velas OHLC sin repetir la consulta, conservando medias y volumen;
 - consultar un año por defecto, ampliar a cinco años al elegir semana y solicitar el histórico
-  completo solo al elegir mes; BTC añade intervalos de 1/5/15/30/45 minutos y 1/2/4/5 horas sobre
-  las últimas 24 horas;
+  completo solo al elegir mes; el selector opera con cadencia diaria única para todos los activos
+  (las resoluciones intradía de BTC han sido retiradas de la superficie interactiva);
 - ampliar el gráfico alrededor del cursor con la rueda del mouse o con `+` y `-`, y restablecer la
   vista con `0`, sin consultar nuevamente el servicio;
 - desplazar horizontalmente la vista ampliada mediante arrastre con el botón izquierdo;
@@ -114,8 +114,8 @@ La página permite:
 - ejecutar una actualización exclusivamente de mercado, incremental por los bordes del histórico
   o completa, para BTC-USD o cualquier activo Alpaca visible; si una empresa también declara SEC,
   ambos writers se ejecutan en orden y conservan evidencia independiente;
-- importar explícitamente las últimas 24 horas de BTC-USD de un minuto cuando se selecciona una
-  resolución intradía;
+- ejecutar actualizaciones de mercado diarias (la importación intradía de 24 horas queda excluida del
+  flujo del gráfico al operar en cadencia diaria única);
 - consultar el reporte diario point-in-time en modo trimestral o anual;
 - seleccionar opcionalmente fechas `as-of` independientes para mercado y fundamentales;
 - ver diagnósticos, métricas, frescura, limitaciones y el contrato JSON versionado;
@@ -457,10 +457,12 @@ El contrato HTTP conserva los demás rangos compatibles. Esta progresión evita 
 sesiones diarias de BTC-USD en la respuesta inicial, sin recortar la evidencia persistida ni impedir
 el acceso al historial completo.
 El endpoint separado `/api/market-intraday` entrega `crypto-spot-intraday-chart-v1` con la identidad
-explícita solicitada y está habilitado únicamente para `crypto:btc-usd` por `market.minute_bars` del
+explícita solicitada y está habilitado en el backend únicamente para `crypto:btc-usd` por `market.minute_bars` del
 catálogo. Acepta los nueve intervalos fijos, consulta una ventana de 24 horas y excluye el
 minuto todavía en curso. No acepta rangos arbitrarios desde el navegador ni reutiliza el contrato
-diario. La actualización `POST /api/market-intraday-refresh` se ejecuta solo por una acción explícita,
+diario. Tras `DATA-CHASSIS-12`, la superficie interactiva del gráfico retira estos intervalos del
+selector, operando en cadencia diaria única para todos los activos; el endpoint se conserva intacto
+para lectura del histórico persistido. La actualización `POST /api/market-intraday-refresh` se ejecuta solo por una acción explícita,
 importa como máximo 1.440 minutos y expone conteos creados/reutilizados para auditar idempotencia.
 Para no truncar una vela por el límite del rango, un intervalo semanal o mensual puede incluir un
 bloque completo que supere ligeramente el objetivo de días. La vela del calendario vigente sí puede
@@ -583,12 +585,15 @@ visible; restablecer el zoom vuelve a incluir el rango consultado completo. El J
 
 Las tres medias móviles ya permiten personalizar ventana, color y visibilidad; el gráfico también
 permite elegir escala lineal o logarítmica, línea o velas —con velas como vista predeterminada— e
-intervalo diario, semanal o mensual, además de intervalos fijos intradía para BTC. Esta personalización
+intervalo diario, semanal o mensual. Tras `DATA-CHASSIS-12`, el selector de intervalos del gráfico ofrece
+exclusivamente intervalos diarios para todos los activos, retirando la superficie intradía; cualquier
+preferencia intradía persistida previamente cae al intervalo diario por defecto (`auto`) sin error y sin
+emitir peticiones a la API intradía. Esta personalización
 usa límites tipados, muestra los parámetros efectivos, conserva fórmula, valores exactos y evidencia
 y no modifica resultados persistidos ni algoritmos canónicos. Quedan para expansiones posteriores
 los parámetros de otras estadísticas y las plantillas reutilizables de indicadores.
 
-## Base intradía
+## Base intradía y su retirada de la superficie del gráfico
 
 La historia diaria de los activos Alpaca y BTC-USD permanece separada por identidad y fuente. Existe
 una fuente paralela de velas BTC-USD de un minuto de Coinbase Exchange, mercado 24/7, con identidad
@@ -596,11 +601,16 @@ y disponibilidad point-in-time propias. Sobre esa evidencia se agregan localment
 UTC de 1, 5, 15, 30 y 45 minutos y de 1, 2, 4 y 5 horas, conservando OHLCV, calidad, completitud y
 UUID de entrada.
 
-La interfaz presenta la fuente intradía solo cuando el activo seleccionado es BTC. Cambiar el
-intervalo consulta exclusivamente el workspace; la acción de actualización ejecuta primero el flujo
-diario y después importa 24 horas de minutos completos. Un fallo de la segunda etapa no elimina el
-progreso diario. No se reconstruyen minutos a partir de barras diarias ni se aplican las SMA,
-estadísticas o diagnósticos diarios a esta fuente.
+Por decisión humana explícita del 2026-09-20 (`DATA-CHASSIS-12`), el producto adopta una política de
+cadencia diaria única para todos los activos, retirando los intervalos intradía de la superficie del
+gráfico en la interfaz local. El minutario persistido histórico no se borra ni se modifica: queda
+congelado en almacenamiento, excluido de la reconstrucción hacia el workspace v2 de la etapa 8, y los
+endpoints HTTP existentes (`/api/market-intraday` y `/api/market-intraday-refresh`) se conservan
+intactos a nivel de transporte backend. La eventual reapertura de frecuencias intradía queda
+formalmente pospuesta hasta disponer de cálculo incremental (etapa 5) y memoria por trabajo acotada.
+Cualquier preferencia intradía guardada en `localStorage` cae automáticamente al intervalo diario por
+defecto sin error y sin emitir peticiones a la API intradía. No se reconstruyen minutos a partir de
+barras diarias ni se aplican las SMA, estadísticas o diagnósticos diarios a esta fuente.
 
 ## Universo de mercado
 

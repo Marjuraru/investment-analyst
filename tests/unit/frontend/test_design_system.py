@@ -5482,3 +5482,52 @@ def test_no_hard_data_truncation_no_hidden_preference_loss_and_no_arbitrary_revi
     assert "/api/candidates?limit=50" in operations
     assert "/api/alerts?limit=50" in operations
     assert 'limit: "250"' in _read("app-analysis.js")
+
+
+def test_chart_offers_only_daily_intervals_for_every_asset() -> None:
+    core = _read("app-core.js")
+    apply_selected = _extract_js_function(core, "applySelectedMarketAsset")
+    assert "const intervals = DAILY_MARKET_INTERVALS;" in apply_selected
+    assert "BTC_INTRADAY_INTERVALS" not in apply_selected
+    assert "presentation.intradaySourceId ?" not in apply_selected
+    assert "if (BTC_INTRADAY_INTERVAL_VALUES.has(chartSettings.interval)) {" in apply_selected
+    assert (
+        "chartSettings = { ...chartSettings, interval: DEFAULT_CHART_SETTINGS.interval };"
+        in apply_selected
+    )
+    daily_intervals_match = re.search(
+        r"const DAILY_MARKET_INTERVALS = Object\.freeze\(\[\s*(.*?)\s*\]\);",
+        core,
+        re.DOTALL,
+    )
+    assert daily_intervals_match is not None
+    daily_intervals_text = daily_intervals_match.group(1)
+    values = re.findall(r'value:\s*"([^"]+)"', daily_intervals_text)
+    assert values == ["auto", "1d", "1w", "1mo"]
+
+
+def test_a_persisted_intraday_interval_falls_back_to_the_daily_default() -> None:
+    core = _read("app-core.js")
+    normalize = _extract_js_function(core, "normalizeChartSettings")
+    assert "BTC_INTRADAY_INTERVAL_VALUES.has(candidateInterval)" in normalize
+    assert "DEFAULT_CHART_SETTINGS.interval" in normalize
+    assert "...BTC_INTRADAY_INTERVAL_VALUES" not in normalize
+
+    init_settings = _extract_js_function(core, "initializeChartSettings")
+    assert "BTC_INTRADAY_INTERVAL_VALUES.has(chartSettings.interval)" in init_settings
+    assert (
+        "chartSettings = { ...chartSettings, interval: DEFAULT_CHART_SETTINGS.interval };"
+        in init_settings
+    )
+
+    persist_settings = _extract_js_function(core, "persistChartSettings")
+    assert "BTC_INTRADAY_INTERVAL_VALUES.has(chartSettings.interval)" in persist_settings
+    assert (
+        "const storedSettings = BTC_INTRADAY_INTERVAL_VALUES.has(chartSettings.interval)"
+        in persist_settings
+    )
+
+    analysis = _read("app-analysis.js")
+    query_chart = _extract_js_function(analysis, "queryMarketChart")
+    assert "const intraday = isIntradayInterval();" in query_chart
+    assert 'intraday ? "/api/market-intraday" : "/api/market-chart"' in query_chart

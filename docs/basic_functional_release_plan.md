@@ -142,6 +142,8 @@ reales todavía.
 Transición de ruta propuesta: route_transition:DATA-CHASSIS:ADVANCES.
 Este candidato (`DATA-CHASSIS-11`/#252) propone route_effect: ADVANCES sobre `DATA-CHASSIS`: corrige el defecto operacional de consumo de memoria y CPU revelado por el primer ciclo en producción (release `2563fad`) que reinició la máquina virtual WSL. Acota DuckDBStore (writer y reader) a memory_limit ≤ 2 GB y threads ≤ 2, acota el motor de medición del colector de observabilidad a memory_limit ≤ 256 MB y threads = 1, retira el escaneo de bytes de documento por intento restringiéndolo a como máximo una vez por día UTC en el primer intento completado del día, y mantiene la clasificación del crecimiento en cada intento calculada exclusivamente desde conteos de filas. La verificación de las etapas 2 y 3 permanece pendiente post-despliegue mediante `scripts/report_storage_observability.py`.
 Transición de ruta propuesta: route_transition:DATA-CHASSIS:ADVANCES.
+Este candidato (`DATA-CHASSIS-12`/#254) propone route_effect: ADVANCES sobre `DATA-CHASSIS`: fija la política de cadencia diaria única para todos los activos por decisión humana explícita del 2026-09-20, pospone el intradía y cualquier frecuencia mayor hasta disponer de cálculo incremental (etapa 5) y memoria por trabajo acotada, congela el minutario persistido existente excluyéndolo de la reconstrucción del workspace de la etapa 8, y retira la superficie intradía del gráfico en la interfaz local.
+Transición de ruta propuesta: route_transition:DATA-CHASSIS:ADVANCES.
 
 
 Condición viva conocida, registrada y fuera de alcance de este bloque: `sec:equity:us:b:declared-activity`
