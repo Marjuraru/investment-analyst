@@ -1,9 +1,7 @@
 """Provider-independent scheduling for explicit asset and data-domain jobs."""
 
-import json
-import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -13,6 +11,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from investment_analyst.application.bounded_journal import (
+    BoundedOperationalJournal,
+    atomic_write,
+)
 from investment_analyst.application.job_memory_budget import (
     JobMemoryBudget,
     JobMemoryWatchdog,
@@ -496,27 +498,143 @@ class MultiAssetScheduleState(ContractModel):
         }
 
 
-class MultiAssetScheduleStateStore:
-    """Read and atomically update the multi-job scheduling history."""
+def _reduce_schedule_attempts(
+    records: Sequence[dict[str, object]],
+) -> Sequence[dict[str, object]]:
+    """Compact schedule attempts by attempt_id retaining latest status and chronological sort."""
+    by_id: dict[str, dict[str, object]] = {}
+    for record in records:
+        attempt_id = str(record.get("attempt_id", ""))
+        by_id[attempt_id] = record
 
-    def __init__(self, path: Path) -> None:
+    def _sort_key(item: dict[str, object]) -> tuple[str, str, int, str]:
+        definition = item.get("definition", {})
+        job_id = definition.get("job_id", "") if isinstance(definition, dict) else ""
+        return (
+            str(item.get("started_at", "")),
+            str(job_id),
+            int(item.get("attempt_number", 0)),
+            str(item.get("attempt_id", "")),
+        )
+
+    return tuple(sorted(by_id.values(), key=_sort_key))
+
+
+class MultiAssetScheduleStateStore:
+    """Read and atomically update the multi-job scheduling history via bounded journal."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        journal_dir: Path | None = None,
+        max_segment_bytes: int = 512 * 1024,
+        max_segment_records: int = 5_000,
+    ) -> None:
         self._path = path.expanduser().resolve(strict=False)
+        self._journal_dir = (
+            journal_dir.expanduser().resolve(strict=False)
+            if journal_dir is not None
+            else self._path.parent / f"{self._path.stem}_journal"
+        )
         self._lock = threading.RLock()
+        self._journal = BoundedOperationalJournal(
+            directory=self._journal_dir,
+            state_root=self._path.parent,
+            max_segment_bytes=max_segment_bytes,
+            max_segment_records=max_segment_records,
+            journal_id="multi-asset-schedule",
+            reducer=_reduce_schedule_attempts,
+        )
+
+    @property
+    def journal_dir(self) -> Path:
+        """Return the directory containing journal files."""
+        return self._journal_dir
+
+    def persisted_signatures(self) -> tuple[tuple[str, bytes], ...]:
+        """Return filenames and byte contents of all files in the journal directory."""
+        if not self._journal_dir.exists():
+            return ()
+        return tuple(
+            (p.name, p.read_bytes()) for p in sorted(self._journal_dir.rglob("*")) if p.is_file()
+        )
 
     def load(self) -> MultiAssetScheduleState:
-        """Load valid state without creating a missing file."""
+        """Load valid state without creating a missing file or mutating disk."""
         with self._lock:
-            if not self._path.exists():
+            has_journal = self._journal.has_data()
+            has_legacy = self._path.exists()
+            if not has_journal and not has_legacy:
                 return MultiAssetScheduleState(attempts=())
+
+            legacy_attempts: list[ScheduledJobAttempt] = []
+            if has_legacy:
+                try:
+                    legacy_state = MultiAssetScheduleState.model_validate_json(
+                        self._path.read_text(encoding="utf-8"),
+                        context={"allow_legacy_failure_categories": True},
+                    )
+                    if not self._journal.has_legacy_v1_folded():
+                        legacy_attempts = list(legacy_state.attempts)
+                except (OSError, UnicodeError, ValueError) as error:
+                    raise AaplOperationalStateError(
+                        "multi-asset schedule state is malformed or unreadable"
+                    ) from error
+
             try:
-                return MultiAssetScheduleState.model_validate_json(
-                    self._path.read_text(encoding="utf-8"),
-                    context={"allow_legacy_failure_categories": True},
-                )
-            except (OSError, UnicodeError, ValueError) as error:
+                journal_records = self._journal.read_entries()
+            except AaplOperationalStateError as error:
                 raise AaplOperationalStateError(
                     "multi-asset schedule state is malformed or unreadable"
                 ) from error
+
+            journal_attempts: list[ScheduledJobAttempt] = []
+            for record in journal_records:
+                try:
+                    attempt = ScheduledJobAttempt.model_validate(
+                        record,
+                        context={"allow_legacy_failure_categories": True},
+                    )
+                    journal_attempts.append(attempt)
+                except (ValueError, TypeError) as error:
+                    raise AaplOperationalStateError(
+                        "multi-asset schedule state is malformed or unreadable"
+                    ) from error
+
+            attempts_by_id: dict[UUID, ScheduledJobAttempt] = {
+                item.attempt_id: item for item in legacy_attempts
+            }
+            for attempt in journal_attempts:
+                if attempt.attempt_id in attempts_by_id:
+                    existing = attempts_by_id[attempt.attempt_id]
+                    if (
+                        existing.status is not ScheduledJobAttemptStatus.RUNNING
+                        or attempt.status is ScheduledJobAttemptStatus.RUNNING
+                        or existing.definition != attempt.definition
+                        or existing.started_at != attempt.started_at
+                    ):
+                        if existing == attempt:
+                            continue
+                        raise AaplOperationalStateError(
+                            "multi-asset schedule attempt lifecycle is inconsistent"
+                        )
+                    attempts_by_id[attempt.attempt_id] = attempt
+                else:
+                    attempts_by_id[attempt.attempt_id] = attempt
+
+            sorted_attempts = tuple(
+                sorted(
+                    attempts_by_id.values(),
+                    key=lambda item: (
+                        item.started_at,
+                        item.definition.job_id,
+                        item.attempt_number,
+                        str(item.attempt_id),
+                    ),
+                )
+            )
+            return MultiAssetScheduleState(attempts=sorted_attempts)
 
     def write_attempt(self, attempt: ScheduledJobAttempt) -> None:
         """Append an attempt or replace its running lifecycle atomically."""
@@ -528,12 +646,7 @@ class MultiAssetScheduleStateStore:
         state: MultiAssetScheduleState,
         attempt: ScheduledJobAttempt,
     ) -> MultiAssetScheduleState:
-        """Persist one transition against the caller's validated state snapshot.
-
-        The scheduler is the sole writer during a tick.  Passing its snapshot avoids
-        reparsing the complete append-only history for each due job while retaining
-        the exact lifecycle validation and atomic replacement semantics.
-        """
+        """Persist one transition against the caller's validated state snapshot in O(1)."""
         with self._lock:
             attempts = list(state.attempts)
             matching = tuple(
@@ -566,43 +679,38 @@ class MultiAssetScheduleStateStore:
                 )
             )
             updated = MultiAssetScheduleState(attempts=tuple(attempts))
-            self._write(updated)
-            return updated
 
-    def _write(self, state: MultiAssetScheduleState) -> None:
-        document = (
-            json.dumps(
-                state.to_json_dict(),
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-            + b"\n"
-        )
-        temporary = self._path.with_name(f".{self._path.name}.{uuid4().hex}.tmp")
-        descriptor: int | None = None
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(descriptor, "wb", closefd=True) as stream:
-                descriptor = None
-                stream.write(document)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self._path)
-            directory = os.open(self._path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        except OSError as error:
-            raise AaplOperationalStateError(
-                "multi-asset schedule state could not be written"
-            ) from error
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            temporary.unlink(missing_ok=True)
+            # Fold legacy v1 into initial snapshot once without altering legacy bytes
+            if self._path.exists() and not self._journal.has_legacy_v1_folded():
+                try:
+                    legacy_state = MultiAssetScheduleState.model_validate_json(
+                        self._path.read_text(encoding="utf-8"),
+                        context={"allow_legacy_failure_categories": True},
+                    )
+                    if len(legacy_state.attempts) > 0:
+                        self._journal.initialize_snapshot_with_legacy(
+                            [item.to_json_dict() for item in legacy_state.attempts]
+                        )
+                    else:
+                        self._journal.mark_legacy_v1_folded()
+                except (OSError, UnicodeError, ValueError) as error:
+                    raise AaplOperationalStateError(
+                        "multi-asset schedule state is malformed or unreadable"
+                    ) from error
+
+            # If self._path does not exist, initialize it once with a minimal valid v1 stub
+            if not self._path.exists():
+                try:
+                    stub = b'{"attempts":[],"schema_version":"multi-asset-schedule-state-v1"}\n'
+                    atomic_write(self._path, stub)
+                except OSError as error:
+                    raise AaplOperationalStateError(
+                        "multi-asset schedule state could not be written"
+                    ) from error
+
+            # Append the new attempt transition to the open segment in O(1)
+            self._journal.append(attempt.to_json_dict())
+            return updated
 
 
 ScheduledJobRun = Callable[[ScheduledJobInvocation], ScheduledJobExecution]

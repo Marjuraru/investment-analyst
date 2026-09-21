@@ -144,6 +144,8 @@ Este candidato (`DATA-CHASSIS-11`/#252) propone route_effect: ADVANCES sobre `DA
 Transición de ruta propuesta: route_transition:DATA-CHASSIS:ADVANCES.
 Este candidato (`DATA-CHASSIS-12`/#254) propone route_effect: ADVANCES sobre `DATA-CHASSIS`: fija la política de cadencia diaria única para todos los activos por decisión humana explícita del 2026-09-20, pospone el intradía y cualquier frecuencia mayor hasta disponer de cálculo incremental (etapa 5) y memoria por trabajo acotada, congela el minutario persistido existente excluyéndolo de la reconstrucción del workspace de la etapa 8, y retira la superficie intradía del gráfico en la interfaz local.
 Transición de ruta propuesta: route_transition:DATA-CHASSIS:ADVANCES.
+Este candidato (`DATA-CHASSIS-13`/#256) propone route_effect: ADVANCES sobre `DATA-CHASSIS`: abre la etapa 6 entregando el contrato aislado de journal operacional acotado (`bounded-operational-journal-v1`) y adoptándolo en el historial de intentos del scheduler (`MultiAssetScheduleStateStore`), retirando la reescritura completa de O(n) por intento sin alterar la API pública ni el estado v1 existente, que se lee, se pliega y se preserva byte a byte. Registra la desviación material de orden (la etapa 6 se adelanta a la etapa 5 por decisión humana del 2026-09-21 al ser la escritura más repetida del ciclo, independiente del pico de memoria e independiente de las etapas previas).
+Transición de ruta propuesta: route_transition:DATA-CHASSIS:ADVANCES.
 
 
 Condición viva conocida, registrada y fuera de alcance de este bloque: `sec:equity:us:b:declared-activity`

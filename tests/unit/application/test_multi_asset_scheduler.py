@@ -674,7 +674,7 @@ def test_scheduler_emits_storage_observability_without_changing_persisted_state(
     def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
         return _execution(invocation, created=2)
 
-    def schedule(store_path: Path) -> bytes:
+    def schedule(store_path: Path) -> tuple[tuple[str, bytes], ...]:
         store = MultiAssetScheduleStateStore(store_path)
         scheduler = MultiAssetScheduler(
             (RegisteredScheduledJob(definition, run),),
@@ -684,7 +684,7 @@ def test_scheduler_emits_storage_observability_without_changing_persisted_state(
         )
         completed = scheduler.tick()
         assert completed[0].status is ScheduledJobAttemptStatus.SUCCEEDED
-        return store_path.read_bytes()
+        return store.persisted_signatures()
 
     baseline = schedule(tmp_path / "baseline.json")
 
@@ -715,7 +715,7 @@ def test_scheduler_emits_storage_observability_without_changing_persisted_state(
 
     assert completed[0].attempt_id == attempt_id
     assert store.load().attempts[0].status is ScheduledJobAttemptStatus.SUCCEEDED
-    assert store_path.read_bytes() == baseline
+    assert store.persisted_signatures() == baseline
     assert scheduler.status().issues == ()
 
     state = collector.state()
@@ -788,3 +788,176 @@ def test_persisted_scheduler_contracts_remain_unchanged(tmp_path: Path) -> None:
     )
     assert tuple(completed.to_json_dict()) == tuple(ScheduledJobAttempt.model_fields)
     assert tuple(store.load().to_json_dict()) == ("schema_version", "attempts")
+
+
+def test_journal_reconstructs_the_same_state_as_the_full_rewrite_path(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+    scheduled_for = datetime(2026, 7, 29, 12, tzinfo=UTC)
+    def1 = _definition("job-1")
+    def2 = _definition("job-2")
+
+    att1_id = UUID("00000000-0000-4000-8000-000000000001")
+    att2_id = UUID("00000000-0000-4000-8000-000000000002")
+
+    att1_running = ScheduledJobAttempt(
+        attempt_id=att1_id,
+        definition=def1,
+        local_date=date(2026, 7, 29),
+        scheduled_for=scheduled_for,
+        attempt_number=1,
+        status=ScheduledJobAttemptStatus.RUNNING,
+        started_at=now,
+    )
+    att2_running = ScheduledJobAttempt(
+        attempt_id=att2_id,
+        definition=def2,
+        local_date=date(2026, 7, 29),
+        scheduled_for=scheduled_for,
+        attempt_number=1,
+        status=ScheduledJobAttemptStatus.RUNNING,
+        started_at=now + timedelta(minutes=1),
+    )
+
+    att1_succeeded = att1_running.model_copy(
+        update={
+            "status": ScheduledJobAttemptStatus.SUCCEEDED,
+            "completed_at": now + timedelta(minutes=2),
+            "execution": ScheduledJobExecution(
+                job_id=def1.job_id,
+                effective_known_at=now,
+                evidence_changed=True,
+                source_ids=(f"source:{def1.job_id}",),
+                created_count=1,
+                reused_count=0,
+            ),
+        }
+    )
+    att2_failed = att2_running.model_copy(
+        update={
+            "status": ScheduledJobAttemptStatus.FAILED,
+            "completed_at": now + timedelta(minutes=3),
+            "failure": scheduled_job_failure(
+                ScheduledJobFailureCategory.TRANSPORT, "transport error"
+            ),
+        }
+    )
+
+    transitions = [att1_running, att2_running, att1_succeeded, att2_failed]
+
+    # Reference full rewrite path:
+    reference_attempts: list[ScheduledJobAttempt] = []
+    for transition in transitions:
+        matching = [
+            i for i, a in enumerate(reference_attempts) if a.attempt_id == transition.attempt_id
+        ]
+        if matching:
+            reference_attempts[matching[0]] = transition
+        else:
+            reference_attempts.append(transition)
+        reference_attempts.sort(
+            key=lambda item: (
+                item.started_at,
+                item.definition.job_id,
+                item.attempt_number,
+                str(item.attempt_id),
+            )
+        )
+    reference_state = MultiAssetScheduleState(attempts=tuple(reference_attempts))
+
+    # Journal path:
+    store = MultiAssetScheduleStateStore(tmp_path / "journal_schedule.json")
+    for transition in transitions:
+        store.write_attempt(transition)
+
+    reconstructed_state = store.load()
+
+    assert reconstructed_state.to_json_dict() == reference_state.to_json_dict()
+    assert reconstructed_state.attempts == reference_state.attempts
+    assert len(reconstructed_state.attempts) == 2
+    assert reconstructed_state.attempts[0].status is ScheduledJobAttemptStatus.SUCCEEDED
+    assert reconstructed_state.attempts[1].status is ScheduledJobAttemptStatus.FAILED
+
+
+def test_legacy_v1_state_is_folded_once_and_preserved_byte_for_byte(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+    scheduled_for = datetime(2026, 7, 29, 12, tzinfo=UTC)
+    def1 = _definition("legacy-job")
+    legacy_att = ScheduledJobAttempt(
+        attempt_id=UUID("00000000-0000-4000-8000-000000000055"),
+        definition=def1,
+        local_date=date(2026, 7, 29),
+        scheduled_for=scheduled_for,
+        attempt_number=1,
+        status=ScheduledJobAttemptStatus.SUCCEEDED,
+        started_at=now,
+        completed_at=now + timedelta(minutes=1),
+        execution=ScheduledJobExecution(
+            job_id=def1.job_id,
+            effective_known_at=now,
+            evidence_changed=True,
+            source_ids=(f"source:{def1.job_id}",),
+            created_count=2,
+            reused_count=0,
+        ),
+    )
+    legacy_state = MultiAssetScheduleState(attempts=(legacy_att,))
+    legacy_path = tmp_path / "multi_asset_schedule_state_v1.json"
+    legacy_payload = (
+        json.dumps(
+            legacy_state.to_json_dict(),
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    legacy_path.write_bytes(legacy_payload)
+    original_bytes = legacy_path.read_bytes()
+
+    store = MultiAssetScheduleStateStore(legacy_path)
+
+    # 1. Loading reads the legacy state without mutating disk
+    loaded_initial = store.load()
+    assert len(loaded_initial.attempts) == 1
+    assert loaded_initial.attempts[0].attempt_id == legacy_att.attempt_id
+    assert legacy_path.read_bytes() == original_bytes
+
+    # 2. Writing a new attempt folds legacy state once into snapshot
+    def2 = _definition("new-job")
+    new_att = ScheduledJobAttempt(
+        attempt_id=UUID("00000000-0000-4000-8000-000000000056"),
+        definition=def2,
+        local_date=date(2026, 7, 29),
+        scheduled_for=scheduled_for,
+        attempt_number=1,
+        status=ScheduledJobAttemptStatus.SUCCEEDED,
+        started_at=now + timedelta(minutes=5),
+        completed_at=now + timedelta(minutes=6),
+        execution=ScheduledJobExecution(
+            job_id=def2.job_id,
+            effective_known_at=now + timedelta(minutes=5),
+            evidence_changed=True,
+            source_ids=(f"source:{def2.job_id}",),
+            created_count=1,
+            reused_count=0,
+        ),
+    )
+    store.write_attempt(new_att)
+
+    # Legacy file is preserved byte-for-byte
+    assert legacy_path.read_bytes() == original_bytes
+
+    # Store load now returns both attempts
+    reloaded = store.load()
+    assert len(reloaded.attempts) == 2
+    assert reloaded.attempts[0].attempt_id == legacy_att.attempt_id
+    assert reloaded.attempts[1].attempt_id == new_att.attempt_id
+
+    # Verify journal snapshot has folded legacy state
+    assert store._journal.has_legacy_v1_folded()
+    assert store._journal.has_snapshot()
+
+    # Even if legacy file is deleted, store continues to have all attempts
+    legacy_path.unlink()
+    reloaded_after_delete = store.load()
+    assert len(reloaded_after_delete.attempts) == 2
+    assert reloaded_after_delete.attempts[0].attempt_id == legacy_att.attempt_id
