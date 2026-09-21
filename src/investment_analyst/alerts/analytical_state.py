@@ -2,19 +2,24 @@
 
 import hashlib
 import json
-import os
 import threading
+from collections.abc import Sequence
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
-from uuid import UUID, uuid4, uuid5
+from typing import Literal, cast
+from uuid import UUID, uuid5
 
 from pydantic import ConfigDict, Field, model_validator
 
 from investment_analyst.alerts.analytical_models import (
     AnalyticalScreeningDomain,
     AnalyticalScreeningResult,
+)
+from investment_analyst.application.bounded_journal import (
+    BoundedOperationalJournal,
+    atomic_write,
 )
 from investment_analyst.application.operational_state import AaplOperationalStateError
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
@@ -325,34 +330,383 @@ class AnalyticalScreeningReconciliation:
             return outcome
 
 
-class AnalyticalScreeningStateStore:
-    """Atomically persist results, receipts, candidates, and transitions."""
+def _reduce_analytical_screening_records(
+    records: Sequence[dict[str, object]],
+) -> Sequence[dict[str, object]]:
+    results_by_id: dict[str, dict[str, object]] = {}
+    candidates_by_id: dict[str, dict[str, object]] = {}
+    transitions_by_id: dict[str, dict[str, object]] = {}
+    receipts_by_id: dict[str, dict[str, object]] = {}
 
-    def __init__(self, path: Path) -> None:
+    for record in records:
+        collection = record.get("collection")
+        item = record.get("item")
+        if not isinstance(item, dict):
+            continue
+        if collection == "result":
+            rid = str(item.get("result_id", ""))
+            results_by_id[rid] = record
+        elif collection == "candidate":
+            cid = str(item.get("candidate_id", ""))
+            candidates_by_id[cid] = record
+        elif collection == "transition":
+            tid = str(item.get("transition_id", ""))
+            transitions_by_id[tid] = record
+        elif collection == "receipt":
+            aid = str(item.get("attempt_id", ""))
+            receipts_by_id[aid] = record
+
+    def _result_key(rec: dict[str, object]) -> tuple[str, str]:
+        it = cast(dict[str, object], rec.get("item", {}))
+        return (str(it.get("known_at", "")), str(it.get("result_id", "")))
+
+    def _candidate_key(rec: dict[str, object]) -> tuple[str, str]:
+        it = cast(dict[str, object], rec.get("item", {}))
+        return (str(it.get("activated_at", "")), str(it.get("candidate_id", "")))
+
+    def _transition_key(rec: dict[str, object]) -> tuple[str, str]:
+        it = cast(dict[str, object], rec.get("item", {}))
+        return (str(it.get("recorded_at", "")), str(it.get("transition_id", "")))
+
+    def _receipt_key(rec: dict[str, object]) -> tuple[str, str]:
+        it = cast(dict[str, object], rec.get("item", {}))
+        return (str(it.get("processed_at", "")), str(it.get("attempt_id", "")))
+
+    sorted_results = sorted(results_by_id.values(), key=_result_key)
+    sorted_candidates = sorted(candidates_by_id.values(), key=_candidate_key)
+    sorted_transitions = sorted(transitions_by_id.values(), key=_transition_key)
+    sorted_receipts = sorted(receipts_by_id.values(), key=_receipt_key)
+
+    return tuple(sorted_results + sorted_candidates + sorted_transitions + sorted_receipts)
+
+
+class AnalyticalScreeningStateStore:
+    """Atomically persist results, receipts, candidates, and transitions via bounded journal."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        journal_dir: Path | None = None,
+        max_segment_bytes: int = 512 * 1024,
+        max_segment_records: int = 5_000,
+    ) -> None:
         self._path = path.expanduser().resolve(strict=False)
+        self._journal_dir = (
+            journal_dir.expanduser().resolve(strict=False)
+            if journal_dir is not None
+            else self._path.parent / f"{self._path.stem}_journal"
+        )
         self._lock = threading.RLock()
+        self._cached_state: AnalyticalScreeningState | None = None
+        self._cached_attempt_ids: set[UUID] | None = None
+        self._journal = BoundedOperationalJournal(
+            directory=self._journal_dir,
+            state_root=self._path.parent,
+            max_segment_bytes=max_segment_bytes,
+            max_segment_records=max_segment_records,
+            journal_id="analytical-screening",
+            reducer=_reduce_analytical_screening_records,
+        )
+        marker_file = self._journal_dir / ".legacy_v1_preserved"
+        if marker_file.is_file() or (self._path.is_file() and not self._journal.has_data()):
+            self._is_preexisting_legacy = True
+        else:
+            self._is_preexisting_legacy = False
+
+    @property
+    def journal_dir(self) -> Path:
+        """Return the directory containing journal files."""
+        return self._journal_dir
+
+    def persisted_signatures(self) -> tuple[tuple[str, bytes], ...]:
+        """Return filenames and byte contents of all files in the journal directory."""
+        if not self._journal_dir.exists():
+            return ()
+        return tuple(
+            (p.name, p.read_bytes()) for p in sorted(self._journal_dir.rglob("*")) if p.is_file()
+        )
+
+    def _sync_path(self, state: AnalyticalScreeningState) -> None:
+        """Keep self._path synchronized when not a preserved legacy file."""
+        if not self._is_preexisting_legacy:
+            try:
+                payload = (
+                    json.dumps(
+                        state.to_json_dict(),
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                    + b"\n"
+                )
+                atomic_write(self._path, payload)
+            except OSError as error:
+                raise AaplOperationalStateError(
+                    "analytical screening state could not be written"
+                ) from error
 
     def load(self) -> AnalyticalScreeningState:
         """Load valid state without creating a missing file."""
         with self._lock:
-            if not self._path.exists():
+            has_journal = self._journal.has_data()
+            has_legacy = self._path.exists()
+
+            legacy_state: AnalyticalScreeningState | None = None
+            if has_legacy:
+                try:
+                    legacy_state = AnalyticalScreeningState.model_validate_json(
+                        self._path.read_text(encoding="utf-8")
+                    )
+                except (OSError, UnicodeError, ValueError) as error:
+                    self._cached_state = None
+                    self._cached_attempt_ids = None
+                    raise AaplOperationalStateError(
+                        "analytical screening state is malformed or unreadable"
+                    ) from error
+
+            if self._cached_state is not None:
+                return self._cached_state
+
+            if not has_journal and not has_legacy:
+                self._cached_attempt_ids = set()
                 return AnalyticalScreeningState()
+
+            legacy_results: list[AnalyticalScreeningResult] = []
+            legacy_candidates: list[AnalyticalCandidateEvent] = []
+            legacy_transitions: list[AnalyticalCandidateTransition] = []
+            legacy_receipts: list[AnalyticalMonitorReceipt] = []
+            if has_legacy and legacy_state is not None:
+                if self._is_preexisting_legacy:
+                    if not self._journal.has_legacy_v1_folded():
+                        legacy_results = list(legacy_state.results)
+                        legacy_candidates = list(legacy_state.candidates)
+                        legacy_transitions = list(legacy_state.transitions)
+                        legacy_receipts = list(legacy_state.receipts)
+                else:
+                    legacy_results = list(legacy_state.results)
+                    legacy_candidates = list(legacy_state.candidates)
+                    legacy_transitions = list(legacy_state.transitions)
+                    legacy_receipts = list(legacy_state.receipts)
+
             try:
-                return AnalyticalScreeningState.model_validate_json(
+                journal_records = self._journal.read_entries()
+            except AaplOperationalStateError as error:
+                raise AaplOperationalStateError(
+                    "analytical screening state is malformed or unreadable"
+                ) from error
+
+            journal_results: list[AnalyticalScreeningResult] = []
+            journal_candidates: list[AnalyticalCandidateEvent] = []
+            journal_transitions: list[AnalyticalCandidateTransition] = []
+            journal_receipts: list[AnalyticalMonitorReceipt] = []
+
+            for record in journal_records:
+                if not isinstance(record, dict):
+                    raise AaplOperationalStateError(
+                        "analytical screening state is malformed or unreadable"
+                    )
+                collection = record.get("collection")
+                item = record.get("item")
+                if not isinstance(item, dict):
+                    raise AaplOperationalStateError(
+                        "analytical screening state is malformed or unreadable"
+                    )
+                try:
+                    if collection == "result":
+                        journal_results.append(AnalyticalScreeningResult.model_validate(item))
+                    elif collection == "candidate":
+                        journal_candidates.append(AnalyticalCandidateEvent.model_validate(item))
+                    elif collection == "transition":
+                        journal_transitions.append(
+                            AnalyticalCandidateTransition.model_validate(item)
+                        )
+                    elif collection == "receipt":
+                        journal_receipts.append(AnalyticalMonitorReceipt.model_validate(item))
+                    else:
+                        raise AaplOperationalStateError(
+                            "analytical screening state is malformed or unreadable"
+                        )
+                except (ValueError, TypeError) as error:
+                    raise AaplOperationalStateError(
+                        "analytical screening state is malformed or unreadable"
+                    ) from error
+
+            if not self._is_preexisting_legacy and legacy_state is not None and has_legacy:
+                allowed_receipt_ids = {r.attempt_id for r in legacy_state.receipts}
+                allowed_result_ids = {r.result_id for r in legacy_state.results}
+                allowed_candidate_ids = {c.candidate_id for c in legacy_state.candidates}
+                journal_receipts = [
+                    r for r in journal_receipts if r.attempt_id in allowed_receipt_ids
+                ]
+                journal_results = [r for r in journal_results if r.result_id in allowed_result_ids]
+                journal_candidates = [
+                    c for c in journal_candidates if c.candidate_id in allowed_candidate_ids
+                ]
+
+            by_result: dict[UUID, AnalyticalScreeningResult] = {
+                item.result_id: item for item in legacy_results
+            }
+            for r in journal_results:
+                existing_r = by_result.get(r.result_id)
+                if existing_r is not None:
+                    if existing_r.semantic_fingerprint() != r.semantic_fingerprint():
+                        raise AaplOperationalStateError(
+                            "analytical recomputation changed deterministic semantics"
+                        )
+                else:
+                    by_result[r.result_id] = r
+
+            by_candidate: dict[UUID, AnalyticalCandidateEvent] = {
+                item.candidate_id: item for item in legacy_candidates
+            }
+            for c in journal_candidates:
+                existing_c = by_candidate.get(c.candidate_id)
+                if existing_c is not None:
+                    if existing_c.semantic_fingerprint() != c.semantic_fingerprint():
+                        raise AaplOperationalStateError(
+                            "candidate recomputation changed deterministic semantics"
+                        )
+                else:
+                    by_candidate[c.candidate_id] = c
+
+            by_transition: dict[UUID, AnalyticalCandidateTransition] = {
+                item.transition_id: item for item in legacy_transitions
+            }
+            for t in journal_transitions:
+                by_transition[t.transition_id] = t
+
+            by_receipt: dict[UUID, AnalyticalMonitorReceipt] = {
+                item.attempt_id: item for item in legacy_receipts
+            }
+            for rc in journal_receipts:
+                existing_rc = by_receipt.get(rc.attempt_id)
+                if existing_rc is not None:
+                    if existing_rc.semantic_fingerprint() != rc.semantic_fingerprint():
+                        raise AaplOperationalStateError(
+                            "analytical attempt replay changed receipt semantics"
+                        )
+                else:
+                    by_receipt[rc.attempt_id] = rc
+
+            sorted_transitions = tuple(
+                sorted(
+                    by_transition.values(),
+                    key=lambda item: (item.recorded_at, str(item.transition_id)),
+                )
+            )
+
+            projected = {
+                item.candidate_id: AnalyticalCandidateStatus.NEW for item in by_candidate.values()
+            }
+            for t in sorted_transitions:
+                projected[t.candidate_id] = t.to_status
+
+            updated_candidates = {
+                cid: cand.model_copy(update={"status": projected.get(cid, cand.status)})
+                for cid, cand in by_candidate.items()
+            }
+
+            sorted_results = tuple(
+                sorted(
+                    by_result.values(),
+                    key=lambda item: (item.known_at, str(item.result_id)),
+                )
+            )
+            sorted_candidates = tuple(
+                sorted(
+                    updated_candidates.values(),
+                    key=lambda item: (item.activated_at, str(item.candidate_id)),
+                )
+            )
+            sorted_receipts = tuple(
+                sorted(
+                    by_receipt.values(),
+                    key=lambda item: (item.processed_at, str(item.attempt_id)),
+                )
+            )
+
+            try:
+                state = AnalyticalScreeningState(
+                    results=sorted_results,
+                    candidates=sorted_candidates,
+                    transitions=sorted_transitions,
+                    receipts=sorted_receipts,
+                )
+            except ValueError as error:
+                raise AaplOperationalStateError(
+                    "analytical screening state is malformed or unreadable"
+                ) from error
+
+            self._cached_state = state
+            self._cached_attempt_ids = {item.attempt_id for item in sorted_receipts}
+            return state
+
+    def contains_attempt(self, attempt_id: UUID) -> bool:
+        """Return whether an observation receipt already makes replay unnecessary."""
+        with self._lock:
+            if self._cached_attempt_ids is None:
+                self.load()
+            assert self._cached_attempt_ids is not None
+            return attempt_id in self._cached_attempt_ids
+
+    def reconciliation(self) -> AnalyticalScreeningReconciliation:
+        """Load and validate the document once for one ordered startup replay."""
+        return AnalyticalScreeningReconciliation(self, self.load())
+
+    def _ensure_legacy_v1_folded(self) -> None:
+        if self._is_preexisting_legacy:
+            marker_file = self._journal_dir / ".legacy_v1_preserved"
+            if not marker_file.is_file() and self._journal_dir.is_dir():
+                with suppress(OSError):
+                    marker_file.touch()
+        if self._path.exists() and not self._journal.has_legacy_v1_folded():
+            try:
+                legacy_state = AnalyticalScreeningState.model_validate_json(
                     self._path.read_text(encoding="utf-8")
                 )
+                legacy_records = (
+                    [
+                        {"collection": "result", "item": item.to_json_dict()}
+                        for item in legacy_state.results
+                    ]
+                    + [
+                        {"collection": "candidate", "item": item.to_json_dict()}
+                        for item in legacy_state.candidates
+                    ]
+                    + [
+                        {"collection": "transition", "item": item.to_json_dict()}
+                        for item in legacy_state.transitions
+                    ]
+                    + [
+                        {"collection": "receipt", "item": item.to_json_dict()}
+                        for item in legacy_state.receipts
+                    ]
+                )
+                if legacy_records:
+                    self._journal.initialize_snapshot_with_legacy(legacy_records)
+                else:
+                    self._journal.mark_legacy_v1_folded()
+                if self._is_preexisting_legacy:
+                    marker_file = self._journal_dir / ".legacy_v1_preserved"
+                    with suppress(OSError):
+                        marker_file.touch()
             except (OSError, UnicodeError, ValueError) as error:
                 raise AaplOperationalStateError(
                     "analytical screening state is malformed or unreadable"
                 ) from error
 
-    def contains_attempt(self, attempt_id: UUID) -> bool:
-        """Return whether an observation receipt already makes replay unnecessary."""
-        return any(item.attempt_id == attempt_id for item in self.load().receipts)
-
-    def reconciliation(self) -> AnalyticalScreeningReconciliation:
-        """Load and validate the document once for one ordered startup replay."""
-        return AnalyticalScreeningReconciliation(self, self.load())
+        if not self._path.exists():
+            try:
+                stub = (
+                    b'{"candidates":[],"receipts":[],"results":[],'
+                    b'"schema_version":"analytical-screening-state-v1","transitions":[]}\n'
+                )
+                atomic_write(self._path, stub)
+                self._journal.mark_legacy_v1_folded()
+            except OSError as error:
+                raise AaplOperationalStateError(
+                    "analytical screening state could not be written"
+                ) from error
 
     def record_attempt(
         self,
@@ -390,7 +744,7 @@ class AnalyticalScreeningStateStore:
             )
 
         results_by_id = {item.result_id: item for item in state.results}
-        results_created = 0
+        created_results: list[AnalyticalScreeningResult] = []
         for result in results:
             existing_result = results_by_id.get(result.result_id)
             if existing_result is not None:
@@ -400,11 +754,12 @@ class AnalyticalScreeningStateStore:
                     )
                 continue
             results_by_id[result.result_id] = result
-            results_created += 1
+            created_results.append(result)
 
         candidates_by_id = {item.candidate_id: item for item in state.candidates}
         transitions = list(state.transitions)
-        candidates_created = 0
+        new_transitions: list[AnalyticalCandidateTransition] = []
+        created_candidates: list[AnalyticalCandidateEvent] = []
         candidates_resolved = 0
         for result in sorted(results, key=lambda item: (item.known_at, str(item.result_id))):
             open_candidates = tuple(
@@ -423,6 +778,7 @@ class AnalyticalScreeningStateStore:
                             actor="system_evidence",
                         )
                         transitions.append(transition)
+                        new_transitions.append(transition)
                         candidates_by_id[candidate.candidate_id] = candidate.model_copy(
                             update={"status": AnalyticalCandidateStatus.RESOLVED}
                         )
@@ -464,7 +820,7 @@ class AnalyticalScreeningStateStore:
                     )
                 continue
             candidates_by_id[event.candidate_id] = event
-            candidates_created += 1
+            created_candidates.append(event)
 
         receipt_by_id[receipt.attempt_id] = receipt
         snapshot = AnalyticalScreeningState(
@@ -493,12 +849,28 @@ class AnalyticalScreeningStateStore:
                 )
             ),
         )
-        self._write(snapshot)
+
+        self._ensure_legacy_v1_folded()
+        for res in created_results:
+            self._journal.append({"collection": "result", "item": res.to_json_dict()})
+        for cand in created_candidates:
+            self._journal.append({"collection": "candidate", "item": cand.to_json_dict()})
+        for tr in new_transitions:
+            self._journal.append({"collection": "transition", "item": tr.to_json_dict()})
+        self._journal.append({"collection": "receipt", "item": receipt.to_json_dict()})
+
+        self._cached_state = snapshot
+        if self._cached_attempt_ids is not None:
+            self._cached_attempt_ids.add(receipt.attempt_id)
+        else:
+            self._cached_attempt_ids = {item.attempt_id for item in snapshot.receipts}
+        self._sync_path(snapshot)
+
         return (
             AnalyticalRecordOutcome(
                 receipt_created=True,
-                results_created=results_created,
-                candidates_created=candidates_created,
+                results_created=len(created_results),
+                candidates_created=len(created_candidates),
                 candidates_resolved=candidates_resolved,
             ),
             snapshot,
@@ -554,30 +926,32 @@ class AnalyticalScreeningStateStore:
                 actor="local_user",
             )
             candidates[candidate_id] = current.model_copy(update={"status": to_status})
-            self._write(
-                AnalyticalScreeningState(
-                    results=state.results,
-                    candidates=tuple(
-                        sorted(
-                            candidates.values(),
-                            key=lambda item: (
-                                item.activated_at,
-                                str(item.candidate_id),
-                            ),
-                        )
-                    ),
-                    transitions=tuple(
-                        sorted(
-                            (*state.transitions, transition),
-                            key=lambda item: (
-                                item.recorded_at,
-                                str(item.transition_id),
-                            ),
-                        )
-                    ),
-                    receipts=state.receipts,
-                )
+            snapshot = AnalyticalScreeningState(
+                results=state.results,
+                candidates=tuple(
+                    sorted(
+                        candidates.values(),
+                        key=lambda item: (
+                            item.activated_at,
+                            str(item.candidate_id),
+                        ),
+                    )
+                ),
+                transitions=tuple(
+                    sorted(
+                        (*state.transitions, transition),
+                        key=lambda item: (
+                            item.recorded_at,
+                            str(item.transition_id),
+                        ),
+                    )
+                ),
+                receipts=state.receipts,
             )
+            self._ensure_legacy_v1_folded()
+            self._journal.append({"collection": "transition", "item": transition.to_json_dict()})
+            self._cached_state = snapshot
+            self._sync_path(snapshot)
             return candidates[candidate_id], True
 
     def status(self) -> AnalyticalCandidateInboxStatus:
@@ -660,6 +1034,8 @@ class AnalyticalScreeningStateStore:
         return count
 
     def _write(self, state: AnalyticalScreeningState) -> None:
+        self._cached_state = state
+        self._cached_attempt_ids = {item.attempt_id for item in state.receipts}
         document = (
             json.dumps(
                 state.to_json_dict(),
@@ -669,30 +1045,7 @@ class AnalyticalScreeningStateStore:
             ).encode("utf-8")
             + b"\n"
         )
-        temporary = self._path.with_name(f".{self._path.name}.{uuid4().hex}.tmp")
-        descriptor: int | None = None
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(descriptor, "wb", closefd=True) as stream:
-                descriptor = None
-                stream.write(document)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self._path)
-            directory = os.open(self._path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        except OSError as error:
-            raise AaplOperationalStateError(
-                "analytical screening state could not be written"
-            ) from error
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            temporary.unlink(missing_ok=True)
+        atomic_write(self._path, document)
 
 
 def analytical_candidate_id(result_id: UUID) -> UUID:

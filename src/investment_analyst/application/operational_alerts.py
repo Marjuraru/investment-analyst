@@ -2,17 +2,21 @@
 
 import hashlib
 import json
-import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
-from uuid import UUID, uuid4, uuid5
+from typing import Literal, cast
+from uuid import UUID, uuid5
 
 from pydantic import ConfigDict, Field, model_validator
 
+from investment_analyst.application.bounded_journal import (
+    BoundedOperationalJournal,
+    atomic_write,
+)
 from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobAttempt,
     ScheduledJobAttemptStatus,
@@ -287,28 +291,324 @@ class OperationalAlertInbox(ContractModel):
         return self.model_dump(mode="json")
 
 
-class OperationalAlertStateStore:
-    """Atomically persist deterministic screening and local-inbox events."""
+def _reduce_operational_alert_records(
+    records: Sequence[dict[str, object]],
+) -> Sequence[dict[str, object]]:
+    screenings_by_id: dict[str, dict[str, object]] = {}
+    events_by_id: dict[str, dict[str, object]] = {}
+    transitions_by_id: dict[str, dict[str, object]] = {}
 
-    def __init__(self, path: Path) -> None:
+    for record in records:
+        collection = record.get("collection")
+        item = record.get("item")
+        if not isinstance(item, dict):
+            continue
+        if collection == "screening":
+            rid = str(item.get("result_id", ""))
+            screenings_by_id[rid] = record
+        elif collection == "event":
+            aid = str(item.get("alert_id", ""))
+            events_by_id[aid] = record
+        elif collection == "transition":
+            tid = str(item.get("transition_id", ""))
+            transitions_by_id[tid] = record
+
+    def _screening_key(rec: dict[str, object]) -> tuple[str, str]:
+        it = cast(dict[str, object], rec.get("item", {}))
+        return (str(it.get("known_at", "")), str(it.get("result_id", "")))
+
+    def _event_key(rec: dict[str, object]) -> tuple[str, str]:
+        it = cast(dict[str, object], rec.get("item", {}))
+        return (str(it.get("first_activated_at", "")), str(it.get("alert_id", "")))
+
+    def _transition_key(rec: dict[str, object]) -> tuple[str, str]:
+        it = cast(dict[str, object], rec.get("item", {}))
+        return (str(it.get("recorded_at", "")), str(it.get("transition_id", "")))
+
+    sorted_screenings = sorted(screenings_by_id.values(), key=_screening_key)
+    sorted_events = sorted(events_by_id.values(), key=_event_key)
+    sorted_transitions = sorted(transitions_by_id.values(), key=_transition_key)
+
+    return tuple(sorted_screenings + sorted_events + sorted_transitions)
+
+
+class OperationalAlertStateStore:
+    """Atomically persist deterministic screening and local-inbox events via bounded journal."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        journal_dir: Path | None = None,
+        max_segment_bytes: int = 512 * 1024,
+        max_segment_records: int = 5_000,
+    ) -> None:
         self._path = path.expanduser().resolve(strict=False)
+        self._journal_dir = (
+            journal_dir.expanduser().resolve(strict=False)
+            if journal_dir is not None
+            else self._path.parent / f"{self._path.stem}_journal"
+        )
         self._lock = threading.RLock()
         self._reconciliation_state: OperationalAlertState | None = None
         self._reconciliation_result_ids: set[UUID] | None = None
         self._reconciling = False
+        self._cached_state: OperationalAlertState | None = None
+        self._journal = BoundedOperationalJournal(
+            directory=self._journal_dir,
+            state_root=self._path.parent,
+            max_segment_bytes=max_segment_bytes,
+            max_segment_records=max_segment_records,
+            journal_id="operational-alerts",
+            reducer=_reduce_operational_alert_records,
+        )
+        marker_file = self._journal_dir / ".legacy_v1_preserved"
+        if marker_file.is_file() or (self._path.is_file() and not self._journal.has_data()):
+            self._is_preexisting_legacy = True
+        else:
+            self._is_preexisting_legacy = False
+
+    @property
+    def journal_dir(self) -> Path:
+        """Return the directory containing journal files."""
+        return self._journal_dir
+
+    def persisted_signatures(self) -> tuple[tuple[str, bytes], ...]:
+        """Return filenames and byte contents of all files in the journal directory."""
+        if not self._journal_dir.exists():
+            return ()
+        return tuple(
+            (p.name, p.read_bytes()) for p in sorted(self._journal_dir.rglob("*")) if p.is_file()
+        )
+
+    def _sync_path(self, state: OperationalAlertState) -> None:
+        """Keep self._path synchronized when not a preserved legacy file."""
+        if not self._is_preexisting_legacy:
+            try:
+                payload = (
+                    json.dumps(
+                        state.to_json_dict(),
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                    + b"\n"
+                )
+                atomic_write(self._path, payload)
+            except OSError as error:
+                raise AaplOperationalStateError(
+                    "operational alert state could not be written"
+                ) from error
 
     def load(self) -> OperationalAlertState:
         """Load valid monitor state without creating a missing file."""
         with self._lock:
-            if not self._path.exists():
+            has_journal = self._journal.has_data()
+            has_legacy = self._path.exists()
+
+            legacy_state: OperationalAlertState | None = None
+            if has_legacy:
+                try:
+                    legacy_state = OperationalAlertState.model_validate_json(
+                        self._path.read_text(encoding="utf-8")
+                    )
+                except (OSError, UnicodeError, ValueError) as error:
+                    self._cached_state = None
+                    raise AaplOperationalStateError(
+                        "operational alert state is malformed or unreadable"
+                    ) from error
+
+            if self._cached_state is not None:
+                return self._cached_state
+
+            if not has_journal and not has_legacy:
                 return OperationalAlertState(screenings=(), events=(), transitions=())
+
+            legacy_screenings: list[OperationalScreeningResult] = []
+            legacy_events: list[OperationalAlertEvent] = []
+            legacy_transitions: list[OperationalAlertTransition] = []
+            if has_legacy and legacy_state is not None:
+                if self._is_preexisting_legacy:
+                    if not self._journal.has_legacy_v1_folded():
+                        legacy_screenings = list(legacy_state.screenings)
+                        legacy_events = list(legacy_state.events)
+                        legacy_transitions = list(legacy_state.transitions)
+                else:
+                    legacy_screenings = list(legacy_state.screenings)
+                    legacy_events = list(legacy_state.events)
+                    legacy_transitions = list(legacy_state.transitions)
+
             try:
-                return OperationalAlertState.model_validate_json(
+                journal_records = self._journal.read_entries()
+            except AaplOperationalStateError as error:
+                raise AaplOperationalStateError(
+                    "operational alert state is malformed or unreadable"
+                ) from error
+
+            journal_screenings: list[OperationalScreeningResult] = []
+            journal_events: list[OperationalAlertEvent] = []
+            journal_transitions: list[OperationalAlertTransition] = []
+
+            for record in journal_records:
+                if not isinstance(record, dict):
+                    raise AaplOperationalStateError(
+                        "operational alert state is malformed or unreadable"
+                    )
+                collection = record.get("collection")
+                item = record.get("item")
+                if not isinstance(item, dict):
+                    raise AaplOperationalStateError(
+                        "operational alert state is malformed or unreadable"
+                    )
+                try:
+                    if collection == "screening":
+                        journal_screenings.append(OperationalScreeningResult.model_validate(item))
+                    elif collection == "event":
+                        journal_events.append(OperationalAlertEvent.model_validate(item))
+                    elif collection == "transition":
+                        journal_transitions.append(OperationalAlertTransition.model_validate(item))
+                    else:
+                        raise AaplOperationalStateError(
+                            "operational alert state is malformed or unreadable"
+                        )
+                except (ValueError, TypeError) as error:
+                    raise AaplOperationalStateError(
+                        "operational alert state is malformed or unreadable"
+                    ) from error
+
+            if not self._is_preexisting_legacy and legacy_state is not None and has_legacy:
+                allowed_result_ids = {s.result_id for s in legacy_state.screenings}
+                allowed_event_ids = {e.alert_id for e in legacy_state.events}
+                journal_screenings = [
+                    s for s in journal_screenings if s.result_id in allowed_result_ids
+                ]
+                journal_events = [e for e in journal_events if e.alert_id in allowed_event_ids]
+
+            by_result: dict[UUID, OperationalScreeningResult] = {
+                item.result_id: item for item in legacy_screenings
+            }
+            for s in journal_screenings:
+                existing_s = by_result.get(s.result_id)
+                if existing_s is not None:
+                    if existing_s.semantic_fingerprint() != s.semantic_fingerprint():
+                        raise AaplOperationalStateError(
+                            "screening recomputation changed deterministic semantics"
+                        )
+                else:
+                    by_result[s.result_id] = s
+
+            by_alert: dict[UUID, OperationalAlertEvent] = {
+                item.alert_id: item for item in legacy_events
+            }
+            for e in journal_events:
+                existing_e = by_alert.get(e.alert_id)
+                if existing_e is not None:
+                    if existing_e.semantic_fingerprint() != e.semantic_fingerprint():
+                        raise AaplOperationalStateError(
+                            "alert recomputation changed deterministic semantics"
+                        )
+                else:
+                    by_alert[e.alert_id] = e
+
+            by_transition: dict[UUID, OperationalAlertTransition] = {
+                item.transition_id: item for item in legacy_transitions
+            }
+            for t in journal_transitions:
+                by_transition[t.transition_id] = t
+
+            sorted_transitions = tuple(
+                sorted(
+                    by_transition.values(),
+                    key=lambda item: (item.recorded_at, str(item.transition_id)),
+                )
+            )
+
+            projected = {
+                item.alert_id: OperationalAlertEventStatus.NEW for item in by_alert.values()
+            }
+            for t in sorted_transitions:
+                projected[t.alert_id] = t.to_status
+
+            updated_events = {
+                alert_id: event.model_copy(update={"status": projected.get(alert_id, event.status)})
+                for alert_id, event in by_alert.items()
+            }
+
+            sorted_screenings = tuple(
+                sorted(
+                    by_result.values(),
+                    key=lambda item: (item.known_at, str(item.result_id)),
+                )
+            )
+            sorted_events = tuple(
+                sorted(
+                    updated_events.values(),
+                    key=lambda item: (item.first_activated_at, str(item.alert_id)),
+                )
+            )
+
+            try:
+                state = OperationalAlertState(
+                    screenings=sorted_screenings,
+                    events=sorted_events,
+                    transitions=sorted_transitions,
+                )
+            except ValueError as error:
+                raise AaplOperationalStateError(
+                    "operational alert state is malformed or unreadable"
+                ) from error
+
+            self._cached_state = state
+            return state
+
+    def _ensure_legacy_v1_folded(self) -> None:
+        if self._is_preexisting_legacy:
+            marker_file = self._journal_dir / ".legacy_v1_preserved"
+            if not marker_file.is_file() and self._journal_dir.is_dir():
+                with suppress(OSError):
+                    marker_file.touch()
+        if self._path.exists() and not self._journal.has_legacy_v1_folded():
+            try:
+                legacy_state = OperationalAlertState.model_validate_json(
                     self._path.read_text(encoding="utf-8")
                 )
+                legacy_records = (
+                    [
+                        {"collection": "screening", "item": item.to_json_dict()}
+                        for item in legacy_state.screenings
+                    ]
+                    + [
+                        {"collection": "event", "item": item.to_json_dict()}
+                        for item in legacy_state.events
+                    ]
+                    + [
+                        {"collection": "transition", "item": item.to_json_dict()}
+                        for item in legacy_state.transitions
+                    ]
+                )
+                if legacy_records:
+                    self._journal.initialize_snapshot_with_legacy(legacy_records)
+                else:
+                    self._journal.mark_legacy_v1_folded()
+                if self._is_preexisting_legacy:
+                    marker_file = self._journal_dir / ".legacy_v1_preserved"
+                    with suppress(OSError):
+                        marker_file.touch()
             except (OSError, UnicodeError, ValueError) as error:
                 raise AaplOperationalStateError(
                     "operational alert state is malformed or unreadable"
+                ) from error
+
+        if not self._path.exists():
+            try:
+                stub = (
+                    b'{"events":[],"schema_version":"operational-alert-state-v1",'
+                    b'"screenings":[],"transitions":[]}\n'
+                )
+                atomic_write(self._path, stub)
+                self._journal.mark_legacy_v1_folded()
+            except OSError as error:
+                raise AaplOperationalStateError(
+                    "operational alert state could not be written"
                 ) from error
 
     def begin_reconciliation(self) -> None:
@@ -369,8 +669,8 @@ class OperationalAlertStateStore:
             state = self._reconciliation_state if self._reconciling else self.load()
             by_result = {item.result_id: item for item in state.screenings}
             by_alert = {item.alert_id: item for item in state.events}
-            created_results = 0
-            created_events = 0
+            created_results: list[OperationalScreeningResult] = []
+            created_events: list[OperationalAlertEvent] = []
             for result in screenings:
                 existing = by_result.get(result.result_id)
                 if existing is not None:
@@ -380,7 +680,7 @@ class OperationalAlertStateStore:
                         )
                     continue
                 by_result[result.result_id] = result
-                created_results += 1
+                created_results.append(result)
             for event in events:
                 existing = by_alert.get(event.alert_id)
                 if existing is not None:
@@ -394,7 +694,7 @@ class OperationalAlertStateStore:
                         "alert event cannot be stored without its screening result"
                     )
                 by_alert[event.alert_id] = event
-                created_events += 1
+                created_events.append(event)
             if created_results or created_events:
                 snapshot = OperationalAlertState(
                     screenings=tuple(
@@ -414,13 +714,20 @@ class OperationalAlertStateStore:
                     ),
                     transitions=state.transitions,
                 )
-                self._write(snapshot)
+                self._ensure_legacy_v1_folded()
+                for result in created_results:
+                    self._journal.append({"collection": "screening", "item": result.to_json_dict()})
+                for event in created_events:
+                    self._journal.append({"collection": "event", "item": event.to_json_dict()})
+
+                self._cached_state = snapshot
                 if self._reconciling:
                     self._reconciliation_state = snapshot
                     self._reconciliation_result_ids = {
                         item.result_id for item in snapshot.screenings
                     }
-            return created_results, created_events
+                self._sync_path(snapshot)
+            return len(created_results), len(created_events)
 
     def transition(
         self,
@@ -500,9 +807,12 @@ class OperationalAlertStateStore:
                 ),
                 transitions=transitions,
             )
-            self._write(snapshot)
+            self._ensure_legacy_v1_folded()
+            self._journal.append({"collection": "transition", "item": transition.to_json_dict()})
+            self._cached_state = snapshot
             if self._reconciling:
                 self._reconciliation_state = snapshot
+            self._sync_path(snapshot)
             return updated, True
 
     def resolve_recovered_job(
@@ -539,22 +849,23 @@ class OperationalAlertStateStore:
                 )
             events = {item.alert_id: item for item in state.events}
             transitions = list(state.transitions)
+            new_transitions: list[OperationalAlertTransition] = []
             for current in recoverable:
-                transitions.append(
-                    OperationalAlertTransition(
-                        transition_id=_alert_transition_id(
-                            current.alert_id,
-                            current.status,
-                            OperationalAlertEventStatus.RESOLVED,
-                            recorded_at,
-                        ),
-                        alert_id=current.alert_id,
-                        from_status=current.status,
-                        to_status=OperationalAlertEventStatus.RESOLVED,
-                        recorded_at=recorded_at,
-                        actor="system_recovery",
-                    )
+                tr = OperationalAlertTransition(
+                    transition_id=_alert_transition_id(
+                        current.alert_id,
+                        current.status,
+                        OperationalAlertEventStatus.RESOLVED,
+                        recorded_at,
+                    ),
+                    alert_id=current.alert_id,
+                    from_status=current.status,
+                    to_status=OperationalAlertEventStatus.RESOLVED,
+                    recorded_at=recorded_at,
+                    actor="system_recovery",
                 )
+                new_transitions.append(tr)
+                transitions.append(tr)
                 events[current.alert_id] = current.model_copy(
                     update={"status": OperationalAlertEventStatus.RESOLVED}
                 )
@@ -576,9 +887,13 @@ class OperationalAlertStateStore:
                     )
                 ),
             )
-            self._write(snapshot)
+            self._ensure_legacy_v1_folded()
+            for tr in new_transitions:
+                self._journal.append({"collection": "transition", "item": tr.to_json_dict()})
+            self._cached_state = snapshot
             if self._reconciling:
                 self._reconciliation_state = snapshot
+            self._sync_path(snapshot)
             return len(recoverable)
 
     def status(self) -> OperationalAlertInboxStatus:
@@ -608,6 +923,7 @@ class OperationalAlertStateStore:
         return OperationalAlertInbox(total=len(ordered), events=ordered[:limit])
 
     def _write(self, state: OperationalAlertState) -> None:
+        self._cached_state = state
         document = (
             json.dumps(
                 state.to_json_dict(),
@@ -617,30 +933,7 @@ class OperationalAlertStateStore:
             ).encode("utf-8")
             + b"\n"
         )
-        temporary = self._path.with_name(f".{self._path.name}.{uuid4().hex}.tmp")
-        descriptor: int | None = None
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(descriptor, "wb", closefd=True) as stream:
-                descriptor = None
-                stream.write(document)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self._path)
-            directory = os.open(self._path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        except OSError as error:
-            raise AaplOperationalStateError(
-                "operational alert state could not be written"
-            ) from error
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            temporary.unlink(missing_ok=True)
+        atomic_write(self._path, document)
 
 
 class OperationalAlertEngine:

@@ -1,5 +1,6 @@
 """Persistence, lifecycle, and scheduler integration for analytical candidates."""
 
+import json
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -27,6 +28,7 @@ from investment_analyst.alerts.analytical_state import (
     AnalyticalCandidateStatus,
     AnalyticalMonitorReceipt,
     AnalyticalMonitorReceiptStatus,
+    AnalyticalScreeningState,
     AnalyticalScreeningStateStore,
 )
 from investment_analyst.analytics.metric_identity_v2 import metric_result_id_v2
@@ -756,3 +758,167 @@ def test_monitor_records_failure_and_unchanged_attempts_without_reading_storage(
         "attempt_failed",
         "unchanged_evidence",
     }
+
+
+def test_journal_append_does_not_reserialize_history_and_reconstructs_the_same_state(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "screening_state.json"
+    store = AnalyticalScreeningStateStore(path)
+    first = _result(
+        "1.7",
+        identifier=1,
+        as_of=datetime(2026, 7, 27, tzinfo=UTC),
+        known_at=datetime(2026, 7, 28, 12, tzinfo=UTC),
+    )
+    _record_result(store, first, identifier=1)
+
+    manifest = store._journal._load_manifest()
+    assert manifest is not None
+    open_segment = store.journal_dir / manifest.open_segment_name
+    assert open_segment.exists()
+    size_after_first = open_segment.stat().st_size
+    assert size_after_first > 0
+
+    second = _result(
+        "1.8",
+        identifier=2,
+        as_of=datetime(2026, 7, 28, tzinfo=UTC),
+        known_at=datetime(2026, 7, 29, 12, tzinfo=UTC),
+    )
+    outcome = _record_result(store, second, identifier=2)
+    assert outcome.candidates_created == 1
+
+    size_after_second = open_segment.stat().st_size
+    delta = size_after_second - size_after_first
+    assert delta < size_after_first * 2
+
+    candidate = store.load().candidates[0]
+    transition_time = datetime(2026, 7, 29, 14, tzinfo=UTC)
+    store.transition(
+        candidate.candidate_id,
+        AnalyticalCandidateStatus.SEEN,
+        recorded_at=transition_time,
+    )
+
+    size_after_transition = open_segment.stat().st_size
+    transition_delta = size_after_transition - size_after_second
+    assert 100 < transition_delta < 600
+
+    reconstructed = store.load()
+    assert len(reconstructed.results) == 2
+    assert len(reconstructed.candidates) == 1
+    assert len(reconstructed.transitions) == 1
+    assert reconstructed.candidates[0].status is AnalyticalCandidateStatus.SEEN
+
+    fresh_store = AnalyticalScreeningStateStore(path)
+    reloaded = fresh_store.load()
+    assert reloaded.to_json_dict() == reconstructed.to_json_dict()
+    assert reloaded == reconstructed
+
+
+def test_contains_attempt_answers_without_reparsing_the_full_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = AnalyticalScreeningStateStore(tmp_path / "state.json")
+    first = _result(
+        "1.7",
+        identifier=1,
+        as_of=datetime(2026, 7, 27, tzinfo=UTC),
+        known_at=datetime(2026, 7, 28, 12, tzinfo=UTC),
+    )
+    second = _result(
+        "1.8",
+        identifier=2,
+        as_of=datetime(2026, 7, 28, tzinfo=UTC),
+        known_at=datetime(2026, 7, 29, 12, tzinfo=UTC),
+    )
+    _record_result(store, first, identifier=1)
+    _record_result(store, second, identifier=2)
+
+    attempt1_id = UUID("20000000-0000-4000-8000-000000000001")
+    attempt2_id = UUID("20000000-0000-4000-8000-000000000002")
+    unknown_id = UUID("20000000-0000-4000-8000-999999999999")
+
+    def fail_read_entries(*args, **kwargs):
+        pytest.fail("read_entries should not be called by contains_attempt on a warm cache")
+
+    loads_calls = 0
+    orig_loads = json.loads
+
+    def counting_loads(*args, **kwargs):
+        nonlocal loads_calls
+        loads_calls += 1
+        return orig_loads(*args, **kwargs)
+
+    monkeypatch.setattr(store._journal, "read_entries", fail_read_entries)
+    monkeypatch.setattr(json, "loads", counting_loads)
+
+    for _ in range(10):
+        assert store.contains_attempt(attempt1_id) is True
+        assert store.contains_attempt(attempt2_id) is True
+        assert store.contains_attempt(unknown_id) is False
+
+    assert loads_calls == 0
+
+
+def test_legacy_v1_state_is_folded_once_and_preserved_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    legacy_path = tmp_path / "screening_state_v1.json"
+    first = _result(
+        "1.7",
+        identifier=1,
+        as_of=datetime(2026, 7, 27, tzinfo=UTC),
+        known_at=datetime(2026, 7, 28, 12, tzinfo=UTC),
+    )
+    first_receipt = _receipt(first, identifier=1)
+    legacy_state = AnalyticalScreeningState(
+        results=(first,),
+        candidates=(),
+        transitions=(),
+        receipts=(first_receipt,),
+    )
+    legacy_payload = (
+        json.dumps(
+            legacy_state.to_json_dict(),
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    legacy_path.write_bytes(legacy_payload)
+    original_bytes = legacy_path.read_bytes()
+
+    store = AnalyticalScreeningStateStore(legacy_path)
+
+    loaded_initial = store.load()
+    assert len(loaded_initial.results) == 1
+    assert len(loaded_initial.receipts) == 1
+    assert legacy_path.read_bytes() == original_bytes
+
+    second = _result(
+        "1.8",
+        identifier=2,
+        as_of=datetime(2026, 7, 28, tzinfo=UTC),
+        known_at=datetime(2026, 7, 29, 12, tzinfo=UTC),
+    )
+    outcome = _record_result(store, second, identifier=2)
+    assert outcome.candidates_created == 1
+
+    assert legacy_path.read_bytes() == original_bytes
+
+    reloaded = store.load()
+    assert len(reloaded.results) == 2
+    assert len(reloaded.receipts) == 2
+    assert len(reloaded.candidates) == 1
+
+    assert store._journal.has_legacy_v1_folded()
+    assert store._journal.has_snapshot()
+
+    legacy_path.unlink()
+    reloaded_after_delete = store.load()
+    assert len(reloaded_after_delete.results) == 2
+    assert len(reloaded_after_delete.receipts) == 2
+    assert len(reloaded_after_delete.candidates) == 1
