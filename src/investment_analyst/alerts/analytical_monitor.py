@@ -7,6 +7,7 @@ from pathlib import Path
 from investment_analyst.alerts.analytical_engine import (
     AmbiguousAnalyticalMetricError,
     AnalyticalScreeningEngine,
+    AnalyticalScreeningError,
 )
 from investment_analyst.alerts.analytical_models import (
     AnalyticalScreeningDomain,
@@ -19,7 +20,11 @@ from investment_analyst.alerts.analytical_state import (
     AnalyticalScreeningReconciliation,
     AnalyticalScreeningStateStore,
 )
-from investment_analyst.analytics.metric_identity_cut import metric_cut_eligibility
+from investment_analyst.analytics.metric_identity_cut import (
+    CutIdentityVersion,
+    metric_cut_eligibility,
+    resolve_cut_identity_version,
+)
 from investment_analyst.application.multi_asset_scheduler import (
     ScheduledJobAttempt,
     ScheduledJobAttemptStatus,
@@ -31,6 +36,22 @@ from investment_analyst.application.runtime import (
 )
 from investment_analyst.core.models import MetricResult
 from investment_analyst.workspace.models import WorkspaceAccessMode
+
+ANALYTICAL_WINDOW_REVISION_SELECTION_POLICY = "analytical-window-revision-selection-v1"
+
+WINDOW_DEPENDENT_METRIC_KEYS: frozenset[str] = frozenset(
+    {
+        "market.technical.ema",
+        "market.technical.rsi",
+        "market.technical.rsi.average_gain",
+        "market.technical.rsi.average_loss",
+        "market.technical.macd.line",
+        "market.technical.macd.signal",
+        "market.technical.macd.histogram",
+        "market.technical.atr",
+        "market.technical.true_range",
+    }
+)
 
 
 class AnalyticalMetricSnapshotSelector:
@@ -82,6 +103,26 @@ class AnalyticalMetricSnapshotSelector:
                 candidates = tuple(
                     item for item in candidates if item.available_at == latest_available
                 )
+            if (
+                len(candidates) > 1
+                and condition.metric_key in WINDOW_DEPENDENT_METRIC_KEYS
+                and all(
+                    resolve_cut_identity_version(item) is CutIdentityVersion.V2
+                    for item in candidates
+                )
+            ):
+                eligible_by_computed_at = tuple(
+                    item for item in candidates if item.computed_at <= known_at
+                )
+                if eligible_by_computed_at:
+                    latest_computed_at = max(item.computed_at for item in eligible_by_computed_at)
+                    best_candidates = tuple(
+                        item
+                        for item in eligible_by_computed_at
+                        if item.computed_at == latest_computed_at
+                    )
+                    if len(best_candidates) == 1:
+                        candidates = best_candidates
             if len(candidates) > 1:
                 raise AmbiguousAnalyticalMetricError(
                     f"{condition.condition_id}: multiple compatible metric revisions exist"
@@ -179,25 +220,36 @@ class AnalyticalScreeningMonitor:
         computed_at = self._normalized_clock()
         if computed_at < known_at:
             computed_at = known_at
-        results = tuple(
-            self._engine.evaluate(
-                AnalyticalScreeningRequest(
-                    rule=rule,
-                    asset_id=asset.asset_id,
-                    asset_class=asset.asset_class,
-                    source_id=source_id,
-                    known_at=known_at,
-                    computed_at=computed_at,
-                    metrics=self._selector.select(
+        try:
+            results = tuple(
+                self._engine.evaluate(
+                    AnalyticalScreeningRequest(
                         rule=rule,
-                        metrics=metrics,
+                        asset_id=asset.asset_id,
+                        asset_class=asset.asset_class,
                         source_id=source_id,
                         known_at=known_at,
-                    ),
+                        computed_at=computed_at,
+                        metrics=self._selector.select(
+                            rule=rule,
+                            metrics=metrics,
+                            source_id=source_id,
+                            known_at=known_at,
+                        ),
+                    )
                 )
+                for rule in rules
             )
-            for rule in rules
-        )
+        except AnalyticalScreeningError as error:
+            reason = str(error).strip()
+            self._record_skipped(
+                attempt,
+                f"screening_error:{reason}"
+                if reason
+                else f"screening_error:{type(error).__name__}",
+                reconciliation=reconciliation,
+            )
+            return
         receipt = AnalyticalMonitorReceipt(
             attempt_id=attempt.attempt_id,
             job_id=attempt.definition.job_id,
@@ -270,6 +322,8 @@ def _analytical_domain(domain: ScheduledJobDomain) -> AnalyticalScreeningDomain 
 
 
 __all__ = [
+    "ANALYTICAL_WINDOW_REVISION_SELECTION_POLICY",
+    "WINDOW_DEPENDENT_METRIC_KEYS",
     "AnalyticalMetricSnapshotSelector",
     "AnalyticalScreeningMonitor",
 ]

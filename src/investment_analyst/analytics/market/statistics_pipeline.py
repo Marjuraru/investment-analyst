@@ -1,6 +1,7 @@
 """Persistence pipeline for point-in-time historical market statistics."""
 
 from collections import Counter
+from collections.abc import Collection
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -32,6 +33,7 @@ from investment_analyst.core.models import DataQuality, MetricResult
 from investment_analyst.core.operation_control import check_operation_cancelled
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import RecordNotFoundError
+from investment_analyst.storage.repositories import DuckDBMetricResultRepository
 
 
 class MarketStatisticsPipelineError(RuntimeError):
@@ -40,6 +42,25 @@ class MarketStatisticsPipelineError(RuntimeError):
 
 class MetricIdentityConflictError(MarketStatisticsPipelineError):
     """Raised when a deterministic metric ID maps to different analytical content."""
+
+
+def _lookup_existing_metrics(
+    repository: DuckDBMetricResultRepository,
+    identifiers: Collection[UUID],
+) -> dict[UUID, MetricResult]:
+    if not identifiers:
+        return {}
+    try:
+        return repository.get_many(identifiers)
+    except RecordNotFoundError:
+        pass
+    found: dict[UUID, MetricResult] = {}
+    for identifier in identifiers:
+        try:
+            found[identifier] = repository.get(identifier)
+        except RecordNotFoundError:
+            continue
+    return found
 
 
 def _utc_now() -> datetime:
@@ -107,16 +128,8 @@ class MarketStatisticsPipeline:
             (calculation, semantic_metric_result_id(calculation))
             for calculation in ordered_calculations
         ]
-        as_of_values = [calculation.as_of for calculation, _ in calc_entries]
-        if as_of_values:
-            existing_metrics = self._storage.metric_results.list(
-                asset_id=request.query.asset_id,
-                as_of_from=min(as_of_values),
-                as_of_to=max(as_of_values),
-            )
-            existing_map = {m.result_id: m for m in existing_metrics}
-        else:
-            existing_map = {}
+        identifiers = {identifier for _, identifier in calc_entries}
+        existing_map = _lookup_existing_metrics(self._storage.metric_results, identifiers)
 
         created = 0
         reused = 0
