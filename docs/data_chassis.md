@@ -408,6 +408,25 @@ La política de contención establece:
 3. **Exclusión de la reconstrucción (etapa 8):** en la etapa 8 (rebuild y cutover a workspace v2), el minutario persistido quedará formalmente excluido de la reconstrucción hacia v2, recuperando el espacio ocupado sin alterar la historia diaria.
 4. **Retirada de la superficie del gráfico:** el selector de intervalos del gráfico en la interfaz local (`app-core.js`) ofrece exclusivamente intervalos diarios para todos los activos (`auto`, `1d`, `1w`, `1mo`), y cualquier preferencia intradía previa persistida en el navegador cae al valor diario por defecto (`auto`) sin error y sin emitir peticiones a la API intradía.
 
+## Etapa 6: Journal operacional acotado y adopción en el historial del scheduler (`DATA-CHASSIS-13`)
+
+Por decisión de PLAN y autorización explícita del Work Block `DATA-CHASSIS-13`, la etapa 6 se abre adelantada a la etapa 5 (indicadores incrementales). La justificación de orden se fundamenta en que el scheduler reescribía el historial completo de intentos en cada corrida en disco (`attempts`), con límite hardcodeado de 100.000 entradas y riesgo de amplificación de I/O O(n), mientras que la infraestructura de journal append-only acotado es completamente ortogonal a las fórmulas de indicadores e introduce una base duradera de baja latencia sin reescrituras globales.
+
+`DATA-CHASSIS-13` entrega:
+
+1. **Abstracción reutilizable de journal acotado (`BoundedOperationalJournal`):**
+   - Contrato puro, tipado y validado en `application/bounded_journal.py` con modelos Pydantic inmutables (`frozen=True`, `extra="forbid"`, sin `Any`).
+   - Formato append-only segmentado (`segment_max_bytes=1_048_576`, `snapshot_interval_records=100`).
+   - Manifiesto `journal_manifest_v1` con digest SHA-256 de snapshot y de cada segmento completado (`journal_segment_v1`).
+   - Recuperación ante caídas (*crash recovery*) que trunca limpiamente registros trailing incompletos o no delimitados por newline en el segmento activo, pero falla cerrado ante segmentos cerrados con hash alterado o snapshots corruptos.
+   - Plegado determinista de snapshots a través de `fold_fn` inyectable por el dominio llamador.
+2. **Adopción en el scheduler (`MultiAssetScheduleStateStore`):**
+   - El historial de intentos de ejecución migra de reescritura monolítica a persistencia append-only en el journal operacional bajo `state_root / "scheduler_attempts_journal"`.
+   - Se mantiene la compatibilidad byte a byte y la API pública (`load`, `write_attempt`, `write_attempt_from_state`).
+   - Estado legado `multi-asset-schedule-state-v1` se lee y se pliega en un snapshot inicial sin reescribir ni mutar el archivo legado original.
+   - Preservación de la sonda operacional OPS-8: si el archivo legado v1 no existía, el store asegura un archivo base para compatibilidad con verificadores de pre-existencia que inspeccionan rutas fijas.
+   - Validación estricta en `load()`: si el archivo v1 existente en disco se corrompe posteriormente, la carga falla cerrado conforme a los invariantes de resiliencia del sistema.
+
 ## Durabilidad inmediata
 
 
