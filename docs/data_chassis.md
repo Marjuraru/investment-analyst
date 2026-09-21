@@ -408,7 +408,7 @@ La política de contención establece:
 3. **Exclusión de la reconstrucción (etapa 8):** en la etapa 8 (rebuild y cutover a workspace v2), el minutario persistido quedará formalmente excluido de la reconstrucción hacia v2, recuperando el espacio ocupado sin alterar la historia diaria.
 4. **Retirada de la superficie del gráfico:** el selector de intervalos del gráfico en la interfaz local (`app-core.js`) ofrece exclusivamente intervalos diarios para todos los activos (`auto`, `1d`, `1w`, `1mo`), y cualquier preferencia intradía previa persistida en el navegador cae al valor diario por defecto (`auto`) sin error y sin emitir peticiones a la API intradía.
 
-## Etapa 6: Journal operacional acotado y adopción en el historial del scheduler (`DATA-CHASSIS-13`)
+## Etapa 6: Journal operacional acotado en scheduler, alertas operacionales y screening analítico (`DATA-CHASSIS-13` y `DATA-CHASSIS-16`)
 
 Por decisión de PLAN y autorización explícita del Work Block `DATA-CHASSIS-13`, la etapa 6 se abre adelantada a la etapa 5 (indicadores incrementales). La justificación de orden se fundamenta en que el scheduler reescribía el historial completo de intentos en cada corrida en disco (`attempts`), con límite hardcodeado de 100.000 entradas y riesgo de amplificación de I/O O(n), mientras que la infraestructura de journal append-only acotado es completamente ortogonal a las fórmulas de indicadores e introduce una base duradera de baja latencia sin reescrituras globales.
 
@@ -426,6 +426,25 @@ Por decisión de PLAN y autorización explícita del Work Block `DATA-CHASSIS-13
    - Estado legado `multi-asset-schedule-state-v1` se lee y se pliega en un snapshot inicial sin reescribir ni mutar el archivo legado original.
    - Preservación de la sonda operacional OPS-8: si el archivo legado v1 no existía, el store asegura un archivo base para compatibilidad con verificadores de pre-existencia que inspeccionan rutas fijas.
    - Validación estricta en `load()`: si el archivo v1 existente en disco se corrompe posteriormente, la carga falla cerrado conforme a los invariantes de resiliencia del sistema.
+
+### Adopción en alertas operacionales y screening analítico (`DATA-CHASSIS-16`)
+
+`DATA-CHASSIS-16` completa el trabajo de código de la Etapa 6 extendiendo la persistencia por journal append-only acotado a los dos almacenes restantes de estado operacional con escrituras frecuentes:
+
+1. **`OperationalAlertStateStore` (`application/operational_alerts.py`):**
+   - Migra el estado de eventos de alerta, resultados de screening operacional y transiciones de usuario a un journal bajo `<stem>_journal` (`journal_id="operational-alerts"`).
+   - Reemplaza la reescritura monolítica de todo el documento JSON en `record()`, `transition()` y `resolve_recovered_job()` por appends en O(1) de entradas categorizadas por colección (`screening`, `event`, `transition`).
+   - Mantiene caché sincronizada en memoria del estado activo bajo lock para lecturas instantáneas.
+   - Plegado transparente del archivo v1 legado (`_ensure_legacy_v1_folded`): el archivo original se valida en cada `load()` estricto y se conserva byte a byte sin alteración de hash SHA-256 tras nuevos appends.
+   - Resiliencia determinista: si ocurre un corte abrupto que deje una línea parcial en el open segment, la recuperación trunca la línea incompleta preservando las transiciones y eventos confirmados.
+
+2. **`AnalyticalScreeningStateStore` (`alerts/analytical_state.py`):**
+   - Migra el estado de screening analítico (resultados de reglas, eventos de candidatos, transiciones de candidatos y recibos de intentos) a un journal bajo `<stem>_journal` (`journal_id="analytical-screening"`).
+   - Registros de intentos (`record_attempt`) y transiciones (`transition`) appendan deltas en O(1) al open segment sin reserializar la historia completa.
+   - Incorpora caché en memoria (`_cached_state`) y conjunto dedicado de identificadores de intentos observados (`_cached_attempt_ids`), permitiendo que `contains_attempt(attempt_id)` responda en O(1) con cero accesos I/O a disco y cero decodificaciones JSON repetidas en caliente.
+   - El archivo legado v1 se pliega una sola vez a snapshot inicial, conservándose intacto y permitiendo operación continua incluso ante la eliminación posterior del archivo legado.
+
+Con la adopción en ambos stores concluye la Etapa 6 a nivel de código. La verificación post-despliegue de la reducción de latencia e I/O en estado operacional se realizará en un bloque posterior de telemetría y observabilidad.
 
 ## Operación de identidad v2: Contención y selección determinista de revisiones (`DATA-CHASSIS-15`)
 

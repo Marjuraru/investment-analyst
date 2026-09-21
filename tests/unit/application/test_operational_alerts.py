@@ -1,5 +1,4 @@
-"""Tests for deterministic silent operational screening and local alerts."""
-
+import json
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from time import monotonic
@@ -396,3 +395,157 @@ def test_alert_transitions_are_audited_idempotent_and_survive_replay(
     assert state.transitions[0].from_status is OperationalAlertEventStatus.NEW
     assert state.transitions[0].to_status is OperationalAlertEventStatus.SEEN
     assert store.status().new_count == 0
+
+
+def test_journal_append_does_not_reserialize_history_and_reconstructs_the_same_state(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "alerts.json"
+    store = OperationalAlertStateStore(path)
+    engine = OperationalAlertEngine()
+
+    attempt1 = _attempt(
+        ScheduledJobAttemptStatus.FAILED,
+        attempt_id=UUID("00000000-0000-4000-8000-000000000001"),
+    )
+    results1 = engine.evaluate(attempt1, computed_at=attempt1.completed_at)
+    events1 = engine.events_for(results1)
+
+    store.record(results1, events1)
+    manifest = store._journal._load_manifest()
+    assert manifest is not None
+    open_segment = store.journal_dir / manifest.open_segment_name
+    assert open_segment.exists()
+    size_after_first = open_segment.stat().st_size
+    assert size_after_first > 0
+
+    attempt2 = _attempt(
+        ScheduledJobAttemptStatus.FAILED,
+        attempt_id=UUID("00000000-0000-4000-8000-000000000002"),
+    )
+    results2 = engine.evaluate(attempt2, computed_at=attempt2.completed_at)
+    events2 = engine.events_for(results2)
+    store.record(results2, events2)
+
+    size_after_second = open_segment.stat().st_size
+    delta = size_after_second - size_after_first
+    assert delta < size_after_first * 2
+
+    alert1_id = events1[0].alert_id
+    recorded_at = datetime(2026, 7, 29, 12, 10, tzinfo=UTC)
+    store.transition(alert1_id, OperationalAlertEventStatus.SEEN, recorded_at=recorded_at)
+
+    size_after_transition = open_segment.stat().st_size
+    transition_delta = size_after_transition - size_after_second
+    assert 100 < transition_delta < 500
+
+    reconstructed = store.load()
+    assert len(reconstructed.screenings) == len(results1) + len(results2)
+    assert len(reconstructed.events) == 2
+    assert len(reconstructed.transitions) == 1
+    events_by_id = {e.alert_id: e for e in reconstructed.events}
+    assert events_by_id[alert1_id].status is OperationalAlertEventStatus.SEEN
+
+    fresh_store = OperationalAlertStateStore(path)
+    reloaded = fresh_store.load()
+    assert reloaded.to_json_dict() == reconstructed.to_json_dict()
+    assert reloaded == reconstructed
+
+
+def test_legacy_v1_state_is_folded_once_and_preserved_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    legacy_path = tmp_path / "operational_alert_state_v1.json"
+    engine = OperationalAlertEngine()
+    attempt1 = _attempt(
+        ScheduledJobAttemptStatus.FAILED,
+        attempt_id=UUID("00000000-0000-4000-8000-000000000010"),
+    )
+    results1 = engine.evaluate(attempt1, computed_at=attempt1.completed_at)
+    events1 = engine.events_for(results1)
+
+    legacy_state = OperationalAlertState(
+        screenings=tuple(sorted(results1, key=lambda item: (item.known_at, str(item.result_id)))),
+        events=tuple(
+            sorted(events1, key=lambda item: (item.first_activated_at, str(item.alert_id)))
+        ),
+        transitions=(),
+    )
+    legacy_payload = (
+        json.dumps(
+            legacy_state.to_json_dict(),
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    legacy_path.write_bytes(legacy_payload)
+    original_bytes = legacy_path.read_bytes()
+
+    store = OperationalAlertStateStore(legacy_path)
+
+    loaded_initial = store.load()
+    assert len(loaded_initial.screenings) == len(results1)
+    assert len(loaded_initial.events) == 1
+    assert legacy_path.read_bytes() == original_bytes
+
+    attempt2 = _attempt(
+        ScheduledJobAttemptStatus.FAILED,
+        attempt_id=UUID("00000000-0000-4000-8000-000000000020"),
+    )
+    results2 = engine.evaluate(attempt2, computed_at=attempt2.completed_at)
+    events2 = engine.events_for(results2)
+    store.record(results2, events2)
+
+    assert legacy_path.read_bytes() == original_bytes
+
+    reloaded = store.load()
+    assert len(reloaded.screenings) == len(results1) + len(results2)
+    assert len(reloaded.events) == 2
+
+    assert store._journal.has_legacy_v1_folded()
+    assert store._journal.has_snapshot()
+
+    legacy_path.unlink()
+    reloaded_after_delete = store.load()
+    assert len(reloaded_after_delete.screenings) == len(results1) + len(results2)
+    assert len(reloaded_after_delete.events) == 2
+
+
+def test_partial_trailing_line_recovers_without_losing_confirmed_transitions(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "alerts.json"
+    store = OperationalAlertStateStore(path)
+    engine = OperationalAlertEngine()
+    attempt = _attempt(ScheduledJobAttemptStatus.FAILED)
+    results = engine.evaluate(attempt, computed_at=attempt.completed_at)
+    store.record(results, engine.events_for(results))
+
+    alert_id = store.inbox().events[0].alert_id
+    t1 = datetime(2026, 7, 29, 12, 1, tzinfo=UTC)
+    t2 = datetime(2026, 7, 29, 12, 2, tzinfo=UTC)
+
+    store.transition(alert_id, OperationalAlertEventStatus.SEEN, recorded_at=t1)
+    store.transition(alert_id, OperationalAlertEventStatus.DISMISSED, recorded_at=t2)
+
+    manifest = store._journal._load_manifest()
+    assert manifest is not None
+    open_segment = store.journal_dir / manifest.open_segment_name
+
+    with open(open_segment, "ab") as stream:
+        stream.write(b'{"collection": "transition", "incomplete": true, "raw_prefix": "abc')
+
+    fresh_store = OperationalAlertStateStore(path)
+    recovered_state = fresh_store.load()
+    assert len(recovered_state.transitions) == 2
+    assert recovered_state.transitions[0].to_status is OperationalAlertEventStatus.SEEN
+    assert recovered_state.transitions[1].to_status is OperationalAlertEventStatus.DISMISSED
+    assert recovered_state.events[0].status is OperationalAlertEventStatus.DISMISSED
+
+    t3 = datetime(2026, 7, 29, 12, 3, tzinfo=UTC)
+    fresh_store.transition(alert_id, OperationalAlertEventStatus.RESOLVED, recorded_at=t3)
+    final_state = fresh_store.load()
+    assert len(final_state.transitions) == 3
+    assert final_state.transitions[2].to_status is OperationalAlertEventStatus.RESOLVED
+    assert final_state.events[0].status is OperationalAlertEventStatus.RESOLVED
