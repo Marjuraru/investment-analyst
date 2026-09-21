@@ -1137,13 +1137,11 @@ function initializeAssetSubtabs() {
 
 function applySelectedMarketAsset() {
   const presentation = marketAssetPresentation();
-  if (!presentation.intradaySourceId && BTC_INTRADAY_INTERVAL_VALUES.has(chartSettings.interval)) {
+  if (BTC_INTRADAY_INTERVAL_VALUES.has(chartSettings.interval)) {
     chartSettings = { ...chartSettings, interval: DEFAULT_CHART_SETTINGS.interval };
   }
   const intervalSelect = byId("chart-interval");
-  const intervals = presentation.intradaySourceId
-    ? [...BTC_INTRADAY_INTERVALS, ...DAILY_MARKET_INTERVALS]
-    : DAILY_MARKET_INTERVALS;
+  const intervals = DAILY_MARKET_INTERVALS;
   intervalSelect.replaceChildren(
     ...intervals.map((interval) => {
       const option = document.createElement("option");
@@ -1425,7 +1423,10 @@ function normalizeChartSettings(candidate) {
   const priceScale = candidate.priceScale === undefined ? "linear" : candidate.priceScale;
   const chartType =
     candidate.chartType === undefined ? DEFAULT_CHART_SETTINGS.chartType : candidate.chartType;
-  const interval = candidate.interval === undefined ? "auto" : candidate.interval;
+  const candidateInterval = candidate.interval === undefined ? "auto" : candidate.interval;
+  const interval = BTC_INTRADAY_INTERVAL_VALUES.has(candidateInterval)
+    ? DEFAULT_CHART_SETTINGS.interval
+    : candidateInterval;
   const colorPattern = /^#[0-9a-f]{6}$/i;
   if (
     !Number.isInteger(shortWindow) ||
@@ -1455,7 +1456,6 @@ function normalizeChartSettings(candidate) {
       "1d",
       "1w",
       "1mo",
-      ...BTC_INTRADAY_INTERVAL_VALUES,
     ].includes(interval)
   ) {
     return null;
