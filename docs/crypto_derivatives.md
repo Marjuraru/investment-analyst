@@ -39,7 +39,14 @@ interpola días.
 Book summary exige exactamente un instrumento perpetuo y conserva los nullable como ausentes. El
 campo raw de Deribit `last` se mantiene en el payload y se promueve explícitamente como observación
 `last_price`. `current_funding`, el snapshot `funding_8h` y los históricos `interest_1h` e
-`interest_8h` no son intercambiables.
+`interest_8h` no son intercambiables. La captura aplica la política versionada
+`deribit-summary-clock-tolerance-v1`: un adelanto del `creation_timestamp` publicado sobre el reloj
+local de hasta `MAX_SUMMARY_CLOCK_LEAD = 5 s` es admisible y reconcilia el instante de recepción a
+`retrieved_at = max(clock, creation_timestamp)`, garantizando `available_at >= event_time` por
+construcción sin que la evidencia quede disponible antes de su propio evento. Un adelanto superior a
+la tolerancia declarada supera el límite y falla cerrado con `DeribitError` sin escribir raw records
+ni observaciones. Funding y DVOL no aplican esta tolerancia y continúan exigiendo intervalos
+estrictamente cerrados.
 
 Cada respuesta está acotada a 4 MiB y 1.000 filas históricas. JSON truncado, números no finitos,
 shape inesperado, error JSON-RPC o estado HTTP fallan sin publicar un receipt de cobertura. El
