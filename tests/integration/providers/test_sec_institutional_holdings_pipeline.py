@@ -1,7 +1,7 @@
 import hashlib
 from datetime import UTC, date, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -11,6 +11,9 @@ from investment_analyst.evidence.sec_institutional_holdings.models import (
     INSTITUTIONAL_HOLDING_POSITION_SCHEMA_VERSION,
     INSTITUTIONAL_HOLDINGS_OUTCOME_SCHEMA_VERSION,
     INSTITUTIONAL_HOLDINGS_REPORT_SCHEMA_VERSION,
+)
+from investment_analyst.evidence.sec_institutional_holdings.repository import (
+    InstitutionalHoldingsRepository,
 )
 from investment_analyst.providers.fundamentals.sec_document_client import (
     SecAccessionManifest,
@@ -132,6 +135,116 @@ def test_pipeline_persists_two_revisions_report_and_positions_idempotently(
         assert first[0].available_at == datetime(2025, 2, 14, 18, tzinfo=UTC)
         assert first[0].value_total_matches is True
         assert backup_module._scan_raw_records(storage) == storage.raw_records.count()
+
+
+_MULTI_COVER = b"""<edgarSubmission><submissionType>13F-HR</submissionType><filingManager>
+<name>Manager LLC</name></filingManager>
+<reportCalendarOrQuarter>12-31-2024</reportCalendarOrQuarter>
+<tableEntryTotal>2</tableEntryTotal><tableValueTotal>300</tableValueTotal></edgarSubmission>"""
+_MULTI_TABLE = (
+    b"<informationTable>"
+    b"<infoTable><nameOfIssuer>APPLE INC</nameOfIssuer>"
+    b"<titleOfClass>COM</titleOfClass><cusip>037833100</cusip><value>100</value>"
+    b"<shrsOrPrnAmt><sshPrnamt>10</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt>"
+    b"<investmentDiscretion>SOLE</investmentDiscretion><votingAuthority><Sole>10</Sole>"
+    b"<Shared>0</Shared><None>0</None></votingAuthority></infoTable>"
+    b"<infoTable><nameOfIssuer>MICROSOFT CORP</nameOfIssuer>"
+    b"<titleOfClass>COM</titleOfClass><cusip>594918104</cusip><value>200</value>"
+    b"<shrsOrPrnAmt><sshPrnamt>20</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt>"
+    b"<investmentDiscretion>SOLE</investmentDiscretion><votingAuthority><Sole>20</Sole>"
+    b"<Shared>0</Shared><None>0</None></votingAuthority></infoTable>"
+    b"</informationTable>"
+)
+
+
+class _MultiDocClient(_DocumentClient):
+    def fetch(self, document):
+        if document.name == "xslForm13F_X02/primary_doc.xml":
+            content = b"<!DOCTYPE html><html><body>declared locator</body></html>"
+        else:
+            content = _MULTI_COVER if document.name == "primary_doc.xml" else _MULTI_TABLE
+        return SecPrimaryDocumentResponse(
+            content=content,
+            sha256=hashlib.sha256(content).hexdigest(),
+            size_bytes=len(content),
+            url=f"https://www.sec.gov/Archives/{document.name}",
+            retrieved_at=self._retrieved_at,
+        )
+
+
+class _DeterministicSubmissionsClient(_SubmissionsClient):
+    _FIXED_ID = UUID("11111111-1111-1111-1111-111111111111")
+
+    def fetch(self, filer_cik):
+        record = super().fetch(filer_cik)
+        return record.model_copy(update={"record_id": self._FIXED_ID})
+
+
+def test_positions_are_persisted_in_batches_with_identical_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = sec_institutional_holdings_pipeline.SecInstitutionalHoldingsImportRequest(
+        filer_cik="1067983", forms=("13F-HR",)
+    )
+    save_many_calls: list[int] = []
+    fixed_client = _DeterministicSubmissionsClient()
+
+    batch_root = tmp_path / "batch"
+    with LocalStorage(StoragePaths.from_root(batch_root)) as storage_batch:
+        original_save_many = storage_batch.raw_records.save_many
+
+        def tracking_save_many(records):
+            save_many_calls.append(len(records))
+            return original_save_many(records)
+
+        monkeypatch.setattr(storage_batch.raw_records, "save_many", tracking_save_many)
+        pipeline = sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipeline(
+            storage_batch, fixed_client, _MultiDocClient()
+        )
+        reports = pipeline.run(request)
+        assert len(reports) == 1
+        assert len(save_many_calls) == 1
+        assert save_many_calls[0] == 2
+
+        # Verify idempotence on second run
+        second_reports = pipeline.run(request)
+        assert [r.report_id for r in reports] == [r.report_id for r in second_reports]
+        assert (
+            storage_batch.raw_records.count(
+                schema_version=INSTITUTIONAL_HOLDING_POSITION_SCHEMA_VERSION
+            )
+            == 2
+        )
+        batch_positions = storage_batch.raw_records.list(
+            schema_version=INSTITUTIONAL_HOLDING_POSITION_SCHEMA_VERSION
+        )
+
+    ref_root = tmp_path / "ref"
+    with LocalStorage(StoragePaths.from_root(ref_root)) as storage_ref:
+        pipeline_ref = sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipeline(
+            storage_ref, fixed_client, _MultiDocClient()
+        )
+
+        def per_record_save_positions(self, positions):
+            for pos in positions:
+                self.save_position(pos)
+            return tuple(positions)
+
+        monkeypatch.setattr(
+            InstitutionalHoldingsRepository,
+            "save_positions",
+            per_record_save_positions,
+        )
+        reports_ref = pipeline_ref.run(request)
+        assert len(reports_ref) == 1
+
+        ref_positions = storage_ref.raw_records.list(
+            schema_version=INSTITUTIONAL_HOLDING_POSITION_SCHEMA_VERSION
+        )
+        assert len(batch_positions) == len(ref_positions) == 2
+        for b_rec, r_rec in zip(batch_positions, ref_positions, strict=True):
+            assert b_rec == r_rec
 
 
 def test_pipeline_records_rejection_for_zero_one_or_three_xml(

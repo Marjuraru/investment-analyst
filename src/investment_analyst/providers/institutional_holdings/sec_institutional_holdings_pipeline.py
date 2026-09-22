@@ -514,8 +514,7 @@ class SecInstitutionalHoldingsPipeline:
             parsed_at=parsed_at,
         )
         report = holdings.save_report(report)
-        for position in positions:
-            holdings.save_position(position)
+        holdings.save_positions(positions)
         return report
 
     def _revision(

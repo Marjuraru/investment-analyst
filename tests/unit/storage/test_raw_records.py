@@ -7,9 +7,14 @@ from uuid import uuid4
 import pytest
 
 from investment_analyst.storage import (
+    LocalStorage,
     RecordConflictError,
     RecordNotFoundError,
     StorageError,
+    StoragePaths,
+)
+from investment_analyst.storage import (
+    raw_records as raw_records_module,
 )
 
 from .conftest import make_raw_record
@@ -167,3 +172,120 @@ def test_raw_count_and_availability_bounds_use_index_filters_without_loading_doc
         source_id="alpaca:bars",
         schema_version="receipt-v1",
     ) == (start, start + timedelta(hours=1))
+
+
+def test_save_many_is_byte_identical_to_per_record_save(tmp_path: Path) -> None:
+    records = [
+        make_raw_record(record_id=uuid4()).model_copy(
+            update={"payload": {"index": i, "val": f"test_{i}"}}
+        )
+        for i in range(5)
+    ]
+    with LocalStorage(StoragePaths.from_root(tmp_path / "single")) as storage_single:
+        for record in records:
+            storage_single.raw_records.save(record)
+
+        with LocalStorage(StoragePaths.from_root(tmp_path / "batch")) as storage_batch:
+            receipt = storage_batch.raw_records.save_many(records)
+            assert receipt.created_ids == tuple(r.record_id for r in records)
+            assert receipt.reused_ids == ()
+
+            # Re-saving identical records returns all reused
+            receipt_reused = storage_batch.raw_records.save_many(records)
+            assert receipt_reused.created_ids == ()
+            assert receipt_reused.reused_ids == tuple(r.record_id for r in records)
+
+            for record in records:
+                path_single = _indexed_path(storage_single, record.record_id)
+                path_batch = _indexed_path(storage_batch, record.record_id)
+
+                assert path_single.is_file()
+                assert path_batch.is_file()
+                assert path_batch.read_bytes() == path_single.read_bytes()
+
+                row_single = storage_single.store.connection.execute(
+                    """
+                    SELECT relative_path, checksum_sha256, document_json
+                    FROM raw_record_index
+                    WHERE record_id = ?
+                    """,
+                    [str(record.record_id)],
+                ).fetchone()
+                row_batch = storage_batch.store.connection.execute(
+                    """
+                    SELECT relative_path, checksum_sha256, document_json
+                    FROM raw_record_index
+                    WHERE record_id = ?
+                    """,
+                    [str(record.record_id)],
+                ).fetchone()
+                assert row_batch == row_single
+
+                assert storage_batch.raw_records.get(record.record_id) == record
+
+
+def test_save_many_uses_a_bounded_number_of_queries(
+    storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = [
+        make_raw_record(record_id=uuid4()).model_copy(update={"payload": {"i": i}})
+        for i in range(20)
+    ]
+
+    class _ConnectionProxy:
+        def __init__(self, target):
+            self._target = target
+            self.queries: list[str] = []
+
+        def execute(self, query, *args, **kwargs):
+            self.queries.append(str(query).strip())
+            return self._target.execute(query, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._target, name)
+
+    proxy = _ConnectionProxy(storage.raw_records._connection)
+    monkeypatch.setattr(storage.raw_records, "_connection", proxy)
+
+    receipt = storage.raw_records.save_many(records)
+    assert receipt.created_count == 20
+    # 1 SELECT to check existing index + 1 INSERT for new records
+    assert len(proxy.queries) == 2
+    assert "SELECT" in proxy.queries[0]
+    assert "INSERT INTO raw_record_index" in proxy.queries[1]
+
+    proxy.queries.clear()
+    receipt_reused = storage.raw_records.save_many(records)
+    assert receipt_reused.reused_count == 20
+    # For already existing records, only 1 SELECT query is executed
+    assert len(proxy.queries) == 1
+    assert "SELECT" in proxy.queries[0]
+
+
+def test_save_many_reports_conflicts_and_preserves_previous_chunks(
+    storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(raw_records_module, "_RAW_RECORD_BATCH_CHUNK_SIZE", 2)
+
+    r1 = make_raw_record(record_id=uuid4()).model_copy(update={"payload": {"n": 1}})
+    r2 = make_raw_record(record_id=uuid4()).model_copy(update={"payload": {"n": 2}})
+    r3 = make_raw_record(record_id=uuid4()).model_copy(update={"payload": {"n": 3}})
+    r4 = make_raw_record(record_id=uuid4()).model_copy(update={"payload": {"n": 4}})
+
+    # Save r4 first so that a conflicting version can be supplied in chunk 2
+    storage.raw_records.save(r4)
+    r4_conflict = r4.model_copy(update={"schema_version": "conflicting-version"})
+
+    # Chunk 1: [r1, r2], Chunk 2: [r3, r4_conflict]
+    with pytest.raises(RecordConflictError, match="already has different content"):
+        storage.raw_records.save_many([r1, r2, r3, r4_conflict])
+
+    # Chunk 1 was saved before chunk 2 failed and must be preserved
+    assert storage.raw_records.get(r1.record_id) == r1
+    assert storage.raw_records.get(r2.record_id) == r2
+
+    # Within-chunk duplicate conflict test
+    r5 = make_raw_record(record_id=uuid4()).model_copy(update={"payload": {"n": 5}})
+    r5_diff = r5.model_copy(update={"schema_version": "conflicting-version"})
+    with pytest.raises(RecordConflictError, match="already has different content"):
+        storage.raw_records.save_many([r5, r5_diff])

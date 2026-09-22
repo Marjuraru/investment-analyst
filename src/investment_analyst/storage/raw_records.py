@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 from duckdb import DuckDBPyConnection
 
+from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import RawRecord
 from investment_analyst.storage.errors import (
     RecordConflictError,
@@ -25,6 +26,7 @@ from investment_analyst.storage.serialization import (
 
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9._-]+")
 _MAX_INDEX_INTEGRITY_RECORDS = 1_000
+_RAW_RECORD_BATCH_CHUNK_SIZE = 1_000
 
 
 def _safe_source_component(source_id: str) -> str:
@@ -115,6 +117,131 @@ class JsonRawRecordRepository:
             ],
         )
         return record
+
+    def save_many(self, records: Collection[RawRecord]) -> BatchWriteReceipt:
+        if self._read_only:
+            raise StorageError("raw records cannot be saved through read-only storage")
+        if not records:
+            return BatchWriteReceipt()
+
+        created_ids: list[UUID] = []
+        reused_ids: list[UUID] = []
+        records_list = list(records)
+
+        for i in range(0, len(records_list), _RAW_RECORD_BATCH_CHUNK_SIZE):
+            chunk = records_list[i : i + _RAW_RECORD_BATCH_CHUNK_SIZE]
+            chunk_created, chunk_reused = self._save_chunk(chunk)
+            created_ids.extend(chunk_created)
+            reused_ids.extend(chunk_reused)
+
+        return BatchWriteReceipt(
+            created_ids=tuple(created_ids),
+            reused_ids=tuple(reused_ids),
+            conflicting_ids=(),
+        )
+
+    def _save_chunk(self, chunk: list[RawRecord]) -> tuple[list[UUID], list[UUID]]:
+        chunk_created: list[UUID] = []
+        chunk_reused: list[UUID] = []
+        seen_in_chunk: dict[UUID, tuple[bytes, str, str]] = {}
+
+        for record in chunk:
+            doc_bytes = canonical_json_bytes(record)
+            doc_text = doc_bytes.decode("utf-8")
+            chk = sha256_hex(doc_bytes)
+            if record.record_id in seen_in_chunk:
+                _, existing_text, _ = seen_in_chunk[record.record_id]
+                if existing_text != doc_text:
+                    raise RecordConflictError(
+                        f"raw record {record.record_id} already has different content"
+                    )
+            else:
+                seen_in_chunk[record.record_id] = (doc_bytes, doc_text, chk)
+
+        unique_ids = tuple(seen_in_chunk.keys())
+        placeholders = ", ".join("?" for _ in unique_ids)
+        rows = self._connection.execute(
+            f"""
+            SELECT record_id, relative_path, checksum_sha256, document_json
+            FROM raw_record_index
+            WHERE record_id IN ({placeholders})
+            """,  # noqa: S608
+            [str(rid) for rid in unique_ids],
+        ).fetchall()
+        existing_index = {UUID(row[0]): (row[1], row[2], row[3]) for row in rows}
+
+        insert_rows: list[list[object]] = []
+        seen_chunk_keys: set[UUID] = set()
+
+        for record in chunk:
+            rid = record.record_id
+            doc_bytes, doc_text, chk = seen_in_chunk[rid]
+            if rid in existing_index:
+                rel_path, chk_sha, existing_text = existing_index[rid]
+                if existing_text != doc_text:
+                    raise RecordConflictError(f"raw record {rid} already has different content")
+                self._verify_file(rel_path, chk_sha)
+                chunk_reused.append(rid)
+                seen_chunk_keys.add(rid)
+            else:
+                if rid not in seen_chunk_keys:
+                    rel_path = self._relative_path(record)
+                    target = _ensure_within(self._raw_root, self._raw_root / rel_path)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if target.exists():
+                        existing_bytes = target.read_bytes()
+                        if existing_bytes != doc_bytes:
+                            raise RecordConflictError(
+                                f"raw record path for {rid} already contains different content"
+                            )
+                    else:
+                        temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+                        try:
+                            temporary.write_bytes(doc_bytes)
+                            if target.exists():
+                                existing_bytes = target.read_bytes()
+                                if existing_bytes != doc_bytes:
+                                    raise RecordConflictError(
+                                        f"raw record {rid} was created concurrently"
+                                    )
+                            else:
+                                temporary.replace(target)
+                        finally:
+                            temporary.unlink(missing_ok=True)
+
+                    chunk_created.append(rid)
+                    seen_chunk_keys.add(rid)
+                    insert_rows.append(
+                        [
+                            str(rid),
+                            record.asset_id,
+                            record.source.source_id,
+                            record.event_time,
+                            record.available_at,
+                            record.received_at,
+                            rel_path.as_posix(),
+                            chk,
+                            record.schema_version,
+                            doc_text,
+                        ]
+                    )
+                else:
+                    chunk_reused.append(rid)
+
+        if insert_rows:
+            columns = (
+                "record_id, asset_id, source_id, event_time, available_at, received_at, "
+                "relative_path, checksum_sha256, schema_version, document_json"
+            )
+            row_placeholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            values_clause = ", ".join(row_placeholder for _ in insert_rows)
+            params = [val for row_data in insert_rows for val in row_data]
+            self._connection.execute(
+                f"INSERT INTO raw_record_index ({columns}) VALUES {values_clause}",
+                params,
+            )
+
+        return chunk_created, chunk_reused
 
     def get(self, record_id: UUID) -> RawRecord:
         row = self._index_row(record_id)
