@@ -28,6 +28,7 @@ from investment_analyst.evidence.sec_ownership.repository import OwnershipReposi
 from investment_analyst.providers.fundamentals.sec_fact_models import SUBMISSIONS_SCHEMA_VERSION
 from investment_analyst.providers.ownership.sec_ownership_index import ownership_filings
 from investment_analyst.providers.ownership.sec_ownership_parser import (
+    SecOwnershipIssuerMismatchError,
     classify_ownership_resource,
     parse_ownership_statement,
 )
@@ -156,13 +157,36 @@ class SecOwnershipPipeline:
             )
             statement = ownership.get(statement_id)
             if statement is None:
-                statement = parse_ownership_statement(
-                    resolved.semantic.content,
-                    asset_id=self._configuration.asset_id,
-                    revision=revision,
-                    parsed_at=datetime.now(UTC),
+                rejected_id = OwnershipResolutionOutcome.expected_id(
+                    filing.accession,
+                    semantic_name,
+                    resolved.semantic.sha256,
+                    "rejected",
+                    OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2,
                 )
-                ownership.save(statement)
+                if ownership.get_outcome(rejected_id) is not None:
+                    continue
+                try:
+                    statement = parse_ownership_statement(
+                        resolved.semantic.content,
+                        asset_id=self._configuration.asset_id,
+                        revision=revision,
+                        parsed_at=datetime.now(UTC),
+                    )
+                    ownership.save(statement)
+                except SecOwnershipIssuerMismatchError:
+                    self._save_outcome(
+                        ownership,
+                        filing,
+                        submissions.record_id,
+                        locator.name,
+                        semantic_name,
+                        resolved.semantic,
+                        resolved.manifest,
+                        status="rejected",
+                        reason_code="issuer_not_subject_asset",
+                    )
+                    continue
             statements.append(statement)
         return tuple(statements)
 

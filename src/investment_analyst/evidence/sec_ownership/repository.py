@@ -26,7 +26,12 @@ class OwnershipRepositoryError(StorageError):
 
 
 OWNERSHIP_TERMINAL_REJECTION_REASONS = frozenset(
-    {"forbidden_declaration", "not_xml", "incompatible_root"}
+    {
+        "forbidden_declaration",
+        "not_xml",
+        "incompatible_root",
+        "issuer_not_subject_asset",
+    }
 )
 """Versioned resource rejections that end resolution for one accession."""
 
@@ -292,6 +297,8 @@ class OwnershipRepository:
 def _resolution(entry: _OwnershipAccumulator) -> Literal["accepted", "rejected", "partial"]:
     if entry.has_statement:
         return "accepted"
+    if "issuer_not_subject_asset" in entry.rejected_reasons:
+        return "rejected"
     if (
         not entry.has_accepted_outcome
         and entry.rejected_reasons & OWNERSHIP_TERMINAL_REJECTION_REASONS

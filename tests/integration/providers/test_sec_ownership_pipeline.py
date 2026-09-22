@@ -3,20 +3,27 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from investment_analyst.core.models import AssetClass, RawRecord, SourceReference
 from investment_analyst.evidence.sec_ownership.models import (
     OWNERSHIP_OUTCOME_SCHEMA_VERSION,
     OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2,
     OWNERSHIP_SCHEMA_VERSION,
     OWNERSHIP_SCHEMA_VERSION_V2,
+    OWNERSHIP_SOURCE_ID,
 )
-from investment_analyst.evidence.sec_ownership.repository import OwnershipRepository
+from investment_analyst.evidence.sec_ownership.repository import (
+    OwnershipRepository,
+    outcome_from_raw_record,
+)
 from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_document_client import (
     SecAccessionManifest,
     SecPrimaryDocumentResponse,
     SecResolvedOwnershipDocument,
 )
+from investment_analyst.providers.ownership.sec_ownership_parser import SecOwnershipParserError
 from investment_analyst.providers.ownership.sec_ownership_pipeline import (
     SecOwnershipImportRequest,
     SecOwnershipPipeline,
@@ -164,3 +171,138 @@ def test_replay_across_two_import_environments_matches_by_known_at(tmp_path: Pat
         item.available_at for item in statements_b
     ]
     assert statements_a[0].parsed_at != statements_b[0].parsed_at
+
+
+class _ForeignIssuerClient(_Client):
+    def resolve_ownership_document(self, document):
+        resolved = super().resolve_ownership_document(document)
+        content = (
+            b"<ownershipDocument>\n"
+            b"<documentType>4</documentType><periodOfReport>2025-01-30</periodOfReport>\n"
+            b"<issuer><issuerCik>0001235912</issuerCik>"
+            b"<issuerName>Foreign Corp</issuerName></issuer>\n"
+            b"<reportingOwner>\n"
+            b"<reportingOwnerId><rptOwnerCik>0000320193</rptOwnerCik>"
+            b"<rptOwnerName>Apple Inc.</rptOwnerName></reportingOwnerId>\n"
+            b"<reportingOwnerRelationship><isDirector>0</isDirector><isOfficer>0</isOfficer>"
+            b"<isTenPercentOwner>1</isTenPercentOwner><isOther>0</isOther>"
+            b"</reportingOwnerRelationship>\n"
+            b"</reportingOwner>\n"
+            b"</ownershipDocument>"
+        )
+        return SecResolvedOwnershipDocument(
+            manifest=resolved.manifest,
+            locator=resolved.locator,
+            semantic=SecPrimaryDocumentResponse(
+                content,
+                hashlib.sha256(content).hexdigest(),
+                len(content),
+                resolved.semantic.url,
+                self._retrieved_at,
+            ),
+        )
+
+
+class _InvalidFormClient(_Client):
+    def resolve_ownership_document(self, document):
+        resolved = super().resolve_ownership_document(document)
+        content = (
+            b"<ownershipDocument>\n"
+            b"<documentType>5</documentType><periodOfReport>2025-01-30</periodOfReport>\n"
+            b"<issuer><issuerCik>0000320193</issuerCik>"
+            b"<issuerName>Apple Inc.</issuerName></issuer>\n"
+            b"<reportingOwner>\n"
+            b"<reportingOwnerId><rptOwnerCik>0001234567</rptOwnerCik>"
+            b"<rptOwnerName>Owner</rptOwnerName></reportingOwnerId>\n"
+            b"<reportingOwnerRelationship><isDirector>0</isDirector><isOfficer>1</isOfficer>"
+            b"<isTenPercentOwner>0</isTenPercentOwner><isOther>0</isOther>"
+            b"</reportingOwnerRelationship>\n"
+            b"</reportingOwner>\n"
+            b"</ownershipDocument>"
+        )
+        return SecResolvedOwnershipDocument(
+            manifest=resolved.manifest,
+            locator=resolved.locator,
+            semantic=SecPrimaryDocumentResponse(
+                content,
+                hashlib.sha256(content).hexdigest(),
+                len(content),
+                resolved.semantic.url,
+                self._retrieved_at,
+            ),
+        )
+
+
+def test_foreign_issuer_document_is_recorded_as_terminal_rejection_without_statement(
+    tmp_path: Path,
+) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions())
+        pipeline = SecOwnershipPipeline(
+            storage, _ForeignIssuerClient(), configuration=_configuration()
+        )
+
+        statements = pipeline.run(SecOwnershipImportRequest(forms=("4",)))
+
+        assert len(statements) == 0
+        assert storage.raw_records.count(schema_version=OWNERSHIP_SCHEMA_VERSION_V2) == 0
+
+        states = OwnershipRepository(storage.raw_records).list_accession_states(
+            asset_id="equity:us:aapl",
+            known_at=datetime(2027, 1, 1, tzinfo=UTC),
+        )
+        assert len(states) == 1
+        assert states[0].accession == "0000320193-25-000001"
+        assert states[0].resolution == "rejected"
+        assert states[0].terminal is True
+
+
+def test_existing_accepted_outcome_is_preserved_and_a_rejected_outcome_is_appended(
+    tmp_path: Path,
+) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions())
+        pipeline = SecOwnershipPipeline(
+            storage, _ForeignIssuerClient(), configuration=_configuration()
+        )
+
+        pipeline.run(SecOwnershipImportRequest(forms=("4",)))
+
+        outcomes = [
+            outcome_from_raw_record(record)
+            for record in storage.raw_records.list(
+                asset_id="equity:us:aapl",
+                source_id=OWNERSHIP_SOURCE_ID,
+                schema_version=OWNERSHIP_OUTCOME_SCHEMA_VERSION_V2,
+            )
+        ]
+
+        reasons = {(o.status, o.reason_code) for o in outcomes}
+        assert ("accepted", "ownership_xml") in reasons
+        assert ("rejected", "issuer_not_subject_asset") in reasons
+
+        semantic_outcomes = [o for o in outcomes if o.resource_name == "form4.xml"]
+        assert len(semantic_outcomes) == 2
+        assert {o.status for o in semantic_outcomes} == {"accepted", "rejected"}
+
+
+def test_other_parser_errors_remain_non_terminal(tmp_path: Path) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions())
+        pipeline = SecOwnershipPipeline(
+            storage, _InvalidFormClient(), configuration=_configuration()
+        )
+
+        with pytest.raises(SecOwnershipParserError, match="ownership form conflicts"):
+            pipeline.run(SecOwnershipImportRequest(forms=("4",)))
+
+        assert storage.raw_records.count(schema_version=OWNERSHIP_SCHEMA_VERSION_V2) == 0
+
+        states = OwnershipRepository(storage.raw_records).list_accession_states(
+            asset_id="equity:us:aapl",
+            known_at=datetime(2027, 1, 1, tzinfo=UTC),
+        )
+        assert len(states) == 1
+        assert states[0].accession == "0000320193-25-000001"
+        assert states[0].resolution == "partial"
+        assert states[0].terminal is False

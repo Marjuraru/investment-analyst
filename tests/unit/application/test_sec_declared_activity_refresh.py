@@ -395,6 +395,16 @@ class _InsiderPipeline:
             )
             if kind == "accepted":
                 continue
+            if kind == "rejected_foreign_issuer":
+                _save_outcome_once(
+                    repository,
+                    _ownership_outcome(
+                        revision,
+                        status="rejected",
+                        reason_code="issuer_not_subject_asset",
+                    ),
+                )
+                continue
             statement = _ownership_statement(filing, revision)
             if repository.get(statement.statement_id) is None:
                 repository.save(statement)
@@ -878,3 +888,49 @@ def test_refresh_rejects_a_foreign_asset_without_provider_work(tmp_path: Path) -
         assert client.calls == 0
         assert insider.calls == []
         assert beneficial.calls == []
+
+
+def test_a_reporting_owner_filing_for_another_issuer_does_not_block_the_family(
+    tmp_path: Path,
+) -> None:
+    first_at = datetime(2025, 4, 1, tzinfo=UTC)
+    rows = (
+        _row(
+            accession="0000320193-25-000001",
+            form="4",
+            accepted_at=first_at - timedelta(days=4),
+        ),
+        _row(
+            accession="0000320193-25-000002",
+            form="5",
+            accepted_at=first_at - timedelta(days=3),
+        ),
+    )
+    client = _SubmissionsClient(_submissions_document(retrieved_at=first_at, rows=rows))
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        service, insider, beneficial = _service(storage, client)
+        insider.behaviour["0000320193-25-000001"] = "rejected_foreign_issuer"
+        insider.behaviour["0000320193-25-000002"] = "statement"
+
+        summary = service.run(_request())
+
+        assert summary.insider.accessions_rejected == ("0000320193-25-000001",)
+        assert summary.insider.accessions_imported == ("0000320193-25-000002",)
+        assert summary.coverage_complete is True
+
+        repository = OwnershipRepository(storage.raw_records)
+        states = {
+            s.accession: s
+            for s in repository.list_accession_states(asset_id="equity:us:aapl", known_at=first_at)
+        }
+        assert states["0000320193-25-000001"].resolution == "rejected"
+        assert states["0000320193-25-000001"].terminal is True
+        assert states["0000320193-25-000002"].resolution == "accepted"
+        assert states["0000320193-25-000002"].terminal is True
+
+        insider.calls.clear()
+        resumed = service.run(_request())
+        assert insider.calls == []
+        assert resumed.insider.accessions_rejected == ()
+        assert resumed.insider.accessions_imported == ()
+        assert resumed.coverage_complete is True
