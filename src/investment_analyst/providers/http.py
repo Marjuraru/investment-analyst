@@ -1,5 +1,6 @@
 """Minimal retrying HTTPS transport built on the Python standard library."""
 
+import zlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -109,6 +110,12 @@ class HttpFormTransport(HttpTransport, Protocol):
         ...
 
 
+class _ReadableStream(Protocol):
+    """Minimal protocol for readable HTTP response byte streams."""
+
+    def read(self, size: int | None = None, /) -> bytes: ...
+
+
 class UrlLibHttpTransport:
     """HTTPS GET/form-POST transport with bounded deterministic retries."""
 
@@ -195,7 +202,11 @@ class UrlLibHttpTransport:
                 failure_kind=HttpRequestFailureKind.CONFIGURATION,
             )
 
-        request = Request(url, data=body, headers=dict(headers), method=method)
+        request_headers = dict(headers)
+        if not any(k.lower() == "accept-encoding" for k in request_headers):
+            request_headers["Accept-Encoding"] = "gzip"
+
+        request = Request(url, data=body, headers=request_headers, method=method)
         for attempt in range(_MAX_ATTEMPTS):
             check_operation_cancelled()
             try:
@@ -203,13 +214,19 @@ class UrlLibHttpTransport:
                     response_headers = MappingProxyType(
                         {str(key): str(value) for key, value in response.headers.items()}
                     )
-                    if max_response_bytes is None:
-                        body = response.read()
-                        body_truncated = False
-                    else:
-                        candidate = response.read(max_response_bytes + 1)
-                        body = candidate[:max_response_bytes]
-                        body_truncated = len(candidate) > max_response_bytes
+                    content_encoding: str | None = None
+                    for header_key, header_value in response.headers.items():
+                        if header_key.lower() == "content-encoding":
+                            content_encoding = header_value
+                            break
+
+                    body, body_truncated = self._read_response_body(
+                        response=response,
+                        content_encoding=content_encoding,
+                        max_response_bytes=max_response_bytes,
+                        url=url,
+                        method=method,
+                    )
                     check_operation_cancelled()
                     return HttpResponse(
                         status_code=int(response.status),
@@ -268,3 +285,78 @@ class UrlLibHttpTransport:
             if 0 <= seconds <= _MAX_RETRY_AFTER_SECONDS:
                 return seconds
         return _DEFAULT_BACKOFF_SECONDS[min(attempt, len(_DEFAULT_BACKOFF_SECONDS) - 1)]
+
+    @staticmethod
+    def _read_response_body(
+        *,
+        response: _ReadableStream,
+        content_encoding: str | None,
+        max_response_bytes: int | None,
+        url: str,
+        method: str,
+    ) -> tuple[bytes, bool]:
+        normalized_encoding = (
+            content_encoding.strip().lower() if content_encoding is not None else ""
+        )
+        if normalized_encoding in ("", "identity"):
+            if max_response_bytes is None:
+                body = response.read()
+                return (body, False)
+            candidate = response.read(max_response_bytes + 1)
+            body = candidate[:max_response_bytes]
+            body_truncated = len(candidate) > max_response_bytes
+            return (body, body_truncated)
+
+        if normalized_encoding != "gzip":
+            raise HttpRequestError(
+                url,
+                f"unsupported Content-Encoding: {content_encoding!r}",
+                method=method,
+                failure_kind=HttpRequestFailureKind.TRANSPORT,
+            )
+
+        decompressor = zlib.decompressobj(wbits=16 + zlib.MAX_WBITS)
+        decompressed = bytearray()
+        target_len = (max_response_bytes + 1) if max_response_bytes is not None else None
+        chunk_size = 65536
+
+        try:
+            while True:
+                check_operation_cancelled()
+                chunk = response.read(chunk_size)
+                if not chunk:
+                    break
+                data_to_feed = chunk
+                while data_to_feed:
+                    max_len = (target_len - len(decompressed)) if target_len is not None else 0
+                    decomp = decompressor.decompress(data_to_feed, max_len)
+                    if decomp:
+                        decompressed.extend(decomp)
+                    if target_len is not None and len(decompressed) >= target_len:
+                        return (bytes(decompressed[:max_response_bytes]), True)
+                    data_to_feed = decompressor.unconsumed_tail
+
+            trailing = decompressor.flush()
+            if trailing:
+                decompressed.extend(trailing)
+        except zlib.error as error:
+            raise HttpRequestError(
+                url,
+                "corrupt or incomplete compressed stream",
+                method=method,
+                cause=error,
+                failure_kind=HttpRequestFailureKind.TRANSPORT,
+            ) from error
+
+        if not decompressor.eof:
+            raise HttpRequestError(
+                url,
+                "corrupt or incomplete compressed stream",
+                method=method,
+                failure_kind=HttpRequestFailureKind.TRANSPORT,
+            )
+
+        if target_len is not None and len(decompressed) >= target_len:
+            return (bytes(decompressed[:max_response_bytes]), True)
+
+        return (bytes(decompressed), False)
