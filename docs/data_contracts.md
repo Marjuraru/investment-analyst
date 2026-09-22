@@ -87,3 +87,12 @@ explícito, umbral `Decimal` entre 0 y 1 y mínimo previo acotado. La evaluació
 una serie homogénea, excluye el punto actual de la referencia y publica percentil empírico Decimal34,
 conteos, IDs y cobertura; una serie ambigua falla cerrado y una historia insuficiente es
 `not_evaluable` sin imputación ni reducción del mínimo.
+
+## Negociación de compresión en el transporte HTTP compartido
+
+El transporte HTTP compartido (`UrlLibHttpTransport`) negocia compresión por defecto y aplica descompresión acotada:
+
+- **Negociación por defecto:** Añade `Accept-Encoding: gzip` de forma automática cuando el llamante no haya declarado dicha cabecera. Si el llamante declara explícitamente cualquier valor para `Accept-Encoding`, ésta se preserva intacta.
+- **Descompresión acotada e identidad:** Cuando la respuesta declara `Content-Encoding: gzip`, el cuerpo se descomprime de forma incremental y el límite `max_response_bytes` se aplica sobre los bytes descomprimidos en memoria, marcando `body_truncated = True` si el contenido expandido supera el tope. Si el cuerpo no supera el tope, se entrega idéntico byte a byte con respecto al cuerpo que entregaría la misma respuesta sin comprimir, preservando hashes y checksums SHA-256.
+- **Comportamiento fail-closed:** Si la respuesta declara una codificación no soportada (cualquiera distinta de `gzip` o `identity`), o si el flujo gzip está corrupto o se interrumpe antes del final de la secuencia comprimida, el transporte falla cerrado levantando un `HttpRequestError` tipado de transporte (`HttpRequestFailureKind.TRANSPORT`), sin entregar datos parciales ni silenciosamente truncados.
+- **Invariantes operativas:** Respuestas no comprimidas (`identity` o sin cabecera), cabeceras de respuesta, URL final, reintentos de estados transitorios, backoff, cabecera `Retry-After` y soporte de cancelación permanecen inalterados.
