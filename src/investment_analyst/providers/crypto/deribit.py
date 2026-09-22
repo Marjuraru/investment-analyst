@@ -24,6 +24,8 @@ MAX_DVOL_INTERVAL = timedelta(days=366)
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_HISTORICAL_ROWS = 1_000
 REQUEST_DELAY_SECONDS = 0.25
+MAX_SUMMARY_CLOCK_LEAD = timedelta(seconds=5)
+SUMMARY_CLOCK_TOLERANCE_POLICY = "deribit-summary-clock-tolerance-v1"
 
 _CURRENCY_PATTERN = re.compile(r"^[A-Z0-9]{2,16}$")
 _INSTRUMENT_PATTERN = re.compile(r"^[A-Z0-9]{2,16}-PERPETUAL$")
@@ -387,9 +389,11 @@ class DeribitClient:
         if not isinstance(result, list) or len(result) != 1:
             raise DeribitError("Deribit summary result must contain exactly one row")
         summary = _parse_summary(instrument_name, currency, result[0])
-        retrieved_at = _utc_datetime(self._clock(), field_name="clock result")
-        if summary.creation_timestamp > retrieved_at:
-            raise DeribitError("Deribit summary timestamp cannot be after local retrieval")
+        clock_time = _utc_datetime(self._clock(), field_name="clock result")
+        lead = summary.creation_timestamp - clock_time
+        if lead > MAX_SUMMARY_CLOCK_LEAD:
+            raise DeribitError("Deribit summary timestamp exceeds declared clock tolerance")
+        retrieved_at = max(clock_time, summary.creation_timestamp)
         return DeribitSummaryFetch(
             instrument_name=instrument_name,
             retrieved_at=retrieved_at,
@@ -656,6 +660,8 @@ __all__ = [
     "DeribitPerpetualSummary",
     "DeribitSummaryFetch",
     "FUNDING_METHOD",
+    "MAX_SUMMARY_CLOCK_LEAD",
     "OFFICIAL_BASE_URL",
+    "SUMMARY_CLOCK_TOLERANCE_POLICY",
     "SUMMARY_METHOD",
 ]

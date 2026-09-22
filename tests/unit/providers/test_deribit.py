@@ -10,6 +10,8 @@ import pytest
 from pydantic import ValidationError
 
 from investment_analyst.providers.crypto.deribit import (
+    MAX_SUMMARY_CLOCK_LEAD,
+    SUMMARY_CLOCK_TOLERANCE_POLICY,
     DeribitClient,
     DeribitError,
     DeribitFundingPoint,
@@ -62,7 +64,7 @@ def _rpc(result: object) -> bytes:
 
 def _ms(value: datetime) -> int:
     delta = value - datetime(1970, 1, 1, tzinfo=UTC)
-    return delta.days * 86_400_000 + delta.seconds * 1_000
+    return int(delta.total_seconds() * 1_000)
 
 
 def _funding_row(timestamp: datetime) -> dict[str, object]:
@@ -355,7 +357,7 @@ def test_redirect_and_invalid_summary_values_fail_closed() -> None:
         ("mid_price", 0, "must be positive"),
         ("instrument_name", "ETH-PERPETUAL", "does not match"),
         ("quote_currency", "EUR", "currency identity"),
-        ("creation_timestamp", _ms(_END + timedelta(hours=1)), "after local retrieval"),
+        ("creation_timestamp", _ms(_END + timedelta(hours=1)), "declared clock tolerance"),
     )
     for field, value, message in cases:
         changed = json.loads(json.dumps(original))
@@ -419,3 +421,78 @@ def test_http_and_exhausted_transport_failures_are_compact_and_classified() -> N
         )
     assert exhausted.value.status_code == 503
     assert "simulated-secret" not in str(exhausted.value)
+
+
+def test_summary_within_the_declared_clock_tolerance_is_accepted_and_reconciles_retrieval() -> None:
+    original = json.loads((_FIXTURES / "btc_perpetual_summary.json").read_text())
+    clock_time = _END
+    creation_time = clock_time + timedelta(seconds=2)
+    original["result"][0]["creation_timestamp"] = _ms(creation_time)
+
+    client = DeribitClient(
+        _Transport(json.dumps(original).encode()),
+        sleep=lambda _: None,
+        clock=lambda: clock_time,
+    )
+    result = client.fetch_perpetual_summary("BTC-PERPETUAL")
+
+    assert result.summary.creation_timestamp == creation_time
+    assert result.retrieved_at == creation_time
+    assert not (result.retrieved_at < result.summary.creation_timestamp)
+    assert SUMMARY_CLOCK_TOLERANCE_POLICY == "deribit-summary-clock-tolerance-v1"
+    assert timedelta(seconds=5) == MAX_SUMMARY_CLOCK_LEAD
+
+
+def test_summary_lead_beyond_the_declared_tolerance_still_fails_closed() -> None:
+    original = json.loads((_FIXTURES / "btc_perpetual_summary.json").read_text())
+    clock_time = _END
+    creation_time = clock_time + MAX_SUMMARY_CLOCK_LEAD + timedelta(milliseconds=10)
+    original["result"][0]["creation_timestamp"] = _ms(creation_time)
+
+    client = DeribitClient(
+        _Transport(json.dumps(original).encode()),
+        sleep=lambda _: None,
+        clock=lambda: clock_time,
+    )
+    with pytest.raises(DeribitError, match="declared clock tolerance") as exc_info:
+        client.fetch_perpetual_summary("BTC-PERPETUAL")
+
+    error_msg = str(exc_info.value)
+    assert "Deribit summary timestamp exceeds declared clock tolerance" in error_msg
+    assert str(_ms(creation_time)) not in error_msg
+
+
+def test_summary_behind_the_local_clock_keeps_the_clock_value_as_retrieval() -> None:
+    original = json.loads((_FIXTURES / "btc_perpetual_summary.json").read_text())
+    clock_time = _END
+    creation_time = clock_time - timedelta(minutes=5)
+    original["result"][0]["creation_timestamp"] = _ms(creation_time)
+
+    client = DeribitClient(
+        _Transport(json.dumps(original).encode()),
+        sleep=lambda _: None,
+        clock=lambda: clock_time,
+    )
+    result = client.fetch_perpetual_summary("BTC-PERPETUAL")
+
+    assert result.summary.creation_timestamp == creation_time
+    assert result.retrieved_at == clock_time
+
+
+def test_funding_and_dvol_interval_closure_checks_are_unchanged() -> None:
+    clock_time = _END
+    future_funding_end = clock_time + timedelta(hours=1)
+    with pytest.raises(DeribitError, match="funding history requires a fully closed interval"):
+        DeribitClient(
+            _Transport(_rpc([])),
+            sleep=lambda _: None,
+            clock=lambda: clock_time,
+        ).fetch_funding_history("BTC-PERPETUAL", _START, future_funding_end)
+
+    future_dvol_end = clock_time + timedelta(days=1)
+    with pytest.raises(DeribitError, match="DVOL history requires a fully closed interval"):
+        DeribitClient(
+            _Transport(_rpc({"data": [], "continuation": None})),
+            sleep=lambda _: None,
+            clock=lambda: clock_time,
+        ).fetch_dvol_daily("BTC", _START, future_dvol_end)

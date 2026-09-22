@@ -205,3 +205,100 @@ def test_empty_completed_interval_creates_only_reusable_receipt(tmp_path: Path) 
         assert second.receipt_id == first.receipt_id
         assert storage.observations.list(asset_id="crypto:btc-usd") == []
         assert len(storage.raw_records.list(source_id=_configuration().funding_source_id)) == 1
+
+
+def test_summary_evidence_is_never_available_before_its_event_time_under_clock_skew(
+    tmp_path: Path,
+) -> None:
+    original = json.loads((_FIXTURES / "btc_perpetual_summary.json").read_text())
+    clock_time = _RECEIVED
+    creation_time = clock_time + timedelta(seconds=2)
+    original["result"][0]["creation_timestamp"] = int(
+        (creation_time - datetime(1970, 1, 1, tzinfo=UTC)).total_seconds() * 1000
+    )
+    summary_body = json.dumps(original).encode()
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "storage")) as storage:
+        pipeline = _pipeline(storage, summary_body, received_at=clock_time)
+        summary = pipeline.capture_summary()
+
+        assert summary.raw_records_created == 1
+        assert summary.observations_created > 0
+
+        raw_records = tuple(storage.raw_records.list(source_id=_configuration().summary_source_id))
+        assert len(raw_records) == 1
+        record = raw_records[0]
+        assert record.available_at == record.received_at
+        assert record.available_at == creation_time
+        assert record.event_time == creation_time
+        assert record.available_at >= record.event_time
+
+        observations = tuple(storage.observations.list(asset_id="crypto:btc-usd"))
+        assert len(observations) > 0
+        for obs in observations:
+            assert obs.available_at == record.available_at
+            assert obs.available_at >= obs.observed_at
+
+
+def test_summary_raw_identity_is_unchanged_by_the_clock_reconciliation(
+    tmp_path: Path,
+) -> None:
+    original = json.loads((_FIXTURES / "btc_perpetual_summary.json").read_text())
+    creation_time = _RECEIVED
+    original["result"][0]["creation_timestamp"] = int(
+        (creation_time - datetime(1970, 1, 1, tzinfo=UTC)).total_seconds() * 1000
+    )
+    summary_body = json.dumps(original).encode()
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "storage_aligned")) as storage_aligned:
+        pipeline_aligned = _pipeline(storage_aligned, summary_body, received_at=creation_time)
+        pipeline_aligned.capture_summary()
+        aligned_records = tuple(storage_aligned.raw_records.list())
+        assert len(aligned_records) == 1
+        aligned_id = aligned_records[0].record_id
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "storage_skewed")) as storage_skewed:
+        pipeline_skewed = _pipeline(
+            storage_skewed,
+            summary_body,
+            received_at=creation_time - timedelta(seconds=2),
+        )
+        pipeline_skewed.capture_summary()
+        skewed_records = tuple(storage_skewed.raw_records.list())
+        assert len(skewed_records) == 1
+        skewed_id = skewed_records[0].record_id
+
+    assert aligned_id == skewed_id
+
+
+def test_two_captures_with_different_retrieval_instants_reuse_the_same_raw_identity(
+    tmp_path: Path,
+) -> None:
+    original = json.loads((_FIXTURES / "btc_perpetual_summary.json").read_text())
+    creation_time = _RECEIVED
+    original["result"][0]["creation_timestamp"] = int(
+        (creation_time - datetime(1970, 1, 1, tzinfo=UTC)).total_seconds() * 1000
+    )
+    summary_body = json.dumps(original).encode()
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "storage")) as storage:
+        pipeline1 = _pipeline(
+            storage,
+            summary_body,
+            received_at=creation_time - timedelta(seconds=3),
+        )
+        res1 = pipeline1.capture_summary()
+        assert res1.raw_records_created == 1
+        assert res1.raw_records_reused == 0
+
+        pipeline2 = _pipeline(
+            storage,
+            summary_body,
+            received_at=creation_time + timedelta(hours=1),
+        )
+        res2 = pipeline2.capture_summary()
+        assert res2.raw_records_created == 0
+        assert res2.raw_records_reused == 1
+
+        raw_records = tuple(storage.raw_records.list(source_id=_configuration().summary_source_id))
+        assert len(raw_records) == 1
