@@ -475,3 +475,51 @@ def test_ownership_raw_records_reject_outer_asset_mismatches(tmp_path: Path) -> 
                     }
                 )
             )
+
+
+def test_foreign_issuer_rejection_is_terminal_even_after_an_accepted_classification(
+    tmp_path: Path,
+) -> None:
+    known_at = datetime(2025, 2, 10, tzinfo=UTC)
+    discovery_id = uuid4()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(discovery_id, known_at - timedelta(days=30)))
+        repository = OwnershipRepository(storage.raw_records)
+
+        filing = _filing(accession="0000320193-25-000001", accepted_at=known_at - timedelta(days=3))
+        accepted_outcome = _outcome(
+            filing=filing,
+            resolver_version="sec-ownership-resolver-v2",
+            checksum="a" * 64,
+            discovery_id=discovery_id,
+            status="accepted",
+            reason_code="ownership_xml",
+        )
+        repository.save_outcome(accepted_outcome)
+
+        states_before = {
+            s.accession: s
+            for s in repository.list_accession_states(asset_id="equity:us:aapl", known_at=known_at)
+        }
+        assert states_before["0000320193-25-000001"].resolution == "partial"
+        assert states_before["0000320193-25-000001"].terminal is False
+
+        rejected_outcome = _outcome(
+            filing=filing,
+            resolver_version="sec-ownership-resolver-v2",
+            checksum="a" * 64,
+            discovery_id=discovery_id,
+            status="rejected",
+            reason_code="issuer_not_subject_asset",
+        )
+        repository.save_outcome(rejected_outcome)
+
+        states_after = {
+            s.accession: s
+            for s in repository.list_accession_states(asset_id="equity:us:aapl", known_at=known_at)
+        }
+        assert states_after["0000320193-25-000001"].resolution == "rejected"
+        assert states_after["0000320193-25-000001"].terminal is True
+
+        assert repository.get_outcome(accepted_outcome.outcome_id) == accepted_outcome
+        assert repository.get_outcome(rejected_outcome.outcome_id) == rejected_outcome

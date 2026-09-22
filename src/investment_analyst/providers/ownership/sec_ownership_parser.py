@@ -24,6 +24,10 @@ class SecOwnershipParserError(StorageError):
     pass
 
 
+class SecOwnershipIssuerMismatchError(SecOwnershipParserError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class OwnershipResourceClassification:
     status: str
@@ -61,7 +65,7 @@ def parse_ownership_statement(
     issuer = _child(root, "issuer", required=True)
     issuer_cik = normalize_cik(_text(issuer, "issuerCik", required=True))
     if issuer_cik != revision.document.filing.filer_cik:
-        raise SecOwnershipParserError("ownership issuer conflicts with document revision")
+        raise SecOwnershipIssuerMismatchError("ownership issuer conflicts with document revision")
     owners = tuple(_owner(node) for node in _children(root, "reportingOwner"))
     if not owners:
         raise SecOwnershipParserError("ownership document has no owner")

@@ -43,6 +43,23 @@ de elegir una arbitrariamente.
 No hay persistencia, umbrales, anomalías, eventos, candidatos, alertas, señales, recomendaciones,
 comparación con precio de mercado ni ratio contra acciones en circulación.
 
+## Reanudación, rechazos terminales y límites de emisor
+
+Las Submissions oficiales de un emisor pueden incluir formularios Section 16 en los que dicho
+emisor actúa como reporting owner de otra entidad (emisor ajeno). Cuando el `issuerCik` del
+documento XML no coincide con el CIK del activo investigado, el documento se rechaza de forma
+terminal con el motivo versionado `issuer_not_subject_asset`.
+
+Este rechazo:
+- Registra un resultado de resolución `rejected` para el recurso semántico sin crear un
+  `OwnershipStatement`.
+- Resuelve la accession como terminal para la regla de reanudación y evita que el formulario
+  bloquee la sincronización de la familia o sea reintentado indefinidamente, aun cuando exista
+  un resultado de clasificación sintáctica por bytes `accepted` (`ownership_xml`).
+- Preserva intactos todos los resultados previos de la accession bajo semántica append-only.
+- Se limita estrictamente a la discordancia tipada de emisor (`SecOwnershipIssuerMismatchError`);
+  cualquier otro error del parser conserva la accession en estado `partial` y reanudable.
+
 ## Ruta HTTP local
 
 La consulta se expone en la interfaz web local en modo de solo lectura mediante:
