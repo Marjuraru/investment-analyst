@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from datetime import datetime
 from uuid import UUID
 
@@ -17,7 +17,11 @@ from investment_analyst.evidence.sec_institutional_holdings.models import (
     InstitutionalHoldingsReport,
     InstitutionalHoldingsResolutionOutcome,
 )
-from investment_analyst.storage import RecordNotFoundError, StorageError
+from investment_analyst.storage import (
+    RecordConflictError,
+    RecordNotFoundError,
+    StorageError,
+)
 
 
 class InstitutionalHoldingsRepositoryError(StorageError):
@@ -233,6 +237,20 @@ class InstitutionalHoldingsRepository:
             )
         self._raw_records.save(position_to_raw_record(position))
         return position
+
+    def save_positions(
+        self, positions: Collection[InstitutionalHoldingPosition]
+    ) -> tuple[InstitutionalHoldingPosition, ...]:
+        if not positions:
+            return ()
+        raw_records = [position_to_raw_record(position) for position in positions]
+        try:
+            self._raw_records.save_many(raw_records)
+        except RecordConflictError as error:
+            raise InstitutionalHoldingsRepositoryError(
+                "institutional holdings position identity conflicts"
+            ) from error
+        return tuple(positions)
 
     def verify_outcome_lineage(self, outcome: InstitutionalHoldingsResolutionOutcome) -> None:
         try:

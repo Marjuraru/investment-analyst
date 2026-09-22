@@ -203,10 +203,10 @@ colector, el informe ni el scheduler: **usa** lo entregado.
   de reutilización` exige una línea base medida antes del cambio de persistencia; sin el cableado esa
   línea base no llega a existir. La etapa 2 pasa a `DATA-CHASSIS-4`.
 
-## Etapa 2: Persistencia y verificación por lotes (`DATA-CHASSIS-4` y `DATA-CHASSIS-5`)
+## Etapa 2: Persistencia y verificación por lotes (`DATA-CHASSIS-4`, `DATA-CHASSIS-5` y `DATA-CHASSIS-17`)
 
 La etapa 2 ataca el patrón de persistencia no batcheado identificado en el baseline. Se entrega
-particionada en dos bloques por decisión de PLAN verificada en vivo:
+particionada en tres bloques por decisión de PLAN verificada en vivo:
 
 1. **`DATA-CHASSIS-4`:** construyó la capa de acceso y persistencia por lotes en la
    capa de almacenamiento (`get_many`, `save_many`, detección de conflictos en memoria y recibos
@@ -216,8 +216,8 @@ particionada en dos bloques por decisión de PLAN verificada en vivo:
 2. **`DATA-CHASSIS-5`:** adopción de la API por lotes en `analytics/crypto/derivatives_pipeline.py` y
    `analytics/market/statistics_pipeline.py`, eliminación del `get` posterior a `save`, memoización del
    grafo de dependencias por corrida, verificación profunda sólo de filas nuevas o conflictivas mediante
-   `BatchWriteReceipt` y migración de los dobles de prueba en los tests que consumen esos contratos. Con esto
-   concluye el trabajo de código de la etapa 2.
+   `BatchWriteReceipt` y migración de los dobles de prueba en los tests que consumen esos contratos.
+3. **`DATA-CHASSIS-17`:** extiende la persistencia por lotes al almacén de registros crudos (`JsonRawRecordRepository.save_many`) con chunks acotados (`_RAW_RECORD_BATCH_CHUNK_SIZE = 1_000`), verificación de existencia en una sola consulta SQL por lote e inserción atómica multi-fila en DuckDB. Adopta esta API en `InstitutionalHoldingsRepository.save_positions` y `sec_institutional_holdings_pipeline.py` para ingesta eficiente de carteras 13F, y corrige el defecto de ordenamiento determinista en `institutional_metric_engine.py` (`_position_sort_key`) ante valores `None` en `put_call`.
 
 ### Reasignación del gate `−80 % real`
 
@@ -227,6 +227,25 @@ producción sobre el scheduler compuesto, ningún diff ni suite de CI puede sati
 aislada en el repositorio; se verificará con `scripts/report_storage_observability.py` comparando
 las ventanas antes y después de desplegar `DATA-CHASSIS-5`. La etapa 2 no se declarará cerrada hasta
 dicha verificación.
+
+### Extensión a registros crudos y posiciones 13F (`DATA-CHASSIS-17`)
+
+`DATA-CHASSIS-17` (#265) amplía la persistencia por lotes de la Etapa 2 al almacén de registros crudos y al flujo de ingesta de posiciones institucionales 13F, resolviendo además un defecto operacional de ordenamiento en el motor analítico de Cazatiburones:
+
+1. **Persistencia por lotes en `JsonRawRecordRepository` (`src/investment_analyst/storage/raw_records.py`):**
+   - Implementa `save_many(records: Sequence[RawRecord]) -> BatchWriteReceipt` con particionamiento en chunks acotados de tamaño fijo (`_RAW_RECORD_BATCH_CHUNK_SIZE = 1_000`).
+   - Por cada chunk, ejecuta una única consulta SQL `SELECT` con placeholders acotados para recuperar los registros existentes y compara el payload exacto en memoria, garantizando idempotencia byte a byte.
+   - Escribe atómicamente en disco los archivos JSON de los registros nuevos antes de la inserción en base de datos.
+   - Inserta las filas nuevas mediante una única sentencia `INSERT INTO raw_records VALUES (?, ...), (?, ...)` por chunk en DuckDB, reduciendo drásticamente los viajes de ida y vuelta a la base de datos y la I/O de disco.
+   - Mantiene semántica fail-closed: ante un `RecordConflictError`, preserva el progreso de los chunks previos completados exitosamente e interrumpe la ejecución sin aplicar el chunk conflictivo.
+
+2. **Adopción en `InstitutionalHoldingsRepository` y pipeline 13F:**
+   - En `src/investment_analyst/evidence/sec_institutional_holdings/repository.py`, introduce `save_positions(positions: Sequence[InstitutionalPositionRecord]) -> BatchWriteReceipt`, mapeando cada posición a su correspondiente `RawRecord` y delegando en `save_many`. Captura `RecordConflictError` y lo reempaqueta limpiamente en `InstitutionalHoldingsRepositoryError`.
+   - En `src/investment_analyst/providers/institutional_holdings/sec_institutional_holdings_pipeline.py`, reemplaza el bucle iterativo de guardado individual de posiciones por la invocación en lote `holdings.save_positions(positions)`, eliminando miles de transacciones individuales durante la ingesta de filings 13F con carteras voluminosas.
+
+3. **Corrección de ordenamiento determinista en `institutional_metric_engine.py`:**
+   - Resuelve el defecto operacional `TypeError: '<' not supported between instances of 'str' and 'NoneType'` que ocurría al procesar filings 13F con posiciones donde `put_call` es `None` mezcladas con opciones de compra/venta (`"PUT"` / `"CALL"`).
+   - Implementa la clave de ordenamiento `_position_sort_key` que mapea `put_call` a una tupla booleana y cadena `(p is not None, p or "")`, asegurando que `None` se ordene deterministamente antes que cualquier cadena sin comparar tipos incompatibles.
 
 ## Etapa 3: Identidad de métrica v2 y adaptador de resolución (`DATA-CHASSIS-6`, `DATA-CHASSIS-7`, `DATA-CHASSIS-8` y `DATA-CHASSIS-9`)
 

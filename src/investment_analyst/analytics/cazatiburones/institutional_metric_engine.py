@@ -45,7 +45,10 @@ def calculate(
             continue
         prior_positions = _positions(prior.observations)
         current_positions = _positions(current.observations)
-        for position in sorted(set(prior_positions) | set(current_positions)):
+        for position in sorted(
+            set(prior_positions) | set(current_positions),
+            key=_position_sort_key,
+        ):
             prior_rows = prior_positions.get(position, ())
             current_rows = current_positions.get(position, ())
             if len(prior_rows) != 1 or len(current_rows) != 1:
@@ -117,3 +120,9 @@ def _positions(
 
 def _quality(left: DataQuality, right: DataQuality) -> DataQuality:
     return DataQuality.VALID if left == right == DataQuality.VALID else DataQuality.PARTIAL
+
+
+def _position_sort_key(
+    position: tuple[str, str, str | None],
+) -> tuple[str, str, int, str]:
+    return (position[0], position[1], 0 if position[2] is None else 1, position[2] or "")
