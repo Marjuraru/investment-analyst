@@ -79,8 +79,8 @@ ceros para nullable.
 
 `crypto-derivatives-metrics-v1-decimal34` calcula con precisión Decimal34 y fuentes aisladas:
 
-- suma y media de `funding_interest_1h` para 24, 168 y 720 horas consecutivas;
-- cambio de `dvol_close` para 1, 7 y 30 días exactos;
+- suma de `funding_interest_1h` para 24 y 168 horas consecutivas;
+- cambio de `dvol_close` para 1 y 7 días exactos;
 - spread `(ask - bid) / mid * 10000` desde tres observaciones del mismo snapshot.
 
 Ventanas incompletas, gaps, fuentes o activos mezclados, inputs posteriores al corte y denominadores

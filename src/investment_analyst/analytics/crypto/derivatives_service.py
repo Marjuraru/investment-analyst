@@ -33,6 +33,8 @@ from investment_analyst.core.models import MetricResult, NormalizedObservation
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import RecordNotFoundError, StorageError
 
+_TRACEABILITY_OBSERVATION_CHUNK_SIZE = 1_000
+
 
 class CryptoDerivativesService:
     """Reconstruct one local information set without providers or storage writes."""
@@ -266,9 +268,10 @@ class CryptoDerivativesService:
         observation_ids: tuple[UUID, ...],
         metrics: tuple[MetricResult, ...],
     ) -> tuple[UUID, ...]:
-        observations = {
-            identifier: self._storage.observations.get(identifier) for identifier in observation_ids
-        }
+        observations: dict[UUID, NormalizedObservation] = {}
+        for offset in range(0, len(observation_ids), _TRACEABILITY_OBSERVATION_CHUNK_SIZE):
+            chunk = observation_ids[offset : offset + _TRACEABILITY_OBSERVATION_CHUNK_SIZE]
+            observations.update(self._storage.observations.get_many(chunk))
         raw_ids = tuple(sorted({item.raw_record_id for item in observations.values()}, key=str))
         raw_records = self._storage.raw_records.get_many(raw_ids)
         for observation in observations.values():

@@ -1,10 +1,19 @@
 """Point-in-time replay and read-only traceability tests."""
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
+from uuid import UUID, uuid4
 
-from investment_analyst.analytics.crypto.derivatives_engine import CryptoDerivativesMetricEngine
+import pytest
+
+from investment_analyst.analytics.crypto.derivatives_engine import (
+    DVOL_CHANGE_KEY,
+    FUNDING_SUM_KEY,
+    SPREAD_BPS_KEY,
+    CryptoDerivativesMetricEngine,
+)
 from investment_analyst.analytics.crypto.derivatives_identity import metric_result_id
 from investment_analyst.analytics.crypto.derivatives_models import (
     CryptoDerivativesDiagnosticStatus,
@@ -12,7 +21,10 @@ from investment_analyst.analytics.crypto.derivatives_models import (
 from investment_analyst.analytics.crypto.derivatives_pipeline import (
     CryptoDerivativesMetricPipeline,
 )
-from investment_analyst.analytics.crypto.derivatives_service import CryptoDerivativesService
+from investment_analyst.analytics.crypto.derivatives_service import (
+    CryptoDerivativesService,
+    _latest_metric,
+)
 from investment_analyst.catalog.provider_configuration import resolve_deribit_configuration
 from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
 from investment_analyst.catalog.service import AssetCatalogService
@@ -21,6 +33,7 @@ from investment_analyst.providers.crypto.deribit import DeribitClient
 from investment_analyst.providers.crypto.deribit_pipeline import DeribitEvidencePipeline
 from investment_analyst.providers.http import HttpResponse
 from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.storage.errors import RecordNotFoundError
 
 _FIXTURES = Path(__file__).parents[3] / "fixtures" / "deribit"
 _START = datetime(2026, 8, 1, tzinfo=UTC)
@@ -230,3 +243,91 @@ def test_replay_prefers_persisted_v2_then_v1_then_in_memory_candidate(tmp_path: 
             row.result_id for row in persisted.results
         }
         assert all(item.result_id.version == 8 for item in replayed.metrics)
+
+
+def test_query_traceability_reads_observations_in_bounded_chunks(tmp_path: Path) -> None:
+    """A4: traceability verifies observations using bounded chunks of at most 1,000 without get."""
+    paths = StoragePaths.from_root(tmp_path / "storage")
+    configuration = _configuration()
+    with LocalStorage(paths) as storage:
+        _setup_evidence(storage, configuration)
+
+    with LocalStorage(paths, read_only=True) as storage:
+        get_calls: list[UUID] = []
+        get_many_calls: list[tuple[UUID, ...]] = []
+
+        original_get = storage.observations.get
+        original_get_many = storage.observations.get_many
+
+        def spy_get(identifier: UUID):
+            get_calls.append(identifier)
+            return original_get(identifier)
+
+        def spy_get_many(identifiers):
+            chunk = tuple(identifiers)
+            get_many_calls.append(chunk)
+            return original_get_many(chunk)
+
+        storage.observations.get = spy_get  # type: ignore[method-assign]
+        storage.observations.get_many = spy_get_many  # type: ignore[method-assign]
+
+        result = _query(storage, _KNOWN)
+
+        assert result.traceability_verified
+        assert len(get_calls) == 0
+        assert len(get_many_calls) > 0
+        assert all(len(chunk) <= 1_000 for chunk in get_many_calls)
+
+        # Test chunking with >1,000 identifiers
+        service = CryptoDerivativesService(storage, CryptoDerivativesMetricEngine())
+        synthetic_ids = tuple(uuid4() for _ in range(2_500))
+        chunk_sizes: list[int] = []
+
+        def spy_chunked_get_many(identifiers):
+            chunk = tuple(identifiers)
+            chunk_sizes.append(len(chunk))
+            sample_obs = original_get(next(iter(result.diagnostic.observation_ids)))
+            return {ident: sample_obs for ident in chunk}
+
+        storage.observations.get_many = spy_chunked_get_many  # type: ignore[method-assign]
+        service._verify_traceability(synthetic_ids, ())
+        assert chunk_sizes == [1_000, 1_000, 500]
+        assert len(get_calls) == 0
+
+
+def test_diagnostic_still_resolves_the_same_three_metric_values(tmp_path: Path) -> None:
+    """X1: diagnostic contract still exposes funding_sum_168h, dvol_change_7d and spread."""
+    paths = StoragePaths.from_root(tmp_path / "storage")
+    configuration = _configuration()
+    with LocalStorage(paths) as storage:
+        _setup_evidence(storage, configuration)
+
+    with LocalStorage(paths, read_only=True) as storage:
+        result = _query(storage, _KNOWN)
+
+        diagnostic = result.diagnostic
+        assert hasattr(diagnostic, "funding_sum_168h")
+        assert hasattr(diagnostic, "dvol_change_7d")
+        assert hasattr(diagnostic, "latest_spread_bps")
+        assert diagnostic.latest_spread_bps is not None
+        assert diagnostic.latest_spread_bps.metric_key == SPREAD_BPS_KEY
+        assert diagnostic.latest_spread_bps.value == Decimal("1.999800019998000199980001999800020")
+
+        sample_metrics = result.metrics
+        assert _latest_metric(sample_metrics, FUNDING_SUM_KEY, window=168) is None
+        assert _latest_metric(sample_metrics, DVOL_CHANGE_KEY, window=7) is None
+        assert _latest_metric(sample_metrics, SPREAD_BPS_KEY, window=1) is not None
+
+
+def test_query_traceability_still_fails_on_a_missing_observation(tmp_path: Path) -> None:
+    """X2: traceability fails closed with RecordNotFoundError on any missing observation."""
+    paths = StoragePaths.from_root(tmp_path / "storage")
+    configuration = _configuration()
+    with LocalStorage(paths) as storage:
+        _setup_evidence(storage, configuration)
+
+    with LocalStorage(paths, read_only=True) as storage:
+        service = CryptoDerivativesService(storage, CryptoDerivativesMetricEngine())
+        missing_id = uuid4()
+        with pytest.raises(RecordNotFoundError):
+            service._verify_traceability((missing_id,), ())

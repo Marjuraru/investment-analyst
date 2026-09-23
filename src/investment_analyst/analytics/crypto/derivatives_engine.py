@@ -28,8 +28,8 @@ FUNDING_SUM_KEY = "crypto.derivatives.funding.sum_1h"
 FUNDING_MEAN_KEY = "crypto.derivatives.funding.mean_1h"
 DVOL_CHANGE_KEY = "crypto.derivatives.dvol.change_points"
 SPREAD_BPS_KEY = "crypto.derivatives.perpetual.bid_ask_spread_bps"
-FUNDING_WINDOWS = (24, 168, 720)
-DVOL_WINDOWS = (1, 7, 30)
+FUNDING_WINDOWS = (24, 168)
+DVOL_WINDOWS = (1, 7)
 DECIMAL34 = Context(prec=34)
 
 
@@ -54,18 +54,6 @@ METRIC_DEFINITIONS = (
             "Historical Deribit backfill is available only from first local retrieval.",
             "The metric is descriptive and is not annualized or a trading signal.",
         ],
-        references=["Deribit public/get_funding_rate_history"],
-        definition_version=ALGORITHM_VERSION,
-    ),
-    MetricDefinition(
-        metric_key=FUNDING_MEAN_KEY,
-        display_name="Hourly funding interest mean",
-        category=MetricCategory.CRYPTO_DERIVATIVES,
-        description="Exact mean of consecutive Deribit historical interest_1h observations.",
-        formula="sum_1h / window",
-        unit="ratio_per_hour",
-        default_parameters={"windows": list(FUNDING_WINDOWS)},
-        limitations=["No annualization or interpolation is performed."],
         references=["Deribit public/get_funding_rate_history"],
         definition_version=ALGORITHM_VERSION,
     ),
@@ -218,7 +206,6 @@ class CryptoDerivativesMetricEngine:
                 continue
             with localcontext(DECIMAL34):
                 sum_value = sum((item.value for item in inputs), start=Decimal(0))
-                mean_value = sum_value / Decimal(window)
             common = {
                 "asset_id": asset_id,
                 "inputs": inputs,
@@ -234,15 +221,6 @@ class CryptoDerivativesMetricEngine:
                     value=sum_value,
                     unit="ratio",
                     formula="sum(funding_interest_1h)",
-                )
-            )
-            results.append(
-                _metric_result(
-                    **common,
-                    metric_key=FUNDING_MEAN_KEY,
-                    value=mean_value,
-                    unit="ratio_per_hour",
-                    formula="sum_1h / window",
                 )
             )
         return tuple(results)
