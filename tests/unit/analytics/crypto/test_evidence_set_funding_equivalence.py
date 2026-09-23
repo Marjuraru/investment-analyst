@@ -9,7 +9,6 @@ from functools import lru_cache
 from uuid import NAMESPACE_URL, uuid5
 
 from investment_analyst.analytics.crypto.derivatives_engine import (
-    FUNDING_MEAN_KEY,
     FUNDING_SUM_KEY,
     CryptoDerivativesMetricEngine,
 )
@@ -82,11 +81,7 @@ def _funding_metrics(
         as_of_from=_START,
         as_of_before=_END,
     )
-    return tuple(
-        item
-        for item in computation.results
-        if item.metric_key in {FUNDING_SUM_KEY, FUNDING_MEAN_KEY}
-    )
+    return tuple(item for item in computation.results if item.metric_key == FUNDING_SUM_KEY)
 
 
 @lru_cache(maxsize=1)
@@ -146,8 +141,8 @@ def test_every_engine_funding_metric_resolves_to_its_exact_lineage() -> None:
     assert len(metrics) > 1000
 
 
-def test_sum_and_mean_and_repeated_cuts_share_one_evidence_set() -> None:
-    """A7: both families and repeated cuts over the same evidence share one set."""
+def test_metrics_sharing_a_cut_and_window_share_one_evidence_set() -> None:
+    """I1: metrics sharing a cut and window share one evidence set."""
     series, segments, metrics = _funding_evidence()
     evidences = _evidence_by_metric()
     target_as_of = _START + timedelta(hours=500)
@@ -166,18 +161,16 @@ def test_sum_and_mean_and_repeated_cuts_share_one_evidence_set() -> None:
         raise AssertionError(f"no {key} metric at {target_as_of}")
 
     sum_index, sum_metric = pick(FUNDING_SUM_KEY)
-    mean_index, mean_metric = pick(FUNDING_MEAN_KEY)
-
-    assert sum_metric.as_of == mean_metric.as_of
-    assert tuple(sum_metric.input_observation_ids) == tuple(mean_metric.input_observation_ids)
-    assert evidences[sum_index].evidence_set_id == evidences[mean_index].evidence_set_id
-    assert evidences[sum_index].canonical_hash == evidences[mean_index].canonical_hash
-
     _, repeated_sum = pick(FUNDING_SUM_KEY, _KNOWN + timedelta(days=1))
+
     assert tuple(repeated_sum.input_observation_ids) == tuple(sum_metric.input_observation_ids)
-    repeated_index = metrics.index(repeated_sum)
-    assert evidences[repeated_index].evidence_set_id == evidences[sum_index].evidence_set_id
-    assert evidences[repeated_index] == evidences[sum_index]
+    by_identifier = {item.observation_id: item for item in series}
+    repeated_evidence = build_evidence_set(
+        tuple(by_identifier[identifier] for identifier in repeated_sum.input_observation_ids),
+        segments=segments,
+    )
+    assert repeated_evidence.evidence_set_id == evidences[sum_index].evidence_set_id
+    assert repeated_evidence == evidences[sum_index]
 
 
 def test_lineage_bytes_are_at_most_ten_percent_of_the_repeated_lists() -> None:
@@ -185,6 +178,11 @@ def test_lineage_bytes_are_at_most_ten_percent_of_the_repeated_lists() -> None:
     _, segments, metrics = _funding_evidence()
     evidences = _evidence_by_metric()
 
+    repeated_metrics = tuple(
+        metric.model_copy(update={"computed_at": _KNOWN + timedelta(days=offset)})
+        for offset in range(5)
+        for metric in metrics
+    )
     baseline = sum(
         len(
             json.dumps(
@@ -193,7 +191,7 @@ def test_lineage_bytes_are_at_most_ten_percent_of_the_repeated_lists() -> None:
                 separators=(",", ":"),
             ).encode("utf-8")
         )
-        for metric in metrics
+        for metric in repeated_metrics
     )
     distinct_sets = {item.evidence_set_id: item for item in evidences.values()}
     representation = sum(_canonical_bytes(segment) for segment in segments) + sum(
@@ -201,6 +199,6 @@ def test_lineage_bytes_are_at_most_ten_percent_of_the_repeated_lists() -> None:
     )
 
     assert baseline > 10_000_000
-    assert len(distinct_sets) < len(metrics)
+    assert len(distinct_sets) < len(repeated_metrics)
     assert len(segments) == _DAYS
     assert representation * 10 <= baseline

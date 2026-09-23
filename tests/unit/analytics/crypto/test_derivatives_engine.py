@@ -12,6 +12,7 @@ from investment_analyst.analytics.crypto.derivatives_engine import (
     DVOL_CHANGE_KEY,
     FUNDING_MEAN_KEY,
     FUNDING_SUM_KEY,
+    METRIC_DEFINITIONS,
     SPREAD_BPS_KEY,
     AmbiguousCryptoDerivativesRevisionError,
     CryptoDerivativesMetricEngine,
@@ -160,14 +161,9 @@ def test_exact_funding_dvol_and_spread_vectors() -> None:
     result = _compute((*_funding(), *_dvol(), *_summary()))
 
     assert _latest(result, FUNDING_SUM_KEY, 24).value == Decimal("0.000024")
-    assert _latest(result, FUNDING_MEAN_KEY, 24).value == Decimal("0.000001")
     assert _latest(result, FUNDING_SUM_KEY, 168).value == Decimal("0.000168")
-    assert _latest(result, FUNDING_MEAN_KEY, 168).value == Decimal("0.000001")
-    assert _latest(result, FUNDING_SUM_KEY, 720).value == Decimal("0.000720")
-    assert _latest(result, FUNDING_MEAN_KEY, 720).value == Decimal("0.000001")
     assert _latest(result, DVOL_CHANGE_KEY, 1).value == Decimal("1")
     assert _latest(result, DVOL_CHANGE_KEY, 7).value == Decimal("7")
-    assert _latest(result, DVOL_CHANGE_KEY, 30).value == Decimal("30")
     assert _latest(result, SPREAD_BPS_KEY, 1).value == Decimal("200")
     assert all(item.algorithm_version.endswith("decimal34") for item in result.results)
     assert all(item.available_at == _AVAILABLE for item in result.results)
@@ -294,7 +290,7 @@ def test_engine_emits_v2_identities_without_known_at_and_with_unchanged_values()
         "formula" in item.parameters and "window" in item.parameters for item in first.results
     )
     assert _latest(first, FUNDING_SUM_KEY, 24).value == Decimal("0.000024")
-    assert _latest(first, FUNDING_MEAN_KEY, 168).value == Decimal("0.000001")
+    assert _latest(first, FUNDING_SUM_KEY, 168).value == Decimal("0.000168")
     assert _latest(first, DVOL_CHANGE_KEY, 7).value == Decimal("7")
     assert _latest(first, SPREAD_BPS_KEY, 1).value == Decimal("200")
 
@@ -401,3 +397,56 @@ def test_derivatives_algorithm_version_is_unchanged() -> None:
 
     assert ALGORITHM_VERSION == "crypto-derivatives-metrics-v1-decimal34"
     assert {item.algorithm_version for item in result.results} == {ALGORITHM_VERSION}
+
+
+def test_funding_mean_is_no_longer_declared_or_emitted() -> None:
+    """A1: funding.mean_1h is not declared in METRIC_DEFINITIONS and never emitted."""
+    assert not any(definition.metric_key == FUNDING_MEAN_KEY for definition in METRIC_DEFINITIONS)
+    result = _compute((*_funding(), *_dvol(), *_summary()))
+    assert not any(item.metric_key == FUNDING_MEAN_KEY for item in result.results)
+
+
+def test_retired_windows_are_no_longer_emitted() -> None:
+    """A2: window 720 for funding and window 30 for DVOL are retired."""
+    result = _compute((*_funding(800), *_dvol(40), *_summary()))
+    funding_windows = {
+        item.parameters["window"] for item in result.results if item.metric_key == FUNDING_SUM_KEY
+    }
+    dvol_windows = {
+        item.parameters["window"] for item in result.results if item.metric_key == DVOL_CHANGE_KEY
+    }
+    assert funding_windows == {24, 168}
+    assert 720 not in funding_windows
+    assert dvol_windows == {1, 7}
+    assert 30 not in dvol_windows
+
+
+def test_surviving_series_keep_value_unit_window_and_identity() -> None:
+    """A3: surviving series keep exact value, unit, window, and deterministic identity."""
+    result = _compute((*_funding(), *_dvol(), *_summary()))
+    sum_24 = _latest(result, FUNDING_SUM_KEY, 24)
+    sum_168 = _latest(result, FUNDING_SUM_KEY, 168)
+    dvol_1 = _latest(result, DVOL_CHANGE_KEY, 1)
+    dvol_7 = _latest(result, DVOL_CHANGE_KEY, 7)
+    spread_1 = _latest(result, SPREAD_BPS_KEY, 1)
+
+    assert sum_24.value == Decimal("0.000024") and sum_24.unit == "ratio"
+    assert sum_168.value == Decimal("0.000168") and sum_168.unit == "ratio"
+    assert dvol_1.value == Decimal("1") and dvol_1.unit == "dvol_index_points"
+    assert dvol_7.value == Decimal("7") and dvol_7.unit == "dvol_index_points"
+    assert spread_1.value == Decimal("200") and spread_1.unit == "basis_points"
+
+    for item in (sum_24, sum_168, dvol_1, dvol_7, spread_1):
+        recomputed_id = semantic_metric_result_id(
+            asset_id=item.asset_id,
+            metric_key=item.metric_key,
+            input_observation_ids=tuple(item.input_observation_ids),
+            parameters=item.parameters,
+            algorithm_version=item.algorithm_version,
+            as_of=item.as_of,
+            available_at=item.available_at,
+            value=item.value,
+            unit=item.unit,
+            quality=item.quality,
+        )
+        assert item.result_id == recomputed_id
