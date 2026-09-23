@@ -483,10 +483,12 @@ def test_batch_read_contract_matches_raw_record_shape(storage) -> None:
 
     obs_sig = inspect.signature(storage.observations.get_many)
     metric_sig = inspect.signature(storage.metric_results.get_many)
+    metric_existing_sig = inspect.signature(storage.metric_results.get_existing)
     diag_sig = inspect.signature(storage.diagnostics.get_many)
 
     assert len(obs_sig.parameters) == 1
     assert len(metric_sig.parameters) == 1
+    assert len(metric_existing_sig.parameters) == 1
     assert len(diag_sig.parameters) == 1
 
     raw_record = make_raw_record()
@@ -621,6 +623,93 @@ def test_batch_read_matches_per_row_get_and_declares_absence(storage) -> None:
         storage.diagnostics.get(absent_diag_id)
     with pytest.raises(RecordNotFoundError):
         storage.diagnostics.get_many([absent_diag_id])
+
+
+def test_partial_metric_read_returns_present_results_without_raising(storage) -> None:
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+    obs = make_observation(raw_record_id=raw_record.record_id)
+    storage.observations.save(obs)
+
+    m1 = make_metric_result(observation_id=obs.observation_id, result_id=uuid4())
+    m2 = make_metric_result(observation_id=obs.observation_id, result_id=uuid4())
+    storage.metric_results.save(m1)
+
+    absent_id1 = uuid4()
+    absent_id2 = uuid4()
+
+    # Query with a mix of present and absent IDs: returns only present results, does not raise
+    results = storage.metric_results.get_existing(
+        [m1.result_id, m2.result_id, absent_id1, absent_id2]
+    )
+    assert isinstance(results, dict)
+    assert len(results) == 1
+    assert results[m1.result_id] == m1
+    assert m2.result_id not in results
+    assert absent_id1 not in results
+    assert absent_id2 not in results
+
+    # Query with only absent IDs returns empty dict without raising
+    assert storage.metric_results.get_existing([absent_id1, absent_id2]) == {}
+
+    # Query with empty collection returns empty dict without queries
+    assert storage.metric_results.get_existing([]) == {}
+
+
+def test_partial_metric_read_is_emitted_in_bounded_chunks(storage) -> None:
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+    obs = make_observation(raw_record_id=raw_record.record_id)
+    storage.observations.save(obs)
+
+    metric = make_metric_result(observation_id=obs.observation_id, result_id=uuid4())
+    storage.metric_results.save(metric)
+
+    # Generate 2,500 identifiers (more than the 1,000 chunk limit)
+    candidate_ids = [metric.result_id] + [uuid4() for _ in range(2499)]
+
+    class _StatementRecordingConnection:
+        def __init__(self, target) -> None:
+            self._target = target
+            self.queries: list[tuple[str, list]] = []
+
+        def execute(self, query: str, parameters=None):
+            self.queries.append((query, parameters or []))
+            return self._target.execute(query, parameters)
+
+        def __getattr__(self, name: str):
+            return getattr(self._target, name)
+
+    recording = _StatementRecordingConnection(storage.metric_results._connection)
+    storage.metric_results._connection = recording
+
+    results = storage.metric_results.get_existing(candidate_ids)
+    assert len(results) == 1
+    assert results[metric.result_id] == metric
+
+    # 2500 identifiers chunked into 1000, 1000, 500 => 3 bounded queries
+    assert len(recording.queries) == 3
+    for query, params in recording.queries:
+        assert len(params) <= 1_000
+        assert "IN (" in query
+    assert sum(len(params) for _, params in recording.queries) == 2500
+
+
+def test_get_many_still_raises_for_a_missing_identifier(storage) -> None:
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+    obs = make_observation(raw_record_id=raw_record.record_id)
+    storage.observations.save(obs)
+
+    metric = make_metric_result(observation_id=obs.observation_id)
+    storage.metric_results.save(metric)
+
+    absent_id = uuid4()
+    with pytest.raises(RecordNotFoundError):
+        storage.metric_results.get_many([metric.result_id, absent_id])
+
+    with pytest.raises(RecordNotFoundError):
+        storage.metric_results.get_many([absent_id])
 
 
 def test_batch_write_preserves_every_validation_and_identity(storage) -> None:

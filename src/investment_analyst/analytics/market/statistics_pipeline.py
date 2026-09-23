@@ -1,7 +1,6 @@
 """Persistence pipeline for point-in-time historical market statistics."""
 
 from collections import Counter
-from collections.abc import Collection
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -33,7 +32,6 @@ from investment_analyst.core.models import DataQuality, MetricResult
 from investment_analyst.core.operation_control import check_operation_cancelled
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import RecordNotFoundError
-from investment_analyst.storage.repositories import DuckDBMetricResultRepository
 
 
 class MarketStatisticsPipelineError(RuntimeError):
@@ -42,25 +40,6 @@ class MarketStatisticsPipelineError(RuntimeError):
 
 class MetricIdentityConflictError(MarketStatisticsPipelineError):
     """Raised when a deterministic metric ID maps to different analytical content."""
-
-
-def _lookup_existing_metrics(
-    repository: DuckDBMetricResultRepository,
-    identifiers: Collection[UUID],
-) -> dict[UUID, MetricResult]:
-    if not identifiers:
-        return {}
-    try:
-        return repository.get_many(identifiers)
-    except RecordNotFoundError:
-        pass
-    found: dict[UUID, MetricResult] = {}
-    for identifier in identifiers:
-        try:
-            found[identifier] = repository.get(identifier)
-        except RecordNotFoundError:
-            continue
-    return found
 
 
 def _utc_now() -> datetime:
@@ -129,7 +108,7 @@ class MarketStatisticsPipeline:
             for calculation in ordered_calculations
         ]
         identifiers = {identifier for _, identifier in calc_entries}
-        existing_map = _lookup_existing_metrics(self._storage.metric_results, identifiers)
+        existing_map = self._storage.metric_results.get_existing(identifiers)
 
         created = 0
         reused = 0

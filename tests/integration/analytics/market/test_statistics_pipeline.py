@@ -763,3 +763,101 @@ def test_no_validation_becomes_optional_sampled_or_configurable() -> None:
         "fast_mode",
     ):
         assert forbidden not in run_sig.parameters
+
+
+class _QueryCountingConnection:
+    def __init__(self, target) -> None:
+        self._target = target
+        self.execute_count = 0
+
+    def execute(self, *args, **kwargs):
+        self.execute_count += 1
+        return self._target.execute(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._target, name)
+
+
+def test_partial_overlap_resolves_reuse_without_per_identifier_queries(tmp_path) -> None:
+    fixed_clock = datetime(2026, 3, 1, tzinfo=UTC)
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        start, end = _store_coinbase(storage, count=4)
+        history = HistoricalMarketDataService(storage)
+        pipeline = MarketStatisticsPipeline(
+            storage,
+            history,
+            MarketStatisticsEngine(),
+            clock=lambda: fixed_clock,
+        )
+        request = _request("crypto:btc-usd", COINBASE_SOURCE_ID, start, end, fixed_clock)
+
+        first = pipeline.run(request)
+        assert first.results_created > 0
+        assert first.results_reused == 0
+
+        stored = storage.metric_results.list(asset_id="crypto:btc-usd")
+        assert len(stored) >= 4
+        deleted_ids = [stored[0].result_id, stored[1].result_id]
+        for deleted_id in deleted_ids:
+            storage.store.connection.execute(
+                "DELETE FROM metric_results WHERE result_id = ?",
+                [str(deleted_id)],
+            )
+
+        wrapper = _QueryCountingConnection(storage.metric_results._connection)
+        storage.metric_results._connection = wrapper
+
+        wrapper.execute_count = 0
+        second = pipeline.run(request)
+
+        assert second.results_reused == len(stored) - len(deleted_ids)
+        assert second.results_created == len(deleted_ids)
+        assert second.results_reused + second.results_created == second.results_generated
+        assert len(storage.metric_results.list(asset_id="crypto:btc-usd")) == len(stored)
+        # Bounded query count: get_existing takes 1 bounded chunk query,
+        # save_many takes bounded queries, never one query per candidate identifier
+        assert wrapper.execute_count <= 8
+
+
+def test_reuse_decisions_and_identities_are_unchanged(tmp_path) -> None:
+    fixed_clock = datetime(2026, 3, 1, tzinfo=UTC)
+    second_clock = datetime(2026, 3, 2, tzinfo=UTC)
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        start, end = _store_coinbase(storage, count=4)
+        history = HistoricalMarketDataService(storage)
+        pipeline1 = MarketStatisticsPipeline(
+            storage,
+            history,
+            MarketStatisticsEngine(),
+            clock=lambda: fixed_clock,
+        )
+        request = _request("crypto:btc-usd", COINBASE_SOURCE_ID, start, end, fixed_clock)
+
+        first = pipeline1.run(request)
+        assert first.results_created > 0
+        assert first.results_reused == 0
+        stored_first = storage.metric_results.list(asset_id="crypto:btc-usd")
+
+        pipeline2 = MarketStatisticsPipeline(
+            storage,
+            history,
+            MarketStatisticsEngine(),
+            clock=lambda: second_clock,
+        )
+        second = pipeline2.run(request)
+
+        assert second.results_created == 0
+        assert second.results_reused == first.results_created
+        assert second.results_generated == first.results_generated
+
+        stored_second = storage.metric_results.list(asset_id="crypto:btc-usd")
+        assert len(stored_second) == len(stored_first)
+
+        first_map = {r.result_id: r for r in stored_first}
+        for result in stored_second:
+            assert result.result_id in first_map
+            original = first_map[result.result_id]
+            assert result.value == original.value
+            assert result.as_of == original.as_of
+            assert result.available_at == original.available_at
+            assert result.computed_at == original.computed_at
