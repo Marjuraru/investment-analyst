@@ -65,6 +65,38 @@ def _get_many_documents[ModelT: BaseModel](
     }
 
 
+_GET_EXISTING_CHUNK_SIZE = 1_000
+
+
+def _get_existing_documents[ModelT: BaseModel](
+    connection: DuckDBPyConnection,
+    *,
+    table: str,
+    key_column: str,
+    identifiers: Collection[UUID],
+    model_type: type[ModelT],
+    chunk_size: int = _GET_EXISTING_CHUNK_SIZE,
+) -> dict[UUID, ModelT]:
+    ordered_ids = tuple(sorted(set(identifiers), key=str))
+    if not ordered_ids:
+        return {}
+    found: dict[UUID, ModelT] = {}
+    for i in range(0, len(ordered_ids), chunk_size):
+        chunk = ordered_ids[i : i + chunk_size]
+        placeholders = ", ".join("?" for _ in chunk)
+        query = (
+            f"SELECT {key_column}, document_json FROM {table} "  # noqa: S608
+            f"WHERE {key_column} IN ({placeholders})"
+        )
+        rows = connection.execute(
+            query,
+            [str(identifier) for identifier in chunk],
+        ).fetchall()
+        for row in rows:
+            found[UUID(row[0])] = model_from_json(model_type, row[1])
+    return found
+
+
 def _list_documents[ModelT: BaseModel](
     connection: DuckDBPyConnection,
     *,
@@ -713,6 +745,15 @@ class DuckDBMetricResultRepository:
 
     def get_many(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]:
         return _get_many_documents(
+            self._connection,
+            table="metric_results",
+            key_column="result_id",
+            identifiers=result_ids,
+            model_type=MetricResult,
+        )
+
+    def get_existing(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]:
+        return _get_existing_documents(
             self._connection,
             table="metric_results",
             key_column="result_id",

@@ -1,8 +1,7 @@
 """Append-only persistence for provider-independent derivatives metrics."""
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable
 from datetime import UTC, datetime
-from uuid import UUID
 
 from investment_analyst.analytics.crypto.derivatives_engine import (
     METRIC_DEFINITIONS,
@@ -14,27 +13,7 @@ from investment_analyst.analytics.crypto.derivatives_models import (
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import MetricResult
 from investment_analyst.storage import LocalStorage
-from investment_analyst.storage.errors import RecordNotFoundError, StorageError
-from investment_analyst.storage.repositories import DuckDBMetricResultRepository
-
-
-def _lookup_existing_metrics(
-    repository: DuckDBMetricResultRepository,
-    identifiers: Collection[UUID],
-) -> dict[UUID, MetricResult]:
-    if not identifiers:
-        return {}
-    try:
-        return repository.get_many(identifiers)
-    except RecordNotFoundError:
-        pass
-    found: dict[UUID, MetricResult] = {}
-    for identifier in identifiers:
-        try:
-            found[identifier] = repository.get(identifier)
-        except RecordNotFoundError:
-            continue
-    return found
+from investment_analyst.storage.errors import StorageError
 
 
 class CryptoDerivativesMetricPipeline:
@@ -84,7 +63,7 @@ class CryptoDerivativesMetricPipeline:
             self._storage.metric_definitions.upsert(definition)
 
         candidate_ids = {candidate.result_id for candidate in computation.results}
-        existing_results = _lookup_existing_metrics(self._storage.metric_results, candidate_ids)
+        existing_results = self._storage.metric_results.get_existing(candidate_ids)
 
         created = 0
         reused = 0

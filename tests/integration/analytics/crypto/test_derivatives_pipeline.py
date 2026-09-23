@@ -16,7 +16,12 @@ from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.providers.crypto.deribit import DeribitClient
 from investment_analyst.providers.crypto.deribit_pipeline import DeribitEvidencePipeline
 from investment_analyst.providers.http import HttpResponse
-from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.storage import (
+    LocalStorage,
+    RecordNotFoundError,
+    StorageError,
+    StoragePaths,
+)
 
 _FIXTURES = Path(__file__).parents[3] / "fixtures" / "deribit"
 _START = datetime(2026, 8, 1, tzinfo=UTC)
@@ -344,3 +349,136 @@ def test_decimal_utc_and_available_at_are_preserved(tmp_path: Path) -> None:
             assert result.computed_at.tzinfo is UTC
             assert result.available_at <= _KNOWN
             assert result.available_at <= result.computed_at
+
+
+def test_partial_overlap_resolves_reuse_without_per_identifier_queries(
+    tmp_path: Path,
+) -> None:
+    configuration = _configuration()
+    with LocalStorage(StoragePaths.from_root(tmp_path / "storage")) as storage:
+        _setup_evidence(storage, configuration)
+        pipeline = CryptoDerivativesMetricPipeline(
+            storage,
+            CryptoDerivativesMetricEngine(),
+            clock=lambda: _KNOWN,
+        )
+
+        first = pipeline.run(
+            asset_id=configuration.asset_id,
+            funding_source_id=configuration.funding_source_id,
+            dvol_source_id=configuration.dvol_source_id,
+            summary_source_id=configuration.summary_source_id,
+            known_at=_KNOWN,
+            as_of_from=_START,
+            as_of_before=_END,
+        )
+        assert first.results_created >= 2
+        assert first.results_reused == 0
+
+        # Delete one of the persisted results to create a partial overlap:
+        # candidate set will have 1 present (reused) and 1 absent (created).
+        deleted_id = first.results[0].result_id
+        storage.store.connection.execute(
+            "DELETE FROM metric_results WHERE result_id = ?",
+            [str(deleted_id)],
+        )
+
+        wrapper = _QueryCountingConnection(storage.metric_results._connection)
+        storage.metric_results._connection = wrapper
+
+        wrapper.execute_count = 0
+        second = pipeline.run(
+            asset_id=configuration.asset_id,
+            funding_source_id=configuration.funding_source_id,
+            dvol_source_id=configuration.dvol_source_id,
+            summary_source_id=configuration.summary_source_id,
+            known_at=_KNOWN,
+            as_of_from=_START,
+            as_of_before=_END,
+        )
+
+        assert second.results_reused == len(first.results) - 1
+        assert second.results_created == 1
+        assert second.results_reused + second.results_created == len(second.results)
+        # Bounded query count: get_existing takes 1 bounded chunk query,
+        # save_many takes bounded queries, never one query per candidate identifier
+        assert wrapper.execute_count <= 8
+
+
+def test_reuse_decisions_and_identities_are_unchanged(
+    tmp_path: Path,
+) -> None:
+    configuration = _configuration()
+    with LocalStorage(StoragePaths.from_root(tmp_path / "storage")) as storage:
+        _setup_evidence(storage, configuration)
+        clock1 = _KNOWN
+        clock2 = _KNOWN + timedelta(hours=6)
+
+        first = CryptoDerivativesMetricPipeline(
+            storage,
+            CryptoDerivativesMetricEngine(),
+            clock=lambda: clock1,
+        ).run(
+            asset_id=configuration.asset_id,
+            funding_source_id=configuration.funding_source_id,
+            dvol_source_id=configuration.dvol_source_id,
+            summary_source_id=configuration.summary_source_id,
+            known_at=_KNOWN,
+            as_of_from=_START,
+            as_of_before=_END,
+        )
+
+        assert first.results_created > 0
+        assert first.results_reused == 0
+
+        second = CryptoDerivativesMetricPipeline(
+            storage,
+            CryptoDerivativesMetricEngine(),
+            clock=lambda: clock2,
+        ).run(
+            asset_id=configuration.asset_id,
+            funding_source_id=configuration.funding_source_id,
+            dvol_source_id=configuration.dvol_source_id,
+            summary_source_id=configuration.summary_source_id,
+            known_at=_KNOWN,
+            as_of_from=_START,
+            as_of_before=_END,
+        )
+
+        assert second.results_created == 0
+        assert second.results_reused == len(first.results)
+        assert len(second.results) == len(first.results)
+
+        first_map = {r.result_id: r for r in first.results}
+        for result in second.results:
+            assert result.result_id in first_map
+            original = first_map[result.result_id]
+            assert result.value == original.value
+            assert result.as_of == original.as_of
+            assert result.available_at == original.available_at
+            assert result.computed_at == original.computed_at
+
+
+def test_traceability_still_fails_on_a_missing_input(
+    tmp_path: Path,
+) -> None:
+    configuration = _configuration()
+    with LocalStorage(StoragePaths.from_root(tmp_path / "storage")) as storage:
+        _setup_evidence(storage, configuration)
+        storage.store.connection.execute("DELETE FROM raw_record_index")
+
+        pipeline = CryptoDerivativesMetricPipeline(
+            storage,
+            CryptoDerivativesMetricEngine(),
+            clock=lambda: _KNOWN,
+        )
+        with pytest.raises((RecordNotFoundError, StorageError)):
+            pipeline.run(
+                asset_id=configuration.asset_id,
+                funding_source_id=configuration.funding_source_id,
+                dvol_source_id=configuration.dvol_source_id,
+                summary_source_id=configuration.summary_source_id,
+                known_at=_KNOWN,
+                as_of_from=_START,
+                as_of_before=_END,
+            )

@@ -153,6 +153,8 @@ class MetricResultRepository(Protocol):
 
     def get_many(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]: ...
 
+    def get_existing(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]: ...
+
     def list(
         self,
         *,
