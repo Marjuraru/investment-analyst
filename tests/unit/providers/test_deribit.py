@@ -1,6 +1,7 @@
 """Contract tests for the bounded public Deribit client."""
 
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -496,3 +497,119 @@ def test_funding_and_dvol_interval_closure_checks_are_unchanged() -> None:
             sleep=lambda _: None,
             clock=lambda: clock_time,
         ).fetch_dvol_daily("BTC", _START, future_dvol_end)
+
+
+def test_public_fetch_contract_checks_declare_a_typed_reason_code() -> None:
+    slug_pattern = re.compile(r"^[a-z][a-z0-9_]{2,39}$")
+
+    # 1. Funding contract checks
+    with pytest.raises(DeribitError) as exc_funding_shape:
+        DeribitClient(
+            _Transport(_rpc({})),
+            sleep=lambda _: None,
+            clock=lambda: _END,
+        ).fetch_funding_history("BTC-PERPETUAL", _START, _END)
+    assert exc_funding_shape.value.reason_code == "deribit_funding_result_not_list"
+    assert slug_pattern.fullmatch(exc_funding_shape.value.reason_code)
+
+    with pytest.raises(DeribitError) as exc_funding_limit:
+        DeribitClient(
+            _Transport(_rpc([_funding_row(_START)] * 1001)),
+            sleep=lambda _: None,
+            clock=lambda: _END,
+        ).fetch_funding_history("BTC-PERPETUAL", _START, _END)
+    assert exc_funding_limit.value.reason_code == "deribit_funding_row_limit_exceeded"
+    assert slug_pattern.fullmatch(exc_funding_limit.value.reason_code)
+
+    with pytest.raises(DeribitError) as exc_funding_interval:
+        DeribitClient(
+            _Transport(_rpc([])),
+            sleep=lambda _: None,
+            clock=lambda: _START,
+        ).fetch_funding_history("BTC-PERPETUAL", _START, _END)
+    assert exc_funding_interval.value.reason_code == "deribit_funding_interval_unclosed"
+    assert slug_pattern.fullmatch(exc_funding_interval.value.reason_code)
+
+    # 2. DVOL contract checks
+    with pytest.raises(DeribitError) as exc_dvol_shape:
+        DeribitClient(
+            _Transport(_rpc([])),
+            sleep=lambda _: None,
+            clock=lambda: _END,
+        ).fetch_dvol_daily("BTC", _START, _END)
+    assert exc_dvol_shape.value.reason_code == "deribit_dvol_result_not_dict"
+    assert slug_pattern.fullmatch(exc_dvol_shape.value.reason_code)
+
+    with pytest.raises(DeribitError) as exc_dvol_keys:
+        DeribitClient(
+            _Transport(_rpc({"data": [], "continuation": None, "extra": True})),
+            sleep=lambda _: None,
+            clock=lambda: _END,
+        ).fetch_dvol_daily("BTC", _START, _END)
+    assert exc_dvol_keys.value.reason_code == "deribit_dvol_result_shape_unexpected"
+    assert slug_pattern.fullmatch(exc_dvol_keys.value.reason_code)
+
+    with pytest.raises(DeribitError) as exc_dvol_list:
+        DeribitClient(
+            _Transport(_rpc({"data": {}, "continuation": None})),
+            sleep=lambda _: None,
+            clock=lambda: _END,
+        ).fetch_dvol_daily("BTC", _START, _END)
+    assert exc_dvol_list.value.reason_code == "deribit_dvol_data_not_list"
+    assert slug_pattern.fullmatch(exc_dvol_list.value.reason_code)
+
+    with pytest.raises(DeribitError) as exc_dvol_limit:
+        DeribitClient(
+            _Transport(_rpc({"data": [_dvol_row(_START, "55")] * 1001, "continuation": None})),
+            sleep=lambda _: None,
+            clock=lambda: _END,
+        ).fetch_dvol_daily("BTC", _START, _END)
+    assert exc_dvol_limit.value.reason_code == "deribit_dvol_row_limit_exceeded"
+    assert slug_pattern.fullmatch(exc_dvol_limit.value.reason_code)
+
+    with pytest.raises(DeribitError) as exc_dvol_conflict:
+        DeribitClient(
+            _Transport(
+                _rpc(
+                    {
+                        "data": [_dvol_row(_START, "55"), _dvol_row(_START, "56")],
+                        "continuation": None,
+                    }
+                )
+            ),
+            sleep=lambda _: None,
+            clock=lambda: _END,
+        ).fetch_dvol_daily("BTC", _START, _END)
+    assert exc_dvol_conflict.value.reason_code == "deribit_dvol_conflicting_candles"
+    assert slug_pattern.fullmatch(exc_dvol_conflict.value.reason_code)
+
+    with pytest.raises(DeribitError) as exc_dvol_interval:
+        DeribitClient(
+            _Transport(_rpc({"data": [], "continuation": None})),
+            sleep=lambda _: None,
+            clock=lambda: _START,
+        ).fetch_dvol_daily("BTC", _START, _END)
+    assert exc_dvol_interval.value.reason_code == "deribit_dvol_interval_unclosed"
+    assert slug_pattern.fullmatch(exc_dvol_interval.value.reason_code)
+
+    # 3. Summary contract checks
+    with pytest.raises(DeribitError) as exc_summary_row:
+        DeribitClient(
+            _Transport(_rpc([])),
+            sleep=lambda _: None,
+            clock=lambda: _END,
+        ).fetch_perpetual_summary("BTC-PERPETUAL")
+    assert exc_summary_row.value.reason_code == "deribit_summary_result_not_single_row"
+    assert slug_pattern.fullmatch(exc_summary_row.value.reason_code)
+
+    payload = json.loads((_FIXTURES / "btc_perpetual_summary.json").read_text(encoding="utf-8"))
+    creation_time = datetime(2026, 8, 2, 1, 0, 0, tzinfo=UTC)
+    payload["result"][0]["creation_timestamp"] = _ms(creation_time)
+    with pytest.raises(DeribitError) as exc_summary_lead:
+        DeribitClient(
+            _Transport(json.dumps(payload).encode()),
+            sleep=lambda _: None,
+            clock=lambda: creation_time - MAX_SUMMARY_CLOCK_LEAD - timedelta(seconds=1),
+        ).fetch_perpetual_summary("BTC-PERPETUAL")
+    assert exc_summary_lead.value.reason_code == "deribit_summary_clock_lead_exceeded"
+    assert slug_pattern.fullmatch(exc_summary_lead.value.reason_code)

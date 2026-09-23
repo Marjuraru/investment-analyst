@@ -60,6 +60,27 @@ Scheduler, alertas operativas y receipts analíticos son archivos requeridos. La
 después de los `load()`, la sonda compara identidad, tamaño, mtime y, para los documentos JSON,
 SHA-256. Un cambio concurrente termina con error `snapshot_changed`.
 
+## Diagnóstico operativo y causa tipada (`reason_code`)
+
+Para evitar reproducir fallos en vivo con sondas externas cuando un trabajo programado termina con
+error de contrato, `ScheduledJobFailure` admite un campo opcional aditivo:
+
+```python
+reason_code: NonEmptyStr | None = None
+```
+
+- **Formato de slug obligatorio:** restringido estrictamente al patrón `^[a-z][a-z0-9_]{2,39}$` (de
+  3 a 40 caracteres, comenzando con letra minúscula y compuesto exclusivamente por minúsculas, dígitos
+  y guiones bajos). Cualquier valor que no cumpla este formato se rechaza de forma fail-closed.
+- **Alcance operativo:** identifica de manera determinista la comprobación interna de contrato que
+  motivó el fallo sin requerir parseo de texto ni propagar fragmentos, cadenas arbitrarias, payloads o
+  secretos del proveedor al estado persistido. La categoría canónica (`category`), el mensaje acotado
+  y la política de reintento (`retryable`) de cada camino existente no cambian.
+- **Primera vertical Deribit:** los métodos públicos de captura (`fetch_funding_history`,
+  `fetch_dvol_daily` y `fetch_perpetual_summary`) declaran reason codes tipados para sus
+  comprobaciones de contrato. Los ayudantes de parseo de valores y cualquier fallo sin causa tipada
+  declaran `reason_code=None`, conservando intacta la compatibilidad con intentos históricos.
+
 ## Evidencia reutilizada por OPS-8
 
 OPS-8 no repite jobs costosos para fabricar datos. Reutiliza la aceptación humana de

@@ -260,8 +260,9 @@ def test_chart_query_is_empty_bounded_and_read_only(tmp_path: Path) -> None:
         pass
     database_before = storage_paths.database_path.read_bytes()
 
-    chart = _application(tmp_path).query_aapl_market_chart(
+    chart = _application(tmp_path).query_listed_market_chart(
         AaplMarketChartRequest(known_at=datetime(2026, 7, 14, 4, 41, 55, tzinfo=UTC)),
+        asset_id="equity:us:aapl",
         location=StorageLocationRequest(legacy_root=root),
     )
 

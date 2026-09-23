@@ -899,6 +899,7 @@ def _crypto_spot_daily_execution(
 def _classified_provider_error(error: Exception) -> ScheduledJobRunError:
     """Map typed provider causes to one safe scheduler policy without parsing messages."""
     chain = _exception_chain(error)
+    reason_code = _provider_reason_code(chain)
     request_error = next(
         (item for item in chain if isinstance(item, HttpRequestError)),
         None,
@@ -907,6 +908,7 @@ def _classified_provider_error(error: Exception) -> ScheduledJobRunError:
         failure = _http_failure(
             status_code=request_error.status_code,
             failure_kind=request_error.failure_kind,
+            reason_code=reason_code,
         )
     else:
         fred_error = next(
@@ -921,6 +923,7 @@ def _classified_provider_error(error: Exception) -> ScheduledJobRunError:
             failure = _http_failure(
                 status_code=fred_error.status_code,
                 failure_kind=fred_error.failure_kind,
+                reason_code=reason_code,
             )
         else:
             status_code = _provider_status_code(chain)
@@ -928,9 +931,10 @@ def _classified_provider_error(error: Exception) -> ScheduledJobRunError:
                 _http_failure(
                     status_code=status_code,
                     failure_kind=HttpRequestFailureKind.HTTP_STATUS,
+                    reason_code=reason_code,
                 )
                 if status_code is not None
-                else _non_http_failure(chain)
+                else _non_http_failure(chain, reason_code=reason_code)
             )
     return ScheduledJobRunError(failure)
 
@@ -939,58 +943,73 @@ def _http_failure(
     *,
     status_code: int | None,
     failure_kind: HttpRequestFailureKind,
+    reason_code: str | None = None,
 ) -> ScheduledJobFailure:
     if failure_kind is HttpRequestFailureKind.CONFIGURATION:
         return _safe_failure(
             ScheduledJobFailureCategory.CONFIGURATION,
             "scheduled provider request configuration is invalid",
+            reason_code=reason_code,
         )
     if failure_kind is HttpRequestFailureKind.TRANSPORT:
         return _safe_failure(
             ScheduledJobFailureCategory.TRANSPORT,
             "scheduled provider transport failed after bounded internal retries",
+            reason_code=reason_code,
         )
     if failure_kind is HttpRequestFailureKind.UNEXPECTED:
         return _safe_failure(
             ScheduledJobFailureCategory.UNEXPECTED,
             "scheduled provider request failed unexpectedly",
+            reason_code=reason_code,
         )
     if status_code in {401, 403}:
         return _safe_failure(
             ScheduledJobFailureCategory.AUTHENTICATION,
             "scheduled provider authentication or authorization failed",
+            reason_code=reason_code,
         )
     if status_code == 429:
         return _safe_failure(
             ScheduledJobFailureCategory.RATE_LIMIT,
             "scheduled provider rate limit remained active after bounded internal retries",
+            reason_code=reason_code,
         )
     if status_code in RETRYABLE_HTTP_STATUS_CODES:
         return _safe_failure(
             ScheduledJobFailureCategory.TRANSIENT_HTTP,
             "scheduled provider returned a transient HTTP failure after bounded internal retries",
+            reason_code=reason_code,
         )
     return _safe_failure(
         ScheduledJobFailureCategory.HTTP,
         "scheduled provider returned a permanent HTTP failure",
+        reason_code=reason_code,
     )
 
 
-def _non_http_failure(chain: tuple[BaseException, ...]) -> ScheduledJobFailure:
+def _non_http_failure(
+    chain: tuple[BaseException, ...],
+    *,
+    reason_code: str | None = None,
+) -> ScheduledJobFailure:
     if any(isinstance(item, ProviderConfigurationError) for item in chain):
         return _safe_failure(
             ScheduledJobFailureCategory.CONFIGURATION,
             "scheduled provider credentials or configuration are invalid",
+            reason_code=reason_code,
         )
     if any(isinstance(item, SmvOpenDataNotFoundError) for item in chain):
         return _safe_failure(
             ScheduledJobFailureCategory.UNSUPPORTED_CAPABILITY,
             "scheduled provider does not support the configured asset or capability",
+            reason_code=reason_code,
         )
     if any(isinstance(item, (TimeoutError, ConnectionError, URLError)) for item in chain):
         return _safe_failure(
             ScheduledJobFailureCategory.TRANSPORT,
             "scheduled provider transport failed after bounded internal retries",
+            reason_code=reason_code,
         )
     if any(
         isinstance(item, (StorageError, WorkspaceError, AaplOperationalStateError, OSError))
@@ -999,6 +1018,7 @@ def _non_http_failure(chain: tuple[BaseException, ...]) -> ScheduledJobFailure:
         return _safe_failure(
             ScheduledJobFailureCategory.STORAGE_STATE,
             "scheduled workspace or persisted state is incompatible or unavailable",
+            reason_code=reason_code,
         )
     if any(
         isinstance(
@@ -1015,6 +1035,7 @@ def _non_http_failure(chain: tuple[BaseException, ...]) -> ScheduledJobFailure:
         return _safe_failure(
             ScheduledJobFailureCategory.VALIDATION,
             "scheduled provider result failed point-in-time or model validation",
+            reason_code=reason_code,
         )
     if any(
         type(item) is SecIssuerFundamentalRefreshError and item.__cause__ is None for item in chain
@@ -1022,6 +1043,7 @@ def _non_http_failure(chain: tuple[BaseException, ...]) -> ScheduledJobFailure:
         return _safe_failure(
             ScheduledJobFailureCategory.UNSUPPORTED_CAPABILITY,
             "scheduled provider does not support the configured asset or capability",
+            reason_code=reason_code,
         )
     if any(
         isinstance(
@@ -1048,10 +1070,12 @@ def _non_http_failure(chain: tuple[BaseException, ...]) -> ScheduledJobFailure:
         return _safe_failure(
             ScheduledJobFailureCategory.PROVIDER_CONTRACT,
             "scheduled provider payload or refresh contract is invalid",
+            reason_code=reason_code,
         )
     return _safe_failure(
         ScheduledJobFailureCategory.UNEXPECTED,
         "scheduled provider refresh failed unexpectedly",
+        reason_code=reason_code,
     )
 
 
@@ -1075,6 +1099,14 @@ def _provider_status_code(chain: tuple[BaseException, ...]) -> int | None:
     return None
 
 
+def _provider_reason_code(chain: tuple[BaseException, ...]) -> str | None:
+    for item in chain:
+        code = getattr(item, "reason_code", None)
+        if isinstance(code, str) and code:
+            return code
+    return None
+
+
 def _exception_chain(error: BaseException) -> tuple[BaseException, ...]:
     chain: list[BaseException] = []
     seen: set[int] = set()
@@ -1092,8 +1124,10 @@ def _exception_chain(error: BaseException) -> tuple[BaseException, ...]:
 def _safe_failure(
     category: ScheduledJobFailureCategory,
     message: str,
+    *,
+    reason_code: str | None = None,
 ) -> ScheduledJobFailure:
-    return scheduled_job_failure(category, message)
+    return scheduled_job_failure(category, message, reason_code=reason_code)
 
 
 def _offset_minute(value: time, minutes: int) -> time:

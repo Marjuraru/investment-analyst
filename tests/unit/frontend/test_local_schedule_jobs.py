@@ -728,3 +728,121 @@ def test_provider_failure_classification_does_not_parse_free_text() -> None:
     assert failure.category == ScheduledJobFailureCategory.PROVIDER_CONTRACT
     assert failure.retryable is False
     assert "simulated-secret" not in failure.message
+
+
+def test_typed_provider_cause_records_its_reason_code_without_changing_category_or_retryable() -> (
+    None
+):
+    error = DeribitError(
+        "sensitive internal provider message with simulated-secret",
+        reason_code="deribit_summary_clock_lead_exceeded",
+    )
+    failure = schedule_jobs_module._classified_provider_error(error).failure
+
+    assert failure.category is ScheduledJobFailureCategory.PROVIDER_CONTRACT
+    assert failure.retryable is False
+    assert failure.reason_code == "deribit_summary_clock_lead_exceeded"
+    assert "sensitive" not in failure.message
+    assert "simulated-secret" not in failure.message
+
+
+def test_failure_without_a_declared_code_is_unchanged_from_today() -> None:
+    error = DeribitError("ordinary failure without reason_code")
+    failure = schedule_jobs_module._classified_provider_error(error).failure
+
+    assert failure.category is ScheduledJobFailureCategory.PROVIDER_CONTRACT
+    assert failure.retryable is False
+    assert failure.reason_code is None
+    assert failure.message == "scheduled provider payload or refresh contract is invalid"
+
+
+def test_every_existing_failure_path_keeps_its_category_and_retry_policy() -> None:
+    cases = (
+        (
+            ProviderConfigurationError("config issue"),
+            ScheduledJobFailureCategory.CONFIGURATION,
+            False,
+        ),
+        (
+            SmvOpenDataNotFoundError("not found"),
+            ScheduledJobFailureCategory.UNSUPPORTED_CAPABILITY,
+            False,
+        ),
+        (
+            TimeoutError("timed out"),
+            ScheduledJobFailureCategory.TRANSPORT,
+            True,
+        ),
+        (
+            StorageError("storage broken"),
+            ScheduledJobFailureCategory.STORAGE_STATE,
+            False,
+        ),
+        (
+            ListedMarketKnownAtTooEarlyError("too early"),
+            ScheduledJobFailureCategory.VALIDATION,
+            False,
+        ),
+        (
+            AlpacaStockError("alpaca issue"),
+            ScheduledJobFailureCategory.PROVIDER_CONTRACT,
+            False,
+        ),
+        (
+            DeribitError("deribit issue"),
+            ScheduledJobFailureCategory.PROVIDER_CONTRACT,
+            False,
+        ),
+        (
+            HttpRequestError("https://api.test", "rate limit", status_code=429),
+            ScheduledJobFailureCategory.RATE_LIMIT,
+            True,
+        ),
+        (
+            HttpRequestError("https://api.test", "auth", status_code=401),
+            ScheduledJobFailureCategory.AUTHENTICATION,
+            False,
+        ),
+        (
+            HttpRequestError("https://api.test", "server error", status_code=500),
+            ScheduledJobFailureCategory.TRANSIENT_HTTP,
+            True,
+        ),
+        (
+            HttpRequestError("https://api.test", "permanent", status_code=404),
+            ScheduledJobFailureCategory.HTTP,
+            False,
+        ),
+        (
+            RuntimeError("something wild"),
+            ScheduledJobFailureCategory.UNEXPECTED,
+            False,
+        ),
+    )
+    for error, expected_category, expected_retryable in cases:
+        failure = schedule_jobs_module._classified_provider_error(error).failure
+        assert failure.category is expected_category
+        assert failure.retryable is expected_retryable
+
+
+def test_provider_message_text_never_reaches_the_persisted_failure() -> None:
+    leaked_texts = (
+        "simulated-secret-key-12345",
+        "non-finite JSON number: 1e9999",
+        "Bearer eyJhbGciOi...",
+        "internal sql error: syntax error at or near SELECT",
+    )
+    for text in leaked_texts:
+        error_with_code = DeribitError(
+            f"Deribit error containing {text}",
+            reason_code="deribit_funding_row_limit_exceeded",
+        )
+        failure = schedule_jobs_module._classified_provider_error(error_with_code).failure
+        assert text not in failure.message
+        assert failure.reason_code is not None
+        assert text not in failure.reason_code
+
+        error_without_code = AlpacaStockError(f"Alpaca error containing {text}")
+        failure2 = schedule_jobs_module._classified_provider_error(error_without_code).failure
+        assert text not in failure2.message
+        assert failure2.reason_code is None

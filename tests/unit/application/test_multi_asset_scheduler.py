@@ -9,6 +9,7 @@ from uuid import UUID
 
 import duckdb
 import pytest
+from pydantic import ValidationError
 
 from investment_analyst.application.multi_asset_scheduler import (
     MultiAssetScheduler,
@@ -961,3 +962,87 @@ def test_legacy_v1_state_is_folded_once_and_preserved_byte_for_byte(tmp_path: Pa
     reloaded_after_delete = store.load()
     assert len(reloaded_after_delete.attempts) == 2
     assert reloaded_after_delete.attempts[0].attempt_id == legacy_att.attempt_id
+
+
+def test_persisted_attempt_without_reason_code_is_still_readable() -> None:
+    job_def = _definition("failed-job")
+    local_date = date(2026, 8, 1)
+    scheduled_for = job_def.scheduled_for(local_date)
+    now = scheduled_for + timedelta(minutes=1)
+    payload = {
+        "schema_version": "scheduled-job-attempt-v1",
+        "attempt_id": "00000000-0000-4000-8000-000000000099",
+        "definition": job_def.model_dump(mode="json"),
+        "local_date": local_date.isoformat(),
+        "scheduled_for": scheduled_for.isoformat(),
+        "attempt_number": 1,
+        "status": "failed",
+        "started_at": now.isoformat(),
+        "completed_at": (now + timedelta(seconds=1)).isoformat(),
+        "failure": {
+            "category": "provider_contract_error",
+            "message": "scheduled provider payload or refresh contract is invalid",
+            "retryable": False,
+        },
+    }
+    attempt = ScheduledJobAttempt.model_validate(payload)
+    assert attempt.status is ScheduledJobAttemptStatus.FAILED
+    assert attempt.failure is not None
+    assert attempt.failure.category is ScheduledJobFailureCategory.PROVIDER_CONTRACT
+    assert attempt.failure.message == "scheduled provider payload or refresh contract is invalid"
+    assert attempt.failure.retryable is False
+    assert attempt.failure.reason_code is None
+
+
+def test_retry_policy_per_category_is_unchanged() -> None:
+    expected_retryable = {
+        ScheduledJobFailureCategory.CONFIGURATION: False,
+        ScheduledJobFailureCategory.AUTHENTICATION: False,
+        ScheduledJobFailureCategory.UNSUPPORTED_CAPABILITY: False,
+        ScheduledJobFailureCategory.PROVIDER_CONTRACT: False,
+        ScheduledJobFailureCategory.VALIDATION: False,
+        ScheduledJobFailureCategory.STORAGE_STATE: False,
+        ScheduledJobFailureCategory.RATE_LIMIT: True,
+        ScheduledJobFailureCategory.TRANSPORT: True,
+        ScheduledJobFailureCategory.TRANSIENT_HTTP: True,
+        ScheduledJobFailureCategory.HTTP: False,
+        ScheduledJobFailureCategory.UNEXPECTED: False,
+        ScheduledJobFailureCategory.INTERRUPTED: True,
+        ScheduledJobFailureCategory.MEMORY_BUDGET: False,
+        ScheduledJobFailureCategory.LEGACY_UNKNOWN: False,
+    }
+    for category, retryable in expected_retryable.items():
+        failure = scheduled_job_failure(category, "test message")
+        assert failure.category is category
+        assert failure.retryable is retryable
+
+
+def test_malformed_reason_code_is_rejected() -> None:
+    # Valid slugs pass
+    valid = scheduled_job_failure(
+        ScheduledJobFailureCategory.PROVIDER_CONTRACT,
+        "test message",
+        reason_code="valid_reason_slug",
+    )
+    assert valid.reason_code == "valid_reason_slug"
+
+    # Malformed slugs fail validation
+    malformed_cases = (
+        "",
+        "ab",  # too short (< 3)
+        "a" * 41,  # too long (> 40)
+        "UPPERCASE",  # uppercase not allowed
+        "CamelCase",
+        "has-hyphen",  # hyphens not allowed
+        "has space",
+        "1starts_with_digit",
+        "_starts_with_underscore",
+        "has.dot",
+    )
+    for bad_code in malformed_cases:
+        with pytest.raises(ValidationError):
+            scheduled_job_failure(
+                ScheduledJobFailureCategory.PROVIDER_CONTRACT,
+                "test message",
+                reason_code=bad_code,
+            )

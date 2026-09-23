@@ -331,6 +331,10 @@ class ScheduledJobFailure(ContractModel):
     category: ScheduledJobFailureCategory | NonEmptyStr = Field(max_length=120)
     message: NonEmptyStr = Field(max_length=500)
     retryable: bool
+    reason_code: NonEmptyStr | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9_]{2,39}$",
+    )
 
     @field_validator("retryable", mode="before")
     @classmethod
@@ -375,12 +379,14 @@ class ScheduledJobFailure(ContractModel):
 def scheduled_job_failure(
     category: ScheduledJobFailureCategory,
     message: str,
+    reason_code: str | None = None,
 ) -> ScheduledJobFailure:
     """Create a new failure only through the canonical retry policy table."""
     return ScheduledJobFailure(
         category=category,
         message=message,
         retryable=_FAILURE_RETRY_POLICY[category],
+        reason_code=reason_code,
     )
 
 
