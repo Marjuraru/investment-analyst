@@ -23,8 +23,10 @@ from investment_analyst.application.storage_observability import (
     ScheduledJobObservation,
     StorageObservabilityCollector,
     StorageObservabilityDurations,
+    StorageObservabilityDurationsV1,
     StorageObservabilityGrowthClassification,
     StorageObservabilityRecord,
+    StorageObservabilityRecordV1,
     StorageObservabilityState,
     StorageObservabilityTableBytes,
     parse_storage_observability_state,
@@ -140,10 +142,13 @@ def _record(root: Path, clock: _ScriptedClock | None = None) -> StorageObservabi
 def test_storage_observability_contract_is_frozen_and_versioned(tmp_path: Path) -> None:
     record = _record(tmp_path)
 
-    assert record.schema_version == "storage-observability-v1"
+    assert record.schema_version == "storage-observability-v2"
     assert StorageObservabilityRecord.model_config["frozen"] is True
     assert StorageObservabilityRecord.model_config["extra"] == "forbid"
+    assert StorageObservabilityRecordV1.model_config["frozen"] is True
+    assert StorageObservabilityRecordV1.model_config["extra"] == "forbid"
     assert StorageObservabilityDurations.model_config["frozen"] is True
+    assert StorageObservabilityDurationsV1.model_config["frozen"] is True
     assert StorageObservabilityState.model_config["extra"] == "forbid"
 
     with pytest.raises(ValidationError):
@@ -152,14 +157,16 @@ def test_storage_observability_contract_is_frozen_and_versioned(tmp_path: Path) 
         StorageObservabilityRecord(**{**record.model_dump(), "unexpected_field": 1})
     with pytest.raises(ValidationError):
         StorageObservabilityRecord(
-            **{**record.model_dump(), "schema_version": "storage-observability-v2"}
+            **{**record.model_dump(), "schema_version": "storage-observability-v3"}
         )
 
     for model in (
         ScheduledJobObservation,
         StorageObservabilityDurations,
+        StorageObservabilityDurationsV1,
         StorageObservabilityGrowthClassification,
         StorageObservabilityRecord,
+        StorageObservabilityRecordV1,
         StorageObservabilityTableBytes,
         StorageObservabilityState,
     ):
@@ -202,16 +209,16 @@ def test_stage_durations_reconcile_with_total_duration(tmp_path: Path) -> None:
     durations = record.durations
     assert durations.model_dump() == {
         "total_ms": 7000,
-        "network_ms": 1000,
+        "job_execution_ms": 1000,
         "query_ms": 3000,
-        "calculation_ms": 1000,
+        "collector_unattributed_ms": 1000,
         "persistence_ms": 1000,
         "verification_ms": 1000,
     }
     assert (
-        durations.network_ms
+        durations.job_execution_ms
         + durations.query_ms
-        + durations.calculation_ms
+        + durations.collector_unattributed_ms
         + durations.persistence_ms
         + durations.verification_ms
         == durations.total_ms
@@ -219,18 +226,18 @@ def test_stage_durations_reconcile_with_total_duration(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="reconcile"):
         StorageObservabilityDurations(
             total_ms=10,
-            network_ms=1,
+            job_execution_ms=1,
             query_ms=1,
-            calculation_ms=1,
+            collector_unattributed_ms=1,
             persistence_ms=1,
             verification_ms=1,
         )
     with pytest.raises(ValidationError, match="reconcile"):
         StorageObservabilityDurations(
             total_ms=9,
-            network_ms=1,
+            job_execution_ms=1,
             query_ms=1,
-            calculation_ms=1,
+            collector_unattributed_ms=1,
             persistence_ms=1,
             verification_ms=1,
         )
@@ -366,12 +373,12 @@ def test_collector_records_its_own_overhead_separately(tmp_path: Path) -> None:
 
     durations = record.durations
     assert record.collector_overhead_ms == 6000
-    assert durations.network_ms == 1000
+    assert durations.job_execution_ms == 1000
     assert durations.total_ms == 7000
-    assert record.collector_overhead_ms + durations.network_ms == durations.total_ms
+    assert record.collector_overhead_ms + durations.job_execution_ms == durations.total_ms
     assert record.collector_overhead_ms == (
         durations.query_ms
-        + durations.calculation_ms
+        + durations.collector_unattributed_ms
         + durations.persistence_ms
         + durations.verification_ms
     )
@@ -512,8 +519,8 @@ def test_record_is_operational_and_never_analytical_evidence(tmp_path: Path) -> 
     assert "available_at" not in StorageObservabilityRecord.model_fields
     assert "known_at" not in StorageObservabilityRecord.model_fields
     assert "available_at" not in payload
-    assert payload["schema_version"] == "storage-observability-v1"
-    assert record.schema_version == "storage-observability-v1"
+    assert payload["schema_version"] == "storage-observability-v2"
+    assert record.schema_version == "storage-observability-v2"
     assert tuple(StorageObservabilityRecord.model_fields) == (
         "schema_version",
         "observed_at",
@@ -759,3 +766,242 @@ def test_growth_classification_uses_row_counts_on_every_attempt(tmp_path: Path) 
     assert record2.growth.unclassified_rows == 0
     assert record2.growth.revision_rows == 3
     assert record2.growth.classified_rows == record2.rows_created == 5
+
+
+def test_durations_name_the_job_execution_window_and_the_collector_residual(
+    tmp_path: Path,
+) -> None:
+    _create_database(_database_path(tmp_path))
+    record = _record(tmp_path, _ScriptedClock(_BASE))
+
+    durations = record.durations
+    assert hasattr(durations, "job_execution_ms")
+    assert hasattr(durations, "collector_unattributed_ms")
+    assert not hasattr(durations, "network_ms")
+    assert not hasattr(durations, "calculation_ms")
+
+    assert "job_execution_ms" in StorageObservabilityDurations.model_fields
+    assert "collector_unattributed_ms" in StorageObservabilityDurations.model_fields
+    assert "network_ms" not in StorageObservabilityDurations.model_fields
+    assert "calculation_ms" not in StorageObservabilityDurations.model_fields
+
+    dumped = durations.model_dump()
+    assert "job_execution_ms" in dumped
+    assert "collector_unattributed_ms" in dumped
+    assert "network_ms" not in dumped
+    assert "calculation_ms" not in dumped
+
+    payload = json.loads((tmp_path / "state" / _ARTIFACT_NAME).read_text(encoding="utf-8"))
+    artifact_durations = payload["durations"]
+    assert "job_execution_ms" in artifact_durations
+    assert "collector_unattributed_ms" in artifact_durations
+    assert "network_ms" not in artifact_durations
+    assert "calculation_ms" not in artifact_durations
+
+
+def test_v1_records_still_parse_while_new_records_are_v2(tmp_path: Path) -> None:
+    _create_database(_database_path(tmp_path))
+    new_record = _record(tmp_path)
+    assert new_record.schema_version == "storage-observability-v2"
+
+    v1_line = json.dumps(
+        {
+            "attempt_id": "00000000-0000-4000-8000-000000000099",
+            "attempt_number": 1,
+            "attempt_status": "succeeded",
+            "collector_overhead_ms": 6000,
+            "database_bytes_after": 1000,
+            "database_bytes_before": 1000,
+            "durations": {
+                "calculation_ms": 1000,
+                "network_ms": 1000,
+                "persistence_ms": 1000,
+                "query_ms": 3000,
+                "total_ms": 7000,
+                "verification_ms": 1000,
+            },
+            "evidence_changed": True,
+            "growth": None,
+            "job_id": _JOB_ID,
+            "local_date": "2026-09-16",
+            "observed_at": "2026-09-16T12:00:03Z",
+            "rows_created": 3,
+            "rows_reused": 0,
+            "schema_version": "storage-observability-v1",
+            "table_bytes": [],
+            "wal_bytes_after": 0,
+            "wal_bytes_before": 0,
+        },
+        sort_keys=True,
+    )
+    v2_line = json.dumps(new_record.to_json_dict(), sort_keys=True)
+
+    state = parse_storage_observability_state(f"{v1_line}\n{v2_line}\n")
+    assert len(state.records) == 2
+
+    r1 = state.records[0]
+    assert isinstance(r1, StorageObservabilityRecordV1)
+    assert r1.schema_version == "storage-observability-v1"
+    assert r1.durations.network_ms == 1000
+    assert r1.durations.calculation_ms == 1000
+
+    r2 = state.records[1]
+    assert isinstance(r2, StorageObservabilityRecord)
+    assert r2.schema_version == "storage-observability-v2"
+    assert r2.durations.job_execution_ms == new_record.durations.job_execution_ms
+    assert r2.durations.collector_unattributed_ms == new_record.durations.collector_unattributed_ms
+
+
+def test_phase_values_are_numerically_unchanged(tmp_path: Path) -> None:
+    _create_database(_database_path(tmp_path))
+    clock = _ScriptedClock(_BASE)
+    record = _record(tmp_path, clock)
+
+    assert record.durations.total_ms == 7000
+    assert record.durations.job_execution_ms == 1000
+    assert record.durations.query_ms == 3000
+    assert record.durations.collector_unattributed_ms == 1000
+    assert record.durations.persistence_ms == 1000
+    assert record.durations.verification_ms == 1000
+    assert record.collector_overhead_ms == 6000
+
+    v1_equivalent = StorageObservabilityDurationsV1(
+        total_ms=7000,
+        network_ms=1000,
+        query_ms=3000,
+        calculation_ms=1000,
+        persistence_ms=1000,
+        verification_ms=1000,
+    )
+    assert record.durations.job_execution_ms == v1_equivalent.network_ms
+    assert record.durations.collector_unattributed_ms == v1_equivalent.calculation_ms
+    assert record.durations.query_ms == v1_equivalent.query_ms
+    assert record.durations.persistence_ms == v1_equivalent.persistence_ms
+    assert record.durations.verification_ms == v1_equivalent.verification_ms
+    assert record.durations.total_ms == v1_equivalent.total_ms
+
+
+def test_reconciliation_still_fails_closed_when_phases_do_not_sum() -> None:
+    with pytest.raises(ValidationError, match="reconcile"):
+        StorageObservabilityDurations(
+            total_ms=7000,
+            job_execution_ms=1000,
+            query_ms=3000,
+            collector_unattributed_ms=999,
+            persistence_ms=1000,
+            verification_ms=1000,
+        )
+
+    with pytest.raises(ValidationError, match="reconcile"):
+        StorageObservabilityDurations(
+            total_ms=7000,
+            job_execution_ms=1001,
+            query_ms=3000,
+            collector_unattributed_ms=1000,
+            persistence_ms=1000,
+            verification_ms=1000,
+        )
+
+    valid_durations = StorageObservabilityDurations(
+        total_ms=7000,
+        job_execution_ms=1000,
+        query_ms=3000,
+        collector_unattributed_ms=1000,
+        persistence_ms=1000,
+        verification_ms=1000,
+    )
+    with pytest.raises(ValidationError, match="separate"):
+        StorageObservabilityRecord(
+            observed_at=datetime(2026, 9, 16, 12, 0, 3, tzinfo=UTC),
+            attempt_id=UUID("00000000-0000-4000-8000-000000000001"),
+            job_id=_JOB_ID,
+            attempt_number=1,
+            local_date=date(2026, 9, 16),
+            attempt_status="succeeded",
+            database_bytes_before=0,
+            database_bytes_after=0,
+            wal_bytes_before=0,
+            wal_bytes_after=0,
+            collector_overhead_ms=5999,
+            durations=valid_durations,
+        )
+
+
+def test_no_network_estimate_is_published(tmp_path: Path) -> None:
+    _create_database(_database_path(tmp_path))
+    record = _record(tmp_path)
+
+    for field_name in StorageObservabilityRecord.model_fields:
+        assert "network" not in field_name.lower()
+    for field_name in StorageObservabilityDurations.model_fields:
+        assert "network" not in field_name.lower()
+
+    dump = record.to_json_dict()
+    for key in dump:
+        assert "network" not in key.lower()
+    for key in dump["durations"]:
+        assert "network" not in key.lower()
+
+    file_content = (tmp_path / "state" / _ARTIFACT_NAME).read_text(encoding="utf-8")
+    assert "network" not in file_content.lower()
+
+
+def test_existing_artifact_lines_are_never_rewritten(tmp_path: Path) -> None:
+    _create_database(_database_path(tmp_path))
+    artifact_path = tmp_path / "state" / _ARTIFACT_NAME
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+
+    v1_line = json.dumps(
+        {
+            "attempt_id": "00000000-0000-4000-8000-000000000010",
+            "attempt_number": 1,
+            "attempt_status": "succeeded",
+            "collector_overhead_ms": 6000,
+            "database_bytes_after": 1000,
+            "database_bytes_before": 1000,
+            "durations": {
+                "calculation_ms": 1000,
+                "network_ms": 1000,
+                "persistence_ms": 1000,
+                "query_ms": 3000,
+                "total_ms": 7000,
+                "verification_ms": 1000,
+            },
+            "evidence_changed": True,
+            "growth": None,
+            "job_id": _JOB_ID,
+            "local_date": "2026-09-16",
+            "observed_at": "2026-09-16T11:00:00Z",
+            "rows_created": 3,
+            "rows_reused": 0,
+            "schema_version": "storage-observability-v1",
+            "table_bytes": [],
+            "wal_bytes_after": 0,
+            "wal_bytes_before": 0,
+        },
+        sort_keys=True,
+    )
+    artifact_path.write_text(f"{v1_line}\n", encoding="utf-8")
+    original_bytes = artifact_path.read_bytes()
+
+    collector = _collector(tmp_path)
+    id2 = UUID("00000000-0000-4000-8000-000000000020")
+    handle = collector.begin_attempt(job_id=_JOB_ID, attempt_id=id2)
+    collector.complete_attempt(
+        handle,
+        _observation(attempt_id=id2, local_date=date(2026, 9, 16)),
+    )
+
+    new_bytes = artifact_path.read_bytes()
+    assert new_bytes.startswith(original_bytes)
+
+    lines = artifact_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert lines[0] == v1_line
+    assert json.loads(lines[1])["schema_version"] == "storage-observability-v2"
+    assert json.loads(lines[1])["attempt_id"] == str(id2)
+
+    state = collector.state()
+    assert len(state.records) == 2
+    assert isinstance(state.records[0], StorageObservabilityRecordV1)
+    assert isinstance(state.records[1], StorageObservabilityRecord)

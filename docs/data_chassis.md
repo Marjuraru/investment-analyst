@@ -6,33 +6,38 @@ eficiencia, la secuencia de etapas y las restricciones operativas permanentes pa
 del chasis de almacenamiento de `investment-analyst`, sin degradar la integridad point-in-time, la
 trazabilidad append-only ni la evidencia histórica persistida.
 
-## Evidencia viva de la necesidad (verificada el 2026-09-12 sobre `b0c41cd`)
+## Evidencia histórica de la necesidad (medida el 2026-09-12 sobre `b0c41cd`, fechada)
 
 1. **Amplificación de identidades por `known_at` en mercado:**
-   `analytics/market/statistics_identity.py:20` incluye `known_at` en el preimage UUID5 de cada
-   `MetricResult` de mercado: un corte nuevo sin evidencia nueva produce identidades nuevas.
+   `analytics/market/statistics_identity.py:20` incluía `known_at` en el preimage UUID5 de cada
+   `MetricResult` de mercado: un corte nuevo sin evidencia nueva producía identidades nuevas.
+   *(Resuelto por `DATA-CHASSIS-7` y `DATA-CHASSIS-8` mediante identidad de métrica v2).*
 2. **Amplificación de identidades por `parameters` y lineage O(n) en derivados:**
-   `analytics/crypto/derivatives_identity.py` declara excluir `known_at`, pero
-   `analytics/crypto/derivatives_engine.py:390` lo inyecta en `parameters`, que sí entra en la
+   `analytics/crypto/derivatives_identity.py` declaraba excluir `known_at`, pero
+   `analytics/crypto/derivatives_engine.py:390` lo inyectaba en `parameters`, que sí entraba en la
    identidad determinista: mismo efecto por otra vía. Cada `funding.sum_1h` y `funding.mean_1h`
-   persiste además su lista completa de `input_observation_ids` (hasta 720 UUIDs) en `document_json`.
+   persistía además su lista completa de `input_observation_ids` (hasta 720 UUIDs) en `document_json`.
+   *(Resuelto por `DATA-CHASSIS-10` con identidad v2 en derivados y `CRYPTO-DERIVATIVES-2` con la retirada del linaje de 720 identificadores).*
 3. **Patrón de persistencia no batcheado:**
    `analytics/crypto/derivatives_pipeline.py:74` y `analytics/market/statistics_pipeline.py:115`
-   hacen `save` seguido de `get` por fila; `derivatives_pipeline.py:102` vuelve a leer cada resultado
+   hacían `save` seguido de `get` por fila; `derivatives_pipeline.py:102` volvía a leer cada resultado
    y cada observación uno a uno para verificar.
+   *(Resuelto por `DATA-CHASSIS-4` y `DATA-CHASSIS-5` mediante persistencia y verificación en lotes).*
 4. **Semilla y recurrencia dependientes de la ventana:**
    `analytics/market/statistics_definitions.py:136`: "The seed and recurrence use only bars selected
    by the point-in-time query" — EMA/RSI/ATR/MACD dependen del inicio de la consulta y no son
-   estables incrementalmente.
+   estables incrementalmente. *(Pendiente de resolución en la etapa 5).*
 5. **Doble persistencia raw:**
-   `storage/raw_records.py` escribe el archivo raw en filesystem **y** `raw_record_index.document_json`
+   `storage/raw_records.py` escribía el archivo raw en filesystem **y** `raw_record_index.document_json`
    con el mismo documento completo.
+   *(Resuelto por `DATA-CHASSIS-4` y `DATA-CHASSIS-5`).*
 6. **Journal operacional sin rotación acotada:**
    `application/multi_asset_scheduler.py:28,470`: `attempts` validado con `max_length=100_000`;
    alertas/candidatos con `250_000`. Documentos JSON reescritos completos.
+   *(Resuelto por `DATA-CHASSIS-13` y `DATA-CHASSIS-16` mediante `BoundedOperationalJournal`).*
 7. **Presión sobre el almacenamiento físico del host:**
    Espacio físico en disco `C:` bajo Windows con ~49-55 GB libres, con un VHD de WSL que no devuelve
-   espacio a `C:` automáticamente al borrar archivos dentro de Linux.
+   espacio a `C:` automáticamente al borrar archivos dentro de Linux. *(Pendiente de resolución en la etapa 8).*
 
 ## Arquitectura objetivo
 
@@ -114,17 +119,24 @@ existente más allá de sus propios campos opcionales.
 - **Hechos medidos por job:** bytes físicos del DuckDB y del WAL antes y después, medidos sobre el
   sistema de archivos como enteros exactos; bytes lógicos por tabla con el motor abierto en
   `read_only=True` y `octet_length(encode(document_json))` (bytes UTF-8 exactos; el baseline publicó
-  `strlen`, equivalente para documentos ASCII); y el desglose de duración en
-  red/consulta/cálculo/persistencia/verificación, medido con **un solo reloj** y reconciliado de forma
-  exacta con la duración total del ciclo.
+  `strlen`, equivalente para documentos ASCII); y el desglose de duración en ejecución del trabajo
+  (`job_execution_ms`), consulta (`query_ms`), residuo no atribuido del colector (`collector_unattributed_ms`),
+  persistencia (`persistence_ms`) y verificación (`verification_ms`), medido con **un solo reloj** y reconciliado de forma
+  exacta con la duración total del ciclo (`total_ms`).
 - **Cota explícita:** 90 snapshots diarios retenidos. Los registros del día abierto se anexan sin
   reescribir el archivo completo y sólo se pliegan al snapshot compacto cuando el día UTC cierra.
 - **No intrusivo:** el colector abre el motor únicamente en `read_only=True`, no introduce una
   segunda conexión de escritura y un fallo suyo nunca degrada ni aborta el job medido: se registra
   como issue operativo del scheduler.
-- **Límite de atribución declarado:** `network_ms` mide la ventana de ejecución del callable del job,
-  donde ocurre el trabajo de transporte; una llamada opaca no es sub-atribuible desde esta superficie
-  sin instrumentar los pipelines, que este bloque no toca.
+- **Límite de atribución declarado y fases honestas (`OBSERVABILITY-1`):** `job_execution_ms`
+  (denominado `network_ms` en el contrato v1 original) mide la ventana de ejecución completa del callable del job,
+  dentro de la cual el trabajo realiza red, cálculo y persistencia local; una llamada opaca no es sub-atribuible
+  desde esta superficie sin instrumentar `providers/http.py` y los pipelines. El colector no estima red ni afirma
+  conocer el transporte por separado. Las fases `query_ms`, `persistence_ms` y `verification_ms` son fases del
+  propio colector alrededor del trabajo (medición de tablas, compactación y verificación/carga), y
+  `collector_unattributed_ms` (denominado `calculation_ms` en v1) es el residuo no atribuido del colector que
+  absorbe el redondeo a milisegundos enteros para reconciliar exactamente. En `OBSERVABILITY-1`, el contrato
+  evoluciona a `storage-observability-v2` reflejando estos nombres sin romper la lectura de registros v1 históricos.
 - **Cableado pendiente:** la allowlist estricta del bloque no incluye la composición de producción
   (`scripts/serve_investment_analyst.py`), de modo que el colector se inyecta explícitamente en el
   scheduler y su cableado operativo queda pendiente. `DATA-CHASSIS-2` cierra la etapa 1 con la lectura
@@ -145,9 +157,10 @@ existente más allá de sus propios campos opcionales.
   reporta filas creadas, o si las tablas crecieron más de lo que el intento declara haber creado, la
   clasificación **se omite** en vez de inventarse.
 - **Overhead propio medido:** `collector_overhead_ms` registra, en milisegundos y con el mismo reloj
-  único, la parte de la ventana medida que consumió el propio instrumento (lectura, compactación y
-  verificación), separada de `network_ms`, que mide la ejecución del job. La relación
-  `collector_overhead_ms + network_ms == total_ms` se valida en el contrato.
+  único, la parte de la ventana medida que consumió el propio instrumento (lectura, compactación,
+  verificación y residuo), separada de `job_execution_ms` (la ejecución del trabajo). La relación
+  `collector_overhead_ms + job_execution_ms == total_ms` se valida en el contrato (con compatibilidad
+  para `network_ms` en registros v1 históricos).
 - **Campos opcionales:** la extensión de `storage-observability-v1` es aditiva y con valor por
   defecto; un registro escrito sin ellos sigue parseando sin error. El contrato diario
   `storage-observability-daily-snapshot-v1` conserva exactamente sus campos.
@@ -412,7 +425,7 @@ El primer ciclo en producción del chasis desplegado (2026-09-19, release `2563f
 - **Motor de medición acotado:** `_open_read_only_engine` ejecuta `SET memory_limit = '256MB'` y `SET threads = 1` inmediatamente tras conectar y antes de cualquier consulta.
 - **Filas por intento, documentos una vez por día UTC:** Cada intento mide sólo `count(*)` por tabla antes y después; la clasificación del crecimiento (`new_evidence_rows`, `revision_rows`, `derived_rows`, `unclassified_rows`) se calcula en cada intento a partir de esos conteos de filas. El escaneo de bytes de documento (`table_bytes`) se ejecuta como máximo una vez por día UTC, en el primer `complete_attempt` del día cuyo artefacto todavía no contiene un registro del día con `table_bytes` no vacío. El resto de registros del día llevan `table_bytes=()`.
 - **DuckDBStore acotado:** `DuckDBStore.open` ejecuta `SET memory_limit = '2GB'` y `SET threads = 2` inmediatamente tras conectar, tanto para el writer como para el store de lectura que comparte proceso, antes de inicializar o validar el schema.
-- **Contención externa:** Se mantiene el override de systemd (`MemoryHigh=3G`, `MemoryMax=4G`, `CPUQuota=200%`, `Nice=10`) aplicado fuera de repo por el operador humano como red de seguridad permanente.
+- **Contención externa:** Se mantiene el override de systemd aplicado fuera de repo por el operador humano como red de seguridad permanente. Los valores vigentes en la máquina están versionados como referencia en el repositorio en `deploy/systemd/investment-analyst.service.d/resource-limits.conf`: `MemoryHigh=3500M` (ajustado el 2026-09-23 para evitar estancamiento por presión de memoria), `MemoryMax=4G`, `MemorySwapMax=512M`, `CPUQuota=200%`, `Nice=10` e `IOSchedulingClass=idle`. Ningún código lee, escribe ni aplica este archivo: el operador humano sigue siendo quien lo instala en el host.
 
 ## Cadencia diaria única y congelamiento del minutario (`DATA-CHASSIS-12`)
 
@@ -473,7 +486,7 @@ El primer ciclo desplegado de la release `7fe76a6` (2026-09-21) reveló dos defe
 
 `DATA-CHASSIS-15` resuelve ambos defectos de forma determinista y sin alterar fórmulas, identidades ni contratos persistidos:
 
-1. **Lectura por identidad en pipelines:** `statistics_pipeline.run` y `derivatives_pipeline.run` sustituyen el escaneo por activo y rango por consulta directa de los identificadores calculados mediante `metric_results.get_existing` en lotes acotados tolerantes a ausencias, sin respaldo fila a fila ni levantar `RecordNotFoundError` en candidatos no existentes aún. Ninguna fila de otra familia métrica es leída para decidir reutilización.
+1. **Lectura por identidad en pipelines:** `statistics_pipeline.run` y `derivatives_pipeline.run` sustituyen el escaneo por activo y rango por consulta directa de los identificadores calculados mediante `metric_results.get_existing` en lotes acotados tolerantes a ausencias, sin levantar `RecordNotFoundError` en candidatos no existentes aún. `DATA-CHASSIS-15` introdujo inicialmente un respaldo fila a fila el 2026-09-21 para candidatos ausentes en el lote; posteriormente `STORAGE-READ-1` retiró ese respaldo fila a fila el 2026-09-23 optimizando la lectura directa en lotes. Ninguna fila de otra familia métrica es leída para decidir reutilización.
 2. **Política versionada `analytical-window-revision-selection-v1`:** Exclusivamente para las nueve claves dependientes de la ventana (`market.technical.ema`, `market.technical.rsi`, `market.technical.rsi.average_gain`, `market.technical.rsi.average_loss`, `market.technical.macd.line`, `market.technical.macd.signal`, `market.technical.macd.histogram`, `market.technical.atr` y `market.technical.true_range`), cuando existen múltiples revisiones v2 con el mismo `as_of` y máxima `available_at`, el selector elige deterministamente la revisión con mayor `computed_at` entre aquellas que satisfacen `computed_at <= known_at` (la evaluación más reciente conocida en el corte). Si ninguna satisface la condición, o ante revisiones fuera de la política (claves no declaradas o revisiones v1), la ambigüedad se preserva fail-closed.
 3. **Aislamiento por intento en el monitor:** Si `AnalyticalScreeningMonitor` detecta un error de evaluación analítica (`AnalyticalScreeningError`, incluyendo `AmbiguousAnalyticalMetricError`), registra el intento como recibo `SKIPPED` con motivo explícito (`screening_error:...`), evitando abortar `reconcile` ni derribar el arranque del servicio.
 4. **Reutilización en backtest:** `AnalyticalBacktestService` utiliza `AnalyticalMetricSnapshotSelector` y hereda la política sin necesidad de código duplicado.
