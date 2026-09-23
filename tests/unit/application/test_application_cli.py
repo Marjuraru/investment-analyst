@@ -9,6 +9,7 @@ from investment_analyst.application.cli import (
     add_storage_location_arguments,
     storage_location_from_namespace,
 )
+from investment_analyst.application.facade import InvestmentAnalystApplication
 
 _PROJECT_ROOT = Path(__file__).parents[3]
 _READ_ONLY_SCRIPTS = (
@@ -100,11 +101,10 @@ def test_scripts_and_facade_keep_explicit_storage_access_modes() -> None:
     facade = (_PROJECT_ROOT / "src" / "investment_analyst" / "application" / "facade.py").read_text(
         encoding="utf-8"
     )
-    assert facade.count("access_mode=WorkspaceAccessMode.READ_ONLY") == 12
+    assert facade.count("access_mode=WorkspaceAccessMode.READ_ONLY") == 11
     assert "def query_fred_point_in_time(" in facade
     assert "def query_bvl_registry(" in facade
     assert "def query_aapl_diagnostics(" in facade
-    assert "def query_aapl_market_chart(" in facade
     assert "def query_btc_market_chart(" in facade
     assert "def query_listed_market_chart(" in facade
     assert "def query_btc_intraday_chart(" in facade
@@ -150,3 +150,12 @@ def test_local_interface_reuses_application_boundaries_and_installer_does_not_st
     assert "dotenv" not in server
     assert "subprocess" not in installer
     assert "systemctl --user enable --now" in installer
+
+
+def test_facade_exposes_no_asset_pinned_market_chart_entry_point() -> None:
+    facade_source = (
+        _PROJECT_ROOT / "src" / "investment_analyst" / "application" / "facade.py"
+    ).read_text(encoding="utf-8")
+    assert "def query_aapl_market_chart(" not in facade_source
+    assert not hasattr(InvestmentAnalystApplication, "query_aapl_market_chart")
+    assert hasattr(InvestmentAnalystApplication, "query_listed_market_chart")

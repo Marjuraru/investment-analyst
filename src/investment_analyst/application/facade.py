@@ -72,7 +72,6 @@ from investment_analyst.analytics.market.chart_models import (
     ListedMarketChart,
 )
 from investment_analyst.analytics.market.chart_service import (
-    AaplMarketChartService,
     CryptoSpotDailyMarketChartService,
     ListedMarketChartService,
 )
@@ -523,22 +522,6 @@ class InvestmentAnalystApplication:
                     sorted((descriptor.source_id, *descriptor.fundamental_source_ids))
                 ),
             )
-
-    def query_aapl_market_chart(
-        self,
-        request: AaplMarketChartRequest,
-        *,
-        location: StorageLocationRequest,
-    ) -> ListedMarketChart:
-        """Return a bounded point-in-time market chart without writes or providers."""
-        with self._runtime.open_storage(
-            location,
-            access_mode=WorkspaceAccessMode.READ_ONLY,
-        ) as storage:
-            return AaplMarketChartService(
-                HistoricalMarketDataService(storage),
-                MarketStatisticsEngine(),
-            ).query(request)
 
     def query_market_comparison(
         self,

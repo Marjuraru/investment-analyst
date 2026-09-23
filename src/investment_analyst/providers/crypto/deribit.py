@@ -35,8 +35,15 @@ _MILLISECOND_PATTERN = re.compile(r"^-?\d+$")
 class DeribitError(ValueError):
     """Invalid Deribit request, transport outcome, or public response contract."""
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        reason_code: str | None = None,
+    ) -> None:
         self.status_code = status_code
+        self.reason_code = reason_code
         super().__init__(message)
 
 
@@ -284,9 +291,15 @@ class DeribitClient:
             )
             request_urls.append(request_url)
             if not isinstance(result, list):
-                raise DeribitError("Deribit funding result must be a list")
+                raise DeribitError(
+                    "Deribit funding result must be a list",
+                    reason_code="deribit_funding_result_not_list",
+                )
             if len(result) > MAX_HISTORICAL_ROWS:
-                raise DeribitError("Deribit funding response exceeds the row limit")
+                raise DeribitError(
+                    "Deribit funding response exceeds the row limit",
+                    reason_code="deribit_funding_row_limit_exceeded",
+                )
             parsed = tuple(_parse_funding_point(instrument_name, row) for row in result)
             for point in parsed:
                 if not cursor <= point.timestamp < chunk_end:
@@ -294,12 +307,23 @@ class DeribitClient:
                 existing = points_by_time.get(point.timestamp)
                 if existing is not None:
                     qualifier = "conflicting " if existing != point else "duplicate "
-                    raise DeribitError(f"Deribit returned a {qualifier}funding timestamp")
+                    code = (
+                        "deribit_funding_conflicting_timestamp"
+                        if existing != point
+                        else "deribit_funding_duplicate_timestamp"
+                    )
+                    raise DeribitError(
+                        f"Deribit returned a {qualifier}funding timestamp",
+                        reason_code=code,
+                    )
                 points_by_time[point.timestamp] = point
             cursor = chunk_end
         retrieved_at = _utc_datetime(self._clock(), field_name="clock result")
         if requested_end > retrieved_at:
-            raise DeribitError("Deribit funding history requires a fully closed interval")
+            raise DeribitError(
+                "Deribit funding history requires a fully closed interval",
+                reason_code="deribit_funding_interval_unclosed",
+            )
         return DeribitFundingFetch(
             instrument_name=instrument_name,
             requested_start=requested_start,
@@ -337,21 +361,36 @@ class DeribitClient:
                 )
                 request_urls.append(request_url)
                 if not isinstance(result, dict):
-                    raise DeribitError("Deribit DVOL result must be an object")
+                    raise DeribitError(
+                        "Deribit DVOL result must be an object",
+                        reason_code="deribit_dvol_result_not_dict",
+                    )
                 if set(result) != {"data", "continuation"}:
-                    raise DeribitError("Deribit DVOL result has an unexpected shape")
+                    raise DeribitError(
+                        "Deribit DVOL result has an unexpected shape",
+                        reason_code="deribit_dvol_result_shape_unexpected",
+                    )
                 data = result["data"]
                 if not isinstance(data, list):
-                    raise DeribitError("Deribit DVOL data must be a list")
+                    raise DeribitError(
+                        "Deribit DVOL data must be a list",
+                        reason_code="deribit_dvol_data_not_list",
+                    )
                 if len(data) > MAX_HISTORICAL_ROWS:
-                    raise DeribitError("Deribit DVOL response exceeds the row limit")
+                    raise DeribitError(
+                        "Deribit DVOL response exceeds the row limit",
+                        reason_code="deribit_dvol_row_limit_exceeded",
+                    )
                 parsed = tuple(_parse_dvol_candle(currency, row) for row in data)
                 for candle in parsed:
                     if not chunk_start <= candle.start < logical_end:
                         continue
                     existing = candles_by_time.get(candle.start)
                     if existing is not None and existing != candle:
-                        raise DeribitError("Deribit returned conflicting DVOL candles")
+                        raise DeribitError(
+                            "Deribit returned conflicting DVOL candles",
+                            reason_code="deribit_dvol_conflicting_candles",
+                        )
                     candles_by_time[candle.start] = candle
                 continuation = result["continuation"]
                 if continuation is None:
@@ -359,17 +398,24 @@ class DeribitClient:
                 next_end_ms = _whole_number(continuation, field_name="DVOL continuation")
                 start_ms = _milliseconds(chunk_start)
                 if next_end_ms in seen_continuations:
-                    raise DeribitError("Deribit DVOL continuation repeated or cycled")
+                    raise DeribitError(
+                        "Deribit DVOL continuation repeated or cycled",
+                        reason_code="deribit_dvol_continuation_cycled",
+                    )
                 if not start_ms < next_end_ms < page_end_ms:
                     raise DeribitError(
-                        "Deribit DVOL continuation must decrease within the logical interval"
+                        "Deribit DVOL continuation must decrease within the logical interval",
+                        reason_code="deribit_dvol_continuation_invalid_range",
                     )
                 seen_continuations.add(next_end_ms)
                 page_end_ms = next_end_ms
             chunk_start = logical_end
         retrieved_at = _utc_datetime(self._clock(), field_name="clock result")
         if requested_end > retrieved_at:
-            raise DeribitError("Deribit DVOL history requires a fully closed interval")
+            raise DeribitError(
+                "Deribit DVOL history requires a fully closed interval",
+                reason_code="deribit_dvol_interval_unclosed",
+            )
         return DeribitDvolFetch(
             currency=currency,
             requested_start=requested_start,
@@ -387,12 +433,18 @@ class DeribitClient:
             {"instrument_name": instrument_name},
         )
         if not isinstance(result, list) or len(result) != 1:
-            raise DeribitError("Deribit summary result must contain exactly one row")
+            raise DeribitError(
+                "Deribit summary result must contain exactly one row",
+                reason_code="deribit_summary_result_not_single_row",
+            )
         summary = _parse_summary(instrument_name, currency, result[0])
         clock_time = _utc_datetime(self._clock(), field_name="clock result")
         lead = summary.creation_timestamp - clock_time
         if lead > MAX_SUMMARY_CLOCK_LEAD:
-            raise DeribitError("Deribit summary timestamp exceeds declared clock tolerance")
+            raise DeribitError(
+                "Deribit summary timestamp exceeds declared clock tolerance",
+                reason_code="deribit_summary_clock_lead_exceeded",
+            )
         retrieved_at = max(clock_time, summary.creation_timestamp)
         return DeribitSummaryFetch(
             instrument_name=instrument_name,
