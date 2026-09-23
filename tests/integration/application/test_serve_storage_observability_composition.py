@@ -339,7 +339,7 @@ def test_running_a_job_writes_one_observability_record(
     records = composed.records()
     assert len(records) == 1
     record = records[0]
-    assert record["schema_version"] == "storage-observability-v1"
+    assert record["schema_version"] == "storage-observability-v2"
     assert record["job_id"] == _JOB_ID
     assert record["database_bytes_before"] == database_bytes
     assert record["database_bytes_after"] == database_bytes

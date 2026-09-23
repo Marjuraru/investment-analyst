@@ -10,21 +10,24 @@ One observation cycle is bound by :meth:`StorageObservabilityCollector.begin_att
 :meth:`StorageObservabilityCollector.complete_attempt`, and it partitions its measured window
 into the five durations of the storage observability contract:
 
-- ``verification``: loading and validating the previously persisted artifact at cycle start.
-- ``query``: local measurement reads, namely the physical database and WAL sizes and the
-  read-only engine query for exact document bytes per table.
-- ``network``: the measured execution window of the job callable, where provider transport
-  work happens. A single opaque callable cannot be sub-attributed from this surface.
-- ``persistence``: bounded artifact persistence performed inside the cycle, that is the
-  once-per-day compaction. The O(1) append of the record itself closes after the window.
-- ``calculation``: the remainder of the window that closes it, where deltas and the
-  created/reused classification are derived; it absorbs whole-millisecond rounding so the
+- ``verification``: loading and validating the previously persisted artifact at cycle start
+  by the collector.
+- ``query``: local measurement reads by the collector, namely the physical database and WAL sizes
+  and the read-only engine query for exact document bytes per table.
+- ``job_execution``: the measured execution window of the job callable, where job execution
+  happens. A single opaque callable cannot be sub-attributed from this surface without provider
+  instrumentation.
+- ``persistence``: bounded artifact persistence performed by the collector inside the cycle,
+  that is the once-per-day compaction. The O(1) append of the record itself closes after the window.
+- ``collector_unattributed``: the residual window of the collector that closes it, where deltas
+  and the created/reused classification are derived; it absorbs whole-millisecond rounding so the
   five stages reconcile exactly.
 
 Every duration comes from one clock and the five stages reconcile exactly with ``total_ms``,
 so no second clock can disagree with the recorded breakdown. ``collector_overhead_ms`` records,
-separately from the measured job stage, the share of that same window the instrument itself
-consumed, so the cost of observing one attempt never hides inside the cost of running it.
+separately from the measured job stage (``job_execution_ms``), the share of that same window
+the instrument itself consumed, so the cost of observing one attempt never hides inside the cost
+of running it.
 
 The same window also classifies the row growth the attempt produced. The collector measures the
 exact row count per document table before the execution and again when it closes, and partitions
@@ -96,6 +99,47 @@ class StorageObservabilityDurations(ContractModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     total_ms: int = Field(ge=0)
+    job_execution_ms: int = Field(ge=0)
+    query_ms: int = Field(ge=0)
+    collector_unattributed_ms: int = Field(ge=0)
+    persistence_ms: int = Field(ge=0)
+    verification_ms: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_reconciliation(self) -> StorageObservabilityDurations:
+        """Require the five stages to account for the whole measured window."""
+        attributed = (
+            self.job_execution_ms
+            + self.query_ms
+            + self.collector_unattributed_ms
+            + self.persistence_ms
+            + self.verification_ms
+        )
+        if attributed != self.total_ms:
+            raise ValueError("stage durations must reconcile with total_ms")
+        return self
+
+    def to_json_dict(self) -> dict[str, object]:
+        """Return explicit JSON primitives for persistence."""
+        return {
+            "total_ms": self.total_ms,
+            "job_execution_ms": self.job_execution_ms,
+            "query_ms": self.query_ms,
+            "collector_unattributed_ms": self.collector_unattributed_ms,
+            "persistence_ms": self.persistence_ms,
+            "verification_ms": self.verification_ms,
+        }
+
+
+StorageObservabilityDurationsV2 = StorageObservabilityDurations
+
+
+class StorageObservabilityDurationsV1(ContractModel):
+    """Per-attempt duration breakdown under the v1 contract."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    total_ms: int = Field(ge=0)
     network_ms: int = Field(ge=0)
     query_ms: int = Field(ge=0)
     calculation_ms: int = Field(ge=0)
@@ -103,7 +147,7 @@ class StorageObservabilityDurations(ContractModel):
     verification_ms: int = Field(ge=0)
 
     @model_validator(mode="after")
-    def validate_reconciliation(self) -> StorageObservabilityDurations:
+    def validate_reconciliation(self) -> StorageObservabilityDurationsV1:
         """Require the five stages to account for the whole measured window."""
         attributed = (
             self.network_ms
@@ -220,7 +264,7 @@ class StorageObservabilityRecord(ContractModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["storage-observability-v1"] = "storage-observability-v1"
+    schema_version: Literal["storage-observability-v2"] = "storage-observability-v2"
     observed_at: UTCDateTime
     attempt_id: UUID
     job_id: NonEmptyStr
@@ -241,6 +285,89 @@ class StorageObservabilityRecord(ContractModel):
 
     @model_validator(mode="after")
     def validate_record(self) -> StorageObservabilityRecord:
+        """Keep identity, classification, and table accounting deterministic."""
+        if isinstance(self.local_date, datetime):
+            raise ValueError("local_date must be a date")
+        _require_coherent_evidence(self.evidence_changed, self.rows_created, self.rows_reused)
+        names = tuple(item.table_name for item in self.table_bytes)
+        if names != tuple(sorted(set(names))):
+            raise ValueError("table bytes must be unique and sorted by table name")
+        if self.growth is not None:
+            if self.rows_created is None:
+                raise ValueError("growth classification requires the created rows of the attempt")
+            if self.growth.classified_rows != self.rows_created:
+                raise ValueError("growth classification must account for every created row")
+        if (
+            self.collector_overhead_ms is not None
+            and self.collector_overhead_ms + self.durations.job_execution_ms
+            != self.durations.total_ms
+        ):
+            raise ValueError("collector overhead must be separate from the measured job stage")
+        return self
+
+    @property
+    def database_delta_bytes(self) -> int:
+        """Return the measured change of the physical database file."""
+        return self.database_bytes_after - self.database_bytes_before
+
+    @property
+    def wal_delta_bytes(self) -> int:
+        """Return the measured change of the write-ahead log."""
+        return self.wal_bytes_after - self.wal_bytes_before
+
+    def to_json_dict(self) -> dict[str, object]:
+        """Return explicit JSON primitives for persistence."""
+        return {
+            "schema_version": self.schema_version,
+            "observed_at": self.observed_at.isoformat(),
+            "attempt_id": str(self.attempt_id),
+            "job_id": self.job_id,
+            "attempt_number": self.attempt_number,
+            "local_date": self.local_date.isoformat(),
+            "attempt_status": self.attempt_status,
+            "evidence_changed": self.evidence_changed,
+            "rows_created": self.rows_created,
+            "rows_reused": self.rows_reused,
+            "database_bytes_before": self.database_bytes_before,
+            "database_bytes_after": self.database_bytes_after,
+            "wal_bytes_before": self.wal_bytes_before,
+            "wal_bytes_after": self.wal_bytes_after,
+            "table_bytes": [item.to_json_dict() for item in self.table_bytes],
+            "growth": None if self.growth is None else self.growth.to_json_dict(),
+            "collector_overhead_ms": self.collector_overhead_ms,
+            "durations": self.durations.to_json_dict(),
+        }
+
+
+StorageObservabilityRecordV2 = StorageObservabilityRecord
+
+
+class StorageObservabilityRecordV1(ContractModel):
+    """Operational storage and duration facts observed under the v1 contract."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["storage-observability-v1"] = "storage-observability-v1"
+    observed_at: UTCDateTime
+    attempt_id: UUID
+    job_id: NonEmptyStr
+    attempt_number: int = Field(ge=1, le=10)
+    local_date: date
+    attempt_status: NonEmptyStr
+    evidence_changed: bool | None = None
+    rows_created: int | None = Field(default=None, ge=0)
+    rows_reused: int | None = Field(default=None, ge=0)
+    database_bytes_before: int = Field(ge=0)
+    database_bytes_after: int = Field(ge=0)
+    wal_bytes_before: int = Field(ge=0)
+    wal_bytes_after: int = Field(ge=0)
+    table_bytes: tuple[StorageObservabilityTableBytes, ...] = ()
+    growth: StorageObservabilityGrowthClassification | None = None
+    collector_overhead_ms: int | None = Field(default=None, ge=0)
+    durations: StorageObservabilityDurationsV1
+
+    @model_validator(mode="after")
+    def validate_record(self) -> StorageObservabilityRecordV1:
         """Keep identity, classification, and table accounting deterministic."""
         if isinstance(self.local_date, datetime):
             raise ValueError("local_date must be a date")
@@ -369,7 +496,7 @@ class StorageObservabilityState(ContractModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     daily_snapshots: tuple[StorageObservabilityDailySnapshot, ...] = ()
-    records: tuple[StorageObservabilityRecord, ...] = ()
+    records: tuple[StorageObservabilityRecord | StorageObservabilityRecordV1, ...] = ()
 
     @model_validator(mode="after")
     def validate_state(self) -> StorageObservabilityState:
@@ -395,7 +522,7 @@ class StorageObservabilityState(ContractModel):
 def parse_storage_observability_state(text: str) -> StorageObservabilityState:
     """Parse and validate one persisted artifact without writing anything."""
     snapshots: list[StorageObservabilityDailySnapshot] = []
-    records: list[StorageObservabilityRecord] = []
+    records: list[StorageObservabilityRecord | StorageObservabilityRecordV1] = []
     for number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
@@ -410,8 +537,10 @@ def parse_storage_observability_state(text: str) -> StorageObservabilityState:
                 f"observability artifact line {number} is not a JSON object"
             )
         schema_version = payload.get("schema_version")
-        if schema_version == "storage-observability-v1":
+        if schema_version == "storage-observability-v2":
             records.append(StorageObservabilityRecord.model_validate(payload))
+        elif schema_version == "storage-observability-v1":
+            records.append(StorageObservabilityRecordV1.model_validate(payload))
         elif schema_version == "storage-observability-daily-snapshot-v1":
             snapshots.append(StorageObservabilityDailySnapshot.model_validate(payload))
         else:
@@ -615,7 +744,7 @@ class StorageObservabilityCollector:
                     rows_after=table_rows_after,
                     table_bytes=table_bytes,
                 ),
-                collector_overhead_ms=durations.total_ms - durations.network_ms,
+                collector_overhead_ms=durations.total_ms - durations.job_execution_ms,
                 durations=durations,
             )
             self._append_line(record)
@@ -640,17 +769,19 @@ class StorageObservabilityCollector:
             + _milliseconds(measured_at - execution_completed_at)
             + _milliseconds(queried_at - measured_at)
         )
-        network_ms = _milliseconds(execution_completed_at - handle.execution_started_at)
+        job_execution_ms = _milliseconds(execution_completed_at - handle.execution_started_at)
         persistence_ms = _milliseconds(persisted_at - queried_at)
         total_ms = _milliseconds(calculated_at - handle.opened_at)
-        calculation_ms = total_ms - (network_ms + query_ms + persistence_ms + verification_ms)
-        if calculation_ms < 0:
+        collector_unattributed_ms = total_ms - (
+            job_execution_ms + query_ms + persistence_ms + verification_ms
+        )
+        if collector_unattributed_ms < 0:
             raise StorageObservabilityError("measured window does not reconcile with its stages")
         return StorageObservabilityDurations(
             total_ms=total_ms,
-            network_ms=network_ms,
+            job_execution_ms=job_execution_ms,
             query_ms=query_ms,
-            calculation_ms=calculation_ms,
+            collector_unattributed_ms=collector_unattributed_ms,
             persistence_ms=persistence_ms,
             verification_ms=verification_ms,
         )
@@ -746,7 +877,9 @@ class StorageObservabilityCollector:
         lines.extend(_line(item.to_json_dict()) for item in retained.records)
         self._rewrite(lines)
 
-    def _append_line(self, record: StorageObservabilityRecord) -> None:
+    def _append_line(
+        self, record: StorageObservabilityRecord | StorageObservabilityRecordV1
+    ) -> None:
         """Append one compact line without rewriting the retained history."""
         self._artifact_path.parent.mkdir(parents=True, exist_ok=True)
         with self.artifact_path.open("a", encoding="utf-8") as stream:
@@ -762,7 +895,9 @@ class StorageObservabilityCollector:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def _verify_append(self, record: StorageObservabilityRecord) -> None:
+    def _verify_append(
+        self, record: StorageObservabilityRecord | StorageObservabilityRecordV1
+    ) -> None:
         """Re-read the artifact and require the appended record to be its open tail."""
         state = self._load_state()
         if not state.records or state.records[-1].attempt_id != record.attempt_id:
@@ -790,7 +925,7 @@ class StorageObservabilityCollector:
 
 def _daily_snapshot(
     utc_date: date,
-    records: tuple[StorageObservabilityRecord, ...],
+    records: tuple[StorageObservabilityRecord | StorageObservabilityRecordV1, ...],
 ) -> StorageObservabilityDailySnapshot:
     """Fold one closed day of records into its compact bounded aggregate."""
     summaries: list[StorageObservabilityDailyJobSummary] = []
@@ -821,9 +956,13 @@ __all__ = [
     "StorageObservabilityDailyJobSummary",
     "StorageObservabilityDailySnapshot",
     "StorageObservabilityDurations",
+    "StorageObservabilityDurationsV1",
+    "StorageObservabilityDurationsV2",
     "StorageObservabilityError",
     "StorageObservabilityGrowthClassification",
     "StorageObservabilityRecord",
+    "StorageObservabilityRecordV1",
+    "StorageObservabilityRecordV2",
     "StorageObservabilityState",
     "StorageObservabilityTableBytes",
     "StorageObservationHandle",
