@@ -964,12 +964,48 @@ def test_legacy_v1_state_is_folded_once_and_preserved_byte_for_byte(tmp_path: Pa
     assert reloaded_after_delete.attempts[0].attempt_id == legacy_att.attempt_id
 
 
-def test_persisted_attempt_without_reason_code_is_still_readable() -> None:
+def test_reason_code_round_trips_in_scheduled_attempt_and_legacy_attempt_loads(
+    tmp_path: Path,
+) -> None:
     job_def = _definition("failed-job")
     local_date = date(2026, 8, 1)
     scheduled_for = job_def.scheduled_for(local_date)
     now = scheduled_for + timedelta(minutes=1)
-    payload = {
+
+    # 1. Round-trip an attempt with a typed reason_code through the store
+    store = MultiAssetScheduleStateStore(tmp_path / "schedule_state.json")
+    attempt_with_code = ScheduledJobAttempt(
+        attempt_id=UUID("00000000-0000-4000-8000-000000000001"),
+        definition=job_def,
+        local_date=local_date,
+        scheduled_for=scheduled_for,
+        attempt_number=1,
+        status=ScheduledJobAttemptStatus.FAILED,
+        started_at=now,
+        completed_at=now + timedelta(seconds=1),
+        failure=scheduled_job_failure(
+            ScheduledJobFailureCategory.PROVIDER_CONTRACT,
+            "scheduled provider payload or refresh contract is invalid",
+            reason_code="smv_no_configured_evidence",
+        ),
+    )
+    store.write_attempt(attempt_with_code)
+
+    loaded_state = store.load()
+    assert len(loaded_state.attempts) == 1
+    loaded_attempt = loaded_state.attempts[0]
+    assert loaded_attempt.status is ScheduledJobAttemptStatus.FAILED
+    assert loaded_attempt.failure is not None
+    assert loaded_attempt.failure.category is ScheduledJobFailureCategory.PROVIDER_CONTRACT
+    assert (
+        loaded_attempt.failure.message
+        == "scheduled provider payload or refresh contract is invalid"
+    )
+    assert loaded_attempt.failure.retryable is False
+    assert loaded_attempt.failure.reason_code == "smv_no_configured_evidence"
+
+    # 2. Legacy attempt payload without reason_code is still valid and readable
+    legacy_payload = {
         "schema_version": "scheduled-job-attempt-v1",
         "attempt_id": "00000000-0000-4000-8000-000000000099",
         "definition": job_def.model_dump(mode="json"),
@@ -985,13 +1021,16 @@ def test_persisted_attempt_without_reason_code_is_still_readable() -> None:
             "retryable": False,
         },
     }
-    attempt = ScheduledJobAttempt.model_validate(payload)
-    assert attempt.status is ScheduledJobAttemptStatus.FAILED
-    assert attempt.failure is not None
-    assert attempt.failure.category is ScheduledJobFailureCategory.PROVIDER_CONTRACT
-    assert attempt.failure.message == "scheduled provider payload or refresh contract is invalid"
-    assert attempt.failure.retryable is False
-    assert attempt.failure.reason_code is None
+    legacy_attempt = ScheduledJobAttempt.model_validate(legacy_payload)
+    assert legacy_attempt.status is ScheduledJobAttemptStatus.FAILED
+    assert legacy_attempt.failure is not None
+    assert legacy_attempt.failure.category is ScheduledJobFailureCategory.PROVIDER_CONTRACT
+    assert (
+        legacy_attempt.failure.message
+        == "scheduled provider payload or refresh contract is invalid"
+    )
+    assert legacy_attempt.failure.retryable is False
+    assert legacy_attempt.failure.reason_code is None
 
 
 def test_retry_policy_per_category_is_unchanged() -> None:

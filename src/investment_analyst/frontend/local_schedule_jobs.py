@@ -371,6 +371,7 @@ def _smv_registry_job(
                 scheduled_job_failure(
                     ScheduledJobFailureCategory.PROVIDER_CONTRACT,
                     "scheduled SMV registry refresh returned no configured evidence",
+                    reason_code="smv_no_configured_evidence",
                 )
             )
         checked_at = max(
