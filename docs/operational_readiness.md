@@ -80,6 +80,24 @@ reason_code: NonEmptyStr | None = None
   `fetch_dvol_daily` y `fetch_perpetual_summary`) declaran reason codes tipados para sus
   comprobaciones de contrato. Los ayudantes de parseo de valores y cualquier fallo sin causa tipada
   declaran `reason_code=None`, conservando intacta la compatibilidad con intentos históricos.
+- **Segunda vertical SMV Open Data:** los métodos de captura de `SmvOpenDataClient`
+  (`fetch_registered_company` y `fetch_registered_securities`) y el job del scheduler
+  (`smv:bvl:registry`) declaran reason codes literales cerrados para violaciones explícitas del contrato
+  de respuesta del portal: comprobaciones de transporte HTTP en fases GET y POST (`smv_{get,post}_{http_status,truncated,redirect,content_type,utf8}`),
+  formulario y resultado (`smv_form_state_missing`, `smv_form_html_invalid`, `smv_result_html_invalid`,
+  `smv_result_header_missing`, `smv_query_echo_mismatch`, `smv_exact_name_not_found`,
+  `smv_result_table_missing`, `smv_result_table_ambiguous`, `smv_company_headers_changed`,
+  `smv_security_headers_changed`), y filas o campos (`smv_company_row_width`, `smv_security_row_width`,
+  `smv_company_name_mismatch`, `smv_security_name_mismatch`, `smv_security_currency_unsupported`,
+  `smv_security_quote_incomplete`, `smv_required_field_empty`, `smv_date_field_empty`,
+  `smv_date_field_invalid`, `smv_decimal_field_empty`, `smv_decimal_field_invalid`). La salida del job
+  sin evidencia configurada se etiqueta como `smv_no_configured_evidence`. Errores de transporte,
+  almacenamiento, configuración local y reloj conservan `reason_code=None` y su clasificación canónica.
+- **Límite y frontera histórica explícita:** el fallo observado en el intento del 2026-09-24
+  (`provider_contract_error`, `reason_code=None`) no se recupera ni se puede reconstruir retroactivamente.
+  Este cambio no altera las respuestas del portal ni el comportamiento del transporte; únicamente hace
+  diagnosticable y auditable de forma tipada cualquier futuro fallo de contrato sin propagar texto del
+  portal ni comprometer la seguridad de secretos.
 
 ## Evidencia reutilizada por OPS-8
 

@@ -187,13 +187,29 @@ class SmvOpenDataFetch:
 class SmvOpenDataError(RuntimeError):
     """Safe failure raised when the official portal violates its bounded contract."""
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        reason_code: str | None = None,
+    ) -> None:
         self.status_code = status_code
+        self.reason_code = reason_code
         super().__init__(message)
 
 
 class SmvOpenDataNotFoundError(SmvOpenDataError):
     """Raised when an exact legal-name query has no registered result."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        reason_code: str | None = "smv_exact_name_not_found",
+    ) -> None:
+        super().__init__(message, status_code=status_code, reason_code=reason_code)
 
 
 @dataclass(slots=True)
@@ -273,7 +289,10 @@ class _PortalHtmlParser(HTMLParser):
             self._cell_parts = None
         elif tag == "tr" and self._row is not None:
             if self._row and not self._table.headers:
-                raise SmvOpenDataError("SMV result table is missing its header row")
+                raise SmvOpenDataError(
+                    "SMV result table is missing its header row",
+                    reason_code="smv_result_header_missing",
+                )
             if self._row and tuple(self._row) != tuple(self._table.headers):
                 self._table.rows.append(tuple(self._row))
             self._row = None
@@ -325,7 +344,7 @@ class SmvOpenDataClient:
             timeout_seconds=self._timeout_seconds,
             max_response_bytes=MAX_SMV_PORTAL_BYTES,
         )
-        initial_text = self._validated_html(initial, expected_url=url)
+        initial_text = self._validated_html(initial, expected_url=url, phase="get")
         state = _parse_form_state(initial_text)
         response = self._transport.post_form(
             url,
@@ -340,7 +359,7 @@ class SmvOpenDataClient:
             timeout_seconds=self._timeout_seconds,
             max_response_bytes=MAX_SMV_PORTAL_BYTES,
         )
-        response_text = self._validated_html(response, expected_url=url)
+        response_text = self._validated_html(response, expected_url=url, phase="post")
         snapshot = parse_smv_portal_snapshot(
             response_text,
             dataset=dataset,
@@ -361,24 +380,41 @@ class SmvOpenDataClient:
         )
 
     @staticmethod
-    def _validated_html(response: HttpResponse, *, expected_url: str) -> str:
+    def _validated_html(
+        response: HttpResponse,
+        *,
+        expected_url: str,
+        phase: Literal["get", "post"],
+    ) -> str:
         if response.status_code != 200:
             raise SmvOpenDataError(
                 f"SMV portal returned HTTP {response.status_code}",
                 status_code=response.status_code,
+                reason_code=f"smv_{phase}_http_status",
             )
         if response.body_truncated:
             raise SmvOpenDataError(
-                f"SMV portal exceeds the {MAX_SMV_PORTAL_BYTES}-byte safety limit"
+                f"SMV portal exceeds the {MAX_SMV_PORTAL_BYTES}-byte safety limit",
+                reason_code=f"smv_{phase}_truncated",
             )
-        _validate_exact_official_url(response.url, expected_url)
+        _validate_exact_official_url(
+            response.url,
+            expected_url,
+            reason_code=f"smv_{phase}_redirect",
+        )
         content_type = _content_type(response)
         if not (content_type == "text/html" or content_type == "application/xhtml+xml"):
-            raise SmvOpenDataError("SMV portal returned an unexpected content type")
+            raise SmvOpenDataError(
+                "SMV portal returned an unexpected content type",
+                reason_code=f"smv_{phase}_content_type",
+            )
         try:
             return response.body.decode("utf-8")
         except UnicodeDecodeError as error:
-            raise SmvOpenDataError("SMV portal response is not valid UTF-8") from error
+            raise SmvOpenDataError(
+                "SMV portal response is not valid UTF-8",
+                reason_code=f"smv_{phase}_utf8",
+            ) from error
 
 
 def validate_legal_name(value: str) -> str:
@@ -427,20 +463,35 @@ def parse_smv_portal_snapshot(
 ) -> SmvOpenDataSnapshot:
     """Parse one already-validated portal response into strict registry models."""
     canonical_name = validate_legal_name(query_legal_name)
-    parser = _parse_html(response_text)
+    parser = _parse_html(response_text, invalid_reason_code="smv_result_html_invalid")
     if parser.query_values != [canonical_name]:
-        raise SmvOpenDataError("SMV portal did not echo the exact legal-name query")
+        raise SmvOpenDataError(
+            "SMV portal did not echo the exact legal-name query",
+            reason_code="smv_query_echo_mismatch",
+        )
     status = _normalize_text(" ".join(parser.status_parts))
     if not parser.tables:
         if status:
-            raise SmvOpenDataNotFoundError(f"SMV registry query returned no result: {status}")
-        raise SmvOpenDataError("SMV portal response is missing the result table")
+            raise SmvOpenDataNotFoundError(
+                f"SMV registry query returned no result: {status}",
+                reason_code="smv_exact_name_not_found",
+            )
+        raise SmvOpenDataError(
+            "SMV portal response is missing the result table",
+            reason_code="smv_result_table_missing",
+        )
     if len(parser.tables) != 1:
-        raise SmvOpenDataError("SMV portal response contains ambiguous result tables")
+        raise SmvOpenDataError(
+            "SMV portal response contains ambiguous result tables",
+            reason_code="smv_result_table_ambiguous",
+        )
     table = parser.tables[0]
     if dataset is SmvOpenDataDataset.REGISTERED_COMPANIES:
         if tuple(table.headers) != _COMPANY_HEADERS:
-            raise SmvOpenDataError("SMV registered-company headers changed")
+            raise SmvOpenDataError(
+                "SMV registered-company headers changed",
+                reason_code="smv_company_headers_changed",
+            )
         companies = tuple(
             sorted(
                 (_parse_company(row, canonical_name) for row in table.rows),
@@ -453,7 +504,10 @@ def parse_smv_portal_snapshot(
             companies=companies,
         )
     if tuple(table.headers) != _SECURITY_HEADERS:
-        raise SmvOpenDataError("SMV registered-security headers changed")
+        raise SmvOpenDataError(
+            "SMV registered-security headers changed",
+            reason_code="smv_security_headers_changed",
+        )
     securities = tuple(
         sorted(
             (_parse_security(row, canonical_name) for row in table.rows),
@@ -469,9 +523,15 @@ def parse_smv_portal_snapshot(
 
 def _parse_company(row: tuple[str, ...], legal_name: str) -> SmvRegisteredCompany:
     if len(row) != len(_COMPANY_HEADERS):
-        raise SmvOpenDataError("SMV registered-company row width changed")
+        raise SmvOpenDataError(
+            "SMV registered-company row width changed",
+            reason_code="smv_company_row_width",
+        )
     if row[5] != legal_name:
-        raise SmvOpenDataError("SMV registered-company row belongs to another legal name")
+        raise SmvOpenDataError(
+            "SMV registered-company row belongs to another legal name",
+            reason_code="smv_company_name_mismatch",
+        )
     return SmvRegisteredCompany(
         address=_required(row[0], "company address"),
         registration_date=_date(row[1], "company registration date"),
@@ -487,17 +547,29 @@ def _parse_company(row: tuple[str, ...], legal_name: str) -> SmvRegisteredCompan
 
 def _parse_security(row: tuple[str, ...], legal_name: str) -> SmvRegisteredSecurity:
     if len(row) != len(_SECURITY_HEADERS):
-        raise SmvOpenDataError("SMV registered-security row width changed")
+        raise SmvOpenDataError(
+            "SMV registered-security row width changed",
+            reason_code="smv_security_row_width",
+        )
     if row[8] != legal_name:
-        raise SmvOpenDataError("SMV registered-security row belongs to another legal name")
+        raise SmvOpenDataError(
+            "SMV registered-security row belongs to another legal name",
+            reason_code="smv_security_name_mismatch",
+        )
     currency_raw = _required(row[5], "security currency")
     normalized_currency = _CURRENCY_CODES.get(_normalized_key(currency_raw))
     if normalized_currency is None:
-        raise SmvOpenDataError(f"SMV security uses unsupported currency: {currency_raw}")
+        raise SmvOpenDataError(
+            f"SMV security uses unsupported currency: {currency_raw}",
+            reason_code="smv_security_currency_unsupported",
+        )
     last_quote = _optional_decimal(row[1], "last quote")
     last_quote_date = _optional_date(row[4], "last quote date")
     if (last_quote is None) != (last_quote_date is None):
-        raise SmvOpenDataError("SMV security last quote and date are incomplete")
+        raise SmvOpenDataError(
+            "SMV security last quote and date are incomplete",
+            reason_code="smv_security_quote_incomplete",
+        )
     return SmvRegisteredSecurity(
         reported_security_code=_required(row[0], "reported security code").upper(),
         last_quote=last_quote,
@@ -515,17 +587,24 @@ def _parse_security(row: tuple[str, ...], legal_name: str) -> SmvRegisteredSecur
 
 
 def _parse_form_state(response_text: str) -> dict[str, str]:
-    parser = _parse_html(response_text)
+    parser = _parse_html(response_text, invalid_reason_code="smv_form_html_invalid")
     state: dict[str, str] = {}
     for field_name in _HIDDEN_FIELDS:
         values = parser.hidden_fields.get(field_name, [])
         if len(values) != 1 or not values[0]:
-            raise SmvOpenDataError(f"SMV portal form state is missing {field_name}")
+            raise SmvOpenDataError(
+                f"SMV portal form state is missing {field_name}",
+                reason_code="smv_form_state_missing",
+            )
         state[field_name] = values[0]
     return state
 
 
-def _parse_html(response_text: str) -> _PortalHtmlParser:
+def _parse_html(
+    response_text: str,
+    *,
+    invalid_reason_code: str = "smv_result_html_invalid",
+) -> _PortalHtmlParser:
     parser = _PortalHtmlParser()
     try:
         parser.feed(response_text)
@@ -533,7 +612,10 @@ def _parse_html(response_text: str) -> _PortalHtmlParser:
     except SmvOpenDataError:
         raise
     except Exception as error:
-        raise SmvOpenDataError("SMV portal HTML could not be parsed safely") from error
+        raise SmvOpenDataError(
+            "SMV portal HTML could not be parsed safely",
+            reason_code=invalid_reason_code,
+        ) from error
     return parser
 
 
@@ -556,7 +638,10 @@ def _security_sort_key(
 def _required(value: str, field_name: str) -> str:
     normalized = _normalize_text(value)
     if not normalized:
-        raise SmvOpenDataError(f"SMV {field_name} is empty")
+        raise SmvOpenDataError(
+            f"SMV {field_name} is empty",
+            reason_code="smv_required_field_empty",
+        )
     return normalized
 
 
@@ -566,10 +651,19 @@ def _optional(value: str) -> str | None:
 
 
 def _date(value: str, field_name: str) -> date:
-    parsed = _optional_date(value, field_name)
-    if parsed is None:
-        raise SmvOpenDataError(f"SMV {field_name} is empty")
-    return parsed
+    normalized = _normalize_text(value)
+    if not normalized:
+        raise SmvOpenDataError(
+            f"SMV {field_name} is empty",
+            reason_code="smv_date_field_empty",
+        )
+    try:
+        return datetime.strptime(normalized, "%d/%m/%Y").date()
+    except ValueError as error:
+        raise SmvOpenDataError(
+            f"SMV {field_name} is invalid",
+            reason_code="smv_date_field_invalid",
+        ) from error
 
 
 def _optional_date(value: str, field_name: str) -> date | None:
@@ -579,13 +673,31 @@ def _optional_date(value: str, field_name: str) -> date | None:
     try:
         return datetime.strptime(normalized, "%d/%m/%Y").date()
     except ValueError as error:
-        raise SmvOpenDataError(f"SMV {field_name} is invalid") from error
+        raise SmvOpenDataError(
+            f"SMV {field_name} is invalid",
+            reason_code="smv_date_field_invalid",
+        ) from error
 
 
 def _decimal(value: str, field_name: str) -> Decimal:
-    parsed = _optional_decimal(value, field_name)
-    if parsed is None:
-        raise SmvOpenDataError(f"SMV {field_name} is empty")
+    normalized = _normalize_text(value)
+    if not normalized:
+        raise SmvOpenDataError(
+            f"SMV {field_name} is empty",
+            reason_code="smv_decimal_field_empty",
+        )
+    try:
+        parsed = Decimal(normalized.replace(",", ""))
+    except InvalidOperation as error:
+        raise SmvOpenDataError(
+            f"SMV {field_name} is invalid",
+            reason_code="smv_decimal_field_invalid",
+        ) from error
+    if not parsed.is_finite() or parsed < 0:
+        raise SmvOpenDataError(
+            f"SMV {field_name} is invalid",
+            reason_code="smv_decimal_field_invalid",
+        )
     return parsed
 
 
@@ -596,9 +708,15 @@ def _optional_decimal(value: str, field_name: str) -> Decimal | None:
     try:
         parsed = Decimal(normalized.replace(",", ""))
     except InvalidOperation as error:
-        raise SmvOpenDataError(f"SMV {field_name} is invalid") from error
+        raise SmvOpenDataError(
+            f"SMV {field_name} is invalid",
+            reason_code="smv_decimal_field_invalid",
+        ) from error
     if not parsed.is_finite() or parsed < 0:
-        raise SmvOpenDataError(f"SMV {field_name} is invalid")
+        raise SmvOpenDataError(
+            f"SMV {field_name} is invalid",
+            reason_code="smv_decimal_field_invalid",
+        )
     return parsed
 
 
@@ -619,7 +737,12 @@ def _content_type(response: HttpResponse) -> str:
     return raw_value.split(";", 1)[0].strip().casefold()
 
 
-def _validate_exact_official_url(final_url: str, expected_url: str) -> None:
+def _validate_exact_official_url(
+    final_url: str,
+    expected_url: str,
+    *,
+    reason_code: str | None = None,
+) -> None:
     actual = urlsplit(final_url)
     expected = urlsplit(expected_url)
     if (
@@ -630,7 +753,10 @@ def _validate_exact_official_url(final_url: str, expected_url: str) -> None:
         or actual.query
         or actual.fragment
     ):
-        raise SmvOpenDataError("SMV portal redirected outside its exact official HTTPS path")
+        raise SmvOpenDataError(
+            "SMV portal redirected outside its exact official HTTPS path",
+            reason_code=reason_code,
+        )
 
 
 __all__ = [

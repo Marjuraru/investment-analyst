@@ -49,11 +49,14 @@ from investment_analyst.frontend.local_schedule_jobs import (
 )
 from investment_analyst.providers.asset_config import ProviderConfigurationError
 from investment_analyst.providers.crypto.deribit import DeribitError
-from investment_analyst.providers.http import HttpRequestError
+from investment_analyst.providers.http import HttpRequestError, HttpRequestFailureKind
 from investment_analyst.providers.macro.fred_alfred import FredAlfredError
 from investment_analyst.providers.macro.fred_catalog import FRED_SERIES_CATALOG
 from investment_analyst.providers.market.alpaca_stock import AlpacaStockError
-from investment_analyst.providers.peru.smv_open_data import SmvOpenDataNotFoundError
+from investment_analyst.providers.peru.smv_open_data import (
+    SmvOpenDataError,
+    SmvOpenDataNotFoundError,
+)
 from investment_analyst.storage import StorageError
 
 
@@ -846,3 +849,144 @@ def test_provider_message_text_never_reaches_the_persisted_failure() -> None:
         failure2 = schedule_jobs_module._classified_provider_error(error_without_code).failure
         assert text not in failure2.message
         assert failure2.reason_code is None
+
+
+def test_smv_job_typed_failure_preserves_policy_and_covers_empty_evidence() -> None:
+    # 1. Empty evidence triggers smv_no_configured_evidence
+    class _EmptyEvidenceController(_UnusedController):
+        def bvl_registry_refresh_request(self, request):
+            del request
+            return SimpleNamespace(assets=())
+
+    config = _config("equity:us:aapl").model_copy(update={"include_smv_registry": True})
+    jobs = build_local_watchlist_jobs(_EmptyEvidenceController(), _universe(), config)
+    smv_job = next(item for item in jobs if item.definition.job_id == "smv:bvl:registry")
+    invocation = ScheduledJobInvocation(
+        definition=smv_job.definition,
+        local_date=date(2026, 8, 11),
+        scheduled_for=smv_job.definition.scheduled_for(date(2026, 8, 11)),
+        started_at=datetime(2026, 8, 11, 7, 45, tzinfo=UTC),
+        attempt_number=1,
+    )
+
+    with pytest.raises(ScheduledJobRunError) as raised:
+        smv_job.run(invocation)
+    failure = raised.value.failure
+    assert failure.category is ScheduledJobFailureCategory.PROVIDER_CONTRACT
+    assert failure.retryable is False
+    assert failure.reason_code == "smv_no_configured_evidence"
+    assert failure.message == "scheduled SMV registry refresh returned no configured evidence"
+
+    # 2. Transient HTTP failure from SMV preserves TRANSIENT_HTTP and retryable=True
+    class _TransientHttpController(_UnusedController):
+        def bvl_registry_refresh_request(self, request):
+            del request
+            raise SmvOpenDataError(
+                "SMV portal returned HTTP 500",
+                status_code=500,
+                reason_code="smv_get_http_status",
+            )
+
+    jobs = build_local_watchlist_jobs(_TransientHttpController(), _universe(), config)
+    smv_job = next(item for item in jobs if item.definition.job_id == "smv:bvl:registry")
+    with pytest.raises(ScheduledJobRunError) as raised:
+        smv_job.run(invocation)
+    failure = raised.value.failure
+    assert failure.category is ScheduledJobFailureCategory.TRANSIENT_HTTP
+    assert failure.retryable is True
+    assert failure.reason_code == "smv_get_http_status"
+
+    # 3. Not found preserves UNSUPPORTED_CAPABILITY and smv_exact_name_not_found
+    class _NotFoundController(_UnusedController):
+        def bvl_registry_refresh_request(self, request):
+            del request
+            raise SmvOpenDataNotFoundError(
+                "No registered result",
+                reason_code="smv_exact_name_not_found",
+            )
+
+    jobs = build_local_watchlist_jobs(_NotFoundController(), _universe(), config)
+    smv_job = next(item for item in jobs if item.definition.job_id == "smv:bvl:registry")
+    with pytest.raises(ScheduledJobRunError) as raised:
+        smv_job.run(invocation)
+    failure = raised.value.failure
+    assert failure.category is ScheduledJobFailureCategory.UNSUPPORTED_CAPABILITY
+    assert failure.retryable is False
+    assert failure.reason_code == "smv_exact_name_not_found"
+
+    # 4. Untyped failure preserves PROVIDER_CONTRACT, retryable=False, and reason_code=None
+    class _UntypedController(_UnusedController):
+        def bvl_registry_refresh_request(self, request):
+            del request
+            raise SmvOpenDataError("untyped failure without reason code")
+
+    jobs = build_local_watchlist_jobs(_UntypedController(), _universe(), config)
+    smv_job = next(item for item in jobs if item.definition.job_id == "smv:bvl:registry")
+    with pytest.raises(ScheduledJobRunError) as raised:
+        smv_job.run(invocation)
+    failure = raised.value.failure
+    assert failure.category is ScheduledJobFailureCategory.PROVIDER_CONTRACT
+    assert failure.retryable is False
+    assert failure.reason_code is None
+
+
+def test_smv_reason_code_and_persisted_failure_exclude_provider_text() -> None:
+    sensitive_fragments = (
+        "SOCIEDAD MINERA CERRO VERDE S.A.A.",
+        "COMPAÑIA DE MINAS BUENAVENTURA S.A.A.",
+        "simulated-secret-key-smv-12345",
+        "https://mvnet.smv.gob.pe/secret/path",
+        "<table id='body_GridView1'><tr><td>SECRET</td></tr></table>",
+        "990658513.96",
+        "PEP646501002",
+        "Calle Jacinto Ibañez No. 315",
+    )
+    for text in sensitive_fragments:
+        error = SmvOpenDataError(
+            f"SMV portal error containing {text}",
+            reason_code="smv_company_name_mismatch",
+        )
+        failure = schedule_jobs_module._classified_provider_error(error).failure
+        assert text not in failure.message
+        assert failure.reason_code == "smv_company_name_mismatch"
+        assert text not in failure.reason_code
+        assert failure.category is ScheduledJobFailureCategory.PROVIDER_CONTRACT
+        assert failure.retryable is False
+
+
+def test_smv_untyped_and_transport_failures_keep_existing_policy() -> None:
+    # Local config / clock errors without reason_code keep existing policy and reason_code=None
+    untyped_cases = (
+        SmvOpenDataError("timeout_seconds must be greater than zero"),
+        SmvOpenDataError("SMV retrieval clock must return a timezone-aware datetime"),
+        SmvOpenDataError("arbitrary internal parse error without reason code"),
+    )
+    for error in untyped_cases:
+        failure = schedule_jobs_module._classified_provider_error(error).failure
+        assert failure.category is ScheduledJobFailureCategory.PROVIDER_CONTRACT
+        assert failure.retryable is False
+        assert failure.reason_code is None
+
+    # Transport errors keep TRANSPORT and reason_code=None
+    transport_cases = (
+        TimeoutError("simulated timeout"),
+        ConnectionError("connection reset"),
+        HttpRequestError(
+            "https://mvnet.smv.gob.pe",
+            "transport timeout",
+            failure_kind=HttpRequestFailureKind.TRANSPORT,
+        ),
+    )
+    for error in transport_cases:
+        failure = schedule_jobs_module._classified_provider_error(error).failure
+        assert failure.category is ScheduledJobFailureCategory.TRANSPORT
+        assert failure.retryable is True
+        assert failure.reason_code is None
+
+    # Storage errors keep STORAGE_STATE and reason_code=None
+    storage_failure = schedule_jobs_module._classified_provider_error(
+        StorageError("storage write failed")
+    ).failure
+    assert storage_failure.category is ScheduledJobFailureCategory.STORAGE_STATE
+    assert storage_failure.retryable is False
+    assert storage_failure.reason_code is None
