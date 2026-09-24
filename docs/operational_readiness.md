@@ -189,6 +189,48 @@ relectura. Si el enablement creado por este rehearsal queda incoherente, se desh
 puede probarse que la misma aceptación lo creó. Nunca se restaura sobre el origen, se edita el
 workspace, se repite un restart independiente ni se usa `enable --now`.
 
+## Sonda operacional del ciclo diario (`scripts/cycle_probe.py`)
+
+`scripts/cycle_probe.py` incorpora al repositorio la sonda operacional viva que recoge fotografías
+comparables del ciclo diario de `investment-analyst`. Funciona en dos modos: `baseline` (ejecutado antes
+del ciclo) y `report` (espera a la finalización del ciclo y genera el informe comparativo contra la
+línea base o informe anterior).
+
+La sonda es estrictamente de lectura (`read_only=True` en DuckDB, lectura de archivos de estado y
+muestras) y no escribe en el workspace ni invoca proveedores ni scheduler:
+
+- **Instantes en UTC:** normaliza a UTC todas las marcas temporales de intentos y muestras JSONL.
+- **Acotación del pico:** busca el pico RSS (`rss_peak`) exclusivamente dentro del intervalo del ciclo
+  `[cycle_start, cycle_end]`. Picos anteriores o posteriores quedan estrictamente excluidos.
+- **Atribución temporal sin causalidad:** si el pico cae durante la ejecución de exactamente un trabajo,
+  se informa en `job_during_peak`. Si ocurre en un hueco, reporta cero trabajos. Ante solapamiento de
+  varios trabajos, `job_during_peak` es `null` y `jobs_during_peak` lista todos los trabajos activos
+  de forma determinista sin elegir culpables arbitrarios.
+- **Cobertura explícita por trabajo:** distingue cobertura `complete` (muestras a $\le 10$ s de ambos
+  límites y sin huecos $> 15$ s con cadencia nominal de 5 s), `partial` y `none`.
+- **Deltas seguros:** `rss_net` se calcula únicamente entre muestras del mismo PID no nulo; un cambio
+  de PID lo deja en `null` con `rss_net_reason="pid_changed"`. `high_events_delta` es un conteo entero
+  de eventos cgroup; si el contador se reinicia, queda en `null` con `high_events_reason="counter_reset"`.
+  Ningún campo presenta RSS como heap o consumo causado por un trabajo, ni eventos como segundos.
+
+### Wrapper, temporizador e instalación local segura
+
+El servicio del host ejecuta `/home/marjuraru/.local/share/investment-analyst/ops/run_cycle_probe.sh`
+mediante el temporizador de usuario `investment-analyst-cycle-probe.timer` (disparo diario a las 07:05).
+El wrapper resuelve el intérprete Python y ejecuta la sonda con el modo solicitado.
+
+Procedimiento de activación local:
+
+1. Conservar un backup verificable del script local previo:
+   `cp -p /home/marjuraru/.local/share/investment-analyst/ops/cycle_probe.py ...cycle_probe.py.bak`
+2. Copiar byte por byte el archivo candidato `scripts/cycle_probe.py` a
+   `/home/marjuraru/.local/share/investment-analyst/ops/cycle_probe.py`.
+3. Verificar que su SHA-256 coincida exactamente con `scripts/cycle_probe.py` del HEAD del repositorio.
+4. Confirmar que `run_cycle_probe.sh` y `investment-analyst-cycle-probe.timer` continúan apuntando a
+   las mismas rutas sin alteración.
+5. Probar importación y ejecución read-only.
+6. En caso de fallo o rollback, restaurar la copia de seguridad previa conservada.
+
 ## Frontera de readiness y release
 
 `ANALYST-READINESS` sólo pasa a `DONE` cuando BUILD, CI, AUDIT, rehearsal HUMAN exact-SHA y merge
