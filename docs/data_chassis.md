@@ -529,3 +529,24 @@ medio externo o a Drive y verifica sus hashes, o acepta el riesgo explícitament
 - Contrato compacto y read-only para el LLM.
 - Producto completo sin LLM.
 - El cierre no implica liberar espacio físico hasta la retirada HUMAN de v1 y la compactación del VHD.
+
+## Etapa 5: EMA diaria incremental (`DATA-CHASSIS-18`)
+
+`DATA-CHASSIS-18` abre la etapa 5 con una sola recurrencia demostrable: la EMA diaria como
+contrato puro, determinista y probado, sin persistirla y sin llamador.
+
+- **Contrato aislado nuevo:** `analytics/market/incremental_ema.py` (`market-ema-incremental-v2-decimal34`,
+  `incremental-ema-seed-first-window-v1`). La semilla canónica es la media de la primera ventana de la
+  historia PIT completa, nunca del `start` de una consulta de presentación. El checkpoint declara
+  activo, fuente, frecuencia `DAY_1`, ventana, semilla, valor Decimal, instantes, longitud del prefijo y
+  digest SHA-256 del prefijo ordenado de IDs `close`; su ID determinista incluye la identidad semántica
+  y el digest, nunca `known_at`, `computed_at` ni reloj.
+- **Transición acotada:** el probe de validación verifica todo el prefijo visible al corte; la
+  continuación sobre una cola válida procesa sólo la cola nueva en Decimal explícito (precisión 34),
+  sin inferir calendario ni inventar huecos. Una revisión de cualquier ID previo invalida el checkpoint
+  y obliga a reconstruir desde la semilla.
+- **Sin adopción:** cero cambios en `MarketStatisticsEngine`, pipelines, almacenamiento, identidades
+  persistidas, definiciones, API o runtime; ninguna fila v1 se presenta como v2. La etapa 5 queda
+  abierta: faltan RSI/ATR/MACD, ventanas finitas, extensión diaria de lineage, persistencia v2 y
+  adopción productiva. Ninguna mejora de filas, bytes o RSS se atribuye a este contrato sin un ciclo
+  posterior a su adopción.
