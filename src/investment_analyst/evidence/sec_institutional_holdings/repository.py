@@ -185,6 +185,8 @@ def _decode(record, *, schema_version: str, kind: str, key: str, model):
 
 
 class InstitutionalHoldingsRepository:
+    _LIST_BATCH_SIZE = 512
+
     def __init__(self, raw_records) -> None:
         self._raw_records = raw_records
 
@@ -281,10 +283,9 @@ class InstitutionalHoldingsRepository:
         return sorted(
             (
                 report
-                for record in self._raw_records.list(
-                    source_id=INSTITUTIONAL_HOLDINGS_SOURCE_ID,
+                for record in self._iter_visible_records(
                     schema_version=INSTITUTIONAL_HOLDINGS_REPORT_SCHEMA_VERSION,
-                    available_to=known_at,
+                    known_at=known_at,
                 )
                 if (report := report_from_raw_record(record)).manager_cik == manager_cik
             ),
@@ -301,10 +302,9 @@ class InstitutionalHoldingsRepository:
         return sorted(
             (
                 outcome
-                for record in self._raw_records.list(
-                    source_id=INSTITUTIONAL_HOLDINGS_SOURCE_ID,
+                for record in self._iter_visible_records(
                     schema_version=INSTITUTIONAL_HOLDINGS_OUTCOME_SCHEMA_VERSION,
-                    available_to=known_at,
+                    known_at=known_at,
                 )
                 if (outcome := outcome_from_raw_record(record)).filing.filer_cik == manager_cik
             ),
@@ -321,15 +321,28 @@ class InstitutionalHoldingsRepository:
         return sorted(
             (
                 position
-                for record in self._raw_records.list(
-                    source_id=INSTITUTIONAL_HOLDINGS_SOURCE_ID,
+                for record in self._iter_visible_records(
                     schema_version=INSTITUTIONAL_HOLDING_POSITION_SCHEMA_VERSION,
-                    available_to=known_at,
+                    known_at=known_at,
                 )
                 if (position := position_from_raw_record(record)).report_id in report_ids
             ),
             key=lambda item: (str(item.report_id), item.row_number),
         )
+
+    def _iter_visible_records(
+        self, *, schema_version: str, known_at: datetime
+    ) -> Iterable[RawRecord]:
+        record_ids = self._raw_records.list_record_ids(
+            source_id=INSTITUTIONAL_HOLDINGS_SOURCE_ID,
+            schema_version=schema_version,
+            available_to=known_at,
+        )
+        for offset in range(0, len(record_ids), self._LIST_BATCH_SIZE):
+            batch_ids = record_ids[offset : offset + self._LIST_BATCH_SIZE]
+            records_by_id = self._raw_records.get_many(batch_ids)
+            for record_id in batch_ids:
+                yield records_by_id[record_id]
 
 
 def verify_institutional_holding_records(
