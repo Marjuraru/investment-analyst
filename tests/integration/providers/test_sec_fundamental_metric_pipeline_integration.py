@@ -4,12 +4,15 @@ import json
 from collections import Counter
 from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import UUID, uuid5
+from uuid import UUID, uuid4, uuid5
+
+import pytest
 
 from investment_analyst.core.models import (
     AssetClass,
     DataFrequency,
     DataQuality,
+    MetricResult,
     NormalizedObservation,
     SourceReference,
 )
@@ -322,3 +325,140 @@ def test_two_sec_issuers_persist_metrics_without_cross_asset_reuse(tmp_path) -> 
         assert {result.parameters["source_id"] for result in amd_results} == {
             amd.companyfacts_source_id
         }
+
+
+class _RecordingMetricResults:
+    """Observe repository access without changing persisted behavior."""
+
+    def __init__(self, repository) -> None:  # type: ignore[no-untyped-def]
+        self._repository = repository
+        self.list_calls = 0
+        self.get_calls = 0
+        self.save_calls = 0
+        self.save_many_calls = 0
+        self.save_many_sizes: list[int] = []
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        return getattr(self._repository, name)
+
+    def list(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.list_calls += 1
+        return self._repository.list(**kwargs)
+
+    def get(self, result_id):  # type: ignore[no-untyped-def]
+        self.get_calls += 1
+        return self._repository.get(result_id)
+
+    def save(self, result):  # type: ignore[no-untyped-def]
+        self.save_calls += 1
+        return self._repository.save(result)
+
+    def save_many(self, results):  # type: ignore[no-untyped-def]
+        self.save_many_calls += 1
+        self.save_many_sizes.append(len(tuple(results)))
+        return self._repository.save_many(results)
+
+
+def _market_metric_result() -> MetricResult:
+    return MetricResult(
+        result_id=uuid4(),
+        asset_id="equity:us:aapl",
+        metric_key="market.history.simple_return_1d",
+        value="0.01",
+        unit="ratio",
+        as_of=datetime(2025, 9, 27, tzinfo=UTC),
+        available_at=datetime(2025, 10, 31, tzinfo=UTC),
+        computed_at=datetime(2026, 1, 2, tzinfo=UTC),
+        parameters={},
+        input_observation_ids=[uuid4()],
+        algorithm_version="market-history-v1",
+        quality=DataQuality.VALID,
+    )
+
+
+def test_pipeline_reads_only_candidate_ids_and_batches_persistence(tmp_path) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        _seed_history(storage)
+        storage.metric_results.save(_market_metric_result())
+        recorder = _RecordingMetricResults(storage.metric_results)
+        storage.metric_results = recorder  # type: ignore[method-assign]
+        pipeline = SecAaplFundamentalMetricPipeline(
+            storage,
+            SecAaplFundamentalPointInTimeService(storage),
+            SecFundamentalMetricEngine(),
+            clock=lambda: datetime(2027, 1, 2, tzinfo=UTC),
+        )
+        request = SecFundamentalMetricRequest(
+            known_at=datetime(2026, 12, 31, tzinfo=UTC),
+            frequency=DataFrequency.ANNUAL,
+        )
+
+        first = pipeline.run(request)
+        created_sizes = list(recorder.save_many_sizes)
+        modeled = len(recorder._repository.list())
+        second = pipeline.run(request)
+
+        assert first.metrics_generated == 8
+        assert first.metrics_created == 8
+        assert first.metrics_reused == 0
+        assert second.metrics_created == 0
+        assert second.metrics_reused == 8
+        assert recorder.list_calls == 0
+        assert recorder.get_calls == 0
+        assert recorder.save_calls == 0
+        assert recorder.save_many_calls == 1
+        assert all(size <= 256 for size in created_sizes)
+        assert modeled == 9
+        sec_rows = recorder._repository.list(asset_id="equity:us:aapl")
+        assert len(sec_rows) == 9
+        assert first.model_dump(exclude={"computed_at", "metrics_created", "metrics_reused"}) == (
+            second.model_dump(exclude={"computed_at", "metrics_created", "metrics_reused"})
+        )
+
+
+def test_pipeline_later_batch_failure_preserves_prior_progress(tmp_path, monkeypatch) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        _seed_history(storage)
+        pipeline = SecAaplFundamentalMetricPipeline(
+            storage,
+            SecAaplFundamentalPointInTimeService(storage),
+            SecFundamentalMetricEngine(),
+            clock=lambda: datetime(2027, 1, 2, tzinfo=UTC),
+        )
+        request = SecFundamentalMetricRequest(
+            known_at=datetime(2026, 12, 31, tzinfo=UTC),
+            frequency=DataFrequency.ANNUAL,
+        )
+        first = pipeline.run(request)
+        assert first.metrics_created == 8
+
+        calls = {"count": 0}
+
+        def failing_save_many(results):  # type: ignore[no-untyped-def]
+            calls["count"] += 1
+            raise RuntimeError("synthetic later batch failure")
+
+        monkeypatch.setattr(storage.metric_results, "save_many", failing_save_many)
+        _save_annual_period(
+            storage,
+            fiscal_year=2025,
+            period_end=datetime(2025, 9, 27, tzinfo=UTC),
+            acceptance_at=datetime(2026, 1, 15, tzinfo=UTC),
+            values={"fundamental.revenue": "130"},
+        )
+        with pytest.raises(RuntimeError, match="later batch"):
+            SecAaplFundamentalMetricPipeline(
+                storage,
+                SecAaplFundamentalPointInTimeService(storage),
+                SecFundamentalMetricEngine(),
+                clock=lambda: datetime(2027, 1, 3, tzinfo=UTC),
+            ).run(
+                SecFundamentalMetricRequest(
+                    known_at=datetime(2026, 12, 31, tzinfo=UTC),
+                    frequency=DataFrequency.ANNUAL,
+                )
+            )
+
+        persisted = {item.result_id for item in storage.metric_results.list()}
+        assert len(persisted) == 8
+        assert calls["count"] == 1

@@ -574,3 +574,15 @@ y el registro se recomputan aunque los bytes no cambien. En scratch, `load()` re
 intentos pasa de p50 ~16,5 ms (validación fresca) a p50 ~0,7 ms (huella + reutilización) y `status()`
 de 30 jobs queda en p50 ~1,2 ms; el objetivo HTTP p95 <100 ms y el efecto en ciclos reales requieren
 medición posterior y no se atribuye ahorro de 13F, Coinbase o derivados a este bloque.
+
+## Lecturas SEC por identidad y familia PIT (`DATA-CHASSIS-21`)
+
+`DATA-CHASSIS-21` acota la vertical SEC de métricas a su propia familia: el pipeline genera por IDs
+candidatos con `get_existing`, verifica identidad antes de escribir, persiste sólo ausentes en lotes
+explícitos de hasta 256 mediante `save_many` y relee candidatos por lotes con `get_many`; el selector
+pide en almacenamiento únicamente el conjunto exacto de claves SEC y conserva PIT, ambigüedad y traza
+en `select_from_results`. Los conteos protegidos, el summary, la idempotencia, el conflicto fail-closed
+y el progreso de lotes anteriores se conservan. En fixtures scratch, la generación hace cero `list()`
+por activo y el selector materializa sólo claves SEC; los tiempos se registran como observación sin
+convertir un umbral de máquina en verdad semántica. No cura contención ni RSS por sí solo; memoria y
+ciclo real esperan evidencia posterior a las releases recientes.

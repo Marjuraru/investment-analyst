@@ -1,6 +1,7 @@
 """Persistence pipeline for deterministic SEC issuer fundamental metrics."""
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID, uuid5
 
@@ -25,6 +26,7 @@ from investment_analyst.providers.fundamentals.sec_raw_records import (
 from investment_analyst.storage import LocalStorage
 
 _RESULT_NAMESPACE = UUID("fe4bb5e6-0983-4ff5-a82e-c20f0789b6c4")
+_METRIC_WRITE_BATCH_SIZE = 256
 
 
 class SecFundamentalMetricPipelineError(RuntimeError):
@@ -118,10 +120,8 @@ class SecIssuerFundamentalMetricPipeline:
         )
         self._validate_proposed_results(proposed, computation)
 
-        existing_results = self._storage.metric_results.list(asset_id=request.asset_id)
-        existing_by_id = {result.result_id: result for result in existing_results}
-        if len(existing_by_id) != len(existing_results):
-            raise SecFundamentalMetricPipelineError("stored metric result IDs are not unique")
+        candidate_ids = tuple(result.result_id for result in proposed)
+        existing_by_id = self._storage.metric_results.get_existing(candidate_ids)
 
         to_create: list[MetricResult] = []
         reused: list[MetricResult] = []
@@ -133,10 +133,11 @@ class SecIssuerFundamentalMetricPipeline:
                 _verify_identity(existing, result)
                 reused.append(existing)
 
-        for result in to_create:
-            self._storage.metric_results.save(result)
+        for batch in _batched(to_create, _METRIC_WRITE_BATCH_SIZE):
+            self._storage.metric_results.save_many(batch)
 
-        stored = [self._storage.metric_results.get(result.result_id) for result in proposed]
+        stored_by_id = self._storage.metric_results.get_many(candidate_ids)
+        stored = [stored_by_id[result.result_id] for result in proposed]
         self._verify_stored_results(stored, computation)
         counts_after = self._protected_counts()
         if counts_after != counts_before:
@@ -316,6 +317,17 @@ def _utc_datetime(value: datetime, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise SecFundamentalMetricPipelineError(f"{field_name} must include timezone information")
     return value.astimezone(UTC)
+
+
+def _batched(
+    results: Sequence[MetricResult],
+    batch_size: int,
+) -> tuple[tuple[MetricResult, ...], ...]:
+    if batch_size <= 0:
+        raise SecFundamentalMetricPipelineError("metric write batch size must be positive")
+    return tuple(
+        tuple(results[index : index + batch_size]) for index in range(0, len(results), batch_size)
+    )
 
 
 SecAaplFundamentalMetricPipeline = SecIssuerFundamentalMetricPipeline
