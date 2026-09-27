@@ -115,3 +115,13 @@ acepta archivos regulares contenidos físicamente en el árbol validado.
 El inventario incluye el documento de preferencias cuando existe; restore conserva exactamente sus
 revisiones y fingerprint. Un workspace que nunca creó preferencias sigue siendo respaldable y
 restaurable.
+
+## Staging raw v2 aislado (`raw-v2-staging-v1`)
+
+El sustrato `raw-v2-staging-v1` es un destino nuevo y explícito para la subfase raw
+de la etapa 7, separado del workspace v1 productivo. Contiene un marcador tipado
+`raw-v2-staging.json`, blobs content-addressed por SHA-256 en `raw/sha256/` y un
+índice DuckDB dedicado `raw_v2_index` sin `document_json`, con proyecciones 13F
+tipadas de gestor y `report_id`. Su marcador no es `WorkspaceManifest` de formato 2
+y no activa un workspace v2: v1 continúa como único workspace productivo. La
+apertura read-only nunca crea ni repara archivos.
