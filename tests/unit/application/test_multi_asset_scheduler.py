@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from investment_analyst.application.multi_asset_scheduler import (
     MultiAssetScheduler,
+    MultiAssetSchedulerStatus,
     MultiAssetScheduleState,
     MultiAssetScheduleStateStore,
     ProviderJobTelemetry,
@@ -1085,3 +1086,286 @@ def test_malformed_reason_code_is_rejected() -> None:
                 "test message",
                 reason_code=bad_code,
             )
+
+
+def _attempt(
+    definition: ScheduledJobDefinition,
+    *,
+    local_date: date,
+    started_at: datetime,
+    attempt_number: int,
+    status: ScheduledJobAttemptStatus,
+    attempt_id: UUID,
+    completed_at: datetime | None = None,
+    succeeded: bool = False,
+    failed: bool = False,
+) -> ScheduledJobAttempt:
+    execution = None
+    failure = None
+    done_at = completed_at
+    if succeeded:
+        done_at = done_at or started_at + timedelta(minutes=1)
+        execution = ScheduledJobExecution(
+            job_id=definition.job_id,
+            effective_known_at=started_at,
+            evidence_changed=True,
+            source_ids=(f"source:{definition.job_id}",),
+            created_count=1,
+            reused_count=0,
+        )
+    if failed:
+        done_at = done_at or started_at + timedelta(minutes=1)
+        failure = scheduled_job_failure(
+            ScheduledJobFailureCategory.TRANSPORT,
+            "transport error",
+        )
+    return ScheduledJobAttempt(
+        attempt_id=attempt_id,
+        definition=definition,
+        local_date=local_date,
+        scheduled_for=definition.scheduled_for(local_date),
+        attempt_number=attempt_number,
+        status=status,
+        started_at=started_at,
+        completed_at=done_at,
+        execution=execution,
+        failure=failure,
+    )
+
+
+def test_store_reuses_only_identical_validated_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "schedule.json"
+    store = MultiAssetScheduleStateStore(path)
+    definition = _definition("cached-job")
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    store.write_attempt(
+        _attempt(
+            definition,
+            local_date=date(2026, 7, 29),
+            started_at=now,
+            attempt_number=1,
+            status=ScheduledJobAttemptStatus.SUCCEEDED,
+            attempt_id=UUID("00000000-0000-4000-8000-000000000101"),
+            succeeded=True,
+        )
+    )
+
+    first = store.load()
+    fingerprint_before = (store._cached_fingerprint, store._cached_state is not None)
+    second = store.load()
+
+    assert second is first
+    assert fingerprint_before[1] is True
+    assert first.to_json_dict() == second.to_json_dict()
+
+    other = MultiAssetScheduleStateStore(path, journal_dir=store.journal_dir)
+    assert other.load().to_json_dict() == first.to_json_dict()
+    assert other.load() is not first
+
+
+def test_status_uses_one_history_pass_with_exact_multi_job_result(tmp_path: Path) -> None:
+    lima_now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    first = _definition("a-multi")
+    second = _definition("b-multi").model_copy(update={"timezone": "Europe/Madrid"})
+    running = _attempt(
+        first,
+        local_date=date(2026, 7, 29),
+        started_at=datetime(2026, 7, 29, 12, 1, tzinfo=UTC),
+        attempt_number=1,
+        status=ScheduledJobAttemptStatus.RUNNING,
+        attempt_id=UUID("00000000-0000-4000-8000-000000000201"),
+    )
+    failed = _attempt(
+        first,
+        local_date=date(2026, 7, 29),
+        started_at=datetime(2026, 7, 29, 12, 1, tzinfo=UTC),
+        attempt_number=1,
+        status=ScheduledJobAttemptStatus.FAILED,
+        attempt_id=UUID("00000000-0000-4000-8000-000000000201"),
+        failed=True,
+        completed_at=datetime(2026, 7, 29, 12, 2, tzinfo=UTC),
+    )
+    succeeded = _attempt(
+        second,
+        local_date=date(2026, 7, 29),
+        started_at=datetime(2026, 7, 29, 12, 3, tzinfo=UTC),
+        attempt_number=1,
+        status=ScheduledJobAttemptStatus.SUCCEEDED,
+        attempt_id=UUID("00000000-0000-4000-8000-000000000202"),
+        succeeded=True,
+    )
+    store = MultiAssetScheduleStateStore(tmp_path / "multi.json")
+    store.write_attempt(running)
+    store.write_attempt(failed)
+    store.write_attempt(succeeded)
+    state = store.load()
+
+    attempts = [
+        item.to_json_dict()
+        for item in (MultiAssetScheduleStateStore(tmp_path / "multi.json").load().attempts)
+    ]
+    assert len(attempts) == len(state.attempts)
+
+    scheduler = MultiAssetScheduler(
+        (
+            RegisteredScheduledJob(first, _execution),
+            RegisteredScheduledJob(second, _execution),
+        ),
+        store,
+        clock=lambda: lima_now,
+    )
+    later = lima_now + timedelta(hours=2)
+    advanced = MultiAssetScheduler(
+        (
+            RegisteredScheduledJob(first, _execution),
+            RegisteredScheduledJob(second, _execution),
+        ),
+        store,
+        clock=lambda: later,
+    )
+
+    current = scheduler.status()
+    per_job = [
+        scheduler._job_status(definition, lima_now, state).to_json_dict()
+        for definition in (first, second)
+    ]
+    reference_jobs = sorted(per_job, key=lambda item: item["definition"]["job_id"])
+    reference = MultiAssetSchedulerStatus.model_validate(
+        {
+            "schema_version": "multi-asset-scheduler-status-v1",
+            "enabled": True,
+            "jobs": reference_jobs,
+            "due_count": sum(item["due"] for item in reference_jobs),
+            "running_count": sum(
+                item["latest_attempt"] is not None and item["latest_attempt"]["status"] == "running"
+                for item in reference_jobs
+            ),
+            "failed_count": sum(
+                item["latest_attempt"] is not None
+                and item["latest_attempt"]["status"] in {"failed", "skipped"}
+                for item in reference_jobs
+            ),
+            "blocked_count": sum(item["health"] == "blocked" for item in reference_jobs),
+            "retry_wait_count": sum(item["health"] == "retry_wait" for item in reference_jobs),
+            "current_count": sum(item["health"] == "current" for item in reference_jobs),
+            "stale_count": sum(item["freshness"] == "stale" for item in reference_jobs),
+            "incomplete_count": sum(item["freshness"] == "incomplete" for item in reference_jobs),
+            "next_run_at": min(item["next_run_at"] for item in reference_jobs),
+            "issues": [issue for item in reference_jobs for issue in item["issues"]],
+        }
+    )
+    assert current.to_json_dict() == reference.to_json_dict()
+
+    recomputed = MultiAssetScheduler(
+        (
+            RegisteredScheduledJob(first, _execution),
+            RegisteredScheduledJob(second, _execution),
+        ),
+        store,
+        clock=lambda: lima_now,
+    ).status()
+    assert current.to_json_dict() == recomputed.to_json_dict()
+    assert {item.definition.job_id for item in current.jobs} == {"a-multi", "b-multi"}
+    assert advanced.status().to_json_dict() != current.to_json_dict()
+
+
+def test_store_invalidates_on_append_and_detects_external_corruption(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "schedule.json"
+    store = MultiAssetScheduleStateStore(path)
+    definition = _definition("invalidate-job")
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    first_id = UUID("00000000-0000-4000-8000-000000000301")
+    second_id = UUID("00000000-0000-4000-8000-000000000302")
+    store.write_attempt(
+        _attempt(
+            definition,
+            local_date=date(2026, 7, 29),
+            started_at=now,
+            attempt_number=1,
+            status=ScheduledJobAttemptStatus.SUCCEEDED,
+            attempt_id=first_id,
+            succeeded=True,
+        )
+    )
+    before = store.load()
+    assert len(before.attempts) == 1
+
+    store.write_attempt(
+        _attempt(
+            definition,
+            local_date=date(2026, 7, 30),
+            started_at=now + timedelta(days=1),
+            attempt_number=1,
+            status=ScheduledJobAttemptStatus.SUCCEEDED,
+            attempt_id=second_id,
+            succeeded=True,
+        )
+    )
+    after = store.load()
+    assert after is not before
+    assert len(after.attempts) == 2
+
+    journal_files = [item for item in store.journal_dir.rglob("*") if item.is_file()]
+    assert journal_files
+    target = sorted(journal_files)[0]
+    original = target.read_bytes()
+    target.write_bytes(original + b'{"corrupted":true}\n')
+    try:
+        with pytest.raises(Exception, match="malformed|corrupt|digest|invalid"):
+            store.load()
+    finally:
+        target.write_bytes(original)
+    assert store.load().to_json_dict() == after.to_json_dict()
+
+
+def test_store_preserves_legacy_and_journal_bytes_on_cached_reads(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "schedule.json"
+    legacy = MultiAssetScheduleState(attempts=()).to_json_dict()
+    path.write_bytes((json.dumps(legacy, sort_keys=True) + "\n").encode("utf-8"))
+    store = MultiAssetScheduleStateStore(path)
+    before_legacy = path.read_bytes()
+    before_journal = store.persisted_signatures()
+
+    assert store.load().attempts == ()
+    assert store.load().attempts == ()
+    assert path.read_bytes() == before_legacy
+    assert store.persisted_signatures() == before_journal
+
+
+def test_status_recomputes_clock_and_registry_with_unchanged_state(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    first = _definition("clock-a")
+    second = _definition("clock-b")
+    store = MultiAssetScheduleStateStore(tmp_path / "clock.json")
+    scheduler = MultiAssetScheduler(
+        (
+            RegisteredScheduledJob(first, _execution),
+            RegisteredScheduledJob(second, _execution),
+        ),
+        store,
+        clock=lambda: now,
+    )
+
+    before = scheduler.status()
+    later = now + timedelta(days=1, minutes=2)
+    scheduler_later = MultiAssetScheduler(
+        (
+            RegisteredScheduledJob(first, _execution),
+            RegisteredScheduledJob(second, _execution),
+        ),
+        MultiAssetScheduleStateStore(tmp_path / "clock.json"),
+        clock=lambda: later,
+    )
+    changed = scheduler_later.status()
+
+    assert before.to_json_dict() != changed.to_json_dict()
+
+    scheduler.reconcile_jobs((RegisteredScheduledJob(_definition("replacement"), _execution),))
+    replaced = scheduler.status()
+    assert {item.definition.job_id for item in replaced.jobs} == {"replacement"}
