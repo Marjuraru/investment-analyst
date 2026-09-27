@@ -1,11 +1,24 @@
 """Tests for immutable canonical raw-record files."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from investment_analyst.evidence.sec_documents.models import (
+    SecFilerDocumentRevision,
+    SecFiling,
+    SecLogicalDocument,
+)
+from investment_analyst.evidence.sec_institutional_holdings.models import (
+    InstitutionalHoldingPosition,
+    InstitutionalHoldingsReport,
+    InstitutionalHoldingsResolutionOutcome,
+)
+from investment_analyst.providers.institutional_holdings.sec_institutional_holdings_parser import (
+    parse_institutional_holdings,
+)
 from investment_analyst.storage import (
     LocalStorage,
     RecordConflictError,
@@ -18,6 +31,121 @@ from investment_analyst.storage import (
 )
 
 from .conftest import make_raw_record
+
+_THIRTEEN_F_COVER = b"""<edgarSubmission><submissionType>13F-HR</submissionType><filingManager>
+<name>Manager LLC</name></filingManager>
+<reportCalendarOrQuarter>2024-12-31</reportCalendarOrQuarter>
+<tableEntryTotal>1</tableEntryTotal><tableValueTotal>100</tableValueTotal></edgarSubmission>"""
+_THIRTEEN_F_TABLE = b"""<informationTable><infoTable><nameOfIssuer>APPLE INC</nameOfIssuer>
+<titleOfClass>COM</titleOfClass><cusip>037833100</cusip><value>100</value>
+<shrsOrPrnAmt><sshPrnamt>10</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt>
+<investmentDiscretion>SOLE</investmentDiscretion><votingAuthority><Sole>10</Sole>
+<Shared>0</Shared><None>0</None></votingAuthority></infoTable></informationTable>"""
+
+
+def _thirteen_f_filing(*, cik: str, accession_suffix: int, accepted_day: int) -> SecFiling:
+    accession = f"0000950123-25-{accession_suffix:06d}"
+    return SecFiling(
+        filing_id=SecFiling.expected_id(cik, accession),
+        filer_cik=cik,
+        accession=accession,
+        form="13F-HR",
+        filing_date=date(2025, 2, accepted_day),
+        report_date=date(2024, 12, 31),
+        accepted_at=datetime(2025, 2, accepted_day, 18, tzinfo=UTC),
+        is_amendment=False,
+    )
+
+
+def _thirteen_f_revision(filing: SecFiling, name: str, digest: str) -> SecFilerDocumentRevision:
+    document = SecLogicalDocument(
+        document_id=SecLogicalDocument.expected_id(filing.filing_id, name),
+        filing=filing,
+        name=name,
+    )
+    revision_id = SecFilerDocumentRevision.expected_id(document.document_id, digest)
+    return SecFilerDocumentRevision(
+        revision_id=revision_id,
+        filer_cik=filing.filer_cik,
+        document=document,
+        raw_record_id=SecFilerDocumentRevision.expected_raw_record_id(revision_id),
+        discovery_raw_record_id=uuid4(),
+        content_sha256=digest,
+        content_size_bytes=12,
+        available_at=filing.accepted_at,
+        retrieved_at=datetime(2025, 2, 15, tzinfo=UTC),
+        source_url=f"https://www.sec.gov/Archives/{name}",
+    )
+
+
+def _thirteen_f_report(
+    filing: SecFiling, name_seed: str, parsed_at: datetime
+) -> tuple[InstitutionalHoldingsReport, tuple[InstitutionalHoldingPosition, ...]]:
+    return parse_institutional_holdings(
+        _THIRTEEN_F_COVER,
+        _THIRTEEN_F_TABLE,
+        cover_revision=_thirteen_f_revision(filing, f"{name_seed}-primary.xml", "a" * 64),
+        information_table_revision=_thirteen_f_revision(filing, f"{name_seed}-info.xml", "b" * 64),
+        parsed_at=parsed_at,
+    )
+
+
+def _thirteen_f_outcome(
+    filing: SecFiling, resource_name: str, retrieved_at: datetime
+) -> InstitutionalHoldingsResolutionOutcome:
+    outcome_id = InstitutionalHoldingsResolutionOutcome.expected_id(
+        filing.accession, resource_name, "c" * 64, "accepted"
+    )
+    return InstitutionalHoldingsResolutionOutcome(
+        outcome_id=outcome_id,
+        raw_record_id=InstitutionalHoldingsResolutionOutcome.expected_raw_record_id(outcome_id),
+        filing=filing,
+        discovery_raw_record_id=uuid4(),
+        declared_locator=f"locator/{resource_name}",
+        resource_name=resource_name,
+        resource_url=f"https://www.sec.gov/Archives/{resource_name}",
+        content_sha256="c" * 64,
+        content_size_bytes=12,
+        manifest_url="https://www.sec.gov/Archives/manifest.xml",
+        manifest_sha256="d" * 64,
+        available_at=filing.accepted_at,
+        retrieved_at=retrieved_at,
+        status="accepted",
+        reason_code="structured_sec_xml",
+    )
+
+
+def _seed_institutional_holdings(repository, *, name_prefix: str) -> dict[str, object]:
+    parsed_at = datetime(2025, 2, 17, tzinfo=UTC)
+    target_filings = [
+        _thirteen_f_filing(cik="0001067983", accession_suffix=1, accepted_day=14),
+        _thirteen_f_filing(cik="0001067983", accession_suffix=2, accepted_day=16),
+    ]
+    other_filing = _thirteen_f_filing(cik="0001234567", accession_suffix=3, accepted_day=15)
+    target_reports: list[InstitutionalHoldingsReport] = []
+    target_positions: list[InstitutionalHoldingPosition] = []
+    seen_report_ids: set[object] = set()
+    for index, filing in enumerate([*target_filings, other_filing]):
+        report, positions = _thirteen_f_report(filing, f"{name_prefix}-{index}", parsed_at)
+        assert report.report_id not in seen_report_ids
+        seen_report_ids.add(report.report_id)
+        repository.save_report(report)
+        repository.save_positions(positions)
+        if filing.filer_cik == "0001067983":
+            target_reports.append(report)
+            target_positions.extend(positions)
+    target_outcomes = [
+        _thirteen_f_outcome(target_filings[0], f"{name_prefix}-primary-0.xml", parsed_at),
+        _thirteen_f_outcome(target_filings[1], f"{name_prefix}-primary-1.xml", parsed_at),
+    ]
+    other_outcome = _thirteen_f_outcome(other_filing, f"{name_prefix}-primary-2.xml", parsed_at)
+    for outcome in [*target_outcomes, other_outcome]:
+        repository.save_outcome(outcome)
+    return {
+        "target_reports": target_reports,
+        "target_positions": target_positions,
+        "target_outcomes": target_outcomes,
+    }
 
 
 def _indexed_path(storage, record_id) -> Path:
@@ -289,3 +417,34 @@ def test_save_many_reports_conflicts_and_preserves_previous_chunks(
     r5_diff = r5.model_copy(update={"schema_version": "conflicting-version"})
     with pytest.raises(RecordConflictError, match="already has different content"):
         storage.raw_records.save_many([r5, r5_diff])
+
+
+def test_select_13f_ids_before_hydration(tmp_path: Path) -> None:
+    from investment_analyst.evidence.sec_institutional_holdings.repository import (
+        InstitutionalHoldingsRepository,
+        report_to_raw_record,
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        repository = InstitutionalHoldingsRepository(storage.raw_records)
+        seed = _seed_institutional_holdings(repository, name_prefix="select")
+        known_at = datetime(2025, 2, 17, tzinfo=UTC)
+        selected = storage.raw_records.select_record_ids_by_json_field(
+            field="report_manager",
+            values=("0001067983",),
+            source_id="sec-edgar:institutional-holdings-13f",
+            schema_version="sec-institutional-holdings-report-v1",
+            available_to=known_at,
+        )
+        assert set(selected) == {
+            report_to_raw_record(report).record_id
+            for report in seed["target_reports"]  # type: ignore[union-attr]
+        }
+        assert (
+            storage.raw_records.select_record_ids_by_json_field(field="report_manager", values=())
+            == []
+        )
+        with pytest.raises(StorageError, match="not supported"):
+            storage.raw_records.select_record_ids_by_json_field(
+                field="payload.report.manager_cik", values=("0001067983",)
+            )

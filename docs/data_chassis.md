@@ -599,3 +599,17 @@ fixtures scratch, la consulta hace cero `list`/`get` de métricas y conserva el 
 con 80 filas ajenas presentes; los tiempos se registran como observación. No prueba reducción de
 RSS global ni resuelve la carga inicial de la interfaz; latencia de endpoint y ciclo esperan una
 release que incluya #283–#292 y este bloque.
+
+## Selección PIT 13F antes de hidratar evidencia (`DATA-CHASSIS-23`)
+
+`DATA-CHASSIS-23` elimina el trabajo conocido de las lecturas 13F: el repositorio raw
+selecciona IDs por los campos tipados `payload.report.manager_cik`,
+`payload.outcome.filing.filer_cik` y `payload.position.report_id` desde un conjunto
+cerrado en código, con filtros de fuente, esquema y disponibilidad, orden determinista
+y valores parametrizados. `list_reports`, `list_outcomes` y `list_positions` verifican
+SHA e hidratan sólo los candidatos en lotes de máximo 512; `report_ids` vacío termina
+sin consultar documentos. Firmas, orden, PIT y errores de registros seleccionados
+ausentes o corruptos se conservan. En fixtures scratch, el resultado tipado y el orden
+son idénticos a la implementación previa en dos cortes, con cero hidrataciones ajenas.
+No promete reducción global de RSS; la comparación de ciclo real con carga 13F espera
+una release posterior.
