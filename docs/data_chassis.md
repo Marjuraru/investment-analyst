@@ -613,3 +613,16 @@ ausentes o corruptos se conservan. En fixtures scratch, el resultado tipado y el
 son idénticos a la implementación previa en dos cortes, con cero hidrataciones ajenas.
 No promete reducción global de RSS; la comparación de ciclo real con carga 13F espera
 una release posterior.
+
+## Grafo incremental diario RSI, ATR y MACD (`DATA-CHASSIS-24`)
+
+`DATA-CHASSIS-24` fija el contrato puro del grafo recursivo diario: RSI Wilder con
+ganancias/pérdidas medias, true range/ATR Wilder y MACD sobre EMAs de cierre con
+semilla SMA de primeras líneas elegibles, en versiones nuevas
+`market-rsi-incremental-v2-decimal34`, `market-atr-incremental-v2-decimal34` y
+`market-macd-incremental-v2-decimal34`. Cada familia expone semilla canónica,
+validación de checkpoint contra el prefijo visible, continuación y cálculo completo
+con igualdad Decimal exacta entre completo y reanudado. Prefijo revisado, truncado o
+reordenado, checkpoint alterado, evidencia futura y números no finitos fallan cerrado.
+El engine y el pipeline productivos no cambian. La etapa 5 sigue abierta: faltan
+ventanas finitas, lineage diario compartido, persistencia v2 y adopción.
