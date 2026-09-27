@@ -155,3 +155,103 @@ def test_both_modes_coexist_without_combination_or_writes(tmp_path) -> None:
     payload = view.to_json_dict()
     assert "combined_score" not in payload
     assert "combined_verdict" not in payload
+
+
+class _RecordingMetricResults:
+    """Observe metric hydration without changing persisted behavior."""
+
+    def __init__(self, repository) -> None:  # type: ignore[no-untyped-def]
+        self._repository = repository
+        self.list_calls = 0
+        self.get_calls = 0
+        self.get_existing_calls = 0
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        return getattr(self._repository, name)
+
+    def list(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.list_calls += 1
+        return self._repository.list(**kwargs)
+
+    def get(self, result_id):  # type: ignore[no-untyped-def]
+        self.get_calls += 1
+        return self._repository.get(result_id)
+
+    def get_existing(self, result_ids):  # type: ignore[no-untyped-def]
+        self.get_existing_calls += 1
+        return self._repository.get_existing(result_ids)
+
+
+def test_consolidated_query_skips_unrelated_metric_history(tmp_path) -> None:
+    market_metric = _metric(SIMPLE_RETURN_KEY, datetime(2026, 7, 10, tzinfo=UTC))
+    fundamental_metric = _metric(
+        "fundamental.net_margin",
+        datetime(2026, 6, 30, tzinfo=UTC),
+        DataFrequency.QUARTERLY,
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.metric_results.save(market_metric)
+        storage.metric_results.save(fundamental_metric)
+        storage.diagnostics.save(
+            _diagnostic(DiagnosticMode.MARKET, market_metric, MARKET_ALGORITHM_VERSION)
+        )
+        storage.diagnostics.save(
+            _diagnostic(
+                DiagnosticMode.FUNDAMENTAL,
+                fundamental_metric,
+                FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION,
+            )
+        )
+        for index in range(40):
+            storage.metric_results.save(
+                MetricResult(
+                    asset_id="equity:us:aapl",
+                    metric_key="market.history.simple_return_1d",
+                    value=Decimal(f"0.{index + 10}"),
+                    unit="ratio",
+                    as_of=datetime(2025, 1, 1, tzinfo=UTC),
+                    available_at=datetime(2025, 2, 1, tzinfo=UTC),
+                    computed_at=datetime(2025, 2, 2, tzinfo=UTC),
+                    parameters={},
+                    input_observation_ids=[uuid4()],
+                    algorithm_version="market-simple-return-1d-v1-decimal34",
+                    quality=DataQuality.VALID,
+                )
+            )
+            storage.metric_results.save(
+                MetricResult(
+                    asset_id="equity:us:aapl",
+                    metric_key="fundamental.noise_family",
+                    value=Decimal("0.01"),
+                    unit="ratio",
+                    as_of=datetime(2025, 1, 1, tzinfo=UTC),
+                    available_at=datetime(2025, 2, 1, tzinfo=UTC),
+                    computed_at=datetime(2025, 2, 2, tzinfo=UTC),
+                    parameters={},
+                    input_observation_ids=[uuid4()],
+                    algorithm_version="sec-fundamental-metric-noise-v1",
+                    quality=DataQuality.VALID,
+                )
+            )
+        baseline = AaplConsolidatedDiagnosticService(storage).query(
+            ConsolidatedDiagnosticRequest(
+                known_at=datetime(2026, 7, 14, tzinfo=UTC),
+                fundamental_frequency=DataFrequency.QUARTERLY,
+            )
+        )
+        recorder = _RecordingMetricResults(storage.metric_results)
+        storage.metric_results = recorder  # type: ignore[method-assign]
+
+        view = AaplConsolidatedDiagnosticService(storage).query(
+            ConsolidatedDiagnosticRequest(
+                known_at=datetime(2026, 7, 14, tzinfo=UTC),
+                fundamental_frequency=DataFrequency.QUARTERLY,
+            )
+        )
+
+        assert view.to_json_dict() == baseline.to_json_dict()
+        assert view.status is ConsolidatedDiagnosticStatus.COMPLETE
+        assert view.metric_results_examined == 2
+        assert recorder.list_calls == 0
+        assert recorder.get_calls == 0
+        assert recorder.get_existing_calls == 1

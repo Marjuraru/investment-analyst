@@ -276,6 +276,238 @@ def _insufficient_market_diagnostic(
     )
 
 
+def _seed_two_modes(storage: LocalStorage):  # type: ignore[no-untyped-def]
+    market_as_of = datetime(2026, 7, 10, tzinfo=UTC)
+    fundamental_as_of = datetime(2026, 6, 30, tzinfo=UTC)
+    market_metric = _metric(key=SIMPLE_RETURN_KEY, as_of=market_as_of)
+    fundamental_metric = _metric(
+        key="fundamental.net_margin",
+        as_of=fundamental_as_of,
+        frequency=DataFrequency.QUARTERLY,
+    )
+    storage.metric_results.save(market_metric)
+    storage.metric_results.save(fundamental_metric)
+    market = _diagnostic(
+        mode=DiagnosticMode.MARKET,
+        metric_id=market_metric.result_id,
+        as_of=market_as_of,
+        algorithm=MARKET_ALGORITHM_VERSION,
+    )
+    fundamental = _diagnostic(
+        mode=DiagnosticMode.FUNDAMENTAL,
+        metric_id=fundamental_metric.result_id,
+        as_of=fundamental_as_of,
+        algorithm=FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION,
+    )
+    storage.diagnostics.save(market)
+    storage.diagnostics.save(fundamental)
+    return market, market_metric, fundamental, fundamental_metric
+
+
+class _RecordingMetricResults:
+    """Observe metric hydration without changing persisted behavior."""
+
+    def __init__(self, repository) -> None:  # type: ignore[no-untyped-def]
+        self._repository = repository
+        self.list_calls = 0
+        self.get_calls = 0
+        self.get_existing_calls = 0
+        self.hydrated: list[object] = []
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        return getattr(self._repository, name)
+
+    def list(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.list_calls += 1
+        return self._repository.list(**kwargs)
+
+    def get(self, result_id):  # type: ignore[no-untyped-def]
+        self.get_calls += 1
+        return self._repository.get(result_id)
+
+    def get_existing(self, result_ids):  # type: ignore[no-untyped-def]
+        self.get_existing_calls += 1
+        found = self._repository.get_existing(result_ids)
+        self.hydrated.append(len(found))
+        return found
+
+
+def test_query_hydrates_only_referenced_eligible_metric_ids(tmp_path) -> None:
+    from investment_analyst.analytics.consolidated_diagnostic_models import (
+        ConsolidatedDiagnosticRequest,
+    )
+    from investment_analyst.analytics.consolidated_diagnostic_service import (
+        AaplConsolidatedDiagnosticService,
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        market, market_metric, fundamental, fundamental_metric = _seed_two_modes(storage)
+        storage.metric_results.save(
+            _metric(key="market.history.orphan_metric", as_of=datetime(2026, 7, 9, tzinfo=UTC))
+        )
+        legacy = _diagnostic(
+            mode=DiagnosticMode.MARKET,
+            metric_id=market_metric.result_id,
+            as_of=datetime(2026, 7, 10, tzinfo=UTC),
+            algorithm="market-diagnostic-legacy-v0",
+        )
+        storage.diagnostics.save(legacy)
+        late = _metric(key=SIMPLE_RETURN_KEY, as_of=datetime(2026, 7, 11, tzinfo=UTC))
+        storage.metric_results.save(late)
+        future = _diagnostic(
+            mode=DiagnosticMode.MARKET,
+            metric_id=late.result_id,
+            as_of=datetime(2026, 7, 11, tzinfo=UTC),
+            algorithm=MARKET_ALGORITHM_VERSION,
+            available_at=datetime(2026, 7, 20, tzinfo=UTC),
+        )
+        storage.diagnostics.save(future)
+        recorder = _RecordingMetricResults(storage.metric_results)
+        storage.metric_results = recorder  # type: ignore[method-assign]
+
+        view = AaplConsolidatedDiagnosticService(storage).query(
+            ConsolidatedDiagnosticRequest(
+                known_at=datetime(2026, 7, 14, tzinfo=UTC),
+                fundamental_frequency=DataFrequency.QUARTERLY,
+            )
+        )
+
+        assert view.status is ConsolidatedDiagnosticStatus.COMPLETE
+        assert view.market.diagnostic == market
+        assert view.fundamental.diagnostic == fundamental
+        assert recorder.list_calls == 0
+        assert recorder.get_calls == 0
+        assert recorder.get_existing_calls == 1
+        assert view.metric_results_examined == 2
+        hydrated = recorder._repository.get_existing(
+            (market_metric.result_id, fundamental_metric.result_id)
+        )
+        assert set(hydrated) == {market_metric.result_id, fundamental_metric.result_id}
+
+
+def test_reference_lookup_preserves_pit_revision_and_traceability(tmp_path) -> None:
+    from investment_analyst.analytics.consolidated_diagnostic_models import (
+        ConsolidatedDiagnosticRequest,
+    )
+    from investment_analyst.analytics.consolidated_diagnostic_service import (
+        AaplConsolidatedDiagnosticService,
+    )
+
+    for known_at, expected_score in (
+        (datetime(2026, 7, 14, tzinfo=UTC), Decimal("70")),
+        (datetime(2026, 7, 1, tzinfo=UTC), Decimal("60")),
+    ):
+        with LocalStorage(StoragePaths.from_root(tmp_path / f"cut-{expected_score}")) as storage:
+            as_of = datetime(2026, 7, 1, tzinfo=UTC)
+            metric = _metric(key=SIMPLE_RETURN_KEY, as_of=as_of)
+            earlier = _diagnostic(
+                mode=DiagnosticMode.MARKET,
+                metric_id=metric.result_id,
+                as_of=as_of,
+                algorithm=MARKET_ALGORITHM_VERSION,
+                available_at=datetime(2026, 7, 1, tzinfo=UTC),
+                score=Decimal("60"),
+            )
+            later = _diagnostic(
+                mode=DiagnosticMode.MARKET,
+                metric_id=metric.result_id,
+                as_of=as_of,
+                algorithm=MARKET_ALGORITHM_VERSION,
+                available_at=datetime(2026, 7, 2, tzinfo=UTC),
+                score=Decimal("70"),
+            )
+            storage.metric_results.save(metric)
+            storage.diagnostics.save(earlier)
+            storage.diagnostics.save(later)
+
+            view = AaplConsolidatedDiagnosticService(storage).query(
+                ConsolidatedDiagnosticRequest(
+                    known_at=known_at,
+                    fundamental_frequency=DataFrequency.QUARTERLY,
+                )
+            )
+
+            assert view.market.diagnostic is not None
+            assert view.market.diagnostic.final_score == expected_score
+            assert view.market.selected_metric_result_ids == (metric.result_id,)
+            assert view.traceability_verified is True
+
+
+def test_reference_lookup_rejects_missing_cross_asset_and_ambiguous_metrics(tmp_path) -> None:
+    from investment_analyst.analytics.consolidated_diagnostic_models import (
+        ConsolidatedDiagnosticRequest,
+    )
+    from investment_analyst.analytics.consolidated_diagnostic_service import (
+        AaplConsolidatedDiagnosticService,
+        AmbiguousStoredDiagnosticRevisionError,
+        ConsolidatedDiagnosticTraceabilityError,
+        MissingReferencedMetricResultError,
+    )
+
+    as_of = datetime(2026, 7, 10, tzinfo=UTC)
+    with LocalStorage(StoragePaths.from_root(tmp_path / "missing")) as storage:
+        storage.diagnostics.save(
+            _diagnostic(
+                mode=DiagnosticMode.MARKET,
+                metric_id=uuid4(),
+                as_of=as_of,
+                algorithm=MARKET_ALGORITHM_VERSION,
+            )
+        )
+        with pytest.raises(MissingReferencedMetricResultError):
+            AaplConsolidatedDiagnosticService(storage).query(
+                ConsolidatedDiagnosticRequest(
+                    known_at=datetime(2026, 7, 14, tzinfo=UTC),
+                    fundamental_frequency=DataFrequency.QUARTERLY,
+                )
+            )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "cross-asset")) as storage:
+        foreign = _metric(key=SIMPLE_RETURN_KEY, as_of=as_of, asset_id="equity:us:msft")
+        storage.metric_results.save(foreign)
+        storage.diagnostics.save(
+            _diagnostic(
+                mode=DiagnosticMode.MARKET,
+                metric_id=foreign.result_id,
+                as_of=as_of,
+                algorithm=MARKET_ALGORITHM_VERSION,
+            )
+        )
+        with pytest.raises(ConsolidatedDiagnosticTraceabilityError):
+            AaplConsolidatedDiagnosticService(storage).query(
+                ConsolidatedDiagnosticRequest(
+                    known_at=datetime(2026, 7, 14, tzinfo=UTC),
+                    fundamental_frequency=DataFrequency.QUARTERLY,
+                )
+            )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "ambiguous")) as storage:
+        observation = _persist_observation(storage, as_of=as_of)
+        metric = _metric(
+            key=SIMPLE_RETURN_KEY,
+            as_of=as_of,
+            input_observation_ids=(observation.observation_id,),
+        )
+        storage.metric_results.save(metric)
+        for score in (Decimal("60"), Decimal("70")):
+            storage.diagnostics.save(
+                _diagnostic(
+                    mode=DiagnosticMode.MARKET,
+                    metric_id=metric.result_id,
+                    as_of=as_of,
+                    algorithm=MARKET_ALGORITHM_VERSION,
+                    score=score,
+                )
+            )
+        with pytest.raises(AmbiguousStoredDiagnosticRevisionError):
+            AaplConsolidatedDiagnosticService(storage).query(
+                ConsolidatedDiagnosticRequest(
+                    known_at=datetime(2026, 7, 14, tzinfo=UTC),
+                    fundamental_frequency=DataFrequency.QUARTERLY,
+                )
+            )
+
+
 def test_insufficient_market_diagnostic_without_metrics_is_valid_and_read_only(
     tmp_path,
     monkeypatch,

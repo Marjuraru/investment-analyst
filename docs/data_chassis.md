@@ -586,3 +586,16 @@ y el progreso de lotes anteriores se conservan. En fixtures scratch, la generaci
 por activo y el selector materializa sólo claves SEC; los tiempos se registran como observación sin
 convertir un umbral de máquina en verdad semántica. No cura contención ni RSS por sí solo; memoria y
 ciclo real esperan evidencia posterior a las releases recientes.
+
+## Consulta consolidada PIT por referencias (`DATA-CHASSIS-22`)
+
+`DATA-CHASSIS-22` acota la hidratación de la consulta consolidada a referencias de diagnóstico:
+lee todos los diagnósticos del activo en su orden actual, reúne los IDs de métricas citados sólo
+por diagnósticos de versión vigente visibles al `known_at`, los deduplica y los hidrata con
+`get_existing`, sin `metric_results.list(asset_id=...)` ni `get()` fila a fila. La ausencia se
+traduce al mismo `MissingReferencedMetricResultError`, la propiedad del activo y la semántica de
+revisiones empatadas se conservan, y `metric_results_examined` cuenta referencias hidratadas. En
+fixtures scratch, la consulta hace cero `list`/`get` de métricas y conserva el JSON exacto previo
+con 80 filas ajenas presentes; los tiempos se registran como observación. No prueba reducción de
+RSS global ni resuelve la carga inicial de la interfaz; latencia de endpoint y ciclo esperan una
+release que incluya #283–#292 y este bloque.

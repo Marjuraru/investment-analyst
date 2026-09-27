@@ -503,7 +503,6 @@ def _validate_diagnostic_common(
     *,
     request: _ConsolidatedRequest,
     metric_index: dict[UUID, MetricResult],
-    storage: LocalStorage,
 ) -> _Candidate:
     if diagnostic.asset_id != request.asset_id:
         raise MalformedStoredDiagnosticError("diagnostic asset does not match request")
@@ -538,14 +537,10 @@ def _validate_diagnostic_common(
     for identifier in metric_ids:
         try:
             metric = metric_index[identifier]
-        except KeyError:
-            try:
-                metric = storage.metric_results.get(identifier)
-            except RecordNotFoundError as not_found:
-                raise MissingReferencedMetricResultError(
-                    f"diagnostic references missing metric result {identifier}"
-                ) from not_found
-            metric_index[identifier] = metric
+        except KeyError as missing:
+            raise MissingReferencedMetricResultError(
+                f"diagnostic references missing metric result {identifier}"
+            ) from missing
         _validate_metric_common(metric, request.asset_id)
         metrics.append(metric)
 
@@ -680,15 +675,11 @@ class ListedCompanyConsolidatedDiagnosticService:
         self._storage = storage
 
     def query(self, request: _ConsolidatedRequest) -> ConsolidatedDiagnosticView:
-        """Return one compact point-in-time view from two repository reads."""
+        """Return one compact point-in-time view from diagnoses plus referenced metrics."""
         self._storage.require_open()
         diagnostics = tuple(self._storage.diagnostics.list(asset_id=request.asset_id))
-        metric_results = tuple(self._storage.metric_results.list(asset_id=request.asset_id))
-        metric_index = {item.result_id: item for item in metric_results}
-        if len(metric_index) != len(metric_results):
-            raise ConsolidatedDiagnosticTraceabilityError(
-                "metric result identifiers are not unique"
-            )
+        metric_index = self._hydrate_eligible_reference_index(diagnostics, request)
+        metric_results_examined = len(metric_index)
         semantic_resolver = _SemanticTraceabilityResolver(
             self._storage,
             metric_index,
@@ -716,7 +707,6 @@ class ListedCompanyConsolidatedDiagnosticService:
                     diagnostic,
                     request=request,
                     metric_index=metric_index,
-                    storage=self._storage,
                 )
                 if (
                     mode is DiagnosticMode.FUNDAMENTAL
@@ -770,12 +760,47 @@ class ListedCompanyConsolidatedDiagnosticService:
             fundamental=fundamental,
             temporal_context=temporal_context,
             diagnostics_examined=len(diagnostics),
-            metric_results_examined=len(metric_results),
+            metric_results_examined=metric_results_examined,
             ignored_algorithm_versions=ignored_versions,
             traceability_verified=True,
         )
         self._verify_view(view, metric_index)
         return view
+
+    def _hydrate_eligible_reference_index(
+        self,
+        diagnostics: tuple[DiagnosticResult, ...],
+        request: _ConsolidatedRequest,
+    ) -> dict[UUID, MetricResult]:
+        """Hydrate only metrics referenced by cut-eligible current-version diagnostics."""
+        referenced: set[UUID] = set()
+        for diagnostic in diagnostics:
+            if diagnostic.asset_id != request.asset_id:
+                continue
+            try:
+                current_version = _current_version(diagnostic.mode)
+            except ValueError:
+                continue
+            if diagnostic.algorithm_version != current_version:
+                continue
+            if diagnostic.available_at > request.known_at:
+                continue
+            if diagnostic.as_of > request.known_at:
+                continue
+            referenced.update(_referenced_metric_ids(diagnostic))
+        ordered = tuple(sorted(referenced, key=str))
+        hydrated = self._storage.metric_results.get_existing(ordered)
+        missing = [identifier for identifier in ordered if identifier not in hydrated]
+        if missing:
+            raise MissingReferencedMetricResultError(
+                f"diagnostic references missing metric result {missing[0]}"
+            )
+        for identifier, result in hydrated.items():
+            if result.asset_id != request.asset_id:
+                raise ConsolidatedDiagnosticTraceabilityError(
+                    f"metric result {identifier} belongs to another asset"
+                )
+        return dict(hydrated)
 
     @staticmethod
     def _verify_view(
