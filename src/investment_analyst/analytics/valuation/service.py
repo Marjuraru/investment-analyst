@@ -2,7 +2,7 @@
 
 import json
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Context, Decimal, localcontext
@@ -85,6 +85,11 @@ class _ObservationRepository(Protocol):
         self,
         *,
         asset_id: str | None = None,
+        source_id: str | None = None,
+        field_names: Collection[str] | None = None,
+        frequency: DataFrequency | None = None,
+        quality: DataQuality | None = None,
+        available_to: datetime | None = None,
         **filters: object,
     ) -> list[NormalizedObservation]: ...
 
@@ -520,7 +525,14 @@ class CorporateValuationService:
     def _annual_facts(self, request: CorporateValuationRequest) -> _AnnualSelection | None:
         candidates = [
             item
-            for item in self._storage.observations.list(asset_id=request.asset_id)
+            for item in self._storage.observations.list(
+                asset_id=request.asset_id,
+                source_id=self._fundamental_source_id,
+                field_names=_FIELDS,
+                frequency=DataFrequency.ANNUAL,
+                quality=DataQuality.VALID,
+                available_to=request.known_at,
+            )
             if item.field_name in _FIELDS
             and item.frequency is DataFrequency.ANNUAL
             and item.quality is DataQuality.VALID
