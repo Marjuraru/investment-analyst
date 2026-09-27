@@ -639,3 +639,16 @@ conflictos de ID; `get`/`get_many` y la selección por fuente, esquema, activo,
 frente al archivo. En workspace scratch, IDs, orden y PIT en dos cortes son
 idénticos a v1 con una sola copia canónica raw. v1 continúa como único workspace
 productivo; importer, backup v2, cutover y rollback quedan para bloques posteriores.
+
+## Mercado diario con corte estable y planificación acotada (`DATA-CHASSIS-26`)
+
+`DATA-CHASSIS-26` corrige el defecto operacional del ciclo diario: tras un fetch
+AUTO sin corte manual y sin raw ni observaciones nuevas, Alpaca y Coinbase fijan
+`analytics_known_at` en la máxima disponibilidad proyectada y `analytics_end` en
+el día siguiente a la última barra válida, con la ventana de 90 días naciendo de
+ese fin. La proyección usa agregados SQL parametrizados sin hidratar documentos;
+el planificador Coinbase reemplaza su lista histórica por `observed_at_bounds` y
+`maximum_available_at` acotados. `analytical_inputs_changed` separa el screening:
+el monitor MARKET omite el check sin cambio de mercado aunque existan receipt o
+valoración. Estadísticas y diagnósticos recalculan la serie como antes; no se
+promete CPU O(delta) ni menos RSS.

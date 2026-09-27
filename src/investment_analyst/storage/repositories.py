@@ -572,6 +572,9 @@ class DuckDBObservationRepository:
         frequency: DataFrequency | None = None,
         quality: DataQuality | None = None,
         transformation_version: str | None = None,
+        observed_from: datetime | None = None,
+        observed_before: datetime | None = None,
+        available_to: datetime | None = None,
     ) -> datetime | None:
         """Return the latest availability cut from indexed observation columns."""
         clauses: list[str] = []
@@ -591,6 +594,21 @@ class DuckDBObservationRepository:
         if transformation_version is not None:
             clauses.append("json_extract_string(document_json, '$.transformation_version') = ?")
             parameters.append(transformation_version)
+        if observed_from is not None:
+            if observed_from.tzinfo is None or observed_from.utcoffset() is None:
+                raise ValueError("observed_from must be timezone-aware")
+            clauses.append("observed_at >= ?")
+            parameters.append(observed_from)
+        if observed_before is not None:
+            if observed_before.tzinfo is None or observed_before.utcoffset() is None:
+                raise ValueError("observed_before must be timezone-aware")
+            clauses.append("observed_at < ?")
+            parameters.append(observed_before)
+        if available_to is not None:
+            if available_to.tzinfo is None or available_to.utcoffset() is None:
+                raise ValueError("available_to must be timezone-aware")
+            clauses.append("available_at <= ?")
+            parameters.append(available_to)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         row = self._connection.execute(
             f"SELECT cast(MAX(available_at) AS VARCHAR) FROM normalized_observations{where}",  # noqa: S608

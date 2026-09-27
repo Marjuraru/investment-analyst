@@ -19,6 +19,7 @@ from investment_analyst.application.listed_market_refresh_models import (
     ListedMarketRefreshRequest,
     ListedMarketRefreshSummary,
 )
+from investment_analyst.application.market_daily_cut import resolve_market_daily_cut
 from investment_analyst.core.operation_control import (
     OperationCancelledError,
     check_operation_cancelled,
@@ -117,12 +118,29 @@ class ListedMarketRefreshPipeline:
         effective_known_at = self._resolve_known_at(request, imports)
         check_operation_cancelled()
         analytics_start = max(start, end - timedelta(days=_OPERATIONAL_ANALYTICS_DAYS))
+        analytics_end = end
+        analytics_known_at = effective_known_at
+        if request.analytics_known_at is None and request.requested_known_at is None:
+            analytics_start, analytics_end, analytics_known_at = resolve_market_daily_cut(
+                self._refresh_planner.storage,
+                asset_id=self._configuration.asset_id,
+                source_id=self._configuration.source_id,
+                market_start=request.market_start,
+                market_end=request.market_end,
+                requested_end=request.market_end,
+                refresh_mode=request.refresh_mode,
+                fetch_created_inputs=any(
+                    item.raw_records_created > 0 or item.observations_created > 0
+                    for item in imports
+                ),
+                effective_known_at=effective_known_at,
+            )
         query = HistoricalBarQuery(
             asset_id=self._configuration.asset_id,
             source_id=self._configuration.source_id,
             start=analytics_start,
-            end=end,
-            known_at=effective_known_at,
+            end=analytics_end,
+            known_at=analytics_known_at,
         )
         try:
             statistics = self._statistics_pipeline.run(MarketStatisticsRequest(query=query))

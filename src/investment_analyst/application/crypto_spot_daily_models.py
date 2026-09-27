@@ -24,6 +24,7 @@ class CryptoSpotDailyRefreshRequest(ContractModel):
     market_end: date
     refresh_mode: BtcRefreshMode = BtcRefreshMode.AUTO
     requested_known_at: UTCDateTime | None = None
+    analytics_known_at: UTCDateTime | None = None
 
     @field_validator("market_start", "market_end", mode="before")
     @classmethod

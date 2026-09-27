@@ -381,6 +381,46 @@ def test_observation_edges_and_source_filter_are_sql_aggregates(storage) -> None
     assert storage.observations.observed_at_bounds(asset_id="asset:missing") == (None, None)
 
 
+def test_maximum_available_at_is_bounded_by_observed_range(storage) -> None:
+    raw_record = make_raw_record()
+    early = make_observation(
+        raw_record_id=raw_record.record_id,
+        asset_id="asset:bounded",
+        observed_at=datetime(2026, 7, 9, 16, tzinfo=UTC),
+        available_at=datetime(2026, 7, 9, 17, tzinfo=UTC),
+    )
+    late = make_observation(
+        raw_record_id=raw_record.record_id,
+        asset_id="asset:bounded",
+        observed_at=datetime(2026, 7, 10, 15, tzinfo=UTC),
+        available_at=datetime(2026, 7, 10, 16, 3, tzinfo=UTC),
+    )
+    for observation in (early, late):
+        storage.observations.save(observation)
+
+    assert storage.observations.maximum_available_at(asset_id="asset:bounded") == late.available_at
+    assert (
+        storage.observations.maximum_available_at(
+            asset_id="asset:bounded",
+            observed_before=datetime(2026, 7, 10, 15, tzinfo=UTC),
+        )
+        == early.available_at
+    )
+    assert (
+        storage.observations.maximum_available_at(
+            asset_id="asset:bounded",
+            observed_from=datetime(2026, 7, 10, 15, tzinfo=UTC),
+            available_to=datetime(2026, 7, 9, 18, tzinfo=UTC),
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        storage.observations.maximum_available_at(
+            asset_id="asset:bounded",
+            observed_from=datetime(2026, 7, 11, 16),
+        )
+
+
 def test_metric_and_diagnostic_counts(storage) -> None:
     raw_record = make_raw_record()
     observation = make_observation(raw_record_id=raw_record.record_id)

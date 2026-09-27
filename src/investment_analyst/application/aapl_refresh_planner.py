@@ -31,6 +31,7 @@ class AaplMarketRefreshPlanner:
     ) -> None:
         storage.require_open()
         self._storage = storage
+        self.storage = storage
         self._asset_id = configuration.asset_id
         self._source_id = configuration.source_id
         self._symbol = configuration.symbol

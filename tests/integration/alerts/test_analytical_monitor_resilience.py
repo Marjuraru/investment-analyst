@@ -500,3 +500,51 @@ def test_duplicate_v1_revisions_remain_ambiguous() -> None:
             source_id=_SOURCE_ID,
             known_at=known_at,
         )
+
+
+def test_empty_market_check_skips_screening_but_new_bar_runs(tmp_path: Path) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    paths = service.initialize(tmp_path / "workspace").paths
+    runtime = ApplicationRuntime.create_default(workspace_service=service)
+    store = AnalyticalScreeningStateStore(paths.state_root / "analytical.json")
+    rule = _get_macd_rule()
+    monitor = AnalyticalScreeningMonitor(
+        store,
+        runtime,
+        paths.root,
+        (rule,),
+        clock=lambda: datetime(2026, 7, 30, 12, 5, tzinfo=UTC),
+    )
+    known_at = datetime(2026, 7, 29, 12, tzinfo=UTC)
+
+    def _market_attempt(identifier: str, analytical_changed: bool | None) -> ScheduledJobAttempt:
+        base = _attempt(
+            "alpaca:equity:us:aapl:market-daily",
+            known_at,
+            attempt_id=UUID(identifier),
+            scheduled_date=date(2026, 7, 29),
+        )
+        return base.model_copy(
+            update={
+                "execution": base.execution.model_copy(
+                    update={"analytical_inputs_changed": analytical_changed}
+                )
+            }
+        )
+
+    quiet = _market_attempt("90000000-0000-4000-8000-000000000011", False)
+    monitor(quiet)
+    quiet_receipt = next(
+        item for item in store.load().receipts if item.attempt_id == quiet.attempt_id
+    )
+    assert quiet_receipt.status is AnalyticalMonitorReceiptStatus.SKIPPED
+    assert quiet_receipt.reason == "unchanged_analytical_inputs"
+
+    legacy = _market_attempt("90000000-0000-4000-8000-000000000012", None)
+    base = _attempt(
+        "alpaca:equity:us:aapl:market-daily",
+        known_at,
+        attempt_id=UUID("90000000-0000-4000-8000-000000000012"),
+        scheduled_date=date(2026, 7, 29),
+    )
+    assert legacy == base

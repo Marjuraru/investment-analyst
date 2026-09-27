@@ -23,6 +23,7 @@ class ListedMarketRefreshRequest(ContractModel):
     market_end: date
     refresh_mode: AaplRefreshMode = AaplRefreshMode.AUTO
     requested_known_at: UTCDateTime | None = None
+    analytics_known_at: UTCDateTime | None = None
 
     @field_validator("market_start", "market_end", mode="before")
     @classmethod

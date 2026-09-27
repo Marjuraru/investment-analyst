@@ -18,7 +18,7 @@ from investment_analyst.analytics.market.history_service import HistoricalMarket
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
 from investment_analyst.analytics.market.statistics_pipeline import MarketStatisticsPipeline
 from investment_analyst.application.btc_refresh import BtcMarketExecutionClock
-from investment_analyst.application.btc_refresh_models import BtcMarketRefreshMode
+from investment_analyst.application.btc_refresh_models import BtcMarketRefreshMode, BtcRefreshMode
 from investment_analyst.application.crypto_spot_daily import (
     CryptoSpotDailyKnownAtTooEarlyError,
     CryptoSpotDailyRefreshPipeline,
@@ -167,11 +167,99 @@ def _request(
     )
 
 
-def test_refresh_ingests_calculates_and_reruns_without_provider_call(tmp_path: Path) -> None:
+def test_auto_no_new_candle_reuses_market_cut_and_results(tmp_path: Path) -> None:
     transport = FixtureTransport()
     configuration = _configuration("crypto:btc-usd")
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
         pipeline = _pipeline(storage, transport, configuration=configuration)
+        first = pipeline.run(_request())
+        first_metric_ids = {item.result_id for item in storage.metric_results.list()}
+        first_diagnostic_ids = {item.diagnostic_id for item in storage.diagnostics.list()}
+
+        second = pipeline.run(_request())
+        assert second.refresh_plan.mode is BtcMarketRefreshMode.ALREADY_CURRENT
+        assert second.intervals_executed == 0
+        assert second.candles_received == 0
+        assert (second.analytics_start, second.analytics_end, second.effective_known_at) == (
+            first.analytics_start,
+            first.analytics_end,
+            first.effective_known_at,
+        )
+        assert second.metric_results_created == 0
+        assert second.diagnostics_created == 0
+        assert {item.result_id for item in storage.metric_results.list()} == first_metric_ids
+        assert {item.diagnostic_id for item in storage.diagnostics.list()} == first_diagnostic_ids
+
+        third = pipeline.run(
+            CryptoSpotDailyRefreshRequest(
+                asset_id="crypto:btc-usd",
+                market_start=date(2026, 7, 9),
+                market_end=date(2026, 7, 11),
+            )
+        )
+        assert third.candles_received == 0
+        assert third.raw_records_created == 0
+        assert third.observations_created == 0
+        assert (third.analytics_start, third.analytics_end, third.effective_known_at) == (
+            first.analytics_start,
+            first.analytics_end,
+            first.effective_known_at,
+        )
+        assert third.metric_results_created == 0
+        assert third.diagnostics_created == 0
+
+
+def test_new_candle_revision_and_explicit_modes_keep_pit(tmp_path: Path) -> None:
+    transport = FixtureTransport()
+    configuration = _configuration("crypto:btc-usd")
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline = _pipeline(storage, transport, configuration=configuration)
+        first = pipeline.run(_request())
+        full = pipeline.run(
+            CryptoSpotDailyRefreshRequest(
+                asset_id="crypto:btc-usd",
+                market_start=date(2026, 7, 9),
+                market_end=date(2026, 7, 11),
+                refresh_mode=BtcRefreshMode.FULL,
+            )
+        )
+        assert full.refresh_plan.mode is BtcMarketRefreshMode.FULL
+        assert full.metric_results_created == 0
+        explicit = pipeline.run(_request(known_at=first.effective_known_at))
+        assert explicit.effective_known_at == first.effective_known_at
+
+
+def test_no_candle_cut_rejects_other_source_and_corrupt_evidence(tmp_path: Path) -> None:
+    from investment_analyst.application.market_daily_cut import (
+        MarketDailyCutError,
+        resolve_market_daily_cut,
+    )
+
+    transport = FixtureTransport()
+    configuration = _configuration("crypto:btc-usd")
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline = _pipeline(storage, transport, configuration=configuration)
+        first = pipeline.run(_request())
+
+        with pytest.raises(MarketDailyCutError, match="timezone-aware"):
+            resolve_market_daily_cut(
+                storage,
+                asset_id=configuration.asset_id,
+                source_id="other:source",
+                market_start=date(2026, 7, 9),
+                market_end=date(2026, 7, 11),
+                requested_end=date(2026, 7, 11),
+                refresh_mode=BtcRefreshMode.AUTO,
+                fetch_created_inputs=False,
+                effective_known_at=first.effective_known_at.replace(tzinfo=None),
+            )
+        rerun = pipeline.run(_request())
+        assert rerun.market_as_of == first.market_as_of
+        assert rerun.metric_results_created == 0
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "isolated-rerun")) as storage:
+        isolated_transport = FixtureTransport()
+        pipeline = _pipeline(storage, isolated_transport, configuration=configuration)
         first = pipeline.run(_request())
         second = pipeline.run(_request())
 
@@ -199,7 +287,7 @@ def test_refresh_ingests_calculates_and_reruns_without_provider_call(tmp_path: P
         assert second.metric_results_reused == first.metric_results_created
         assert second.diagnostics_created == 0
         assert second.diagnostics_reused == 1
-        assert len(transport.calls) == 1
+        assert len(isolated_transport.calls) == 1
         assert len(storage.raw_records.list(source_id=SOURCE_ID)) == 3
         assert len(storage.observations.list(asset_id=ASSET_ID)) == 15
 
