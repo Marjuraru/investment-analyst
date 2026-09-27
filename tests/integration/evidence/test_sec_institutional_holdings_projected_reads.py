@@ -1,30 +1,153 @@
 """Projected 13F reads preserve PIT results while skipping unrelated history."""
 
 import time
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from uuid import uuid4
 
 from investment_analyst.core.models import RawRecord, SourceReference
+from investment_analyst.evidence.sec_documents.models import (
+    SecFilerDocumentRevision,
+    SecFiling,
+    SecLogicalDocument,
+)
 from investment_analyst.evidence.sec_institutional_holdings.models import (
     INSTITUTIONAL_HOLDINGS_SOURCE_ID,
+    InstitutionalHoldingPosition,
+    InstitutionalHoldingsReport,
+    InstitutionalHoldingsResolutionOutcome,
 )
 from investment_analyst.evidence.sec_institutional_holdings.repository import (
     InstitutionalHoldingsRepository,
     report_to_raw_record,
 )
+from investment_analyst.providers.institutional_holdings.sec_institutional_holdings_parser import (
+    parse_institutional_holdings,
+)
 from investment_analyst.storage import LocalStorage, StoragePaths
+
+_COVER = b"""<edgarSubmission><submissionType>13F-HR</submissionType><filingManager>
+<name>Manager LLC</name></filingManager>
+<reportCalendarOrQuarter>2024-12-31</reportCalendarOrQuarter>
+<tableEntryTotal>1</tableEntryTotal><tableValueTotal>100</tableValueTotal></edgarSubmission>"""
+_TABLE = b"""<informationTable><infoTable><nameOfIssuer>APPLE INC</nameOfIssuer>
+<titleOfClass>COM</titleOfClass><cusip>037833100</cusip><value>100</value>
+<shrsOrPrnAmt><sshPrnamt>10</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt>
+<investmentDiscretion>SOLE</investmentDiscretion><votingAuthority><Sole>10</Sole>
+<Shared>0</Shared><None>0</None></votingAuthority></infoTable></informationTable>"""
+
+
+def _filing(*, cik: str, accession_suffix: int, accepted_day: int) -> SecFiling:
+    accession = f"0000950123-25-{accession_suffix:06d}"
+    return SecFiling(
+        filing_id=SecFiling.expected_id(cik, accession),
+        filer_cik=cik,
+        accession=accession,
+        form="13F-HR",
+        filing_date=date(2025, 2, accepted_day),
+        report_date=date(2024, 12, 31),
+        accepted_at=datetime(2025, 2, accepted_day, 18, tzinfo=UTC),
+        is_amendment=False,
+    )
+
+
+def _filing_revision(filing: SecFiling, name: str, digest: str) -> SecFilerDocumentRevision:
+    document = SecLogicalDocument(
+        document_id=SecLogicalDocument.expected_id(filing.filing_id, name),
+        filing=filing,
+        name=name,
+    )
+    revision_id = SecFilerDocumentRevision.expected_id(document.document_id, digest)
+    return SecFilerDocumentRevision(
+        revision_id=revision_id,
+        filer_cik=filing.filer_cik,
+        document=document,
+        raw_record_id=SecFilerDocumentRevision.expected_raw_record_id(revision_id),
+        discovery_raw_record_id=uuid4(),
+        content_sha256=digest,
+        content_size_bytes=12,
+        available_at=filing.accepted_at,
+        retrieved_at=datetime(2025, 2, 15, tzinfo=UTC),
+        source_url=f"https://www.sec.gov/Archives/{name}",
+    )
+
+
+def _report(
+    filing: SecFiling, name_seed: str, parsed_at: datetime
+) -> tuple[InstitutionalHoldingsReport, tuple[InstitutionalHoldingPosition, ...]]:
+    return parse_institutional_holdings(
+        _COVER,
+        _TABLE,
+        cover_revision=_filing_revision(filing, f"{name_seed}-primary.xml", "a" * 64),
+        information_table_revision=_filing_revision(filing, f"{name_seed}-info.xml", "b" * 64),
+        parsed_at=parsed_at,
+    )
+
+
+def _outcome(
+    filing: SecFiling, resource_name: str, retrieved_at: datetime
+) -> InstitutionalHoldingsResolutionOutcome:
+    outcome_id = InstitutionalHoldingsResolutionOutcome.expected_id(
+        filing.accession, resource_name, "c" * 64, "accepted"
+    )
+    return InstitutionalHoldingsResolutionOutcome(
+        outcome_id=outcome_id,
+        raw_record_id=InstitutionalHoldingsResolutionOutcome.expected_raw_record_id(outcome_id),
+        filing=filing,
+        discovery_raw_record_id=uuid4(),
+        declared_locator=f"locator/{resource_name}",
+        resource_name=resource_name,
+        resource_url=f"https://www.sec.gov/Archives/{resource_name}",
+        content_sha256="c" * 64,
+        content_size_bytes=12,
+        manifest_url="https://www.sec.gov/Archives/manifest.xml",
+        manifest_sha256="d" * 64,
+        available_at=filing.accepted_at,
+        retrieved_at=retrieved_at,
+        status="accepted",
+        reason_code="structured_sec_xml",
+    )
+
+
+def _seed_mixed_corpus(
+    repository: InstitutionalHoldingsRepository, *, name_prefix: str
+) -> dict[str, object]:
+    parsed_at = datetime(2025, 2, 17, tzinfo=UTC)
+    target_filings = [
+        _filing(cik="0001067983", accession_suffix=1, accepted_day=14),
+        _filing(cik="0001067983", accession_suffix=2, accepted_day=16),
+    ]
+    other_filing = _filing(cik="0001234567", accession_suffix=3, accepted_day=15)
+    target_reports: list[InstitutionalHoldingsReport] = []
+    target_positions: list[InstitutionalHoldingPosition] = []
+    seen_report_ids: set[object] = set()
+    for index, filing in enumerate([*target_filings, other_filing]):
+        report, positions = _report(filing, f"{name_prefix}-{index}", parsed_at)
+        assert report.report_id not in seen_report_ids
+        seen_report_ids.add(report.report_id)
+        repository.save_report(report)
+        repository.save_positions(positions)
+        if filing.filer_cik == "0001067983":
+            target_reports.append(report)
+            target_positions.extend(positions)
+    target_outcomes = [
+        _outcome(target_filings[0], f"{name_prefix}-primary-0.xml", parsed_at),
+        _outcome(target_filings[1], f"{name_prefix}-primary-1.xml", parsed_at),
+    ]
+    other_outcome = _outcome(other_filing, f"{name_prefix}-primary-2.xml", parsed_at)
+    for outcome in [*target_outcomes, other_outcome]:
+        repository.save_outcome(outcome)
+    return {
+        "target_reports": target_reports,
+        "target_positions": target_positions,
+        "target_outcomes": target_outcomes,
+    }
 
 
 def test_13f_projected_reads_preserve_pit_and_order(tmp_path: Path) -> None:
-    import sys
-
-    sys.path.insert(0, "tests/unit/evidence/sec_institutional_holdings")
-    import test_repository as holdings_tests
-
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
         repository = InstitutionalHoldingsRepository(storage.raw_records)
-        seed = holdings_tests._seed_mixed_corpus(repository, name_prefix="projected")
+        seed = _seed_mixed_corpus(repository, name_prefix="projected")
         for index in range(60):
             storage.raw_records.save(
                 RawRecord(
