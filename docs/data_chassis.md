@@ -561,3 +561,16 @@ y el fixture demuestra la reducción de modelos hidratados; los tiempos del fixt
 observación sin convertir un umbral de máquina en verdad semántica. Este bloque no promete resolver
 los ~24 s de la matriz ni el pico de RSS; la ruta queda `DATA-CHASSIS NEXT` con un gate de lectura
 real pendiente.
+
+## Estado compacto del scheduler sin reprocesar historial (`DATA-CHASSIS-20`)
+
+`DATA-CHASSIS-20` acelera la lectura repetida del estado operacional del scheduler sin tocar su
+journal: `MultiAssetScheduleStateStore` reutiliza un único estado completamente validado cuando la
+huella SHA-256 del legado y de todos los archivos del journal coincide, invalida la caché en cada
+escritura y relee o falla cerrado ante sustitución, corrupción o borrado externo. `MultiAssetScheduler`
+construye un índice efímero por job y día en una sola pasada y conserva el JSON exacto de status, la
+fecha local por zona horaria, reintentos, frescura, `next_run` y reconciliación del registro; el reloj
+y el registro se recomputan aunque los bytes no cambien. En scratch, `load()` repetido sobre 600
+intentos pasa de p50 ~16,5 ms (validación fresca) a p50 ~0,7 ms (huella + reutilización) y `status()`
+de 30 jobs queda en p50 ~1,2 ms; el objetivo HTTP p95 <100 ms y el efecto en ciclos reales requieren
+medición posterior y no se atribuye ahorro de 13F, Coinbase o derivados a este bloque.

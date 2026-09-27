@@ -1,5 +1,6 @@
 """Provider-independent scheduling for explicit asset and data-domain jobs."""
 
+import hashlib
 import threading
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time, timedelta
@@ -552,6 +553,8 @@ class MultiAssetScheduleStateStore:
             journal_id="multi-asset-schedule",
             reducer=_reduce_schedule_attempts,
         )
+        self._cached_state: MultiAssetScheduleState | None = None
+        self._cached_fingerprint: tuple[tuple[str, str], ...] | None = None
 
     @property
     def journal_dir(self) -> Path:
@@ -568,6 +571,58 @@ class MultiAssetScheduleStateStore:
 
     def load(self) -> MultiAssetScheduleState:
         """Load valid state without creating a missing file or mutating disk."""
+        with self._lock:
+            fingerprint = self._content_fingerprint()
+            if (
+                self._cached_state is not None
+                and self._cached_fingerprint is not None
+                and fingerprint is not None
+                and fingerprint == self._cached_fingerprint
+            ):
+                return self._cached_state
+            state = self._load_fresh()
+            if fingerprint is not None:
+                self._cached_state = state
+                self._cached_fingerprint = fingerprint
+            else:
+                self._cached_state = None
+                self._cached_fingerprint = None
+            return state
+
+    def _content_fingerprint(self) -> tuple[tuple[str, str], ...] | None:
+        """Hash every relevant persisted byte without validating any model."""
+        if self._path.exists() and not self._path.is_file():
+            return None
+        entries: list[tuple[str, str]] = []
+        if self._path.exists():
+            try:
+                entries.append(("legacy", hashlib.sha256(self._path.read_bytes()).hexdigest()))
+            except OSError:
+                return None
+        if not self._journal_dir.exists():
+            return tuple(entries)
+        try:
+            files = sorted(item for item in self._journal_dir.rglob("*") if item.is_file())
+        except OSError:
+            return None
+        digest = hashlib.sha256()
+        names: list[str] = []
+        for item in files:
+            try:
+                content = item.read_bytes()
+            except OSError:
+                return None
+            relative = item.relative_to(self._journal_dir).as_posix()
+            names.append(relative)
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative.encode("utf-8"))
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+        entries.append(("journal", f"{len(names)}:{digest.hexdigest()}"))
+        return tuple(entries)
+
+    def _load_fresh(self) -> MultiAssetScheduleState:
+        """Validate and model every persisted byte exactly like the legacy path."""
         with self._lock:
             has_journal = self._journal.has_data()
             has_legacy = self._path.exists()
@@ -716,11 +771,67 @@ class MultiAssetScheduleStateStore:
 
             # Append the new attempt transition to the open segment in O(1)
             self._journal.append(attempt.to_json_dict())
+            self._cached_state = None
+            self._cached_fingerprint = None
             return updated
 
 
 ScheduledJobRun = Callable[[ScheduledJobInvocation], ScheduledJobExecution]
 ScheduledJobObserver = Callable[[ScheduledJobAttempt], None]
+
+
+class _JobHistoryView:
+    """Ephemeral per-job projection of one validated schedule state."""
+
+    __slots__ = ("_attempts", "_by_date", "_latest", "_latest_success")
+
+    def __init__(self) -> None:
+        self._attempts: list[ScheduledJobAttempt] = []
+        self._by_date: dict[date, list[ScheduledJobAttempt]] = {}
+        self._latest: ScheduledJobAttempt | None = None
+        self._latest_success: ScheduledJobAttempt | None = None
+
+    @property
+    def latest(self) -> ScheduledJobAttempt | None:
+        return self._latest
+
+    @property
+    def latest_success(self) -> ScheduledJobAttempt | None:
+        return self._latest_success
+
+    def attempts_on(self, local_date: date) -> tuple[ScheduledJobAttempt, ...]:
+        return tuple(self._by_date.get(local_date, ()))
+
+
+class _HistoryIndex:
+    """One-pass index of latest/latest-success/day buckets for every job."""
+
+    __slots__ = ("_views",)
+
+    def __init__(self, views: dict[str, _JobHistoryView]) -> None:
+        self._views = views
+
+    @staticmethod
+    def build(state: MultiAssetScheduleState) -> "_HistoryIndex":
+        views: dict[str, _JobHistoryView] = {}
+        for attempt in state.attempts:
+            job_id = attempt.definition.job_id
+            view = views.get(job_id)
+            if view is None:
+                view = _JobHistoryView()
+                views[job_id] = view
+            view._attempts.append(attempt)
+            view._by_date.setdefault(attempt.local_date, []).append(attempt)
+            view._latest = attempt
+            if attempt.status is ScheduledJobAttemptStatus.SUCCEEDED:
+                view._latest_success = attempt
+        return _HistoryIndex(views)
+
+    def for_job(self, definition: ScheduledJobDefinition) -> _JobHistoryView:
+        view = self._views.get(definition.job_id)
+        if view is None:
+            return _JobHistoryView()
+        return view
 
 
 class RegisteredScheduledJob:
@@ -1140,7 +1251,11 @@ class MultiAssetScheduler:
         state: MultiAssetScheduleState,
         jobs: tuple[RegisteredScheduledJob, ...],
     ) -> MultiAssetSchedulerStatus:
-        statuses = tuple(self._job_status(item.definition, now, state) for item in jobs)
+        index = _HistoryIndex.build(state)
+        statuses = tuple(
+            self._job_status(item.definition, now, state, history=index.for_job(item.definition))
+            for item in jobs
+        )
         issues = tuple(issue for item in statuses for issue in item.issues)
         if self._observer_issue is not None:
             issues = (*issues, self._observer_issue)
@@ -1193,13 +1308,20 @@ class MultiAssetScheduler:
         definition: ScheduledJobDefinition,
         now: datetime,
         state: MultiAssetScheduleState,
+        *,
+        history: "_JobHistoryView | None" = None,
     ) -> ScheduledJobStatus:
         local_now = now.astimezone(ZoneInfo(definition.timezone))
         local_date = local_now.date()
         scheduled = definition.scheduled_for(local_date)
-        attempts_today = self._attempts_for(state, definition.job_id, local_date)
-        latest = self._latest_by_job(state).get(definition.job_id)
-        latest_success = self._latest_success_by_job(state).get(definition.job_id)
+        if history is None:
+            attempts_today = self._attempts_for(state, definition.job_id, local_date)
+            latest = self._latest_by_job(state).get(definition.job_id)
+            latest_success = self._latest_success_by_job(state).get(definition.job_id)
+        else:
+            attempts_today = history.attempts_on(local_date)
+            latest = history.latest
+            latest_success = history.latest_success
         due = False
         next_run = scheduled
         next_retry: datetime | None = None
