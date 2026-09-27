@@ -280,15 +280,21 @@ class InstitutionalHoldingsRepository:
     def list_reports(
         self, *, manager_cik: str, known_at: datetime
     ) -> list[InstitutionalHoldingsReport]:
+        selected_ids = self._raw_records.select_record_ids_by_json_field(
+            field="report_manager",
+            values=(manager_cik,),
+            source_id=INSTITUTIONAL_HOLDINGS_SOURCE_ID,
+            schema_version=INSTITUTIONAL_HOLDINGS_REPORT_SCHEMA_VERSION,
+            available_to=known_at,
+        )
+        reports = [
+            report
+            for record in self._hydrate_selected_records(selected_ids)
+            for report in (report_from_raw_record(record),)
+            if report.manager_cik == manager_cik
+        ]
         return sorted(
-            (
-                report
-                for record in self._iter_visible_records(
-                    schema_version=INSTITUTIONAL_HOLDINGS_REPORT_SCHEMA_VERSION,
-                    known_at=known_at,
-                )
-                if (report := report_from_raw_record(record)).manager_cik == manager_cik
-            ),
+            reports,
             key=lambda item: (
                 item.available_at,
                 item.cover_revision.document.filing.accession,
@@ -299,15 +305,21 @@ class InstitutionalHoldingsRepository:
     def list_outcomes(
         self, *, manager_cik: str, known_at: datetime
     ) -> list[InstitutionalHoldingsResolutionOutcome]:
+        selected_ids = self._raw_records.select_record_ids_by_json_field(
+            field="outcome_filer",
+            values=(manager_cik,),
+            source_id=INSTITUTIONAL_HOLDINGS_SOURCE_ID,
+            schema_version=INSTITUTIONAL_HOLDINGS_OUTCOME_SCHEMA_VERSION,
+            available_to=known_at,
+        )
+        outcomes = [
+            outcome
+            for record in self._hydrate_selected_records(selected_ids)
+            for outcome in (outcome_from_raw_record(record),)
+            if outcome.filing.filer_cik == manager_cik
+        ]
         return sorted(
-            (
-                outcome
-                for record in self._iter_visible_records(
-                    schema_version=INSTITUTIONAL_HOLDINGS_OUTCOME_SCHEMA_VERSION,
-                    known_at=known_at,
-                )
-                if (outcome := outcome_from_raw_record(record)).filing.filer_cik == manager_cik
-            ),
+            outcomes,
             key=lambda item: (
                 item.available_at,
                 item.filing.accession,
@@ -318,26 +330,26 @@ class InstitutionalHoldingsRepository:
     def list_positions(
         self, *, report_ids: set[UUID], known_at: datetime
     ) -> list[InstitutionalHoldingPosition]:
-        return sorted(
-            (
-                position
-                for record in self._iter_visible_records(
-                    schema_version=INSTITUTIONAL_HOLDING_POSITION_SCHEMA_VERSION,
-                    known_at=known_at,
-                )
-                if (position := position_from_raw_record(record)).report_id in report_ids
-            ),
-            key=lambda item: (str(item.report_id), item.row_number),
-        )
-
-    def _iter_visible_records(
-        self, *, schema_version: str, known_at: datetime
-    ) -> Iterable[RawRecord]:
-        record_ids = self._raw_records.list_record_ids(
+        ordered_report_ids = tuple(sorted(report_ids, key=str))
+        if not ordered_report_ids:
+            return []
+        selected_ids = self._raw_records.select_record_ids_by_json_field(
+            field="position_report",
+            values=tuple(str(report_id) for report_id in ordered_report_ids),
             source_id=INSTITUTIONAL_HOLDINGS_SOURCE_ID,
-            schema_version=schema_version,
+            schema_version=INSTITUTIONAL_HOLDING_POSITION_SCHEMA_VERSION,
             available_to=known_at,
         )
+        wanted = set(ordered_report_ids)
+        positions = [
+            position
+            for record in self._hydrate_selected_records(selected_ids)
+            for position in (position_from_raw_record(record),)
+            if position.report_id in wanted
+        ]
+        return sorted(positions, key=lambda item: (str(item.report_id), item.row_number))
+
+    def _hydrate_selected_records(self, record_ids: list[UUID]) -> Iterable[RawRecord]:
         for offset in range(0, len(record_ids), self._LIST_BATCH_SIZE):
             batch_ids = record_ids[offset : offset + self._LIST_BATCH_SIZE]
             records_by_id = self._raw_records.get_many(batch_ids)

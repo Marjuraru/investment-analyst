@@ -28,6 +28,12 @@ _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9._-]+")
 _MAX_INDEX_INTEGRITY_RECORDS = 1_000
 _RAW_RECORD_BATCH_CHUNK_SIZE = 1_000
 
+_THIRTEEN_F_JSON_PATHS = {
+    "report_manager": "payload.report.manager_cik",
+    "outcome_filer": "payload.outcome.filing.filer_cik",
+    "position_report": "payload.position.report_id",
+}
+
 
 def _safe_source_component(source_id: str) -> str:
     slug = _SAFE_COMPONENT.sub("_", source_id).strip("._-") or "source"
@@ -319,6 +325,46 @@ class JsonRawRecordRepository:
             received_to=received_to,
         )
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._connection.execute(
+            f"SELECT record_id FROM raw_record_index{where} ORDER BY received_at, record_id",
+            parameters,
+        ).fetchall()
+        return [UUID(row[0]) for row in rows]
+
+    def select_record_ids_by_json_field(
+        self,
+        *,
+        field: str,
+        values: Collection[str],
+        source_id: str | None = None,
+        schema_version: str | None = None,
+        available_to: datetime | None = None,
+    ) -> list[UUID]:
+        """Select indexed identifiers by an allowlisted JSON payload field.
+
+        Only closed-set 13F paths are accepted; everything else fails closed.
+        Values, identifiers and the cutoff are bound parameters.
+        """
+        if field not in _THIRTEEN_F_JSON_PATHS:
+            raise StorageError("raw record JSON field selection is not supported")
+        selected = tuple(dict.fromkeys(str(value) for value in values))
+        if not selected:
+            return []
+        json_path = f"$.{_THIRTEEN_F_JSON_PATHS[field]}"
+        value_clauses = [f"json_extract_string(document_json, '{json_path}') = ?" for _ in selected]
+        parameters: list[object] = list(selected)
+        clauses: list[str] = []
+        if source_id is not None:
+            clauses.append("source_id = ?")
+            parameters.append(source_id)
+        if schema_version is not None:
+            clauses.append("schema_version = ?")
+            parameters.append(schema_version)
+        if available_to is not None:
+            clauses.append("available_at <= ?")
+            parameters.append(available_to)
+        where_parts = [f"({' OR '.join(value_clauses)})", *clauses]
+        where = f" WHERE {' AND '.join(where_parts)}"
         rows = self._connection.execute(
             f"SELECT record_id FROM raw_record_index{where} ORDER BY received_at, record_id",
             parameters,

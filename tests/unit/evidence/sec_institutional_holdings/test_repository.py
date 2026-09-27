@@ -276,9 +276,9 @@ def test_13f_lists_bound_get_many_batches(tmp_path: Path) -> None:
     assert [position.position_id for position in positions] == [
         position.position_id for position in target_positions
     ]
-    assert report_batches == [1, 1, 1]
-    assert outcome_batches == [1, 1, 1]
-    assert position_batches == [1, 1, 1]
+    assert report_batches == [1, 1]
+    assert outcome_batches == [1, 1]
+    assert position_batches == [1, 1]
     assert list_calls() == 0
 
 
@@ -344,7 +344,70 @@ def test_13f_lists_preserve_filters_order_and_known_at(tmp_path: Path) -> None:
             for position in positions
         )
 
+
+def test_13f_lists_materialize_only_selected_records(tmp_path: Path) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        repository = InstitutionalHoldingsRepository(storage.raw_records)
+        seed = _seed_mixed_corpus(repository, name_prefix="selected")
+        known_at = datetime(2025, 2, 17, tzinfo=UTC)
+
+        hydrated: list[object] = []
+        original_get_many = storage.raw_records.get_many
+
+        def spy_get_many(record_ids):  # type: ignore[no-untyped-def]
+            hydrated.append(tuple(record_ids))
+            return original_get_many(record_ids)
+
+        storage.raw_records.get_many = spy_get_many  # type: ignore[method-assign]
+        reports = repository.list_reports(manager_cik="0001067983", known_at=known_at)
+        positions = repository.list_positions(
+            report_ids={report.report_id for report in reports},  # type: ignore[union-attr]
+            known_at=known_at,
+        )
+
+        assert [report.report_id for report in reports] == [  # type: ignore[union-attr]
+            report.report_id
+            for report in sorted(  # type: ignore[union-attr]
+                seed["target_reports"],  # type: ignore[arg-type]
+                key=lambda item: (
+                    item.available_at,
+                    item.cover_revision.document.filing.accession,
+                    str(item.report_id),
+                ),
+            )
+        ]
+        assert positions
+        assert hydrated
+        assert sum(len(batch) for batch in hydrated) == len(reports) + len(positions)
+
+
+def test_13f_projected_reads_reject_selected_corruption(tmp_path: Path) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        repository = InstitutionalHoldingsRepository(storage.raw_records)
+        seed = _seed_mixed_corpus(repository, name_prefix="select-corrupt")
+        target_report_id = seed["target_reports"][0].report_id  # type: ignore[union-attr]
+        target_record_id = next(
+            record.record_id
+            for record in storage.raw_records.list(
+                source_id="sec-edgar:institutional-holdings-13f",
+                schema_version="sec-institutional-holdings-report-v1",
+            )
+            if report_from_raw_record(record).report_id == target_report_id
+        )
+        row = storage.store.connection.execute(
+            "SELECT relative_path FROM raw_record_index WHERE record_id = ?",
+            [str(target_record_id)],
+        ).fetchone()
+        assert row is not None
+        (storage.paths.raw_dir / row[0]).write_text('{"tampered":true}', encoding="utf-8")
+        with pytest.raises(StorageError, match="checksum mismatch"):
+            repository.list_reports(
+                manager_cik="0001067983", known_at=datetime(2025, 2, 17, tzinfo=UTC)
+            )
+
     with LocalStorage(StoragePaths.from_root(tmp_path / "lists")) as storage:
+        baseline_repository = InstitutionalHoldingsRepository(storage.raw_records)
+        seed_lists = _seed_mixed_corpus(baseline_repository, name_prefix="lists-baseline")
         known_at = datetime(2025, 2, 17, tzinfo=UTC)
         baseline_reports = [
             report_from_raw_record(record)
@@ -355,9 +418,10 @@ def test_13f_lists_preserve_filters_order_and_known_at(tmp_path: Path) -> None:
             )
         ]
         candidate = [report for report in baseline_reports if report.manager_cik == "0001067983"]
-        assert [report.report_id for report in candidate] == [
-            report.report_id for report in expected_reports
-        ]
+        assert sorted(report.report_id for report in candidate) == sorted(
+            report.report_id  # type: ignore[union-attr]
+            for report in seed_lists["target_reports"]  # type: ignore[union-attr]
+        )
 
 
 def test_13f_lists_propagate_missing_and_corrupt_records(tmp_path: Path) -> None:

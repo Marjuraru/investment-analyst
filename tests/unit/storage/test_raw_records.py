@@ -289,3 +289,42 @@ def test_save_many_reports_conflicts_and_preserves_previous_chunks(
     r5_diff = r5.model_copy(update={"schema_version": "conflicting-version"})
     with pytest.raises(RecordConflictError, match="already has different content"):
         storage.raw_records.save_many([r5, r5_diff])
+
+
+def test_select_13f_ids_before_hydration(tmp_path: Path) -> None:
+    from investment_analyst.evidence.sec_institutional_holdings.repository import (
+        InstitutionalHoldingsRepository,
+        report_to_raw_record,
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        repository = InstitutionalHoldingsRepository(storage.raw_records)
+        import sys
+
+        sys.path.insert(
+            0,
+            "tests/unit/evidence/sec_institutional_holdings",
+        )
+        import test_repository as holdings_tests
+
+        seed = holdings_tests._seed_mixed_corpus(repository, name_prefix="select")
+        known_at = datetime(2025, 2, 17, tzinfo=UTC)
+        selected = storage.raw_records.select_record_ids_by_json_field(
+            field="report_manager",
+            values=("0001067983",),
+            source_id="sec-edgar:institutional-holdings-13f",
+            schema_version="sec-institutional-holdings-report-v1",
+            available_to=known_at,
+        )
+        assert set(selected) == {
+            report_to_raw_record(report).record_id
+            for report in seed["target_reports"]  # type: ignore[union-attr]
+        }
+        assert (
+            storage.raw_records.select_record_ids_by_json_field(field="report_manager", values=())
+            == []
+        )
+        with pytest.raises(StorageError, match="not supported"):
+            storage.raw_records.select_record_ids_by_json_field(
+                field="payload.report.manager_cik", values=("0001067983",)
+            )
