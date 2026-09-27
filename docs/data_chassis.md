@@ -626,3 +626,16 @@ con igualdad Decimal exacta entre completo y reanudado. Prefijo revisado, trunca
 reordenado, checkpoint alterado, evidencia futura y números no finitos fallan cerrado.
 El engine y el pipeline productivos no cambian. La etapa 5 sigue abierta: faltan
 ventanas finitas, lineage diario compartido, persistencia v2 y adopción.
+
+## Sustrato raw v2 aislado e índice consultable (`DATA-CHASSIS-25`)
+
+`DATA-CHASSIS-25` abre la subfase raw de la etapa 7 con un formato físico aislado
+`raw-v2-staging-v1`: destino nuevo y explícito con marcador tipado, blobs
+content-addressed por SHA-256 en `raw/sha256/` e índice `raw_v2_index` sin columna
+`document_json`, con proyecciones 13F tipadas de gestor y `report_id` extraídas del
+`RawRecord` validado al insertar. `save`/`save_many` son idempotentes y rechazan
+conflictos de ID; `get`/`get_many` y la selección por fuente, esquema, activo,
+`available_at` y proyecciones verifican hash, identidad, metadatos y proyección
+frente al archivo. En workspace scratch, IDs, orden y PIT en dos cortes son
+idénticos a v1 con una sola copia canónica raw. v1 continúa como único workspace
+productivo; importer, backup v2, cutover y rollback quedan para bloques posteriores.
