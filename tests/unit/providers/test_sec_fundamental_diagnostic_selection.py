@@ -111,11 +111,13 @@ def test_selector_reads_metric_results_once(tmp_path, monkeypatch) -> None:
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
         storage.metric_results.save(_result("fundamental.net_margin", "0.20"))
         calls = 0
+        seen_kwargs: list[dict] = []
         original = storage.metric_results.list
 
         def counting_list(**kwargs):
             nonlocal calls
             calls += 1
+            seen_kwargs.append(dict(kwargs))
             return original(**kwargs)
 
         monkeypatch.setattr(storage.metric_results, "list", counting_list)
@@ -123,6 +125,61 @@ def test_selector_reads_metric_results_once(tmp_path, monkeypatch) -> None:
 
         assert calls == 1
         assert selection.target_period_end == datetime(2025, 9, 27, tzinfo=UTC)
+        assert seen_kwargs[0].get("asset_id") == "equity:us:aapl"
+
+
+def test_selector_reads_only_sec_metric_keys_with_pit_equivalence(tmp_path) -> None:
+    from investment_analyst.providers.fundamentals.sec_diagnostic_selection import (
+        _ALLOWED_METRIC_NAMES,
+    )
+    from investment_analyst.providers.fundamentals.sec_metric_models import (
+        SEC_FUNDAMENTAL_METRIC_DEFINITIONS,
+    )
+
+    expected_keys = tuple(
+        definition.metric_name for definition in SEC_FUNDAMENTAL_METRIC_DEFINITIONS
+    )
+    assert tuple(_ALLOWED_METRIC_NAMES) == expected_keys
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        sec_results = tuple(
+            _result(name, "0.20")
+            for name in ("fundamental.net_margin", "fundamental.liabilities_to_assets")
+        )
+        for result in sec_results:
+            storage.metric_results.save(result)
+        storage.metric_results.save(
+            _result("fundamental.net_margin", "0.20").model_copy(
+                update={
+                    "metric_key": "market.history.simple_return_1d",
+                    "parameters": {},
+                    "algorithm_version": "other",
+                }
+            )
+        )
+        calls: list[dict] = []
+        original = storage.metric_results.list
+
+        def recording_list(**kwargs):  # type: ignore[no-untyped-def]
+            calls.append(dict(kwargs))
+            return original(**kwargs)
+
+        storage.metric_results.list = recording_list  # type: ignore[method-assign]
+        selector = SecFundamentalDiagnosticSelector(storage)
+        selection = selector.select(_request())
+        reference = SecFundamentalDiagnosticSelector.select_from_results(
+            _request(),
+            tuple(original(asset_id="equity:us:aapl")),
+        )
+
+        assert len(calls) == 1
+        assert calls[0].get("asset_id") == "equity:us:aapl"
+        assert tuple(calls[0].get("metric_keys", ())) == expected_keys
+        assert selection.selected_metrics == reference.selected_metrics
+        assert selection.target_period_end == reference.target_period_end
+        assert selection.missing_metric_names == reference.missing_metric_names
+        assert selection.metrics_examined == len(sec_results)
+        assert selection.metrics_eligible == len(sec_results)
 
 
 def test_latest_period_and_exact_period_selection() -> None:

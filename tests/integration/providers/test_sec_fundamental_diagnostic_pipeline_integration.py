@@ -347,3 +347,48 @@ def test_two_sec_issuers_persist_isolated_diagnostics(tmp_path) -> None:
         assert apple.diagnostic_id != amd_first.diagnostic_id
         assert amd_diagnostics[0].algorithm_version == ("sec-fundamental-diagnostic-v3-decimal34")
         assert amd_diagnostics[0].summary.startswith("Advanced Micro Devices, Inc.")
+
+
+def test_filtered_selection_preserves_revision_and_traceability(tmp_path) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        _seed_metrics(storage)
+        storage.metric_results.save(
+            _metric_result(
+                "fundamental.net_margin",
+                "0.24",
+                available_at=datetime(2026, 1, 15, tzinfo=UTC),
+            )
+        )
+        reference = SecFundamentalDiagnosticSelector.select_from_results(
+            SecFundamentalDiagnosticRequest(
+                known_at=datetime(2026, 1, 31, tzinfo=UTC),
+                frequency=DataFrequency.ANNUAL,
+            ),
+            tuple(storage.metric_results.list(asset_id="equity:us:aapl")),
+        )
+        pipeline = SecAaplFundamentalDiagnosticPipeline(
+            storage,
+            SecFundamentalDiagnosticSelector(storage),
+            SecFundamentalDiagnosticEngine(),
+            clock=lambda: datetime(2026, 2, 1, tzinfo=UTC),
+        )
+        summary = pipeline.run(
+            SecFundamentalDiagnosticRequest(
+                known_at=datetime(2026, 1, 31, tzinfo=UTC),
+                frequency=DataFrequency.ANNUAL,
+            )
+        )
+
+        assert summary.diagnostics_created == 1
+        assert summary.traceability_verified is True
+        diagnostics = storage.diagnostics.list(asset_id="equity:us:aapl")
+        assert len(diagnostics) == 1
+        assert diagnostics[0].diagnostic_id == summary.diagnostic_id
+        assert {item.metric_name for item in reference.selected_metrics} == {
+            "fundamental.net_margin",
+            "fundamental.liabilities_to_assets",
+            "fundamental.liabilities_to_equity",
+            "fundamental.revenue_yoy_growth",
+            "fundamental.net_income_yoy_change_rate",
+        }
+        assert reference.revisions_superseded == 1

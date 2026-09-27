@@ -303,7 +303,12 @@ class SecFundamentalDiagnosticSelector:
             raise SecFundamentalDiagnosticSelectionError(
                 "request asset_id does not match the configured SEC issuer"
             )
-        results = tuple(self._storage.metric_results.list(asset_id=request.asset_id))
+        results = tuple(
+            self._storage.metric_results.list(
+                asset_id=request.asset_id,
+                metric_keys=_ALLOWED_METRIC_NAMES,
+            )
+        )
         return self.select_from_results(
             request,
             results,
