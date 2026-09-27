@@ -1,7 +1,7 @@
 """Focused latest-annual corporate valuation tests."""
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -38,9 +38,32 @@ _SOURCE = SourceReference(source_id="sec-edgar:aapl:companyfacts", retrieved_at=
 class _Observations:
     def __init__(self, rows: list[NormalizedObservation]) -> None:
         self._rows = rows
+        self.hydrated = 0
 
-    def list(self, *, asset_id: str | None = None) -> list[NormalizedObservation]:
-        return [row for row in self._rows if asset_id is None or row.asset_id == asset_id]
+    def list(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        field_names: object | None = None,
+        frequency: DataFrequency | None = None,
+        quality: DataQuality | None = None,
+        available_to: datetime | None = None,
+    ) -> list[NormalizedObservation]:
+        rows = [
+            row
+            for row in self._rows
+            if (asset_id is None or row.asset_id == asset_id)
+            and (source_id is None or row.source.source_id == source_id)
+            and (
+                field_names is None or row.field_name in set(field_names)  # type: ignore[arg-type]
+            )
+            and (frequency is None or row.frequency is frequency)
+            and (quality is None or row.quality is quality)
+            and (available_to is None or row.available_at <= available_to)
+        ]
+        self.hydrated += len(rows)
+        return rows
 
 
 class _Storage:
@@ -123,10 +146,15 @@ def _price() -> MarketBar:
     )
 
 
-def _service(rows: list[NormalizedObservation]) -> CorporateValuationService:
+def _service(
+    rows: list[NormalizedObservation],
+    *,
+    storage: _Storage | None = None,
+) -> CorporateValuationService:
     asset = AssetCatalogService.load_default().get(_ASSET_ID)
+    resolved_storage = storage if storage is not None else _Storage(rows)
     return CorporateValuationService(
-        _Storage(rows),
+        resolved_storage,
         capabilities=analysis_capabilities_for(asset),
         market_source_id="alpaca-market-data:iex:aapl:daily-bars:adjustment-all",
         fundamental_source_id=_SOURCE.source_id,
@@ -711,6 +739,111 @@ def test_cut_before_filing_acceptance_does_not_select_future_facts() -> None:
     assert {item.reason_code for item in snapshot.metrics} == {
         ValuationReasonCode.FUNDAMENTALS_UNAVAILABLE
     }
+
+
+def test_scoped_annual_read_preserves_valuation_and_ambiguity() -> None:
+    rows = _reference_rows()
+    decoys = [
+        _observation(
+            "fundamental.revenue",
+            "999999",
+            asset_id="equity:us:msft",
+            source_id="sec-edgar:msft:companyfacts",
+        ),
+        _observation(
+            "fundamental.revenue",
+            "999999",
+            source_id="sec-edgar:other:companyfacts",
+        ),
+        _observation(
+            "fundamental.revenue",
+            "999999",
+            frequency=DataFrequency.QUARTERLY,
+        ),
+        _observation(
+            "fundamental.revenue",
+            "999999",
+            available_at=_KNOWN_AT + timedelta(days=30),
+        ),
+        _observation(
+            "fundamental.revenue",
+            "999999",
+            asset_id="equity:us:msft",
+        ),
+    ]
+    storage = _Storage([*rows, *decoys])
+    service = _service([*rows, *decoys], storage=storage)
+    price = _price()
+    service._price = lambda request: price  # type: ignore[method-assign]
+
+    snapshot = service.query(
+        CorporateValuationRequest(
+            asset_id=_ASSET_ID,
+            known_at=_KNOWN_AT,
+            valuation_date=_KNOWN_AT.date(),
+        ),
+        computed_at=_KNOWN_AT,
+    )
+    baseline = _service(rows)
+    baseline._price = lambda request: price  # type: ignore[method-assign]
+    expected = baseline.query(
+        CorporateValuationRequest(
+            asset_id=_ASSET_ID,
+            known_at=_KNOWN_AT,
+            valuation_date=_KNOWN_AT.date(),
+        ),
+        computed_at=_KNOWN_AT,
+    )
+
+    assert snapshot.model_dump_json() == expected.model_dump_json()
+    assert storage.observations.hydrated < len(rows) + len(decoys)
+
+    conflicting = [
+        _observation("fundamental.shares_outstanding", "100"),
+        _observation(
+            "fundamental.shares_outstanding",
+            "100",
+            accession_number="0000320193-26-000002",
+            available_at=_AVAILABLE_AT,
+            period_end=_PERIOD_END,
+        ),
+    ]
+    conflict_service = _service(conflicting)
+    conflict_service._price = lambda request: _price()  # type: ignore[method-assign]
+    with pytest.raises(AmbiguousValuationEvidenceError, match="disagree semantically"):
+        conflict_service.query(
+            CorporateValuationRequest(
+                asset_id=_ASSET_ID,
+                known_at=_KNOWN_AT,
+                valuation_date=_KNOWN_AT.date(),
+            ),
+            computed_at=_KNOWN_AT,
+        )
+
+
+def test_scoped_valuation_rejects_conflicting_revisions() -> None:
+    rows = [
+        _observation("fundamental.shares_outstanding", "100"),
+        _observation(
+            "fundamental.shares_outstanding",
+            "100",
+            accession_number="0000320193-26-000002",
+            available_at=_AVAILABLE_AT,
+            period_end=_PERIOD_END,
+        ),
+    ]
+    service = _service(rows)
+    service._price = lambda request: _price()  # type: ignore[method-assign]
+
+    with pytest.raises(AmbiguousValuationEvidenceError, match="disagree semantically"):
+        service.query(
+            CorporateValuationRequest(
+                asset_id=_ASSET_ID,
+                known_at=_KNOWN_AT,
+                valuation_date=_KNOWN_AT.date(),
+            ),
+            computed_at=_KNOWN_AT,
+        )
 
 
 def test_crypto_asset_is_not_applicable_without_reading_price() -> None:

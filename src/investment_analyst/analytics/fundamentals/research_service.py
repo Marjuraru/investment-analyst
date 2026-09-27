@@ -2,8 +2,8 @@
 
 import json
 from collections import Counter, defaultdict
-from collections.abc import Mapping
-from datetime import date
+from collections.abc import Collection, Mapping
+from datetime import date, datetime
 from decimal import Context, Decimal, localcontext
 from typing import Protocol
 from uuid import UUID
@@ -49,7 +49,16 @@ _REQUIRED_RECORD_KEY_FIELDS = frozenset(
 
 
 class _ObservationRepository(Protocol):
-    def list(self, *, asset_id: str | None = None) -> list[NormalizedObservation]:
+    def list(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        field_names: Collection[str] | None = None,
+        frequency: DataFrequency | None = None,
+        quality: DataQuality | None = None,
+        available_to: datetime | None = None,
+    ) -> list[NormalizedObservation]:
         """Return stored observations in repository order."""
         ...
 
@@ -108,7 +117,14 @@ class SecIssuerFundamentalResearchService:
     ) -> AaplFundamentalResearchResult:
         """Return one bounded, deterministic, point-in-time research result."""
         self._storage.require_open()
-        observations = self._storage.observations.list(asset_id=self._configuration.asset_id)
+        observations = self._storage.observations.list(
+            asset_id=self._configuration.asset_id,
+            source_id=self._configuration.companyfacts_source_id,
+            field_names=self._research_fields,
+            frequency=request.frequency,
+            quality=DataQuality.VALID,
+            available_to=request.known_at,
+        )
         eligible = [
             observation
             for observation in observations

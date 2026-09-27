@@ -550,3 +550,14 @@ contrato puro, determinista y probado, sin persistirla y sin llamador.
   abierta: faltan RSI/ATR/MACD, ventanas finitas, extensión diaria de lineage, persistencia v2 y
   adopción productiva. Ninguna mejora de filas, bytes o RSS se atribuye a este contrato sin un ciclo
   posterior a su adopción.
+
+## Lecturas SEC acotadas para cobertura y valoración (`DATA-CHASSIS-19`)
+
+`DATA-CHASSIS-19` amplía las lecturas acotadas del chasis a los dos lectores SEC que se repiten por
+emisor en `universe-coverage-v1`: investigación fundamental y valoración anual consultan sólo filas
+potencialmente elegibles con los filtros read-only ya existentes, sin cambiar resultados PIT, conteos
+públicos ni detección de evidencia elegible inválida. La matriz completa queda idéntica en dos cortes
+y el fixture demuestra la reducción de modelos hidratados; los tiempos del fixture se registran como
+observación sin convertir un umbral de máquina en verdad semántica. Este bloque no promete resolver
+los ~24 s de la matriz ni el pico de RSS; la ruta queda `DATA-CHASSIS NEXT` con un gate de lectura
+real pendiente.

@@ -86,12 +86,33 @@ class _ObservationRepository:
     def __init__(self, observations: list[NormalizedObservation]) -> None:
         self._observations = observations
         self.calls = 0
+        self.hydrated = 0
 
-    def list(self, *, asset_id: str | None = None) -> list[NormalizedObservation]:
+    def list(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        field_names: object | None = None,
+        frequency: DataFrequency | None = None,
+        quality: DataQuality | None = None,
+        available_to: datetime | None = None,
+    ) -> list[NormalizedObservation]:
         self.calls += 1
-        return [
-            item for item in self._observations if asset_id is None or item.asset_id == asset_id
+        rows = [
+            item
+            for item in self._observations
+            if (asset_id is None or item.asset_id == asset_id)
+            and (source_id is None or item.source.source_id == source_id)
+            and (
+                field_names is None or item.field_name in set(field_names)  # type: ignore[arg-type]
+            )
+            and (frequency is None or item.frequency is frequency)
+            and (quality is None or item.quality is quality)
+            and (available_to is None or item.available_at <= available_to)
         ]
+        self.hydrated += len(rows)
+        return rows
 
 
 class _ForbiddenRawRepository:
@@ -122,6 +143,7 @@ def _observation(
     asset_id: str = ASSET_ID,
     source_id: str = COMPANYFACTS_SOURCE_ID,
     transformation_version: str = TRANSFORMATION_VERSION,
+    frequency: DataFrequency = DataFrequency.ANNUAL,
 ) -> NormalizedObservation:
     definition = get_sec_fact_definition(field_name)
     resolved_unit = unit or definition.unit
@@ -156,7 +178,7 @@ def _observation(
         field_name=field_name,
         value=Decimal(value),
         unit=resolved_unit,
-        frequency=DataFrequency.ANNUAL,
+        frequency=frequency,
         observed_at=datetime.combine(period_end, datetime.min.time(), tzinfo=UTC),
         period_start=period_start,
         period_end=datetime.combine(period_end, datetime.min.time(), tzinfo=UTC),
@@ -310,7 +332,7 @@ def test_configured_issuer_isolated_through_research_history_and_analysis() -> N
     assert research.schema_version == "sec-fundamental-research-v3"
     assert research.asset_id == amd.asset_id
     assert research.source_id == amd.companyfacts_source_id
-    assert research.coverage.observations_examined == len(amd_observations) + 1
+    assert research.coverage.observations_examined == len(amd_observations)
     assert research.coverage.observations_eligible == len(amd_observations)
     assert research.coverage.metrics_returned == 40
     amd_ids = {item.observation_id for item in amd_observations}
@@ -522,5 +544,78 @@ def test_malformed_evidence_is_rejected_before_calculation() -> None:
     )
     with pytest.raises(MalformedFundamentalResearchObservationError, match="unit"):
         AaplFundamentalResearchService(_Storage([wrong_unit])).query(  # type: ignore[arg-type]
+            _request()
+        )
+
+
+def test_scoped_repository_read_preserves_pit_coverage_and_revisions() -> None:
+    decoy_period = date(2024, 9, 28)
+    amendment_at = _AVAILABLE_AT + timedelta(days=10)
+    observations = [
+        _observation("fundamental.current_assets", "400", period_end=decoy_period),
+        _observation("fundamental.current_liabilities", "200", period_end=decoy_period),
+        _observation("fundamental.current_assets", "500"),
+        _observation("fundamental.current_assets", "600", available_at=amendment_at),
+        _observation("fundamental.current_liabilities", "250"),
+    ]
+    decoys = [
+        _observation(
+            "fundamental.revenue",
+            "999999",
+            asset_id="equity:us:amd",
+            source_id="sec-edgar:amd:companyfacts",
+        ),
+        _observation(
+            "fundamental.revenue",
+            "999999",
+            frequency=DataFrequency.QUARTERLY,
+        ),
+        _observation(
+            "fundamental.revenue",
+            "999999",
+            available_at=_KNOWN_AT + timedelta(days=30),
+        ),
+        _observation(
+            "fundamental.revenue",
+            "1",
+            frequency=DataFrequency.QUARTERLY,
+            available_at=amendment_at - timedelta(seconds=1),
+        ),
+    ]
+    storage = _Storage([*observations, *decoys])
+
+    service = AaplFundamentalResearchService(storage)  # type: ignore[arg-type]
+    before = service.query(
+        _request(
+            known_at=amendment_at - timedelta(seconds=1),
+            start=_PERIOD_END,
+            end=_PERIOD_END,
+        )
+    )
+    after = service.query(_request(known_at=amendment_at, limit=1))
+
+    assert _metric_values(before)["fundamental.research.current_ratio"] == Decimal("2")
+    assert _metric_values(after)["fundamental.research.current_ratio"] == Decimal("2.4")
+    assert before.coverage.observations_superseded == 0
+    assert after.coverage.observations_superseded == 1
+    assert before.coverage.observations_examined == len(observations) - 1
+    assert after.coverage.observations_examined == len(observations)
+    assert after.coverage.observations_eligible == len(observations)
+    assert before.coverage.observations_eligible == 2
+    assert storage.observations.hydrated == sum(
+        [before.coverage.observations_examined, after.coverage.observations_examined]
+    )
+    assert [period.period_end.date() for period in after.periods] == [_PERIOD_END]
+
+
+def test_scoped_research_rejects_malformed_eligible_evidence() -> None:
+    observation = _observation(
+        "fundamental.current_assets",
+        "500",
+        record_key_updates={"tag": "WrongTag"},
+    )
+
+    with pytest.raises(MalformedFundamentalResearchObservationError, match="tag"):
+        AaplFundamentalResearchService(_Storage([observation])).query(  # type: ignore[arg-type]
             _request()
         )
