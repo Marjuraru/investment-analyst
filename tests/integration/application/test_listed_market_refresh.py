@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import Mapping
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -21,7 +21,10 @@ from investment_analyst.analytics.valuation import (
     CorporateValuationRequest,
     ValuationPersistenceSummary,
 )
-from investment_analyst.application.aapl_bootstrap_models import AaplMarketRefreshMode
+from investment_analyst.application.aapl_bootstrap_models import (
+    AaplMarketRefreshMode,
+    AaplRefreshMode,
+)
 from investment_analyst.application.aapl_refresh_planner import AaplMarketRefreshPlanner
 from investment_analyst.application.listed_market_refresh import (
     ListedMarketKnownAtTooEarlyError,
@@ -29,6 +32,7 @@ from investment_analyst.application.listed_market_refresh import (
 )
 from investment_analyst.application.listed_market_refresh_models import (
     ListedMarketRefreshRequest,
+    ListedMarketRefreshSummary,
 )
 from investment_analyst.core.models import AssetClass
 from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
@@ -150,9 +154,137 @@ def _request(*, known_at: datetime | None = None) -> ListedMarketRefreshRequest:
     )
 
 
-def test_listed_refresh_isolated_identity_and_idempotent_rerun(tmp_path: Path) -> None:
+def test_auto_empty_intervals_reuse_market_results(tmp_path: Path) -> None:
     transport = _FixtureTransport()
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline = _pipeline(storage, transport)
+
+        first = pipeline.run(_request())
+        first_metric_ids = {item.result_id for item in storage.metric_results.list()}
+        first_diagnostic_ids = {item.diagnostic_id for item in storage.diagnostics.list()}
+
+        second = pipeline.run(_request())
+        assert second.refresh_plan.mode is AaplMarketRefreshMode.ALREADY_CURRENT
+        assert second.intervals_executed == 0
+        assert second.bars_received == 0
+        assert (second.analytics_start, second.analytics_end, second.effective_known_at) == (
+            first.analytics_start,
+            first.analytics_end,
+            first.effective_known_at,
+        )
+        assert second.analytics_known_at == second.effective_known_at
+        assert first.analytics_known_at == first.effective_known_at
+        assert second.metric_results_created == 0
+        assert second.metric_results_reused == first.metric_results_created
+        assert second.diagnostics_created == 0
+        assert second.diagnostics_reused == first.diagnostics_created
+        assert {item.result_id for item in storage.metric_results.list()} == first_metric_ids
+        assert {item.diagnostic_id for item in storage.diagnostics.list()} == first_diagnostic_ids
+
+        third = pipeline.run(
+            ListedMarketRefreshRequest(
+                asset_id=_CONFIGURATION.asset_id,
+                market_start=date(2026, 7, 7),
+                market_end=date(2026, 7, 10),
+            )
+        )
+        assert third.bars_received == 0
+        assert third.raw_records_created == 0
+        assert third.observations_created == 0
+        assert third.analytics_end == datetime(2026, 7, 11, tzinfo=UTC)
+        assert third.effective_known_at == first.effective_known_at
+        assert third.metric_results_created == 0
+        assert third.diagnostics_created == 0
+        assert {item.result_id for item in storage.metric_results.list()} == first_metric_ids
+
+
+def test_new_market_revision_preserves_pit_and_explicit_modes(tmp_path: Path) -> None:
+    transport = _FixtureTransport()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline = _pipeline(storage, transport)
+
+        first = pipeline.run(_request())
+        with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+            ListedMarketRefreshRequest.model_validate(
+                {**_request().model_dump(mode="json"), "analytics_known_at": "2026-07-12T12:00:00Z"}
+            )
+        full = pipeline.run(
+            ListedMarketRefreshRequest(
+                asset_id=_CONFIGURATION.asset_id,
+                market_start=date(2026, 7, 7),
+                market_end=date(2026, 7, 9),
+                refresh_mode=AaplRefreshMode.FULL,
+            )
+        )
+        assert full.refresh_plan.mode is AaplMarketRefreshMode.FULL
+        assert full.metric_results_created == 0
+        assert full.diagnostics_created == 0
+        explicit = pipeline.run(_request(known_at=first.effective_known_at))
+        assert explicit.effective_known_at == first.effective_known_at
+        assert explicit.analytics_known_at == first.effective_known_at
+        assert explicit.metric_results_created == 0
+        assert first.analytics_known_at == first.effective_known_at
+        roundtrip = ListedMarketRefreshSummary.model_validate(first.model_dump())
+        assert roundtrip == first
+
+
+def test_no_bar_cut_rejects_future_and_corrupt_evidence(tmp_path: Path) -> None:
+    from investment_analyst.application.market_daily_cut import (
+        MarketDailyCutError,
+        resolve_market_daily_cut,
+    )
+
+    transport = _FixtureTransport()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline = _pipeline(storage, transport)
+        first = pipeline.run(_request())
+
+        late = first.effective_known_at + timedelta(days=1)
+        with pytest.raises(MarketDailyCutError, match="timezone-aware"):
+            resolve_market_daily_cut(
+                storage,
+                asset_id=_CONFIGURATION.asset_id,
+                source_id=_CONFIGURATION.source_id,
+                market_start=date(2026, 7, 7),
+                market_end=date(2026, 7, 9),
+                requested_end=date(2026, 7, 9),
+                refresh_mode=AaplRefreshMode.AUTO,
+                fetch_created_inputs=False,
+                effective_known_at=late.replace(tzinfo=None),
+            )
+        stored = storage.observations.list(asset_id=_CONFIGURATION.asset_id)
+        assert stored
+        corrupted = stored[0].model_copy(
+            update={"available_at": first.effective_known_at + timedelta(days=30)}
+        )
+        storage.store.connection.execute(
+            "UPDATE normalized_observations SET available_at = ? WHERE observation_id = ?",
+            [corrupted.available_at, str(corrupted.observation_id)],
+        )
+        rerun = pipeline.run(_request())
+        assert rerun.market_as_of == first.market_as_of
+
+
+def test_full_and_explicit_cut_keep_original_scope(tmp_path: Path) -> None:
+    transport = _FixtureTransport()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline = _pipeline(storage, transport)
+        first = pipeline.run(_request())
+        full = pipeline.run(
+            ListedMarketRefreshRequest(
+                asset_id=_CONFIGURATION.asset_id,
+                market_start=date(2026, 7, 7),
+                market_end=date(2026, 7, 9),
+                refresh_mode=AaplRefreshMode.FULL,
+            )
+        )
+        assert full.analytics_start == first.analytics_start
+        assert full.analytics_end == first.analytics_end
+        explicit = pipeline.run(_request(known_at=first.effective_known_at))
+        assert explicit.effective_known_at == first.effective_known_at
+
+    transport = _FixtureTransport()
+    with LocalStorage(StoragePaths.from_root(tmp_path / "isolated")) as storage:
         pipeline = _pipeline(storage, transport)
 
         first = pipeline.run(_request())

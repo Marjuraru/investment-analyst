@@ -298,6 +298,11 @@ class AnalyticalScreeningMonitor:
             return "missing_execution"
         if not attempt.execution.coverage_complete:
             return "incomplete_coverage"
+        analytical_changed = attempt.execution.analytical_inputs_changed
+        if analytical_changed is False and attempt.definition.domain in {
+            ScheduledJobDomain.MARKET_DAILY,
+        }:
+            return "unchanged_analytical_inputs"
         if not attempt.execution.evidence_changed:
             return "unchanged_evidence"
         if _analytical_domain(attempt.definition.domain) is None:

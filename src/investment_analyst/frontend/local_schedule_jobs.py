@@ -861,6 +861,10 @@ def _listed_market_execution(
         + summary.metric_results_reused
         + summary.diagnostics_reused
     )
+    analytical_inputs_changed = (
+        summary.raw_records_created + summary.observations_created > 0
+        or (summary.metric_results_created - summary.valuation_metric_results_created) > 0
+    )
     return ScheduledJobExecution(
         job_id=job_id,
         effective_known_at=summary.effective_known_at,
@@ -868,6 +872,7 @@ def _listed_market_execution(
         source_ids=(summary.source_id,),
         created_count=created,
         reused_count=reused,
+        analytical_inputs_changed=analytical_inputs_changed,
     )
 
 
@@ -887,6 +892,10 @@ def _crypto_spot_daily_execution(
         + summary.metric_results_reused
         + summary.diagnostics_reused
     )
+    analytical_inputs_changed = (
+        summary.raw_records_created + summary.observations_created > 0
+        or summary.metric_results_created > 0
+    )
     return ScheduledJobExecution(
         job_id=job_id,
         effective_known_at=summary.effective_known_at,
@@ -894,6 +903,7 @@ def _crypto_spot_daily_execution(
         source_ids=(summary.source_id,),
         created_count=created,
         reused_count=reused,
+        analytical_inputs_changed=analytical_inputs_changed,
     )
 
 

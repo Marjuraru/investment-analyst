@@ -990,3 +990,70 @@ def test_smv_untyped_and_transport_failures_keep_existing_policy() -> None:
     assert storage_failure.category is ScheduledJobFailureCategory.STORAGE_STATE
     assert storage_failure.retryable is False
     assert storage_failure.reason_code is None
+
+
+def test_market_daily_execution_distinguishes_analytical_inputs() -> None:
+    from investment_analyst.frontend.local_schedule_jobs import (
+        _crypto_spot_daily_execution,
+        _listed_market_execution,
+    )
+
+    listed_receipt_only = SimpleNamespace(
+        effective_known_at=datetime(2026, 8, 11, 13, 15, tzinfo=UTC),
+        source_id="alpaca-market-data:iex:aapl:daily-bars:adjustment-all",
+        raw_records_created=0,
+        raw_records_reused=1,
+        observations_created=0,
+        observations_reused=7,
+        coverage_receipts_created=1,
+        coverage_receipts_reused=0,
+        metric_results_created=2,
+        metric_results_reused=5,
+        valuation_metric_results_created=2,
+        valuation_metric_results_reused=0,
+        diagnostics_created=1,
+        diagnostics_reused=0,
+    )
+    receipt_only = _listed_market_execution(
+        "alpaca:equity:us:aapl:market-daily", listed_receipt_only
+    )
+    assert receipt_only.evidence_changed is True
+    assert receipt_only.analytical_inputs_changed is False
+
+    listed_new_bar = SimpleNamespace(
+        effective_known_at=datetime(2026, 8, 11, 13, 15, tzinfo=UTC),
+        source_id="alpaca-market-data:iex:aapl:daily-bars:adjustment-all",
+        raw_records_created=1,
+        raw_records_reused=0,
+        observations_created=7,
+        observations_reused=0,
+        coverage_receipts_created=0,
+        coverage_receipts_reused=0,
+        metric_results_created=3,
+        metric_results_reused=0,
+        valuation_metric_results_created=0,
+        valuation_metric_results_reused=0,
+        diagnostics_created=1,
+        diagnostics_reused=0,
+    )
+    new_bar = _listed_market_execution("alpaca:equity:us:aapl:market-daily", listed_new_bar)
+    assert new_bar.evidence_changed is True
+    assert new_bar.analytical_inputs_changed is True
+
+    crypto_diagnostics_only = SimpleNamespace(
+        effective_known_at=datetime(2026, 8, 11, 13, 15, tzinfo=UTC),
+        source_id="coinbase-exchange:btc-usd:daily-candles",
+        raw_records_created=0,
+        raw_records_reused=1,
+        observations_created=0,
+        observations_reused=5,
+        metric_results_created=0,
+        metric_results_reused=4,
+        diagnostics_created=1,
+        diagnostics_reused=0,
+    )
+    quiet = _crypto_spot_daily_execution(
+        "coinbase:crypto:btc-usd:market-daily", crypto_diagnostics_only
+    )
+    assert quiet.evidence_changed is True
+    assert quiet.analytical_inputs_changed is False

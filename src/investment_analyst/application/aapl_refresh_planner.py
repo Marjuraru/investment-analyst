@@ -35,6 +35,11 @@ class AaplMarketRefreshPlanner:
         self._source_id = configuration.source_id
         self._symbol = configuration.symbol
 
+    @property
+    def storage_handle(self) -> LocalStorage:
+        """Expose the injected storage for the shared daily-cut projection."""
+        return self._storage
+
     def plan(
         self,
         *,

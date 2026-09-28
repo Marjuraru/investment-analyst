@@ -1369,3 +1369,26 @@ def test_status_recomputes_clock_and_registry_with_unchanged_state(
     scheduler.reconcile_jobs((RegisteredScheduledJob(_definition("replacement"), _execution),))
     replaced = scheduler.status()
     assert {item.definition.job_id for item in replaced.jobs} == {"replacement"}
+
+
+def test_legacy_execution_without_analytical_inputs_flag_round_trips() -> None:
+    definition = _definition("legacy-flag")
+    legacy = ScheduledJobExecution(
+        job_id=definition.job_id,
+        effective_known_at=datetime(2026, 7, 29, 12, tzinfo=UTC),
+        evidence_changed=True,
+        source_ids=("source:legacy-flag",),
+        created_count=1,
+        reused_count=0,
+    )
+    assert legacy.analytical_inputs_changed is None
+    assert legacy.to_json_dict()["analytical_inputs_changed"] is None
+    restored = ScheduledJobExecution.model_validate(legacy.to_json_dict())
+    assert restored == legacy
+    flagged = legacy.model_copy(update={"analytical_inputs_changed": False})
+    assert flagged.analytical_inputs_changed is False
+    assert ScheduledJobExecution.model_validate(flagged.to_json_dict()) == flagged
+    with pytest.raises(ValueError, match="analytical_inputs_changed"):
+        ScheduledJobExecution.model_validate(
+            {**legacy.to_json_dict(), "analytical_inputs_changed": "yes"}
+        )

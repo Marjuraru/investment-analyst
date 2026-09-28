@@ -20,21 +20,36 @@ SOURCE_ID = "coinbase-exchange:eth-usd:daily-candles"
 
 
 class ObservationRepositoryDouble:
-    """Return supplied observations while recording the repository projection."""
+    """Project bounded aggregates while recording the repository projection."""
 
     def __init__(self, observations: list[SimpleNamespace]) -> None:
         self.observations = observations
         self.calls: list[dict[str, object]] = []
 
-    def list(
+    def _eligible(self) -> list[SimpleNamespace]:
+        return [
+            item
+            for item in self.observations
+            if item.asset_id == ASSET_ID
+            and item.source.source_id == SOURCE_ID
+            and item.frequency is DataFrequency.DAY_1
+            and item.observed_at is not None
+            and item.observed_at.tzinfo is not None
+            and item.observed_at.utcoffset() is not None
+            and item.available_at.tzinfo is not None
+            and item.available_at.utcoffset() is not None
+        ]
+
+    def observed_at_bounds(
         self,
         *,
         asset_id: str,
         source_id: str | None = None,
         frequency: DataFrequency | None = None,
-    ) -> list[SimpleNamespace]:
+    ) -> tuple[object, object]:
         self.calls.append(
             {
+                "aggregate": "observed_at_bounds",
                 "asset_id": asset_id,
                 "source_id": source_id,
                 "frequency": frequency,
@@ -43,7 +58,43 @@ class ObservationRepositoryDouble:
         assert asset_id == ASSET_ID
         assert source_id == SOURCE_ID
         assert frequency is DataFrequency.DAY_1
-        return list(self.observations)
+        eligible = self._eligible()
+        if not eligible:
+            return None, None
+        timestamps = sorted(item.observed_at for item in eligible)
+        return timestamps[0], timestamps[-1]
+
+    def maximum_available_at(
+        self,
+        *,
+        asset_id: str,
+        source_id: str | None = None,
+        frequency: DataFrequency | None = None,
+    ) -> object:
+        self.calls.append(
+            {
+                "aggregate": "maximum_available_at",
+                "asset_id": asset_id,
+                "source_id": source_id,
+                "frequency": frequency,
+            }
+        )
+        assert asset_id == ASSET_ID
+        assert source_id == SOURCE_ID
+        assert frequency is DataFrequency.DAY_1
+        eligible = self._eligible()
+        if not eligible:
+            return None
+        return max(item.available_at for item in eligible)
+
+    def list(
+        self,
+        *,
+        asset_id: str,
+        source_id: str | None = None,
+        frequency: DataFrequency | None = None,
+    ) -> list[SimpleNamespace]:
+        raise AssertionError("planner must not hydrate observation history")
 
 
 class StorageDouble:
@@ -51,6 +102,10 @@ class StorageDouble:
 
     def __init__(self, observations: list[SimpleNamespace]) -> None:
         self.observations = ObservationRepositoryDouble(observations)
+
+    @property
+    def storage_handle(self):  # type: ignore[no-untyped-def]
+        return self
 
     def require_open(self) -> None:
         return None
@@ -109,11 +164,37 @@ def test_crypto_spot_planner_projects_source_and_daily_frequency_in_sql() -> Non
     assert plan.persisted_earliest == datetime(2026, 7, 5, tzinfo=UTC)
     assert storage.observations.calls == [
         {
+            "aggregate": "observed_at_bounds",
             "asset_id": ASSET_ID,
             "source_id": SOURCE_ID,
             "frequency": DataFrequency.DAY_1,
-        }
+        },
+        {
+            "aggregate": "maximum_available_at",
+            "asset_id": ASSET_ID,
+            "source_id": SOURCE_ID,
+            "frequency": DataFrequency.DAY_1,
+        },
     ]
+
+
+def test_planner_uses_bounded_projections_without_listing_history() -> None:
+    storage = StorageDouble([_observation(datetime(2026, 7, 5, tzinfo=UTC))])
+
+    CryptoSpotDailyRefreshPlanner(
+        storage,
+        asset_id=ASSET_ID,
+        source_id=SOURCE_ID,
+    ).plan(
+        requested_start=date(2026, 7, 1),
+        requested_end=date(2026, 7, 10),
+        refresh_mode=BtcRefreshMode.AUTO,
+    )
+
+    assert all(
+        call.get("aggregate") in {"observed_at_bounds", "maximum_available_at"}
+        for call in storage.observations.calls
+    )
 
 
 def test_crypto_spot_planner_ignores_intraday_and_derivative_rows_of_the_same_asset() -> None:

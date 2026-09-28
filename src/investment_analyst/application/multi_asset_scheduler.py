@@ -291,6 +291,7 @@ class ScheduledJobExecution(ContractModel):
     reused_count: int = Field(ge=0)
     coverage_complete: bool = True
     traceability_verified: Literal[True] = True
+    analytical_inputs_changed: bool | None = None
 
     @field_validator("evidence_changed", "coverage_complete", mode="before")
     @classmethod
@@ -298,6 +299,14 @@ class ScheduledJobExecution(ContractModel):
         """Reject truthy values in the evidence-change contract."""
         if not isinstance(value, bool):
             raise ValueError("execution boolean fields must be bool")
+        return value
+
+    @field_validator("analytical_inputs_changed", mode="before")
+    @classmethod
+    def require_optional_analytical_boolean(cls, value: object) -> object:
+        """Reject truthy values in the optional analytical-inputs signal."""
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("analytical_inputs_changed must be bool or null")
         return value
 
     @field_validator("created_count", "reused_count", mode="before")

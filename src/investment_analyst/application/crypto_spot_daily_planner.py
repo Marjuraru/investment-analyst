@@ -9,7 +9,7 @@ from investment_analyst.application.btc_refresh_models import (
     BtcMarketRefreshPlan,
     BtcRefreshMode,
 )
-from investment_analyst.core.models import DataFrequency, NormalizedObservation
+from investment_analyst.core.models import DataFrequency
 from investment_analyst.storage import LocalStorage
 
 
@@ -22,14 +22,15 @@ class CryptoSpotDailyRefreshPlanner:
         self._asset_id = asset_id
         self._source_id = source_id
 
+    @property
+    def storage_handle(self) -> LocalStorage:
+        """Expose the injected storage for the shared daily-cut projection."""
+        return self._storage
+
     def plan(
         self, *, requested_start: date, requested_end: date, refresh_mode: BtcRefreshMode
     ) -> BtcMarketRefreshPlan:
-        observations = self._persisted_observations()
-        persisted = tuple(sorted({item.observed_at.astimezone(UTC) for item in observations}))
-        earliest = min(persisted) if persisted else None
-        latest = max(persisted) if persisted else None
-        available = max((item.available_at.astimezone(UTC) for item in observations), default=None)
+        earliest, latest, available = self._persisted_edges()
         full = BtcMarketDateInterval(start=requested_start, end=requested_end)
         if refresh_mode is BtcRefreshMode.FULL:
             return self._result(
@@ -42,7 +43,7 @@ class CryptoSpotDailyRefreshPlanner:
                 BtcMarketRefreshMode.FULL,
                 "Full Coinbase refresh explicitly requested; persisted deterministic identities remain reusable.",
             )
-        if not persisted:
+        if earliest is None or latest is None:
             return self._result(
                 requested_start,
                 requested_end,
@@ -97,22 +98,24 @@ class CryptoSpotDailyRefreshPlanner:
             reason,
         )
 
-    def _persisted_observations(self) -> tuple[NormalizedObservation, ...]:
-        return tuple(
-            item
-            for item in self._storage.observations.list(
-                asset_id=self._asset_id,
-                source_id=self._source_id,
-                frequency=DataFrequency.DAY_1,
-            )
-            if item.asset_id == self._asset_id
-            and item.source.source_id == self._source_id
-            and item.frequency is DataFrequency.DAY_1
-            and item.observed_at is not None
-            and item.observed_at.tzinfo is not None
-            and item.observed_at.utcoffset() is not None
-            and item.available_at.tzinfo is not None
-            and item.available_at.utcoffset() is not None
+    def _persisted_edges(self) -> tuple[datetime | None, datetime | None, datetime | None]:
+        """Project persisted series edges with bounded SQL aggregates, never hydrating history."""
+        earliest, latest = self._storage.observations.observed_at_bounds(
+            asset_id=self._asset_id,
+            source_id=self._source_id,
+            frequency=DataFrequency.DAY_1,
+        )
+        if earliest is None or latest is None:
+            return None, None, None
+        available = self._storage.observations.maximum_available_at(
+            asset_id=self._asset_id,
+            source_id=self._source_id,
+            frequency=DataFrequency.DAY_1,
+        )
+        return (
+            earliest.astimezone(UTC),
+            latest.astimezone(UTC),
+            available.astimezone(UTC) if available is not None else None,
         )
 
     @staticmethod
