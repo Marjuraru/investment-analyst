@@ -27,12 +27,20 @@ from duckdb import DuckDBPyConnection
 from pydantic import ValidationError
 
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
-from investment_analyst.core.models import RawRecord
+from investment_analyst.core.models import NormalizedObservation, RawRecord
 from investment_analyst.core.models.base import ContractModel, UTCDateTime
 from investment_analyst.storage.errors import (
     RecordConflictError,
     RecordNotFoundError,
     StorageError,
+)
+from investment_analyst.storage.observation_v2 import (
+    MAX_OBSERVATION_V2_PAGE,
+    ObservationV2Error,
+    ObservationV2Store,
+    ensure_observation_v2_table,
+    observation_to_row,
+    row_to_observation,
 )
 from investment_analyst.storage.serialization import (
     canonical_json_bytes,
@@ -181,6 +189,7 @@ class RawV2Staging:
         if self._read_only:
             self._read_marker(marker_path)
             self._require_index_table(marker_path, create=False)
+            ensure_observation_v2_table(self._connection, create=False)
             self._is_open = True
             return self
         key = str(destination.absolute())
@@ -209,6 +218,7 @@ class RawV2Staging:
         if not marker_path.exists():
             self._write_marker(marker_path)
         self._require_index_table(marker_path, create=True)
+        ensure_observation_v2_table(self._connection, create=True)
         self._lock_path = destination / _STAGING_LOCK_FILENAME
         try:
             descriptor = os.open(str(self._lock_path), os.O_RDWR | os.O_CREAT, 0o644)
@@ -649,6 +659,133 @@ class RawV2Staging:
         count = self._connection.execute(f"SELECT count(*) FROM {_INDEX_TABLE}").fetchone()
         if count is not None and int(count[0]) > 0 and not self._marker_matches(marker_path):
             raise RawV2StagingError("raw v2 index holds rows without a staging marker")
+
+    def save_observations(
+        self, observations: Collection[NormalizedObservation]
+    ) -> BatchWriteReceipt:
+        """Persist typed normalized observations under the same writer lock.
+
+        The typed observation table shares the staging connection and writer
+        slot; callers provide full ``NormalizedObservation`` models whose raw
+        reference must already be staged completely.
+        """
+        typed = tuple(observations)
+        for observation in typed:
+            if not isinstance(observation, NormalizedObservation):
+                raise ObservationV2Error("observation v2 save requires NormalizedObservation")
+        self._require_writable()
+        ensure_observation_v2_table(self._connection, create=True)
+        return ObservationV2Store(self._connection).save_many(typed)
+
+    def get_observations(
+        self, observation_ids: Collection[UUID]
+    ) -> dict[UUID, NormalizedObservation]:
+        """Hydrate verified typed observations in deterministic order."""
+        self._require_open()
+        ensure_observation_v2_table(self._connection, create=False)
+        hydrated = ObservationV2Store(self._connection).get_many(tuple(observation_ids))
+        for key, observation in hydrated.items():
+            if (
+                not isinstance(observation, NormalizedObservation)
+                or observation.observation_id != key
+            ):
+                raise ObservationV2Error("observation v2 identity diverged on read")
+        return hydrated
+
+    def list_observation_inventory_page(
+        self,
+        *,
+        limit: int,
+        after_available_at: datetime | None = None,
+        after_observation_id: UUID | None = None,
+    ) -> list[UUID]:
+        """Return one bounded keyset page of observation IDs without hydration."""
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ObservationV2Error("observation inventory page limit must be an integer")
+        if limit < 1 or limit > MAX_OBSERVATION_V2_PAGE:
+            raise ObservationV2Error("observation inventory page limit must be between 1 and 256")
+        if (after_available_at is None) != (after_observation_id is None):
+            raise ObservationV2Error("observation inventory cursor requires both fields together")
+        self._require_open()
+        ensure_observation_v2_table(self._connection, create=False)
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if after_available_at is not None and after_observation_id is not None:
+            if after_available_at.tzinfo is None or after_available_at.utcoffset() is None:
+                raise ObservationV2Error("observation cursor available_at must be timezone-aware")
+            clauses.append("(available_at, observation_id) > (?, ?)")
+            parameters.extend([_instant_text(after_available_at), str(after_observation_id)])
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._connection.execute(
+            "SELECT observation_id FROM normalized_observations_v2"
+            f"{where} ORDER BY available_at, observation_id LIMIT ?",
+            [*parameters, limit],
+        ).fetchall()
+        return [UUID(row[0]) for row in rows]
+
+    def list_observations(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        frequency: object | None = None,
+        available_to: datetime | None = None,
+    ) -> list[NormalizedObservation]:
+        """Hydrate typed PIT observations in stable order with verification."""
+        self._require_open()
+        ensure_observation_v2_table(self._connection, create=False)
+        frequency_value = frequency.value if hasattr(frequency, "value") else frequency
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if asset_id is not None:
+            clauses.append("asset_id = ?")
+            parameters.append(asset_id)
+        if source_id is not None:
+            clauses.append("source_id = ?")
+            parameters.append(source_id)
+        if frequency_value is not None:
+            clauses.append("frequency = ?")
+            parameters.append(str(frequency_value))
+        if available_to is not None:
+            clauses.append("available_at <= ?")
+            parameters.append(_instant_text(available_to))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._connection.execute(
+            "SELECT observation_id FROM normalized_observations_v2"
+            f"{where} ORDER BY available_at, observation_id",
+            parameters,
+        ).fetchall()
+        return [
+            observation
+            for _, observation in sorted(
+                self.get_observations([UUID(row[0]) for row in rows]).items(),
+                key=lambda pair: str(pair[0]),
+            )
+            if isinstance(observation, NormalizedObservation)
+        ]
+
+    def verify_observation_row(self, observation_id: UUID) -> NormalizedObservation:
+        """Hydrate and verify one observation row with its raw reference."""
+        hydrated = self.get_observations([observation_id])
+        if observation_id not in hydrated:
+            raise RecordNotFoundError(f"observation v2 {observation_id} was not found")
+        return hydrated[observation_id]
+
+    def observation_projection_text(self, observation: NormalizedObservation) -> str:
+        """Expose the canonical typed row used by verifiers without JSON."""
+        return ",".join(str(part) for part in observation_to_row(observation))
+
+    def hydrate_observation_row(self, row: tuple[object, ...]) -> NormalizedObservation:
+        """Rehydrate one typed row and confirm its raw linkage."""
+        observation = row_to_observation(row)
+        self._require_open()
+        rows = self._connection.execute(
+            "SELECT source_id FROM raw_v2_index WHERE record_id = ?",
+            [str(observation.raw_record_id)],
+        ).fetchall()
+        if not rows or str(rows[0][0]) != observation.source.source_id:
+            raise ObservationV2Error("observation v2 raw reference is missing or foreign")
+        return observation
 
     def _marker_matches(self, marker_path: Path) -> bool:
         try:

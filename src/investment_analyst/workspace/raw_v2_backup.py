@@ -1,14 +1,15 @@
 """Verified backup and restore of an isolated raw v2 staging destination.
 
 A staging backup is an ordered inventory of regular files with sizes and
-SHA-256 digests, bound to the stable ``staging_id`` of the source staging, the
-checkpoint version/digest when an import state exists, and the verified corpus
-counts and ordered digest. Only a file-backed DuckDB index that lives inside
-the staging destination and is consistent with the supplied writer connection
-is eligible; memory or external index paths fail closed. Creation and restore
-publish atomically into an empty destination after verifying every file; a
-truncated manifest, a missing or corrupt file, a foreign identity or a
-non-empty destination never promotes a partial restore.
+SHA-256 digests, bound to the stable ``staging_id`` of the source staging,
+the checkpoint versions/digests of both imports when they exist, and the
+verified corpus counts and ordered digest covering raw and observations.
+Backups without observations keep the raw-only ``v1`` schema and read path;
+backups with an observation table emit the ``v2`` schema and verify both
+inventories and both checkpoints before any atomic promotion. Only a
+file-backed DuckDB index that lives inside the staging destination and is
+consistent with the supplied writer connection is eligible; memory or
+external index paths fail closed.
 """
 
 from __future__ import annotations
@@ -28,6 +29,17 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 from investment_analyst.storage.errors import StorageError
+from investment_analyst.storage.observation_v2 import (
+    ObservationV2Error,
+    ensure_observation_v2_table,
+    observation_to_row,
+    row_to_observation,
+)
+from investment_analyst.storage.observation_v2_import import (
+    ObservationV2ImportState,
+    observation_empty_digest,
+    observation_extend_digest,
+)
 from investment_analyst.storage.raw_v2 import (
     STAGING_FORMAT,
     RawV2Staging,
@@ -41,8 +53,10 @@ from investment_analyst.storage.raw_v2_import import (
 )
 
 RAW_V2_BACKUP_MANIFEST_SCHEMA = "raw-v2-staging-backup-manifest-v1"
+RAW_V2_BACKUP_MANIFEST_SCHEMA_V2 = "raw-v2-staging-backup-manifest-v2"
 BACKUP_MANIFEST_NAME = "raw-v2-staging-backup-manifest.json"
 _IMPORT_STATE_FILENAME = "raw-v2-import-state.json"
+_OBSERVATION_IMPORT_STATE_FILENAME = "observation-v2-import-state.json"
 _MAX_BACKUP_PAGE = 256
 
 
@@ -87,12 +101,30 @@ class RawV2BackupCounts(ContractModel):
     corpus_digest: NonEmptyStr
 
 
-class RawV2StagingBackupManifest(ContractModel):
-    """Versioned inventory used to verify a staging backup before activation."""
+class RawV2BackupObservationCounts(ContractModel):
+    """Verified observation counts bound into a v2 staging backup."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal["raw-v2-staging-backup-manifest-v1"] = RAW_V2_BACKUP_MANIFEST_SCHEMA
+    observations: int = Field(ge=0)
+    counts_by_source: Mapping[str, int]
+    counts_by_frequency: Mapping[str, int]
+    corpus_digest: NonEmptyStr
+
+
+class RawV2StagingBackupManifest(ContractModel):
+    """Versioned inventory used to verify a staging backup before activation.
+
+    Schema ``v1`` is raw-only and stays byte-compatible with prior backups.
+    Schema ``v2`` additionally binds the typed observation inventory, its
+    content digest and the observation import checkpoint when it exists.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[
+        "raw-v2-staging-backup-manifest-v1", "raw-v2-staging-backup-manifest-v2"
+    ] = RAW_V2_BACKUP_MANIFEST_SCHEMA
     backup_id: UUID
     staging_id: NonEmptyStr
     staging_format: Literal["raw-v2-staging-v1"] = STAGING_FORMAT
@@ -101,6 +133,9 @@ class RawV2StagingBackupManifest(ContractModel):
     checkpoint_format: str | None = None
     checkpoint_digest: str | None = None
     counts: RawV2BackupCounts
+    observation_checkpoint_format: str | None = None
+    observation_checkpoint_digest: str | None = None
+    observation_counts: RawV2BackupObservationCounts | None = None
 
     @model_validator(mode="after")
     def validate_inventory(self) -> RawV2StagingBackupManifest:
@@ -109,11 +144,32 @@ class RawV2StagingBackupManifest(ContractModel):
             raise ValueError("backup inventory must be non-empty, unique, and sorted")
         if BACKUP_MANIFEST_NAME in paths:
             raise ValueError("backup inventory must not contain its own manifest")
-        expected_id = _backup_id(self.staging_id, self.files, self.counts)
+        if self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V2:
+            expected_id = _backup_id(
+                self.staging_id,
+                self.files,
+                self.counts,
+                self.observation_counts,
+                self.schema_version,
+            )
+        else:
+            expected_id = _legacy_backup_id(self.staging_id, self.files, self.counts)
         if self.backup_id != expected_id:
             raise ValueError("backup identity does not match its inventory")
         if (self.checkpoint_format is None) != (self.checkpoint_digest is None):
             raise ValueError("checkpoint version and digest travel together")
+        if (self.observation_checkpoint_format is None) != (
+            self.observation_checkpoint_digest is None
+        ):
+            raise ValueError("observation checkpoint version and digest travel together")
+        if self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V2:
+            if self.observation_counts is None:
+                raise ValueError("v2 manifest requires observation counts")
+        else:
+            if self.observation_counts is not None:
+                raise ValueError("v1 manifest must not carry observation counts")
+            if self.observation_checkpoint_format is not None:
+                raise ValueError("v1 manifest must not carry observation checkpoint")
         return self
 
     def to_json_dict(self) -> dict[str, object]:
@@ -121,6 +177,29 @@ class RawV2StagingBackupManifest(ContractModel):
 
 
 def _backup_id(
+    staging_id: str,
+    files: tuple[RawV2BackupFile, ...],
+    counts: RawV2BackupCounts,
+    observation_counts: RawV2BackupObservationCounts | None = None,
+    schema_version: str = RAW_V2_BACKUP_MANIFEST_SCHEMA,
+) -> UUID:
+    document = json.dumps(
+        {
+            "staging_id": staging_id,
+            "schema_version": schema_version,
+            "files": [item.model_dump(mode="json") for item in files],
+            "counts": counts.model_dump(mode="json"),
+            "observation_counts": (
+                observation_counts.model_dump(mode="json") if observation_counts else None
+            ),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return uuid5(NAMESPACE_URL, document)
+
+
+def _legacy_backup_id(
     staging_id: str,
     files: tuple[RawV2BackupFile, ...],
     counts: RawV2BackupCounts,
@@ -143,6 +222,19 @@ def _sha256_streaming(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _observation_row_digest(row: tuple[object, ...]) -> str:
+    document = json.dumps(
+        [None if value is None else str(value) for value in row],
+        separators=(",", ":"),
+        sort_keys=False,
+    )
+    return hashlib.sha256(document.encode("utf-8")).hexdigest()
+
+
+def _sha256_row(row: tuple[object, ...]) -> str:
+    return _observation_row_digest(row)
 
 
 def _reject_symlinks(root: Path) -> None:
@@ -232,15 +324,40 @@ class RawV2StagingBackupService:
                 inventory = self._inventory(staging_root)
                 counts = self._count_corpus(staging, connection)
                 checkpoint_format, checkpoint_digest = self._checkpoint_binding(staging_root)
-                manifest = RawV2StagingBackupManifest(
-                    backup_id=_backup_id(staging_id, inventory, counts),
-                    staging_id=staging_id,
-                    created_at=datetime.now(UTC),
-                    files=inventory,
-                    checkpoint_format=checkpoint_format,
-                    checkpoint_digest=checkpoint_digest,
-                    counts=counts,
+                observation_counts = self._count_observations(staging, connection)
+                (observation_format, observation_digest) = self._observation_checkpoint_binding(
+                    staging_root
                 )
+                if observation_counts is None:
+                    manifest = RawV2StagingBackupManifest(
+                        backup_id=_legacy_backup_id(staging_id, inventory, counts),
+                        staging_id=staging_id,
+                        created_at=datetime.now(UTC),
+                        files=inventory,
+                        checkpoint_format=checkpoint_format,
+                        checkpoint_digest=checkpoint_digest,
+                        counts=counts,
+                    )
+                else:
+                    manifest = RawV2StagingBackupManifest(
+                        schema_version=RAW_V2_BACKUP_MANIFEST_SCHEMA_V2,
+                        backup_id=_backup_id(
+                            staging_id,
+                            inventory,
+                            counts,
+                            observation_counts,
+                            RAW_V2_BACKUP_MANIFEST_SCHEMA_V2,
+                        ),
+                        staging_id=staging_id,
+                        created_at=datetime.now(UTC),
+                        files=inventory,
+                        checkpoint_format=checkpoint_format,
+                        checkpoint_digest=checkpoint_digest,
+                        counts=counts,
+                        observation_checkpoint_format=observation_format,
+                        observation_checkpoint_digest=observation_digest,
+                        observation_counts=observation_counts,
+                    )
                 for item in inventory:
                     source_file = staging_root / item.path
                     target_file = temporary / item.path
@@ -394,6 +511,86 @@ class RawV2StagingBackupService:
             raise RawV2BackupError("import state is truncated or incompatible") from error
         return state.format, _sha256_streaming(state_path)
 
+    def _observation_checkpoint_binding(self, staging_root: Path) -> tuple[str | None, str | None]:
+        state_path = staging_root / _OBSERVATION_IMPORT_STATE_FILENAME
+        if not state_path.exists():
+            return None, None
+        if state_path.is_symlink() or not state_path.is_file():
+            raise RawV2BackupError("observation import state must be a regular file")
+        try:
+            state = ObservationV2ImportState.model_validate_json(
+                state_path.read_text(encoding="utf-8")
+            )
+        except ValueError as error:
+            raise RawV2BackupError("observation import state is truncated") from error
+        return state.format, _sha256_streaming(state_path)
+
+    def _count_observations(
+        self, staging: RawV2Staging, connection: DuckDBPyConnection
+    ) -> RawV2BackupObservationCounts | None:
+        reader = RawV2Staging(staging.destination, connection, read_only=True)
+        try:
+            reader.open()
+        except (ObservationV2Error, Exception) as error:
+            if "observation v2 index table is missing" in str(error):
+                return None
+            raise
+        try:
+            ensure_observation_v2_table(connection, create=False)
+        except ObservationV2Error:
+            reader.close()
+            return None
+        try:
+            digest = observation_empty_digest()
+            counts_by_source: dict[str, int] = {}
+            counts_by_frequency: dict[str, int] = {}
+            observations = 0
+            cursor_at = None
+            cursor_id = None
+            while True:
+                page = reader.list_observation_inventory_page(
+                    limit=_MAX_BACKUP_PAGE,
+                    after_available_at=cursor_at,
+                    after_observation_id=cursor_id,
+                )
+                if not page:
+                    break
+                hydrated = reader.get_observations(page)
+                for observation_id in page:
+                    observation = hydrated[observation_id]
+                    canonical_row = tuple(observation_to_row(observation))
+                    digest = observation_extend_digest(
+                        digest, _observation_row_digest(canonical_row)
+                    )
+                    counts_by_source[observation.source.source_id] = (
+                        counts_by_source.get(observation.source.source_id, 0) + 1
+                    )
+                    counts_by_frequency[observation.frequency.value] = (
+                        counts_by_frequency.get(observation.frequency.value, 0) + 1
+                    )
+                    expected = observation_to_row(observation)
+                    if observation_to_row(hydrated[observation_id]) != expected:
+                        raise RawV2BackupError("observation projection diverged")
+                observations += len(page)
+                last = hydrated[page[-1]]
+                cursor_at, cursor_id = last.available_at, last.observation_id
+            if observations == 0:
+                try:
+                    state_path = staging.destination / _OBSERVATION_IMPORT_STATE_FILENAME
+                    has_state = state_path.is_file() and not state_path.is_symlink()
+                except OSError:
+                    has_state = False
+                if not has_state:
+                    return None
+            return RawV2BackupObservationCounts(
+                observations=observations,
+                counts_by_source=counts_by_source,
+                counts_by_frequency=counts_by_frequency,
+                corpus_digest=digest,
+            )
+        finally:
+            reader.close()
+
     def _verify_backup_directory(self, root: Path, manifest: RawV2StagingBackupManifest) -> None:
         _reject_symlinks(root)
         expected = {item.path: item for item in manifest.files}
@@ -465,6 +662,116 @@ class RawV2StagingBackupService:
                 raise RawV2BackupError("restored checkpoint belongs to another staging")
             if state.format == "raw-v2-import-state-v1" and state.staging_id is not None:
                 raise RawV2BackupError("restored checkpoint mixes portable and legacy bindings")
+        observation_state_path = root / _OBSERVATION_IMPORT_STATE_FILENAME
+        if manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V2:
+            if manifest.observation_counts is None:
+                raise RawV2BackupError("restored v2 manifest is missing observation counts")
+            if not observation_state_path.is_file() or observation_state_path.is_symlink():
+                if manifest.observation_checkpoint_format is not None:
+                    raise RawV2BackupError("restored observation checkpoint is missing")
+            else:
+                try:
+                    observation_state = ObservationV2ImportState.model_validate_json(
+                        observation_state_path.read_text(encoding="utf-8")
+                    )
+                except ValueError as error:
+                    raise RawV2BackupError("restored observation state is incompatible") from error
+                if manifest.observation_checkpoint_format != observation_state.format:
+                    raise RawV2BackupError("restored observation checkpoint mismatches backup")
+                if manifest.observation_checkpoint_digest != _sha256_streaming(
+                    observation_state_path
+                ):
+                    raise RawV2BackupError("restored observation checkpoint mismatches backup")
+            self._verify_restored_observations(root, index_path, manifest)
+        elif observation_state_path.exists():
+            raise RawV2BackupError("restored v1 backup must not carry observation state")
+
+    def _verify_restored_observations(
+        self, root: Path, index_path: Path, manifest: RawV2StagingBackupManifest
+    ) -> None:
+        import duckdb
+
+        expected = manifest.observation_counts
+        if expected is None:
+            raise RawV2BackupError("restored v2 manifest is missing observation counts")
+        connection = duckdb.connect(str(index_path), read_only=True)
+        try:
+            try:
+                names = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'normalized_observations_v2'"
+                    ).fetchall()
+                }
+            except Exception as error:
+                raise RawV2BackupError("restored observation table is missing") from error
+            if not names or "document_json" in names:
+                raise RawV2BackupError("restored observation table is incompatible")
+            digest = observation_empty_digest()
+            counts_by_source: dict[str, int] = {}
+            counts_by_frequency: dict[str, int] = {}
+            verified = 0
+            cursor_at = None
+            cursor_id = None
+            from uuid import UUID as _UUID
+
+            while True:
+                clauses: list[str] = []
+                parameters: list[object] = []
+                if cursor_at is not None and cursor_id is not None:
+                    clauses.append("(available_at, observation_id) > (?, ?)")
+                    parameters.extend([cursor_at, str(cursor_id)])
+                where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+                rows = connection.execute(
+                    "SELECT observation_id, raw_record_id, source_id, available_at "
+                    "FROM normalized_observations_v2"
+                    f"{where} ORDER BY available_at, observation_id LIMIT {_MAX_BACKUP_PAGE}",
+                    parameters,
+                ).fetchall()
+                if not rows:
+                    break
+                full = connection.execute(
+                    "SELECT observation_id, raw_record_id, asset_id, field_name, value_text, "
+                    "unit, frequency, observed_at, period_start, period_end, available_at, "
+                    "normalized_at, source_id, source_record_key, source_retrieved_at, "
+                    "source_raw_uri, source_checksum_sha256, quality, transformation_version "
+                    "FROM normalized_observations_v2 WHERE observation_id IN ("
+                    + ", ".join("?" for _ in rows)
+                    + ")",
+                    [str(row[0]) for row in rows],
+                ).fetchall()
+                indexed = {str(row[0]): row for row in full}
+                ordered_ids = [str(row[0]) for row in rows]
+                if sorted(indexed) != sorted(ordered_ids):
+                    raise RawV2BackupError("restored observation page is incomplete")
+                for key in ordered_ids:
+                    row = indexed[key]
+                    try:
+                        row_to_observation(tuple(row))
+                    except ObservationV2Error as error:
+                        raise RawV2BackupError("restored observation row is corrupt") from error
+                    raw_rows = connection.execute(
+                        "SELECT source_id FROM raw_v2_index WHERE record_id = ?",
+                        [str(row[1])],
+                    ).fetchall()
+                    if not raw_rows or str(raw_rows[0][0]) != str(row[12]):
+                        raise RawV2BackupError("restored observation raw link is foreign")
+                    digest = observation_extend_digest(digest, _observation_row_digest(tuple(row)))
+                    counts_by_source[str(row[12])] = counts_by_source.get(str(row[12]), 0) + 1
+                    counts_by_frequency[str(row[6])] = counts_by_frequency.get(str(row[6]), 0) + 1
+                verified += len(rows)
+                cursor_at, cursor_id = str(rows[-1][3]), _UUID(str(rows[-1][0]))
+            if verified != expected.observations:
+                raise RawV2BackupError("restored observation count mismatches manifest")
+            if dict(counts_by_source) != dict(expected.counts_by_source):
+                raise RawV2BackupError("restored observation sources mismatch manifest")
+            if dict(counts_by_frequency) != dict(expected.counts_by_frequency):
+                raise RawV2BackupError("restored observation frequencies mismatch manifest")
+            if digest != expected.corpus_digest:
+                raise RawV2BackupError("restored observation digest mismatches manifest")
+        finally:
+            connection.close()
 
 
 __all__ = [

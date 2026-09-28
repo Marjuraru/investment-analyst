@@ -9,6 +9,12 @@ from investment_analyst.storage.errors import (
     StorageSchemaError,
 )
 from investment_analyst.storage.local import LocalStorage
+from investment_analyst.storage.observation_v2 import (
+    MAX_OBSERVATION_V2_PAGE,
+    OBSERVATION_V2_TABLE,
+    ObservationV2Error,
+    ObservationV2Store,
+)
 from investment_analyst.storage.parquet import ParquetExporter
 from investment_analyst.storage.paths import StoragePaths
 from investment_analyst.storage.raw_records import JsonRawRecordRepository
@@ -32,6 +38,10 @@ __all__ = [
     "DocumentContentStore",
     "JsonRawRecordRepository",
     "LocalStorage",
+    "MAX_OBSERVATION_V2_PAGE",
+    "OBSERVATION_V2_TABLE",
+    "ObservationV2Error",
+    "ObservationV2Store",
     "ParquetExporter",
     "RecordConflictError",
     "RecordNotFoundError",

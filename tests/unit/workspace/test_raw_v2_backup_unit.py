@@ -37,6 +37,24 @@ def test_backup_inventory_pages_are_bounded(tmp_path: Path) -> None:
     )
 
 
+def test_legacy_raw_only_manifest_remains_readable(tmp_path: Path) -> None:
+    import json
+
+    staging = _staging(tmp_path)
+    with staging:
+        from tests.unit.storage.test_raw_v2 import _record
+
+        staging.save(_record())
+        manifest = RawV2StagingBackupService().create(
+            staging, staging._connection, tmp_path / "backup"
+        )
+    assert manifest.schema_version == "raw-v2-staging-backup-manifest-v1"
+    assert manifest.observation_counts is None
+    document = json.loads((tmp_path / "backup" / "raw-v2-staging-backup-manifest.json").read_text())
+    assert document["schema_version"] == "raw-v2-staging-backup-manifest-v1"
+    assert "observation_counts" not in document or document["observation_counts"] is None
+
+
 def test_backup_rejects_external_or_memory_index(tmp_path: Path) -> None:
     from investment_analyst.workspace.raw_v2_backup import _require_snapshot_consistent
 
