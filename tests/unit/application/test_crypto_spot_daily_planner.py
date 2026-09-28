@@ -102,7 +102,10 @@ class StorageDouble:
 
     def __init__(self, observations: list[SimpleNamespace]) -> None:
         self.observations = ObservationRepositoryDouble(observations)
-        self.storage = self
+
+    @property
+    def storage_handle(self):  # type: ignore[no-untyped-def]
+        return self
 
     def require_open(self) -> None:
         return None

@@ -32,6 +32,7 @@ from investment_analyst.application.listed_market_refresh import (
 )
 from investment_analyst.application.listed_market_refresh_models import (
     ListedMarketRefreshRequest,
+    ListedMarketRefreshSummary,
 )
 from investment_analyst.core.models import AssetClass
 from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
@@ -171,6 +172,8 @@ def test_auto_empty_intervals_reuse_market_results(tmp_path: Path) -> None:
             first.analytics_end,
             first.effective_known_at,
         )
+        assert second.analytics_known_at == second.effective_known_at
+        assert first.analytics_known_at == first.effective_known_at
         assert second.metric_results_created == 0
         assert second.metric_results_reused == first.metric_results_created
         assert second.diagnostics_created == 0
@@ -201,6 +204,10 @@ def test_new_market_revision_preserves_pit_and_explicit_modes(tmp_path: Path) ->
         pipeline = _pipeline(storage, transport)
 
         first = pipeline.run(_request())
+        with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+            ListedMarketRefreshRequest.model_validate(
+                {**_request().model_dump(mode="json"), "analytics_known_at": "2026-07-12T12:00:00Z"}
+            )
         full = pipeline.run(
             ListedMarketRefreshRequest(
                 asset_id=_CONFIGURATION.asset_id,
@@ -214,7 +221,11 @@ def test_new_market_revision_preserves_pit_and_explicit_modes(tmp_path: Path) ->
         assert full.diagnostics_created == 0
         explicit = pipeline.run(_request(known_at=first.effective_known_at))
         assert explicit.effective_known_at == first.effective_known_at
+        assert explicit.analytics_known_at == first.effective_known_at
         assert explicit.metric_results_created == 0
+        assert first.analytics_known_at == first.effective_known_at
+        roundtrip = ListedMarketRefreshSummary.model_validate(first.model_dump())
+        assert roundtrip == first
 
 
 def test_no_bar_cut_rejects_future_and_corrupt_evidence(tmp_path: Path) -> None:

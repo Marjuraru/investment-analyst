@@ -120,9 +120,9 @@ class ListedMarketRefreshPipeline:
         analytics_start = max(start, end - timedelta(days=_OPERATIONAL_ANALYTICS_DAYS))
         analytics_end = end
         analytics_known_at = effective_known_at
-        if request.analytics_known_at is None and request.requested_known_at is None:
+        if request.requested_known_at is None:
             analytics_start, analytics_end, analytics_known_at = resolve_market_daily_cut(
-                self._refresh_planner.storage,
+                self._refresh_planner.storage_handle,
                 asset_id=self._configuration.asset_id,
                 source_id=self._configuration.source_id,
                 market_start=request.market_start,
@@ -168,6 +168,7 @@ class ListedMarketRefreshPipeline:
             effective_known_at=effective_known_at,
             analytics_start=analytics_start,
             analytics_end=end,
+            analytics_known_at=analytics_known_at,
             intervals_executed=len(imports),
             bars_received=sum(item.bars_received for item in imports),
             raw_records_created=sum(item.raw_records_created for item in imports),

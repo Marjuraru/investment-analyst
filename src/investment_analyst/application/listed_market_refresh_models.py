@@ -23,7 +23,6 @@ class ListedMarketRefreshRequest(ContractModel):
     market_end: date
     refresh_mode: AaplRefreshMode = AaplRefreshMode.AUTO
     requested_known_at: UTCDateTime | None = None
-    analytics_known_at: UTCDateTime | None = None
 
     @field_validator("market_start", "market_end", mode="before")
     @classmethod
@@ -61,6 +60,7 @@ class ListedMarketRefreshSummary(ContractModel):
     effective_known_at: UTCDateTime
     analytics_start: UTCDateTime
     analytics_end: UTCDateTime
+    analytics_known_at: UTCDateTime
     analytics_lookback_days: Literal[90] = 90
     intervals_executed: int = Field(ge=0)
     bars_received: int = Field(ge=0)

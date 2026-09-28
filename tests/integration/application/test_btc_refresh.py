@@ -25,6 +25,7 @@ from investment_analyst.application.crypto_spot_daily import (
 )
 from investment_analyst.application.crypto_spot_daily_models import (
     CryptoSpotDailyRefreshRequest,
+    CryptoSpotDailyRefreshSummary,
 )
 from investment_analyst.application.crypto_spot_daily_planner import CryptoSpotDailyRefreshPlanner
 from investment_analyst.application.runtime import ApplicationRuntime
@@ -185,6 +186,7 @@ def test_auto_no_new_candle_reuses_market_cut_and_results(tmp_path: Path) -> Non
             first.analytics_end,
             first.effective_known_at,
         )
+        assert second.analytics_known_at == second.effective_known_at
         assert second.metric_results_created == 0
         assert second.diagnostics_created == 0
         assert {item.result_id for item in storage.metric_results.list()} == first_metric_ids
@@ -215,6 +217,10 @@ def test_new_candle_revision_and_explicit_modes_keep_pit(tmp_path: Path) -> None
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
         pipeline = _pipeline(storage, transport, configuration=configuration)
         first = pipeline.run(_request())
+        with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+            CryptoSpotDailyRefreshRequest.model_validate(
+                {**_request().model_dump(mode="json"), "analytics_known_at": "2026-07-12T12:00:00Z"}
+            )
         full = pipeline.run(
             CryptoSpotDailyRefreshRequest(
                 asset_id="crypto:btc-usd",
@@ -227,6 +233,10 @@ def test_new_candle_revision_and_explicit_modes_keep_pit(tmp_path: Path) -> None
         assert full.metric_results_created == 0
         explicit = pipeline.run(_request(known_at=first.effective_known_at))
         assert explicit.effective_known_at == first.effective_known_at
+        assert explicit.analytics_known_at == first.effective_known_at
+        assert first.analytics_known_at == first.effective_known_at
+        roundtrip = CryptoSpotDailyRefreshSummary.model_validate(first.model_dump())
+        assert roundtrip == first
 
 
 def test_no_candle_cut_rejects_other_source_and_corrupt_evidence(tmp_path: Path) -> None:
@@ -395,6 +405,7 @@ def test_btc_market_refresh_v1_is_retired_and_generic_daily_refresh_summary_is_f
         "effective_known_at",
         "analytics_start",
         "analytics_end",
+        "analytics_known_at",
         "analytics_lookback_days",
         "intervals_executed",
         "candles_received",

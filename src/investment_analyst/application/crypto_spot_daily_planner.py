@@ -19,9 +19,13 @@ class CryptoSpotDailyRefreshPlanner:
     def __init__(self, storage: LocalStorage, *, asset_id: str, source_id: str) -> None:
         storage.require_open()
         self._storage = storage
-        self.storage = storage
         self._asset_id = asset_id
         self._source_id = source_id
+
+    @property
+    def storage_handle(self) -> LocalStorage:
+        """Expose the injected storage for the shared daily-cut projection."""
+        return self._storage
 
     def plan(
         self, *, requested_start: date, requested_end: date, refresh_mode: BtcRefreshMode
