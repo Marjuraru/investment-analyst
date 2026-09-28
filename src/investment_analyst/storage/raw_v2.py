@@ -148,6 +148,11 @@ class RawV2Staging:
         """Return whether this staging currently owns its writer slot."""
         return self._is_open
 
+    @property
+    def destination(self) -> Path:
+        """Return the absolute staging destination supplied at construction."""
+        return self._destination
+
     def open(self) -> RawV2Staging:
         """Validate the destination and marker without trusting prior bytes."""
         if self._is_open:
@@ -297,6 +302,64 @@ class RawV2Staging:
         rows = self._connection.execute(
             f"SELECT record_id FROM {_INDEX_TABLE}{where} ORDER BY received_at, record_id",
             parameters,
+        ).fetchall()
+        return [UUID(row[0]) for row in rows]
+
+    def list_inventory_page(
+        self,
+        *,
+        limit: int,
+        after_received_at: datetime | None = None,
+        after_record_id: UUID | None = None,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        schema_version: str | None = None,
+        available_to: datetime | None = None,
+        manager_cik: str | None = None,
+        report_id: str | None = None,
+    ) -> list[UUID]:
+        """Return one bounded keyset page of staged IDs without loading blobs.
+
+        Pages follow the stable ``(received_at, record_id)`` cursor in the same
+        order as the v1 import pages, so a verifier can walk both inventories
+        side by side without materializing either corpus.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise RawV2StagingError("inventory page limit must be an integer")
+        if limit < 1 or limit > 256:
+            raise RawV2StagingError("inventory page limit must be between 1 and 256")
+        if (after_received_at is None) != (after_record_id is None):
+            raise RawV2StagingError("inventory cursor requires received_at and record_id together")
+        self._require_open()
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if asset_id is not None:
+            clauses.append("asset_id = ?")
+            parameters.append(asset_id)
+        if source_id is not None:
+            clauses.append("source_id = ?")
+            parameters.append(source_id)
+        if schema_version is not None:
+            clauses.append("schema_version = ?")
+            parameters.append(schema_version)
+        if available_to is not None:
+            clauses.append("available_at <= ?")
+            parameters.append(_instant_text(available_to))
+        if manager_cik is not None:
+            clauses.append("projected_manager_cik = ?")
+            parameters.append(manager_cik)
+        if report_id is not None:
+            clauses.append("projected_report_id = ?")
+            parameters.append(report_id)
+        if after_received_at is not None and after_record_id is not None:
+            if after_received_at.tzinfo is None or after_received_at.utcoffset() is None:
+                raise RawV2StagingError("inventory cursor received_at must be timezone-aware")
+            clauses.append("(received_at, record_id) > (?, ?)")
+            parameters.extend([_instant_text(after_received_at), str(after_record_id)])
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._connection.execute(
+            f"SELECT record_id FROM {_INDEX_TABLE}{where} ORDER BY received_at, record_id LIMIT ?",
+            [*parameters, limit],
         ).fetchall()
         return [UUID(row[0]) for row in rows]
 

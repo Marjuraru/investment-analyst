@@ -448,3 +448,67 @@ def test_select_13f_ids_before_hydration(tmp_path: Path) -> None:
             storage.raw_records.select_record_ids_by_json_field(
                 field="payload.report.manager_cik", values=("0001067983",)
             )
+
+
+def test_raw_import_pages_use_stable_keyset_without_full_list(
+    storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from uuid import UUID
+
+    base = datetime(2026, 7, 10, 16, 3, tzinfo=UTC)
+    first_id = UUID("10000000-0000-4000-8000-000000000001")
+    second_id = UUID("10000000-0000-4000-8000-000000000002")
+    same_hour = make_raw_record(record_id=second_id, received_at=base).model_copy(
+        update={"payload": {"close": "211.00", "sequence": 2}}
+    )
+    first = make_raw_record(record_id=first_id, received_at=base).model_copy(
+        update={"payload": {"close": "210.50", "sequence": 1}}
+    )
+    foreign = make_raw_record(received_at=base + timedelta(hours=1)).model_copy(
+        update={"asset_id": "equity:us:amd", "payload": {"close": "212.00", "sequence": 3}}
+    )
+    revised = make_raw_record(received_at=base + timedelta(hours=2)).model_copy(
+        update={"payload": {"close": "213.00", "sequence": 4}}
+    )
+    for record in (first, same_hour, foreign, revised):
+        storage.raw_records.save(record)
+
+    monkeypatch.setattr(
+        storage.raw_records,
+        "get_many",
+        lambda record_ids: pytest.fail("import page materialized raw documents"),
+    )
+    monkeypatch.setattr(
+        storage.raw_records,
+        "list_record_ids",
+        lambda **kwargs: pytest.fail("import page used the unbounded full list"),
+    )
+
+    assert storage.raw_records.list_import_page(limit=256) == [
+        first_id,
+        second_id,
+        foreign.record_id,
+        revised.record_id,
+    ]
+    assert storage.raw_records.list_import_page(limit=2) == [first_id, second_id]
+    after_first = storage.raw_records.get(first_id)
+    assert storage.raw_records.list_import_page(
+        limit=2, after_received_at=after_first.received_at, after_record_id=first_id
+    ) == [second_id, foreign.record_id]
+    tail = storage.raw_records.list_import_page(
+        limit=256,
+        after_received_at=revised.received_at,
+        after_record_id=revised.record_id,
+    )
+    assert tail == []
+    assert storage.raw_records.list_import_page(limit=256, asset_id="equity:us:amd") == [
+        foreign.record_id
+    ]
+    with pytest.raises(StorageError, match="between 1 and 256"):
+        storage.raw_records.list_import_page(limit=257)
+    with pytest.raises(StorageError, match="together"):
+        storage.raw_records.list_import_page(limit=2, after_received_at=base)
+    with pytest.raises(StorageError, match="timezone-aware"):
+        storage.raw_records.list_import_page(
+            limit=2, after_received_at=base.replace(tzinfo=None), after_record_id=first_id
+        )

@@ -27,6 +27,7 @@ from investment_analyst.storage.serialization import (
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9._-]+")
 _MAX_INDEX_INTEGRITY_RECORDS = 1_000
 _RAW_RECORD_BATCH_CHUNK_SIZE = 1_000
+_RAW_IMPORT_PAGE_LIMIT = 256
 
 _THIRTEEN_F_JSON_PATHS = {
     "report_manager": "payload.report.manager_cik",
@@ -328,6 +329,55 @@ class JsonRawRecordRepository:
         rows = self._connection.execute(
             f"SELECT record_id FROM raw_record_index{where} ORDER BY received_at, record_id",
             parameters,
+        ).fetchall()
+        return [UUID(row[0]) for row in rows]
+
+    def list_import_page(
+        self,
+        *,
+        limit: int,
+        after_received_at: datetime | None = None,
+        after_record_id: UUID | None = None,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        schema_version: str | None = None,
+        available_to: datetime | None = None,
+    ) -> list[UUID]:
+        """Return one bounded keyset page of IDs without loading JSON documents.
+
+        Pages follow the stable ``(received_at, record_id)`` cursor across the
+        filtered inventory; the cursor position itself is never interpreted as
+        coverage. Callers hydrate each page with ``get_many`` and must treat an
+        empty page as completion.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise StorageError("import page limit must be an integer")
+        if limit < 1 or limit > _RAW_IMPORT_PAGE_LIMIT:
+            raise StorageError("import page limit must be between 1 and 256")
+        if available_to is not None and (
+            available_to.tzinfo is None or available_to.utcoffset() is None
+        ):
+            raise StorageError("available_to must be timezone-aware")
+        if (after_received_at is None) != (after_record_id is None):
+            raise StorageError("import cursor requires received_at and record_id together")
+        if after_received_at is not None and (
+            after_received_at.tzinfo is None or after_received_at.utcoffset() is None
+        ):
+            raise StorageError("import cursor received_at must be timezone-aware")
+        clauses, parameters = self._build_filter_clauses(
+            asset_id=asset_id,
+            source_id=source_id,
+            schema_version=schema_version,
+            available_to=available_to,
+        )
+        if after_received_at is not None and after_record_id is not None:
+            clauses.append("(received_at, record_id) > (?, ?)")
+            parameters.extend([after_received_at, str(after_record_id)])
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._connection.execute(
+            f"SELECT record_id FROM raw_record_index{where} "
+            "ORDER BY received_at, record_id LIMIT ?",
+            [*parameters, limit],
         ).fetchall()
         return [UUID(row[0]) for row in rows]
 

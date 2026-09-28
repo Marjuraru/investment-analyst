@@ -652,3 +652,17 @@ el planificador Coinbase reemplaza su lista histórica por `observed_at_bounds` 
 el monitor MARKET omite el check sin cambio de mercado aunque existan receipt o
 valoración. Estadísticas y diagnósticos recalculan la serie como antes; no se
 promete CPU O(delta) ni menos RSS.
+
+## Importación raw v1 a v2 reanudable y verificable (`DATA-CHASSIS-27`)
+
+`DATA-CHASSIS-27` completa la unidad de reconstrucción raw: paginación keyset v1
+por `(received_at, record_id)` e inventario v2 por páginas de máximo 256 IDs,
+importador que verifica cada página en origen, escribe con `save_many`,
+relee lo insertado y confirma un checkpoint atómico con cursor, conteo y digest
+acumulado. Cada lote es independiente y la reapertura valida el prefijo
+confirmado antes de continuar. Al terminar, ambos inventarios se recorren por
+páginas con conjunto exacto de IDs, bytes SHA-256, metadatos, conteos por
+fuente/esquema y digest ordenado; PIT v1/v2 coincide en dos cortes. El origen es
+una copia v1 restaurada y verificada abierta read-only en scratch; el destino es
+disjunto y nuevo. Sin backup v2 completo, observaciones/métricas v2, cutover ni
+promesa de reducción de RSS.

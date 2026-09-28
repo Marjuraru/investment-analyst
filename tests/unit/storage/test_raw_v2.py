@@ -156,3 +156,35 @@ def test_staging_missing_and_tampered_records_fail_closed(tmp_path: Path) -> Non
         with pytest.raises(RawV2StagingError, match="checksum mismatch"):
             staging.get(record.record_id)
     staging.close()
+
+
+def test_import_inventory_pages_are_bounded_and_verified(tmp_path: Path) -> None:
+    from investment_analyst.storage.raw_v2 import RawV2StagingError
+
+    staging, _ = _staging(tmp_path)
+    with staging:
+        records = [_record() for _ in range(3)]
+        staging.save_many(records)
+        ordered = sorted((record.record_id for record in records), key=str)
+        assert staging.list_inventory_page(limit=256) == ordered
+        assert staging.list_inventory_page(limit=2) == ordered[:2]
+        last = staging.get(ordered[1])
+        assert (
+            staging.list_inventory_page(
+                limit=2, after_received_at=last.received_at, after_record_id=ordered[1]
+            )
+            == ordered[2:]
+        )
+        assert (
+            staging.list_inventory_page(
+                limit=256,
+                after_received_at=staging.get(ordered[2]).received_at,
+                after_record_id=ordered[2],
+            )
+            == []
+        )
+        with pytest.raises(RawV2StagingError, match="between 1 and 256"):
+            staging.list_inventory_page(limit=257)
+        with pytest.raises(RawV2StagingError, match="together"):
+            staging.list_inventory_page(limit=2, after_received_at=last.received_at)
+    staging.close()
