@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -36,6 +36,7 @@ from investment_analyst.storage.raw_v2 import RawV2Staging
 from investment_analyst.storage.serialization import canonical_json_bytes, sha256_hex
 
 RAW_V2_IMPORT_STATE_FORMAT = "raw-v2-import-state-v1"
+RAW_V2_IMPORT_STATE_FORMAT_V2 = "raw-v2-import-state-v2"
 RAW_V2_IMPORT_SUMMARY_SCHEMA = "raw-v2-import-summary-v1"
 RAW_V2_IMPORT_POLICY_VERSION = "raw-v2-import-v1"
 _MAX_IMPORT_PAGE = 256
@@ -66,14 +67,21 @@ class RawV2ImportCursor(ContractModel):
 
 
 class RawV2ImportState(ContractModel):
-    """Atomic progress record for one resumable raw v1 to v2 import."""
+    """Atomic progress record for one resumable raw v1 to v2 import.
+
+    Format v1 binds the checkpoint to the absolute destination path and only
+    resumes on that same path. Format v2 binds it to the stable ``staging_id``
+    recorded in the staging marker and remains resumable after a verified
+    backup/restore relocates the staging to another path.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    format: Literal["raw-v2-import-state-v1"] = RAW_V2_IMPORT_STATE_FORMAT
+    format: Literal["raw-v2-import-state-v1", "raw-v2-import-state-v2"] = RAW_V2_IMPORT_STATE_FORMAT
     source_workspace_id: NonEmptyStr
     source_fingerprint: NonEmptyStr
     destination: NonEmptyStr
+    staging_id: str | None = None
     staging_format: Literal["raw-v2-staging-v1"] = "raw-v2-staging-v1"
     policy_version: Literal["raw-v2-import-v1"] = RAW_V2_IMPORT_POLICY_VERSION
     cursor: RawV2ImportCursor = RawV2ImportCursor()
@@ -87,6 +95,17 @@ class RawV2ImportState(ContractModel):
     def reject_boolean_limit(cls, value: object) -> object:
         if isinstance(value, bool):
             raise ValueError("page_limit must be an integer")
+        return value
+
+    @field_validator("staging_id", mode="before")
+    @classmethod
+    def validate_staging_binding(cls, value: object, info) -> object:
+        """Accept portable v2 bindings; legacy v1 checkpoints carry no identity."""
+        del info
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("staging_id must be a non-empty string")
         return value
 
 
@@ -142,12 +161,15 @@ class RawV2Importer:
         if not source.read_only:
             raise RawV2ImportError("import source must be opened read-only")
         staging_destination = staging.destination
+        if staging.is_open:
+            staging.require_open_for_import()
         self._source = source
         self._staging = staging
         self._workspace_id = source_workspace_id
         self._fingerprint = source_fingerprint
         self._clock = clock or (lambda: datetime.now(UTC))
         self._destination_key = str(staging_destination.absolute())
+        self._staging_id = staging.staging_id
         if not self._workspace_id.strip():
             raise RawV2ImportError("import source workspace identity must be explicit")
         if not self._fingerprint.strip():
@@ -233,6 +255,21 @@ class RawV2Importer:
     def _state_path(self) -> Path:
         return self._staging.destination / _IMPORT_STATE_FILENAME
 
+    def _is_portable_state(self, state: RawV2ImportState) -> bool:
+        """Return whether a checkpoint binds by stable identity instead of path."""
+        return state.format == RAW_V2_IMPORT_STATE_FORMAT_V2 and state.staging_id is not None
+
+    def _check_state_binding(self, state: RawV2ImportState) -> None:
+        if state.source_workspace_id != self._workspace_id:
+            raise RawV2ImportError("import state belongs to another source or destination")
+        if state.source_fingerprint != self._fingerprint:
+            raise RawV2ImportError("import state belongs to another source or destination")
+        if self._is_portable_state(state):
+            if self._staging_id is None or state.staging_id != self._staging_id:
+                raise RawV2ImportError("import state belongs to another source or destination")
+        elif state.destination != self._destination_key:
+            raise RawV2ImportError("import state belongs to another source or destination")
+
     def _load_or_initialize_state(self, page_limit: int) -> RawV2ImportState:
         path = self._state_path()
         if path.is_symlink():
@@ -248,12 +285,7 @@ class RawV2Importer:
             state = RawV2ImportState.model_validate_json(path.read_text(encoding="utf-8"))
         except ValueError as error:
             raise RawV2ImportError("import state is truncated or incompatible") from error
-        if (
-            state.source_workspace_id != self._workspace_id
-            or state.source_fingerprint != self._fingerprint
-            or state.destination != self._destination_key
-        ):
-            raise RawV2ImportError("import state belongs to another source or destination")
+        self._check_state_binding(state)
         if state.page_limit != page_limit:
             raise RawV2ImportError("import state page limit does not match this run")
         self._validate_confirmed_prefix(state)
@@ -268,48 +300,46 @@ class RawV2Importer:
             return
         if state.cursor.received_at is None or state.cursor.record_id is None:
             raise RawV2ImportError("import state cursor does not match its confirmed count")
-        prefix: list[UUID] = []
-        cursor_at: datetime | None = None
-        cursor_id: UUID | None = None
-        while len(prefix) < state.confirmed_count:
-            page = self._source.raw_records.list_import_page(
-                limit=min(state.page_limit, state.confirmed_count - len(prefix)),
-                after_received_at=cursor_at,
-                after_record_id=cursor_id,
-            )
-            if not page:
-                break
-            prefix.extend(page)
-            last = self._source.raw_records.get(page[-1])
-            cursor_at, cursor_id = last.received_at, last.record_id
-        if len(prefix) != state.confirmed_count:
-            raise RawV2ImportError("import state prefix does not match the source inventory")
-        expected_ids = prefix
-        if expected_ids[-1] != state.cursor.record_id:
-            raise RawV2ImportError("import state cursor does not match its confirmed count")
-        staged_prefix: list[UUID] = []
+        digest = empty_digest()
+        confirmed = 0
+        source_at: datetime | None = None
+        source_id: UUID | None = None
         staged_at: datetime | None = None
         staged_id: UUID | None = None
-        while len(staged_prefix) < state.confirmed_count:
-            page = self._staging.list_inventory_page(
-                limit=min(state.page_limit, state.confirmed_count - len(staged_prefix)),
+        last_source_id: UUID | None = None
+        while confirmed < state.confirmed_count:
+            remaining = state.confirmed_count - confirmed
+            source_page = self._source.raw_records.list_import_page(
+                limit=min(state.page_limit, remaining),
+                after_received_at=source_at,
+                after_record_id=source_id,
+            )
+            staged_page = self._staging.list_inventory_page(
+                limit=min(state.page_limit, remaining),
                 after_received_at=staged_at,
                 after_record_id=staged_id,
             )
-            if not page:
-                break
-            staged_prefix.extend(page)
-            last = self._source.raw_records.get(page[-1])
-            staged_at, staged_id = last.received_at, last.record_id
-        if staged_prefix != expected_ids:
-            raise RawV2ImportError("import state prefix does not match the staged inventory")
-        digest = empty_digest()
-        for record_id in expected_ids:
-            source_record = self._source.raw_records.get(record_id)
-            staged_record = self._staging.get(record_id)
-            if staged_record != source_record:
-                raise RawV2ImportError("confirmed prefix differs between source and staging")
-            digest = extend_digest(digest, sha256_hex(canonical_json_bytes(source_record)))
+            if not source_page or not staged_page or len(source_page) != len(staged_page):
+                raise RawV2ImportError("import state prefix does not match the source inventory")
+            if [str(record_id) for record_id in staged_page] != [
+                str(record_id) for record_id in source_page
+            ]:
+                raise RawV2ImportError("import state prefix does not match the staged inventory")
+            source_records = self._source.raw_records.get_many(source_page)
+            staged_records = self._staging.get_many(staged_page)
+            for record_id in source_page:
+                source_record = source_records[record_id]
+                staged_record = staged_records[record_id]
+                if staged_record != source_record:
+                    raise RawV2ImportError("confirmed prefix differs between source and staging")
+                digest = extend_digest(digest, sha256_hex(canonical_json_bytes(source_record)))
+                last_source_id = record_id
+            last_source = source_records[source_page[-1]]
+            source_at, source_id = last_source.received_at, last_source.record_id
+            staged_at, staged_id = source_at, source_id
+            confirmed += len(source_page)
+        if last_source_id != state.cursor.record_id:
+            raise RawV2ImportError("import state cursor does not match its confirmed count")
         if digest != state.accumulated_digest:
             raise RawV2ImportError("import state digest does not match its confirmed prefix")
 
@@ -321,10 +351,18 @@ class RawV2Importer:
         accumulated_digest: str,
         page_limit: int,
     ) -> RawV2ImportState:
+        if self._staging_id is None:
+            state_format: str = RAW_V2_IMPORT_STATE_FORMAT
+            binding_id: str | None = None
+        else:
+            state_format = RAW_V2_IMPORT_STATE_FORMAT_V2
+            binding_id = self._staging_id
         state = RawV2ImportState(
+            format=state_format,  # type: ignore[arg-type]
             source_workspace_id=self._workspace_id,
             source_fingerprint=self._fingerprint,
             destination=self._destination_key,
+            staging_id=binding_id,
             cursor=cursor,
             confirmed_count=confirmed_count,
             accumulated_digest=accumulated_digest,
@@ -350,19 +388,37 @@ class RawV2Importer:
         max_page_requested: int,
         max_page_hydrated: int,
     ) -> RawV2ImportSummary:
-        source_ids = self._walk_inventory(self._source.raw_records.list_import_page)
-        staged_ids = self._walk_inventory(self._staging.list_inventory_page)
-        if source_ids != staged_ids:
-            raise RawV2ImportError("staged inventory does not match the source inventory")
         digest = empty_digest()
         counts_by_source: dict[str, int] = {}
         counts_by_schema: dict[str, int] = {}
-        for page_start in range(0, len(source_ids), state.page_limit):
-            page = source_ids[page_start : page_start + state.page_limit]
-            self._source.raw_records.verify_index_integrity(page)
-            source_records = self._source.raw_records.get_many(page)
-            staged_records = self._staging.get_many(page)
-            for record_id in page:
+        verified = 0
+        source_at: datetime | None = None
+        source_id: UUID | None = None
+        staged_at: datetime | None = None
+        staged_id: UUID | None = None
+        while True:
+            source_page = self._source.raw_records.list_import_page(
+                limit=state.page_limit,
+                after_received_at=source_at,
+                after_record_id=source_id,
+            )
+            staged_page = self._staging.list_inventory_page(
+                limit=state.page_limit,
+                after_received_at=staged_at,
+                after_record_id=staged_id,
+            )
+            if not source_page and not staged_page:
+                break
+            if not source_page or not staged_page or len(source_page) != len(staged_page):
+                raise RawV2ImportError("staged inventory does not match the source inventory")
+            if [str(record_id) for record_id in staged_page] != [
+                str(record_id) for record_id in source_page
+            ]:
+                raise RawV2ImportError("staged inventory does not match the source inventory")
+            self._source.raw_records.verify_index_integrity(source_page)
+            source_records = self._source.raw_records.get_many(source_page)
+            staged_records = self._staging.get_many(staged_page)
+            for record_id in source_page:
                 source_record = source_records[record_id]
                 staged_record = staged_records[record_id]
                 if staged_record != source_record:
@@ -375,9 +431,13 @@ class RawV2Importer:
                 counts_by_schema[source_record.schema_version] = (
                     counts_by_schema.get(source_record.schema_version, 0) + 1
                 )
+            last_source = source_records[source_page[-1]]
+            source_at, source_id = last_source.received_at, last_source.record_id
+            staged_at, staged_id = source_at, source_id
+            verified += len(source_page)
         if digest != state.accumulated_digest:
             raise RawV2ImportError("import digest does not match the verified corpus")
-        if imported_count != len(source_ids):
+        if imported_count != verified:
             raise RawV2ImportError("import confirmed count does not match the source inventory")
         return RawV2ImportSummary(
             source_workspace_id=self._workspace_id,
@@ -393,24 +453,6 @@ class RawV2Importer:
             max_page_hydrated=max_page_hydrated,
             traceability_verified=True,
         )
-
-    def _walk_inventory(self, pager: Callable[..., Sequence[UUID] | list[UUID]]) -> list[UUID]:
-        collected: list[UUID] = []
-        cursor_at: datetime | None = None
-        cursor_id: UUID | None = None
-        while True:
-            page = list(
-                pager(
-                    limit=_MAX_IMPORT_PAGE,
-                    after_received_at=cursor_at,
-                    after_record_id=cursor_id,
-                )
-            )
-            if not page:
-                return collected
-            collected.extend(page)
-            last = self._source.raw_records.get(page[-1])
-            cursor_at, cursor_id = last.received_at, last.record_id
 
     @staticmethod
     def _assert_same_projection(source_record: RawRecord, staged_record: RawRecord) -> None:
@@ -440,6 +482,7 @@ class RawV2Importer:
 __all__ = [
     "RAW_V2_IMPORT_POLICY_VERSION",
     "RAW_V2_IMPORT_STATE_FORMAT",
+    "RAW_V2_IMPORT_STATE_FORMAT_V2",
     "RAW_V2_IMPORT_SUMMARY_SCHEMA",
     "RawV2ImportCursor",
     "RawV2ImportError",

@@ -102,3 +102,83 @@ def test_import_requires_read_only_source(tmp_path: Path) -> None:
                 source_workspace_id="workspace-1",
                 source_fingerprint="fingerprint-1",
             )
+
+
+def test_legacy_v1_checkpoint_keeps_same_path_semantics(tmp_path) -> None:
+    import json
+
+    from investment_analyst.storage.raw_v2_import import (
+        RAW_V2_IMPORT_STATE_FORMAT,
+        RawV2ImportState,
+    )
+
+    source_paths = StoragePaths.from_root(tmp_path / "source")
+    with LocalStorage(source_paths) as writer:
+        _seed(writer, 2)
+    with LocalStorage(source_paths, read_only=True) as source:
+        staging = _staging(tmp_path, "staging")
+        with staging:
+            importer = _importer(source, staging)
+            summary = importer.run(page_limit=2)
+            assert summary.complete is True
+            state_path = staging.destination / "raw-v2-import-state.json"
+            document = json.loads(state_path.read_text(encoding="utf-8"))
+            assert document["format"] == "raw-v2-import-state-v2"
+            legacy = dict(document)
+            legacy["format"] = RAW_V2_IMPORT_STATE_FORMAT
+            legacy["staging_id"] = None
+            RawV2ImportState.model_validate(legacy)
+            state_path.write_text(
+                json.dumps(legacy, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            rerun = importer.run(page_limit=2)
+            assert rerun.complete is True
+            other = _staging(tmp_path, "other")
+            with other:
+                state_document = json.loads(state_path.read_text(encoding="utf-8"))
+                (other.destination / "raw-v2-import-state.json").write_text(
+                    json.dumps(state_document, sort_keys=True, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+                foreign = RawV2Importer(
+                    source,
+                    other,
+                    source_workspace_id=importer._workspace_id,
+                    source_fingerprint=importer._fingerprint,
+                )
+                import pytest as _pytest
+
+                with _pytest.raises(RawV2ImportError, match="another source or destination"):
+                    foreign.run(page_limit=2)
+
+
+def test_resume_and_completion_never_accumulate_full_inventory(tmp_path) -> None:
+    source_paths = StoragePaths.from_root(tmp_path / "source")
+    with LocalStorage(source_paths) as writer:
+        _seed(writer, 5)
+    with LocalStorage(source_paths, read_only=True) as source:
+        staging = _staging(tmp_path, "staging")
+        with staging:
+            importer = _importer(source, staging)
+            calls: list = []
+            original_source = source.raw_records.list_import_page
+            original_staged = staging.list_inventory_page
+
+            def _counting_source(**kwargs):
+                page = original_source(**kwargs)
+                calls.append(("source", kwargs.get("limit")))
+                return page
+
+            def _counting_staged(**kwargs):
+                page = original_staged(**kwargs)
+                calls.append(("staged", kwargs.get("limit")))
+                return page
+
+            source.raw_records.list_import_page = _counting_source  # type: ignore[method-assign]
+            staging.list_inventory_page = _counting_staged  # type: ignore[method-assign]
+            summary = importer.run(page_limit=2)
+            assert summary.complete is True
+            assert calls
+            assert all(limit is not None and limit <= 2 for _, limit in calls)
+            assert all(limit is not None and limit <= 256 for _, limit in calls)
