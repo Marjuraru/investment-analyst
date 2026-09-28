@@ -14,6 +14,7 @@ providers, credentials and installed runtimes stay out of reach.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from collections.abc import Collection, Sequence
@@ -39,8 +40,10 @@ from investment_analyst.storage.serialization import (
     sha256_hex,
 )
 
-STAGING_FORMAT = "raw-v2-staging-v1"
+_STAGING_FORMAT = "raw-v2-staging-v1"
+STAGING_FORMAT = _STAGING_FORMAT
 _STAGING_MARKER_FILENAME = "raw-v2-staging.json"
+_STAGING_LOCK_FILENAME = "raw-v2-staging.lock"
 _BLOB_DIR_PARTS = ("raw", "sha256")
 _INDEX_TABLE = "raw_v2_index"
 _RAW_V2_BATCH_CHUNK_SIZE = 512
@@ -71,7 +74,19 @@ class RawV2StagingMarker(ContractModel):
     """Typed versioned marker of one raw v2 staging destination."""
 
     format: Literal["raw-v2-staging-v1"] = STAGING_FORMAT
+    staging_id: str | None = None
     created_at: UTCDateTime
+
+    @classmethod
+    def validate_legacy_marker(cls, marker_path: Path) -> RawV2StagingMarker:
+        """Read a legacy marker byte-identically compatible with the prior contract."""
+        if marker_path.is_symlink() or not marker_path.is_file():
+            raise RawV2StagingError("raw v2 staging marker is missing or not a regular file")
+        try:
+            document = json.loads(marker_path.read_bytes().decode("utf-8"))
+            return cls.model_validate(document)
+        except (ValueError, ValidationError, UnicodeDecodeError) as error:
+            raise RawV2StagingError("raw v2 staging marker is incompatible") from error
 
 
 def _project_13f_fields(record: RawRecord) -> tuple[str | None, str | None]:
@@ -194,6 +209,20 @@ class RawV2Staging:
         if not marker_path.exists():
             self._write_marker(marker_path)
         self._require_index_table(marker_path, create=True)
+        self._lock_path = destination / _STAGING_LOCK_FILENAME
+        try:
+            descriptor = os.open(str(self._lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError as error:
+            raise RawV2StagingError("raw v2 staging lock could not be acquired") from error
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            os.close(descriptor)
+            raise RawV2StagingError("raw v2 staging destination already has a writer") from error
+        except OSError as error:
+            os.close(descriptor)
+            raise RawV2StagingError("raw v2 staging lock could not be acquired") from error
+        self._lock_descriptor: int | None = descriptor
         _OPEN_WRITERS.add(key)
         self._is_open = True
         return self
@@ -204,7 +233,29 @@ class RawV2Staging:
             return
         if not self._read_only:
             _OPEN_WRITERS.discard(str(self._destination.absolute()))
+            descriptor = getattr(self, "_lock_descriptor", None)
+            if descriptor is not None:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(descriptor)
+                self._lock_descriptor = None
         self._is_open = False
+
+    @property
+    def staging_id(self) -> str | None:
+        """Return the stable staging identity recorded in the marker, if any."""
+        marker_path = self._destination / _STAGING_MARKER_FILENAME
+        if not marker_path.is_file() or marker_path.is_symlink():
+            return None
+        try:
+            return self._read_marker(marker_path).staging_id
+        except RawV2StagingError:
+            return None
+
+    def require_open_for_import(self) -> None:
+        """Require an open writable staging before an import reads its identity."""
+        self._require_writable()
 
     def __enter__(self) -> RawV2Staging:
         return self.open()
@@ -541,7 +592,9 @@ class RawV2Staging:
             raise RawV2StagingError("raw v2 staging marker already exists")
         document = (
             json.dumps(
-                RawV2StagingMarker(created_at=datetime.now(UTC)).model_dump(mode="json"),
+                RawV2StagingMarker(created_at=datetime.now(UTC), staging_id=uuid4().hex).model_dump(
+                    mode="json"
+                ),
                 ensure_ascii=False,
                 separators=(",", ":"),
                 sort_keys=True,
@@ -620,3 +673,17 @@ __all__ = [
     "RawV2StagingError",
     "RawV2StagingMarker",
 ]
+
+
+def index_database_path(destination: Path) -> Path | None:
+    """Return the file-backed DuckDB index inside a staging destination, if unique."""
+    if not destination.is_absolute() or destination.is_symlink():
+        return None
+    candidates = [
+        entry
+        for entry in destination.iterdir()
+        if entry.is_file() and not entry.is_symlink() and entry.suffix == ".duckdb"
+    ]
+    if len(candidates) != 1:
+        return None
+    return candidates[0]

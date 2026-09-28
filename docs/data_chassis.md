@@ -666,3 +666,16 @@ fuente/esquema y digest ordenado; PIT v1/v2 coincide en dos cortes. El origen es
 una copia v1 restaurada y verificada abierta read-only en scratch; el destino es
 disjunto y nuevo. Sin backup v2 completo, observaciones/métricas v2, cutover ni
 promesa de reducción de RSS.
+
+## Backup raw v2 portable y verificable (`DATA-CHASSIS-28`)
+
+`DATA-CHASSIS-28` entrega durabilidad del staging raw v2: marcador con
+`staging_id` estable en destinos nuevos (los antiguos siguen legibles),
+checkpoint de import `raw-v2-import-state-v2` ligado a identidad y fingerprint
+en vez de ruta absoluta (v1 conserva su semántica de misma ruta), backup con
+inventario ordenado de archivos por streaming SHA-256 e índice DuckDB
+file-backed verificado contra la conexión, y restore a destino vacío que
+verifica archivos, índice, blobs, checkpoint y prefijo antes de promocionar.
+La verificación final del import compara inventarios en streaming por páginas
+de máximo 256 IDs sin acumular listas O(N). Sin workspace v2 productivo,
+observaciones/métricas v2, cutover, liberación de bytes ni mejora de RSS.
