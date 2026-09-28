@@ -1053,3 +1053,53 @@ def test_no_validation_becomes_optional_sampled_or_configurable(storage) -> None
         assert len(get_params) == 1
         param_name = next(iter(save_params.keys()))
         assert param_name in {"observations", "results"}
+
+
+def test_observation_import_page_is_bounded_and_stable(storage) -> None:
+    import uuid as uuid_module
+
+    from investment_analyst.storage.errors import StorageError
+
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+    first = make_observation(raw_record_id=raw_record.record_id)
+    second = make_observation(raw_record_id=raw_record.record_id)
+    storage.observations.save_many([first, second])
+
+    ordered = sorted(
+        [first.observation_id, second.observation_id],
+        key=str,
+    )
+    assert storage.observations.list_observation_import_page(limit=256) == ordered
+    assert storage.observations.list_observation_import_page(limit=1) == ordered[:1]
+    head = storage.observations.get(ordered[0])
+    assert (
+        storage.observations.list_observation_import_page(
+            limit=256,
+            after_available_at=head.available_at,
+            after_observation_id=ordered[0],
+        )
+        == ordered[1:]
+    )
+    tail = storage.observations.get(ordered[1])
+    assert (
+        storage.observations.list_observation_import_page(
+            limit=256,
+            after_available_at=tail.available_at,
+            after_observation_id=ordered[1],
+        )
+        == []
+    )
+    with pytest.raises(StorageError, match="between 1 and 256"):
+        storage.observations.list_observation_import_page(limit=257)
+    with pytest.raises(StorageError, match="together"):
+        storage.observations.list_observation_import_page(
+            limit=2, after_available_at=head.available_at
+        )
+    with pytest.raises(StorageError, match="timezone-aware"):
+        storage.observations.list_observation_import_page(
+            limit=2,
+            after_available_at=head.available_at.replace(tzinfo=None),
+            after_observation_id=ordered[0],
+        )
+    assert uuid_module.UUID(str(ordered[0])) == ordered[0]

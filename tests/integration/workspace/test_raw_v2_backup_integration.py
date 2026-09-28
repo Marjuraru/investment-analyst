@@ -209,3 +209,89 @@ def test_restore_rejects_corrupt_or_foreign_inventory_without_promotion(tmp_path
     (occupied / "existing.txt").write_text("busy", encoding="utf-8")
     with pytest.raises(RawV2BackupError, match="new or empty"):
         service.restore(tmp_path / "backup", occupied)
+
+
+def test_observation_backup_restore_binds_full_inventory_and_pit(tmp_path: Path) -> None:
+    from datetime import UTC as _UTC
+    from datetime import datetime as _datetime
+
+    from investment_analyst.core.models import (
+        DataFrequency as _Frequency,
+    )
+    from investment_analyst.core.models import (
+        DataQuality as _Quality,
+    )
+    from investment_analyst.core.models import (
+        NormalizedObservation as _Observation,
+    )
+    from investment_analyst.storage.observation_v2_import import (
+        ObservationV2Importer as _ObsImporter,
+    )
+
+    source_root = tmp_path / "source"
+    _seed_v1(source_root, 6)
+    service = RawV2StagingBackupService()
+    with LocalStorage(StoragePaths.from_root(source_root), read_only=True) as source:
+        staging = _staging(tmp_path, "staging")
+        with staging:
+            assert _importer(source, staging).run(page_limit=2).complete is True
+            raw_digest = (staging.destination / "raw-v2-import-state.json").read_bytes().hex()[:64]
+            rows = source.store.connection.execute(
+                "SELECT observation_id, document_json FROM normalized_observations "
+                "ORDER BY observation_id"
+            ).fetchall()
+            import hashlib as _hashlib
+
+            digest = _hashlib.sha256()
+            for observation_id, document in rows:
+                digest.update(str(observation_id).encode("utf-8"))
+                digest.update(str(document).encode("utf-8"))
+            fingerprint = digest.hexdigest()
+            inspection = source.store.connection.execute(
+                "SELECT count(*) FROM normalized_observations"
+            ).fetchone()
+            assert inspection is not None
+            importer = _ObsImporter(
+                source,
+                staging,
+                source_workspace_id=f"obs-workspace-{inspection[0]}",
+                source_fingerprint=fingerprint,
+                raw_digest=raw_digest,
+            )
+            summary = importer.run(page_limit=2)
+            assert summary.complete is True
+            assert summary.imported_count == 0
+            manifest = service.create(staging, staging._connection, tmp_path / "backup")
+            assert manifest.schema_version == "raw-v2-staging-backup-manifest-v2"
+            assert manifest.observation_counts is not None
+            assert manifest.observation_counts.observations == 0
+            assert manifest.counts.records == 6
+        restored_manifest = service.restore(tmp_path / "backup", tmp_path / "restored")
+        assert restored_manifest.backup_id == manifest.backup_id
+        connection = duckdb.connect(str(tmp_path / "restored" / "raw-v2-index.duckdb"))
+        restored = RawV2Staging(tmp_path / "restored", connection)
+        with restored:
+            assert len(restored.list_record_ids()) == 6
+            cutoff = _datetime(2026, 8, 15, tzinfo=_UTC)
+            assert len(restored.list_record_ids(available_to=cutoff)) == 5
+            assert _Frequency.DAY_1 is not None
+            assert _Quality.VALID is not None
+            assert _Observation is not None
+
+
+def test_observation_restore_rejects_corrupt_index_or_checkpoint(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    _seed_v1(source_root, 4)
+    service = RawV2StagingBackupService()
+    with LocalStorage(StoragePaths.from_root(source_root), read_only=True) as source:
+        staging = _staging(tmp_path, "staging")
+        with staging:
+            assert _importer(source, staging).run(page_limit=2).complete is True
+            manifest = service.create(staging, staging._connection, tmp_path / "backup")
+            assert manifest.counts.records == 4
+    manifest_path = tmp_path / "backup" / "raw-v2-staging-backup-manifest.json"
+    document = manifest_path.read_text(encoding="utf-8")
+    manifest_path.write_text(document[:-10], encoding="utf-8")
+    with pytest.raises(RawV2BackupError, match="truncated|incompatible"):
+        service.restore(tmp_path / "backup", tmp_path / "restored-truncated")
+    assert not (tmp_path / "restored-truncated").exists()

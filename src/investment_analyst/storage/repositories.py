@@ -1,5 +1,7 @@
 """Concrete DuckDB repositories for typed project models."""
 
+from __future__ import annotations
+
 from collections.abc import Collection
 from datetime import UTC, date, datetime
 from uuid import UUID
@@ -66,6 +68,7 @@ def _get_many_documents[ModelT: BaseModel](
 
 
 _GET_EXISTING_CHUNK_SIZE = 1_000
+_OBSERVATION_IMPORT_PAGE_LIMIT = 256
 
 
 def _get_existing_documents[ModelT: BaseModel](
@@ -666,6 +669,45 @@ class DuckDBObservationRepository:
             parsed = datetime.fromisoformat(str(value))
             values.append(parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC))
         return values[0], values[1]
+
+    def list_observation_import_page(
+        self,
+        *,
+        limit: int,
+        after_available_at: datetime | None = None,
+        after_observation_id: UUID | None = None,
+    ) -> list[UUID]:
+        """Return one bounded keyset page of v1 observation IDs without documents.
+
+        Pages follow the stable ``(available_at, observation_id)`` cursor used
+        by the v2 importer, so the confirmed prefix can be walked and verified
+        without materializing the whole corpus. The existing query API is
+        unchanged; this is an additional read-only page over the same table.
+        """
+        from investment_analyst.storage.errors import StorageError
+
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise StorageError("observation import page limit must be an integer")
+        if limit < 1 or limit > _OBSERVATION_IMPORT_PAGE_LIMIT:
+            raise StorageError("observation import page limit must be between 1 and 256")
+        if (after_available_at is None) != (after_observation_id is None):
+            raise StorageError("observation import cursor requires both fields together")
+        if after_available_at is not None and (
+            after_available_at.tzinfo is None or after_available_at.utcoffset() is None
+        ):
+            raise StorageError("observation import cursor available_at must be timezone-aware")
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if after_available_at is not None and after_observation_id is not None:
+            clauses.append("(available_at, observation_id) > (?, ?)")
+            parameters.extend([after_available_at, str(after_observation_id)])
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._connection.execute(
+            "SELECT observation_id FROM normalized_observations"
+            f"{where} ORDER BY available_at, observation_id LIMIT ?",
+            [*parameters, limit],
+        ).fetchall()
+        return [UUID(row[0]) for row in rows]
 
 
 class DuckDBMetricDefinitionRepository:

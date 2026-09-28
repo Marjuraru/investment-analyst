@@ -679,3 +679,26 @@ verifica archivos, índice, blobs, checkpoint y prefijo antes de promocionar.
 La verificación final del import compara inventarios en streaming por páginas
 de máximo 256 IDs sin acumular listas O(N). Sin workspace v2 productivo,
 observaciones/métricas v2, cutover, liberación de bytes ni mejora de RSS.
+
+## Observaciones v2 y restauración verificable (`DATA-CHASSIS-29`)
+
+`DATA-CHASSIS-29` amplía el staging aislado a evidencia normalizada sin tocar
+el workspace permanente: tabla `normalized_observations_v2` en el mismo índice
+DuckDB del staging, sin `document_json`, con todas las coordenadas de
+`NormalizedObservation`, Decimal exacto como texto canónico y componentes
+tipados de `SourceReference`. `save_observations`/`get_observations` y la
+lectura PIT por activo/fuente/frecuencia/tiempo/corte reconstruyen el mismo
+modelo y orden que v1; cada lectura confirma ID, contenido y vínculo al raw v2
+completo, y la corrupción, ausencia o proyección divergente falla cerrado. El
+origen es una copia v1 restaurada y verificada abierta read-only con
+paginación keyset adicional por `(available_at, observation_id)` en lotes de
+máximo 256 IDs; el importador hidrata y verifica cada lote, exige raw v2
+completo y correspondiente, escribe, relee y confirma el checkpoint atómico
+`observation-v2-import-state-v1` sólo después. La reapertura valida el prefijo
+en streaming acotado y la restauración a otra ruta conserva identidad y
+permite reanudar. El backup con observaciones emite
+`raw-v2-staging-backup-manifest-v2` y verifica ambos inventarios, ambos
+checkpoints y dos cortes PIT antes de la promoción atómica; los backups
+raw-only v1 siguen restaurando como antes. Sin Parquet, métricas,
+diagnósticos, `EvidenceSet`, cutover, limpieza de v1 ni promesa de reducción
+de RSS.
