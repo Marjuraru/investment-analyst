@@ -702,3 +702,27 @@ checkpoints y dos cortes PIT antes de la promoción atómica; los backups
 raw-only v1 siguen restaurando como antes. Sin Parquet, métricas,
 diagnósticos, `EvidenceSet`, cutover, limpieza de v1 ni promesa de reducción
 de RSS.
+
+## Métricas v2 y lineage horario compartido restaurable (`DATA-CHASSIS-30`)
+
+`DATA-CHASSIS-30` entrega la representación física verificable de métricas y
+lineage sobre las observaciones v2, sin activar rutas productivas: tablas
+`metric_results_v2` sin `document_json` con Decimal exacto como texto
+canónico, parámetros semánticos como JSON canónico y `computed_at` de la
+primera persistencia; links ordenados para inputs de observación y métrica;
+y `evidence_segments_v2`/`evidence_sets_v2` que reutilizan el contrato puro
+horario byte por byte con identidad de contenido. `save_metrics` recalcula
+el UUIDv8 semántico, valida inputs y dependencias en orden topológico con
+visibilidad por `available_at` y activo, conserva lotes previos si uno
+posterior falla y devuelve recibos created/reused; el rerun con distinto
+`computed_at` reutiliza la primera fila y el mismo ID con valor, orden,
+parámetros o dependencias distintos falla cerrado. Para lineage HOUR_1
+representable, la fila refiere un `EvidenceSet` persistido y compartido sin
+repetir sus 24/168/720 IDs; ventanas no representables o con disponibilidad
+conservadora tardía usan links explícitos. El backup con familia analítica
+emite `raw-v2-staging-backup-manifest-v3` y verifica métricas, DAG y lineage
+por páginas de máximo 256 IDs además del hash físico; los manifests v1
+raw-only y v2 con observaciones siguen legibles y restaurables sin
+reescritura. Sin `AnalysisSnapshot`, diagnósticos v2, checkpoints
+EMA/RSI/ATR/MACD, migración de 1,67 M de métricas, adopción productiva,
+Parquet, cutover ni promesa de reducción de RSS.

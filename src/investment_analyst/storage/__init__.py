@@ -8,7 +8,22 @@ from investment_analyst.storage.errors import (
     StorageError,
     StorageSchemaError,
 )
+from investment_analyst.storage.evidence_set_v2 import (
+    EVIDENCE_SEGMENT_V2_TABLE,
+    EVIDENCE_SET_V2_MEMBERS_TABLE,
+    EVIDENCE_SET_V2_TABLE,
+    EvidenceSetV2Error,
+    EvidenceSetV2Store,
+)
 from investment_analyst.storage.local import LocalStorage
+from investment_analyst.storage.metric_v2 import (
+    MAX_METRIC_V2_PAGE,
+    METRIC_V2_METRIC_LINKS_TABLE,
+    METRIC_V2_OBSERVATION_LINKS_TABLE,
+    METRIC_V2_TABLE,
+    MetricV2Error,
+    MetricV2Store,
+)
 from investment_analyst.storage.observation_v2 import (
     MAX_OBSERVATION_V2_PAGE,
     OBSERVATION_V2_TABLE,
@@ -36,9 +51,20 @@ __all__ = [
     "DuckDBSourceDefinitionRepository",
     "DuckDBStore",
     "DocumentContentStore",
+    "EVIDENCE_SEGMENT_V2_TABLE",
+    "EVIDENCE_SET_V2_MEMBERS_TABLE",
+    "EVIDENCE_SET_V2_TABLE",
+    "EvidenceSetV2Error",
+    "EvidenceSetV2Store",
     "JsonRawRecordRepository",
     "LocalStorage",
+    "MAX_METRIC_V2_PAGE",
     "MAX_OBSERVATION_V2_PAGE",
+    "METRIC_V2_METRIC_LINKS_TABLE",
+    "METRIC_V2_OBSERVATION_LINKS_TABLE",
+    "METRIC_V2_TABLE",
+    "MetricV2Error",
+    "MetricV2Store",
     "OBSERVATION_V2_TABLE",
     "ObservationV2Error",
     "ObservationV2Store",

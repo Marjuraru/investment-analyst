@@ -359,8 +359,15 @@ def test_evidence_identifiers_are_never_metric_identifiers() -> None:
     assert "metric_key" not in EvidenceSegment.model_fields
 
 
-def test_module_is_pure_and_has_no_production_importer() -> None:
-    """A9: the module is pure and no production module imports it."""
+def test_module_is_pure_and_only_staging_storage_imports_it() -> None:
+    """I2: the module stays pure and only staging storage imports the contract.
+
+    The pure hourly lineage representation is consumed as validated bytes by
+    the isolated v2 staging persistence (``storage/evidence_set_v2.py`` via
+    ``storage/raw_v2.py``). Any importer outside that staging boundary, or any
+    reverse import of storage/workspace/providers/engines into the pure module,
+    fails this guard.
+    """
     source = Path(evidence_set_module.__file__).read_text(encoding="utf-8")
     for forbidden in (
         "investment_analyst.storage",
@@ -391,9 +398,21 @@ def test_module_is_pure_and_has_no_production_importer() -> None:
     assert imported_modules == {"hashlib", "json"}
 
     root = Path(evidence_set_module.__file__).parents[1]
-    importers = [
-        path
+    repo_root = Path(evidence_set_module.__file__).parents[3]
+    allowed_importers = {
+        Path("src/investment_analyst/storage/evidence_set_v2.py"),
+        Path("src/investment_analyst/storage/raw_v2.py"),
+    }
+    importers = {
+        path.relative_to(repo_root)
         for path in sorted(root.rglob("*.py"))
-        if path.name != "evidence_set.py" and "evidence_set" in path.read_text(encoding="utf-8")
-    ]
-    assert importers == []
+        if path.name != "evidence_set.py"
+        and "from investment_analyst.analytics.evidence_set import"
+        in path.read_text(encoding="utf-8")
+    }
+    assert importers - allowed_importers == set(), (
+        f"Unexpected importers of the pure evidence contract: {sorted(importers)}"
+    )
+    assert allowed_importers <= importers, (
+        f"Staging storage must import the pure evidence contract: {sorted(importers)}"
+    )

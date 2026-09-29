@@ -86,3 +86,28 @@ def test_backup_rejects_external_or_memory_index(tmp_path: Path) -> None:
                 )
         finally:
             (staging.destination / f"{index_names[0]}.wal").unlink(missing_ok=True)
+
+
+def test_legacy_v1_v2_manifests_remain_readable(tmp_path: Path) -> None:
+    from investment_analyst.workspace.raw_v2_backup import (
+        RAW_V2_BACKUP_MANIFEST_SCHEMA_V2,
+        RawV2StagingBackupManifest,
+    )
+
+    staging = _staging(tmp_path)
+    with staging:
+        from tests.unit.storage.test_raw_v2 import _record
+
+        staging.save(_record())
+        manifest = RawV2StagingBackupService().create(
+            staging, staging._connection, tmp_path / "backup"
+        )
+    assert manifest.schema_version == "raw-v2-staging-backup-manifest-v1"
+    assert manifest.metric_counts is None
+    parsed = RawV2StagingBackupManifest.model_validate_json(
+        (tmp_path / "backup" / "raw-v2-staging-backup-manifest.json").read_text(encoding="utf-8")
+    )
+    assert parsed.schema_version == "raw-v2-staging-backup-manifest-v1"
+    assert parsed.metric_counts is None
+    assert parsed.observation_counts is None
+    assert RAW_V2_BACKUP_MANIFEST_SCHEMA_V2 == "raw-v2-staging-backup-manifest-v2"

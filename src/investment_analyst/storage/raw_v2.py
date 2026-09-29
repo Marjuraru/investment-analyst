@@ -26,13 +26,25 @@ from uuid import UUID, uuid4
 from duckdb import DuckDBPyConnection
 from pydantic import ValidationError
 
+from investment_analyst.analytics.evidence_set import EvidenceSegment, EvidenceSet
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
-from investment_analyst.core.models import NormalizedObservation, RawRecord
+from investment_analyst.core.models import MetricResult, NormalizedObservation, RawRecord
 from investment_analyst.core.models.base import ContractModel, UTCDateTime
 from investment_analyst.storage.errors import (
     RecordConflictError,
     RecordNotFoundError,
     StorageError,
+)
+from investment_analyst.storage.evidence_set_v2 import (
+    EvidenceSetV2Error,
+    EvidenceSetV2Store,
+    ensure_evidence_v2_tables,
+)
+from investment_analyst.storage.metric_v2 import (
+    MAX_METRIC_V2_PAGE,
+    MetricV2Error,
+    MetricV2Store,
+    ensure_metric_v2_tables,
 )
 from investment_analyst.storage.observation_v2 import (
     MAX_OBSERVATION_V2_PAGE,
@@ -190,6 +202,7 @@ class RawV2Staging:
             self._read_marker(marker_path)
             self._require_index_table(marker_path, create=False)
             ensure_observation_v2_table(self._connection, create=False)
+            self._ensure_optional_analytical_tables(create=False)
             self._is_open = True
             return self
         key = str(destination.absolute())
@@ -219,6 +232,7 @@ class RawV2Staging:
             self._write_marker(marker_path)
         self._require_index_table(marker_path, create=True)
         ensure_observation_v2_table(self._connection, create=True)
+        self._ensure_optional_analytical_tables(create=True)
         self._lock_path = destination / _STAGING_LOCK_FILENAME
         try:
             descriptor = os.open(str(self._lock_path), os.O_RDWR | os.O_CREAT, 0o644)
@@ -786,6 +800,168 @@ class RawV2Staging:
         if not rows or str(rows[0][0]) != observation.source.source_id:
             raise ObservationV2Error("observation v2 raw reference is missing or foreign")
         return observation
+
+    def save_metrics(self, results: Collection[MetricResult]) -> BatchWriteReceipt:
+        """Persist typed metric results with verified lineage under the writer lock."""
+        from investment_analyst.core.models import MetricResult as MetricResultModel
+
+        typed = tuple(results)
+        for result in typed:
+            if not isinstance(result, MetricResultModel):
+                raise MetricV2Error("metric v2 save requires MetricResult")
+        self._require_writable()
+        ensure_metric_v2_tables(self._connection, create=True)
+        ensure_observation_v2_table(self._connection, create=False)
+        receipt = MetricV2Store(self._connection).save_many(typed)
+        self._ensure_optional_analytical_tables(create=True)
+        return receipt
+
+    def get_metrics(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]:
+        """Hydrate verified typed metrics with resolved lineage in order."""
+        self._require_open()
+        ensure_metric_v2_tables(self._connection, create=False)
+        hydrated = MetricV2Store(self._connection).get_many(tuple(result_ids))
+        resolved: dict[UUID, MetricResult] = {}
+        for key, result in hydrated.items():
+            resolved[key] = self.resolve_metric_lineage(result)
+        return resolved
+
+    def resolve_metric_lineage(self, result: MetricResult) -> MetricResult:
+        """Verify inputs and shared evidence before returning one metric."""
+        from investment_analyst.storage.metric_v2 import require_metric_inputs_visible
+
+        self._require_open()
+        ensure_metric_v2_tables(self._connection, create=False)
+        require_metric_inputs_visible(self._connection, result)
+        reference = result.parameters.get("evidence_set_id")
+        if reference is not None:
+            ensure_evidence_v2_tables(self._connection, create=False)
+            stored = EvidenceSetV2Store(self._connection).get_set(UUID(str(reference)))
+            ordered = EvidenceSetV2Store(self._connection).verify_set_lineage(stored)
+            ordered_text = [str(item) for item in ordered]
+            input_text = [str(item) for item in result.input_observation_ids]
+            if ordered_text != input_text and (
+                set(ordered_text) != set(input_text) or len(ordered_text) != len(input_text)
+            ):
+                raise MetricV2Error("metric v2 evidence lineage does not match its inputs")
+            if stored.available_at > result.available_at:
+                raise MetricV2Error("metric v2 evidence is not visible at the result")
+        return result
+
+    def list_metric_inventory_page(
+        self,
+        *,
+        limit: int,
+        after_available_at: datetime | None = None,
+        after_result_id: UUID | None = None,
+    ) -> list[UUID]:
+        """Return one bounded keyset page of metric IDs without hydration."""
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise MetricV2Error("metric inventory page limit must be an integer")
+        if limit < 1 or limit > MAX_METRIC_V2_PAGE:
+            raise MetricV2Error("metric inventory page limit must be between 1 and 256")
+        if (after_available_at is None) != (after_result_id is None):
+            raise MetricV2Error("metric inventory cursor requires both fields together")
+        self._require_open()
+        ensure_metric_v2_tables(self._connection, create=False)
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if after_available_at is not None and after_result_id is not None:
+            if after_available_at.tzinfo is None or after_available_at.utcoffset() is None:
+                raise MetricV2Error("metric cursor available_at must be timezone-aware")
+            clauses.append("(available_at, result_id) > (?, ?)")
+            parameters.extend([_instant_text(after_available_at), str(after_result_id)])
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._connection.execute(
+            "SELECT result_id FROM metric_results_v2"
+            f"{where} ORDER BY available_at, result_id LIMIT ?",
+            [*parameters, limit],
+        ).fetchall()
+        return [UUID(row[0]) for row in rows]
+
+    def list_metrics(
+        self,
+        *,
+        asset_id: str | None = None,
+        metric_key: str | None = None,
+        as_of: datetime | None = None,
+        available_to: datetime | None = None,
+    ) -> list[MetricResult]:
+        """Hydrate typed PIT metrics in stable order with lineage verification."""
+        self._require_open()
+        ensure_metric_v2_tables(self._connection, create=False)
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if asset_id is not None:
+            clauses.append("asset_id = ?")
+            parameters.append(asset_id)
+        if metric_key is not None:
+            clauses.append("metric_key = ?")
+            parameters.append(metric_key)
+        if as_of is not None:
+            clauses.append("as_of <= ?")
+            parameters.append(_instant_text(as_of))
+        if available_to is not None:
+            clauses.append("available_at <= ?")
+            parameters.append(_instant_text(available_to))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._connection.execute(
+            f"SELECT result_id FROM metric_results_v2{where} ORDER BY available_at, result_id",
+            parameters,
+        ).fetchall()
+        ordered = [UUID(row[0]) for row in rows]
+        return [self.get_metrics([result_id])[result_id] for result_id in ordered]
+
+    def save_evidence_segments(self, segments: Collection[EvidenceSegment]) -> int:
+        """Persist shared hourly segments idempotently under the writer lock."""
+        from investment_analyst.analytics.evidence_set import EvidenceSegment as SegmentModel
+
+        typed = tuple(segments)
+        for segment in typed:
+            if not isinstance(segment, SegmentModel):
+                raise EvidenceSetV2Error("evidence v2 save requires EvidenceSegment")
+        self._require_writable()
+        ensure_evidence_v2_tables(self._connection, create=True)
+        created = EvidenceSetV2Store(self._connection).save_segments(typed)
+        self._ensure_optional_analytical_tables(create=True)
+        return created
+
+    def save_evidence_set(self, evidence_set: EvidenceSet) -> bool:
+        """Persist one shared set after verifying its lineage against observations."""
+        from investment_analyst.analytics.evidence_set import EvidenceSet as SetModel
+
+        if not isinstance(evidence_set, SetModel):
+            raise EvidenceSetV2Error("evidence v2 save requires EvidenceSet")
+        self._require_writable()
+        ensure_evidence_v2_tables(self._connection, create=True)
+        ensure_observation_v2_table(self._connection, create=False)
+        created = EvidenceSetV2Store(self._connection).save_set(evidence_set)
+        self._ensure_optional_analytical_tables(create=True)
+        return created
+
+    def get_evidence_set(self, evidence_set_id: UUID) -> EvidenceSet:
+        """Hydrate and verify one shared set with every observation."""
+        self._require_open()
+        ensure_evidence_v2_tables(self._connection, create=False)
+        return EvidenceSetV2Store(self._connection).get_set(evidence_set_id)
+
+    def _ensure_optional_analytical_tables(self, *, create: bool) -> None:
+        """Require metric/evidence tables only when the staging already has them."""
+        from investment_analyst.storage.evidence_set_v2 import evidence_v2_tables_exist
+        from investment_analyst.storage.metric_v2 import metric_v2_table_exists
+
+        has_metrics = metric_v2_table_exists(self._connection)
+        has_evidence = evidence_v2_tables_exist(self._connection)
+        if create:
+            if has_metrics:
+                ensure_metric_v2_tables(self._connection, create=True)
+            if has_evidence:
+                ensure_evidence_v2_tables(self._connection, create=True)
+            return
+        if has_metrics:
+            ensure_metric_v2_tables(self._connection, create=False)
+        if has_evidence:
+            ensure_evidence_v2_tables(self._connection, create=False)
 
     def _marker_matches(self, marker_path: Path) -> bool:
         try:
