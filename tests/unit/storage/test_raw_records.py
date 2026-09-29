@@ -450,6 +450,149 @@ def test_select_13f_ids_before_hydration(tmp_path: Path) -> None:
             )
 
 
+def test_semantics_manager_selector_is_pit_and_parameterized(tmp_path: Path) -> None:
+    from investment_analyst.evidence.sec_institutional_holdings.repository import (
+        InstitutionalHoldingsRepository,
+    )
+    from investment_analyst.evidence.sec_institutional_semantics.repository import (
+        InstitutionalSemanticsRepository,
+        semantics_to_raw_record,
+    )
+    from investment_analyst.evidence.sec_institutional_semantics.service import (
+        InstitutionalHoldingsSemanticsService,
+        InstitutionalSemanticsEnrichRequest,
+    )
+    from investment_analyst.providers.fundamentals.sec_document_client import (
+        SecAccessionManifest,
+        SecPrimaryDocumentResponse,
+    )
+    from investment_analyst.providers.institutional_holdings import (
+        sec_institutional_holdings_pipeline,
+    )
+
+    class _Submissions:
+        def fetch(self, filer_cik: str):
+            from uuid import uuid4
+
+            from investment_analyst.core.models import RawRecord, SourceReference
+
+            accepted = datetime(2025, 2, 14, 18, tzinfo=UTC)
+            return RawRecord(
+                record_id=uuid4(),
+                asset_id=None,
+                source=SourceReference(
+                    source_id=f"sec-edgar:manager:{filer_cik}:submissions",
+                    retrieved_at=accepted,
+                ),
+                event_time=accepted,
+                available_at=accepted,
+                received_at=accepted,
+                payload={
+                    "document": {
+                        "cik": filer_cik,
+                        "name": "Manager LLC",
+                        "filings": {
+                            "recent": {
+                                "accessionNumber": ["0000950123-25-000001"],
+                                "filingDate": ["2025-02-14"],
+                                "reportDate": ["2024-12-31"],
+                                "acceptanceDateTime": ["2025-02-14T18:00:00Z"],
+                                "form": ["13F-HR"],
+                                "primaryDocument": ["primary_doc.xml"],
+                            }
+                        },
+                    }
+                },
+                schema_version="sec-manager-submissions-snapshot-v1",
+            )
+
+    class _Documents:
+        retrieved_at = datetime(2025, 2, 15, tzinfo=UTC)
+
+        def fetch_manifest(self, document: object) -> SecAccessionManifest:
+            del document
+            return SecAccessionManifest(
+                entries=("primary_doc.xml", "infotable.xml"),
+                sha256="c" * 64,
+                size_bytes=10,
+                url="https://www.sec.gov/Archives/index.json",
+                retrieved_at=self.retrieved_at,
+            )
+
+        def fetch(self, document: object) -> SecPrimaryDocumentResponse:
+            content = (
+                b"<edgarSubmission><submissionType>13F-HR</submissionType>"
+                b"<filingManager><name>Manager LLC</name></filingManager>"
+                b"<reportCalendarOrQuarter>12-31-2024</reportCalendarOrQuarter>"
+                b"<tableEntryTotal>1</tableEntryTotal><tableValueTotal>100</tableValueTotal>"
+                b"</edgarSubmission>"
+                if document.name == "primary_doc.xml"
+                else b"<informationTable><infoTable><nameOfIssuer>APPLE INC</nameOfIssuer>"
+                b"<titleOfClass>COM</titleOfClass><cusip>037833100</cusip><value>100</value>"
+                b"<shrsOrPrnAmt><sshPrnamt>10</sshPrnamt><sshPrnamtType>SH</sshPrnamtType>"
+                b"</shrsOrPrnAmt></infoTable></informationTable>"
+            )
+            return SecPrimaryDocumentResponse(
+                content=content,
+                sha256=__import__("hashlib").sha256(content).hexdigest(),
+                size_bytes=len(content),
+                url=f"https://www.sec.gov/Archives/{document.name}",
+                retrieved_at=self.retrieved_at,
+            )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        holdings = InstitutionalHoldingsRepository(storage.raw_records)
+        for filer_cik in ("1067983", "0001234567"):
+            sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipeline(
+                storage, _Submissions(), _Documents()
+            ).run(
+                sec_institutional_holdings_pipeline.SecInstitutionalHoldingsImportRequest(
+                    filer_cik=filer_cik, forms=("13F-HR",)
+                )
+            )
+        known_at = datetime(2025, 2, 16, tzinfo=UTC)
+        service = InstitutionalHoldingsSemanticsService(storage, clock=lambda: known_at)
+        for filer_cik in ("1067983", "0001234567"):
+            reports = holdings.list_reports(
+                manager_cik="0001067983" if filer_cik == "1067983" else "0001234567",
+                known_at=known_at,
+            )
+            assert reports
+            service.enrich(
+                InstitutionalSemanticsEnrichRequest(
+                    manager_cik="0001067983" if filer_cik == "1067983" else "0001234567",
+                    report_ids=tuple(report.report_id for report in reports),
+                    known_at=known_at,
+                )
+            )
+        semantics = InstitutionalSemanticsRepository(storage.raw_records)
+        target_reports = holdings.list_reports(manager_cik="0001067983", known_at=known_at)
+        target_record_ids = {
+            semantics_to_raw_record(semantics.get_for_parent(report)).record_id
+            for report in target_reports
+        }
+        selected = storage.raw_records.select_record_ids_by_json_field(
+            field="semantics_manager",
+            values=("0001067983",),
+            source_id="sec-edgar:institutional-holdings-semantics",
+            schema_version="sec-institutional-holdings-semantics-v2",
+            available_to=known_at,
+        )
+        assert set(selected) == target_record_ids
+        before_cut = storage.raw_records.select_record_ids_by_json_field(
+            field="semantics_manager",
+            values=("0001067983",),
+            source_id="sec-edgar:institutional-holdings-semantics",
+            schema_version="sec-institutional-holdings-semantics-v2",
+            available_to=datetime(2025, 2, 14, 17, tzinfo=UTC),
+        )
+        assert before_cut == []
+        with pytest.raises(StorageError, match="not supported"):
+            storage.raw_records.select_record_ids_by_json_field(
+                field="payload.artifact.manager_cik", values=("0001067983",)
+            )
+
+
 def test_raw_import_pages_use_stable_keyset_without_full_list(
     storage, monkeypatch: pytest.MonkeyPatch
 ) -> None:

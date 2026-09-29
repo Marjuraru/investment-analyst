@@ -453,6 +453,37 @@ class DuckDBObservationRepository:
             parameters.append(_normalize_period_bound(period_end_to, is_end_of_day=True))
         return clauses, parameters
 
+    def list_ids_for_manager_observation_references(
+        self,
+        *,
+        asset_id: str,
+        available_to: datetime | None = None,
+    ) -> list[UUID]:
+        """Return candidate institutional observation IDs before model hydration.
+
+        Selection pushes the asset, source and PIT cut into SQL. The closed-set
+        manager identity is verified per declaration by the caller after reading
+        each lineage key, so foreign-manager documents are never parsed.
+        """
+        from investment_analyst.evidence.sec_institutional_observations.definitions import (
+            SOURCE_ID as _INSTITUTIONAL_OBSERVATION_SOURCE_ID,
+        )
+
+        clauses: list[str] = ["asset_id = ?"]
+        parameters: list[object] = [asset_id]
+        clauses.append("json_extract_string(document_json, '$.source.source_id') = ?")
+        parameters.append(_INSTITUTIONAL_OBSERVATION_SOURCE_ID)
+        if available_to is not None:
+            clauses.append("available_at <= ?")
+            parameters.append(available_to)
+        where = f" WHERE {' AND '.join(clauses)}"
+        rows = self._connection.execute(
+            "SELECT observation_id FROM normalized_observations"
+            f"{where} ORDER BY available_at, observation_id",
+            parameters,
+        ).fetchall()
+        return [UUID(row[0]) for row in rows]
+
     def list(
         self,
         *,

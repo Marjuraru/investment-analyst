@@ -18,9 +18,20 @@ from investment_analyst.analytics.cazatiburones.institutional_event_models impor
 from investment_analyst.analytics.cazatiburones.institutional_event_repository import (
     InstitutionalEventRepository,
 )
+from investment_analyst.analytics.cazatiburones.institutional_metric_definitions import (
+    ALGORITHM_VERSION as INSTITUTIONAL_METRIC_ALGORITHM_VERSION,
+)
+from investment_analyst.analytics.cazatiburones.institutional_metric_definitions import (
+    INSTITUTIONAL_METRIC_DEFINITIONS,
+)
 from investment_analyst.core.models.metric import MetricResult
 from investment_analyst.evidence.sec_documents.models import normalize_cik
 from investment_analyst.storage import LocalStorage, StorageError
+
+_INSTITUTIONAL_METRIC_KEYS = tuple(
+    definition.metric_key for definition in INSTITUTIONAL_METRIC_DEFINITIONS
+)
+_EVENT_METRIC_BATCH_SIZE = 512
 
 
 class InstitutionalEventService:
@@ -50,24 +61,9 @@ class InstitutionalEventService:
         normalized_mgr = normalize_cik(manager_cik)
         recorded_at = self._clock()
 
-        # Load metrics for asset_id and filter by algorithm_version, manager_cik,
-        # and PIT (available_at <= known_at)
-        all_metrics: list[MetricResult] = self._storage.metric_results.list(asset_id=asset_id)
-        filtered_metrics: list[MetricResult] = []
-        for item in all_metrics:
-            if item.algorithm_version != "cazatiburones-institutional-metrics-v1":
-                continue
-            item_mgr = item.parameters.get("manager_cik")
-            if item_mgr is None:
-                continue
-            try:
-                if normalize_cik(str(item_mgr)) != normalized_mgr:
-                    continue
-            except ValueError:
-                if str(item_mgr) != normalized_mgr:
-                    continue
-            if item.available_at <= known_at:
-                filtered_metrics.append(item)
+        filtered_metrics = self._select_family_metrics(
+            asset_id=asset_id, known_at=known_at, manager_cik=normalized_mgr
+        )
 
         evaluations, events, candidates = project_institutional_events(filtered_metrics)
 
@@ -107,6 +103,65 @@ class InstitutionalEventService:
             events=len(events),
             candidates=len(candidates),
         )
+
+    def _select_family_metrics(
+        self, *, asset_id: str, known_at: datetime, manager_cik: str
+    ) -> list[MetricResult]:
+        """Select the versioned metric family before hydrating any document.
+
+        The closed-set ``metric_keys`` projection, asset and PIT cut are pushed
+        into storage as ID selection; each selected candidate is then validated
+        for version, manager and cut before parsing its document into a model,
+        so market metrics are never hydrated.
+        """
+        from investment_analyst.storage.errors import RecordNotFoundError
+
+        clauses: list[str] = ["asset_id = ?"]
+        parameters: list[object] = [asset_id]
+        placeholders = ", ".join("?" for _ in _INSTITUTIONAL_METRIC_KEYS)
+        clauses.append(f"metric_key IN ({placeholders})")
+        parameters.extend(_INSTITUTIONAL_METRIC_KEYS)
+        clauses.append("available_at <= ?")
+        parameters.append(known_at)
+        rows = self._storage.metric_results._connection.execute(
+            "SELECT result_id FROM metric_results"
+            f" WHERE {' AND '.join(clauses)} ORDER BY available_at, result_id",
+            parameters,
+        ).fetchall()
+        candidate_ids = [UUID(row[0]) for row in rows]
+        filtered: list[MetricResult] = []
+        for offset in range(0, len(candidate_ids), _EVENT_METRIC_BATCH_SIZE):
+            batch_ids = candidate_ids[offset : offset + _EVENT_METRIC_BATCH_SIZE]
+            placeholders = ", ".join("?" for _ in batch_ids)
+            selected = self._storage.metric_results._connection.execute(
+                f"SELECT result_id FROM metric_results WHERE result_id IN ({placeholders})",
+                [str(result_id) for result_id in batch_ids],
+            ).fetchall()
+            indexed = {UUID(row[0]) for row in selected}
+            missing = [result_id for result_id in batch_ids if result_id not in indexed]
+            if missing:
+                raise StorageError("selected institutional metric is absent")
+            for result_id in batch_ids:
+                try:
+                    item = self._storage.metric_results.get(result_id)
+                except RecordNotFoundError as error:
+                    raise StorageError("selected institutional metric is absent") from error
+                if item.algorithm_version != INSTITUTIONAL_METRIC_ALGORITHM_VERSION:
+                    continue
+                item_mgr = item.parameters.get("manager_cik")
+                if item_mgr is None:
+                    continue
+                try:
+                    matches = normalize_cik(str(item_mgr)) == manager_cik
+                except ValueError:
+                    matches = str(item_mgr) == manager_cik
+                if not matches:
+                    continue
+                if item.available_at > known_at:
+                    continue
+                filtered.append(item)
+        filtered.sort(key=lambda item: (item.available_at, item.result_id))
+        return filtered
 
     def query(
         self,

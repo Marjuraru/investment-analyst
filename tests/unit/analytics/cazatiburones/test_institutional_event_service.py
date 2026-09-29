@@ -143,3 +143,54 @@ def test_service_filters_by_algorithm_manager_and_pit(tmp_path: Path) -> None:
 
         assert summary.events == 1
         assert summary.created is True
+
+
+def test_unrelated_market_metrics_are_not_hydrated(tmp_path: Path) -> None:
+    from decimal import Decimal
+    from uuid import uuid4
+
+    from investment_analyst.core.models.enums import DataQuality
+    from investment_analyst.core.models.metric import MetricResult
+
+    paths = StoragePaths.from_root(tmp_path)
+    known_at = datetime(2025, 1, 1, tzinfo=UTC)
+    eligible = _metric(available_at=datetime(2024, 11, 14, tzinfo=UTC))
+    market_metrics = [
+        MetricResult(
+            result_id=uuid4(),
+            asset_id="equity:us:aapl",
+            metric_key="market.close_copy",
+            value=Decimal("210.50"),
+            unit="USD",
+            as_of=datetime(2024, 11, 14, tzinfo=UTC),
+            available_at=datetime(2024, 11, 14, tzinfo=UTC),
+            computed_at=datetime(2024, 11, 14, tzinfo=UTC),
+            parameters={"window": 1},
+            input_observation_ids=[uuid4()],
+            algorithm_version="1.0.0",
+            quality=DataQuality.VALID,
+        )
+        for _ in range(3)
+    ]
+
+    with LocalStorage(paths, read_only=False) as storage:
+        storage.metric_results.save(eligible)
+        for metric in market_metrics:
+            storage.metric_results.save(metric)
+        hydrated: list[object] = []
+        original_get = storage.metric_results.get
+
+        def spy_get(result_id):  # type: ignore[no-untyped-def]
+            hydrated.append(result_id)
+            return original_get(result_id)
+
+        storage.metric_results.get = spy_get  # type: ignore[method-assign]
+        service = InstitutionalEventService(storage, clock=lambda: known_at)
+        summary = service.materialize(
+            asset_id=eligible.asset_id,
+            manager_cik="0001350694",
+            known_at=known_at,
+        )
+
+    assert summary.events == 1
+    assert set(hydrated) == {eligible.result_id}

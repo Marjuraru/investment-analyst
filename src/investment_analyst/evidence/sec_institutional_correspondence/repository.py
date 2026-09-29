@@ -8,6 +8,7 @@ from datetime import datetime
 from uuid import UUID
 
 from investment_analyst.core.models import RawRecord, SourceReference
+from investment_analyst.evidence.sec_documents.models import normalize_cik
 from investment_analyst.evidence.sec_institutional_correspondence.models import (
     ROW_CORRESPONDENCE_SCHEMA_VERSION,
     ROW_CORRESPONDENCE_SOURCE_ID,
@@ -15,6 +16,8 @@ from investment_analyst.evidence.sec_institutional_correspondence.models import 
     same_evidence,
 )
 from investment_analyst.storage import RecordNotFoundError, StorageError
+
+_ROW_CLAIM_SELECTION_BATCH_SIZE = 512
 
 
 class SecInstitutionalRowCorrespondenceRepositoryError(StorageError):
@@ -116,9 +119,30 @@ class SecInstitutionalRowCorrespondenceRepository:
         known_at: datetime,
         asset_id: str | None = None,
         artifact_id: UUID | None = None,
+        manager_cik: str | None = None,
         row_id: UUID | None = None,
     ) -> list[SecInstitutionalRowCorrespondence]:
         """Load claims available at one cut, then filter and order them deterministically."""
+        if artifact_id is not None:
+            manager = normalize_cik(manager_cik) if manager_cik is not None else None
+            selected_ids = self._raw_records.select_record_ids_by_json_field(
+                field="correspondence_artifact",
+                values=(str(artifact_id),),
+                source_id=ROW_CORRESPONDENCE_SOURCE_ID,
+                schema_version=ROW_CORRESPONDENCE_SCHEMA_VERSION,
+                available_to=known_at,
+            )
+            ordered = self._hydrate_selected_in_order(selected_ids)
+            return sorted(
+                (
+                    claim
+                    for claim in (row_correspondence_from_raw_record(record) for record in ordered)
+                    if (asset_id is None or claim.asset_id == asset_id)
+                    and (manager is None or claim.manager_cik == manager)
+                    and (row_id is None or claim.row_id == row_id)
+                ),
+                key=lambda item: (item.available_at, str(item.correspondence_id)),
+            )
         claims = (
             row_correspondence_from_raw_record(record)
             for record in self._raw_records.list(
@@ -132,11 +156,69 @@ class SecInstitutionalRowCorrespondenceRepository:
             (
                 item
                 for item in claims
-                if (artifact_id is None or item.artifact_id == artifact_id)
+                if (manager_cik is None or item.manager_cik == normalize_cik(manager_cik))
                 and (row_id is None or item.row_id == row_id)
             ),
             key=lambda item: (item.available_at, str(item.correspondence_id)),
         )
+
+    def selected_claim_ids_for_candidate(
+        self, *, known_at: datetime, claim_ids: tuple[UUID, ...]
+    ) -> set[UUID]:
+        """Confirm exactly the declared claim IDs remain visible at one cut.
+
+        Selection by closed-set identity precedes hydration: only the declared
+        candidates are read and validated, never the asset history.
+        """
+        ordered_ids = tuple(dict.fromkeys(claim_ids))
+        if not ordered_ids:
+            return set()
+        expected_raw_ids = tuple(
+            SecInstitutionalRowCorrespondence.expected_raw_record_id(correspondence_id)
+            for correspondence_id in ordered_ids
+        )
+        try:
+            records_by_id = self._raw_records.get_many(expected_raw_ids)
+        except RecordNotFoundError as error:
+            raise SecInstitutionalRowCorrespondenceRepositoryError(
+                "selected row correspondence claim is absent"
+            ) from error
+        visible: set[UUID] = set()
+        for correspondence_id, raw_record_id in zip(ordered_ids, expected_raw_ids, strict=True):
+            try:
+                record = records_by_id[raw_record_id]
+            except KeyError as error:
+                raise SecInstitutionalRowCorrespondenceRepositoryError(
+                    "selected row correspondence claim is absent"
+                ) from error
+            if record.available_at > known_at:
+                continue
+            claim = row_correspondence_from_raw_record(record)
+            if claim.correspondence_id != correspondence_id:
+                raise SecInstitutionalRowCorrespondenceRepositoryError(
+                    "selected row correspondence claim conflicts"
+                )
+            visible.add(claim.correspondence_id)
+        return visible
+
+    def _hydrate_selected_in_order(self, record_ids: list[UUID]) -> list[RawRecord]:
+        ordered: list[RawRecord] = []
+        for offset in range(0, len(record_ids), _ROW_CLAIM_SELECTION_BATCH_SIZE):
+            batch_ids = record_ids[offset : offset + _ROW_CLAIM_SELECTION_BATCH_SIZE]
+            try:
+                records_by_id = self._raw_records.get_many(batch_ids)
+            except RecordNotFoundError as error:
+                raise SecInstitutionalRowCorrespondenceRepositoryError(
+                    "selected row correspondence claim is absent"
+                ) from error
+            for record_id in batch_ids:
+                try:
+                    ordered.append(records_by_id[record_id])
+                except KeyError as error:
+                    raise SecInstitutionalRowCorrespondenceRepositoryError(
+                        "selected row correspondence claim is absent"
+                    ) from error
+        return ordered
 
 
 def verify_sec_institutional_row_correspondence_records(

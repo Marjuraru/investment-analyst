@@ -2,6 +2,7 @@
 
 import json
 from collections import Counter
+from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
@@ -32,6 +33,8 @@ from .models import (
     InstitutionalObservationView,
 )
 from .normalizer import normalize_row
+
+_OBSERVATION_SELECTION_BATCH_SIZE = 512
 
 _RECORD_KEY_FIELDS = frozenset(
     {
@@ -98,7 +101,11 @@ class InstitutionalObservationService:
                 skips["not_enriched"] += 1
                 continue
             claims_by_row: dict[UUID, list] = {}
-            for claim in row_claims.list(known_at=request.known_at, artifact_id=item.artifact_id):
+            for claim in row_claims.list(
+                known_at=request.known_at,
+                artifact_id=item.artifact_id,
+                manager_cik=item.manager_cik,
+            ):
                 claims_by_row.setdefault(claim.row_id, []).append(claim)
             for row in item.rows:
                 rows += 1
@@ -170,6 +177,98 @@ class InstitutionalObservationService:
             observations_reused=reused,
             skipped_by_reason=dict(skips),
         )
+
+    def list_for_manager(
+        self,
+        *,
+        asset_id: str,
+        manager_cik: str,
+        known_at: datetime,
+        field_name: str | None = None,
+    ) -> tuple[object, ...]:
+        """Return exactly the manager's observations at one cut before hydrating models.
+
+        Identity selection by the closed-set ``manager_cik`` precedes hydration:
+        only candidates of this manager are parsed into models.
+        """
+        from investment_analyst.evidence.sec_documents.models import normalize_cik
+
+        manager = normalize_cik(manager_cik)
+        candidate_ids = self._storage.observations.list_ids_for_manager_observation_references(
+            asset_id=asset_id, available_to=known_at
+        )
+        selected_ids = self._select_manager_observation_ids(candidate_ids, manager=manager)
+        if field_name is not None:
+            selected_ids = [
+                observation_id
+                for observation_id in selected_ids
+                if self._observation_field_name(observation_id) == field_name
+            ]
+        return tuple(self.observation_ids_for_references(selected_ids).values())
+
+    def _observation_field_name(self, observation_id: UUID) -> str | None:
+        row = self._storage.observations._connection.execute(
+            "SELECT field_name FROM normalized_observations WHERE observation_id = ?",
+            [str(observation_id)],
+        ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def _select_manager_observation_ids(
+        self, candidate_ids: list[UUID], *, manager: str
+    ) -> list[UUID]:
+        """Select candidate IDs whose persisted lineage declares exactly this manager."""
+        selected: list[UUID] = []
+        for offset in range(0, len(candidate_ids), _OBSERVATION_SELECTION_BATCH_SIZE):
+            batch_ids = candidate_ids[offset : offset + _OBSERVATION_SELECTION_BATCH_SIZE]
+            placeholders = ", ".join("?" for _ in batch_ids)
+            rows = self._storage.observations._connection.execute(
+                "SELECT observation_id, json_extract_string("
+                "json_extract_string(document_json, '$.source.record_key'), "
+                "'$.manager_cik') FROM normalized_observations "
+                f"WHERE observation_id IN ({placeholders})",
+                [str(observation_id) for observation_id in batch_ids],
+            ).fetchall()
+            indexed = {UUID(row[0]): row[1] for row in rows}
+            missing = [
+                observation_id for observation_id in batch_ids if observation_id not in indexed
+            ]
+            if missing:
+                raise InstitutionalObservationLineageError(
+                    "selected institutional observation is absent"
+                )
+            for observation_id in batch_ids:
+                if indexed[observation_id] != manager:
+                    continue
+                selected.append(observation_id)
+        return selected
+
+    def observation_ids_for_references(
+        self,
+        observation_ids: Collection[UUID],
+    ) -> dict[UUID, object]:
+        """Hydrate exactly the declared observation references without scanning history."""
+        ordered_ids = tuple(dict.fromkeys(observation_ids))
+        if not ordered_ids:
+            return {}
+        from investment_analyst.storage.errors import RecordNotFoundError
+
+        resolved: dict[UUID, object] = {}
+        for offset in range(0, len(ordered_ids), _OBSERVATION_SELECTION_BATCH_SIZE):
+            batch_ids = ordered_ids[offset : offset + _OBSERVATION_SELECTION_BATCH_SIZE]
+            try:
+                records = self._storage.observations.get_many(batch_ids)
+            except RecordNotFoundError as error:
+                raise InstitutionalObservationLineageError(
+                    "selected institutional observation is absent"
+                ) from error
+            for observation_id in batch_ids:
+                try:
+                    resolved[observation_id] = records[observation_id]
+                except KeyError as error:
+                    raise InstitutionalObservationLineageError(
+                        "selected institutional observation is absent"
+                    ) from error
+        return resolved
 
     def query(self, query: InstitutionalObservationQuery) -> InstitutionalObservationQueryResult:
         if not self._storage.read_only:

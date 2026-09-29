@@ -21,11 +21,15 @@ from investment_analyst.analytics.cazatiburones.institutional_metric_models impo
 )
 from investment_analyst.core.models.metric import MetricResult
 from investment_analyst.evidence.sec_documents.models import normalize_cik
-from investment_analyst.evidence.sec_institutional_observations.definitions import SOURCE_ID
+from investment_analyst.evidence.sec_institutional_observations.service import (
+    InstitutionalObservationService,
+)
 from investment_analyst.evidence.sec_institutional_semantics.artifact_reader import (
     InstitutionalSemanticsArtifactReader,
 )
 from investment_analyst.storage import RecordNotFoundError, StorageError
+
+_OBSERVATION_REFERENCE_BATCH_SIZE = 512
 
 
 class InstitutionalMetricPipeline:
@@ -41,14 +45,18 @@ class InstitutionalMetricPipeline:
         computed_at = self._clock().astimezone(UTC)
         for definition in INSTITUTIONAL_METRIC_DEFINITIONS:
             self._storage.metric_definitions.upsert(definition)
-        artifacts = InstitutionalSemanticsArtifactReader(self._storage.raw_records).list_visible(
-            known_at=known_at
-        )
+        artifacts = InstitutionalSemanticsArtifactReader(
+            self._storage.raw_records
+        ).list_for_manager(manager_cik=manager, known_at=known_at)
         periods = candidates_by_period(artifacts, manager_cik=manager)
+        observations_service = InstitutionalObservationService(self._storage)
+        references = observations_service.list_for_manager(
+            asset_id=asset_id, manager_cik=manager, known_at=known_at
+        )
         observations = tuple(
-            self._storage.observations.list(
-                asset_id=asset_id, source_id=SOURCE_ID, available_to=known_at
-            )
+            observations_service.observation_ids_for_references(
+                tuple(item.observation_id for item in references)
+            ).values()
         )
         by_artifact = {}
         for observation in observations:

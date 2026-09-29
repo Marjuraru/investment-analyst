@@ -41,15 +41,11 @@ from investment_analyst.evidence.sec_institutional_correspondence.service import
 from investment_analyst.evidence.sec_institutional_holdings.repository import (
     InstitutionalHoldingsRepository,
 )
-from investment_analyst.evidence.sec_institutional_observations.definitions import (
-    SOURCE_ID as OBSERVATION_SOURCE_ID,
-)
 from investment_analyst.evidence.sec_institutional_observations.models import (
     InstitutionalObservationRequest,
 )
 from investment_analyst.evidence.sec_institutional_observations.service import (
     InstitutionalObservationService,
-    observation_lineage_key,
 )
 from investment_analyst.evidence.sec_institutional_semantics.repository import (
     InstitutionalSemanticsRepository,
@@ -501,28 +497,35 @@ def _verify_traceability(
     known_at: datetime,
 ) -> bool:
     """Re-read the persisted claims and observations and confirm every proof is still visible."""
+    from investment_analyst.evidence.sec_institutional_observations.definitions import (
+        SOURCE_ID as _OBSERVATION_SOURCE_ID,
+    )
+    from investment_analyst.evidence.sec_institutional_observations.service import (
+        observation_lineage_key,
+    )
+
     observed: dict[str, set[str]] = {}
     for candidate in candidates:
         if candidate.state == "failed" or candidate.claims_ambiguous:
             return False
-        persisted = {
-            str(claim.correspondence_id)
-            for claim in repository.list(known_at=known_at, asset_id=candidate.asset_id)
-            if claim.manager_cik == candidate.manager_cik
-            and claim.report_period == candidate.report_period
-        }
-        if not set(map(str, candidate.claim_ids)).issubset(persisted):
+        candidate_claim_ids = set(map(str, candidate.claim_ids))
+        persisted_ids = repository.selected_claim_ids_for_candidate(
+            known_at=known_at,
+            claim_ids=tuple(candidate.claim_ids),
+        )
+        if not candidate_claim_ids.issubset({str(value) for value in persisted_ids}):
             return False
         key = f"{candidate.asset_id}|{candidate.manager_cik}"
         if key not in observed:
+            candidate_ids = storage.observations.list_ids_for_manager_observation_references(
+                asset_id=candidate.asset_id,
+                available_to=known_at,
+            )
             observed[key] = {
                 str(observation_lineage_key(item)["correspondence_id"])
-                for item in storage.observations.list(
-                    asset_id=candidate.asset_id,
-                    source_id=OBSERVATION_SOURCE_ID,
-                    available_to=known_at,
-                )
+                for item in storage.observations.get_many(candidate_ids).values()
                 if observation_lineage_key(item)["manager_cik"] == candidate.manager_cik
+                and item.source.source_id == _OBSERVATION_SOURCE_ID
             }
         if not set(map(str, candidate.claim_ids)).issubset(observed[key]):
             return False
