@@ -295,3 +295,224 @@ def test_observation_restore_rejects_corrupt_index_or_checkpoint(tmp_path: Path)
     with pytest.raises(RawV2BackupError, match="truncated|incompatible"):
         service.restore(tmp_path / "backup", tmp_path / "restored-truncated")
     assert not (tmp_path / "restored-truncated").exists()
+
+
+def test_metric_backup_restore_v3_preserves_pit_and_lineage(tmp_path: Path) -> None:
+    from datetime import timedelta
+    from decimal import Decimal
+    from uuid import uuid4
+
+    from investment_analyst.analytics.evidence_set import (
+        build_evidence_segments as _segments,
+    )
+    from investment_analyst.analytics.evidence_set import (
+        build_evidence_set as _build_set,
+    )
+    from investment_analyst.analytics.metric_identity_v2 import (
+        metric_result_id_from_model_v2 as _metric_id,
+    )
+    from investment_analyst.core.models import (
+        DataFrequency as _MetricFrequency,
+    )
+    from investment_analyst.core.models import (
+        DataQuality as _MetricQuality,
+    )
+    from investment_analyst.core.models import (
+        MetricResult as _Metric,
+    )
+    from investment_analyst.core.models import (
+        NormalizedObservation as _MetricObservation,
+    )
+    from investment_analyst.core.models import (
+        SourceReference as _MetricSource,
+    )
+
+    staging = _staging(tmp_path, "metric-staging")
+    base = datetime(2026, 8, 1, tzinfo=UTC)
+    with staging:
+        observations: list[_MetricObservation] = []
+        for index in range(48):
+            moment = base + timedelta(hours=index)
+            raw = RawRecord(
+                record_id=uuid4(),
+                asset_id="crypto:btc-usd",
+                source=_MetricSource(
+                    source_id="deribit:funding", record_key=f"v3-{index}", retrieved_at=moment
+                ),
+                event_time=moment,
+                available_at=moment,
+                received_at=moment,
+                payload={"v": str(index)},
+                schema_version="metric-v3-backup",
+            )
+            staging.save(raw)
+            observations.append(
+                _MetricObservation(
+                    observation_id=uuid4(),
+                    raw_record_id=raw.record_id,
+                    asset_id="crypto:btc-usd",
+                    field_name="funding_rate",
+                    value=Decimal(f"0.00{index % 10}"),
+                    unit="rate",
+                    frequency=_MetricFrequency.HOUR_1,
+                    observed_at=moment,
+                    available_at=moment,
+                    normalized_at=moment,
+                    source=raw.source,
+                    quality=_MetricQuality.VALID,
+                    transformation_version="1.0.0",
+                )
+            )
+        assert staging.save_observations(observations).created_count == 48
+        segments = _segments(observations)
+        assert staging.save_evidence_segments(segments) == 2
+        evidence_set = _build_set(observations, segments=segments)
+        assert staging.save_evidence_set(evidence_set) is True
+        window_end = base + timedelta(hours=47)
+
+        def _metric(key: str, value: Decimal) -> _Metric:
+            candidate = _Metric(
+                result_id=uuid4(),
+                asset_id="crypto:btc-usd",
+                metric_key=key,
+                value=value,
+                unit="rate",
+                as_of=window_end,
+                available_at=evidence_set.available_at,
+                computed_at=evidence_set.available_at,
+                parameters={
+                    "window": len(observations),
+                    "evidence_set_id": str(evidence_set.evidence_set_id),
+                },
+                input_observation_ids=[item.observation_id for item in observations],
+                algorithm_version="metric-v3-backup",
+                quality=_MetricQuality.VALID,
+            )
+            return candidate.model_copy(update={"result_id": _metric_id(candidate)})
+
+        total = _metric("funding.sum_1h", Decimal("2.5"))
+        mean = _metric("funding.mean_1h", Decimal("0.05"))
+        assert staging.save_metrics([total, mean]).created_count == 2
+        service = RawV2StagingBackupService()
+        manifest = service.create(staging, staging._connection, tmp_path / "metric-backup")
+        assert manifest.schema_version == "raw-v2-staging-backup-manifest-v3"
+        assert manifest.metric_counts is not None
+        assert manifest.metric_counts.metrics == 2
+        assert manifest.metric_counts.evidence_sets == 1
+        assert manifest.metric_counts.evidence_segments == 2
+    restored_manifest = service.restore(tmp_path / "metric-backup", tmp_path / "metric-restored")
+    assert restored_manifest.backup_id == manifest.backup_id
+    connection = duckdb.connect(str(tmp_path / "metric-restored" / "raw-v2-index.duckdb"))
+    restored = RawV2Staging(tmp_path / "metric-restored", connection)
+    with restored:
+        both = restored.get_metrics([total.result_id, mean.result_id])
+        assert both[total.result_id] == total
+        assert both[mean.result_id] == mean
+        assert restored.get_evidence_set(evidence_set.evidence_set_id) == evidence_set
+        assert restored.list_metrics(available_to=base) == []
+        assert len(restored.list_metrics(available_to=evidence_set.available_at)) == 2
+
+
+def test_metric_restore_rejects_corrupt_lineage_or_missing_observation(
+    tmp_path: Path,
+) -> None:
+    from datetime import timedelta
+    from decimal import Decimal
+    from uuid import uuid4
+
+    from investment_analyst.analytics.evidence_set import (
+        build_evidence_segments as _lineage_segments,
+    )
+    from investment_analyst.analytics.evidence_set import (
+        build_evidence_set as _lineage_set,
+    )
+    from investment_analyst.analytics.metric_identity_v2 import (
+        metric_result_id_from_model_v2 as _lineage_id,
+    )
+    from investment_analyst.core.models import (
+        DataFrequency as _LineageFrequency,
+    )
+    from investment_analyst.core.models import (
+        DataQuality as _LineageQuality,
+    )
+    from investment_analyst.core.models import (
+        MetricResult as _LineageMetric,
+    )
+    from investment_analyst.core.models import (
+        NormalizedObservation as _LineageObservation,
+    )
+    from investment_analyst.core.models import (
+        SourceReference as _LineageSource,
+    )
+
+    staging = _staging(tmp_path, "lineage-staging")
+    base = datetime(2026, 8, 1, tzinfo=UTC)
+    with staging:
+        observations: list[_LineageObservation] = []
+        for index in range(24):
+            moment = base + timedelta(hours=index)
+            raw = RawRecord(
+                record_id=uuid4(),
+                asset_id="crypto:btc-usd",
+                source=_LineageSource(
+                    source_id="deribit:funding",
+                    record_key=f"neg-{index}",
+                    retrieved_at=moment,
+                ),
+                event_time=moment,
+                available_at=moment,
+                received_at=moment,
+                payload={"v": str(index)},
+                schema_version="metric-v3-negative",
+            )
+            staging.save(raw)
+            observations.append(
+                _LineageObservation(
+                    observation_id=uuid4(),
+                    raw_record_id=raw.record_id,
+                    asset_id="crypto:btc-usd",
+                    field_name="funding_rate",
+                    value=Decimal("0.01"),
+                    unit="rate",
+                    frequency=_LineageFrequency.HOUR_1,
+                    observed_at=moment,
+                    available_at=moment,
+                    normalized_at=moment,
+                    source=raw.source,
+                    quality=_LineageQuality.VALID,
+                    transformation_version="1.0.0",
+                )
+            )
+        assert staging.save_observations(observations).created_count == 24
+        segments = _lineage_segments(observations)
+        staging.save_evidence_segments(segments)
+        evidence_set = _lineage_set(observations, segments=segments)
+        staging.save_evidence_set(evidence_set)
+        candidate = _LineageMetric(
+            result_id=uuid4(),
+            asset_id="crypto:btc-usd",
+            metric_key="funding.sum_1h",
+            value=Decimal("1.0"),
+            unit="rate",
+            as_of=base + timedelta(hours=23),
+            available_at=evidence_set.available_at,
+            computed_at=evidence_set.available_at,
+            parameters={
+                "window": len(observations),
+                "evidence_set_id": str(evidence_set.evidence_set_id),
+            },
+            input_observation_ids=[item.observation_id for item in observations],
+            algorithm_version="metric-v3-negative",
+            quality=_LineageQuality.VALID,
+        )
+        fixed = candidate.model_copy(update={"result_id": _lineage_id(candidate)})
+        assert staging.save_metrics([fixed]).created_count == 1
+        service = RawV2StagingBackupService()
+        manifest = service.create(staging, staging._connection, tmp_path / "lineage-backup")
+        assert manifest.schema_version == "raw-v2-staging-backup-manifest-v3"
+    manifest_path = tmp_path / "lineage-backup" / "raw-v2-staging-backup-manifest.json"
+    document = manifest_path.read_text(encoding="utf-8")
+    manifest_path.write_text(document[:-12], encoding="utf-8")
+    with pytest.raises(RawV2BackupError, match="truncated|incompatible"):
+        service.restore(tmp_path / "lineage-backup", tmp_path / "lineage-corrupt")
+    assert not (tmp_path / "lineage-corrupt").exists()

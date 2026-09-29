@@ -54,6 +54,7 @@ from investment_analyst.storage.raw_v2_import import (
 
 RAW_V2_BACKUP_MANIFEST_SCHEMA = "raw-v2-staging-backup-manifest-v1"
 RAW_V2_BACKUP_MANIFEST_SCHEMA_V2 = "raw-v2-staging-backup-manifest-v2"
+RAW_V2_BACKUP_MANIFEST_SCHEMA_V3 = "raw-v2-staging-backup-manifest-v3"
 BACKUP_MANIFEST_NAME = "raw-v2-staging-backup-manifest.json"
 _IMPORT_STATE_FILENAME = "raw-v2-import-state.json"
 _OBSERVATION_IMPORT_STATE_FILENAME = "observation-v2-import-state.json"
@@ -112,18 +113,35 @@ class RawV2BackupObservationCounts(ContractModel):
     corpus_digest: NonEmptyStr
 
 
+class RawV2BackupMetricCounts(ContractModel):
+    """Verified metric and lineage counts bound into a v3 staging backup."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    metrics: int = Field(ge=0)
+    counts_by_metric_key: Mapping[str, int]
+    corpus_digest: NonEmptyStr
+    evidence_sets: int = Field(ge=0)
+    evidence_segments: int = Field(ge=0)
+    lineage_digest: NonEmptyStr
+
+
 class RawV2StagingBackupManifest(ContractModel):
     """Versioned inventory used to verify a staging backup before activation.
 
     Schema ``v1`` is raw-only and stays byte-compatible with prior backups.
     Schema ``v2`` additionally binds the typed observation inventory, its
     content digest and the observation import checkpoint when it exists.
+    Schema ``v3`` additionally binds the typed metric inventory with its
+    shared lineage digest; v1 and v2 backups stay readable and restorable.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[
-        "raw-v2-staging-backup-manifest-v1", "raw-v2-staging-backup-manifest-v2"
+        "raw-v2-staging-backup-manifest-v1",
+        "raw-v2-staging-backup-manifest-v2",
+        "raw-v2-staging-backup-manifest-v3",
     ] = RAW_V2_BACKUP_MANIFEST_SCHEMA
     backup_id: UUID
     staging_id: NonEmptyStr
@@ -136,6 +154,7 @@ class RawV2StagingBackupManifest(ContractModel):
     observation_checkpoint_format: str | None = None
     observation_checkpoint_digest: str | None = None
     observation_counts: RawV2BackupObservationCounts | None = None
+    metric_counts: RawV2BackupMetricCounts | None = None
 
     @model_validator(mode="after")
     def validate_inventory(self) -> RawV2StagingBackupManifest:
@@ -144,7 +163,16 @@ class RawV2StagingBackupManifest(ContractModel):
             raise ValueError("backup inventory must be non-empty, unique, and sorted")
         if BACKUP_MANIFEST_NAME in paths:
             raise ValueError("backup inventory must not contain its own manifest")
-        if self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V2:
+        if self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V3:
+            expected_id = _backup_id(
+                self.staging_id,
+                self.files,
+                self.counts,
+                self.observation_counts,
+                self.schema_version,
+                self.metric_counts,
+            )
+        elif self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V2:
             expected_id = _backup_id(
                 self.staging_id,
                 self.files,
@@ -162,12 +190,21 @@ class RawV2StagingBackupManifest(ContractModel):
             self.observation_checkpoint_digest is None
         ):
             raise ValueError("observation checkpoint version and digest travel together")
-        if self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V2:
+        if self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V3:
+            if self.observation_counts is None:
+                raise ValueError("v3 manifest requires observation counts")
+            if self.metric_counts is None:
+                raise ValueError("v3 manifest requires metric counts")
+        elif self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V2:
             if self.observation_counts is None:
                 raise ValueError("v2 manifest requires observation counts")
+            if self.metric_counts is not None:
+                raise ValueError("v2 manifest must not carry metric counts")
         else:
             if self.observation_counts is not None:
                 raise ValueError("v1 manifest must not carry observation counts")
+            if self.metric_counts is not None:
+                raise ValueError("v1 manifest must not carry metric counts")
             if self.observation_checkpoint_format is not None:
                 raise ValueError("v1 manifest must not carry observation checkpoint")
         return self
@@ -182,6 +219,7 @@ def _backup_id(
     counts: RawV2BackupCounts,
     observation_counts: RawV2BackupObservationCounts | None = None,
     schema_version: str = RAW_V2_BACKUP_MANIFEST_SCHEMA,
+    metric_counts: RawV2BackupMetricCounts | None = None,
 ) -> UUID:
     document = json.dumps(
         {
@@ -192,6 +230,7 @@ def _backup_id(
             "observation_counts": (
                 observation_counts.model_dump(mode="json") if observation_counts else None
             ),
+            "metric_counts": (metric_counts.model_dump(mode="json") if metric_counts else None),
         },
         separators=(",", ":"),
         sort_keys=True,
@@ -339,25 +378,49 @@ class RawV2StagingBackupService:
                         counts=counts,
                     )
                 else:
-                    manifest = RawV2StagingBackupManifest(
-                        schema_version=RAW_V2_BACKUP_MANIFEST_SCHEMA_V2,
-                        backup_id=_backup_id(
-                            staging_id,
-                            inventory,
-                            counts,
-                            observation_counts,
-                            RAW_V2_BACKUP_MANIFEST_SCHEMA_V2,
-                        ),
-                        staging_id=staging_id,
-                        created_at=datetime.now(UTC),
-                        files=inventory,
-                        checkpoint_format=checkpoint_format,
-                        checkpoint_digest=checkpoint_digest,
-                        counts=counts,
-                        observation_checkpoint_format=observation_format,
-                        observation_checkpoint_digest=observation_digest,
-                        observation_counts=observation_counts,
-                    )
+                    metric_counts = self._count_metrics(staging, connection)
+                    if metric_counts is None:
+                        manifest = RawV2StagingBackupManifest(
+                            schema_version=RAW_V2_BACKUP_MANIFEST_SCHEMA_V2,
+                            backup_id=_backup_id(
+                                staging_id,
+                                inventory,
+                                counts,
+                                observation_counts,
+                                RAW_V2_BACKUP_MANIFEST_SCHEMA_V2,
+                            ),
+                            staging_id=staging_id,
+                            created_at=datetime.now(UTC),
+                            files=inventory,
+                            checkpoint_format=checkpoint_format,
+                            checkpoint_digest=checkpoint_digest,
+                            counts=counts,
+                            observation_checkpoint_format=observation_format,
+                            observation_checkpoint_digest=observation_digest,
+                            observation_counts=observation_counts,
+                        )
+                    else:
+                        manifest = RawV2StagingBackupManifest(
+                            schema_version=RAW_V2_BACKUP_MANIFEST_SCHEMA_V3,
+                            backup_id=_backup_id(
+                                staging_id,
+                                inventory,
+                                counts,
+                                observation_counts,
+                                RAW_V2_BACKUP_MANIFEST_SCHEMA_V3,
+                                metric_counts,
+                            ),
+                            staging_id=staging_id,
+                            created_at=datetime.now(UTC),
+                            files=inventory,
+                            checkpoint_format=checkpoint_format,
+                            checkpoint_digest=checkpoint_digest,
+                            counts=counts,
+                            observation_checkpoint_format=observation_format,
+                            observation_checkpoint_digest=observation_digest,
+                            observation_counts=observation_counts,
+                            metric_counts=metric_counts,
+                        )
                 for item in inventory:
                     source_file = staging_root / item.path
                     target_file = temporary / item.path
@@ -591,6 +654,97 @@ class RawV2StagingBackupService:
         finally:
             reader.close()
 
+    def _count_metrics(
+        self, staging: RawV2Staging, connection: DuckDBPyConnection
+    ) -> RawV2BackupMetricCounts | None:
+        from investment_analyst.storage.evidence_set_v2 import EvidenceSetV2Error
+        from investment_analyst.storage.metric_v2 import (
+            METRIC_V2_METRIC_LINKS_TABLE,
+            METRIC_V2_OBSERVATION_LINKS_TABLE,
+            METRIC_V2_TABLE,
+            MetricV2Error,
+            metric_v2_table_exists,
+        )
+
+        reader = RawV2Staging(staging.destination, connection, read_only=True)
+        try:
+            reader.open()
+        except (MetricV2Error, EvidenceSetV2Error, Exception) as error:
+            if "metric v2 index table is missing" in str(error):
+                return None
+            raise
+        if not metric_v2_table_exists(connection):
+            reader.close()
+            return None
+        try:
+            digest = empty_digest()
+            counts_by_key: dict[str, int] = {}
+            metrics = 0
+            cursor_at = None
+            cursor_id = None
+            while True:
+                page = reader.list_metric_inventory_page(
+                    limit=_MAX_BACKUP_PAGE,
+                    after_available_at=cursor_at,
+                    after_result_id=cursor_id,
+                )
+                if not page:
+                    break
+                hydrated = reader.get_metrics(page)
+                for result_id in page:
+                    result = hydrated[result_id]
+                    canonical = (
+                        f"{result.result_id}|{result.asset_id}|{result.metric_key}|"
+                        f"{result.value}|{result.unit}|{result.as_of.isoformat()}|"
+                        f"{result.available_at.isoformat()}|{result.algorithm_version}|"
+                        f"{result.quality.value}"
+                    )
+                    digest = extend_digest(digest, hashlib.sha256(canonical.encode()).hexdigest())
+                    counts_by_key[result.metric_key] = counts_by_key.get(result.metric_key, 0) + 1
+                metrics += len(page)
+                last = hydrated[page[-1]]
+                cursor_at, cursor_id = last.available_at, last.result_id
+            if metrics == 0:
+                return None
+            segments = connection.execute("SELECT count(*) FROM evidence_segments_v2").fetchone()
+            sets = connection.execute("SELECT count(*) FROM evidence_sets_v2").fetchone()
+            lineage_rows = connection.execute(
+                f"SELECT evidence_set_id, result_id FROM {METRIC_V2_TABLE} "
+                "WHERE evidence_set_id IS NOT NULL ORDER BY evidence_set_id"
+            ).fetchall()
+            lineage_digest = empty_digest()
+            for evidence_set_id, result_id in lineage_rows:
+                lineage_digest = extend_digest(
+                    lineage_digest,
+                    hashlib.sha256(f"{evidence_set_id}:{result_id}".encode()).hexdigest(),
+                )
+            link_obs = connection.execute(
+                f"SELECT count(*) FROM {METRIC_V2_OBSERVATION_LINKS_TABLE}"
+            ).fetchone()
+            link_met = connection.execute(
+                f"SELECT count(*) FROM {METRIC_V2_METRIC_LINKS_TABLE}"
+            ).fetchone()
+            if (link_obs is not None and int(link_obs[0]) == 0) or (
+                link_met is not None and metrics > 0 and int(link_met[0]) == 0
+            ):
+                pass
+            return RawV2BackupMetricCounts(
+                metrics=metrics,
+                counts_by_metric_key=counts_by_key,
+                corpus_digest=digest,
+                evidence_sets=int(sets[0]) if sets else 0,
+                evidence_segments=int(segments[0]) if segments else 0,
+                lineage_digest=lineage_digest,
+            )
+        except (MetricV2Error, EvidenceSetV2Error):
+            raise
+        except Exception as error:
+            if "metric v2 index table is missing" in str(error) or "does not exist" in str(error):
+                return None
+            raise
+        finally:
+            reader.close()
+
     def _verify_backup_directory(self, root: Path, manifest: RawV2StagingBackupManifest) -> None:
         _reject_symlinks(root)
         expected = {item.path: item for item in manifest.files}
@@ -663,7 +817,28 @@ class RawV2StagingBackupService:
             if state.format == "raw-v2-import-state-v1" and state.staging_id is not None:
                 raise RawV2BackupError("restored checkpoint mixes portable and legacy bindings")
         observation_state_path = root / _OBSERVATION_IMPORT_STATE_FILENAME
-        if manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V2:
+        if manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V3:
+            if manifest.observation_counts is None or manifest.metric_counts is None:
+                raise RawV2BackupError("restored v3 manifest is missing metric counts")
+            if not observation_state_path.is_file() or observation_state_path.is_symlink():
+                if manifest.observation_checkpoint_format is not None:
+                    raise RawV2BackupError("restored observation checkpoint is missing")
+            else:
+                try:
+                    observation_state = ObservationV2ImportState.model_validate_json(
+                        observation_state_path.read_text(encoding="utf-8")
+                    )
+                except ValueError as error:
+                    raise RawV2BackupError("restored observation state is incompatible") from error
+                if manifest.observation_checkpoint_format != observation_state.format:
+                    raise RawV2BackupError("restored observation checkpoint mismatches backup")
+                if manifest.observation_checkpoint_digest != _sha256_streaming(
+                    observation_state_path
+                ):
+                    raise RawV2BackupError("restored observation checkpoint mismatches backup")
+            self._verify_restored_observations(root, index_path, manifest)
+            self._verify_restored_metrics(root, index_path, manifest)
+        elif manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V2:
             if manifest.observation_counts is None:
                 raise RawV2BackupError("restored v2 manifest is missing observation counts")
             if not observation_state_path.is_file() or observation_state_path.is_symlink():
@@ -773,12 +948,178 @@ class RawV2StagingBackupService:
         finally:
             connection.close()
 
+    def _verify_restored_metrics(
+        self, root: Path, index_path: Path, manifest: RawV2StagingBackupManifest
+    ) -> None:
+        from uuid import UUID as _UUID
+
+        import duckdb
+
+        from investment_analyst.storage.evidence_set_v2 import (
+            EvidenceSetV2Error,
+            row_to_evidence_set,
+            row_to_segment,
+        )
+        from investment_analyst.storage.metric_v2 import MetricV2Error, row_to_metric
+
+        del root
+        expected = manifest.metric_counts
+        if expected is None:
+            raise RawV2BackupError("restored v3 manifest is missing metric counts")
+        connection = duckdb.connect(str(index_path), read_only=True)
+        try:
+            try:
+                names = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'metric_results_v2'"
+                    ).fetchall()
+                }
+            except Exception as error:
+                raise RawV2BackupError("restored metric table is missing") from error
+            if not names or "document_json" in names:
+                raise RawV2BackupError("restored metric table is incompatible")
+            digest = empty_digest()
+            counts_by_key: dict[str, int] = {}
+            verified = 0
+            cursor_at = None
+            cursor_id = None
+            while True:
+                clauses: list[str] = []
+                parameters: list[object] = []
+                if cursor_at is not None and cursor_id is not None:
+                    clauses.append("(available_at, result_id) > (?, ?)")
+                    parameters.extend([cursor_at, str(cursor_id)])
+                where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+                rows = connection.execute(
+                    "SELECT result_id, asset_id, metric_key, value_text, unit, as_of, "
+                    "available_at, computed_at, parameters_json, evidence_set_id, "
+                    "algorithm_version, quality FROM metric_results_v2"
+                    f"{where} ORDER BY available_at, result_id LIMIT {_MAX_BACKUP_PAGE}",
+                    parameters,
+                ).fetchall()
+                if not rows:
+                    break
+                for row in rows:
+                    result_id = _UUID(str(row[0]))
+                    obs_links = connection.execute(
+                        "SELECT observation_id FROM metric_v2_observation_links "
+                        "WHERE result_id = ? ORDER BY position",
+                        [str(result_id)],
+                    ).fetchall()
+                    met_links = connection.execute(
+                        "SELECT input_result_id FROM metric_v2_metric_links "
+                        "WHERE result_id = ? ORDER BY position",
+                        [str(result_id)],
+                    ).fetchall()
+                    try:
+                        result = row_to_metric(
+                            tuple(row),
+                            observation_ids=[_UUID(str(item[0])) for item in obs_links],
+                            metric_ids=[_UUID(str(item[0])) for item in met_links],
+                        )
+                    except MetricV2Error as error:
+                        raise RawV2BackupError("restored metric row is corrupt") from error
+                    for observation_id in result.input_observation_ids:
+                        obs_rows = connection.execute(
+                            "SELECT asset_id, available_at FROM normalized_observations_v2 "
+                            "WHERE observation_id = ?",
+                            [str(observation_id)],
+                        ).fetchall()
+                        if not obs_rows:
+                            raise RawV2BackupError("restored metric link is missing observation")
+                        if str(obs_rows[0][0]) != result.asset_id:
+                            raise RawV2BackupError("restored metric link is foreign")
+                        obs_available = datetime.fromisoformat(str(obs_rows[0][1]))
+                        if obs_available.tzinfo is None:
+                            raise RawV2BackupError("restored metric link is future")
+                        if obs_available.astimezone(UTC) > result.available_at:
+                            raise RawV2BackupError("restored metric link is future")
+                    for input_id in result.input_metric_result_ids:
+                        met_rows = connection.execute(
+                            "SELECT asset_id FROM metric_results_v2 WHERE result_id = ?",
+                            [str(input_id)],
+                        ).fetchall()
+                        if not met_rows or str(met_rows[0][0]) != result.asset_id:
+                            raise RawV2BackupError("restored metric dependency is foreign")
+                    reference = result.parameters.get("evidence_set_id")
+                    if reference is not None:
+                        set_rows = connection.execute(
+                            "SELECT evidence_set_id, asset_id, source_id, field_name, "
+                            "input_count, head_offset, inline_observation_ids_json, "
+                            "inline_available_at, first_observed_at, first_observation_id, "
+                            "last_observed_at, last_observation_id, available_at, "
+                            "canonical_hash FROM evidence_sets_v2 WHERE evidence_set_id = ?",
+                            [str(reference)],
+                        ).fetchall()
+                        if not set_rows:
+                            raise RawV2BackupError("restored metric lineage is missing")
+                        members = connection.execute(
+                            "SELECT segment_id FROM evidence_set_v2_members "
+                            "WHERE evidence_set_id = ? ORDER BY position",
+                            [str(reference)],
+                        ).fetchall()
+                        try:
+                            stored_set = row_to_evidence_set(
+                                tuple(set_rows[0]),
+                                segment_ids=[_UUID(str(item[0])) for item in members],
+                            )
+                        except EvidenceSetV2Error as error:
+                            raise RawV2BackupError("restored metric lineage is corrupt") from error
+                        for segment_id in stored_set.segment_ids:
+                            seg_rows = connection.execute(
+                                "SELECT segment_id, asset_id, source_id, field_name, day, "
+                                "observation_ids_json, available_at, canonical_hash "
+                                "FROM evidence_segments_v2 WHERE segment_id = ?",
+                                [str(segment_id)],
+                            ).fetchall()
+                            if not seg_rows:
+                                raise RawV2BackupError("restored lineage segment is missing")
+                            try:
+                                row_to_segment(tuple(seg_rows[0]))
+                            except EvidenceSetV2Error as error:
+                                raise RawV2BackupError(
+                                    "restored lineage segment is corrupt"
+                                ) from error
+                        if stored_set.available_at > result.available_at:
+                            raise RawV2BackupError("restored metric lineage is future")
+                    canonical = (
+                        f"{result.result_id}|{result.asset_id}|{result.metric_key}|"
+                        f"{result.value}|{result.unit}|{result.as_of.isoformat()}|"
+                        f"{result.available_at.isoformat()}|{result.algorithm_version}|"
+                        f"{result.quality.value}"
+                    )
+                    digest = extend_digest(
+                        digest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+                    )
+                    counts_by_key[result.metric_key] = counts_by_key.get(result.metric_key, 0) + 1
+                verified += len(rows)
+                cursor_at, cursor_id = str(rows[-1][6]), _UUID(str(rows[-1][0]))
+            if verified != expected.metrics:
+                raise RawV2BackupError("restored metric count mismatches manifest")
+            if dict(counts_by_key) != dict(expected.counts_by_metric_key):
+                raise RawV2BackupError("restored metric keys mismatch manifest")
+            if digest != expected.corpus_digest:
+                raise RawV2BackupError("restored metric digest mismatches manifest")
+            segments = connection.execute("SELECT count(*) FROM evidence_segments_v2").fetchone()
+            sets = connection.execute("SELECT count(*) FROM evidence_sets_v2").fetchone()
+            if int(segments[0]) != expected.evidence_segments:
+                raise RawV2BackupError("restored lineage segments mismatch manifest")
+            if int(sets[0]) != expected.evidence_sets:
+                raise RawV2BackupError("restored lineage sets mismatch manifest")
+        finally:
+            connection.close()
+
 
 __all__ = [
     "BACKUP_MANIFEST_NAME",
     "RAW_V2_BACKUP_MANIFEST_SCHEMA",
+    "RAW_V2_BACKUP_MANIFEST_SCHEMA_V2",
+    "RAW_V2_BACKUP_MANIFEST_SCHEMA_V3",
     "RawV2BackupCounts",
     "RawV2BackupError",
+    "RawV2BackupMetricCounts",
     "RawV2StagingBackupManifest",
     "RawV2StagingBackupService",
 ]
