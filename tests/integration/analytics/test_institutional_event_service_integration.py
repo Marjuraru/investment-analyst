@@ -99,6 +99,51 @@ def _seed_metrics(storage: LocalStorage, available_at: datetime) -> list[MetricR
     return metrics
 
 
+def test_event_reads_only_institutional_metric_family(tmp_path: Path) -> None:
+    from investment_analyst.analytics.cazatiburones.institutional_event_service import (
+        InstitutionalEventService,
+    )
+    from investment_analyst.core.models.enums import DataQuality
+    from investment_analyst.core.models.metric import MetricResult
+
+    workspace_paths = WorkspaceService().initialize(tmp_path / "workspace").paths
+    runtime = ApplicationRuntime.create_default()
+    location = StorageLocationRequest(workspace=workspace_paths.root)
+    available_at = datetime(2024, 11, 14, 16, 0, 0, tzinfo=UTC)
+    known_at = datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    with runtime.open_storage(location, access_mode=WorkspaceAccessMode.READ_WRITE) as storage:
+        seeded = _seed_metrics(storage, available_at)
+        market_metric = MetricResult(
+            result_id=uuid4(),
+            asset_id=_ASSET_ID,
+            metric_key="market.close_copy",
+            value=Decimal("210.50"),
+            unit="USD",
+            as_of=available_at,
+            available_at=available_at,
+            computed_at=available_at,
+            parameters={"window": 1},
+            input_observation_ids=[uuid4()],
+            algorithm_version="1.0.0",
+            quality=DataQuality.VALID,
+        )
+        storage.metric_results.save(market_metric)
+        hydrated: list[object] = []
+        original_get = storage.metric_results.get
+
+        def spy_get(result_id):  # type: ignore[no-untyped-def]
+            hydrated.append(result_id)
+            return original_get(result_id)
+
+        storage.metric_results.get = spy_get  # type: ignore[method-assign]
+        service = InstitutionalEventService(storage, clock=lambda: known_at)
+        summary = service.materialize(asset_id=_ASSET_ID, manager_cik=_CIK, known_at=known_at)
+
+    assert summary.events == 3
+    assert set(hydrated) == {metric.result_id for metric in seeded}
+
+
 def test_rematerialization_is_idempotent_and_divergent_identity_fails_closed(
     tmp_path: Path,
 ) -> None:

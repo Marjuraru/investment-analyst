@@ -33,6 +33,9 @@ _THIRTEEN_F_JSON_PATHS = {
     "report_manager": "payload.report.manager_cik",
     "outcome_filer": "payload.outcome.filing.filer_cik",
     "position_report": "payload.position.report_id",
+    "semantics_manager": "payload.artifact.manager_cik",
+    "correspondence_artifact": "payload.correspondence.artifact_id",
+    "correspondence_manager": "payload.correspondence.manager_cik",
 }
 
 

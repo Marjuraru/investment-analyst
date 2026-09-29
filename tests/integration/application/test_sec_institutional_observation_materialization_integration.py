@@ -294,6 +294,72 @@ def _prepared(tmp_path: Path, *, extra_rows: int = 0, manager_limit: int = 3):
     return location, universe, known_at, submissions, documents, acquisition
 
 
+def test_target_claim_and_observation_verification_is_bounded(tmp_path: Path) -> None:
+    location, _, known_at, _, _, _ = _prepared(tmp_path, manager_limit=2)
+    application = SecInstitutionalObservationMaterializationApplication(
+        ApplicationRuntime.create_default()
+    )
+    request = SecInstitutionalObservationMaterializationRequest(known_at=known_at, manager_limit=2)
+    summary = application.materialize(request, location=location)
+    assert summary.traceability_verified is True
+    assert summary.failed_candidates == 0 and summary.failed_runs == 0
+
+    with LocalStorage(StoragePaths.from_root(tmp_path), read_only=True) as storage:
+        observation_lists = storage.observations.list
+        observation_get_many = storage.observations.get_many
+        raw_lists = storage.raw_records.list
+        raw_get_many = storage.raw_records.get_many
+
+        def forbidden_observation_list(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("bounded verification hydrated full observation history")
+
+        def forbidden_raw_list(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("bounded verification hydrated full raw history")
+
+        observed_observation_ids: list[object] = []
+        observed_raw_ids: list[object] = []
+
+        def spy_observation_get_many(record_ids):  # type: ignore[no-untyped-def]
+            observed_observation_ids.append(tuple(record_ids))
+            return observation_get_many(record_ids)
+
+        def spy_raw_get_many(record_ids):  # type: ignore[no-untyped-def]
+            observed_raw_ids.append(tuple(record_ids))
+            return raw_get_many(record_ids)
+
+        storage.observations.list = forbidden_observation_list  # type: ignore[method-assign]
+        storage.observations.get_many = spy_observation_get_many  # type: ignore[method-assign]
+        storage.raw_records.list = forbidden_raw_list  # type: ignore[method-assign]
+        storage.raw_records.get_many = spy_raw_get_many  # type: ignore[method-assign]
+        try:
+            from investment_analyst.application.sec_institutional_observation_materialization import (  # noqa: E501
+                _verify_traceability,
+            )
+            from investment_analyst.evidence.sec_institutional_correspondence.repository import (
+                SecInstitutionalRowCorrespondenceRepository,
+            )
+
+            assert (
+                _verify_traceability(
+                    repository=SecInstitutionalRowCorrespondenceRepository(storage.raw_records),
+                    storage=storage,
+                    candidates=summary.candidates,
+                    known_at=known_at,
+                )
+                is True
+            )
+            assert observed_raw_ids
+            assert observed_observation_ids
+            assert sum(len(batch) for batch in observed_raw_ids) == sum(
+                len(candidate.claim_ids) for candidate in summary.candidates
+            )
+        finally:
+            storage.observations.list = observation_lists  # type: ignore[method-assign]
+            storage.observations.get_many = observation_get_many  # type: ignore[method-assign]
+            storage.raw_records.list = raw_lists  # type: ignore[method-assign]
+            storage.raw_records.get_many = raw_get_many  # type: ignore[method-assign]
+
+
 def test_materialization_proves_claims_and_observations_without_network(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

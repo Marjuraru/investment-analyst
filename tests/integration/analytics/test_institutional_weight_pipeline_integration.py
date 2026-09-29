@@ -146,6 +146,101 @@ def test_pipeline_persists_one_effective_close_weight_idempotently(tmp_path) -> 
     assert results[0].parameters["effective_accession"] == "0000950123-25-000001"
 
 
+def test_manager_scoped_weights_match_full_history_at_two_cuts(tmp_path) -> None:
+    from datetime import date
+
+    from investment_analyst.evidence.sec_institutional_holdings.repository import (
+        InstitutionalHoldingsRepository,
+    )
+
+    paths = StoragePaths.from_root(tmp_path)
+    with LocalStorage(paths) as storage:
+        for filer_cik in ("1067983", "0001234567"):
+            report = sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipeline(
+                storage, _Submissions(), _Documents()
+            ).run(
+                sec_institutional_holdings_pipeline.SecInstitutionalHoldingsImportRequest(
+                    filer_cik=filer_cik, forms=("13F-HR",)
+                )
+            )[0]
+            manager = "0001067983" if filer_cik == "1067983" else "0001234567"
+            InstitutionalHoldingsSemanticsService(storage, clock=lambda: _NOW).enrich(
+                InstitutionalSemanticsEnrichRequest(
+                    manager_cik=manager, report_ids=(report.report_id,), known_at=_NOW
+                )
+            )
+        correspondence = InstrumentCorrespondence.declare(
+            asset_id="equity:us:aapl",
+            cusip="037833100",
+            title_of_class="COM",
+            effective_from=date(2020, 1, 1),
+            effective_to=None,
+            available_at=_NOW,
+            recorded_at=_NOW,
+        )
+        InstrumentCorrespondenceRepository(storage.raw_records).save(
+            correspondence, catalog_version=1, declared_by="test"
+        )
+    holdings_reports = None
+    with LocalStorage(paths) as storage:
+        holdings_reports = InstitutionalHoldingsRepository(storage.raw_records).list_reports(
+            manager_cik="0001067983", known_at=_NOW
+        )
+    assert holdings_reports
+    location = StorageLocationRequest(legacy_root=tmp_path)
+    from investment_analyst.application.cazatiburones_institutional_observations import (
+        CazatiburonesInstitutionalObservationsApplication,
+    )
+    from investment_analyst.application.runtime import StorageLocationRequest as _Location
+    from investment_analyst.evidence.sec_institutional_observations.models import (
+        InstitutionalObservationRequest as _ObservationRequest,
+    )
+
+    del _Location
+    CazatiburonesInstitutionalObservationsApplication.create_default().normalize(
+        _ObservationRequest(
+            asset_id="equity:us:aapl",
+            manager_cik="1067983",
+            report_ids=tuple(report.report_id for report in holdings_reports),
+            known_at=_NOW,
+        ),
+        location=location,
+    )
+    with LocalStorage(paths) as storage:
+        raw_lists = storage.raw_records.list
+        observation_lists = storage.observations.list
+        metric_lists = storage.metric_results.list
+
+        def forbidden_raw_list(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("weight pipeline hydrated full raw history")
+
+        def forbidden_observation_list(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("weight pipeline hydrated full observation history")
+
+        def forbidden_metric_list(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("weight pipeline listed metric history")
+
+        storage.raw_records.list = forbidden_raw_list  # type: ignore[method-assign]
+        storage.observations.list = forbidden_observation_list  # type: ignore[method-assign]
+        storage.metric_results.list = forbidden_metric_list  # type: ignore[method-assign]
+        try:
+            first = InstitutionalWeightPipeline(
+                storage, clock=lambda: _NOW + timedelta(seconds=1)
+            ).compute(asset_id="equity:us:aapl", manager_cik="1067983", known_at=_NOW)
+            second = InstitutionalWeightPipeline(
+                storage, clock=lambda: _NOW + timedelta(seconds=2)
+            ).compute(asset_id="equity:us:aapl", manager_cik="1067983", known_at=_NOW)
+        finally:
+            storage.raw_records.list = raw_lists  # type: ignore[method-assign]
+            storage.observations.list = observation_lists  # type: ignore[method-assign]
+            storage.metric_results.list = metric_lists  # type: ignore[method-assign]
+        results = storage.metric_results.list(asset_id="equity:us:aapl")
+    assert first.metrics_created == 1
+    assert second.metrics_reused == 1
+    assert results[0].value == 1
+    assert all(result.parameters.get("manager_cik") == "0001067983" for result in results)
+
+
 def test_pipeline_requires_writable_storage(tmp_path) -> None:
     paths = StoragePaths.from_root(tmp_path)
     with LocalStorage(paths):

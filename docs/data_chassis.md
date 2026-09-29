@@ -726,3 +726,20 @@ raw-only y v2 con observaciones siguen legibles y restaurables sin
 reescritura. Sin `AnalysisSnapshot`, diagnósticos v2, checkpoints
 EMA/RSI/ATR/MACD, migración de 1,67 M de métricas, adopción productiva,
 Parquet, cutover ni promesa de reducción de RSS.
+
+## Lecturas 13F acotadas por gestor y evidencia (`DATA-CHASSIS-31`)
+
+`DATA-CHASSIS-31` acota la cadena 13F al gestor y al objetivo sin cambiar
+resultado, calendario ni corpus: el selector raw cerrado gana
+`semantics_manager`, `correspondence_artifact` y `correspondence_manager`
+con valores parametrizados; el lector de artefactos hidrata sólo las
+revisiones PIT del gestor en orden y en lotes de máximo 512, con ausencia o
+gestor ajeno en fail-closed; las correspondencias del artefacto y las
+observaciones del gestor/activo/corte se leen por identidad y referencias
+declaradas en lotes acotados; los pipelines de métricas y pesos consumen
+sólo ese subconjunto; el evento consulta la familia versionada antes de
+validar versión, gestor y PIT; y la verificación relee sólo los IDs
+declarados del candidato. La equivalencia PIT en dos cortes, la hidratación
+que escala con el objetivo y el probe scratch de dos cierres con RSS/tiempo
+orientativos quedan probados; la reducción de RSS del ciclo real queda para
+el probe post-despliegue.
