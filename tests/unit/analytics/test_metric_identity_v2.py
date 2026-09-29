@@ -413,12 +413,13 @@ def test_decimal_and_utc_are_preserved_in_the_preimage() -> None:
         metric_result_id_v2(**{**coords, "as_of": naive_dt})
 
 
-def test_no_production_caller_invokes_the_v2_rule() -> None:
-    """A9: exactly two production callers consume the audited v2 rule."""
+def test_only_audited_callers_invoke_v2_rule() -> None:
+    """I2: exactly the two audited analytics callers plus the staging validator."""
     src_dir = Path("src/investment_analyst")
     allowed_callers = {
         "src/investment_analyst/analytics/crypto/derivatives_identity.py",
         "src/investment_analyst/analytics/market/statistics_identity.py",
+        "src/investment_analyst/storage/metric_v2.py",
     }
     violating_files: list[str] = []
 
