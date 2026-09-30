@@ -750,20 +750,24 @@ el probe post-despliegue.
 y snapshots analíticos point-in-time sobre el staging aislado v2, sin activar
 rutas productivas ni migración de histórico:
 - **Contrato puro `AnalysisSnapshot`**: modelo inmutable y tipado con
-  identidad determinista UUIDv8 (namespace UUIDv5, preimagen canónica que
-  incluye `asset_id`, `snapshot_policy`, `as_of` normalizado a UTC, tupla
-  ordenada y deduplicada de `metric_ids`, tupla ordenada y deduplicada de
-  `diagnostic_ids` y `canonical_evidence_set_digest` SHA-256 opcional). El reloj
-  de creación del snapshot queda excluido de la identidad de dominio.
+  identidad determinista UUIDv8 derivada directamente de un digest SHA-256 (sin
+  namespace UUIDv5), cuya preimagen canónica incluye `asset_id`, `domain`,
+  `known_at` normalizado a UTC, `policy_version`, tupla ordenada y deduplicada
+  de `metric_ids`, tupla ordenada y deduplicada de `diagnostic_ids` y
+  `evidence_set_digest` requerido (con digest canónico vacío cuando no existen
+  EvidenceSets). El reloj de creación `created_at` del snapshot queda excluido
+  de la identidad de dominio.
 - **Tablas `diagnostic_results_v2` en staging**: persistencia física sin
   `document_json`, preservando componentes estructurados, links a métricas y
   evidencia tipada con `evidence_direction`, `weight` Decimal y verificación
-  estricta de referencias point-in-time contra `metric_results_v2` y
-  `normalized_observations_v2`.
+  estricta de referencias point-in-time contra `metric_results_v2` (comprobando
+  existencia, correspondencia de activo y disponibilidad temporal al corte).
 - **Tablas `analysis_snapshots_v2` en staging**: persistencia física sin
   `document_json`, con links relacionales normalizados a métricas y
-  diagnósticos, verificación de consistencia temporal (`available_at <= as_of`)
-  y pertenencia al mismo activo.
+  diagnósticos, verificación de consistencia temporal (`available_at <= known_at`
+  para métricas, diagnósticos y EvidenceSets referenciados), correspondencia de
+  activo y coincidencia exacta del `evidence_set_digest` con los hashes
+  canónicos resueltos.
 - **Backup v4 verificable (`raw-v2-staging-backup-manifest-v4`)**: generado
   automáticamente cuando existen diagnósticos o snapshots en staging, ligando
   los inventarios de crudo, observaciones, métricas, lineage, diagnósticos y
