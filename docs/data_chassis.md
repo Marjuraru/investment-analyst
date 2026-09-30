@@ -30,7 +30,7 @@ trazabilidad append-only ni la evidencia histórica persistida.
 5. **Doble persistencia raw:**
    `storage/raw_records.py` escribía el archivo raw en filesystem **y** `raw_record_index.document_json`
    con el mismo documento completo.
-   *(Resuelto por `DATA-CHASSIS-4` y `DATA-CHASSIS-5`).*
+   *(La doble persistencia permanece en el camino productivo v1; los sustratos v2 sin document_json son staging aislado pendientes de migración y cutover).*
 6. **Journal operacional sin rotación acotada:**
    `application/multi_asset_scheduler.py:28,470`: `attempts` validado con `max_length=100_000`;
    alertas/candidatos con `250_000`. Documentos JSON reescritos completos.
@@ -778,3 +778,21 @@ rutas productivas ni migración de histórico:
 Sin checkpoints de series temporales (EMA/RSI/ATR/MACD), migración masiva de
 analítica v1, cutover productivo de workspace v2, liberación de almacenamiento ni
 promesa de reducción de RSS.
+
+## Alcance diario acotado y resumen analítico fiel (`DATA-CHASSIS-33`)
+
+`DATA-CHASSIS-33` acota el horizonte operativo de los refrescos de mercado diario para Alpaca y Coinbase y garantiza la fidelidad de sus resúmenes analíticos:
+- **Horizonte operativo acotado a 90 días naturales**: tanto en `resolve_market_daily_cut` para acciones (Alpaca) como en el pipeline de Bitcoin (Coinbase), la ventana de cálculo analítico queda acotada superiormente por `operational_end = requested_end` e inferiormente por `operational_start = max(start, operational_end - timedelta(days=90))`. Si el usuario solicita un intervalo más corto (por ejemplo 10 o 30 días), se respeta la fecha de inicio solicitada; pero si la historia solicitada o existente abarca cientos de días (ej. >600 días), la consulta analítica no hidrata ni procesa la serie completa, manteniéndose en un máximo de 90 días.
+- **Fidelidad del resumen (`analytics_end`)**: `ListedMarketRefreshSummary` y `CryptoSpotDailyRefreshSummary` reportan exactamente la ventana ejecutada (`analytics_end` proyectado o acotado en vez del fin solicitado sin evidencia). Si una consulta solicita hasta el día 12 pero la última evidencia disponible llega hasta el día 9 (fin proyectado día 10 a las 00:00 UTC), el resumen reporta fielmente `analytics_end = 2026-07-10T00:00:00Z` coincidiendo exactamente con la query ejecutada en `MarketStatisticsPipeline`.
+- **Preflight estricto de timezone**: `resolve_market_daily_cut` valida la presencia de timezone y normaliza a UTC el reloj `effective_known_at` de forma inmediata antes de cualquier ramificación de retorno temprano, garantizando fail-closed ante relojes naive sin importar el modo o la existencia de datos.
+- **Pushdown de `source_id` en `HistoricalMarketDataService`**: el filtrado por fuente se traslada al nivel de almacenamiento (`storage.observations.list(source_id=...)`) antes de la hidratación de modelos y la verificación de calidad en memoria, evitando lecturas y conversiones innecesarias de observaciones pertenecientes a fuentes ajenas del mismo activo.
+
+Cola compacta de 6 elementos para los siguientes bloques de la ruta:
+1. Checkpoints verificables y reanudación PIT para series recursivas diarias (RSI, ATR, MACD).
+2. Adopción de reanudación O(1) en los pipelines productivos de mercado diario.
+3. Migración y reescritura masiva de métricas históricas v1 a `metric_results_v2`.
+4. Migración de diagnósticos históricos a `diagnostic_results_v2` y generación de `analysis_snapshots_v2`.
+5. Promoción y cutover productivo del workspace a sustrato v2 con verificación bidireccional.
+6. Limpieza atómica y desmantelamiento de tablas legadas v1 (`metric_results`, `raw_record_index.document_json`).
+
+Sin checkpoints de series temporales (EMA/RSI/ATR/MACD), cálculo incremental continuo O(delta), adopción productiva de staging v2 ni alteración del esquema de almacenamiento v1.

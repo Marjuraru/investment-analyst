@@ -191,7 +191,7 @@ def test_auto_empty_intervals_reuse_market_results(tmp_path: Path) -> None:
         assert third.bars_received == 0
         assert third.raw_records_created == 0
         assert third.observations_created == 0
-        assert third.analytics_end == datetime(2026, 7, 11, tzinfo=UTC)
+        assert third.analytics_end == datetime(2026, 7, 10, tzinfo=UTC)
         assert third.effective_known_at == first.effective_known_at
         assert third.metric_results_created == 0
         assert third.diagnostics_created == 0
