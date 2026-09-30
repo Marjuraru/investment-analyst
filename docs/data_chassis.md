@@ -743,3 +743,34 @@ declarados del candidato. La equivalencia PIT en dos cortes, la hidratación
 que escala con el objetivo y el probe scratch de dos cierres con RSS/tiempo
 orientativos quedan probados; la reducción de RSS del ciclo real queda para
 el probe post-despliegue.
+
+## Diagnósticos y snapshots PIT en staging v2 (`DATA-CHASSIS-32`)
+
+`DATA-CHASSIS-32` entrega la representación física verificable de diagnósticos
+y snapshots analíticos point-in-time sobre el staging aislado v2, sin activar
+rutas productivas ni migración de histórico:
+- **Contrato puro `AnalysisSnapshot`**: modelo inmutable y tipado con
+  identidad determinista UUIDv8 (namespace UUIDv5, preimagen canónica que
+  incluye `asset_id`, `snapshot_policy`, `as_of` normalizado a UTC, tupla
+  ordenada y deduplicada de `metric_ids`, tupla ordenada y deduplicada de
+  `diagnostic_ids` y `canonical_evidence_set_digest` SHA-256 opcional). El reloj
+  de creación del snapshot queda excluido de la identidad de dominio.
+- **Tablas `diagnostic_results_v2` en staging**: persistencia física sin
+  `document_json`, preservando componentes estructurados, links a métricas y
+  evidencia tipada con `evidence_direction`, `weight` Decimal y verificación
+  estricta de referencias point-in-time contra `metric_results_v2` y
+  `normalized_observations_v2`.
+- **Tablas `analysis_snapshots_v2` en staging**: persistencia física sin
+  `document_json`, con links relacionales normalizados a métricas y
+  diagnósticos, verificación de consistencia temporal (`available_at <= as_of`)
+  y pertenencia al mismo activo.
+- **Backup v4 verificable (`raw-v2-staging-backup-manifest-v4`)**: generado
+  automáticamente cuando existen diagnósticos o snapshots en staging, ligando
+  los inventarios de crudo, observaciones, métricas, lineage, diagnósticos y
+  snapshots con verificación profunda de DAG y enlaces relacionales antes de la
+  promoción atómica. Los manifests previos (v1, v2, v3) se preservan legibles y
+  restaurables con total compatibilidad hacia atrás.
+
+Sin checkpoints de series temporales (EMA/RSI/ATR/MACD), migración masiva de
+analítica v1, cutover productivo de workspace v2, liberación de almacenamiento ni
+promesa de reducción de RSS.
