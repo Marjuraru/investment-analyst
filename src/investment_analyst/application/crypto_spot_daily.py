@@ -2,7 +2,7 @@
 # ruff: noqa: E501
 
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
 from investment_analyst.analytics.market.diagnostic_models import MarketDiagnosticRequest
@@ -21,8 +21,6 @@ from investment_analyst.providers.crypto.coinbase_pipeline import (
     CoinbaseImportSummary,
 )
 from investment_analyst.time_intervals import inclusive_utc_date_bounds
-
-_OPERATIONAL_ANALYTICS_DAYS = 90
 
 
 class CryptoSpotDailyRefreshError(RuntimeError):
@@ -101,24 +99,19 @@ class CryptoSpotDailyRefreshPipeline:
             and plan.persisted_latest_available_at <= effective_known_at
         ):
             self._clock.observe(plan.persisted_latest_available_at)
-        analytics_start = max(start, end - timedelta(days=_OPERATIONAL_ANALYTICS_DAYS))
-        analytics_end = end
-        analytics_known_at = effective_known_at
-        if request.requested_known_at is None:
-            analytics_start, analytics_end, analytics_known_at = resolve_market_daily_cut(
-                self._refresh_planner.storage_handle,
-                asset_id=self._asset_id,
-                source_id=self._source_id,
-                market_start=request.market_start,
-                market_end=request.market_end,
-                requested_end=request.market_end,
-                refresh_mode=request.refresh_mode,
-                fetch_created_inputs=any(
-                    item.raw_records_created > 0 or item.observations_created > 0
-                    for item in imports
-                ),
-                effective_known_at=effective_known_at,
-            )
+        analytics_start, analytics_end, analytics_known_at = resolve_market_daily_cut(
+            self._refresh_planner.storage_handle,
+            asset_id=self._asset_id,
+            source_id=self._source_id,
+            market_start=request.market_start,
+            market_end=request.market_end,
+            requested_end=request.market_end,
+            refresh_mode=request,
+            fetch_created_inputs=any(
+                item.raw_records_created > 0 or item.observations_created > 0 for item in imports
+            ),
+            effective_known_at=effective_known_at,
+        )
         query = HistoricalBarQuery(
             asset_id=self._asset_id,
             source_id=self._source_id,
@@ -150,7 +143,7 @@ class CryptoSpotDailyRefreshPipeline:
             refresh_plan=plan,
             effective_known_at=effective_known_at,
             analytics_start=analytics_start,
-            analytics_end=end,
+            analytics_end=analytics_end,
             analytics_known_at=analytics_known_at,
             intervals_executed=len(imports),
             candles_received=sum(item.candles_received for item in imports),

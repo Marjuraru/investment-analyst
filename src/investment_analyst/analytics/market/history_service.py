@@ -56,6 +56,7 @@ class HistoricalMarketDataService:
         schema = self._schema(query.source_id)
         observations = self._storage.observations.list(
             asset_id=query.asset_id,
+            source_id=query.source_id,
             frequency=schema.frequency,
             observed_from=query.start,
             observed_before=query.end,

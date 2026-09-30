@@ -430,3 +430,86 @@ def test_result_order_is_deterministic(tmp_path) -> None:
         result = HistoricalMarketDataService(storage).query(_query())
 
     assert [bar.timestamp.day for bar in result.bars] == [2, 3, 4]
+
+
+def test_source_filter_precedes_hydration_without_changing_pit(tmp_path) -> None:
+    timestamp = datetime(2026, 7, 2, tzinfo=UTC)
+    available = datetime(2026, 7, 3, tzinfo=UTC)
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        raw, observations = _store_version(
+            storage,
+            asset_id="crypto:btc-usd",
+            source_id=COINBASE_SOURCE_ID,
+            timestamp=timestamp,
+            available_at=available,
+        )
+        # Store valid version from another source for the same asset
+        _store_version(
+            storage,
+            asset_id="crypto:btc-usd",
+            source_id=SIMULATED_SOURCE_ID,
+            timestamp=timestamp,
+            available_at=available,
+        )
+        # Insert a corrupt observation for another source directly into DB
+        # that would fail Pydantic model hydration if selected by storage
+        other_raw_id = uuid4()
+        storage.store.connection.execute(
+            """
+            INSERT INTO normalized_observations (
+                observation_id, raw_record_id, asset_id, field_name,
+                frequency, observed_at, period_end, available_at, quality, document_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                str(uuid4()),
+                str(other_raw_id),
+                "crypto:btc-usd",
+                "corrupt_field",
+                "1d",
+                timestamp,
+                None,
+                available,
+                "valid",
+                '{"source": {"source_id": "other:unsupported-source"}, "corrupt": true}',
+            ],
+        )
+
+        recorded_calls: list[dict[str, object]] = []
+        original_list = storage.observations.list
+
+        def spy_list(**kwargs):
+            recorded_calls.append(kwargs)
+            return original_list(**kwargs)
+
+        storage.observations.list = spy_list
+
+        service = HistoricalMarketDataService(storage)
+        query = _query(
+            asset_id="crypto:btc-usd",
+            source_id=COINBASE_SOURCE_ID,
+            start=datetime(2026, 7, 1, tzinfo=UTC),
+            end=datetime(2026, 7, 5, tzinfo=UTC),
+            known_at=available,
+        )
+        first_result = service.query(query)
+        second_result = service.query(query)
+
+    # 1. Verify source_id was pushed down to storage.observations.list
+    assert len(recorded_calls) == 2
+    assert recorded_calls[0]["source_id"] == COINBASE_SOURCE_ID
+    assert recorded_calls[0]["asset_id"] == "crypto:btc-usd"
+    assert recorded_calls[1]["source_id"] == COINBASE_SOURCE_ID
+
+    # 2. Verify query succeeded without hydrating other sources or crashing on corrupt row
+    assert len(first_result.bars) == 1
+    bar = first_result.bars[0]
+    assert bar.source_id == COINBASE_SOURCE_ID
+    assert bar.asset_id == "crypto:btc-usd"
+    assert bar.raw_record_id == raw.record_id
+    assert bar.observation_ids == {obs.field_name: obs.observation_id for obs in observations}
+
+    # 3. Verify determinism, idempotence and PIT equivalence
+    assert first_result == second_result
+    assert first_result.coverage == second_result.coverage
+    assert first_result.traceability_verified is True

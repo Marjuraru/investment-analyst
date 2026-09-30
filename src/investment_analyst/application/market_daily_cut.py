@@ -37,17 +37,23 @@ def resolve_market_daily_cut(
     window keeps the maximum availability of the eligible observations and
     the analytics end the day after the last valid bar, bounded by the
     requested end. Any other situation keeps the caller-supplied cut.
+    Operational lookback is bounded by 90 days across all branches.
     Corrupt or partial projections never invent coverage.
     """
-    start, end = _requested_bounds(market_start, market_end, requested_end)
-    if _is_explicit_cut(refresh_mode):
-        return start, end, effective_known_at
-    if fetch_created_inputs:
-        return start, end, effective_known_at
-    if _is_full_mode(refresh_mode):
-        return start, end, effective_known_at
     if effective_known_at.tzinfo is None or effective_known_at.utcoffset() is None:
         raise MarketDailyCutError("effective_known_at must be timezone-aware")
+    effective_known_at = effective_known_at.astimezone(UTC)
+
+    start, end = _requested_bounds(market_start, market_end, requested_end)
+    operational_end = end
+    operational_start = max(start, operational_end - timedelta(days=_OPERATIONAL_ANALYTICS_DAYS))
+
+    if _is_explicit_cut(refresh_mode):
+        return operational_start, operational_end, effective_known_at
+    if fetch_created_inputs:
+        return operational_start, operational_end, effective_known_at
+    if _is_full_mode(refresh_mode):
+        return operational_start, operational_end, effective_known_at
     projected = _project_series_cut(
         storage,
         asset_id=asset_id,
@@ -57,7 +63,7 @@ def resolve_market_daily_cut(
         effective_known_at=effective_known_at,
     )
     if projected is None:
-        return start, end, effective_known_at
+        return operational_start, operational_end, effective_known_at
     return projected
 
 
