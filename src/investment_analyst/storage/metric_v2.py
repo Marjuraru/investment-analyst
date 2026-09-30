@@ -16,7 +16,7 @@ closed on conflict, cycle, future or foreign reference.
 from __future__ import annotations
 
 import json
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from uuid import UUID
@@ -31,6 +31,13 @@ from investment_analyst.analytics.metric_identity_v2 import (
 )
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import MetricResult
+from investment_analyst.storage.analytical_v2_validation import (
+    MAX_CHUNK_SIZE,
+    AnalyticalV2ValidationError,
+    chunked_sequence,
+    fetch_metrics_chunked,
+    topological_sort_metrics,
+)
 from investment_analyst.storage.errors import (
     RecordConflictError,
     RecordNotFoundError,
@@ -332,10 +339,17 @@ def require_metric_inputs_visible(
     connection: DuckDBPyConnection,
     result: MetricResult,
     *,
-    known_ids: Collection[UUID] | None = None,
+    known_ids: Collection[UUID] | Mapping[str, tuple[str, datetime]] | None = None,
 ) -> None:
     """Require every input to exist, share asset and be visible at the result."""
-    known = {str(item) for item in (known_ids or ())}
+    known_map: dict[str, tuple[str, datetime]] = {}
+    if known_ids is not None:
+        if isinstance(known_ids, Mapping):
+            known_map = dict(known_ids)
+        else:
+            for item in known_ids:
+                known_map[str(item)] = ("", datetime.min.replace(tzinfo=UTC))
+
     seen_observations: set[str] = set()
     for observation_id in result.input_observation_ids:
         key = str(observation_id)
@@ -354,6 +368,7 @@ def require_metric_inputs_visible(
         available = _parse_instant_text(rows[0][1])
         if available > result.available_at:
             raise MetricV2Error(f"metric v2 references a future observation {key}")
+
     seen_metrics: set[str] = set()
     for metric_id in result.input_metric_result_ids:
         key = str(metric_id)
@@ -362,8 +377,15 @@ def require_metric_inputs_visible(
         seen_metrics.add(key)
         if key == str(result.result_id):
             raise MetricV2Error("metric v2 dependency cycle is not allowed")
-        if key in known:
+
+        if key in known_map and known_map[key][0]:
+            dep_asset, dep_avail = known_map[key]
+            if dep_asset != result.asset_id:
+                raise MetricV2Error(f"metric v2 references a foreign metric {key}")
+            if dep_avail > result.available_at:
+                raise MetricV2Error(f"metric v2 references a future metric {key}")
             continue
+
         rows = connection.execute(
             f"SELECT asset_id, available_at FROM {METRIC_V2_TABLE} WHERE result_id = ?",
             [key],
@@ -382,6 +404,12 @@ def raise_missing_metric(result_id: UUID) -> None:
     raise RecordNotFoundError(f"metric v2 {result_id} was not found")
 
 
+def _obs_id_str(item: object) -> str:
+    if hasattr(item, "observation_id"):
+        return str(item.observation_id)
+    return str(item)
+
+
 class MetricV2Store:
     """Typed append-only store over the metric v2 staging tables."""
 
@@ -394,103 +422,130 @@ class MetricV2Store:
         """Persist typed rows idempotently in topological order; keep prior lots."""
         if not results:
             return BatchWriteReceipt()
-        ordered = sorted(results, key=lambda item: str(item.result_id))
+
+        # 1. Require unique inputs and reject self-reference before identity check
+        for result in results:
+            obs_id_strs = [_obs_id_str(item) for item in result.input_observation_ids]
+            if len(obs_id_strs) != len(set(obs_id_strs)):
+                raise MetricV2Error("metric v2 observation inputs must be unique")
+            met_id_strs = [str(item) for item in result.input_metric_result_ids]
+            if len(met_id_strs) != len(set(met_id_strs)):
+                raise MetricV2Error("metric v2 metric inputs must be unique")
+            for dep in met_id_strs:
+                if dep == str(result.result_id):
+                    raise MetricV2Error("metric v2 dependency cycle is not allowed")
+            _require_v2_identity(result)
+
+        # 2. Check for duplicate IDs with different content in the input batch
         canonical: dict[str, MetricResult] = {}
-        for result in ordered:
+        for result in results:
             key = str(result.result_id)
-            if key in canonical and canonical[key] != result:
+            if key in canonical and not _same_semantic_content(canonical[key], result):
                 raise RecordConflictError(
                     f"metric v2 identifier {key!r} already has different content"
                 )
             canonical[key] = result
-        ordered_keys = tuple(sorted(canonical))
-        placeholders = ", ".join("?" for _ in ordered_keys)
-        columns = ", ".join(_METRIC_V2_COLUMNS)
-        existing = {
-            str(row[0]): row
-            for row in self._connection.execute(
-                f"SELECT {columns} FROM {METRIC_V2_TABLE} WHERE result_id IN ({placeholders})",
-                list(ordered_keys),
+
+        # 3. Topologically sort the unique batch items iteratively (detects cycles within batch)
+        try:
+            sorted_batch = topological_sort_metrics(list(canonical.values()))
+        except AnalyticalV2ValidationError as error:
+            raise MetricV2Error(str(error)) from error
+
+        # 4. Check all referenced observations in chunks <= 256
+        all_obs_ids = sorted(
+            {_obs_id_str(oid) for m in sorted_batch for oid in m.input_observation_ids}
+        )
+        obs_info: dict[str, tuple[str, datetime]] = {}
+        for obs_chunk in chunked_sequence(all_obs_ids, MAX_CHUNK_SIZE):
+            placeholders = ", ".join("?" for _ in obs_chunk)
+            rows = self._connection.execute(
+                f"SELECT observation_id, asset_id, available_at FROM normalized_observations_v2 "
+                f"WHERE observation_id IN ({placeholders})",
+                list(obs_chunk),
             ).fetchall()
+            for r in rows:
+                obs_info[str(r[0])] = (str(r[1]), _parse_instant_text(r[2]))
+
+        for m in sorted_batch:
+            for oid in m.input_observation_ids:
+                oid_str = _obs_id_str(oid)
+                if oid_str not in obs_info:
+                    raise MetricV2Error(f"metric v2 references a missing observation {oid_str}")
+                o_asset, o_avail = obs_info[oid_str]
+                if o_asset != m.asset_id:
+                    raise MetricV2Error(f"metric v2 references a foreign observation {oid_str}")
+                if o_avail > m.available_at:
+                    raise MetricV2Error(f"metric v2 references a future observation {oid_str}")
+
+        # 5. Check all input metric dependencies (both in-batch and external)
+        batch_ids = {str(m.result_id) for m in sorted_batch}
+        metric_info: dict[str, tuple[str, datetime]] = {
+            str(m.result_id): (m.asset_id, m.available_at) for m in sorted_batch
         }
+        external_deps = sorted(
+            {str(dep) for m in sorted_batch for dep in m.input_metric_result_ids} - batch_ids
+        )
+        for dep_chunk in chunked_sequence(external_deps, MAX_CHUNK_SIZE):
+            placeholders = ", ".join("?" for _ in dep_chunk)
+            rows = self._connection.execute(
+                f"SELECT result_id, asset_id, available_at FROM {METRIC_V2_TABLE} "
+                f"WHERE result_id IN ({placeholders})",
+                list(dep_chunk),
+            ).fetchall()
+            for r in rows:
+                metric_info[str(r[0])] = (str(r[1]), _parse_instant_text(r[2]))
+
+        for m in sorted_batch:
+            for dep in m.input_metric_result_ids:
+                dep_str = str(dep)
+                if dep_str not in metric_info:
+                    raise MetricV2Error(f"metric v2 dependency {dep_str} is not persisted")
+                d_asset, d_avail = metric_info[dep_str]
+                if d_asset != m.asset_id:
+                    raise MetricV2Error(f"metric v2 references a foreign metric {dep_str}")
+                if d_avail > m.available_at:
+                    raise MetricV2Error(f"metric v2 references a future metric {dep_str}")
+
+        # 6. Check existing rows in DB in chunks <= 256 for idempotence/conflict
+        all_batch_ids = [str(m.result_id) for m in sorted_batch]
+        existing_rows: dict[str, tuple[object, ...]] = {}
+        for id_chunk in chunked_sequence(all_batch_ids, MAX_CHUNK_SIZE):
+            placeholders = ", ".join("?" for _ in id_chunk)
+            columns = ", ".join(_METRIC_V2_COLUMNS)
+            rows = self._connection.execute(
+                f"SELECT {columns} FROM {METRIC_V2_TABLE} WHERE result_id IN ({placeholders})",
+                list(id_chunk),
+            ).fetchall()
+            for r in rows:
+                existing_rows[str(r[0])] = r
+
         created: list[UUID] = []
         reused: list[UUID] = []
-        seen: set[str] = set()
-        pending = [canonical[key] for key in ordered_keys]
-        settled_known: set[str] = set(existing)
-        for result in pending:
-            _require_v2_identity(result)
-        dependency_ids = sorted(
-            {str(item) for result in pending for item in result.input_metric_result_ids}
-            - settled_known
-        )
-        if dependency_ids:
-            placeholders_dep = ", ".join("?" for _ in dependency_ids)
-            persisted = {
-                str(row[0])
-                for row in self._connection.execute(
-                    f"SELECT result_id FROM {METRIC_V2_TABLE} "
-                    f"WHERE result_id IN ({placeholders_dep})",
-                    dependency_ids,
-                ).fetchall()
-            }
-            settled_known |= persisted
-        progress = True
-        while pending and progress:
-            progress = False
-            remaining: list[MetricResult] = []
-            pending_known = {str(item.result_id) for item in pending}
-            for result in pending:
-                key = str(result.result_id)
-                dependencies = {str(item) for item in result.input_metric_result_ids}
-                if not dependencies.issubset(settled_known | pending_known):
-                    require_metric_inputs_visible(self._connection, result)
-                    remaining.append(result)
-                    continue
-                if not dependencies.issubset(settled_known):
-                    remaining.append(result)
-                    continue
-                row, observation_ids, metric_ids = metric_to_row(result)
-                if key in existing:
-                    stored_observations = self._link_observation_ids(UUID(key))
-                    stored_metrics = self._link_metric_ids(UUID(key))
-                    stored = row_to_metric(
-                        existing[key],
-                        observation_ids=stored_observations,
-                        metric_ids=stored_metrics,
-                    )
-                    if not _same_semantic_content(stored, result):
-                        raise RecordConflictError(
-                            f"metric v2 identifier {key!r} already has different content"
-                        )
-                    if key not in seen:
-                        reused.append(result.result_id)
-                        seen.add(key)
-                    settled_known.add(key)
-                    progress = True
-                    continue
-                require_metric_inputs_visible(
-                    self._connection, result, known_ids=[UUID(item) for item in settled_known]
-                )
-                if key not in seen:
-                    if not dependencies.issubset(settled_known):
-                        remaining.append(result)
-                        continue
-                    self._insert_one(row, observation_ids, metric_ids)
-                    created.append(result.result_id)
-                    seen.add(key)
-                    settled_known.add(key)
-                    progress = True
-                else:
-                    reused.append(result.result_id)
-            pending = remaining
-        if pending:
-            unresolved = sorted(
-                {str(item) for result in pending for item in result.input_metric_result_ids}
-                - settled_known
+
+        if existing_rows:
+            stored_metrics = fetch_metrics_chunked(
+                self._connection, [UUID(k) for k in existing_rows]
             )
-            missing = unresolved[0] if unresolved else str(pending[0].result_id)
-            raise MetricV2Error(f"metric v2 dependency {missing} is not persisted")
+            for m in sorted_batch:
+                k = str(m.result_id)
+                if k in existing_rows:
+                    stored = stored_metrics[m.result_id]
+                    if not _same_semantic_content(stored, m):
+                        raise RecordConflictError(
+                            f"metric v2 identifier {k!r} already has different content"
+                        )
+                    reused.append(m.result_id)
+
+        # 7. Insert new rows in topological order
+        reused_set = {str(uid) for uid in reused}
+        for m in sorted_batch:
+            if str(m.result_id) in reused_set:
+                continue
+            row, obs_ids, dep_ids = metric_to_row(m)
+            self._insert_one(row, obs_ids, dep_ids)
+            created.append(m.result_id)
+
         return BatchWriteReceipt(
             created_ids=tuple(created),
             reused_ids=tuple(reused),
@@ -498,28 +553,8 @@ class MetricV2Store:
         )
 
     def get_many(self, result_ids: tuple[UUID, ...] | list[UUID]) -> dict[UUID, MetricResult]:
-        """Hydrate verified metrics in deterministic order."""
-        ordered = tuple(sorted(set(result_ids), key=str))
-        if not ordered:
-            return {}
-        columns = ", ".join(_METRIC_V2_COLUMNS)
-        placeholders = ", ".join("?" for _ in ordered)
-        rows = self._connection.execute(
-            f"SELECT {columns} FROM {METRIC_V2_TABLE} WHERE result_id IN ({placeholders})",
-            [str(result_id) for result_id in ordered],
-        ).fetchall()
-        indexed = {UUID(row[0]): row for row in rows}
-        for result_id in ordered:
-            if result_id not in indexed:
-                raise_missing_metric(result_id)
-        return {
-            result_id: row_to_metric(
-                indexed[result_id],
-                observation_ids=self._link_observation_ids(result_id),
-                metric_ids=self._link_metric_ids(result_id),
-            )
-            for result_id in ordered
-        }
+        """Hydrate verified metrics in deterministic order without N+1 queries."""
+        return fetch_metrics_chunked(self._connection, result_ids)
 
     def _link_observation_ids(self, result_id: UUID) -> list[UUID]:
         rows = self._connection.execute(

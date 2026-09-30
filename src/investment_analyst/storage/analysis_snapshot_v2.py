@@ -20,12 +20,26 @@ from uuid import UUID
 
 from duckdb import DuckDBPyConnection
 
+from investment_analyst.analytics.analysis_domain import (
+    DomainMembershipError,
+    require_authorized_domain,
+    validate_metric_key_for_domain,
+)
 from investment_analyst.analytics.analysis_snapshot import (
     AnalysisSnapshot,
     analysis_snapshot_identity,
     canonical_evidence_set_digest,
 )
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
+from investment_analyst.storage.analytical_v2_validation import (
+    MAX_CHUNK_SIZE,
+    AnalyticalV2ValidationError,
+    chunked_sequence,
+    fetch_diagnostics_chunked,
+    fetch_snapshots_chunked,
+    validate_keyset_cursor,
+    validate_keyset_limit,
+)
 from investment_analyst.storage.errors import (
     RecordConflictError,
     RecordNotFoundError,
@@ -260,11 +274,12 @@ class AnalysisSnapshotV2Store:
     def save_snapshots(self, snapshots: Collection[AnalysisSnapshot]) -> BatchWriteReceipt:
         """Save snapshots idempotently, verifying identity, references, and evidence digest."""
         if not snapshots:
-            return BatchWriteReceipt(created_count=0, reused_count=0)
+            return BatchWriteReceipt()
 
         created_ids: list[UUID] = []
         reused_ids: list[UUID] = []
 
+        # 1. Type, deterministic identity and domain membership checks
         for item in snapshots:
             if not isinstance(item, AnalysisSnapshot):
                 raise AnalysisSnapshotV2Error("save_snapshots requires AnalysisSnapshot instances")
@@ -282,32 +297,146 @@ class AnalysisSnapshotV2Store:
                 raise RecordConflictError(
                     f"snapshot identity {item.snapshot_id} is not deterministic"
                 )
+            try:
+                require_authorized_domain(item.domain)
+            except DomainMembershipError as error:
+                raise AnalysisSnapshotV2Error(str(error)) from error
 
-            known_at = item.known_at.astimezone(UTC)
-            # Verify metrics and collect referenced evidence set IDs
-            referenced_es_ids: set[str] = set()
-            for mid in item.metric_ids:
-                es_id = self._verify_metric_reference(
-                    mid, asset_id=item.asset_id, known_at=known_at
+        # 2. Gather cited diagnostics across the batch and hydrate them in chunks <= 256
+        all_cited_diag_ids = {did for s in snapshots for did in s.diagnostic_ids}
+        try:
+            diags_by_id = fetch_diagnostics_chunked(self._connection, all_cited_diag_ids)
+        except AnalyticalV2ValidationError as error:
+            raise AnalysisSnapshotV2Error(str(error)) from error
+
+        # 3. Gather all cited metric IDs (both direct and from diagnostics)
+        all_metric_ids = {mid for s in snapshots for mid in s.metric_ids}
+        for diag in diags_by_id.values():
+            for comp in diag.components:
+                all_metric_ids.update(comp.metric_result_ids)
+            for ev in diag.evidence:
+                all_metric_ids.add(ev.metric_result_id)
+
+        # 4. Fetch metric metadata in chunks <= 256
+        metric_info: dict[UUID, tuple[str, datetime, str, str | None]] = {}
+        for m_chunk in chunked_sequence(sorted(all_metric_ids, key=str), MAX_CHUNK_SIZE):
+            m_placeholders = ", ".join("?" for _ in m_chunk)
+            rows = self._connection.execute(
+                f"SELECT result_id, asset_id, available_at, metric_key, evidence_set_id "
+                f"FROM metric_results_v2 WHERE result_id IN ({m_placeholders})",
+                [str(item) for item in m_chunk],
+            ).fetchall()
+            for r_id, a_id, avail, key, es_id in rows:
+                metric_info[UUID(str(r_id))] = (
+                    str(a_id),
+                    _parse_instant_text(avail),
+                    str(key),
+                    str(es_id) if es_id is not None else None,
                 )
+
+        for mid in all_metric_ids:
+            if mid not in metric_info:
+                raise RecordNotFoundError(f"snapshot references missing metric {mid}")
+
+        # 5. Gather all referenced EvidenceSets across all cited metrics in chunks <= 256
+        all_es_ids = {info[3] for info in metric_info.values() if info[3] is not None}
+        es_info: dict[str, tuple[str, datetime, str]] = {}
+        for es_chunk in chunked_sequence(sorted(all_es_ids), MAX_CHUNK_SIZE):
+            es_placeholders = ", ".join("?" for _ in es_chunk)
+            rows = self._connection.execute(
+                f"SELECT evidence_set_id, asset_id, available_at, canonical_hash "
+                f"FROM evidence_sets_v2 WHERE evidence_set_id IN ({es_placeholders})",
+                list(es_chunk),
+            ).fetchall()
+            for e_id, a_id, avail, c_hash in rows:
+                es_info[str(e_id)] = (
+                    str(a_id),
+                    _parse_instant_text(avail),
+                    str(c_hash),
+                )
+
+        for es_id in all_es_ids:
+            if es_id not in es_info:
+                raise RecordNotFoundError(
+                    f"snapshot metric references missing evidence set {es_id}"
+                )
+
+        # 6. Verify each snapshot
+        for item in snapshots:
+            known_at = item.known_at.astimezone(UTC)
+            snap_es_ids: set[str] = set()
+
+            # Verify direct metrics
+            for mid in item.metric_ids:
+                m_asset, m_avail, m_key, es_id = metric_info[mid]
+                if m_asset != item.asset_id:
+                    raise AnalysisSnapshotV2Error(
+                        f"snapshot for {item.asset_id} references foreign metric {mid} "
+                        f"belonging to {m_asset}"
+                    )
+                if m_avail > known_at:
+                    raise AnalysisSnapshotV2Error(
+                        f"snapshot cut at {known_at.isoformat()} references future metric "
+                        f"{mid} available at {m_avail.isoformat()}"
+                    )
+                try:
+                    validate_metric_key_for_domain(m_key, item.domain)
+                except DomainMembershipError as error:
+                    raise AnalysisSnapshotV2Error(str(error)) from error
                 if es_id:
-                    referenced_es_ids.add(es_id)
+                    snap_es_ids.add(es_id)
 
-            # Verify diagnostics
+            # Verify diagnostics and their cited metrics
             for did in item.diagnostic_ids:
-                self._verify_diagnostic_reference(did, asset_id=item.asset_id, known_at=known_at)
+                diag = diags_by_id[did]
+                if diag.asset_id != item.asset_id:
+                    raise AnalysisSnapshotV2Error(
+                        f"snapshot for {item.asset_id} references foreign diagnostic {did} "
+                        f"belonging to {diag.asset_id}"
+                    )
+                if diag.available_at > known_at:
+                    raise AnalysisSnapshotV2Error(
+                        f"snapshot cut at {known_at.isoformat()} references future diagnostic "
+                        f"{did} available at {diag.available_at.isoformat()}"
+                    )
+                diag_mids: set[UUID] = set()
+                for comp in diag.components:
+                    diag_mids.update(comp.metric_result_ids)
+                for ev in diag.evidence:
+                    diag_mids.add(ev.metric_result_id)
+                for mid in diag_mids:
+                    _, _, m_key, es_id = metric_info[mid]
+                    try:
+                        validate_metric_key_for_domain(m_key, item.domain)
+                    except DomainMembershipError as error:
+                        raise AnalysisSnapshotV2Error(str(error)) from error
+                    if es_id:
+                        snap_es_ids.add(es_id)
 
-            # Verify EvidenceSets digest
-            resolved_hashes = self._resolve_evidence_set_hashes(
-                referenced_es_ids, asset_id=item.asset_id, known_at=known_at
-            )
-            expected_digest = canonical_evidence_set_digest(resolved_hashes)
+            # Verify evidence sets and digest
+            snap_es_hashes: list[str] = []
+            for es_id in sorted(snap_es_ids):
+                es_asset, es_avail, es_hash = es_info[es_id]
+                if es_asset != item.asset_id:
+                    raise AnalysisSnapshotV2Error(
+                        f"snapshot for {item.asset_id} references foreign evidence set {es_id} "
+                        f"belonging to {es_asset}"
+                    )
+                if es_avail > known_at:
+                    raise AnalysisSnapshotV2Error(
+                        f"snapshot cut at {known_at.isoformat()} references future evidence set "
+                        f"{es_id} available at {es_avail.isoformat()}"
+                    )
+                snap_es_hashes.append(es_hash)
+
+            expected_digest = canonical_evidence_set_digest(snap_es_hashes)
             if expected_digest != item.evidence_set_digest:
                 raise AnalysisSnapshotV2Error(
                     f"snapshot evidence_set_digest {item.evidence_set_digest} does not match "
                     f"resolved hashes digest {expected_digest}"
                 )
 
+            # Check existing row
             snap_id_str = str(item.snapshot_id)
             existing_rows = self._connection.execute(
                 f"SELECT {', '.join(ANALYSIS_SNAPSHOT_V2_COLUMNS)} "
@@ -316,7 +445,6 @@ class AnalysisSnapshotV2Store:
             ).fetchall()
 
             if existing_rows:
-                # Rehydrate existing snapshot and compare semantic content
                 existing = self.get_snapshot(item.snapshot_id)
                 if (
                     existing.asset_id == item.asset_id
@@ -327,7 +455,6 @@ class AnalysisSnapshotV2Store:
                     and existing.metric_ids == item.metric_ids
                     and existing.diagnostic_ids == item.diagnostic_ids
                 ):
-                    # Reuse first persisted row (including original created_at)
                     reused_ids.append(item.snapshot_id)
                     continue
                 raise RecordConflictError(f"snapshot content conflict for {item.snapshot_id}")
@@ -377,69 +504,17 @@ class AnalysisSnapshotV2Store:
 
         return BatchWriteReceipt(created_ids=tuple(created_ids), reused_ids=tuple(reused_ids))
 
+    def get_snapshots(self, snapshot_ids: Collection[UUID]) -> dict[UUID, AnalysisSnapshot]:
+        """Hydrate typed AnalysisSnapshots, verifying links and cited references."""
+        try:
+            return fetch_snapshots_chunked(self._connection, snapshot_ids)
+        except AnalyticalV2ValidationError as error:
+            raise AnalysisSnapshotV2Error(str(error)) from error
+
     def get_snapshot(self, snapshot_id: UUID) -> AnalysisSnapshot:
         """Hydrate typed AnalysisSnapshot, verifying links and cited references."""
-        snap_id_str = str(snapshot_id)
-        rows = self._connection.execute(
-            f"SELECT {', '.join(ANALYSIS_SNAPSHOT_V2_COLUMNS)} "
-            f"FROM {ANALYSIS_SNAPSHOT_V2_TABLE} WHERE snapshot_id = ?",
-            [snap_id_str],
-        ).fetchall()
-        if not rows:
-            raise RecordNotFoundError(f"analysis snapshot {snapshot_id} not found")
-        row = rows[0]
-        asset_id = str(row[1])
-        domain = str(row[2])
-        known_at = _parse_instant_text(row[3])
-        policy_version = str(row[4])
-        evidence_set_digest = str(row[5])
-        created_at = _parse_instant_text(row[6])
-
-        # Hydrate metric links
-        metric_rows = self._connection.execute(
-            f"""
-            SELECT position, metric_result_id
-            FROM {ANALYSIS_SNAPSHOT_V2_METRIC_LINKS_TABLE}
-            WHERE snapshot_id = ? ORDER BY position
-            """,
-            [snap_id_str],
-        ).fetchall()
-        metric_ids: list[UUID] = []
-        for pos, mid in metric_rows:
-            if int(pos) != len(metric_ids):
-                raise AnalysisSnapshotV2Error("snapshot metric link positions are corrupt")
-            metric_ids.append(UUID(str(mid)))
-            self._verify_metric_reference(metric_ids[-1], asset_id=asset_id, known_at=known_at)
-
-        # Hydrate diagnostic links
-        diag_rows = self._connection.execute(
-            f"""
-            SELECT position, diagnostic_id
-            FROM {ANALYSIS_SNAPSHOT_V2_DIAGNOSTIC_LINKS_TABLE}
-            WHERE snapshot_id = ? ORDER BY position
-            """,
-            [snap_id_str],
-        ).fetchall()
-        diagnostic_ids: list[UUID] = []
-        for pos, did in diag_rows:
-            if int(pos) != len(diagnostic_ids):
-                raise AnalysisSnapshotV2Error("snapshot diagnostic link positions are corrupt")
-            diagnostic_ids.append(UUID(str(did)))
-            self._verify_diagnostic_reference(
-                diagnostic_ids[-1], asset_id=asset_id, known_at=known_at
-            )
-
-        return AnalysisSnapshot(
-            snapshot_id=snapshot_id,
-            asset_id=asset_id,
-            domain=domain,
-            known_at=known_at,
-            policy_version=policy_version,
-            metric_ids=tuple(metric_ids),
-            diagnostic_ids=tuple(diagnostic_ids),
-            evidence_set_digest=evidence_set_digest,
-            created_at=created_at,
-        )
+        results = self.get_snapshots([snapshot_id])
+        return results[snapshot_id]
 
     def list_snapshots(
         self,
@@ -447,8 +522,18 @@ class AnalysisSnapshotV2Store:
         asset_id: str | None = None,
         domain: str | None = None,
         known_to: datetime | None = None,
+        cursor_at: datetime | str | None = None,
+        cursor_id: UUID | str | None = None,
+        limit: int | None = None,
     ) -> list[AnalysisSnapshot]:
-        """List and hydrate analysis snapshots in stable order."""
+        """List and hydrate analysis snapshots in stable order without N+1 queries."""
+        try:
+            normalized_cursor = validate_keyset_cursor(cursor_at, cursor_id)
+            if limit is not None:
+                validate_keyset_limit(limit)
+        except AnalyticalV2ValidationError as error:
+            raise AnalysisSnapshotV2Error(str(error)) from error
+
         clauses: list[str] = []
         parameters: list[object] = []
         if asset_id is not None:
@@ -460,13 +545,21 @@ class AnalysisSnapshotV2Store:
         if known_to is not None:
             clauses.append("known_at <= ?")
             parameters.append(_instant_text(known_to))
+
+        if normalized_cursor is not None:
+            clauses.append("(known_at > ? OR (known_at = ? AND snapshot_id > ?))")
+            parameters.extend([normalized_cursor[0], normalized_cursor[0], normalized_cursor[1]])
+
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        limit_clause = f" LIMIT {limit}" if limit is not None else ""
         rows = self._connection.execute(
             f"SELECT snapshot_id FROM {ANALYSIS_SNAPSHOT_V2_TABLE}{where} "
-            "ORDER BY known_at, snapshot_id",
+            f"ORDER BY known_at, snapshot_id{limit_clause}",
             parameters,
         ).fetchall()
-        return [self.get_snapshot(UUID(str(row[0]))) for row in rows]
+        ids = [UUID(str(row[0])) for row in rows]
+        hydrated = self.get_snapshots(ids)
+        return [hydrated[sid] for sid in ids]
 
 
 __all__ = [

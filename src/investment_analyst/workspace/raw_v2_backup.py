@@ -909,9 +909,10 @@ class RawV2StagingBackupService:
                 ).fetchall()
                 if not rows:
                     break
-                for r in rows:
-                    sid = UUID(str(r[0]))
-                    snap = snap_store.get_snapshot(sid)
+                page_ids = [UUID(str(r[0])) for r in rows]
+                hydrated = snap_store.get_snapshots(page_ids)
+                for sid in page_ids:
+                    snap = hydrated[sid]
                     canonical = (
                         f"{snap.snapshot_id}|{snap.asset_id}|{snap.domain}|{snap.known_at.isoformat()}|"
                         f"{snap.policy_version}|{snap.evidence_set_digest}|{len(snap.metric_ids)}|{len(snap.diagnostic_ids)}"
@@ -1445,14 +1446,15 @@ class RawV2StagingBackupService:
                 ).fetchall()
                 if not rows:
                     break
-                for r in rows:
-                    sid = UUID(str(r[0]))
-                    try:
-                        snap = snap_store.get_snapshot(sid)
-                    except Exception as error:
-                        raise RawV2BackupError(
-                            f"restored snapshot verification failed: {error}"
-                        ) from error
+                page_ids = [UUID(str(r[0])) for r in rows]
+                try:
+                    hydrated = snap_store.get_snapshots(page_ids)
+                except Exception as error:
+                    raise RawV2BackupError(
+                        f"restored snapshot verification failed: {error}"
+                    ) from error
+                for sid in page_ids:
+                    snap = hydrated[sid]
                     canonical = (
                         f"{snap.snapshot_id}|{snap.asset_id}|{snap.domain}|{snap.known_at.isoformat()}|"
                         f"{snap.policy_version}|{snap.evidence_set_digest}|{len(snap.metric_ids)}|{len(snap.diagnostic_ids)}"

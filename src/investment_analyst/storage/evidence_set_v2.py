@@ -28,6 +28,10 @@ from investment_analyst.analytics.evidence_set import (
     resolve_evidence_set,
     verify_evidence_set,
 )
+from investment_analyst.storage.analytical_v2_validation import (
+    MAX_CHUNK_SIZE,
+    chunked_sequence,
+)
 from investment_analyst.storage.errors import RecordConflictError, StorageError
 
 EVIDENCE_SEGMENT_V2_TABLE = "evidence_segments_v2"
@@ -347,16 +351,17 @@ class EvidenceSetV2Store:
         if not ordered:
             return 0
         keys = tuple(str(item.segment_id) for item in ordered)
-        placeholders = ", ".join("?" for _ in keys)
         columns = ", ".join(_SEGMENT_V2_COLUMNS)
-        existing = {
-            str(row[0]): row
-            for row in self._connection.execute(
+        existing: dict[str, tuple[object, ...]] = {}
+        for chunk in chunked_sequence(keys, MAX_CHUNK_SIZE):
+            placeholders = ", ".join("?" for _ in chunk)
+            chunk_rows = self._connection.execute(
                 f"SELECT {columns} FROM {EVIDENCE_SEGMENT_V2_TABLE} "
                 f"WHERE segment_id IN ({placeholders})",
-                list(keys),
+                list(chunk),
             ).fetchall()
-        }
+            for row in chunk_rows:
+                existing[str(row[0])] = row
         created = 0
         for segment in ordered:
             key = str(segment.segment_id)
@@ -452,14 +457,19 @@ class EvidenceSetV2Store:
         except EvidenceSetVerificationError as error:
             raise EvidenceSetV2Error("evidence set v2 lineage does not verify") from error
         ordered = tuple(sorted(set(identifiers), key=str))
-        placeholders = ", ".join("?" for _ in ordered)
-        rows = self._connection.execute(
-            "SELECT observation_id, asset_id, source_id, field_name, available_at "
-            "FROM normalized_observations_v2 "
-            f"WHERE observation_id IN ({placeholders})",
-            [str(item) for item in ordered],
-        ).fetchall()
-        indexed = {str(row[0]): row for row in rows}
+        if not ordered:
+            return identifiers
+        indexed: dict[str, tuple[object, ...]] = {}
+        for chunk in chunked_sequence(ordered, MAX_CHUNK_SIZE):
+            placeholders = ", ".join("?" for _ in chunk)
+            chunk_rows = self._connection.execute(
+                "SELECT observation_id, asset_id, source_id, field_name, available_at "
+                "FROM normalized_observations_v2 "
+                f"WHERE observation_id IN ({placeholders})",
+                [str(item) for item in chunk],
+            ).fetchall()
+            for row in chunk_rows:
+                indexed[str(row[0])] = row
         for identifier in identifiers:
             row = indexed.get(str(identifier))
             if row is None:

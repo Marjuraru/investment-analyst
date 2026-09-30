@@ -983,6 +983,9 @@ class RawV2Staging:
         mode: DiagnosticMode | None = None,
         as_of: datetime | None = None,
         available_to: datetime | None = None,
+        cursor_at: datetime | str | None = None,
+        cursor_id: UUID | str | None = None,
+        limit: int | None = None,
     ) -> list[DiagnosticResult]:
         """Hydrate typed PIT diagnostics in stable order."""
         self._require_open()
@@ -993,6 +996,9 @@ class RawV2Staging:
             mode=mode,
             as_of=as_of,
             available_to=available_to,
+            cursor_at=cursor_at,
+            cursor_id=cursor_id,
+            limit=limit,
         )
 
     def save_analysis_snapshots(self, snapshots: Collection[AnalysisSnapshot]) -> BatchWriteReceipt:
@@ -1011,12 +1017,24 @@ class RawV2Staging:
         ensure_analysis_snapshot_v2_tables(self._connection, create=False)
         return AnalysisSnapshotV2Store(self._connection).get_snapshot(snapshot_id)
 
+    def get_analysis_snapshots(
+        self, snapshot_ids: Collection[UUID]
+    ) -> dict[UUID, AnalysisSnapshot]:
+        """Hydrate typed analysis snapshots with verified links and cited references."""
+        self._require_open()
+        ensure_metric_v2_tables(self._connection, create=False)
+        ensure_analysis_snapshot_v2_tables(self._connection, create=False)
+        return AnalysisSnapshotV2Store(self._connection).get_snapshots(snapshot_ids)
+
     def list_analysis_snapshots(
         self,
         *,
         asset_id: str | None = None,
         domain: str | None = None,
         known_to: datetime | None = None,
+        cursor_at: datetime | str | None = None,
+        cursor_id: UUID | str | None = None,
+        limit: int | None = None,
     ) -> list[AnalysisSnapshot]:
         """Hydrate typed PIT analysis snapshots in stable order."""
         self._require_open()
@@ -1026,6 +1044,9 @@ class RawV2Staging:
             asset_id=asset_id,
             domain=domain,
             known_to=known_to,
+            cursor_at=cursor_at,
+            cursor_id=cursor_id,
+            limit=limit,
         )
 
     def _ensure_optional_analytical_tables(self, *, create: bool) -> None:

@@ -161,9 +161,7 @@ def test_backup_rejects_active_writer_wal_symlink_and_overlap(tmp_path: Path) ->
     service = RawV2StagingBackupService()
     staging = _staging(tmp_path, "staging")
     with staging:
-        from tests.unit.storage.test_raw_v2 import _record
-
-        staging.save(_record())
+        staging.save(_raw_record(0))
         with pytest.raises(RawV2BackupError, match="outside the staging"):
             service.create(staging, staging._connection, staging.destination / "nested")
         foreign = _staging(tmp_path, "foreign")
@@ -608,7 +606,7 @@ def test_analysis_backup_v4_restores_diagnostics_and_snapshots(tmp_path: Path) -
         candidate = _LineageMetric(
             result_id=uuid4(),
             asset_id=asset_id,
-            metric_key="funding.sum_1h",
+            metric_key="crypto.derivatives.funding.sum_1h",
             value=Decimal("1.2345"),
             unit="rate",
             as_of=base + timedelta(hours=23),
@@ -780,7 +778,7 @@ def test_analysis_restore_rejects_corrupt_links_without_promotion(tmp_path: Path
         candidate = _LineageMetric(
             result_id=uuid4(),
             asset_id=asset_id,
-            metric_key="funding.sum_1h",
+            metric_key="crypto.derivatives.funding.sum_1h",
             value=Decimal("1.0"),
             unit="rate",
             as_of=base + timedelta(hours=23),
