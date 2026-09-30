@@ -55,6 +55,7 @@ from investment_analyst.storage.raw_v2_import import (
 RAW_V2_BACKUP_MANIFEST_SCHEMA = "raw-v2-staging-backup-manifest-v1"
 RAW_V2_BACKUP_MANIFEST_SCHEMA_V2 = "raw-v2-staging-backup-manifest-v2"
 RAW_V2_BACKUP_MANIFEST_SCHEMA_V3 = "raw-v2-staging-backup-manifest-v3"
+RAW_V2_BACKUP_MANIFEST_SCHEMA_V4 = "raw-v2-staging-backup-manifest-v4"
 BACKUP_MANIFEST_NAME = "raw-v2-staging-backup-manifest.json"
 _IMPORT_STATE_FILENAME = "raw-v2-import-state.json"
 _OBSERVATION_IMPORT_STATE_FILENAME = "observation-v2-import-state.json"
@@ -126,6 +127,19 @@ class RawV2BackupMetricCounts(ContractModel):
     lineage_digest: NonEmptyStr
 
 
+class RawV2BackupAnalysisCounts(ContractModel):
+    """Verified diagnostic and analysis snapshot counts bound into a v4 staging backup."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    diagnostics: int = Field(ge=0)
+    counts_by_mode: Mapping[str, int]
+    diagnostic_digest: NonEmptyStr
+    snapshots: int = Field(ge=0)
+    counts_by_domain: Mapping[str, int]
+    snapshot_digest: NonEmptyStr
+
+
 class RawV2StagingBackupManifest(ContractModel):
     """Versioned inventory used to verify a staging backup before activation.
 
@@ -134,6 +148,8 @@ class RawV2StagingBackupManifest(ContractModel):
     content digest and the observation import checkpoint when it exists.
     Schema ``v3`` additionally binds the typed metric inventory with its
     shared lineage digest; v1 and v2 backups stay readable and restorable.
+    Schema ``v4`` additionally binds the typed diagnostic and snapshot
+    inventory with their verified links and digests.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -142,6 +158,7 @@ class RawV2StagingBackupManifest(ContractModel):
         "raw-v2-staging-backup-manifest-v1",
         "raw-v2-staging-backup-manifest-v2",
         "raw-v2-staging-backup-manifest-v3",
+        "raw-v2-staging-backup-manifest-v4",
     ] = RAW_V2_BACKUP_MANIFEST_SCHEMA
     backup_id: UUID
     staging_id: NonEmptyStr
@@ -155,6 +172,7 @@ class RawV2StagingBackupManifest(ContractModel):
     observation_checkpoint_digest: str | None = None
     observation_counts: RawV2BackupObservationCounts | None = None
     metric_counts: RawV2BackupMetricCounts | None = None
+    analysis_counts: RawV2BackupAnalysisCounts | None = None
 
     @model_validator(mode="after")
     def validate_inventory(self) -> RawV2StagingBackupManifest:
@@ -163,7 +181,17 @@ class RawV2StagingBackupManifest(ContractModel):
             raise ValueError("backup inventory must be non-empty, unique, and sorted")
         if BACKUP_MANIFEST_NAME in paths:
             raise ValueError("backup inventory must not contain its own manifest")
-        if self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V3:
+        if self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V4:
+            expected_id = _backup_id(
+                self.staging_id,
+                self.files,
+                self.counts,
+                self.observation_counts,
+                self.schema_version,
+                self.metric_counts,
+                self.analysis_counts,
+            )
+        elif self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V3:
             expected_id = _backup_id(
                 self.staging_id,
                 self.files,
@@ -190,21 +218,34 @@ class RawV2StagingBackupManifest(ContractModel):
             self.observation_checkpoint_digest is None
         ):
             raise ValueError("observation checkpoint version and digest travel together")
-        if self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V3:
+        if self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V4:
+            if self.observation_counts is None:
+                raise ValueError("v4 manifest requires observation counts")
+            if self.metric_counts is None:
+                raise ValueError("v4 manifest requires metric counts")
+            if self.analysis_counts is None:
+                raise ValueError("v4 manifest requires analysis counts")
+        elif self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V3:
             if self.observation_counts is None:
                 raise ValueError("v3 manifest requires observation counts")
             if self.metric_counts is None:
                 raise ValueError("v3 manifest requires metric counts")
+            if self.analysis_counts is not None:
+                raise ValueError("v3 manifest must not carry analysis counts")
         elif self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V2:
             if self.observation_counts is None:
                 raise ValueError("v2 manifest requires observation counts")
             if self.metric_counts is not None:
                 raise ValueError("v2 manifest must not carry metric counts")
+            if self.analysis_counts is not None:
+                raise ValueError("v2 manifest must not carry analysis counts")
         else:
             if self.observation_counts is not None:
                 raise ValueError("v1 manifest must not carry observation counts")
             if self.metric_counts is not None:
                 raise ValueError("v1 manifest must not carry metric counts")
+            if self.analysis_counts is not None:
+                raise ValueError("v1 manifest must not carry analysis counts")
             if self.observation_checkpoint_format is not None:
                 raise ValueError("v1 manifest must not carry observation checkpoint")
         return self
@@ -220,18 +261,24 @@ def _backup_id(
     observation_counts: RawV2BackupObservationCounts | None = None,
     schema_version: str = RAW_V2_BACKUP_MANIFEST_SCHEMA,
     metric_counts: RawV2BackupMetricCounts | None = None,
+    analysis_counts: RawV2BackupAnalysisCounts | None = None,
 ) -> UUID:
+    payload: dict[str, object] = {
+        "staging_id": staging_id,
+        "schema_version": schema_version,
+        "files": [item.model_dump(mode="json") for item in files],
+        "counts": counts.model_dump(mode="json"),
+        "observation_counts": (
+            observation_counts.model_dump(mode="json") if observation_counts else None
+        ),
+        "metric_counts": (metric_counts.model_dump(mode="json") if metric_counts else None),
+    }
+    if schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V4:
+        payload["analysis_counts"] = (
+            analysis_counts.model_dump(mode="json") if analysis_counts else None
+        )
     document = json.dumps(
-        {
-            "staging_id": staging_id,
-            "schema_version": schema_version,
-            "files": [item.model_dump(mode="json") for item in files],
-            "counts": counts.model_dump(mode="json"),
-            "observation_counts": (
-                observation_counts.model_dump(mode="json") if observation_counts else None
-            ),
-            "metric_counts": (metric_counts.model_dump(mode="json") if metric_counts else None),
-        },
+        payload,
         separators=(",", ":"),
         sort_keys=True,
     )
@@ -400,27 +447,53 @@ class RawV2StagingBackupService:
                             observation_counts=observation_counts,
                         )
                     else:
-                        manifest = RawV2StagingBackupManifest(
-                            schema_version=RAW_V2_BACKUP_MANIFEST_SCHEMA_V3,
-                            backup_id=_backup_id(
-                                staging_id,
-                                inventory,
-                                counts,
-                                observation_counts,
-                                RAW_V2_BACKUP_MANIFEST_SCHEMA_V3,
-                                metric_counts,
-                            ),
-                            staging_id=staging_id,
-                            created_at=datetime.now(UTC),
-                            files=inventory,
-                            checkpoint_format=checkpoint_format,
-                            checkpoint_digest=checkpoint_digest,
-                            counts=counts,
-                            observation_checkpoint_format=observation_format,
-                            observation_checkpoint_digest=observation_digest,
-                            observation_counts=observation_counts,
-                            metric_counts=metric_counts,
-                        )
+                        analysis_counts = self._count_analysis(staging, connection)
+                        if analysis_counts is None:
+                            manifest = RawV2StagingBackupManifest(
+                                schema_version=RAW_V2_BACKUP_MANIFEST_SCHEMA_V3,
+                                backup_id=_backup_id(
+                                    staging_id,
+                                    inventory,
+                                    counts,
+                                    observation_counts,
+                                    RAW_V2_BACKUP_MANIFEST_SCHEMA_V3,
+                                    metric_counts,
+                                ),
+                                staging_id=staging_id,
+                                created_at=datetime.now(UTC),
+                                files=inventory,
+                                checkpoint_format=checkpoint_format,
+                                checkpoint_digest=checkpoint_digest,
+                                counts=counts,
+                                observation_checkpoint_format=observation_format,
+                                observation_checkpoint_digest=observation_digest,
+                                observation_counts=observation_counts,
+                                metric_counts=metric_counts,
+                            )
+                        else:
+                            manifest = RawV2StagingBackupManifest(
+                                schema_version=RAW_V2_BACKUP_MANIFEST_SCHEMA_V4,
+                                backup_id=_backup_id(
+                                    staging_id,
+                                    inventory,
+                                    counts,
+                                    observation_counts,
+                                    RAW_V2_BACKUP_MANIFEST_SCHEMA_V4,
+                                    metric_counts,
+                                    analysis_counts,
+                                ),
+                                staging_id=staging_id,
+                                created_at=datetime.now(UTC),
+                                files=inventory,
+                                checkpoint_format=checkpoint_format,
+                                checkpoint_digest=checkpoint_digest,
+                                counts=counts,
+                                observation_checkpoint_format=observation_format,
+                                observation_checkpoint_digest=observation_digest,
+                                observation_counts=observation_counts,
+                                metric_counts=metric_counts,
+                                analysis_counts=analysis_counts,
+                            )
                 for item in inventory:
                     source_file = staging_root / item.path
                     target_file = temporary / item.path
@@ -745,6 +818,130 @@ class RawV2StagingBackupService:
         finally:
             reader.close()
 
+    def _count_analysis(
+        self, staging: RawV2Staging, connection: DuckDBPyConnection
+    ) -> RawV2BackupAnalysisCounts | None:
+        from investment_analyst.storage.analysis_snapshot_v2 import (
+            ANALYSIS_SNAPSHOT_V2_TABLE,
+            AnalysisSnapshotV2Error,
+            AnalysisSnapshotV2Store,
+            analysis_snapshot_v2_tables_exist,
+        )
+        from investment_analyst.storage.diagnostic_v2 import (
+            DIAGNOSTIC_V2_TABLE,
+            DiagnosticV2Error,
+            DiagnosticV2Store,
+            diagnostic_v2_tables_exist,
+        )
+
+        del staging
+        if not diagnostic_v2_tables_exist(connection) or not analysis_snapshot_v2_tables_exist(
+            connection
+        ):
+            return None
+
+        try:
+            diag_store = DiagnosticV2Store(connection)
+            snap_store = AnalysisSnapshotV2Store(connection)
+
+            diag_digest = empty_digest()
+            counts_by_mode: dict[str, int] = {}
+            total_diags = 0
+            cursor_at: str | None = None
+            cursor_id: str | None = None
+
+            while True:
+                clauses: list[str] = []
+                params: list[object] = []
+                if cursor_at is not None and cursor_id is not None:
+                    clauses.append("(available_at, diagnostic_id) > (?, ?)")
+                    params.extend([cursor_at, cursor_id])
+                where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+                rows = connection.execute(
+                    f"SELECT diagnostic_id, available_at FROM {DIAGNOSTIC_V2_TABLE}{where} "
+                    f"ORDER BY available_at, diagnostic_id LIMIT {_MAX_BACKUP_PAGE}",
+                    params,
+                ).fetchall()
+                if not rows:
+                    break
+                page_ids = [UUID(str(r[0])) for r in rows]
+                hydrated = diag_store.get_diagnostics(page_ids)
+                for did in page_ids:
+                    diag = hydrated[did]
+                    mode_str = diag.mode.value if hasattr(diag.mode, "value") else str(diag.mode)
+                    verdict_str = (
+                        diag.verdict.value if hasattr(diag.verdict, "value") else str(diag.verdict)
+                    )
+                    qual_str = (
+                        diag.quality.value if hasattr(diag.quality, "value") else str(diag.quality)
+                    )
+                    canonical = (
+                        f"{diag.diagnostic_id}|{diag.asset_id}|{mode_str}|{verdict_str}|"
+                        f"{diag.final_score}|{diag.confidence}|{diag.as_of.isoformat()}|"
+                        f"{diag.available_at.isoformat()}|{diag.computed_at.isoformat()}|"
+                        f"{diag.algorithm_version}|{qual_str}|{len(diag.components)}|{len(diag.evidence)}"
+                    )
+                    diag_digest = extend_digest(
+                        diag_digest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+                    )
+                    counts_by_mode[mode_str] = counts_by_mode.get(mode_str, 0) + 1
+                total_diags += len(rows)
+                cursor_at = str(rows[-1][1])
+                cursor_id = str(rows[-1][0])
+
+            snap_digest = empty_digest()
+            counts_by_domain: dict[str, int] = {}
+            total_snaps = 0
+            cursor_at = None
+            cursor_id = None
+
+            while True:
+                clauses = []
+                params = []
+                if cursor_at is not None and cursor_id is not None:
+                    clauses.append("(known_at, snapshot_id) > (?, ?)")
+                    params.extend([cursor_at, cursor_id])
+                where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+                rows = connection.execute(
+                    f"SELECT snapshot_id, known_at FROM {ANALYSIS_SNAPSHOT_V2_TABLE}{where} "
+                    f"ORDER BY known_at, snapshot_id LIMIT {_MAX_BACKUP_PAGE}",
+                    params,
+                ).fetchall()
+                if not rows:
+                    break
+                for r in rows:
+                    sid = UUID(str(r[0]))
+                    snap = snap_store.get_snapshot(sid)
+                    canonical = (
+                        f"{snap.snapshot_id}|{snap.asset_id}|{snap.domain}|{snap.known_at.isoformat()}|"
+                        f"{snap.policy_version}|{snap.evidence_set_digest}|{len(snap.metric_ids)}|{len(snap.diagnostic_ids)}"
+                    )
+                    snap_digest = extend_digest(
+                        snap_digest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+                    )
+                    counts_by_domain[snap.domain] = counts_by_domain.get(snap.domain, 0) + 1
+                total_snaps += len(rows)
+                cursor_at = str(rows[-1][1])
+                cursor_id = str(rows[-1][0])
+
+            if total_diags == 0 and total_snaps == 0:
+                return None
+
+            return RawV2BackupAnalysisCounts(
+                diagnostics=total_diags,
+                counts_by_mode=counts_by_mode,
+                diagnostic_digest=diag_digest,
+                snapshots=total_snaps,
+                counts_by_domain=counts_by_domain,
+                snapshot_digest=snap_digest,
+            )
+        except (DiagnosticV2Error, AnalysisSnapshotV2Error):
+            raise
+        except Exception as error:
+            if "table is missing" in str(error) or "does not exist" in str(error):
+                return None
+            raise
+
     def _verify_backup_directory(self, root: Path, manifest: RawV2StagingBackupManifest) -> None:
         _reject_symlinks(root)
         expected = {item.path: item for item in manifest.files}
@@ -817,7 +1014,33 @@ class RawV2StagingBackupService:
             if state.format == "raw-v2-import-state-v1" and state.staging_id is not None:
                 raise RawV2BackupError("restored checkpoint mixes portable and legacy bindings")
         observation_state_path = root / _OBSERVATION_IMPORT_STATE_FILENAME
-        if manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V3:
+        if manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V4:
+            if (
+                manifest.observation_counts is None
+                or manifest.metric_counts is None
+                or manifest.analysis_counts is None
+            ):
+                raise RawV2BackupError("restored v4 manifest is missing analysis counts")
+            if not observation_state_path.is_file() or observation_state_path.is_symlink():
+                if manifest.observation_checkpoint_format is not None:
+                    raise RawV2BackupError("restored observation checkpoint is missing")
+            else:
+                try:
+                    observation_state = ObservationV2ImportState.model_validate_json(
+                        observation_state_path.read_text(encoding="utf-8")
+                    )
+                except ValueError as error:
+                    raise RawV2BackupError("restored observation state is incompatible") from error
+                if manifest.observation_checkpoint_format != observation_state.format:
+                    raise RawV2BackupError("restored observation checkpoint mismatches backup")
+                if manifest.observation_checkpoint_digest != _sha256_streaming(
+                    observation_state_path
+                ):
+                    raise RawV2BackupError("restored observation checkpoint mismatches backup")
+            self._verify_restored_observations(root, index_path, manifest)
+            self._verify_restored_metrics(root, index_path, manifest)
+            self._verify_restored_analysis(root, index_path, manifest)
+        elif manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V3:
             if manifest.observation_counts is None or manifest.metric_counts is None:
                 raise RawV2BackupError("restored v3 manifest is missing metric counts")
             if not observation_state_path.is_file() or observation_state_path.is_symlink():
@@ -1111,12 +1334,154 @@ class RawV2StagingBackupService:
         finally:
             connection.close()
 
+    def _verify_restored_analysis(
+        self, root: Path, index_path: Path, manifest: RawV2StagingBackupManifest
+    ) -> None:
+        import duckdb
+
+        from investment_analyst.storage.analysis_snapshot_v2 import (
+            ANALYSIS_SNAPSHOT_V2_TABLE,
+            AnalysisSnapshotV2Store,
+            analysis_snapshot_v2_tables_exist,
+        )
+        from investment_analyst.storage.diagnostic_v2 import (
+            DIAGNOSTIC_V2_TABLE,
+            DiagnosticV2Store,
+            diagnostic_v2_tables_exist,
+        )
+
+        del root
+        expected = manifest.analysis_counts
+        if expected is None:
+            raise RawV2BackupError("restored v4 manifest is missing analysis counts")
+
+        connection = duckdb.connect(str(index_path), read_only=True)
+        try:
+            if not diagnostic_v2_tables_exist(connection) or not analysis_snapshot_v2_tables_exist(
+                connection
+            ):
+                raise RawV2BackupError("restored diagnostic or snapshot tables are missing")
+
+            diag_store = DiagnosticV2Store(connection)
+            snap_store = AnalysisSnapshotV2Store(connection)
+
+            # 1. Verify diagnostics
+            diag_digest = empty_digest()
+            counts_by_mode: dict[str, int] = {}
+            verified_diags = 0
+            cursor_at: str | None = None
+            cursor_id: str | None = None
+
+            while True:
+                clauses: list[str] = []
+                params: list[object] = []
+                if cursor_at is not None and cursor_id is not None:
+                    clauses.append("(available_at, diagnostic_id) > (?, ?)")
+                    params.extend([cursor_at, cursor_id])
+                where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+                rows = connection.execute(
+                    f"SELECT diagnostic_id, available_at FROM {DIAGNOSTIC_V2_TABLE}{where} "
+                    f"ORDER BY available_at, diagnostic_id LIMIT {_MAX_BACKUP_PAGE}",
+                    params,
+                ).fetchall()
+                if not rows:
+                    break
+                page_ids = [UUID(str(r[0])) for r in rows]
+                try:
+                    hydrated = diag_store.get_diagnostics(page_ids)
+                except Exception as error:
+                    raise RawV2BackupError(
+                        f"restored diagnostic verification failed: {error}"
+                    ) from error
+
+                for did in page_ids:
+                    diag = hydrated[did]
+                    mode_str = diag.mode.value if hasattr(diag.mode, "value") else str(diag.mode)
+                    verdict_str = (
+                        diag.verdict.value if hasattr(diag.verdict, "value") else str(diag.verdict)
+                    )
+                    qual_str = (
+                        diag.quality.value if hasattr(diag.quality, "value") else str(diag.quality)
+                    )
+                    canonical = (
+                        f"{diag.diagnostic_id}|{diag.asset_id}|{mode_str}|{verdict_str}|"
+                        f"{diag.final_score}|{diag.confidence}|{diag.as_of.isoformat()}|"
+                        f"{diag.available_at.isoformat()}|{diag.computed_at.isoformat()}|"
+                        f"{diag.algorithm_version}|{qual_str}|{len(diag.components)}|{len(diag.evidence)}"
+                    )
+                    diag_digest = extend_digest(
+                        diag_digest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+                    )
+                    counts_by_mode[mode_str] = counts_by_mode.get(mode_str, 0) + 1
+                verified_diags += len(rows)
+                cursor_at = str(rows[-1][1])
+                cursor_id = str(rows[-1][0])
+
+            if verified_diags != expected.diagnostics:
+                raise RawV2BackupError("restored diagnostic count mismatches manifest")
+            if dict(counts_by_mode) != dict(expected.counts_by_mode):
+                raise RawV2BackupError("restored diagnostic modes mismatch manifest")
+            if diag_digest != expected.diagnostic_digest:
+                raise RawV2BackupError("restored diagnostic digest mismatches manifest")
+
+            # 2. Verify snapshots
+            snap_digest = empty_digest()
+            counts_by_domain: dict[str, int] = {}
+            verified_snaps = 0
+            cursor_at = None
+            cursor_id = None
+
+            while True:
+                clauses = []
+                params = []
+                if cursor_at is not None and cursor_id is not None:
+                    clauses.append("(known_at, snapshot_id) > (?, ?)")
+                    params.extend([cursor_at, cursor_id])
+                where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+                rows = connection.execute(
+                    f"SELECT snapshot_id, known_at FROM {ANALYSIS_SNAPSHOT_V2_TABLE}{where} "
+                    f"ORDER BY known_at, snapshot_id LIMIT {_MAX_BACKUP_PAGE}",
+                    params,
+                ).fetchall()
+                if not rows:
+                    break
+                for r in rows:
+                    sid = UUID(str(r[0]))
+                    try:
+                        snap = snap_store.get_snapshot(sid)
+                    except Exception as error:
+                        raise RawV2BackupError(
+                            f"restored snapshot verification failed: {error}"
+                        ) from error
+                    canonical = (
+                        f"{snap.snapshot_id}|{snap.asset_id}|{snap.domain}|{snap.known_at.isoformat()}|"
+                        f"{snap.policy_version}|{snap.evidence_set_digest}|{len(snap.metric_ids)}|{len(snap.diagnostic_ids)}"
+                    )
+                    snap_digest = extend_digest(
+                        snap_digest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+                    )
+                    counts_by_domain[snap.domain] = counts_by_domain.get(snap.domain, 0) + 1
+                verified_snaps += len(rows)
+                cursor_at = str(rows[-1][1])
+                cursor_id = str(rows[-1][0])
+
+            if verified_snaps != expected.snapshots:
+                raise RawV2BackupError("restored snapshot count mismatches manifest")
+            if dict(counts_by_domain) != dict(expected.counts_by_domain):
+                raise RawV2BackupError("restored snapshot domains mismatch manifest")
+            if snap_digest != expected.snapshot_digest:
+                raise RawV2BackupError("restored snapshot digest mismatches manifest")
+        finally:
+            connection.close()
+
 
 __all__ = [
     "BACKUP_MANIFEST_NAME",
     "RAW_V2_BACKUP_MANIFEST_SCHEMA",
     "RAW_V2_BACKUP_MANIFEST_SCHEMA_V2",
     "RAW_V2_BACKUP_MANIFEST_SCHEMA_V3",
+    "RAW_V2_BACKUP_MANIFEST_SCHEMA_V4",
+    "RawV2BackupAnalysisCounts",
     "RawV2BackupCounts",
     "RawV2BackupError",
     "RawV2BackupMetricCounts",

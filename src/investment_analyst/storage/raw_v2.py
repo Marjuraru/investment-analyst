@@ -26,10 +26,25 @@ from uuid import UUID, uuid4
 from duckdb import DuckDBPyConnection
 from pydantic import ValidationError
 
+from investment_analyst.analytics.analysis_snapshot import AnalysisSnapshot
 from investment_analyst.analytics.evidence_set import EvidenceSegment, EvidenceSet
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
-from investment_analyst.core.models import MetricResult, NormalizedObservation, RawRecord
+from investment_analyst.core.models import (
+    DiagnosticMode,
+    DiagnosticResult,
+    MetricResult,
+    NormalizedObservation,
+    RawRecord,
+)
 from investment_analyst.core.models.base import ContractModel, UTCDateTime
+from investment_analyst.storage.analysis_snapshot_v2 import (
+    AnalysisSnapshotV2Store,
+    ensure_analysis_snapshot_v2_tables,
+)
+from investment_analyst.storage.diagnostic_v2 import (
+    DiagnosticV2Store,
+    ensure_diagnostic_v2_tables,
+)
 from investment_analyst.storage.errors import (
     RecordConflictError,
     RecordNotFoundError,
@@ -945,23 +960,109 @@ class RawV2Staging:
         ensure_evidence_v2_tables(self._connection, create=False)
         return EvidenceSetV2Store(self._connection).get_set(evidence_set_id)
 
+    def save_diagnostics(self, diagnostics: Collection[DiagnosticResult]) -> BatchWriteReceipt:
+        """Persist typed diagnostics idempotently under the writer lock."""
+        self._require_writable()
+        ensure_metric_v2_tables(self._connection, create=False)
+        ensure_diagnostic_v2_tables(self._connection, create=True)
+        receipt = DiagnosticV2Store(self._connection).save_diagnostics(diagnostics)
+        self._ensure_optional_analytical_tables(create=True)
+        return receipt
+
+    def get_diagnostics(self, diagnostic_ids: Collection[UUID]) -> dict[UUID, DiagnosticResult]:
+        """Hydrate typed diagnostics with verified components and evidence."""
+        self._require_open()
+        ensure_metric_v2_tables(self._connection, create=False)
+        ensure_diagnostic_v2_tables(self._connection, create=False)
+        return DiagnosticV2Store(self._connection).get_diagnostics(diagnostic_ids)
+
+    def list_diagnostics(
+        self,
+        *,
+        asset_id: str | None = None,
+        mode: DiagnosticMode | None = None,
+        as_of: datetime | None = None,
+        available_to: datetime | None = None,
+    ) -> list[DiagnosticResult]:
+        """Hydrate typed PIT diagnostics in stable order."""
+        self._require_open()
+        ensure_metric_v2_tables(self._connection, create=False)
+        ensure_diagnostic_v2_tables(self._connection, create=False)
+        return DiagnosticV2Store(self._connection).list_diagnostics(
+            asset_id=asset_id,
+            mode=mode,
+            as_of=as_of,
+            available_to=available_to,
+        )
+
+    def save_analysis_snapshots(self, snapshots: Collection[AnalysisSnapshot]) -> BatchWriteReceipt:
+        """Persist typed analysis snapshots idempotently under the writer lock."""
+        self._require_writable()
+        ensure_metric_v2_tables(self._connection, create=False)
+        ensure_analysis_snapshot_v2_tables(self._connection, create=True)
+        receipt = AnalysisSnapshotV2Store(self._connection).save_snapshots(snapshots)
+        self._ensure_optional_analytical_tables(create=True)
+        return receipt
+
+    def get_analysis_snapshot(self, snapshot_id: UUID) -> AnalysisSnapshot:
+        """Hydrate and verify one analysis snapshot."""
+        self._require_open()
+        ensure_metric_v2_tables(self._connection, create=False)
+        ensure_analysis_snapshot_v2_tables(self._connection, create=False)
+        return AnalysisSnapshotV2Store(self._connection).get_snapshot(snapshot_id)
+
+    def list_analysis_snapshots(
+        self,
+        *,
+        asset_id: str | None = None,
+        domain: str | None = None,
+        known_to: datetime | None = None,
+    ) -> list[AnalysisSnapshot]:
+        """Hydrate typed PIT analysis snapshots in stable order."""
+        self._require_open()
+        ensure_metric_v2_tables(self._connection, create=False)
+        ensure_analysis_snapshot_v2_tables(self._connection, create=False)
+        return AnalysisSnapshotV2Store(self._connection).list_snapshots(
+            asset_id=asset_id,
+            domain=domain,
+            known_to=known_to,
+        )
+
     def _ensure_optional_analytical_tables(self, *, create: bool) -> None:
-        """Require metric/evidence tables only when the staging already has them."""
+        """Require analytical tables only when the staging already has them."""
+        from investment_analyst.storage.analysis_snapshot_v2 import (
+            analysis_snapshot_v2_tables_exist,
+            ensure_analysis_snapshot_v2_tables,
+        )
+        from investment_analyst.storage.diagnostic_v2 import (
+            diagnostic_v2_tables_exist,
+            ensure_diagnostic_v2_tables,
+        )
         from investment_analyst.storage.evidence_set_v2 import evidence_v2_tables_exist
         from investment_analyst.storage.metric_v2 import metric_v2_table_exists
 
         has_metrics = metric_v2_table_exists(self._connection)
         has_evidence = evidence_v2_tables_exist(self._connection)
+        has_diagnostics = diagnostic_v2_tables_exist(self._connection)
+        has_snapshots = analysis_snapshot_v2_tables_exist(self._connection)
         if create:
             if has_metrics:
                 ensure_metric_v2_tables(self._connection, create=True)
             if has_evidence:
                 ensure_evidence_v2_tables(self._connection, create=True)
+            if has_diagnostics:
+                ensure_diagnostic_v2_tables(self._connection, create=True)
+            if has_snapshots:
+                ensure_analysis_snapshot_v2_tables(self._connection, create=True)
             return
         if has_metrics:
             ensure_metric_v2_tables(self._connection, create=False)
         if has_evidence:
             ensure_evidence_v2_tables(self._connection, create=False)
+        if has_diagnostics:
+            ensure_diagnostic_v2_tables(self._connection, create=False)
+        if has_snapshots:
+            ensure_analysis_snapshot_v2_tables(self._connection, create=False)
 
     def _marker_matches(self, marker_path: Path) -> bool:
         try:

@@ -1,6 +1,6 @@
 """Integration tests for raw v2 staging backup, restore and portable resume."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -516,3 +516,345 @@ def test_metric_restore_rejects_corrupt_lineage_or_missing_observation(
     with pytest.raises(RawV2BackupError, match="truncated|incompatible"):
         service.restore(tmp_path / "lineage-backup", tmp_path / "lineage-corrupt")
     assert not (tmp_path / "lineage-corrupt").exists()
+
+
+def test_analysis_backup_v4_restores_diagnostics_and_snapshots(tmp_path: Path) -> None:
+    """A3: backup v4 binds diagnostics and snapshots, and restore preserves IDs, Decimal, PIT."""
+    from decimal import Decimal
+    from uuid import uuid4
+
+    from investment_analyst.analytics.analysis_snapshot import build_analysis_snapshot
+    from investment_analyst.analytics.evidence_set import (
+        build_evidence_segments as _lineage_segments,
+    )
+    from investment_analyst.analytics.evidence_set import (
+        build_evidence_set as _lineage_set,
+    )
+    from investment_analyst.analytics.metric_identity_v2 import (
+        metric_result_id_from_model_v2 as _lineage_id,
+    )
+    from investment_analyst.core.models import (
+        DataFrequency as _LineageFrequency,
+    )
+    from investment_analyst.core.models import (
+        DataQuality as _LineageQuality,
+    )
+    from investment_analyst.core.models import (
+        DiagnosticComponent,
+        DiagnosticEvidence,
+        DiagnosticMode,
+        DiagnosticResult,
+        DiagnosticVerdict,
+        EvidenceDirection,
+    )
+    from investment_analyst.core.models import (
+        MetricResult as _LineageMetric,
+    )
+    from investment_analyst.core.models import (
+        NormalizedObservation as _LineageObservation,
+    )
+    from investment_analyst.core.models import (
+        SourceReference as _LineageSource,
+    )
+    from investment_analyst.workspace.raw_v2_backup import (
+        RAW_V2_BACKUP_MANIFEST_SCHEMA_V4,
+    )
+
+    staging = _staging(tmp_path, "analysis-staging")
+    base = datetime(2026, 8, 1, tzinfo=UTC)
+    asset_id = "crypto:btc-usd"
+    with staging:
+        observations: list[_LineageObservation] = []
+        for index in range(24):
+            moment = base + timedelta(hours=index)
+            raw = RawRecord(
+                record_id=uuid4(),
+                asset_id=asset_id,
+                source=_LineageSource(
+                    source_id="deribit:funding",
+                    record_key=f"an-obs-{index}",
+                    retrieved_at=moment,
+                ),
+                event_time=moment,
+                available_at=moment,
+                received_at=moment,
+                payload={"v": str(index)},
+                schema_version="analysis-v4-test",
+            )
+            staging.save(raw)
+            observations.append(
+                _LineageObservation(
+                    observation_id=uuid4(),
+                    raw_record_id=raw.record_id,
+                    asset_id=asset_id,
+                    field_name="funding_rate",
+                    value=Decimal("0.01"),
+                    unit="rate",
+                    frequency=_LineageFrequency.HOUR_1,
+                    observed_at=moment,
+                    available_at=moment,
+                    normalized_at=moment,
+                    source=raw.source,
+                    quality=_LineageQuality.VALID,
+                    transformation_version="1.0.0",
+                )
+            )
+        staging.save_observations(observations)
+        segments = _lineage_segments(observations)
+        staging.save_evidence_segments(segments)
+        evidence_set = _lineage_set(observations, segments=segments)
+        staging.save_evidence_set(evidence_set)
+
+        candidate = _LineageMetric(
+            result_id=uuid4(),
+            asset_id=asset_id,
+            metric_key="funding.sum_1h",
+            value=Decimal("1.2345"),
+            unit="rate",
+            as_of=base + timedelta(hours=23),
+            available_at=evidence_set.available_at,
+            computed_at=evidence_set.available_at,
+            parameters={
+                "window": len(observations),
+                "evidence_set_id": str(evidence_set.evidence_set_id),
+            },
+            input_observation_ids=[item.observation_id for item in observations],
+            algorithm_version="v1",
+            quality=_LineageQuality.VALID,
+        )
+        metric = candidate.model_copy(update={"result_id": _lineage_id(candidate)})
+        staging.save_metrics([metric])
+
+        diagnostic = DiagnosticResult(
+            diagnostic_id=uuid4(),
+            asset_id=asset_id,
+            mode=DiagnosticMode.MARKET,
+            verdict=DiagnosticVerdict.POSITIVE,
+            final_score=Decimal("80.0"),
+            confidence=Decimal("0.95"),
+            as_of=metric.as_of,
+            available_at=metric.available_at,
+            computed_at=metric.computed_at,
+            components=[
+                DiagnosticComponent(
+                    component_key="funding_pressure",
+                    score=Decimal("80.0"),
+                    weight=Decimal("1.0"),
+                    weighted_contribution=Decimal("80.0"),
+                    metric_result_ids=[metric.result_id],
+                    explanation="Elevated funding rate",
+                )
+            ],
+            evidence=[
+                DiagnosticEvidence(
+                    metric_result_id=metric.result_id,
+                    direction=EvidenceDirection.SUPPORTS,
+                    contribution=Decimal("80.0"),
+                    reason="Funding is positive",
+                )
+            ],
+            algorithm_version="v1",
+            summary="Market diagnostic positive",
+            quality=_LineageQuality.VALID,
+        )
+        staging.save_diagnostics([diagnostic])
+
+        snapshot = build_analysis_snapshot(
+            asset_id=asset_id,
+            domain="derivatives",
+            known_at=metric.available_at,
+            policy_version="v1",
+            metric_ids=[metric.result_id],
+            diagnostic_ids=[diagnostic.diagnostic_id],
+            evidence_set_hashes=[evidence_set.canonical_hash],
+            created_at=datetime(2026, 8, 2, 10, 0, tzinfo=UTC),
+        )
+        staging.save_analysis_snapshots([snapshot])
+
+        service = RawV2StagingBackupService()
+        manifest = service.create(staging, staging._connection, tmp_path / "analysis-backup")
+        assert manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V4
+        assert manifest.analysis_counts is not None
+        assert manifest.analysis_counts.diagnostics == 1
+        assert manifest.analysis_counts.snapshots == 1
+
+    restored_manifest = service.restore(
+        tmp_path / "analysis-backup", tmp_path / "analysis-restored"
+    )
+    assert restored_manifest.backup_id == manifest.backup_id
+    connection = duckdb.connect(str(tmp_path / "analysis-restored" / "raw-v2-index.duckdb"))
+    restored = RawV2Staging(tmp_path / "analysis-restored", connection)
+    with restored:
+        diag_map = restored.get_diagnostics([diagnostic.diagnostic_id])
+        assert diag_map[diagnostic.diagnostic_id] == diagnostic
+        restored_snap = restored.get_analysis_snapshot(snapshot.snapshot_id)
+        assert restored_snap == snapshot
+        assert restored.list_diagnostics(as_of=metric.as_of) == [diagnostic]
+        assert restored.list_analysis_snapshots(known_to=metric.available_at) == [snapshot]
+
+
+def test_analysis_restore_rejects_corrupt_links_without_promotion(tmp_path: Path) -> None:
+    """X1: corruption of diagnostic/snapshot links rejects restore without promotion."""
+    from decimal import Decimal
+    from uuid import uuid4
+
+    from investment_analyst.analytics.analysis_snapshot import build_analysis_snapshot
+    from investment_analyst.analytics.evidence_set import (
+        build_evidence_segments as _lineage_segments,
+    )
+    from investment_analyst.analytics.evidence_set import (
+        build_evidence_set as _lineage_set,
+    )
+    from investment_analyst.analytics.metric_identity_v2 import (
+        metric_result_id_from_model_v2 as _lineage_id,
+    )
+    from investment_analyst.core.models import (
+        DataFrequency as _LineageFrequency,
+    )
+    from investment_analyst.core.models import (
+        DataQuality as _LineageQuality,
+    )
+    from investment_analyst.core.models import (
+        DiagnosticComponent,
+        DiagnosticEvidence,
+        DiagnosticMode,
+        DiagnosticResult,
+        DiagnosticVerdict,
+        EvidenceDirection,
+    )
+    from investment_analyst.core.models import (
+        MetricResult as _LineageMetric,
+    )
+    from investment_analyst.core.models import (
+        NormalizedObservation as _LineageObservation,
+    )
+    from investment_analyst.core.models import (
+        SourceReference as _LineageSource,
+    )
+
+    staging = _staging(tmp_path, "corrupt-source-staging")
+    base = datetime(2026, 8, 1, tzinfo=UTC)
+    asset_id = "crypto:btc-usd"
+    with staging:
+        observations: list[_LineageObservation] = []
+        for index in range(24):
+            moment = base + timedelta(hours=index)
+            raw = RawRecord(
+                record_id=uuid4(),
+                asset_id=asset_id,
+                source=_LineageSource(
+                    source_id="deribit:funding",
+                    record_key=f"corrupt-obs-{index}",
+                    retrieved_at=moment,
+                ),
+                event_time=moment,
+                available_at=moment,
+                received_at=moment,
+                payload={"v": str(index)},
+                schema_version="corrupt-test",
+            )
+            staging.save(raw)
+            observations.append(
+                _LineageObservation(
+                    observation_id=uuid4(),
+                    raw_record_id=raw.record_id,
+                    asset_id=asset_id,
+                    field_name="funding_rate",
+                    value=Decimal("0.01"),
+                    unit="rate",
+                    frequency=_LineageFrequency.HOUR_1,
+                    observed_at=moment,
+                    available_at=moment,
+                    normalized_at=moment,
+                    source=raw.source,
+                    quality=_LineageQuality.VALID,
+                    transformation_version="1.0.0",
+                )
+            )
+        staging.save_observations(observations)
+        segments = _lineage_segments(observations)
+        staging.save_evidence_segments(segments)
+        evidence_set = _lineage_set(observations, segments=segments)
+        staging.save_evidence_set(evidence_set)
+
+        candidate = _LineageMetric(
+            result_id=uuid4(),
+            asset_id=asset_id,
+            metric_key="funding.sum_1h",
+            value=Decimal("1.0"),
+            unit="rate",
+            as_of=base + timedelta(hours=23),
+            available_at=evidence_set.available_at,
+            computed_at=evidence_set.available_at,
+            parameters={
+                "window": len(observations),
+                "evidence_set_id": str(evidence_set.evidence_set_id),
+            },
+            input_observation_ids=[item.observation_id for item in observations],
+            algorithm_version="v1",
+            quality=_LineageQuality.VALID,
+        )
+        metric = candidate.model_copy(update={"result_id": _lineage_id(candidate)})
+        staging.save_metrics([metric])
+
+        diagnostic = DiagnosticResult(
+            diagnostic_id=uuid4(),
+            asset_id=asset_id,
+            mode=DiagnosticMode.MARKET,
+            verdict=DiagnosticVerdict.POSITIVE,
+            final_score=Decimal("80.0"),
+            confidence=Decimal("0.95"),
+            as_of=metric.as_of,
+            available_at=metric.available_at,
+            computed_at=metric.computed_at,
+            components=[
+                DiagnosticComponent(
+                    component_key="funding_pressure",
+                    score=Decimal("80.0"),
+                    weight=Decimal("1.0"),
+                    weighted_contribution=Decimal("80.0"),
+                    metric_result_ids=[metric.result_id],
+                    explanation="Elevated funding rate",
+                )
+            ],
+            evidence=[
+                DiagnosticEvidence(
+                    metric_result_id=metric.result_id,
+                    direction=EvidenceDirection.SUPPORTS,
+                    contribution=Decimal("80.0"),
+                    reason="Funding is positive",
+                )
+            ],
+            algorithm_version="v1",
+            summary="Market diagnostic positive",
+            quality=_LineageQuality.VALID,
+        )
+        staging.save_diagnostics([diagnostic])
+
+        snapshot = build_analysis_snapshot(
+            asset_id=asset_id,
+            domain="derivatives",
+            known_at=metric.available_at,
+            policy_version="v1",
+            metric_ids=[metric.result_id],
+            diagnostic_ids=[diagnostic.diagnostic_id],
+            evidence_set_hashes=[evidence_set.canonical_hash],
+            created_at=datetime(2026, 8, 2, 10, 0, tzinfo=UTC),
+        )
+        staging.save_analysis_snapshots([snapshot])
+
+        service = RawV2StagingBackupService()
+        service.create(staging, staging._connection, tmp_path / "valid-analysis-backup")
+
+    # Corrupt index db inside backup by altering diagnostic links to a non-existent metric
+    backup_db_path = tmp_path / "valid-analysis-backup" / "raw-v2-index.duckdb"
+    corrupt_conn = duckdb.connect(str(backup_db_path))
+    corrupt_conn.execute(
+        f"UPDATE diagnostic_v2_component_metric_links SET metric_result_id = '{uuid4()}'"
+    )
+    corrupt_conn.close()
+
+    # Attempting restore must fail closed without creating the promoted directory
+    with pytest.raises(RawV2BackupError):
+        service.restore(tmp_path / "valid-analysis-backup", tmp_path / "corrupt-promoted")
+    assert not (tmp_path / "corrupt-promoted").exists()
