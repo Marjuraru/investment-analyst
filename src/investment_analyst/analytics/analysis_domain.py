@@ -110,11 +110,16 @@ def validate_diagnostic_mode_for_domain(
 ) -> None:
     """Validate compatibility between DiagnosticMode and AnalysisDomain.
 
-    FUNDAMENTAL mode requires fundamental domain.
-    MARKET mode requires market, derivatives, valuation or events domain (never fundamental).
+    DiagnosticMode.MARKET admits exclusively market or derivatives domains.
+    DiagnosticMode.FUNDAMENTAL admits exclusively fundamental domain.
+    DiagnosticMode.UNIFIED is unauthorized.
+    Valuation and events domains do not have authorized diagnostic modes yet.
     """
     dom = require_authorized_domain(domain.value if isinstance(domain, AnalysisDomain) else domain)
     mode_str = mode.value if hasattr(mode, "value") else str(mode)
+
+    if mode_str == DiagnosticMode.UNIFIED.value:
+        raise DomainMembershipError("diagnostic mode UNIFIED is unauthorized")
 
     if mode_str == DiagnosticMode.FUNDAMENTAL.value:
         if dom is not AnalysisDomain.FUNDAMENTAL:
@@ -122,12 +127,13 @@ def validate_diagnostic_mode_for_domain(
                 f"diagnostic with FUNDAMENTAL mode cannot belong to domain {dom.value!r}"
             )
     elif mode_str == DiagnosticMode.MARKET.value:
-        if dom is AnalysisDomain.FUNDAMENTAL:
+        if dom not in (AnalysisDomain.MARKET, AnalysisDomain.DERIVATIVES):
             raise DomainMembershipError(
-                "diagnostic with MARKET mode cannot belong to FUNDAMENTAL domain"
+                "diagnostic with MARKET mode admits only market or derivatives "
+                f"domains, not {dom.value!r}"
             )
-    elif mode_str == DiagnosticMode.UNIFIED.value:
-        pass
+    else:
+        raise DomainMembershipError(f"unsupported diagnostic mode: {mode_str!r}")
 
 
 def validate_diagnostic_internal_consistency(
@@ -150,9 +156,13 @@ def validate_diagnostic_internal_consistency(
         mode_str = (
             diagnostic.mode.value if hasattr(diagnostic.mode, "value") else str(diagnostic.mode)
         )
+        if mode_str == DiagnosticMode.UNIFIED.value:
+            raise DomainMembershipError("diagnostic mode UNIFIED is unauthorized")
         if mode_str == DiagnosticMode.FUNDAMENTAL.value:
             return AnalysisDomain.FUNDAMENTAL
-        return AnalysisDomain.MARKET
+        if mode_str == DiagnosticMode.MARKET.value:
+            return AnalysisDomain.MARKET
+        raise DomainMembershipError(f"unsupported diagnostic mode: {mode_str!r}")
 
     domains: set[AnalysisDomain] = set()
     for mid in cited_metric_ids:

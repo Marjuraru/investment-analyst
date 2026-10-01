@@ -98,11 +98,31 @@ def test_validate_diagnostic_mode_for_domain() -> None:
     validate_diagnostic_mode_for_domain(DiagnosticMode.MARKET, "derivatives")
     validate_diagnostic_mode_for_domain(DiagnosticMode.FUNDAMENTAL, "fundamental")
 
+    # UNIFIED mode is unauthorized
+    with pytest.raises(DomainMembershipError, match="UNIFIED is unauthorized"):
+        validate_diagnostic_mode_for_domain(DiagnosticMode.UNIFIED, "market")
+
+    with pytest.raises(DomainMembershipError, match="UNIFIED is unauthorized"):
+        validate_diagnostic_mode_for_domain(DiagnosticMode.UNIFIED, "fundamental")
+
     with pytest.raises(DomainMembershipError, match="FUNDAMENTAL mode cannot belong"):
         validate_diagnostic_mode_for_domain(DiagnosticMode.FUNDAMENTAL, "market")
 
-    with pytest.raises(DomainMembershipError, match="MARKET mode cannot belong"):
+    with pytest.raises(
+        DomainMembershipError, match="MARKET mode admits only market or derivatives"
+    ):
         validate_diagnostic_mode_for_domain(DiagnosticMode.MARKET, "fundamental")
+
+    # Valuation and events do not have authorized diagnostic modes
+    with pytest.raises(
+        DomainMembershipError, match="MARKET mode admits only market or derivatives"
+    ):
+        validate_diagnostic_mode_for_domain(DiagnosticMode.MARKET, "valuation")
+
+    with pytest.raises(
+        DomainMembershipError, match="MARKET mode admits only market or derivatives"
+    ):
+        validate_diagnostic_mode_for_domain(DiagnosticMode.MARKET, "events")
 
 
 def test_validate_diagnostic_internal_consistency() -> None:
@@ -153,7 +173,29 @@ def test_validate_diagnostic_internal_consistency() -> None:
     with pytest.raises(DomainMembershipError, match="cites mixed metric domains"):
         validate_diagnostic_internal_consistency(diag, keys_mixed)
 
+    # Mixed market and derivatives metrics
+    keys_market_deriv = {m1: "market.sma_20", m2: "crypto.derivatives.funding"}
+    with pytest.raises(DomainMembershipError, match="cites mixed metric domains"):
+        validate_diagnostic_internal_consistency(diag, keys_market_deriv)
+
     # Incompatible mode: MARKET mode with fundamental metric
     keys_fund = {m1: "fundamental.eps", m2: "fundamental.revenue"}
-    with pytest.raises(DomainMembershipError, match="MARKET mode cannot belong"):
+    with pytest.raises(
+        DomainMembershipError, match="MARKET mode admits only market or derivatives"
+    ):
         validate_diagnostic_internal_consistency(diag, keys_fund)
+
+    # Empty diagnostic (cites no metrics)
+    empty_market = diag.model_copy(update={"components": [], "evidence": []})
+    assert validate_diagnostic_internal_consistency(empty_market, {}) == AnalysisDomain.MARKET
+
+    empty_fund = diag.model_copy(
+        update={"mode": DiagnosticMode.FUNDAMENTAL, "components": [], "evidence": []}
+    )
+    assert validate_diagnostic_internal_consistency(empty_fund, {}) == AnalysisDomain.FUNDAMENTAL
+
+    empty_unified = diag.model_copy(
+        update={"mode": DiagnosticMode.UNIFIED, "components": [], "evidence": []}
+    )
+    with pytest.raises(DomainMembershipError, match="UNIFIED is unauthorized"):
+        validate_diagnostic_internal_consistency(empty_unified, {})

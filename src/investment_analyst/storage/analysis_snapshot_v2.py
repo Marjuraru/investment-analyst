@@ -21,8 +21,10 @@ from uuid import UUID
 from duckdb import DuckDBPyConnection
 
 from investment_analyst.analytics.analysis_domain import (
+    AnalysisDomain,
     DomainMembershipError,
     require_authorized_domain,
+    validate_diagnostic_mode_for_domain,
     validate_metric_key_for_domain,
 )
 from investment_analyst.analytics.analysis_snapshot import (
@@ -382,9 +384,23 @@ class AnalysisSnapshotV2Store:
                 if es_id:
                     snap_es_ids.add(str(es_id))
 
+            # Diagnostics check: valuation and events do not have authorized diagnostics
+            if (
+                item.domain in (AnalysisDomain.VALUATION.value, AnalysisDomain.EVENTS.value)
+                and item.diagnostic_ids
+            ):
+                raise AnalysisSnapshotV2Error(
+                    f"domain {item.domain!r} does not have authorized diagnostic mode; "
+                    "snapshots with diagnostics require subsequent contract"
+                )
+
             # Verify diagnostics and their cited metrics
             for did in item.diagnostic_ids:
                 diag = diags_by_id[did]
+                try:
+                    validate_diagnostic_mode_for_domain(diag.mode, item.domain)
+                except DomainMembershipError as error:
+                    raise AnalysisSnapshotV2Error(str(error)) from error
                 if diag.asset_id != item.asset_id:
                     raise AnalysisSnapshotV2Error(
                         f"snapshot for {item.asset_id} references foreign diagnostic {did} "
@@ -437,37 +453,53 @@ class AnalysisSnapshotV2Store:
                     f"resolved hashes digest {expected_digest}"
                 )
 
-            # Check existing row
-            snap_id_str = str(item.snapshot_id)
-            existing_rows = self._connection.execute(
-                f"SELECT {', '.join(ANALYSIS_SNAPSHOT_V2_COLUMNS)} "
-                f"FROM {ANALYSIS_SNAPSHOT_V2_TABLE} WHERE snapshot_id = ?",
-                [snap_id_str],
+        # 7. Check existing rows in DB in chunks <= 256 for idempotence/conflict
+        all_snap_ids = [str(item.snapshot_id) for item in snapshots]
+        existing_rows: dict[str, tuple[object, ...]] = {}
+        for id_chunk in chunked_sequence(all_snap_ids, MAX_CHUNK_SIZE):
+            placeholders = ", ".join("?" for _ in id_chunk)
+            columns = ", ".join(ANALYSIS_SNAPSHOT_V2_COLUMNS)
+            rows = self._connection.execute(
+                f"SELECT {columns} FROM {ANALYSIS_SNAPSHOT_V2_TABLE} "
+                f"WHERE snapshot_id IN ({placeholders})",
+                list(id_chunk),
             ).fetchall()
+            for r in rows:
+                existing_rows[str(r[0])] = r
 
-            if existing_rows:
-                existing = self.get_snapshot(item.snapshot_id)
-                if (
-                    existing.asset_id == item.asset_id
-                    and existing.domain == item.domain
-                    and existing.known_at == item.known_at
-                    and existing.policy_version == item.policy_version
-                    and existing.evidence_set_digest == item.evidence_set_digest
-                    and existing.metric_ids == item.metric_ids
-                    and existing.diagnostic_ids == item.diagnostic_ids
-                ):
-                    reused_ids.append(item.snapshot_id)
-                    continue
-                raise RecordConflictError(f"snapshot content conflict for {item.snapshot_id}")
+        if existing_rows:
+            existing_snaps = fetch_snapshots_chunked(
+                self._connection, [UUID(k) for k in existing_rows]
+            )
+            for item in snapshots:
+                k = str(item.snapshot_id)
+                if k in existing_rows:
+                    existing = existing_snaps[item.snapshot_id]
+                    if (
+                        existing.asset_id == item.asset_id
+                        and existing.domain == item.domain
+                        and existing.known_at == item.known_at
+                        and existing.policy_version == item.policy_version
+                        and existing.evidence_set_digest == item.evidence_set_digest
+                        and existing.metric_ids == item.metric_ids
+                        and existing.diagnostic_ids == item.diagnostic_ids
+                    ):
+                        reused_ids.append(item.snapshot_id)
+                    else:
+                        raise RecordConflictError(
+                            f"snapshot content conflict for {item.snapshot_id}"
+                        )
 
-            # Insert new snapshot row
-            self._connection.execute(
-                f"""
-                INSERT INTO {ANALYSIS_SNAPSHOT_V2_TABLE} (
-                    snapshot_id, asset_id, domain, known_at,
-                    policy_version, evidence_set_digest, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
+        reused_set = {str(uid) for uid in reused_ids}
+        new_snaps = [s for s in snapshots if str(s.snapshot_id) not in reused_set]
+
+        # 8. Insert new snapshot rows and links in batch
+        snap_rows = []
+        metric_link_rows = []
+        diag_link_rows = []
+        for item in new_snaps:
+            snap_id_str = str(item.snapshot_id)
+            snap_rows.append(
                 [
                     snap_id_str,
                     item.asset_id,
@@ -476,32 +508,56 @@ class AnalysisSnapshotV2Store:
                     item.policy_version,
                     item.evidence_set_digest,
                     _instant_text(item.created_at),
-                ],
+                ]
             )
-
-            # Insert metric links in position order
             for pos, mid in enumerate(item.metric_ids):
-                self._connection.execute(
+                metric_link_rows.append([snap_id_str, pos, str(mid)])
+            for pos, did in enumerate(item.diagnostic_ids):
+                diag_link_rows.append([snap_id_str, pos, str(did)])
+            created_ids.append(item.snapshot_id)
+
+        in_tx = False
+        try:
+            self._connection.execute("BEGIN TRANSACTION")
+            in_tx = True
+        except Exception:
+            pass
+
+        try:
+            if snap_rows:
+                self._connection.executemany(
+                    f"""
+                    INSERT INTO {ANALYSIS_SNAPSHOT_V2_TABLE} (
+                        snapshot_id, asset_id, domain, known_at,
+                        policy_version, evidence_set_digest, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    snap_rows,
+                )
+            if metric_link_rows:
+                self._connection.executemany(
                     f"""
                     INSERT INTO {ANALYSIS_SNAPSHOT_V2_METRIC_LINKS_TABLE} (
                         snapshot_id, position, metric_result_id
                     ) VALUES (?, ?, ?)
                     """,
-                    [snap_id_str, pos, str(mid)],
+                    metric_link_rows,
                 )
-
-            # Insert diagnostic links in position order
-            for pos, did in enumerate(item.diagnostic_ids):
-                self._connection.execute(
+            if diag_link_rows:
+                self._connection.executemany(
                     f"""
                     INSERT INTO {ANALYSIS_SNAPSHOT_V2_DIAGNOSTIC_LINKS_TABLE} (
                         snapshot_id, position, diagnostic_id
                     ) VALUES (?, ?, ?)
                     """,
-                    [snap_id_str, pos, str(did)],
+                    diag_link_rows,
                 )
-
-            created_ids.append(item.snapshot_id)
+            if in_tx:
+                self._connection.execute("COMMIT")
+        except Exception:
+            if in_tx:
+                self._connection.execute("ROLLBACK")
+            raise
 
         return BatchWriteReceipt(created_ids=tuple(created_ids), reused_ids=tuple(reused_ids))
 

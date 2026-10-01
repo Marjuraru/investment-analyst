@@ -516,8 +516,8 @@ def test_metric_restore_rejects_corrupt_lineage_or_missing_observation(
     assert not (tmp_path / "lineage-corrupt").exists()
 
 
-def test_analysis_v4_restore_verifies_full_references_in_bounded_pages(tmp_path: Path) -> None:
-    """A4: backup v4 binds diagnostics and snapshots; restore verifies references in pages."""
+def test_analysis_backup_v4_restores_diagnostics_and_snapshots(tmp_path: Path) -> None:
+    """A3/A4: backup v4 binds diagnostics and snapshots, and restore preserves IDs, Decimal, PIT."""
     from decimal import Decimal
     from uuid import uuid4
 
@@ -691,9 +691,430 @@ def test_analysis_v4_restore_verifies_full_references_in_bounded_pages(tmp_path:
         assert restored.list_analysis_snapshots(known_to=metric.available_at) == [snapshot]
 
 
-test_analysis_backup_v4_restores_diagnostics_and_snapshots = (
-    test_analysis_v4_restore_verifies_full_references_in_bounded_pages
-)
+def test_analysis_v4_restore_verifies_full_references_in_bounded_pages(tmp_path: Path) -> None:
+    """A4: Smoke test raw -> obs -> >256 metrics -> diags -> snaps across 2 assets and 2 cuts."""
+    import shutil
+    from decimal import Decimal
+    from uuid import uuid4
+
+    from investment_analyst.analytics.analysis_snapshot import build_analysis_snapshot
+    from investment_analyst.analytics.evidence_set import (
+        build_evidence_segments,
+        build_evidence_set,
+    )
+    from investment_analyst.analytics.metric_identity_v2 import (
+        metric_result_id_from_model_v2,
+    )
+    from investment_analyst.core.models import (
+        DataFrequency,
+        DataQuality,
+        DiagnosticComponent,
+        DiagnosticEvidence,
+        DiagnosticMode,
+        DiagnosticResult,
+        DiagnosticVerdict,
+        EvidenceDirection,
+        MetricResult,
+        NormalizedObservation,
+        RawRecord,
+        SourceReference,
+    )
+    from investment_analyst.workspace.raw_v2_backup import (
+        RAW_V2_BACKUP_MANIFEST_SCHEMA_V4,
+        RawV2BackupError,
+        RawV2StagingBackupService,
+    )
+
+    staging = _staging(tmp_path, "smoke-staging")
+    asset_equity = "equity:us:aapl"
+    asset_crypto = "crypto:btc-usd"
+    cut1 = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+    cut2 = datetime(2026, 8, 2, 10, 0, tzinfo=UTC)
+
+    with staging:
+        # 1. Raw records and normalized observations (2 assets, 2 cuts)
+        raw_records = []
+        observations = []
+        es_map = {}
+
+        for asset, source_name, field in (
+            (asset_equity, "alpaca:bars", "close"),
+            (asset_crypto, "deribit:funding", "funding_rate"),
+        ):
+            es_map[asset] = {}
+            for cut_idx, cut in enumerate((cut1, cut2)):
+                raw = RawRecord(
+                    record_id=uuid4(),
+                    asset_id=asset,
+                    source=SourceReference(
+                        source_id=source_name,
+                        record_key=f"rec-{asset}-{cut_idx}",
+                        retrieved_at=cut,
+                    ),
+                    event_time=cut,
+                    available_at=cut,
+                    received_at=cut,
+                    payload={"idx": cut_idx},
+                    schema_version="v1",
+                )
+                staging.save(raw)
+                raw_records.append(raw)
+
+                obs = NormalizedObservation(
+                    observation_id=uuid4(),
+                    raw_record_id=raw.record_id,
+                    asset_id=asset,
+                    field_name=field,
+                    value=Decimal("150.00") if asset == asset_equity else Decimal("0.01"),
+                    unit="USD" if asset == asset_equity else "rate",
+                    frequency=DataFrequency.HOUR_1,
+                    observed_at=cut,
+                    available_at=cut,
+                    normalized_at=cut,
+                    source=raw.source,
+                    quality=DataQuality.VALID,
+                    transformation_version="1.0.0",
+                )
+                staging.save_observations([obs])
+                observations.append(obs)
+
+                segs = build_evidence_segments([obs])
+                staging.save_evidence_segments(segs)
+                es = build_evidence_set([obs], segments=segs)
+                staging.save_evidence_set(es)
+                es_map[asset][cut] = es
+
+        # 2. >256 metrics across assets and cuts (130 for equity, 130 for crypto = 260 metrics)
+        all_metrics = []
+        equity_cut1_m = []
+        equity_cut2_m = []
+        crypto_cut1_m = []
+        crypto_cut2_m = []
+
+        for i in range(130):
+            cut = cut1 if i < 65 else cut2
+            es = es_map[asset_equity][cut]
+            obs = [o for o in observations if o.asset_id == asset_equity and o.observed_at == cut][
+                0
+            ]
+            cand = MetricResult(
+                result_id=uuid4(),
+                asset_id=asset_equity,
+                metric_key=f"market.close.idx_{i}",
+                value=Decimal(str(100 + i)),
+                unit="USD",
+                as_of=cut,
+                available_at=cut,
+                computed_at=cut,
+                parameters={"idx": i, "evidence_set_id": str(es.evidence_set_id)},
+                input_observation_ids=[obs.observation_id],
+                input_metric_result_ids=[],
+                algorithm_version="v1",
+                quality=DataQuality.VALID,
+            )
+            m = cand.model_copy(update={"result_id": metric_result_id_from_model_v2(cand)})
+            all_metrics.append(m)
+            if i < 65:
+                equity_cut1_m.append(m)
+            else:
+                equity_cut2_m.append(m)
+
+        for i in range(130):
+            cut = cut1 if i < 65 else cut2
+            es = es_map[asset_crypto][cut]
+            obs = [o for o in observations if o.asset_id == asset_crypto and o.observed_at == cut][
+                0
+            ]
+            cand = MetricResult(
+                result_id=uuid4(),
+                asset_id=asset_crypto,
+                metric_key=f"crypto.derivatives.funding.idx_{i}",
+                value=Decimal(str(i)) / Decimal("1000"),
+                unit="rate",
+                as_of=cut,
+                available_at=cut,
+                computed_at=cut,
+                parameters={"idx": i, "evidence_set_id": str(es.evidence_set_id)},
+                input_observation_ids=[obs.observation_id],
+                input_metric_result_ids=[],
+                algorithm_version="v1",
+                quality=DataQuality.VALID,
+            )
+            m = cand.model_copy(update={"result_id": metric_result_id_from_model_v2(cand)})
+            all_metrics.append(m)
+            if i < 65:
+                crypto_cut1_m.append(m)
+            else:
+                crypto_cut2_m.append(m)
+
+        assert len(all_metrics) == 260
+        staging.save_metrics(all_metrics)
+
+        # 3. Diagnostics referencing metrics
+        all_diags = []
+        diag_eq_1 = DiagnosticResult(
+            diagnostic_id=uuid4(),
+            asset_id=asset_equity,
+            mode=DiagnosticMode.MARKET,
+            verdict=DiagnosticVerdict.POSITIVE,
+            final_score=Decimal("80.0"),
+            confidence=Decimal("0.9"),
+            as_of=cut1,
+            available_at=cut1,
+            computed_at=cut1,
+            components=[
+                DiagnosticComponent(
+                    component_key="market_trend",
+                    score=Decimal("80.0"),
+                    weight=Decimal("1.0"),
+                    weighted_contribution=Decimal("80.0"),
+                    metric_result_ids=[equity_cut1_m[0].result_id],
+                    explanation="AAPL positive trend",
+                )
+            ],
+            evidence=[
+                DiagnosticEvidence(
+                    metric_result_id=equity_cut1_m[0].result_id,
+                    direction=EvidenceDirection.SUPPORTS,
+                    contribution=Decimal("80.0"),
+                    reason="AAPL price supported",
+                )
+            ],
+            algorithm_version="v1",
+            summary="AAPL cut1 diag",
+            quality=DataQuality.VALID,
+        )
+        diag_eq_2 = DiagnosticResult(
+            diagnostic_id=uuid4(),
+            asset_id=asset_equity,
+            mode=DiagnosticMode.MARKET,
+            verdict=DiagnosticVerdict.POSITIVE,
+            final_score=Decimal("80.0"),
+            confidence=Decimal("0.9"),
+            as_of=cut2,
+            available_at=cut2,
+            computed_at=cut2,
+            components=[
+                DiagnosticComponent(
+                    component_key="market_trend",
+                    score=Decimal("80.0"),
+                    weight=Decimal("1.0"),
+                    weighted_contribution=Decimal("80.0"),
+                    metric_result_ids=[equity_cut2_m[0].result_id],
+                    explanation="AAPL positive trend cut2",
+                )
+            ],
+            evidence=[
+                DiagnosticEvidence(
+                    metric_result_id=equity_cut2_m[0].result_id,
+                    direction=EvidenceDirection.SUPPORTS,
+                    contribution=Decimal("80.0"),
+                    reason="AAPL cut2 price supported",
+                )
+            ],
+            algorithm_version="v1",
+            summary="AAPL cut2 diag",
+            quality=DataQuality.VALID,
+        )
+        diag_cr_1 = DiagnosticResult(
+            diagnostic_id=uuid4(),
+            asset_id=asset_crypto,
+            mode=DiagnosticMode.MARKET,
+            verdict=DiagnosticVerdict.POSITIVE,
+            final_score=Decimal("70.0"),
+            confidence=Decimal("0.85"),
+            as_of=cut1,
+            available_at=cut1,
+            computed_at=cut1,
+            components=[
+                DiagnosticComponent(
+                    component_key="deriv_trend",
+                    score=Decimal("70.0"),
+                    weight=Decimal("1.0"),
+                    weighted_contribution=Decimal("70.0"),
+                    metric_result_ids=[crypto_cut1_m[0].result_id],
+                    explanation="BTC funding positive",
+                )
+            ],
+            evidence=[
+                DiagnosticEvidence(
+                    metric_result_id=crypto_cut1_m[0].result_id,
+                    direction=EvidenceDirection.SUPPORTS,
+                    contribution=Decimal("70.0"),
+                    reason="BTC funding supported",
+                )
+            ],
+            algorithm_version="v1",
+            summary="BTC cut1 diag",
+            quality=DataQuality.VALID,
+        )
+        diag_cr_2 = DiagnosticResult(
+            diagnostic_id=uuid4(),
+            asset_id=asset_crypto,
+            mode=DiagnosticMode.MARKET,
+            verdict=DiagnosticVerdict.POSITIVE,
+            final_score=Decimal("70.0"),
+            confidence=Decimal("0.85"),
+            as_of=cut2,
+            available_at=cut2,
+            computed_at=cut2,
+            components=[
+                DiagnosticComponent(
+                    component_key="deriv_trend",
+                    score=Decimal("70.0"),
+                    weight=Decimal("1.0"),
+                    weighted_contribution=Decimal("70.0"),
+                    metric_result_ids=[crypto_cut2_m[0].result_id],
+                    explanation="BTC funding positive cut2",
+                )
+            ],
+            evidence=[
+                DiagnosticEvidence(
+                    metric_result_id=crypto_cut2_m[0].result_id,
+                    direction=EvidenceDirection.SUPPORTS,
+                    contribution=Decimal("70.0"),
+                    reason="BTC cut2 funding supported",
+                )
+            ],
+            algorithm_version="v1",
+            summary="BTC cut2 diag",
+            quality=DataQuality.VALID,
+        )
+        all_diags.extend([diag_eq_1, diag_eq_2, diag_cr_1, diag_cr_2])
+        staging.save_diagnostics(all_diags)
+
+        # 4. Snapshots referencing metrics, diagnostics, and evidence sets
+        all_snaps = []
+        snap_eq_1 = build_analysis_snapshot(
+            asset_id=asset_equity,
+            domain="market",
+            known_at=cut1,
+            policy_version="v1",
+            metric_ids=[m.result_id for m in equity_cut1_m],
+            diagnostic_ids=[diag_eq_1.diagnostic_id],
+            evidence_set_hashes=[es_map[asset_equity][cut1].canonical_hash],
+            created_at=cut1,
+        )
+        snap_eq_2 = build_analysis_snapshot(
+            asset_id=asset_equity,
+            domain="market",
+            known_at=cut2,
+            policy_version="v1",
+            metric_ids=[m.result_id for m in equity_cut2_m],
+            diagnostic_ids=[diag_eq_2.diagnostic_id],
+            evidence_set_hashes=[es_map[asset_equity][cut2].canonical_hash],
+            created_at=cut2,
+        )
+        snap_cr_1 = build_analysis_snapshot(
+            asset_id=asset_crypto,
+            domain="derivatives",
+            known_at=cut1,
+            policy_version="v1",
+            metric_ids=[m.result_id for m in crypto_cut1_m],
+            diagnostic_ids=[diag_cr_1.diagnostic_id],
+            evidence_set_hashes=[es_map[asset_crypto][cut1].canonical_hash],
+            created_at=cut1,
+        )
+        snap_cr_2 = build_analysis_snapshot(
+            asset_id=asset_crypto,
+            domain="derivatives",
+            known_at=cut2,
+            policy_version="v1",
+            metric_ids=[m.result_id for m in crypto_cut2_m],
+            diagnostic_ids=[diag_cr_2.diagnostic_id],
+            evidence_set_hashes=[es_map[asset_crypto][cut2].canonical_hash],
+            created_at=cut2,
+        )
+        all_snaps.extend([snap_eq_1, snap_eq_2, snap_cr_1, snap_cr_2])
+        staging.save_analysis_snapshots(all_snaps)
+
+        # 5. Create backup v4
+        service = RawV2StagingBackupService()
+        backup_path = tmp_path / "smoke-backup-v4"
+        manifest = service.create(staging, staging._connection, backup_path)
+        assert manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V4
+        assert manifest.counts.records == 4
+        assert manifest.observation_counts.observations == 4
+        assert manifest.metric_counts.metrics == 260
+        assert manifest.analysis_counts.diagnostics == 4
+        assert manifest.analysis_counts.snapshots == 4
+
+    # 6. Reject restore from corrupted backup without promoting destination
+    corrupt_backup = tmp_path / "corrupt-backup"
+    shutil.copytree(backup_path, corrupt_backup)
+    (corrupt_backup / "raw-v2-index.duckdb").write_bytes(b"corrupt-database-bytes")
+    corrupt_dest = tmp_path / "corrupt-restored"
+    with pytest.raises(RawV2BackupError):
+        service.restore(corrupt_backup, corrupt_dest)
+    assert not corrupt_dest.exists()
+
+    # 7. Restore to separate destination path
+    restored_path = tmp_path / "restored-staging"
+    restored_manifest = service.restore(backup_path, restored_path)
+    assert restored_manifest.backup_id == manifest.backup_id
+
+    # 8. Reopen restored staging and verify full references
+    connection = duckdb.connect(str(restored_path / "raw-v2-index.duckdb"))
+    restored = RawV2Staging(restored_path, connection)
+    with restored:
+        # Keyset pagination on restored diagnostics (pages of 2)
+        paged_diags = []
+        cur_at = None
+        cur_id = None
+        while True:
+            page = restored.list_diagnostics(limit=2, cursor_at=cur_at, cursor_id=cur_id)
+            if not page:
+                break
+            paged_diags.extend(page)
+            cur_at = page[-1].available_at
+            cur_id = page[-1].diagnostic_id
+        assert len(paged_diags) == 4
+        assert {d.diagnostic_id for d in paged_diags} == {d.diagnostic_id for d in all_diags}
+
+        # Keyset pagination on restored snapshots (pages of 2)
+        paged_snaps = []
+        cur_at = None
+        cur_id = None
+        while True:
+            page = restored.list_analysis_snapshots(limit=2, cursor_at=cur_at, cursor_id=cur_id)
+            if not page:
+                break
+            paged_snaps.extend(page)
+            cur_at = page[-1].known_at
+            cur_id = page[-1].snapshot_id
+        assert len(paged_snaps) == 4
+        assert {s.snapshot_id for s in paged_snaps} == {s.snapshot_id for s in all_snaps}
+
+        # Direct rehydration and references
+        hydrated_m = restored.get_metrics([m.result_id for m in all_metrics])
+        assert len(hydrated_m) == 260
+        for orig in all_metrics:
+            rec = hydrated_m[orig.result_id]
+            assert rec.metric_key == orig.metric_key
+            assert rec.value == orig.value
+            assert rec.input_observation_ids == orig.input_observation_ids
+
+        hydrated_d = restored.get_diagnostics([d.diagnostic_id for d in all_diags])
+        assert len(hydrated_d) == 4
+        for orig in all_diags:
+            rec = hydrated_d[orig.diagnostic_id]
+            assert rec == orig
+
+        hydrated_s = restored.get_analysis_snapshots([s.snapshot_id for s in all_snaps])
+        assert len(hydrated_s) == 4
+        for orig in all_snaps:
+            rec = hydrated_s[orig.snapshot_id]
+            assert rec == orig
+
+        # 9. Idempotence: re-saving already existing data produces zero creates
+        assert restored.save_metrics(all_metrics).created_count == 0
+        assert restored.save_diagnostics(all_diags).created_count == 0
+        assert restored.save_analysis_snapshots(all_snaps).created_count == 0
+
+    # 10. Second restore to clean destination is idempotent
+    restored_path_2 = tmp_path / "restored-staging-2"
+    second_manifest = service.restore(backup_path, restored_path_2)
+    assert second_manifest.backup_id == manifest.backup_id
 
 
 def test_analysis_restore_rejects_corrupt_links_without_promotion(tmp_path: Path) -> None:

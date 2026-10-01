@@ -539,12 +539,26 @@ class MetricV2Store:
 
         # 7. Insert new rows in topological order
         reused_set = {str(uid) for uid in reused}
-        for m in sorted_batch:
-            if str(m.result_id) in reused_set:
-                continue
-            row, obs_ids, dep_ids = metric_to_row(m)
-            self._insert_one(row, obs_ids, dep_ids)
-            created.append(m.result_id)
+        in_tx = False
+        try:
+            self._connection.execute("BEGIN TRANSACTION")
+            in_tx = True
+        except Exception:
+            pass
+
+        try:
+            for m in sorted_batch:
+                if str(m.result_id) in reused_set:
+                    continue
+                row, obs_ids, dep_ids = metric_to_row(m)
+                self._insert_one(row, obs_ids, dep_ids)
+                created.append(m.result_id)
+            if in_tx:
+                self._connection.execute("COMMIT")
+        except Exception:
+            if in_tx:
+                self._connection.execute("ROLLBACK")
+            raise
 
         return BatchWriteReceipt(
             created_ids=tuple(created),

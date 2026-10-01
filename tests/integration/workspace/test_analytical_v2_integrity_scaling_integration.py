@@ -158,207 +158,561 @@ def test_dependency_validation_matches_write_read_and_reopen(tmp_path: Path) -> 
 
 
 def test_domains_and_snapshot_digest_resolve_all_cited_metrics(tmp_path: Path) -> None:
-    """A2: Domain membership and snapshot digest resolving all direct & diagnostic metrics."""
-    staging = _staging(tmp_path, "staging-domains")
-    base_time = datetime(2026, 8, 1, tzinfo=UTC)
-    asset_id = "crypto:btc-usd"
+    """A2: Domain membership matrix and snapshot digest resolving all metrics."""
+    staging = _staging(tmp_path, "staging-domains-matrix")
+    cut1 = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+    cut2 = datetime(2026, 8, 2, 10, 0, tzinfo=UTC)
+    clock1 = datetime(2026, 8, 1, 11, 0, tzinfo=UTC)  # computed_at > available_at
+    clock2 = datetime(2026, 8, 2, 11, 0, tzinfo=UTC)
+
+    # 1. Multi-asset matrix: equity, ETF, crypto, and synthetic asset
+    assets = {
+        "equity": "equity:us:aapl",
+        "etf": "equity:us:spy",
+        "crypto": "crypto:btc-usd",
+        "synthetic": "synthetic:custom:test",
+    }
 
     with staging:
-        # Create observations and evidence sets for two metrics in derivatives domain
-        obs1 = _seed_observation(staging, base_time, asset_id, field_name="funding_1")
-        seg1 = build_evidence_segments([obs1])
-        staging.save_evidence_segments(seg1)
-        es1 = build_evidence_set([obs1], segments=seg1)
-        staging.save_evidence_set(es1)
+        # Seed observations and evidence sets for each asset across two PIT cuts
+        obs_by_asset: dict[str, dict[datetime, NormalizedObservation]] = {}
+        es_by_asset: dict[str, dict[datetime, object]] = {}
+        for category, asset_id in assets.items():
+            obs_by_asset[category] = {}
+            es_by_asset[category] = {}
+            for cut in (cut1, cut2):
+                obs = _seed_observation(staging, cut, asset_id, field_name=f"price_{category}")
+                obs_by_asset[category][cut] = obs
+                seg = build_evidence_segments([obs])
+                staging.save_evidence_segments(seg)
+                es = build_evidence_set([obs], segments=seg)
+                staging.save_evidence_set(es)
+                es_by_asset[category][cut] = es
 
-        obs2 = _seed_observation(staging, base_time, asset_id, field_name="funding_2")
-        seg2 = build_evidence_segments([obs2])
-        staging.save_evidence_segments(seg2)
-        es2 = build_evidence_set([obs2], segments=seg2)
-        staging.save_evidence_set(es2)
-
-        # Metric 1: crypto.derivatives.funding.rate
-        m1_cand = MetricResult(
+        # Canonical metrics per domain
+        # Market metric for AAPL at cut1
+        aapl_m_cand = MetricResult(
             result_id=uuid4(),
-            asset_id=asset_id,
+            asset_id=assets["equity"],
+            metric_key="market.close.price",
+            value=Decimal("150.00"),
+            unit="USD",
+            as_of=cut1,
+            available_at=cut1,
+            computed_at=clock1,
+            parameters={"evidence_set_id": str(es_by_asset["equity"][cut1].evidence_set_id)},
+            input_observation_ids=[obs_by_asset["equity"][cut1].observation_id],
+            algorithm_version="v1",
+            quality=DataQuality.VALID,
+        )
+        aapl_m = aapl_m_cand.model_copy(
+            update={"result_id": metric_result_id_from_model_v2(aapl_m_cand)}
+        )
+
+        # Market metric for SPY at cut1
+        spy_m_cand = MetricResult(
+            result_id=uuid4(),
+            asset_id=assets["etf"],
+            metric_key="market.close.price",
+            value=Decimal("450.00"),
+            unit="USD",
+            as_of=cut1,
+            available_at=cut1,
+            computed_at=clock1,
+            parameters={"evidence_set_id": str(es_by_asset["etf"][cut1].evidence_set_id)},
+            input_observation_ids=[obs_by_asset["etf"][cut1].observation_id],
+            algorithm_version="v1",
+            quality=DataQuality.VALID,
+        )
+        spy_m = spy_m_cand.model_copy(
+            update={"result_id": metric_result_id_from_model_v2(spy_m_cand)}
+        )
+
+        # Derivatives metric for Crypto (funding rate) at cut2
+        btc_m_cand = MetricResult(
+            result_id=uuid4(),
+            asset_id=assets["crypto"],
             metric_key="crypto.derivatives.funding.rate",
-            value=Decimal("0.05"),
+            value=Decimal("0.01"),
             unit="rate",
-            as_of=base_time,
-            available_at=es1.available_at,
-            computed_at=es1.available_at,
-            parameters={"evidence_set_id": str(es1.evidence_set_id)},
-            input_observation_ids=[obs1.observation_id],
+            as_of=cut2,
+            available_at=cut2,
+            computed_at=clock2,
+            parameters={"evidence_set_id": str(es_by_asset["crypto"][cut2].evidence_set_id)},
+            input_observation_ids=[obs_by_asset["crypto"][cut2].observation_id],
             algorithm_version="v1",
             quality=DataQuality.VALID,
         )
-        m1 = m1_cand.model_copy(update={"result_id": metric_result_id_from_model_v2(m1_cand)})
+        btc_m = btc_m_cand.model_copy(
+            update={"result_id": metric_result_id_from_model_v2(btc_m_cand)}
+        )
 
-        # Metric 2: crypto.derivatives.open_interest
-        m2_cand = MetricResult(
+        # Fundamental metric for AAPL at cut1
+        fund_m_cand = MetricResult(
             result_id=uuid4(),
-            asset_id=asset_id,
-            metric_key="crypto.derivatives.open_interest",
-            value=Decimal("1000.0"),
-            unit="contracts",
-            as_of=base_time,
-            available_at=es2.available_at,
-            computed_at=es2.available_at,
-            parameters={"evidence_set_id": str(es2.evidence_set_id)},
-            input_observation_ids=[obs2.observation_id],
+            asset_id=assets["equity"],
+            metric_key="fundamental.net_income",
+            value=Decimal("25000000000.00"),
+            unit="USD",
+            as_of=cut1,
+            available_at=cut1,
+            computed_at=clock1,
+            parameters={"evidence_set_id": str(es_by_asset["equity"][cut1].evidence_set_id)},
+            input_observation_ids=[obs_by_asset["equity"][cut1].observation_id],
             algorithm_version="v1",
             quality=DataQuality.VALID,
         )
-        m2 = m2_cand.model_copy(update={"result_id": metric_result_id_from_model_v2(m2_cand)})
+        fund_m = fund_m_cand.model_copy(
+            update={"result_id": metric_result_id_from_model_v2(fund_m_cand)}
+        )
 
-        # Metric 3: market.volume (different domain: market)
-        obs3 = _seed_observation(staging, base_time, asset_id, field_name="volume")
-        m3_cand = MetricResult(
+        # Valuation metric for AAPL at cut1
+        val_m_cand = MetricResult(
             result_id=uuid4(),
-            asset_id=asset_id,
-            metric_key="market.volume",
-            value=Decimal("500.0"),
-            unit="volume",
-            as_of=base_time,
-            available_at=base_time,
-            computed_at=base_time,
+            asset_id=assets["equity"],
+            metric_key="valuation.corporate.pe_ratio",
+            value=Decimal("28.5"),
+            unit="ratio",
+            as_of=cut1,
+            available_at=cut1,
+            computed_at=clock1,
             parameters={},
-            input_observation_ids=[obs3.observation_id],
+            input_observation_ids=[obs_by_asset["equity"][cut1].observation_id],
             algorithm_version="v1",
             quality=DataQuality.VALID,
         )
-        m3 = m3_cand.model_copy(update={"result_id": metric_result_id_from_model_v2(m3_cand)})
+        val_m = val_m_cand.model_copy(
+            update={"result_id": metric_result_id_from_model_v2(val_m_cand)}
+        )
 
-        staging.save_metrics([m1, m2, m3])
+        # Events metric for Synthetic asset at cut2
+        events_m_cand = MetricResult(
+            result_id=uuid4(),
+            asset_id=assets["synthetic"],
+            metric_key="cazatiburones.insider_signal",
+            value=Decimal("1.0"),
+            unit="signal",
+            as_of=cut2,
+            available_at=cut2,
+            computed_at=clock2,
+            parameters={},
+            input_observation_ids=[obs_by_asset["synthetic"][cut2].observation_id],
+            algorithm_version="v1",
+            quality=DataQuality.VALID,
+        )
+        events_m = events_m_cand.model_copy(
+            update={"result_id": metric_result_id_from_model_v2(events_m_cand)}
+        )
 
-        # 1. Diagnostic citing mixed domains (derivatives m1 + market m3) -> fails
-        diag_mixed = DiagnosticResult(
+        staging.save_metrics([aapl_m, spy_m, btc_m, fund_m, val_m, events_m])
+
+        # 2. Separation of references: changing only asset applies same policy
+        # and separates references
+        snap_spy_foreign = build_analysis_snapshot(
+            asset_id=assets["etf"],
+            domain=AnalysisDomain.MARKET.value,
+            known_at=cut1,
+            policy_version="v1",
+            metric_ids=[aapl_m.result_id],  # AAPL metric cited for SPY!
+            diagnostic_ids=[],
+            evidence_set_hashes=[],
+            created_at=cut1,
+        )
+        with pytest.raises(AnalysisSnapshotV2Error, match="foreign metric"):
+            staging.save_analysis_snapshots([snap_spy_foreign])
+
+        # 3. FUNDAMENTAL <-> funding rejection:
+        # A fundamental snapshot citing funding/derivatives metric fails closed
+        snap_fund_with_funding = build_analysis_snapshot(
+            asset_id=assets["crypto"],
+            domain=AnalysisDomain.FUNDAMENTAL.value,
+            known_at=cut2,
+            policy_version="v1",
+            metric_ids=[btc_m.result_id],  # crypto.derivatives.* in fundamental snapshot!
+            diagnostic_ids=[],
+            evidence_set_hashes=[],
+            created_at=cut2,
+        )
+        with pytest.raises(AnalysisSnapshotV2Error, match="must start with 'fundamental.'"):
+            staging.save_analysis_snapshots([snap_fund_with_funding])
+
+        # Diagnostic in FUNDAMENTAL mode citing crypto.derivatives.* metric fails closed
+        diag_fund_with_funding = DiagnosticResult(
             diagnostic_id=uuid4(),
-            asset_id=asset_id,
+            asset_id=assets["crypto"],
+            mode=DiagnosticMode.FUNDAMENTAL,
+            verdict=DiagnosticVerdict.POSITIVE,
+            final_score=Decimal("80.0"),
+            confidence=Decimal("0.9"),
+            as_of=cut2,
+            available_at=cut2,
+            computed_at=clock2,
+            components=[
+                DiagnosticComponent(
+                    component_key="funding_comp",
+                    score=Decimal("80.0"),
+                    weight=Decimal("1.0"),
+                    weighted_contribution=Decimal("80.0"),
+                    metric_result_ids=[btc_m.result_id],
+                    explanation="Funding in fundamental diag",
+                )
+            ],
+            evidence=[
+                DiagnosticEvidence(
+                    metric_result_id=btc_m.result_id,
+                    direction=EvidenceDirection.SUPPORTS,
+                    contribution=Decimal("80.0"),
+                    reason="Funding in fundamental diag",
+                )
+            ],
+            algorithm_version="v1",
+            summary="Fund diag with funding",
+            quality=DataQuality.VALID,
+        )
+        with pytest.raises(DiagnosticV2Error, match="FUNDAMENTAL mode cannot belong"):
+            staging.save_diagnostics([diag_fund_with_funding])
+
+        # 4. MARKET <-> fundamental rejection:
+        # A market snapshot citing fundamental metric fails closed
+        snap_market_with_fund = build_analysis_snapshot(
+            asset_id=assets["equity"],
+            domain=AnalysisDomain.MARKET.value,
+            known_at=cut1,
+            policy_version="v1",
+            metric_ids=[fund_m.result_id],  # fundamental metric in market snapshot!
+            diagnostic_ids=[],
+            evidence_set_hashes=[],
+            created_at=cut1,
+        )
+        with pytest.raises(AnalysisSnapshotV2Error, match="must start with 'market.'"):
+            staging.save_analysis_snapshots([snap_market_with_fund])
+
+        # Diagnostic in MARKET mode citing fundamental metric fails closed
+        diag_market_with_fund = DiagnosticResult(
+            diagnostic_id=uuid4(),
+            asset_id=assets["equity"],
             mode=DiagnosticMode.MARKET,
             verdict=DiagnosticVerdict.POSITIVE,
             final_score=Decimal("80.0"),
             confidence=Decimal("0.9"),
-            as_of=base_time,
-            available_at=base_time,
-            computed_at=base_time,
+            as_of=cut1,
+            available_at=cut1,
+            computed_at=clock1,
+            components=[
+                DiagnosticComponent(
+                    component_key="fund_comp",
+                    score=Decimal("80.0"),
+                    weight=Decimal("1.0"),
+                    weighted_contribution=Decimal("80.0"),
+                    metric_result_ids=[fund_m.result_id],
+                    explanation="Fundamental in market diag",
+                )
+            ],
+            evidence=[
+                DiagnosticEvidence(
+                    metric_result_id=fund_m.result_id,
+                    direction=EvidenceDirection.SUPPORTS,
+                    contribution=Decimal("80.0"),
+                    reason="Fundamental in market diag",
+                )
+            ],
+            algorithm_version="v1",
+            summary="Market diag with fundamental",
+            quality=DataQuality.VALID,
+        )
+        with pytest.raises(
+            DiagnosticV2Error, match="MARKET mode admits only market or derivatives"
+        ):
+            staging.save_diagnostics([diag_market_with_fund])
+
+        # 5. Unknown domain rejection
+        for bad_domain in ("unknown", "macro", "funding", ""):
+            with pytest.raises((AnalysisSnapshotV2Error, ValueError)):
+                snap_unknown = build_analysis_snapshot(
+                    asset_id=assets["equity"],
+                    domain=bad_domain,
+                    known_at=cut1,
+                    policy_version="v1",
+                    metric_ids=[aapl_m.result_id],
+                    diagnostic_ids=[],
+                    evidence_set_hashes=[],
+                    created_at=cut1,
+                )
+                staging.save_analysis_snapshots([snap_unknown])
+
+        # 6. UNIFIED mode rejection
+        diag_unified = DiagnosticResult(
+            diagnostic_id=uuid4(),
+            asset_id=assets["equity"],
+            mode=DiagnosticMode.UNIFIED,
+            verdict=DiagnosticVerdict.NEUTRAL,
+            final_score=Decimal("50.0"),
+            confidence=Decimal("0.5"),
+            as_of=cut1,
+            available_at=cut1,
+            computed_at=clock1,
+            components=[
+                DiagnosticComponent(
+                    component_key="u_comp",
+                    score=Decimal("50.0"),
+                    weight=Decimal("1.0"),
+                    weighted_contribution=Decimal("50.0"),
+                    metric_result_ids=[aapl_m.result_id],
+                    explanation="Unified diag",
+                )
+            ],
+            evidence=[
+                DiagnosticEvidence(
+                    metric_result_id=aapl_m.result_id,
+                    direction=EvidenceDirection.SUPPORTS,
+                    contribution=Decimal("50.0"),
+                    reason="Unified diag",
+                )
+            ],
+            algorithm_version="v1",
+            summary="Unified diag",
+            quality=DataQuality.VALID,
+        )
+        with pytest.raises(DiagnosticV2Error, match="UNIFIED is unauthorized"):
+            staging.save_diagnostics([diag_unified])
+
+        # 7. Mixed diagnostic rejection (market + derivatives in single diagnostic)
+        obs_mix = _seed_observation(staging, cut1, assets["equity"], field_name="crypto_mix")
+        cand_deriv_aapl = MetricResult(
+            result_id=uuid4(),
+            asset_id=assets["equity"],
+            metric_key="crypto.derivatives.index_price",
+            value=Decimal("100.0"),
+            unit="USD",
+            as_of=cut1,
+            available_at=cut1,
+            computed_at=clock1,
+            parameters={},
+            input_observation_ids=[obs_mix.observation_id],
+            algorithm_version="v1",
+            quality=DataQuality.VALID,
+        )
+        deriv_aapl = cand_deriv_aapl.model_copy(
+            update={"result_id": metric_result_id_from_model_v2(cand_deriv_aapl)}
+        )
+        staging.save_metrics([deriv_aapl])
+
+        diag_mixed = DiagnosticResult(
+            diagnostic_id=uuid4(),
+            asset_id=assets["equity"],
+            mode=DiagnosticMode.MARKET,
+            verdict=DiagnosticVerdict.POSITIVE,
+            final_score=Decimal("80.0"),
+            confidence=Decimal("0.9"),
+            as_of=cut1,
+            available_at=cut1,
+            computed_at=clock1,
             components=[
                 DiagnosticComponent(
                     component_key="c1",
                     score=Decimal("80.0"),
                     weight=Decimal("0.5"),
                     weighted_contribution=Decimal("40.0"),
-                    metric_result_ids=[m1.result_id],
-                    explanation="Derivatives metric",
+                    metric_result_ids=[aapl_m.result_id],  # market.*
+                    explanation="Market part",
                 ),
                 DiagnosticComponent(
                     component_key="c2",
                     score=Decimal("80.0"),
                     weight=Decimal("0.5"),
                     weighted_contribution=Decimal("40.0"),
-                    metric_result_ids=[m3.result_id],
-                    explanation="Market metric",
+                    metric_result_ids=[deriv_aapl.result_id],  # crypto.derivatives.*
+                    explanation="Deriv part",
                 ),
             ],
             evidence=[
                 DiagnosticEvidence(
-                    metric_result_id=m1.result_id,
+                    metric_result_id=aapl_m.result_id,
                     direction=EvidenceDirection.SUPPORTS,
-                    contribution=Decimal("80.0"),
-                    reason="Mix",
-                )
+                    contribution=Decimal("40.0"),
+                    reason="Market part",
+                ),
+                DiagnosticEvidence(
+                    metric_result_id=deriv_aapl.result_id,
+                    direction=EvidenceDirection.SUPPORTS,
+                    contribution=Decimal("40.0"),
+                    reason="Deriv part",
+                ),
             ],
             algorithm_version="v1",
-            summary="Mixed diag",
+            summary="Mixed diagnostic",
             quality=DataQuality.VALID,
         )
         with pytest.raises(DiagnosticV2Error, match="mixed metric domains"):
             staging.save_diagnostics([diag_mixed])
 
-        # 2. Valid diagnostic citing only derivatives Metric 2
-        diag_valid = DiagnosticResult(
+        # 8. Valuation and events domains:
+        # Snapshot in valuation with metric and NO diagnostics succeeds!
+        snap_val = build_analysis_snapshot(
+            asset_id=assets["equity"],
+            domain=AnalysisDomain.VALUATION.value,
+            known_at=cut1,
+            policy_version="v1",
+            metric_ids=[val_m.result_id],
+            diagnostic_ids=[],
+            evidence_set_hashes=[],
+            created_at=cut1,
+        )
+        assert staging.save_analysis_snapshots([snap_val]).created_count == 1
+
+        # Snapshot in events with metric and NO diagnostics succeeds!
+        snap_events = build_analysis_snapshot(
+            asset_id=assets["synthetic"],
+            domain=AnalysisDomain.EVENTS.value,
+            known_at=cut2,
+            policy_version="v1",
+            metric_ids=[events_m.result_id],
+            diagnostic_ids=[],
+            evidence_set_hashes=[],
+            created_at=cut2,
+        )
+        assert staging.save_analysis_snapshots([snap_events]).created_count == 1
+
+        # Diagnostic in valid market domain
+        valid_aapl_diag = DiagnosticResult(
             diagnostic_id=uuid4(),
-            asset_id=asset_id,
+            asset_id=assets["equity"],
             mode=DiagnosticMode.MARKET,
             verdict=DiagnosticVerdict.POSITIVE,
             final_score=Decimal("80.0"),
             confidence=Decimal("0.9"),
-            as_of=base_time,
-            available_at=base_time,
-            computed_at=base_time,
+            as_of=cut1,
+            available_at=cut1,
+            computed_at=clock1,
             components=[
                 DiagnosticComponent(
-                    component_key="oi_component",
+                    component_key="c1",
                     score=Decimal("80.0"),
                     weight=Decimal("1.0"),
                     weighted_contribution=Decimal("80.0"),
-                    metric_result_ids=[m2.result_id],
-                    explanation="Open interest",
+                    metric_result_ids=[aapl_m.result_id],
+                    explanation="AAPL market trend",
                 )
             ],
             evidence=[
                 DiagnosticEvidence(
-                    metric_result_id=m2.result_id,
+                    metric_result_id=aapl_m.result_id,
                     direction=EvidenceDirection.SUPPORTS,
                     contribution=Decimal("80.0"),
-                    reason="Open interest positive",
+                    reason="AAPL market trend",
                 )
             ],
             algorithm_version="v1",
-            summary="Derivatives diag",
+            summary="AAPL market diag",
             quality=DataQuality.VALID,
         )
-        staging.save_diagnostics([diag_valid])
+        staging.save_diagnostics([valid_aapl_diag])
 
-        # 3. Snapshot domain mismatch: domain="market" but cites derivatives m1 -> fails
-        snap_mismatched_domain = build_analysis_snapshot(
-            asset_id=asset_id,
-            domain=AnalysisDomain.MARKET.value,
-            known_at=base_time,
+        # Valuation snapshot with diagnostic fails closed
+        snap_val_with_diag = build_analysis_snapshot(
+            asset_id=assets["equity"],
+            domain=AnalysisDomain.VALUATION.value,
+            known_at=cut1,
             policy_version="v1",
-            metric_ids=[m1.result_id],
-            diagnostic_ids=[],
-            evidence_set_hashes=[es1.canonical_hash],
-            created_at=base_time,
+            metric_ids=[val_m.result_id],
+            diagnostic_ids=[valid_aapl_diag.diagnostic_id],
+            evidence_set_hashes=[],
+            created_at=cut1,
         )
-        with pytest.raises(AnalysisSnapshotV2Error, match="must start with 'market.'"):
-            staging.save_analysis_snapshots([snap_mismatched_domain])
+        with pytest.raises(
+            AnalysisSnapshotV2Error, match="does not have authorized diagnostic mode"
+        ):
+            staging.save_analysis_snapshots([snap_val_with_diag])
 
-        # 4. Snapshot directly cites m1, and cites diag_valid (which cites m2).
-        # Both m1 and m2 have EvidenceSets: es1 and es2!
-        # If the snapshot's evidence_set_digest only covers es1 -> fails closed!
-        snap_partial_digest = build_analysis_snapshot(
-            asset_id=asset_id,
-            domain=AnalysisDomain.DERIVATIVES.value,
-            known_at=base_time,
+        # 9. Snapshot with ONLY diagnostics (metric_ids=[]) whose EvidenceSet
+        # does not appear in metric_ids:
+        snap_diag_only_valid = build_analysis_snapshot(
+            asset_id=assets["equity"],
+            domain=AnalysisDomain.MARKET.value,
+            known_at=cut1,
             policy_version="v1",
-            metric_ids=[m1.result_id],
-            diagnostic_ids=[diag_valid.diagnostic_id],
-            evidence_set_hashes=[es1.canonical_hash],  # Missing es2 from diag_valid!
-            created_at=base_time,
+            metric_ids=[],  # ONLY diagnostics!
+            diagnostic_ids=[valid_aapl_diag.diagnostic_id],
+            evidence_set_hashes=[es_by_asset["equity"][cut1].canonical_hash],
+            created_at=cut1,
+        )
+        receipt_diag_only = staging.save_analysis_snapshots([snap_diag_only_valid])
+        assert receipt_diag_only.created_count == 1
+
+        # 10. Modified digest rejection:
+        snap_bad_digest = build_analysis_snapshot(
+            asset_id=assets["equity"],
+            domain=AnalysisDomain.MARKET.value,
+            known_at=cut1,
+            policy_version="v1",
+            metric_ids=[],
+            diagnostic_ids=[valid_aapl_diag.diagnostic_id],
+            evidence_set_hashes=["0" * 64],  # Modified hash!
+            created_at=cut1,
         )
         with pytest.raises(AnalysisSnapshotV2Error, match="does not match resolved hashes digest"):
-            staging.save_analysis_snapshots([snap_partial_digest])
+            staging.save_analysis_snapshots([snap_bad_digest])
 
-        # 5. Snapshot providing canonical hashes for BOTH es1 and es2 -> succeeds!
-        snap_full_digest = build_analysis_snapshot(
-            asset_id=asset_id,
-            domain=AnalysisDomain.DERIVATIVES.value,
-            known_at=base_time,
+        # 11. Legitimate absence:
+        # Snapshot with empty metric_ids and empty diagnostic_ids
+        snap_empty = build_analysis_snapshot(
+            asset_id=assets["synthetic"],
+            domain=AnalysisDomain.EVENTS.value,
+            known_at=cut2,
             policy_version="v1",
-            metric_ids=[m1.result_id],
-            diagnostic_ids=[diag_valid.diagnostic_id],
-            evidence_set_hashes=[es1.canonical_hash, es2.canonical_hash],
-            created_at=base_time,
+            metric_ids=[],
+            diagnostic_ids=[],
+            evidence_set_hashes=[],
+            created_at=cut2,
         )
-        receipt_snap = staging.save_analysis_snapshots([snap_full_digest])
-        assert receipt_snap.created_count == 1
+        assert staging.save_analysis_snapshots([snap_empty]).created_count == 1
 
-        # Rehydrate and verify
-        loaded = staging.get_analysis_snapshot(snap_full_digest.snapshot_id)
-        assert loaded.snapshot_id == snap_full_digest.snapshot_id
-        assert loaded.metric_ids == (m1.result_id,)
-        assert loaded.diagnostic_ids == (diag_valid.diagnostic_id,)
+        # Empty diagnostics
+        empty_diag_market = DiagnosticResult(
+            diagnostic_id=uuid4(),
+            asset_id=assets["equity"],
+            mode=DiagnosticMode.MARKET,
+            verdict=DiagnosticVerdict.INSUFFICIENT_DATA,
+            final_score=Decimal("0.0"),
+            confidence=Decimal("0.0"),
+            as_of=cut1,
+            available_at=cut1,
+            computed_at=clock1,
+            components=[],
+            evidence=[],
+            algorithm_version="v1",
+            summary="Empty market diag",
+            quality=DataQuality.VALID,
+        )
+        assert staging.save_diagnostics([empty_diag_market]).created_count == 1
+
+        empty_diag_fund = DiagnosticResult(
+            diagnostic_id=uuid4(),
+            asset_id=assets["equity"],
+            mode=DiagnosticMode.FUNDAMENTAL,
+            verdict=DiagnosticVerdict.INSUFFICIENT_DATA,
+            final_score=Decimal("0.0"),
+            confidence=Decimal("0.0"),
+            as_of=cut1,
+            available_at=cut1,
+            computed_at=clock1,
+            components=[],
+            evidence=[],
+            algorithm_version="v1",
+            summary="Empty fund diag",
+            quality=DataQuality.VALID,
+        )
+        assert staging.save_diagnostics([empty_diag_fund]).created_count == 1
+
+        # 12. Deserialization and pure original identity:
+        rehydrated = staging.get_analysis_snapshot(snap_diag_only_valid.snapshot_id)
+        assert rehydrated.snapshot_id == snap_diag_only_valid.snapshot_id
+        assert rehydrated.asset_id == assets["equity"]
+        assert rehydrated.domain == AnalysisDomain.MARKET.value
+        assert rehydrated.known_at == cut1
+        assert rehydrated.diagnostic_ids == (valid_aapl_diag.diagnostic_id,)
+        assert rehydrated.metric_ids == ()
+        assert rehydrated.evidence_set_digest == snap_diag_only_valid.evidence_set_digest
 
 
 def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
@@ -457,6 +811,79 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         staging.save_diagnostics(target_diags)
         staging.save_analysis_snapshots(target_snaps)
 
+        # Install Query Tracking Proxy
+        class TrackingConnection:
+            def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
+                self._conn = conn
+                self.queries: list[str] = []
+                self.param_chunks: list[int] = []
+                self.table_counts: dict[str, int] = {}
+                self.active = True
+
+            def execute(
+                self, query: str, *args: object, **kwargs: object
+            ) -> duckdb.DuckDBPyConnection:
+                if self.active:
+                    q_str = str(query)
+                    self.queries.append(q_str)
+                    for tbl in (
+                        "metric_results_v2",
+                        "metric_observation_links_v2",
+                        "metric_dependency_links_v2",
+                        "diagnostic_results_v2",
+                        "diagnostic_components_v2",
+                        "diagnostic_metric_links_v2",
+                        "diagnostic_evidence_v2",
+                        "analysis_snapshots_v2",
+                        "analysis_snapshot_metric_links_v2",
+                        "analysis_snapshot_diagnostic_links_v2",
+                    ):
+                        if tbl in q_str:
+                            self.table_counts[tbl] = self.table_counts.get(tbl, 0) + 1
+                    if args and isinstance(args[0], (list, tuple)):
+                        self.param_chunks.append(len(args[0]))
+                return self._conn.execute(query, *args, **kwargs)
+
+            def clear(self) -> None:
+                self.queries.clear()
+                self.param_chunks.clear()
+                self.table_counts.clear()
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._conn, name)
+
+        proxy = TrackingConnection(staging._connection)
+        staging._connection = proxy
+
+        # --- BASELINE: Measure queries BEFORE inserting 2,048 foreign rows ---
+        baseline_res_m = {}
+        baseline_res_d = {}
+        baseline_res_s = {}
+        baseline_queries_m = {}
+        baseline_queries_d = {}
+        baseline_queries_s = {}
+
+        for K in (1, 256, 257, 513):
+            # 1. get_metrics baseline
+            proxy.clear()
+            baseline_res_m[K] = staging.get_metrics([m.result_id for m in target_metrics[:K]])
+            baseline_queries_m[K] = len(proxy.queries)
+
+            # 2. get_diagnostics baseline
+            proxy.clear()
+            baseline_res_d[K] = staging.get_diagnostics([d.diagnostic_id for d in target_diags[:K]])
+            baseline_queries_d[K] = len(proxy.queries)
+
+            # 3. get_analysis_snapshots baseline
+            proxy.clear()
+            baseline_res_s[K] = staging.get_analysis_snapshots(
+                [s.snapshot_id for s in target_snaps[:K]]
+            )
+            baseline_queries_s[K] = len(proxy.queries)
+
+        # Deactivate proxy tracking while seeding foreign rows
+        proxy.active = False
+
         # Populate 32 foreign assets with 2,048 foreign rows in diagnostic_results_v2
         # and analysis_snapshots_v2
         staging._connection.execute(
@@ -499,54 +926,88 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             """
         )
 
-        # Install Query Tracking Proxy
-        class TrackingConnection:
-            def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
-                self._conn = conn
-                self.queries: list[str] = []
-                self.param_chunks: list[int] = []
+        proxy.active = True
 
-            def execute(
-                self, query: str, *args: object, **kwargs: object
-            ) -> duckdb.DuckDBPyConnection:
-                self.queries.append(str(query))
-                if args and isinstance(args[0], (list, tuple)):
-                    self.param_chunks.append(len(args[0]))
-                return self._conn.execute(query, *args, **kwargs)
-
-            def __getattr__(self, name: str) -> object:
-                return getattr(self._conn, name)
-
-        proxy = TrackingConnection(staging._connection)
-        staging._connection = proxy
-
-        # Cardinalities matrix: K in (1, 256, 257, 513)
+        # --- AFTER FOREIGN ROWS: Cardinalities matrix K in (1, 256, 257, 513) ---
         for K in (1, 256, 257, 513):
-            expected_bound = 16 + 64 * math.ceil(K / 256)
+            expected_chunks = math.ceil(K / 256)
+            loose_bound = 16 + 64 * expected_chunks
 
             # 1. get_metrics
-            proxy.queries.clear()
-            proxy.param_chunks.clear()
+            proxy.clear()
             res_m = staging.get_metrics([m.result_id for m in target_metrics[:K]])
             assert len(res_m) == K
-            assert len(proxy.queries) <= expected_bound
+            assert res_m == baseline_res_m[K]
+            assert len(proxy.queries) == baseline_queries_m[K]
+            assert len(proxy.queries) <= loose_bound
+            assert proxy.table_counts.get("metric_results_v2", 0) <= 4 + expected_chunks
+            assert proxy.table_counts.get("metric_observation_links_v2", 0) <= 4 + expected_chunks
+            assert proxy.table_counts.get("metric_dependency_links_v2", 0) <= 4 + expected_chunks
             assert all(size <= 256 for size in proxy.param_chunks)
 
             # 2. get_diagnostics
-            proxy.queries.clear()
-            proxy.param_chunks.clear()
+            proxy.clear()
             res_d = staging.get_diagnostics([d.diagnostic_id for d in target_diags[:K]])
             assert len(res_d) == K
-            assert len(proxy.queries) <= expected_bound
+            assert res_d == baseline_res_d[K]
+            assert len(proxy.queries) == baseline_queries_d[K]
+            assert len(proxy.queries) <= loose_bound
+            assert proxy.table_counts.get("diagnostic_results_v2", 0) <= 4 + expected_chunks
+            assert proxy.table_counts.get("diagnostic_components_v2", 0) <= 4 + expected_chunks
+            assert proxy.table_counts.get("diagnostic_metric_links_v2", 0) <= 4 + expected_chunks
+            assert proxy.table_counts.get("diagnostic_evidence_v2", 0) <= 4 + expected_chunks
             assert all(size <= 256 for size in proxy.param_chunks)
 
             # 3. get_analysis_snapshots
-            proxy.queries.clear()
-            proxy.param_chunks.clear()
+            proxy.clear()
             res_s = staging.get_analysis_snapshots([s.snapshot_id for s in target_snaps[:K]])
             assert len(res_s) == K
-            assert len(proxy.queries) <= expected_bound
+            assert res_s == baseline_res_s[K]
+            assert len(proxy.queries) == baseline_queries_s[K]
+            assert len(proxy.queries) <= loose_bound
+            assert proxy.table_counts.get("analysis_snapshots_v2", 0) <= 4 + expected_chunks
+            assert (
+                proxy.table_counts.get("analysis_snapshot_metric_links_v2", 0)
+                <= 4 + expected_chunks
+            )
+            assert (
+                proxy.table_counts.get("analysis_snapshot_diagnostic_links_v2", 0)
+                <= 4 + expected_chunks
+            )
             assert all(size <= 256 for size in proxy.param_chunks)
+
+        # 4. Measure SQL queries on shared / deep DAG
+        # Build a shared 256-node metric DAG where 256 metrics share a single observation
+        dag_metrics = []
+        for i in range(256):
+            moment = base_time + timedelta(seconds=i)
+            c = MetricResult(
+                result_id=uuid4(),
+                asset_id=asset_target,
+                metric_key=f"market.dag.node_{i}",
+                value=Decimal(str(i)),
+                unit="USD",
+                as_of=moment,
+                available_at=moment,
+                computed_at=moment,
+                parameters={"dag_idx": i},
+                input_observation_ids=[obs_target.observation_id],
+                input_metric_result_ids=[dag_metrics[-1].result_id] if dag_metrics else [],
+                algorithm_version="v1",
+                quality=DataQuality.VALID,
+            )
+            m = c.model_copy(update={"result_id": metric_result_id_from_model_v2(c)})
+            dag_metrics.append(m)
+
+        proxy.active = False
+        staging.save_metrics(dag_metrics)
+        proxy.active = True
+
+        proxy.clear()
+        dag_res = staging.get_metrics([m.result_id for m in dag_metrics])
+        assert len(dag_res) == 256
+        assert len(proxy.queries) <= 16 + 64 * 1
+        assert all(size <= 256 for size in proxy.param_chunks)
 
         # 4. list_diagnostics with limit=None traverses internally by pages without truncating
         all_diags = staging.list_diagnostics(asset_id=asset_target)

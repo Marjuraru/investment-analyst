@@ -366,20 +366,17 @@ class DiagnosticV2Store:
                         )
 
         reused_set = {str(uid) for uid in reused_ids}
-        # 5. Insert new diagnostic rows, components, component metric links, evidence
+        diag_rows = []
+        comp_rows = []
+        link_rows = []
+        ev_rows = []
+
         for item in diagnostics:
             diag_id_str = str(item.diagnostic_id)
             if diag_id_str in reused_set:
                 continue
 
-            self._connection.execute(
-                f"""
-                INSERT INTO {DIAGNOSTIC_V2_TABLE} (
-                    diagnostic_id, asset_id, mode, verdict, final_score_text,
-                    confidence_text, as_of, available_at, computed_at,
-                    algorithm_version, summary, quality
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+            diag_rows.append(
                 [
                     diag_id_str,
                     item.asset_id,
@@ -393,17 +390,11 @@ class DiagnosticV2Store:
                     item.algorithm_version,
                     item.summary,
                     item.quality.value if hasattr(item.quality, "value") else str(item.quality),
-                ],
+                ]
             )
 
             for comp_pos, comp in enumerate(item.components):
-                self._connection.execute(
-                    f"""
-                    INSERT INTO {DIAGNOSTIC_V2_COMPONENTS_TABLE} (
-                        diagnostic_id, position, component_key, score_text,
-                        weight_text, weighted_contribution_text, explanation
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
+                comp_rows.append(
                     [
                         diag_id_str,
                         comp_pos,
@@ -412,26 +403,13 @@ class DiagnosticV2Store:
                         _decimal_text(comp.weight),
                         _decimal_text(comp.weighted_contribution),
                         comp.explanation,
-                    ],
+                    ]
                 )
                 for link_pos, mid in enumerate(comp.metric_result_ids):
-                    self._connection.execute(
-                        f"""
-                        INSERT INTO {DIAGNOSTIC_V2_COMPONENT_METRIC_LINKS_TABLE} (
-                            diagnostic_id, component_position, link_position, metric_result_id
-                        ) VALUES (?, ?, ?, ?)
-                        """,
-                        [diag_id_str, comp_pos, link_pos, str(mid)],
-                    )
+                    link_rows.append([diag_id_str, comp_pos, link_pos, str(mid)])
 
             for ev_pos, ev in enumerate(item.evidence):
-                self._connection.execute(
-                    f"""
-                    INSERT INTO {DIAGNOSTIC_V2_EVIDENCE_TABLE} (
-                        diagnostic_id, position, metric_result_id, direction,
-                        contribution_text, reason
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
+                ev_rows.append(
                     [
                         diag_id_str,
                         ev_pos,
@@ -439,10 +417,65 @@ class DiagnosticV2Store:
                         ev.direction.value if hasattr(ev.direction, "value") else str(ev.direction),
                         _decimal_text(ev.contribution),
                         ev.reason,
-                    ],
+                    ]
                 )
 
             created_ids.append(item.diagnostic_id)
+
+        in_tx = False
+        try:
+            self._connection.execute("BEGIN TRANSACTION")
+            in_tx = True
+        except Exception:
+            pass
+
+        try:
+            if diag_rows:
+                self._connection.executemany(
+                    f"""
+                    INSERT INTO {DIAGNOSTIC_V2_TABLE} (
+                        diagnostic_id, asset_id, mode, verdict, final_score_text,
+                        confidence_text, as_of, available_at, computed_at,
+                        algorithm_version, summary, quality
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    diag_rows,
+                )
+            if comp_rows:
+                self._connection.executemany(
+                    f"""
+                    INSERT INTO {DIAGNOSTIC_V2_COMPONENTS_TABLE} (
+                        diagnostic_id, position, component_key, score_text,
+                        weight_text, weighted_contribution_text, explanation
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    comp_rows,
+                )
+            if link_rows:
+                self._connection.executemany(
+                    f"""
+                    INSERT INTO {DIAGNOSTIC_V2_COMPONENT_METRIC_LINKS_TABLE} (
+                        diagnostic_id, component_position, link_position, metric_result_id
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    link_rows,
+                )
+            if ev_rows:
+                self._connection.executemany(
+                    f"""
+                    INSERT INTO {DIAGNOSTIC_V2_EVIDENCE_TABLE} (
+                        diagnostic_id, position, metric_result_id, direction,
+                        contribution_text, reason
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    ev_rows,
+                )
+            if in_tx:
+                self._connection.execute("COMMIT")
+        except Exception:
+            if in_tx:
+                self._connection.execute("ROLLBACK")
+            raise
 
         return BatchWriteReceipt(created_ids=tuple(created_ids), reused_ids=tuple(reused_ids))
 
