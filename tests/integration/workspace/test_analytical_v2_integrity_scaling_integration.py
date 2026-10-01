@@ -720,6 +720,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
 ) -> None:
     """A3: Keyset pagination isolates assets, verifies bounds and handles ties in time."""
     import math
+    import re
     import time
 
     from investment_analyst.storage.analytical_v2_validation import chunked_sequence
@@ -872,6 +873,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 self.param_chunks: list[int] = []
                 self.table_counts: dict[str, int] = {}
                 self.table_rows: dict[str, int] = {}
+                self.metadata_queries: int = 0
                 self.rows_fetched: int = 0
                 self.current_query_tables: list[str] = []
                 self.active = True
@@ -881,10 +883,14 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 if self.active:
                     q_str = str(query)
                     self.queries.append(q_str)
-                    for tbl in self.ALL_TABLES:
-                        if tbl in q_str:
-                            self.table_counts[tbl] = self.table_counts.get(tbl, 0) + 1
-                            self.current_query_tables.append(tbl)
+                    is_metadata = "information_schema" in q_str.lower()
+                    if is_metadata:
+                        self.metadata_queries += 1
+                    else:
+                        for tbl in self.ALL_TABLES:
+                            if re.search(rf"\b{tbl}\b", q_str):
+                                self.table_counts[tbl] = self.table_counts.get(tbl, 0) + 1
+                                self.current_query_tables.append(tbl)
                     if args and isinstance(args[0], (list, tuple)):
                         self.param_chunks.append(len(args[0]))
                 cursor = self._conn.execute(query, *args, **kwargs)
@@ -898,6 +904,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 self.param_chunks.clear()
                 self.table_counts.clear()
                 self.table_rows.clear()
+                self.metadata_queries = 0
                 self.rows_fetched = 0
                 self.current_query_tables.clear()
 
@@ -1065,9 +1072,11 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             assert proxy.table_rows == baseline_table_rows_m[K]
             assert baseline_durations_m[K] > 0 and after_durations_m[K] > 0
             assert len(proxy.queries) <= loose_bound
-            assert proxy.table_counts.get("metric_results_v2", 0) <= 4 + expected_chunks
-            assert proxy.table_counts.get("metric_v2_observation_links", 0) <= 4 + expected_chunks
-            assert proxy.table_counts.get("metric_v2_metric_links", 0) <= 4 + expected_chunks
+            assert proxy.table_rows.get("metric_results_v2", 0) == K
+            assert proxy.table_rows.get("metric_v2_observation_links", 0) == K
+            assert proxy.table_counts.get("metric_results_v2", 0) <= expected_chunks
+            assert proxy.table_counts.get("metric_v2_observation_links", 0) <= expected_chunks
+            assert proxy.table_counts.get("metric_v2_metric_links", 0) <= expected_chunks
             assert all(size <= 256 for size in proxy.param_chunks)
 
             # 2. get_diagnostics
@@ -1085,13 +1094,18 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             assert proxy.table_rows == baseline_table_rows_d[K]
             assert baseline_durations_d[K] > 0 and after_durations_d[K] > 0
             assert len(proxy.queries) <= loose_bound
-            assert proxy.table_counts.get("diagnostic_results_v2", 0) <= 4 + expected_chunks
-            assert proxy.table_counts.get("diagnostic_v2_components", 0) <= 4 + expected_chunks
+            assert proxy.table_rows.get("diagnostic_results_v2", 0) == K
+            assert proxy.table_rows.get("diagnostic_v2_components", 0) == K
+            assert proxy.table_rows.get("diagnostic_v2_component_metric_links", 0) == K
+            assert proxy.table_rows.get("diagnostic_v2_evidence", 0) == K
+            assert proxy.table_rows.get("metric_results_v2", 0) == K
+            assert proxy.table_counts.get("diagnostic_results_v2", 0) <= expected_chunks
+            assert proxy.table_counts.get("diagnostic_v2_components", 0) <= expected_chunks
             assert (
                 proxy.table_counts.get("diagnostic_v2_component_metric_links", 0)
-                <= 4 + expected_chunks
+                <= expected_chunks
             )
-            assert proxy.table_counts.get("diagnostic_v2_evidence", 0) <= 4 + expected_chunks
+            assert proxy.table_counts.get("diagnostic_v2_evidence", 0) <= expected_chunks
             assert all(size <= 256 for size in proxy.param_chunks)
 
             # 3. get_analysis_snapshots
@@ -1109,14 +1123,19 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             assert proxy.table_rows == baseline_table_rows_s[K]
             assert baseline_durations_s[K] > 0 and after_durations_s[K] > 0
             assert len(proxy.queries) <= loose_bound
-            assert proxy.table_counts.get("analysis_snapshots_v2", 0) <= 4 + expected_chunks
+            assert proxy.table_rows.get("analysis_snapshots_v2", 0) == K
+            assert proxy.table_rows.get("analysis_snapshot_v2_metric_links", 0) == K
+            assert proxy.table_rows.get("analysis_snapshot_v2_diagnostic_links", 0) == K
+            assert proxy.table_rows.get("diagnostic_results_v2", 0) == K
+            assert proxy.table_rows.get("metric_results_v2", 0) == 2 * K
+            assert proxy.table_counts.get("analysis_snapshots_v2", 0) <= expected_chunks
             assert (
                 proxy.table_counts.get("analysis_snapshot_v2_metric_links", 0)
-                <= 4 + expected_chunks
+                <= expected_chunks
             )
             assert (
                 proxy.table_counts.get("analysis_snapshot_v2_diagnostic_links", 0)
-                <= 4 + expected_chunks
+                <= expected_chunks
             )
             assert all(size <= 256 for size in proxy.param_chunks)
 
