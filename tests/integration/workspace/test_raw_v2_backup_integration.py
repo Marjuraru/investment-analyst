@@ -516,8 +516,8 @@ def test_metric_restore_rejects_corrupt_lineage_or_missing_observation(
     assert not (tmp_path / "lineage-corrupt").exists()
 
 
-def test_analysis_backup_v4_restores_diagnostics_and_snapshots(tmp_path: Path) -> None:
-    """A3: backup v4 binds diagnostics and snapshots, and restore preserves IDs, Decimal, PIT."""
+def test_analysis_v4_restore_verifies_full_references_in_bounded_pages(tmp_path: Path) -> None:
+    """A4: backup v4 binds diagnostics and snapshots; restore verifies references in pages."""
     from decimal import Decimal
     from uuid import uuid4
 
@@ -689,6 +689,11 @@ def test_analysis_backup_v4_restores_diagnostics_and_snapshots(tmp_path: Path) -
         assert restored_snap == snapshot
         assert restored.list_diagnostics(as_of=metric.as_of) == [diagnostic]
         assert restored.list_analysis_snapshots(known_to=metric.available_at) == [snapshot]
+
+
+test_analysis_backup_v4_restores_diagnostics_and_snapshots = (
+    test_analysis_v4_restore_verifies_full_references_in_bounded_pages
+)
 
 
 def test_analysis_restore_rejects_corrupt_links_without_promotion(tmp_path: Path) -> None:

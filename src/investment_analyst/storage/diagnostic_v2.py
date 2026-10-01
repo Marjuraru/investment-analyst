@@ -37,6 +37,7 @@ from investment_analyst.storage.analytical_v2_validation import (
     AnalyticalV2ValidationError,
     chunked_sequence,
     fetch_diagnostics_chunked,
+    fetch_metrics_chunked,
     validate_keyset_cursor,
     validate_keyset_limit,
     validate_link_positions,
@@ -46,6 +47,7 @@ from investment_analyst.storage.errors import (
     RecordNotFoundError,
     StorageError,
 )
+from investment_analyst.storage.metric_v2 import MetricV2Error
 
 DIAGNOSTIC_V2_TABLE: Final[str] = "diagnostic_results_v2"
 DIAGNOSTIC_V2_COMPONENTS_TABLE: Final[str] = "diagnostic_v2_components"
@@ -267,7 +269,7 @@ class DiagnosticV2Store:
                 )
             validate_link_positions(list(range(len(item.evidence))), "diagnostic evidence")
 
-        # 2. Gather cited metrics in chunks <= 256
+        # 2. Gather, hydrate and verify cited metrics in chunks <= 256 using fetch_metrics_chunked
         all_cited_mids = sorted(
             {
                 mid
@@ -279,20 +281,12 @@ class DiagnosticV2Store:
             key=str,
         )
 
-        cited_metric_info: dict[UUID, tuple[str, datetime, str]] = {}
-        for m_chunk in chunked_sequence(all_cited_mids, MAX_CHUNK_SIZE):
-            placeholders = ", ".join("?" for _ in m_chunk)
-            rows = self._connection.execute(
-                f"SELECT result_id, asset_id, available_at, metric_key "
-                f"FROM metric_results_v2 WHERE result_id IN ({placeholders})",
-                [str(item) for item in m_chunk],
-            ).fetchall()
-            for r in rows:
-                cited_metric_info[UUID(str(r[0]))] = (
-                    str(r[1]),
-                    _parse_instant_text(r[2]),
-                    str(r[3]),
-                )
+        try:
+            cited_metrics_by_id = fetch_metrics_chunked(self._connection, all_cited_mids)
+        except RecordNotFoundError as error:
+            raise RecordNotFoundError(f"diagnostic references missing metric: {error}") from error
+        except (AnalyticalV2ValidationError, MetricV2Error) as error:
+            raise DiagnosticV2Error(str(error)) from error
 
         # 3. Check cited metrics per diagnostic
         for item in diagnostics:
@@ -304,22 +298,22 @@ class DiagnosticV2Store:
                 item_mids.add(ev.metric_result_id)
 
             for mid in item_mids:
-                if mid not in cited_metric_info:
+                if mid not in cited_metrics_by_id:
                     raise RecordNotFoundError(f"diagnostic references missing metric {mid}")
-                m_asset, m_avail, m_key = cited_metric_info[mid]
-                if m_asset != item.asset_id:
+                metric = cited_metrics_by_id[mid]
+                if metric.asset_id != item.asset_id:
                     raise DiagnosticV2Error(
                         f"diagnostic for {item.asset_id} references foreign metric {mid} "
-                        f"belonging to {m_asset}"
+                        f"belonging to {metric.asset_id}"
                     )
-                if m_avail > avail:
+                if metric.available_at > avail:
                     raise DiagnosticV2Error(
                         f"diagnostic available at {avail.isoformat()} references future "
-                        f"metric {mid} available at {m_avail.isoformat()}"
+                        f"metric {mid} available at {metric.available_at.isoformat()}"
                     )
 
             # Validate domain consistency
-            metric_keys = {mid: cited_metric_info[mid][2] for mid in item_mids}
+            metric_keys = {mid: cited_metrics_by_id[mid].metric_key for mid in item_mids}
             try:
                 validate_diagnostic_internal_consistency(item, metric_keys)
             except DomainMembershipError as error:
@@ -493,18 +487,55 @@ class DiagnosticV2Store:
             clauses.append("available_at <= ?")
             parameters.append(_instant_text(available_to))
 
-        if normalized_cursor is not None:
-            clauses.append("(available_at > ? OR (available_at = ? AND diagnostic_id > ?))")
-            parameters.extend([normalized_cursor[0], normalized_cursor[0], normalized_cursor[1]])
+        if limit is not None:
+            query_clauses = list(clauses)
+            query_params = list(parameters)
+            if normalized_cursor is not None:
+                query_clauses.append(
+                    "(available_at > ? OR (available_at = ? AND diagnostic_id > ?))"
+                )
+                query_params.extend(
+                    [
+                        normalized_cursor[0],
+                        normalized_cursor[0],
+                        normalized_cursor[1],
+                    ]
+                )
+            where = f" WHERE {' AND '.join(query_clauses)}" if query_clauses else ""
+            limit_clause = f" LIMIT {limit}"
+            rows = self._connection.execute(
+                f"SELECT diagnostic_id FROM {DIAGNOSTIC_V2_TABLE}{where} "
+                f"ORDER BY available_at, diagnostic_id{limit_clause}",
+                query_params,
+            ).fetchall()
+            ids = [UUID(str(row[0])) for row in rows]
+        else:
+            all_ids: list[UUID] = []
+            current_cursor = normalized_cursor
+            while True:
+                page_clauses = list(clauses)
+                page_params = list(parameters)
+                if current_cursor is not None:
+                    page_clauses.append(
+                        "(available_at > ? OR (available_at = ? AND diagnostic_id > ?))"
+                    )
+                    page_params.extend([current_cursor[0], current_cursor[0], current_cursor[1]])
+                where = f" WHERE {' AND '.join(page_clauses)}" if page_clauses else ""
+                page_rows = self._connection.execute(
+                    f"SELECT diagnostic_id, available_at FROM {DIAGNOSTIC_V2_TABLE}{where} "
+                    f"ORDER BY available_at, diagnostic_id LIMIT {MAX_CHUNK_SIZE}",
+                    page_params,
+                ).fetchall()
+                if not page_rows:
+                    break
+                for row in page_rows:
+                    all_ids.append(UUID(str(row[0])))
+                last_row = page_rows[-1]
+                current_cursor = (str(last_row[1]), str(last_row[0]))
+                if len(page_rows) < MAX_CHUNK_SIZE:
+                    break
+            ids = all_ids
 
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        limit_clause = f" LIMIT {limit}" if limit is not None else ""
-        rows = self._connection.execute(
-            f"SELECT diagnostic_id FROM {DIAGNOSTIC_V2_TABLE}{where} "
-            f"ORDER BY available_at, diagnostic_id{limit_clause}",
-            parameters,
-        ).fetchall()
-        ids = [UUID(str(row[0])) for row in rows]
         hydrated = self.get_diagnostics(ids)
         return [hydrated[did] for did in ids]
 

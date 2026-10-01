@@ -364,39 +364,52 @@ def test_domains_and_snapshot_digest_resolve_all_cited_metrics(tmp_path: Path) -
 def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
     tmp_path: Path,
 ) -> None:
-    """A3: Keyset pagination isolates assets and does not execute foreign queries."""
+    """A3: Keyset pagination isolates assets, verifies bounds and handles ties in time."""
+    import math
+
     staging = _staging(tmp_path, "staging-multiasset")
     base_time = datetime(2026, 8, 1, tzinfo=UTC)
-    asset_a = "equity:us:aapl"
-    asset_b = "crypto:btc-usd"
+    asset_target = "equity:us:aapl"
 
     with staging:
-        # Populate Asset A (market domain)
-        obs_a = _seed_observation(staging, base_time, asset_a)
-        m_a_cand = MetricResult(
-            result_id=uuid4(),
-            asset_id=asset_a,
-            metric_key="market.close.aapl",
-            value=Decimal("150.0"),
-            unit="USD",
-            as_of=base_time,
-            available_at=base_time,
-            computed_at=base_time,
-            parameters={},
-            input_observation_ids=[obs_a.observation_id],
-            algorithm_version="v1",
-            quality=DataQuality.VALID,
+        obs_target = _seed_observation(staging, base_time, asset_target)
+        # Seed another observation with different source and cut for target asset to test isolation
+        _seed_observation(
+            staging,
+            base_time + timedelta(days=10),
+            asset_target,
+            field_name="volume",
+            source_id="test:other_feed",
         )
-        m_a = m_a_cand.model_copy(update={"result_id": metric_result_id_from_model_v2(m_a_cand)})
-        staging.save_metrics([m_a])
 
-        diags_a: list[DiagnosticResult] = []
-        snaps_a = []
-        for i in range(5):
-            moment = base_time + timedelta(hours=i)
+        target_metrics: list[MetricResult] = []
+        target_diags: list[DiagnosticResult] = []
+        target_snaps = []
+
+        # Create 513 metrics, 513 diagnostics, and 513 snapshots for asset_target
+        for i in range(513):
+            moment = base_time + timedelta(minutes=i)
+            cand_m = MetricResult(
+                result_id=uuid4(),
+                asset_id=asset_target,
+                metric_key=f"market.close.{i}",
+                value=Decimal(str(i)),
+                unit="USD",
+                as_of=moment,
+                available_at=moment,
+                computed_at=moment,
+                parameters={"idx": i},
+                input_observation_ids=[obs_target.observation_id],
+                input_metric_result_ids=[],
+                algorithm_version="v1",
+                quality=DataQuality.VALID,
+            )
+            m = cand_m.model_copy(update={"result_id": metric_result_id_from_model_v2(cand_m)})
+            target_metrics.append(m)
+
             d = DiagnosticResult(
                 diagnostic_id=uuid4(),
-                asset_id=asset_a,
+                asset_id=asset_target,
                 mode=DiagnosticMode.MARKET,
                 verdict=DiagnosticVerdict.POSITIVE,
                 final_score=Decimal("50.0"),
@@ -406,156 +419,293 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 computed_at=moment,
                 components=[
                     DiagnosticComponent(
-                        component_key="c",
+                        component_key="comp",
                         score=Decimal("50.0"),
                         weight=Decimal("1.0"),
                         weighted_contribution=Decimal("50.0"),
-                        metric_result_ids=[m_a.result_id],
+                        metric_result_ids=[m.result_id],
                         explanation="Check",
                     )
                 ],
                 evidence=[
                     DiagnosticEvidence(
-                        metric_result_id=m_a.result_id,
+                        metric_result_id=m.result_id,
                         direction=EvidenceDirection.SUPPORTS,
                         contribution=Decimal("50.0"),
                         reason="Check positive",
                     )
                 ],
                 algorithm_version="v1",
-                summary=f"Diag A {i}",
+                summary=f"Diag target {i}",
                 quality=DataQuality.VALID,
             )
-            diags_a.append(d)
+            target_diags.append(d)
+
             s = build_analysis_snapshot(
-                asset_id=asset_a,
+                asset_id=asset_target,
                 domain="market",
                 known_at=moment,
                 policy_version="v1",
-                metric_ids=[m_a.result_id],
+                metric_ids=[m.result_id],
                 diagnostic_ids=[d.diagnostic_id],
                 evidence_set_hashes=[],
                 created_at=moment,
             )
-            snaps_a.append(s)
+            target_snaps.append(s)
 
-        staging.save_diagnostics(diags_a)
-        staging.save_analysis_snapshots(snaps_a)
+        staging.save_metrics(target_metrics)
+        staging.save_diagnostics(target_diags)
+        staging.save_analysis_snapshots(target_snaps)
 
-        # Populate Asset B (derivatives domain)
-        obs_b = _seed_observation(staging, base_time, asset_b)
-        m_b_cand = MetricResult(
+        # Populate 32 foreign assets with 2,048 foreign rows in diagnostic_results_v2
+        # and analysis_snapshots_v2
+        staging._connection.execute(
+            """
+            INSERT INTO diagnostic_results_v2 (
+                diagnostic_id, asset_id, mode, verdict, final_score_text, confidence_text,
+                as_of, available_at, computed_at, algorithm_version, summary, quality
+            )
+            SELECT
+                uuid()::VARCHAR,
+                'foreign:asset_' || (i % 32)::VARCHAR,
+                'market',
+                'positive',
+                '50.0',
+                '0.8',
+                '2026-08-01T00:00:00+00:00',
+                '2026-08-01T00:00:00+00:00',
+                '2026-08-01T00:00:00+00:00',
+                'v1',
+                'foreign summary',
+                'valid'
+            FROM range(2048) tbl(i)
+            """
+        )
+        staging._connection.execute(
+            """
+            INSERT INTO analysis_snapshots_v2 (
+                snapshot_id, asset_id, domain, known_at, policy_version,
+                evidence_set_digest, created_at
+            )
+            SELECT
+                uuid()::VARCHAR,
+                'foreign:asset_' || (i % 32)::VARCHAR,
+                'market',
+                '2026-08-01T00:00:00+00:00',
+                'v1',
+                '0000000000000000000000000000000000000000000000000000000000000000',
+                '2026-08-01T00:00:00+00:00'
+            FROM range(2048) tbl(i)
+            """
+        )
+
+        # Install Query Tracking Proxy
+        class TrackingConnection:
+            def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
+                self._conn = conn
+                self.queries: list[str] = []
+                self.param_chunks: list[int] = []
+
+            def execute(
+                self, query: str, *args: object, **kwargs: object
+            ) -> duckdb.DuckDBPyConnection:
+                self.queries.append(str(query))
+                if args and isinstance(args[0], (list, tuple)):
+                    self.param_chunks.append(len(args[0]))
+                return self._conn.execute(query, *args, **kwargs)
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._conn, name)
+
+        proxy = TrackingConnection(staging._connection)
+        staging._connection = proxy
+
+        # Cardinalities matrix: K in (1, 256, 257, 513)
+        for K in (1, 256, 257, 513):
+            expected_bound = 16 + 64 * math.ceil(K / 256)
+
+            # 1. get_metrics
+            proxy.queries.clear()
+            proxy.param_chunks.clear()
+            res_m = staging.get_metrics([m.result_id for m in target_metrics[:K]])
+            assert len(res_m) == K
+            assert len(proxy.queries) <= expected_bound
+            assert all(size <= 256 for size in proxy.param_chunks)
+
+            # 2. get_diagnostics
+            proxy.queries.clear()
+            proxy.param_chunks.clear()
+            res_d = staging.get_diagnostics([d.diagnostic_id for d in target_diags[:K]])
+            assert len(res_d) == K
+            assert len(proxy.queries) <= expected_bound
+            assert all(size <= 256 for size in proxy.param_chunks)
+
+            # 3. get_analysis_snapshots
+            proxy.queries.clear()
+            proxy.param_chunks.clear()
+            res_s = staging.get_analysis_snapshots([s.snapshot_id for s in target_snaps[:K]])
+            assert len(res_s) == K
+            assert len(proxy.queries) <= expected_bound
+            assert all(size <= 256 for size in proxy.param_chunks)
+
+        # 4. list_diagnostics with limit=None traverses internally by pages without truncating
+        all_diags = staging.list_diagnostics(asset_id=asset_target)
+        assert len(all_diags) == 513
+        assert all(d.asset_id == asset_target for d in all_diags)
+        assert [d.diagnostic_id for d in all_diags] == [d.diagnostic_id for d in target_diags]
+
+        # 5. list_analysis_snapshots with limit=None traverses internally by pages
+        # without truncating
+        all_snaps = staging.list_analysis_snapshots(asset_id=asset_target)
+        assert len(all_snaps) == 513
+        assert all(s.asset_id == asset_target for s in all_snaps)
+        assert [s.snapshot_id for s in all_snaps] == [s.snapshot_id for s in target_snaps]
+
+        # 6. Keyset pagination across pages with limit=256
+        collected_paged_diags: list[DiagnosticResult] = []
+        cur_at: datetime | None = None
+        cur_id: UUID | None = None
+        page_sizes = []
+        while True:
+            page = staging.list_diagnostics(
+                asset_id=asset_target,
+                cursor_at=cur_at,
+                cursor_id=cur_id,
+                limit=256,
+            )
+            if not page:
+                break
+            page_sizes.append(len(page))
+            collected_paged_diags.extend(page)
+            cur_at = page[-1].available_at
+            cur_id = page[-1].diagnostic_id
+        assert page_sizes == [256, 256, 1]
+        assert len(collected_paged_diags) == 513
+        assert [d.diagnostic_id for d in collected_paged_diags] == [
+            d.diagnostic_id for d in target_diags
+        ]
+
+        collected_paged_snaps = []
+        cur_at = None
+        cur_id = None
+        snap_page_sizes = []
+        while True:
+            page = staging.list_analysis_snapshots(
+                asset_id=asset_target,
+                cursor_at=cur_at,
+                cursor_id=cur_id,
+                limit=256,
+            )
+            if not page:
+                break
+            snap_page_sizes.append(len(page))
+            collected_paged_snaps.extend(page)
+            cur_at = page[-1].known_at
+            cur_id = page[-1].snapshot_id
+        assert snap_page_sizes == [256, 256, 1]
+        assert len(collected_paged_snaps) == 513
+        assert [s.snapshot_id for s in collected_paged_snaps] == [
+            s.snapshot_id for s in target_snaps
+        ]
+
+        # 7. Keyset pagination with ties in time: identical timestamps, distinct UUIDs
+        tie_time = base_time + timedelta(days=50)
+        obs_tie = _seed_observation(staging, tie_time, "equity:us:tie")
+        cand_tie_m = MetricResult(
             result_id=uuid4(),
-            asset_id=asset_b,
-            metric_key="crypto.derivatives.btc.rate",
-            value=Decimal("0.01"),
-            unit="rate",
-            as_of=base_time,
-            available_at=base_time,
-            computed_at=base_time,
+            asset_id="equity:us:tie",
+            metric_key="market.close.tie",
+            value=Decimal("100.0"),
+            unit="USD",
+            as_of=tie_time,
+            available_at=tie_time,
+            computed_at=tie_time,
             parameters={},
-            input_observation_ids=[obs_b.observation_id],
+            input_observation_ids=[obs_tie.observation_id],
+            input_metric_result_ids=[],
             algorithm_version="v1",
             quality=DataQuality.VALID,
         )
-        m_b = m_b_cand.model_copy(update={"result_id": metric_result_id_from_model_v2(m_b_cand)})
-        staging.save_metrics([m_b])
+        tie_m = cand_tie_m.model_copy(
+            update={"result_id": metric_result_id_from_model_v2(cand_tie_m)}
+        )
+        staging.save_metrics([tie_m])
 
-        diags_b: list[DiagnosticResult] = []
-        snaps_b = []
-        for i in range(5):
-            moment = base_time + timedelta(hours=i)
-            d = DiagnosticResult(
+        tie_diags = []
+        for j in range(5):
+            td = DiagnosticResult(
                 diagnostic_id=uuid4(),
-                asset_id=asset_b,
+                asset_id="equity:us:tie",
                 mode=DiagnosticMode.MARKET,
                 verdict=DiagnosticVerdict.POSITIVE,
                 final_score=Decimal("50.0"),
                 confidence=Decimal("0.8"),
-                as_of=moment,
-                available_at=moment,
-                computed_at=moment,
+                as_of=tie_time,
+                available_at=tie_time,
+                computed_at=tie_time,
                 components=[
                     DiagnosticComponent(
                         component_key="c",
                         score=Decimal("50.0"),
                         weight=Decimal("1.0"),
                         weighted_contribution=Decimal("50.0"),
-                        metric_result_ids=[m_b.result_id],
-                        explanation="Check",
+                        metric_result_ids=[tie_m.result_id],
+                        explanation="ok",
                     )
                 ],
                 evidence=[
                     DiagnosticEvidence(
-                        metric_result_id=m_b.result_id,
+                        metric_result_id=tie_m.result_id,
                         direction=EvidenceDirection.SUPPORTS,
                         contribution=Decimal("50.0"),
-                        reason="Check positive",
+                        reason="ok",
                     )
                 ],
                 algorithm_version="v1",
-                summary=f"Diag B {i}",
+                summary=f"Tie diag {j}",
                 quality=DataQuality.VALID,
             )
-            diags_b.append(d)
-            s = build_analysis_snapshot(
-                asset_id=asset_b,
-                domain="derivatives",
-                known_at=moment,
-                policy_version="v1",
-                metric_ids=[m_b.result_id],
-                diagnostic_ids=[d.diagnostic_id],
-                evidence_set_hashes=[],
-                created_at=moment,
-            )
-            snaps_b.append(s)
+            tie_diags.append(td)
+        staging.save_diagnostics(tie_diags)
+        # In SQL, rows with identical available_at are ordered by diagnostic_id string comparison
+        expected_tie_order = sorted([d.diagnostic_id for d in tie_diags], key=lambda u: str(u))
 
-        staging.save_diagnostics(diags_b)
-        staging.save_analysis_snapshots(snaps_b)
-
-        # 1. Keyset-paginated list of diagnostics for Asset A only, page size = 2
-        collected_diags_a: list[DiagnosticResult] = []
-        cursor_at = None
-        cursor_id = None
+        tie_collected = []
+        t_at = None
+        t_id = None
         while True:
             page = staging.list_diagnostics(
-                asset_id=asset_a,
-                cursor_at=cursor_at,
-                cursor_id=cursor_id,
+                asset_id="equity:us:tie",
+                cursor_at=t_at,
+                cursor_id=t_id,
                 limit=2,
             )
             if not page:
                 break
-            for item in page:
-                assert item.asset_id == asset_a
-                collected_diags_a.append(item)
-            cursor_at = page[-1].available_at
-            cursor_id = page[-1].diagnostic_id
+            tie_collected.extend(page)
+            t_at = page[-1].available_at
+            t_id = page[-1].diagnostic_id
+        assert [d.diagnostic_id for d in tie_collected] == expected_tie_order
 
-        assert len(collected_diags_a) == 5
-        assert [d.diagnostic_id for d in collected_diags_a] == [d.diagnostic_id for d in diags_a]
+        # 8. Rejection of invalid limits and partial cursors
+        for invalid_limit in (True, False, 0, 257, "10"):  # type: ignore[arg-type]
+            with pytest.raises(DiagnosticV2Error):
+                staging.list_diagnostics(asset_id=asset_target, limit=invalid_limit)
+            with pytest.raises(AnalysisSnapshotV2Error):
+                staging.list_analysis_snapshots(asset_id=asset_target, limit=invalid_limit)
 
-        # 2. Keyset-paginated list of snapshots for Asset A only, page size = 2
-        collected_snaps_a = []
-        cursor_at = None
-        cursor_id = None
-        while True:
-            page = staging.list_analysis_snapshots(
-                asset_id=asset_a,
-                cursor_at=cursor_at,
-                cursor_id=cursor_id,
-                limit=2,
+        with pytest.raises(DiagnosticV2Error):
+            staging.list_diagnostics(asset_id=asset_target, cursor_at=base_time, cursor_id=None)
+        with pytest.raises(DiagnosticV2Error):
+            staging.list_diagnostics(asset_id=asset_target, cursor_at=None, cursor_id=uuid4())
+        with pytest.raises(AnalysisSnapshotV2Error):
+            staging.list_analysis_snapshots(
+                asset_id=asset_target, cursor_at=base_time, cursor_id=None
             )
-            if not page:
-                break
-            for item in page:
-                assert item.asset_id == asset_a
-                collected_snaps_a.append(item)
-            cursor_at = page[-1].known_at
-            cursor_id = page[-1].snapshot_id
-
-        assert len(collected_snaps_a) == 5
-        assert [s.snapshot_id for s in collected_snaps_a] == [s.snapshot_id for s in snaps_a]
+        with pytest.raises(AnalysisSnapshotV2Error):
+            staging.list_analysis_snapshots(
+                asset_id=asset_target, cursor_at=None, cursor_id=uuid4()
+            )
 
 
 def test_corrupt_missing_future_foreign_and_cyclic_references_fail_closed(
@@ -686,3 +836,82 @@ def test_corrupt_missing_future_foreign_and_cyclic_references_fail_closed(
         )
         with pytest.raises(AnalysisSnapshotV2Error, match="positions are corrupt"):
             staging.get_analysis_snapshot(valid_snap.snapshot_id)
+
+        # 5. Tampering metric_key within market.* (e.g. daily.close -> daily.open) fails closed
+        tamper_cand = MetricResult(
+            result_id=uuid4(),
+            asset_id=asset_id,
+            metric_key="market.statistics.daily.close",
+            value=Decimal("150.00"),
+            unit="USD",
+            as_of=base_time,
+            available_at=base_time,
+            computed_at=base_time,
+            parameters={},
+            input_observation_ids=[obs.observation_id],
+            input_metric_result_ids=[],
+            algorithm_version="v1",
+            quality=DataQuality.VALID,
+        )
+        tamper_m = tamper_cand.model_copy(
+            update={"result_id": metric_result_id_from_model_v2(tamper_cand)}
+        )
+        staging.save_metrics([tamper_m])
+
+        staging._connection.execute(
+            "UPDATE metric_results_v2 "
+            "SET metric_key = 'market.statistics.daily.open' "
+            "WHERE result_id = ?",
+            [str(tamper_m.result_id)],
+        )
+
+        with pytest.raises(MetricV2Error, match="metric v2 identity diverged"):
+            staging.get_metrics([tamper_m.result_id])
+
+        diag_citing_tampered = DiagnosticResult(
+            diagnostic_id=uuid4(),
+            asset_id=asset_id,
+            mode=DiagnosticMode.MARKET,
+            verdict=DiagnosticVerdict.POSITIVE,
+            final_score=Decimal("50.0"),
+            confidence=Decimal("0.8"),
+            as_of=base_time,
+            available_at=base_time,
+            computed_at=base_time,
+            components=[
+                DiagnosticComponent(
+                    component_key="c",
+                    score=Decimal("50.0"),
+                    weight=Decimal("1.0"),
+                    weighted_contribution=Decimal("50.0"),
+                    metric_result_ids=[tamper_m.result_id],
+                    explanation="Citing tampered metric",
+                )
+            ],
+            evidence=[
+                DiagnosticEvidence(
+                    metric_result_id=tamper_m.result_id,
+                    direction=EvidenceDirection.SUPPORTS,
+                    contribution=Decimal("50.0"),
+                    reason="Tampered",
+                )
+            ],
+            algorithm_version="v1",
+            summary="Diag with tampered metric",
+            quality=DataQuality.VALID,
+        )
+        with pytest.raises(DiagnosticV2Error, match="metric v2 identity diverged"):
+            staging.save_diagnostics([diag_citing_tampered])
+
+        snap_citing_tampered = build_analysis_snapshot(
+            asset_id=asset_id,
+            domain="market",
+            known_at=base_time,
+            policy_version="v1",
+            metric_ids=[tamper_m.result_id],
+            diagnostic_ids=[],
+            evidence_set_hashes=[],
+            created_at=base_time,
+        )
+        with pytest.raises(AnalysisSnapshotV2Error, match="metric v2 identity diverged"):
+            staging.save_analysis_snapshots([snap_citing_tampered])

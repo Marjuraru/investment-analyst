@@ -36,6 +36,7 @@ from investment_analyst.storage.analytical_v2_validation import (
     AnalyticalV2ValidationError,
     chunked_sequence,
     fetch_diagnostics_chunked,
+    fetch_metrics_chunked,
     fetch_snapshots_chunked,
     validate_keyset_cursor,
     validate_keyset_limit,
@@ -45,6 +46,7 @@ from investment_analyst.storage.errors import (
     RecordNotFoundError,
     StorageError,
 )
+from investment_analyst.storage.metric_v2 import MetricV2Error
 
 ANALYSIS_SNAPSHOT_V2_TABLE: Final[str] = "analysis_snapshots_v2"
 ANALYSIS_SNAPSHOT_V2_METRIC_LINKS_TABLE: Final[str] = "analysis_snapshot_v2_metric_links"
@@ -317,29 +319,20 @@ class AnalysisSnapshotV2Store:
             for ev in diag.evidence:
                 all_metric_ids.add(ev.metric_result_id)
 
-        # 4. Fetch metric metadata in chunks <= 256
-        metric_info: dict[UUID, tuple[str, datetime, str, str | None]] = {}
-        for m_chunk in chunked_sequence(sorted(all_metric_ids, key=str), MAX_CHUNK_SIZE):
-            m_placeholders = ", ".join("?" for _ in m_chunk)
-            rows = self._connection.execute(
-                f"SELECT result_id, asset_id, available_at, metric_key, evidence_set_id "
-                f"FROM metric_results_v2 WHERE result_id IN ({m_placeholders})",
-                [str(item) for item in m_chunk],
-            ).fetchall()
-            for r_id, a_id, avail, key, es_id in rows:
-                metric_info[UUID(str(r_id))] = (
-                    str(a_id),
-                    _parse_instant_text(avail),
-                    str(key),
-                    str(es_id) if es_id is not None else None,
-                )
-
-        for mid in all_metric_ids:
-            if mid not in metric_info:
-                raise RecordNotFoundError(f"snapshot references missing metric {mid}")
+        # 4. Hydrate and verify cited metrics in chunks <= 256 using fetch_metrics_chunked
+        try:
+            metrics_by_id = fetch_metrics_chunked(self._connection, all_metric_ids)
+        except RecordNotFoundError as error:
+            raise RecordNotFoundError(f"snapshot references missing metric: {error}") from error
+        except (AnalyticalV2ValidationError, MetricV2Error) as error:
+            raise AnalysisSnapshotV2Error(str(error)) from error
 
         # 5. Gather all referenced EvidenceSets across all cited metrics in chunks <= 256
-        all_es_ids = {info[3] for info in metric_info.values() if info[3] is not None}
+        all_es_ids = {
+            str(m.parameters["evidence_set_id"])
+            for m in metrics_by_id.values()
+            if m.parameters.get("evidence_set_id")
+        }
         es_info: dict[str, tuple[str, datetime, str]] = {}
         for es_chunk in chunked_sequence(sorted(all_es_ids), MAX_CHUNK_SIZE):
             es_placeholders = ", ".join("?" for _ in es_chunk)
@@ -368,23 +361,26 @@ class AnalysisSnapshotV2Store:
 
             # Verify direct metrics
             for mid in item.metric_ids:
-                m_asset, m_avail, m_key, es_id = metric_info[mid]
-                if m_asset != item.asset_id:
+                if mid not in metrics_by_id:
+                    raise RecordNotFoundError(f"snapshot references missing metric {mid}")
+                metric = metrics_by_id[mid]
+                if metric.asset_id != item.asset_id:
                     raise AnalysisSnapshotV2Error(
                         f"snapshot for {item.asset_id} references foreign metric {mid} "
-                        f"belonging to {m_asset}"
+                        f"belonging to {metric.asset_id}"
                     )
-                if m_avail > known_at:
+                if metric.available_at > known_at:
                     raise AnalysisSnapshotV2Error(
                         f"snapshot cut at {known_at.isoformat()} references future metric "
-                        f"{mid} available at {m_avail.isoformat()}"
+                        f"{mid} available at {metric.available_at.isoformat()}"
                     )
                 try:
-                    validate_metric_key_for_domain(m_key, item.domain)
+                    validate_metric_key_for_domain(metric.metric_key, item.domain)
                 except DomainMembershipError as error:
                     raise AnalysisSnapshotV2Error(str(error)) from error
+                es_id = metric.parameters.get("evidence_set_id")
                 if es_id:
-                    snap_es_ids.add(es_id)
+                    snap_es_ids.add(str(es_id))
 
             # Verify diagnostics and their cited metrics
             for did in item.diagnostic_ids:
@@ -405,13 +401,18 @@ class AnalysisSnapshotV2Store:
                 for ev in diag.evidence:
                     diag_mids.add(ev.metric_result_id)
                 for mid in diag_mids:
-                    _, _, m_key, es_id = metric_info[mid]
+                    if mid not in metrics_by_id:
+                        raise RecordNotFoundError(
+                            f"snapshot diagnostic references missing metric {mid}"
+                        )
+                    m = metrics_by_id[mid]
                     try:
-                        validate_metric_key_for_domain(m_key, item.domain)
+                        validate_metric_key_for_domain(m.metric_key, item.domain)
                     except DomainMembershipError as error:
                         raise AnalysisSnapshotV2Error(str(error)) from error
+                    es_id = m.parameters.get("evidence_set_id")
                     if es_id:
-                        snap_es_ids.add(es_id)
+                        snap_es_ids.add(str(es_id))
 
             # Verify evidence sets and digest
             snap_es_hashes: list[str] = []
@@ -546,18 +547,51 @@ class AnalysisSnapshotV2Store:
             clauses.append("known_at <= ?")
             parameters.append(_instant_text(known_to))
 
-        if normalized_cursor is not None:
-            clauses.append("(known_at > ? OR (known_at = ? AND snapshot_id > ?))")
-            parameters.extend([normalized_cursor[0], normalized_cursor[0], normalized_cursor[1]])
+        if limit is not None:
+            query_clauses = list(clauses)
+            query_params = list(parameters)
+            if normalized_cursor is not None:
+                query_clauses.append("(known_at > ? OR (known_at = ? AND snapshot_id > ?))")
+                query_params.extend(
+                    [
+                        normalized_cursor[0],
+                        normalized_cursor[0],
+                        normalized_cursor[1],
+                    ]
+                )
+            where = f" WHERE {' AND '.join(query_clauses)}" if query_clauses else ""
+            limit_clause = f" LIMIT {limit}"
+            rows = self._connection.execute(
+                f"SELECT snapshot_id FROM {ANALYSIS_SNAPSHOT_V2_TABLE}{where} "
+                f"ORDER BY known_at, snapshot_id{limit_clause}",
+                query_params,
+            ).fetchall()
+            ids = [UUID(str(row[0])) for row in rows]
+        else:
+            all_ids: list[UUID] = []
+            current_cursor = normalized_cursor
+            while True:
+                page_clauses = list(clauses)
+                page_params = list(parameters)
+                if current_cursor is not None:
+                    page_clauses.append("(known_at > ? OR (known_at = ? AND snapshot_id > ?))")
+                    page_params.extend([current_cursor[0], current_cursor[0], current_cursor[1]])
+                where = f" WHERE {' AND '.join(page_clauses)}" if page_clauses else ""
+                page_rows = self._connection.execute(
+                    f"SELECT snapshot_id, known_at FROM {ANALYSIS_SNAPSHOT_V2_TABLE}{where} "
+                    f"ORDER BY known_at, snapshot_id LIMIT {MAX_CHUNK_SIZE}",
+                    page_params,
+                ).fetchall()
+                if not page_rows:
+                    break
+                for row in page_rows:
+                    all_ids.append(UUID(str(row[0])))
+                last_row = page_rows[-1]
+                current_cursor = (str(last_row[1]), str(last_row[0]))
+                if len(page_rows) < MAX_CHUNK_SIZE:
+                    break
+            ids = all_ids
 
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        limit_clause = f" LIMIT {limit}" if limit is not None else ""
-        rows = self._connection.execute(
-            f"SELECT snapshot_id FROM {ANALYSIS_SNAPSHOT_V2_TABLE}{where} "
-            f"ORDER BY known_at, snapshot_id{limit_clause}",
-            parameters,
-        ).fetchall()
-        ids = [UUID(str(row[0])) for row in rows]
         hydrated = self.get_snapshots(ids)
         return [hydrated[sid] for sid in ids]
 

@@ -836,32 +836,131 @@ class RawV2Staging:
         self._require_open()
         ensure_metric_v2_tables(self._connection, create=False)
         hydrated = MetricV2Store(self._connection).get_many(tuple(result_ids))
+        return self._resolve_metrics_lineage_batch(hydrated)
+
+    def _resolve_metrics_lineage_batch(
+        self, hydrated: dict[UUID, MetricResult]
+    ) -> dict[UUID, MetricResult]:
+        """Verify inputs and shared evidence for a batch of metrics without N+1 queries."""
+        if not hydrated:
+            return {}
+
+        self._require_open()
+        ensure_metric_v2_tables(self._connection, create=False)
+
+        # 1. Collect all observation IDs, metric dependency IDs, and evidence set IDs
+        all_obs_ids: set[str] = set()
+        all_dep_ids: set[str] = set()
+        all_ev_ids: set[UUID] = set()
+
+        for result in hydrated.values():
+            seen_obs: set[str] = set()
+            for obs_id in result.input_observation_ids:
+                key = str(obs_id)
+                if key in seen_obs:
+                    raise MetricV2Error("metric v2 observation inputs must be unique")
+                seen_obs.add(key)
+                all_obs_ids.add(key)
+
+            seen_deps: set[str] = set()
+            for dep_id in result.input_metric_result_ids:
+                key = str(dep_id)
+                if key in seen_deps:
+                    raise MetricV2Error("metric v2 metric inputs must be unique")
+                seen_deps.add(key)
+                if key == str(result.result_id):
+                    raise MetricV2Error("metric v2 dependency cycle is not allowed")
+                all_dep_ids.add(key)
+
+            reference = result.parameters.get("evidence_set_id")
+            if reference is not None:
+                all_ev_ids.add(UUID(str(reference)))
+
+        # 2. Batch fetch observation inputs in chunks <= 256
+        obs_map: dict[str, tuple[str, datetime]] = {}
+        if all_obs_ids:
+            from investment_analyst.storage.analytical_v2_validation import chunked_sequence
+            from investment_analyst.storage.diagnostic_v2 import _parse_instant_text
+
+            for chunk in chunked_sequence(list(all_obs_ids), 256):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = self._connection.execute(
+                    "SELECT observation_id, asset_id, available_at FROM normalized_observations_v2 "
+                    f"WHERE observation_id IN ({placeholders})",
+                    list(chunk),
+                ).fetchall()
+                for r in rows:
+                    obs_map[str(r[0])] = (str(r[1]), _parse_instant_text(r[2]))
+
+        # 3. Batch fetch metric dependencies in chunks <= 256
+        dep_map: dict[str, tuple[str, datetime]] = {}
+        if all_dep_ids:
+            from investment_analyst.storage.analytical_v2_validation import chunked_sequence
+            from investment_analyst.storage.diagnostic_v2 import _parse_instant_text
+            from investment_analyst.storage.metric_v2 import METRIC_V2_TABLE
+
+            for chunk in chunked_sequence(list(all_dep_ids), 256):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = self._connection.execute(
+                    f"SELECT result_id, asset_id, available_at FROM {METRIC_V2_TABLE} "
+                    f"WHERE result_id IN ({placeholders})",
+                    list(chunk),
+                ).fetchall()
+                for r in rows:
+                    dep_map[str(r[0])] = (str(r[1]), _parse_instant_text(r[2]))
+
+        # 4. Batch fetch evidence sets if any
+        ev_map: dict[UUID, tuple[list[str], datetime]] = {}
+        if all_ev_ids:
+            ensure_evidence_v2_tables(self._connection, create=False)
+            ev_store = EvidenceSetV2Store(self._connection)
+            for ev_id in all_ev_ids:
+                stored = ev_store.get_set(ev_id)
+                ordered = ev_store.verify_set_lineage(stored)
+                ev_map[ev_id] = ([str(item) for item in ordered], stored.available_at)
+
+        # 5. Verify each metric against pre-fetched lookup maps
         resolved: dict[UUID, MetricResult] = {}
-        for key, result in hydrated.items():
-            resolved[key] = self.resolve_metric_lineage(result)
+        for rid, result in hydrated.items():
+            for obs_id in result.input_observation_ids:
+                key = str(obs_id)
+                if key not in obs_map:
+                    raise MetricV2Error(f"metric v2 references a missing observation {key}")
+                obs_asset, obs_avail = obs_map[key]
+                if obs_asset != result.asset_id:
+                    raise MetricV2Error(f"metric v2 references a foreign observation {key}")
+                if obs_avail > result.available_at:
+                    raise MetricV2Error(f"metric v2 references a future observation {key}")
+
+            for dep_id in result.input_metric_result_ids:
+                key = str(dep_id)
+                if key not in dep_map:
+                    raise MetricV2Error(f"metric v2 references a missing metric {key}")
+                dep_asset, dep_avail = dep_map[key]
+                if dep_asset != result.asset_id:
+                    raise MetricV2Error(f"metric v2 references a foreign metric {key}")
+                if dep_avail > result.available_at:
+                    raise MetricV2Error(f"metric v2 references a future metric {key}")
+
+            reference = result.parameters.get("evidence_set_id")
+            if reference is not None:
+                ev_id = UUID(str(reference))
+                ordered_text, stored_available_at = ev_map[ev_id]
+                input_text = [str(item) for item in result.input_observation_ids]
+                if ordered_text != input_text and (
+                    set(ordered_text) != set(input_text) or len(ordered_text) != len(input_text)
+                ):
+                    raise MetricV2Error("metric v2 evidence lineage does not match its inputs")
+                if stored_available_at > result.available_at:
+                    raise MetricV2Error("metric v2 evidence is not visible at the result")
+
+            resolved[rid] = result
+
         return resolved
 
     def resolve_metric_lineage(self, result: MetricResult) -> MetricResult:
         """Verify inputs and shared evidence before returning one metric."""
-        from investment_analyst.storage.metric_v2 import require_metric_inputs_visible
-
-        self._require_open()
-        ensure_metric_v2_tables(self._connection, create=False)
-        require_metric_inputs_visible(self._connection, result)
-        reference = result.parameters.get("evidence_set_id")
-        if reference is not None:
-            ensure_evidence_v2_tables(self._connection, create=False)
-            stored = EvidenceSetV2Store(self._connection).get_set(UUID(str(reference)))
-            ordered = EvidenceSetV2Store(self._connection).verify_set_lineage(stored)
-            ordered_text = [str(item) for item in ordered]
-            input_text = [str(item) for item in result.input_observation_ids]
-            if ordered_text != input_text and (
-                set(ordered_text) != set(input_text) or len(ordered_text) != len(input_text)
-            ):
-                raise MetricV2Error("metric v2 evidence lineage does not match its inputs")
-            if stored.available_at > result.available_at:
-                raise MetricV2Error("metric v2 evidence is not visible at the result")
-        return result
+        return self._resolve_metrics_lineage_batch({result.result_id: result})[result.result_id]
 
     def list_metric_inventory_page(
         self,
