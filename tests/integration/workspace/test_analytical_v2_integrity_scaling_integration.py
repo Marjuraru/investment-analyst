@@ -1102,8 +1102,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             assert proxy.table_counts.get("diagnostic_results_v2", 0) <= expected_chunks
             assert proxy.table_counts.get("diagnostic_v2_components", 0) <= expected_chunks
             assert (
-                proxy.table_counts.get("diagnostic_v2_component_metric_links", 0)
-                <= expected_chunks
+                proxy.table_counts.get("diagnostic_v2_component_metric_links", 0) <= expected_chunks
             )
             assert proxy.table_counts.get("diagnostic_v2_evidence", 0) <= expected_chunks
             assert all(size <= 256 for size in proxy.param_chunks)
@@ -1129,10 +1128,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             assert proxy.table_rows.get("diagnostic_results_v2", 0) == K
             assert proxy.table_rows.get("metric_results_v2", 0) == 2 * K
             assert proxy.table_counts.get("analysis_snapshots_v2", 0) <= expected_chunks
-            assert (
-                proxy.table_counts.get("analysis_snapshot_v2_metric_links", 0)
-                <= expected_chunks
-            )
+            assert proxy.table_counts.get("analysis_snapshot_v2_metric_links", 0) <= expected_chunks
             assert (
                 proxy.table_counts.get("analysis_snapshot_v2_diagnostic_links", 0)
                 <= expected_chunks
