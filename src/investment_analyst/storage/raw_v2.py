@@ -876,8 +876,20 @@ class RawV2Staging:
             if reference is not None:
                 all_ev_ids.add(UUID(str(reference)))
 
-        # 2. Batch fetch observation inputs in chunks <= 256
-        obs_map: dict[str, tuple[str, datetime]] = {}
+        # 2. Batch load unique evidence sets, members, and segments without observation fetch
+        ev_sets: dict[UUID, EvidenceSet] = {}
+        ev_lineages: dict[UUID, tuple[UUID, ...]] = {}
+        ev_store: EvidenceSetV2Store | None = None
+        if all_ev_ids:
+            ensure_evidence_v2_tables(self._connection, create=False)
+            ev_store = EvidenceSetV2Store(self._connection)
+            ev_sets, ev_lineages = ev_store.get_sets_and_lineages(all_ev_ids)
+            for identifiers in ev_lineages.values():
+                for ident in identifiers:
+                    all_obs_ids.add(str(ident))
+
+        # 3. Batch fetch ALL unique observations (metric + evidence set inputs) in chunks <= 256
+        obs_map: dict[str, tuple[str, str, str, datetime]] = {}
         if all_obs_ids:
             from investment_analyst.storage.analytical_v2_validation import chunked_sequence
             from investment_analyst.storage.diagnostic_v2 import _parse_instant_text
@@ -885,14 +897,20 @@ class RawV2Staging:
             for chunk in chunked_sequence(list(all_obs_ids), 256):
                 placeholders = ", ".join("?" for _ in chunk)
                 rows = self._connection.execute(
-                    "SELECT observation_id, asset_id, available_at FROM normalized_observations_v2 "
+                    "SELECT observation_id, asset_id, source_id, field_name, available_at "
+                    "FROM normalized_observations_v2 "
                     f"WHERE observation_id IN ({placeholders})",
                     list(chunk),
                 ).fetchall()
                 for r in rows:
-                    obs_map[str(r[0])] = (str(r[1]), _parse_instant_text(r[2]))
+                    obs_map[str(r[0])] = (
+                        str(r[1]),
+                        str(r[2]),
+                        str(r[3]),
+                        _parse_instant_text(r[4]),
+                    )
 
-        # 3. Batch fetch metric dependencies in chunks <= 256
+        # 4. Batch fetch metric dependencies in chunks <= 256
         dep_map: dict[str, tuple[str, datetime]] = {}
         if all_dep_ids:
             from investment_analyst.storage.analytical_v2_validation import chunked_sequence
@@ -909,24 +927,24 @@ class RawV2Staging:
                 for r in rows:
                     dep_map[str(r[0])] = (str(r[1]), _parse_instant_text(r[2]))
 
-        # 4. Batch fetch evidence sets if any
+        # 5. Verify evidence set lineages against obs_map once per unique set
         ev_map: dict[UUID, tuple[list[str], datetime]] = {}
-        if all_ev_ids:
-            ensure_evidence_v2_tables(self._connection, create=False)
-            ev_store = EvidenceSetV2Store(self._connection)
-            for ev_id in all_ev_ids:
-                stored = ev_store.get_set(ev_id)
-                ordered = ev_store.verify_set_lineage(stored)
-                ev_map[ev_id] = ([str(item) for item in ordered], stored.available_at)
+        if all_ev_ids and ev_store is not None:
+            ev_store.verify_observation_lineages(ev_sets.values(), ev_lineages, obs_map)
+            for ev_id, ev_set in ev_sets.items():
+                ev_map[ev_id] = (
+                    [str(item) for item in ev_lineages[ev_id]],
+                    ev_set.available_at,
+                )
 
-        # 5. Verify each metric against pre-fetched lookup maps
+        # 6. Verify each metric against pre-fetched lookup maps
         resolved: dict[UUID, MetricResult] = {}
         for rid, result in hydrated.items():
             for obs_id in result.input_observation_ids:
                 key = str(obs_id)
                 if key not in obs_map:
                     raise MetricV2Error(f"metric v2 references a missing observation {key}")
-                obs_asset, obs_avail = obs_map[key]
+                obs_asset, _source, _field, obs_avail = obs_map[key]
                 if obs_asset != result.asset_id:
                     raise MetricV2Error(f"metric v2 references a foreign observation {key}")
                 if obs_avail > result.available_at:

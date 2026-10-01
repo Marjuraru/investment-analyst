@@ -1074,6 +1074,12 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             assert len(proxy.queries) <= loose_bound
             assert proxy.table_rows.get("metric_results_v2", 0) == K
             assert proxy.table_rows.get("metric_v2_observation_links", 0) == K
+            assert proxy.table_rows.get("normalized_observations_v2", 0) == 1
+            assert proxy.table_counts.get("normalized_observations_v2", 0) == 1
+            assert proxy.table_rows.get("evidence_sets_v2", 0) == 1
+            assert proxy.table_counts.get("evidence_sets_v2", 0) == 1
+            assert proxy.table_rows.get("evidence_set_v2_members", 0) == len(es_target.segment_ids)
+            assert proxy.table_rows.get("evidence_segments_v2", 0) == len(es_target.segment_ids)
             assert proxy.table_counts.get("metric_results_v2", 0) <= expected_chunks
             assert proxy.table_counts.get("metric_v2_observation_links", 0) <= expected_chunks
             assert proxy.table_counts.get("metric_v2_metric_links", 0) <= expected_chunks
@@ -1134,6 +1140,68 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 <= expected_chunks
             )
             assert all(size <= 256 for size in proxy.param_chunks)
+
+        # 5b. Direct observation outside EvidenceSet and per-operation cache lifecycle
+        obs_extra = _seed_observation(
+            staging,
+            base_time + timedelta(hours=1),
+            asset_target,
+            field_name="close",
+            source_id="test:feed",
+        )
+        cand_m_extra = MetricResult(
+            result_id=uuid4(),
+            asset_id=asset_target,
+            metric_key="market.close.direct_only",
+            value=Decimal("999.0"),
+            unit="USD",
+            as_of=base_time + timedelta(hours=1),
+            available_at=base_time + timedelta(hours=1),
+            computed_at=base_time + timedelta(hours=1),
+            parameters={"idx": 9999},
+            input_observation_ids=[obs_extra.observation_id],
+            input_metric_result_ids=[],
+            algorithm_version="v1",
+            quality=DataQuality.VALID,
+        )
+        m_extra = cand_m_extra.model_copy(
+            update={"result_id": metric_result_id_from_model_v2(cand_m_extra)}
+        )
+        staging.save_metrics([m_extra])
+
+        # Batch get: target_metrics[0] (uses es_target with obs_target) +
+        # m_extra (uses obs_extra directly, NOT in es_target)
+        proxy.clear()
+        batch_res = staging.get_metrics([target_metrics[0].result_id, m_extra.result_id])
+        assert len(batch_res) == 2
+        assert batch_res[target_metrics[0].result_id] == target_metrics[0]
+        assert batch_res[m_extra.result_id] == m_extra
+        # Exactly 2 unique observations read in a single chunk (obs_target + obs_extra)
+        assert proxy.table_rows.get("normalized_observations_v2", 0) == 2
+        assert proxy.table_counts.get("normalized_observations_v2", 0) == 1
+        assert proxy.table_rows.get("evidence_sets_v2", 0) == 1
+
+        # Cache is per-operation only: subsequent call re-queries DuckDB and detects any corruption
+        proxy.clear()
+        batch_res2 = staging.get_metrics([target_metrics[0].result_id, m_extra.result_id])
+        assert len(batch_res2) == 2
+        assert proxy.table_rows.get("normalized_observations_v2", 0) == 2
+        assert proxy.table_counts.get("normalized_observations_v2", 0) == 1
+
+        # Corruption after first call fails closed on second call
+        staging._connection.execute(
+            "UPDATE normalized_observations_v2 SET asset_id = 'equity:us:corrupt' "
+            "WHERE observation_id = ?",
+            [str(obs_extra.observation_id)],
+        )
+        with pytest.raises(MetricV2Error, match="foreign observation"):
+            staging.get_metrics([target_metrics[0].result_id, m_extra.result_id])
+
+        # Restore observation for subsequent tests
+        staging._connection.execute(
+            "UPDATE normalized_observations_v2 SET asset_id = ? WHERE observation_id = ?",
+            [asset_target, str(obs_extra.observation_id)],
+        )
 
         # 6. Shared DAG Traversal (recorrido):
         # 2 roots -> 16 intermediates -> 256 leaves (274 total nodes) with shared EvidenceSet
