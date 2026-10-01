@@ -720,6 +720,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
 ) -> None:
     """A3: Keyset pagination isolates assets, verifies bounds and handles ties in time."""
     import math
+    import time
 
     from investment_analyst.storage.analytical_v2_validation import chunked_sequence
 
@@ -906,7 +907,8 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         proxy = TrackingConnection(staging._connection)
         staging._connection = proxy
 
-        # 3. BASELINE: Measure queries, rows fetched, and models BEFORE inserting 2,048 foreign rows
+        # 3. BASELINE: Measure queries, rows fetched, table rows, and timings
+        # BEFORE inserting 2,048 foreign rows
         baseline_res_m = {}
         baseline_res_d = {}
         baseline_res_s = {}
@@ -916,27 +918,48 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         baseline_rows_m = {}
         baseline_rows_d = {}
         baseline_rows_s = {}
+        baseline_table_counts_m = {}
+        baseline_table_counts_d = {}
+        baseline_table_counts_s = {}
+        baseline_table_rows_m = {}
+        baseline_table_rows_d = {}
+        baseline_table_rows_s = {}
+        baseline_durations_m = {}
+        baseline_durations_d = {}
+        baseline_durations_s = {}
 
         for K in (1, 256, 257, 513):
             # 1. get_metrics baseline
             proxy.clear()
+            t0 = time.perf_counter()
             baseline_res_m[K] = staging.get_metrics([m.result_id for m in target_metrics[:K]])
+            baseline_durations_m[K] = time.perf_counter() - t0
             baseline_queries_m[K] = len(proxy.queries)
             baseline_rows_m[K] = proxy.rows_fetched
+            baseline_table_counts_m[K] = dict(proxy.table_counts)
+            baseline_table_rows_m[K] = dict(proxy.table_rows)
 
             # 2. get_diagnostics baseline
             proxy.clear()
+            t0 = time.perf_counter()
             baseline_res_d[K] = staging.get_diagnostics([d.diagnostic_id for d in target_diags[:K]])
+            baseline_durations_d[K] = time.perf_counter() - t0
             baseline_queries_d[K] = len(proxy.queries)
             baseline_rows_d[K] = proxy.rows_fetched
+            baseline_table_counts_d[K] = dict(proxy.table_counts)
+            baseline_table_rows_d[K] = dict(proxy.table_rows)
 
             # 3. get_analysis_snapshots baseline
             proxy.clear()
+            t0 = time.perf_counter()
             baseline_res_s[K] = staging.get_analysis_snapshots(
                 [s.snapshot_id for s in target_snaps[:K]]
             )
+            baseline_durations_s[K] = time.perf_counter() - t0
             baseline_queries_s[K] = len(proxy.queries)
             baseline_rows_s[K] = proxy.rows_fetched
+            baseline_table_counts_s[K] = dict(proxy.table_counts)
+            baseline_table_rows_s[K] = dict(proxy.table_rows)
 
         # 4. Deactivate proxy tracking while seeding foreign rows
         proxy.active = False
@@ -1013,21 +1036,34 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         # - Models hydrated == K, zero foreign models
         # - Queries exactly match baseline (no foreign scans)
         # - Rows fetched exactly match baseline (no foreign hydration)
+        # - Table counts and table rows match baseline exactly (zero foreign rows hydrated)
+        # - Execution timings measured before and after foreign rows
+        #   (without constant latency assumption)
         # - Queries strictly <= 16 + 64 * ceil(K / 256)
         # - Chunk lookups <= 256
         # - Per-table queries bounded
+        after_durations_m = {}
+        after_durations_d = {}
+        after_durations_s = {}
+
         for K in (1, 256, 257, 513):
             expected_chunks = math.ceil(K / 256)
             loose_bound = 16 + 64 * expected_chunks
 
             # 1. get_metrics
             proxy.clear()
+            t0 = time.perf_counter()
             res_m = staging.get_metrics([m.result_id for m in target_metrics[:K]])
+            after_durations_m[K] = time.perf_counter() - t0
+
             assert len(res_m) == K
             assert all(m.asset_id == asset_target for m in res_m.values())
             assert res_m == baseline_res_m[K]
             assert len(proxy.queries) == baseline_queries_m[K]
             assert proxy.rows_fetched == baseline_rows_m[K]
+            assert proxy.table_counts == baseline_table_counts_m[K]
+            assert proxy.table_rows == baseline_table_rows_m[K]
+            assert baseline_durations_m[K] > 0 and after_durations_m[K] > 0
             assert len(proxy.queries) <= loose_bound
             assert proxy.table_counts.get("metric_results_v2", 0) <= 4 + expected_chunks
             assert proxy.table_counts.get("metric_v2_observation_links", 0) <= 4 + expected_chunks
@@ -1036,12 +1072,18 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
 
             # 2. get_diagnostics
             proxy.clear()
+            t0 = time.perf_counter()
             res_d = staging.get_diagnostics([d.diagnostic_id for d in target_diags[:K]])
+            after_durations_d[K] = time.perf_counter() - t0
+
             assert len(res_d) == K
             assert all(d.asset_id == asset_target for d in res_d.values())
             assert res_d == baseline_res_d[K]
             assert len(proxy.queries) == baseline_queries_d[K]
             assert proxy.rows_fetched == baseline_rows_d[K]
+            assert proxy.table_counts == baseline_table_counts_d[K]
+            assert proxy.table_rows == baseline_table_rows_d[K]
+            assert baseline_durations_d[K] > 0 and after_durations_d[K] > 0
             assert len(proxy.queries) <= loose_bound
             assert proxy.table_counts.get("diagnostic_results_v2", 0) <= 4 + expected_chunks
             assert proxy.table_counts.get("diagnostic_v2_components", 0) <= 4 + expected_chunks
@@ -1054,12 +1096,18 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
 
             # 3. get_analysis_snapshots
             proxy.clear()
+            t0 = time.perf_counter()
             res_s = staging.get_analysis_snapshots([s.snapshot_id for s in target_snaps[:K]])
+            after_durations_s[K] = time.perf_counter() - t0
+
             assert len(res_s) == K
             assert all(s.asset_id == asset_target for s in res_s.values())
             assert res_s == baseline_res_s[K]
             assert len(proxy.queries) == baseline_queries_s[K]
             assert proxy.rows_fetched == baseline_rows_s[K]
+            assert proxy.table_counts == baseline_table_counts_s[K]
+            assert proxy.table_rows == baseline_table_rows_s[K]
+            assert baseline_durations_s[K] > 0 and after_durations_s[K] > 0
             assert len(proxy.queries) <= loose_bound
             assert proxy.table_counts.get("analysis_snapshots_v2", 0) <= 4 + expected_chunks
             assert (
