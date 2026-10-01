@@ -721,12 +721,20 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
     """A3: Keyset pagination isolates assets, verifies bounds and handles ties in time."""
     import math
 
+    from investment_analyst.storage.analytical_v2_validation import chunked_sequence
+
     staging = _staging(tmp_path, "staging-multiasset")
-    base_time = datetime(2026, 8, 1, tzinfo=UTC)
+    base_time = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
     asset_target = "equity:us:aapl"
 
     with staging:
+        # 1. Target fixtures: observation and shared EvidenceSet
         obs_target = _seed_observation(staging, base_time, asset_target)
+        seg_target = build_evidence_segments([obs_target])
+        staging.save_evidence_segments(seg_target)
+        es_target = build_evidence_set([obs_target], segments=seg_target)
+        staging.save_evidence_set(es_target)
+
         # Seed another observation with different source and cut for target asset to test isolation
         _seed_observation(
             staging,
@@ -741,6 +749,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         target_snaps = []
 
         # Create 513 metrics, 513 diagnostics, and 513 snapshots for asset_target
+        # Metrics share the exact same evidence_set_id pointing to es_target
         for i in range(513):
             moment = base_time + timedelta(minutes=i)
             cand_m = MetricResult(
@@ -752,7 +761,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 as_of=moment,
                 available_at=moment,
                 computed_at=moment,
-                parameters={"idx": i},
+                parameters={"idx": i, "evidence_set_id": str(es_target.evidence_set_id)},
                 input_observation_ids=[obs_target.observation_id],
                 input_metric_result_ids=[],
                 algorithm_version="v1",
@@ -802,7 +811,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 policy_version="v1",
                 metric_ids=[m.result_id],
                 diagnostic_ids=[d.diagnostic_id],
-                evidence_set_hashes=[],
+                evidence_set_hashes=[es_target.canonical_hash],
                 created_at=moment,
             )
             target_snaps.append(s)
@@ -811,43 +820,85 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         staging.save_diagnostics(target_diags)
         staging.save_analysis_snapshots(target_snaps)
 
-        # Install Query Tracking Proxy
+        # 2. Query and Row Tracking Proxy
+        class TrackingCursor:
+            def __init__(
+                self, cursor: duckdb.DuckDBPyConnection, proxy: "TrackingConnection"
+            ) -> None:
+                self._cursor = cursor
+                self._proxy = proxy
+
+            def fetchall(self) -> list[tuple[object, ...]]:
+                rows = self._cursor.fetchall()
+                if self._proxy.active:
+                    self._proxy.rows_fetched += len(rows)
+                    for tbl in self._proxy.current_query_tables:
+                        self._proxy.table_rows[tbl] = self._proxy.table_rows.get(tbl, 0) + len(rows)
+                return rows
+
+            def fetchone(self) -> tuple[object, ...] | None:
+                row = self._cursor.fetchone()
+                if self._proxy.active and row is not None:
+                    self._proxy.rows_fetched += 1
+                    for tbl in self._proxy.current_query_tables:
+                        self._proxy.table_rows[tbl] = self._proxy.table_rows.get(tbl, 0) + 1
+                return row
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._cursor, name)
+
         class TrackingConnection:
+            ALL_TABLES = (
+                "metric_results_v2",
+                "metric_v2_observation_links",
+                "metric_v2_metric_links",
+                "diagnostic_results_v2",
+                "diagnostic_v2_components",
+                "diagnostic_v2_component_metric_links",
+                "diagnostic_v2_evidence",
+                "analysis_snapshots_v2",
+                "analysis_snapshot_v2_metric_links",
+                "analysis_snapshot_v2_diagnostic_links",
+                "evidence_sets_v2",
+                "evidence_set_v2_members",
+                "evidence_segments_v2",
+                "normalized_observations_v2",
+            )
+
             def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
                 self._conn = conn
                 self.queries: list[str] = []
                 self.param_chunks: list[int] = []
                 self.table_counts: dict[str, int] = {}
+                self.table_rows: dict[str, int] = {}
+                self.rows_fetched: int = 0
+                self.current_query_tables: list[str] = []
                 self.active = True
 
-            def execute(
-                self, query: str, *args: object, **kwargs: object
-            ) -> duckdb.DuckDBPyConnection:
+            def execute(self, query: str, *args: object, **kwargs: object) -> TrackingCursor:
+                self.current_query_tables = []
                 if self.active:
                     q_str = str(query)
                     self.queries.append(q_str)
-                    for tbl in (
-                        "metric_results_v2",
-                        "metric_observation_links_v2",
-                        "metric_dependency_links_v2",
-                        "diagnostic_results_v2",
-                        "diagnostic_components_v2",
-                        "diagnostic_metric_links_v2",
-                        "diagnostic_evidence_v2",
-                        "analysis_snapshots_v2",
-                        "analysis_snapshot_metric_links_v2",
-                        "analysis_snapshot_diagnostic_links_v2",
-                    ):
+                    for tbl in self.ALL_TABLES:
                         if tbl in q_str:
                             self.table_counts[tbl] = self.table_counts.get(tbl, 0) + 1
+                            self.current_query_tables.append(tbl)
                     if args and isinstance(args[0], (list, tuple)):
                         self.param_chunks.append(len(args[0]))
-                return self._conn.execute(query, *args, **kwargs)
+                cursor = self._conn.execute(query, *args, **kwargs)
+                return TrackingCursor(cursor, self)
+
+            def cursor(self) -> TrackingCursor:
+                return TrackingCursor(self._conn.cursor(), self)
 
             def clear(self) -> None:
                 self.queries.clear()
                 self.param_chunks.clear()
                 self.table_counts.clear()
+                self.table_rows.clear()
+                self.rows_fetched = 0
+                self.current_query_tables.clear()
 
             def __getattr__(self, name: str) -> object:
                 return getattr(self._conn, name)
@@ -855,24 +906,29 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         proxy = TrackingConnection(staging._connection)
         staging._connection = proxy
 
-        # --- BASELINE: Measure queries BEFORE inserting 2,048 foreign rows ---
+        # 3. BASELINE: Measure queries, rows fetched, and models BEFORE inserting 2,048 foreign rows
         baseline_res_m = {}
         baseline_res_d = {}
         baseline_res_s = {}
         baseline_queries_m = {}
         baseline_queries_d = {}
         baseline_queries_s = {}
+        baseline_rows_m = {}
+        baseline_rows_d = {}
+        baseline_rows_s = {}
 
         for K in (1, 256, 257, 513):
             # 1. get_metrics baseline
             proxy.clear()
             baseline_res_m[K] = staging.get_metrics([m.result_id for m in target_metrics[:K]])
             baseline_queries_m[K] = len(proxy.queries)
+            baseline_rows_m[K] = proxy.rows_fetched
 
             # 2. get_diagnostics baseline
             proxy.clear()
             baseline_res_d[K] = staging.get_diagnostics([d.diagnostic_id for d in target_diags[:K]])
             baseline_queries_d[K] = len(proxy.queries)
+            baseline_rows_d[K] = proxy.rows_fetched
 
             # 3. get_analysis_snapshots baseline
             proxy.clear()
@@ -880,12 +936,36 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 [s.snapshot_id for s in target_snaps[:K]]
             )
             baseline_queries_s[K] = len(proxy.queries)
+            baseline_rows_s[K] = proxy.rows_fetched
 
-        # Deactivate proxy tracking while seeding foreign rows
+        # 4. Deactivate proxy tracking while seeding foreign rows
         proxy.active = False
 
-        # Populate 32 foreign assets with 2,048 foreign rows in diagnostic_results_v2
-        # and analysis_snapshots_v2
+        # Populate 32 foreign assets with 2,048 foreign rows in metric_results_v2,
+        # diagnostic_results_v2, and analysis_snapshots_v2
+        staging._connection.execute(
+            """
+            INSERT INTO metric_results_v2 (
+                result_id, asset_id, metric_key, value_text, unit,
+                as_of, available_at, computed_at, parameters_json, evidence_set_id,
+                algorithm_version, quality
+            )
+            SELECT
+                uuid()::VARCHAR,
+                'foreign:asset_' || (i % 32)::VARCHAR,
+                'market.close.foreign',
+                '100.0',
+                'USD',
+                '2026-08-01T00:00:00+00:00',
+                '2026-08-01T00:00:00+00:00',
+                '2026-08-01T00:00:00+00:00',
+                '{}',
+                NULL,
+                'v1',
+                'valid'
+            FROM range(2048) tbl(i)
+            """
+        )
         staging._connection.execute(
             """
             INSERT INTO diagnostic_results_v2 (
@@ -928,7 +1008,14 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
 
         proxy.active = True
 
-        # --- AFTER FOREIGN ROWS: Cardinalities matrix K in (1, 256, 257, 513) ---
+        # 5. AFTER FOREIGN ROWS: Cardinalities matrix K in (1, 256, 257, 513)
+        # Asserts:
+        # - Models hydrated == K, zero foreign models
+        # - Queries exactly match baseline (no foreign scans)
+        # - Rows fetched exactly match baseline (no foreign hydration)
+        # - Queries strictly <= 16 + 64 * ceil(K / 256)
+        # - Chunk lookups <= 256
+        # - Per-table queries bounded
         for K in (1, 256, 257, 513):
             expected_chunks = math.ceil(K / 256)
             loose_bound = 16 + 64 * expected_chunks
@@ -937,77 +1024,204 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             proxy.clear()
             res_m = staging.get_metrics([m.result_id for m in target_metrics[:K]])
             assert len(res_m) == K
+            assert all(m.asset_id == asset_target for m in res_m.values())
             assert res_m == baseline_res_m[K]
             assert len(proxy.queries) == baseline_queries_m[K]
+            assert proxy.rows_fetched == baseline_rows_m[K]
             assert len(proxy.queries) <= loose_bound
             assert proxy.table_counts.get("metric_results_v2", 0) <= 4 + expected_chunks
-            assert proxy.table_counts.get("metric_observation_links_v2", 0) <= 4 + expected_chunks
-            assert proxy.table_counts.get("metric_dependency_links_v2", 0) <= 4 + expected_chunks
+            assert proxy.table_counts.get("metric_v2_observation_links", 0) <= 4 + expected_chunks
+            assert proxy.table_counts.get("metric_v2_metric_links", 0) <= 4 + expected_chunks
             assert all(size <= 256 for size in proxy.param_chunks)
 
             # 2. get_diagnostics
             proxy.clear()
             res_d = staging.get_diagnostics([d.diagnostic_id for d in target_diags[:K]])
             assert len(res_d) == K
+            assert all(d.asset_id == asset_target for d in res_d.values())
             assert res_d == baseline_res_d[K]
             assert len(proxy.queries) == baseline_queries_d[K]
+            assert proxy.rows_fetched == baseline_rows_d[K]
             assert len(proxy.queries) <= loose_bound
             assert proxy.table_counts.get("diagnostic_results_v2", 0) <= 4 + expected_chunks
-            assert proxy.table_counts.get("diagnostic_components_v2", 0) <= 4 + expected_chunks
-            assert proxy.table_counts.get("diagnostic_metric_links_v2", 0) <= 4 + expected_chunks
-            assert proxy.table_counts.get("diagnostic_evidence_v2", 0) <= 4 + expected_chunks
+            assert proxy.table_counts.get("diagnostic_v2_components", 0) <= 4 + expected_chunks
+            assert (
+                proxy.table_counts.get("diagnostic_v2_component_metric_links", 0)
+                <= 4 + expected_chunks
+            )
+            assert proxy.table_counts.get("diagnostic_v2_evidence", 0) <= 4 + expected_chunks
             assert all(size <= 256 for size in proxy.param_chunks)
 
             # 3. get_analysis_snapshots
             proxy.clear()
             res_s = staging.get_analysis_snapshots([s.snapshot_id for s in target_snaps[:K]])
             assert len(res_s) == K
+            assert all(s.asset_id == asset_target for s in res_s.values())
             assert res_s == baseline_res_s[K]
             assert len(proxy.queries) == baseline_queries_s[K]
+            assert proxy.rows_fetched == baseline_rows_s[K]
             assert len(proxy.queries) <= loose_bound
             assert proxy.table_counts.get("analysis_snapshots_v2", 0) <= 4 + expected_chunks
             assert (
-                proxy.table_counts.get("analysis_snapshot_metric_links_v2", 0)
+                proxy.table_counts.get("analysis_snapshot_v2_metric_links", 0)
                 <= 4 + expected_chunks
             )
             assert (
-                proxy.table_counts.get("analysis_snapshot_diagnostic_links_v2", 0)
+                proxy.table_counts.get("analysis_snapshot_v2_diagnostic_links", 0)
                 <= 4 + expected_chunks
             )
             assert all(size <= 256 for size in proxy.param_chunks)
 
-        # 4. Measure SQL queries on shared / deep DAG
-        # Build a shared 256-node metric DAG where 256 metrics share a single observation
-        dag_metrics = []
+        # 6. Shared DAG Traversal (recorrido):
+        # 2 roots -> 16 intermediates -> 256 leaves (274 total nodes) with shared EvidenceSet
+        shared_roots = []
+        for i in range(2):
+            c = MetricResult(
+                result_id=uuid4(),
+                asset_id=asset_target,
+                metric_key=f"market.dag.shared_root_{i}",
+                value=Decimal(str(i)),
+                unit="USD",
+                as_of=base_time,
+                available_at=base_time,
+                computed_at=base_time,
+                parameters={"evidence_set_id": str(es_target.evidence_set_id)},
+                input_observation_ids=[obs_target.observation_id],
+                input_metric_result_ids=[],
+                algorithm_version="v1",
+                quality=DataQuality.VALID,
+            )
+            shared_roots.append(
+                c.model_copy(update={"result_id": metric_result_id_from_model_v2(c)})
+            )
+
+        shared_intermediates = []
+        for i in range(16):
+            c = MetricResult(
+                result_id=uuid4(),
+                asset_id=asset_target,
+                metric_key=f"market.dag.shared_inter_{i}",
+                value=Decimal(str(i)),
+                unit="USD",
+                as_of=base_time,
+                available_at=base_time,
+                computed_at=base_time,
+                parameters={"evidence_set_id": str(es_target.evidence_set_id)},
+                input_observation_ids=[obs_target.observation_id],
+                input_metric_result_ids=[r.result_id for r in shared_roots],
+                algorithm_version="v1",
+                quality=DataQuality.VALID,
+            )
+            shared_intermediates.append(
+                c.model_copy(update={"result_id": metric_result_id_from_model_v2(c)})
+            )
+
+        shared_leaves = []
         for i in range(256):
+            c = MetricResult(
+                result_id=uuid4(),
+                asset_id=asset_target,
+                metric_key=f"market.dag.shared_leaf_{i}",
+                value=Decimal(str(i)),
+                unit="USD",
+                as_of=base_time,
+                available_at=base_time,
+                computed_at=base_time,
+                parameters={"evidence_set_id": str(es_target.evidence_set_id)},
+                input_observation_ids=[obs_target.observation_id],
+                input_metric_result_ids=[
+                    shared_intermediates[i % 16].result_id,
+                    shared_intermediates[(i + 1) % 16].result_id,
+                ],
+                algorithm_version="v1",
+                quality=DataQuality.VALID,
+            )
+            shared_leaves.append(
+                c.model_copy(update={"result_id": metric_result_id_from_model_v2(c)})
+            )
+
+        proxy.active = False
+        staging.save_metrics(shared_roots + shared_intermediates + shared_leaves)
+        proxy.active = True
+
+        # Iterative level-by-level traversal (recorrido) from leaves to roots in chunks <= 256
+        proxy.clear()
+        visited_shared: dict[UUID, MetricResult] = {}
+        shared_frontier: list[UUID] = [m.result_id for m in shared_leaves]
+        shared_batches = 0
+
+        while shared_frontier:
+            next_frontier: set[UUID] = set()
+            for chunk in chunked_sequence(shared_frontier, 256):
+                shared_batches += 1
+                batch = staging.get_metrics(chunk)
+                for mid, model in batch.items():
+                    visited_shared[mid] = model
+                    for pid in model.input_metric_result_ids:
+                        if pid not in visited_shared:
+                            next_frontier.add(pid)
+            shared_frontier = sorted(next_frontier, key=str)
+
+        assert shared_batches == 3
+        assert len(visited_shared) == 274
+        assert all(m.asset_id == asset_target for m in visited_shared.values())
+        assert all(size <= 256 for size in proxy.param_chunks)
+        assert len(proxy.queries) <= 3 * (16 + 64 * 1)
+        assert proxy.rows_fetched > 0
+
+        # 7. Deep DAG Traversal (recorrido):
+        # 513-node sequential dependency chain without RecursionError
+        deep_chain = []
+        for i in range(513):
             moment = base_time + timedelta(seconds=i)
             c = MetricResult(
                 result_id=uuid4(),
                 asset_id=asset_target,
-                metric_key=f"market.dag.node_{i}",
+                metric_key=f"market.deep.node_{i}",
                 value=Decimal(str(i)),
                 unit="USD",
                 as_of=moment,
                 available_at=moment,
                 computed_at=moment,
-                parameters={"dag_idx": i},
+                parameters={"evidence_set_id": str(es_target.evidence_set_id)},
                 input_observation_ids=[obs_target.observation_id],
-                input_metric_result_ids=[dag_metrics[-1].result_id] if dag_metrics else [],
+                input_metric_result_ids=[deep_chain[-1].result_id] if deep_chain else [],
                 algorithm_version="v1",
                 quality=DataQuality.VALID,
             )
-            m = c.model_copy(update={"result_id": metric_result_id_from_model_v2(c)})
-            dag_metrics.append(m)
+            deep_chain.append(c.model_copy(update={"result_id": metric_result_id_from_model_v2(c)}))
 
         proxy.active = False
-        staging.save_metrics(dag_metrics)
+        staging.save_metrics(deep_chain)
         proxy.active = True
 
+        # Iterative chunked hydration of entire deep DAG in bounded chunks <= 256
         proxy.clear()
-        dag_res = staging.get_metrics([m.result_id for m in dag_metrics])
-        assert len(dag_res) == 256
-        assert len(proxy.queries) <= 16 + 64 * 1
+        deep_hydrated: dict[UUID, MetricResult] = {}
+        for chunk in chunked_sequence([m.result_id for m in deep_chain], 256):
+            batch = staging.get_metrics(chunk)
+            deep_hydrated.update(batch)
+
+        assert len(deep_hydrated) == 513
+        assert all(m.asset_id == asset_target for m in deep_hydrated.values())
         assert all(size <= 256 for size in proxy.param_chunks)
+        assert len(proxy.queries) <= 3 * (16 + 64 * 1)
+
+        # Step-by-step sequential traversal of suffix demonstrating O(DAG depth) cost scaling
+        proxy.clear()
+        step_cur = deep_chain[-1].result_id
+        step_visited = []
+        for _ in range(16):
+            m = staging.get_metrics([step_cur])[step_cur]
+            step_visited.append(m)
+            if not m.input_metric_result_ids:
+                break
+            step_cur = m.input_metric_result_ids[0]
+        assert len(step_visited) == 16
+        # Each step in the deep chain resolves 1 metric dependency
+        # (+1 query compared to leaf baseline)
+        assert len(proxy.queries) == 16 * (baseline_queries_m[1] + 1)
+        assert len(proxy.queries) <= 16 * (16 + 64 * 1)
 
         # 4. list_diagnostics with limit=None traverses internally by pages without truncating
         all_diags = staging.list_diagnostics(asset_id=asset_target)
