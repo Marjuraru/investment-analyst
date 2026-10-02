@@ -870,6 +870,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 "evidence_segments_v2",
                 "normalized_observations_v2",
             )
+            TABLE_PATTERNS = {tbl: re.compile(rf"\b{tbl}\b") for tbl in ALL_TABLES}
 
             def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
                 self._conn = conn
@@ -891,8 +892,8 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                     if is_metadata:
                         self.metadata_queries += 1
                     else:
-                        for tbl in self.ALL_TABLES:
-                            if re.search(rf"\b{tbl}\b", q_str):
+                        for tbl, pattern in self.TABLE_PATTERNS.items():
+                            if pattern.search(q_str):
                                 self.table_counts[tbl] = self.table_counts.get(tbl, 0) + 1
                                 self.current_query_tables.append(tbl)
                     if args and isinstance(args[0], (list, tuple)):

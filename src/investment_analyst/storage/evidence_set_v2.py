@@ -14,6 +14,7 @@ availability and observations before rehydrating any metric.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Collection, Mapping
 from datetime import UTC, date, datetime
 from uuid import UUID
@@ -90,8 +91,6 @@ def _parse_optional_instant(value: object) -> datetime | None:
 
 
 def _ids_text(identifiers: tuple[UUID, ...] | list[UUID]) -> str:
-    import json
-
     return json.dumps(
         [str(identifier) for identifier in identifiers],
         separators=(",", ":"),
@@ -100,8 +99,6 @@ def _ids_text(identifiers: tuple[UUID, ...] | list[UUID]) -> str:
 
 
 def _parse_ids_text(value: object) -> tuple[UUID, ...]:
-    import json
-
     try:
         parsed = json.loads(str(value))
     except (ValueError, TypeError) as error:

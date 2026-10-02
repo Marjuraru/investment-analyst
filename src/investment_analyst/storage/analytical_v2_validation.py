@@ -64,6 +64,41 @@ _SNAP_DIAG_LINKS = "analysis_snapshot_v2_diagnostic_links"
 _OBS_TABLE = "normalized_observations_v2"
 _ES_TABLE = "evidence_sets_v2"
 
+_metric_v2_symbols: tuple[object, ...] | None = None
+_evidence_v2_symbols: tuple[object, ...] | None = None
+
+
+def _get_metric_v2_symbols() -> tuple[object, ...]:
+    global _metric_v2_symbols
+    if _metric_v2_symbols is None:
+        from investment_analyst.storage.metric_v2 import (
+            MetricV2Error,
+            recalculate_metric_result_id,
+            row_to_metric,
+        )
+
+        _metric_v2_symbols = (MetricV2Error, recalculate_metric_result_id, row_to_metric)
+    return _metric_v2_symbols
+
+
+def _get_evidence_v2_symbols() -> tuple[object, ...]:
+    global _evidence_v2_symbols
+    if _evidence_v2_symbols is None:
+        from investment_analyst.storage.evidence_set_v2 import (
+            EvidenceSet,
+            EvidenceSetV2Error,
+            EvidenceSetV2Store,
+            ensure_evidence_v2_tables,
+        )
+
+        _evidence_v2_symbols = (
+            EvidenceSet,
+            EvidenceSetV2Error,
+            EvidenceSetV2Store,
+            ensure_evidence_v2_tables,
+        )
+    return _evidence_v2_symbols
+
 
 class AnalyticalV2ValidationError(StorageError):
     """Raised when analytical v2 integrity, references or domains fail verification."""
@@ -245,7 +280,7 @@ def fetch_metrics_chunked(
     result_ids: Collection[UUID],
 ) -> dict[UUID, MetricResult]:
     """Hydrate MetricResult models in chunks of <= 256 without N+1 queries."""
-    from investment_analyst.storage.metric_v2 import row_to_metric
+    _, _, row_to_metric = _get_metric_v2_symbols()
 
     ordered_ids = tuple(sorted(set(result_ids), key=str))
     if not ordered_ids:
@@ -339,10 +374,7 @@ def verify_metrics_dag_and_lineage(
     if not seed_map:
         return {}
 
-    from investment_analyst.storage.metric_v2 import (
-        MetricV2Error,
-        recalculate_metric_result_id,
-    )
+    MetricV2Error, recalculate_metric_result_id, _ = _get_metric_v2_symbols()
 
     all_metric_models: dict[UUID, MetricResult] = dict(seed_map)
     external_seeds: set[UUID] = {
@@ -406,12 +438,12 @@ def verify_metrics_dag_and_lineage(
     ev_lineages: dict[UUID, tuple[UUID, ...]] = {}
     ev_store: EvidenceSetV2Store | None = None
     if all_ev_ids:
-        from investment_analyst.storage.evidence_set_v2 import (
+        (
             EvidenceSet,
             EvidenceSetV2Error,
             EvidenceSetV2Store,
             ensure_evidence_v2_tables,
-        )
+        ) = _get_evidence_v2_symbols()
 
         try:
             ensure_evidence_v2_tables(connection, create=False)
@@ -465,6 +497,7 @@ def verify_metrics_dag_and_lineage(
                 raise MetricV2Error(f"metric v2 references a future observation {oid_str}")
 
     # Verify EvidenceSet parameters for EVERY metric in the DAG
+    es_obs_set_by_id = {k: set(v) for k, v in ev_lineages.items()}
     for m in all_metric_models.values():
         ref = m.parameters.get("evidence_set_id")
         if ref is not None:
@@ -476,8 +509,8 @@ def verify_metrics_dag_and_lineage(
                 raise MetricV2Error(f"metric v2 references a foreign evidence set {es_id}")
             if es.available_at > m.available_at:
                 raise MetricV2Error(f"metric v2 references a future evidence set {es_id}")
-            es_obs = ev_lineages[es_id]
-            if set(es_obs) != set(m.input_observation_ids) or len(es_obs) != len(
+            es_obs_set = es_obs_set_by_id[es_id]
+            if es_obs_set != set(m.input_observation_ids) or len(ev_lineages[es_id]) != len(
                 m.input_observation_ids
             ):
                 raise MetricV2Error(
@@ -800,11 +833,12 @@ def fetch_snapshots_chunked(
             if ref is not None:
                 all_es_ids.add(UUID(str(ref)))
 
-        from investment_analyst.storage.evidence_set_v2 import (
+        (
             EvidenceSet,
+            _,
             EvidenceSetV2Store,
             ensure_evidence_v2_tables,
-        )
+        ) = _get_evidence_v2_symbols()
 
         es_by_id: dict[UUID, EvidenceSet] = {}
         if all_es_ids:
