@@ -461,10 +461,30 @@ def verify_metrics_dag_and_lineage(
     # Batch fetch ALL unique observations (metric + evidence set inputs) in chunks <= 256
     obs_map: dict[str, tuple[str, str, str, datetime]] = {}
     if all_obs_ids:
+        use_fallback = False
         for chunk in chunked_sequence(list(all_obs_ids), MAX_CHUNK_SIZE):
             placeholders = ", ".join("?" for _ in chunk)
+            if not use_fallback:
+                try:
+                    rows = connection.execute(
+                        f"SELECT observation_id, asset_id, source_id, field_name, available_at "
+                        f"FROM {_OBS_TABLE} "
+                        f"WHERE observation_id IN ({placeholders})",
+                        list(chunk),
+                    ).fetchall()
+                    for r in rows:
+                        obs_map[str(r[0])] = (
+                            str(r[1]),
+                            str(r[2]),
+                            str(r[3]),
+                            parse_instant_utc(r[4], "observation available_at"),
+                        )
+                    continue
+                except Exception:
+                    use_fallback = True
+
             rows = connection.execute(
-                f"SELECT observation_id, asset_id, source_id, field_name, available_at "
+                f"SELECT observation_id, asset_id, available_at "
                 f"FROM {_OBS_TABLE} "
                 f"WHERE observation_id IN ({placeholders})",
                 list(chunk),
@@ -472,9 +492,9 @@ def verify_metrics_dag_and_lineage(
             for r in rows:
                 obs_map[str(r[0])] = (
                     str(r[1]),
-                    str(r[2]),
-                    str(r[3]),
-                    parse_instant_utc(r[4], "observation available_at"),
+                    "",
+                    "",
+                    parse_instant_utc(r[2], "observation available_at"),
                 )
 
     # Verify evidence set observation lineages against obs_map
