@@ -36,6 +36,7 @@ from investment_analyst.storage.analytical_v2_validation import (
     AnalyticalV2ValidationError,
     chunked_sequence,
     fetch_metrics_chunked,
+    find_transitive_metric_ancestor_ids,
     topological_sort_metrics,
 )
 from investment_analyst.storage.errors import (
@@ -478,34 +479,84 @@ class MetricV2Store:
                 if o_avail > m.available_at:
                     raise MetricV2Error(f"metric v2 references a future observation {oid_str}")
 
-        # 5. Check all input metric dependencies (both in-batch and external)
-        batch_ids = {str(m.result_id) for m in sorted_batch}
-        metric_info: dict[str, tuple[str, datetime]] = {
-            str(m.result_id): (m.asset_id, m.available_at) for m in sorted_batch
+        # 5. Transitively resolve and verify all external metric dependencies in chunks <= 256
+        all_metrics: dict[UUID, MetricResult] = {m.result_id: m for m in sorted_batch}
+        external_seeds: set[UUID] = {
+            dep for m in sorted_batch for dep in m.input_metric_result_ids if dep not in all_metrics
         }
-        external_deps = sorted(
-            {str(dep) for m in sorted_batch for dep in m.input_metric_result_ids} - batch_ids
-        )
-        for dep_chunk in chunked_sequence(external_deps, MAX_CHUNK_SIZE):
-            placeholders = ", ".join("?" for _ in dep_chunk)
-            rows = self._connection.execute(
-                f"SELECT result_id, asset_id, available_at FROM {METRIC_V2_TABLE} "
-                f"WHERE result_id IN ({placeholders})",
-                list(dep_chunk),
-            ).fetchall()
-            for r in rows:
-                metric_info[str(r[0])] = (str(r[1]), _parse_instant_text(r[2]))
+        if external_seeds:
+            transitive_ids = find_transitive_metric_ancestor_ids(self._connection, external_seeds)
+            needed_ids = external_seeds | transitive_ids
+            try:
+                fetched_ancestors = fetch_metrics_chunked(self._connection, list(needed_ids))
+            except RecordNotFoundError as error:
+                raise MetricV2Error(f"metric v2 dependency is not persisted: {error}") from error
 
-        for m in sorted_batch:
+            for dep in needed_ids:
+                if dep not in fetched_ancestors:
+                    raise MetricV2Error(f"metric v2 dependency {dep} is not persisted")
+                dep_m = fetched_ancestors[dep]
+                if metric_result_id_from_model_v2(dep_m) != dep_m.result_id:
+                    raise MetricV2Error(
+                        f"metric v2 ancestor {dep} identity does not match its semantic preimage"
+                    )
+                all_metrics[dep] = dep_m
+
+        # Verify DAG acyclicity across both batch metrics and ancestors
+        try:
+            topological_sort_metrics(list(all_metrics.values()))
+        except AnalyticalV2ValidationError as error:
+            raise MetricV2Error(str(error)) from error
+
+        # Verify edge consistency (asset matching and PIT availability) across all dependencies
+        for m in all_metrics.values():
             for dep in m.input_metric_result_ids:
-                dep_str = str(dep)
-                if dep_str not in metric_info:
-                    raise MetricV2Error(f"metric v2 dependency {dep_str} is not persisted")
-                d_asset, d_avail = metric_info[dep_str]
-                if d_asset != m.asset_id:
-                    raise MetricV2Error(f"metric v2 references a foreign metric {dep_str}")
-                if d_avail > m.available_at:
-                    raise MetricV2Error(f"metric v2 references a future metric {dep_str}")
+                dep_m = all_metrics[dep]
+                if dep_m.asset_id != m.asset_id:
+                    raise MetricV2Error(f"metric v2 references a foreign metric {dep}")
+                if dep_m.available_at > m.available_at:
+                    raise MetricV2Error(f"metric v2 references a future metric {dep}")
+
+        # 5b. Verify EvidenceSets for all metrics in the batch before inserting
+        from investment_analyst.storage.evidence_set_v2 import (
+            EvidenceSetV2Error,
+            EvidenceSetV2Store,
+            ensure_evidence_v2_tables,
+        )
+
+        batch_ev_ids = {
+            UUID(str(m.parameters["evidence_set_id"]))
+            for m in sorted_batch
+            if m.parameters.get("evidence_set_id") is not None
+        }
+        if batch_ev_ids:
+            try:
+                ensure_evidence_v2_tables(self._connection, create=False)
+            except EvidenceSetV2Error as error:
+                missing_id = next(iter(batch_ev_ids))
+                raise MetricV2Error(
+                    f"metric v2 references a missing evidence set {missing_id}"
+                ) from error
+            ev_store = EvidenceSetV2Store(self._connection)
+            ev_sets, ev_lineages = ev_store.get_sets_and_lineages(batch_ev_ids)
+            for m in sorted_batch:
+                ref = m.parameters.get("evidence_set_id")
+                if ref is not None:
+                    es_id = UUID(str(ref))
+                    if es_id not in ev_sets:
+                        raise MetricV2Error(f"metric v2 references a missing evidence set {es_id}")
+                    es = ev_sets[es_id]
+                    if es.asset_id != m.asset_id:
+                        raise MetricV2Error(f"metric v2 references a foreign evidence set {es_id}")
+                    if es.available_at > m.available_at:
+                        raise MetricV2Error(f"metric v2 references a future evidence set {es_id}")
+                    es_obs = ev_lineages[es_id]
+                    if set(es_obs) != set(m.input_observation_ids) or len(es_obs) != len(
+                        m.input_observation_ids
+                    ):
+                        raise MetricV2Error(
+                            "metric v2 observation inputs do not match evidence set members"
+                        )
 
         # 6. Check existing rows in DB in chunks <= 256 for idempotence/conflict
         all_batch_ids = [str(m.result_id) for m in sorted_batch]
@@ -609,6 +660,11 @@ class MetricV2Store:
             )
 
 
+def recalculate_metric_result_id(metric: MetricResult) -> UUID:
+    """Recalculate deterministic UUIDv8 canonical identity for a metric result."""
+    return metric_result_id_from_model_v2(metric)
+
+
 __all__ = [
     "MAX_METRIC_V2_PAGE",
     "METRIC_V2_METRIC_LINKS_TABLE",
@@ -619,6 +675,7 @@ __all__ = [
     "ensure_metric_v2_tables",
     "metric_to_row",
     "metric_v2_table_exists",
+    "recalculate_metric_result_id",
     "require_metric_inputs_visible",
     "row_to_metric",
 ]

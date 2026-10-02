@@ -48,6 +48,7 @@ from investment_analyst.storage.errors import (
     RecordNotFoundError,
     StorageError,
 )
+from investment_analyst.storage.evidence_set_v2 import EvidenceSetV2Error
 from investment_analyst.storage.metric_v2 import MetricV2Error
 
 ANALYSIS_SNAPSHOT_V2_TABLE: Final[str] = "analysis_snapshots_v2"
@@ -565,7 +566,7 @@ class AnalysisSnapshotV2Store:
         """Hydrate typed AnalysisSnapshots, verifying links and cited references."""
         try:
             return fetch_snapshots_chunked(self._connection, snapshot_ids)
-        except AnalyticalV2ValidationError as error:
+        except (AnalyticalV2ValidationError, MetricV2Error, EvidenceSetV2Error) as error:
             raise AnalysisSnapshotV2Error(str(error)) from error
 
     def get_snapshot(self, snapshot_id: UUID) -> AnalysisSnapshot:

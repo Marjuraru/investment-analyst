@@ -848,12 +848,62 @@ class RawV2Staging:
         self._require_open()
         ensure_metric_v2_tables(self._connection, create=False)
 
-        # 1. Collect all observation IDs, metric dependency IDs, and evidence set IDs
+        from investment_analyst.storage.analytical_v2_validation import (
+            AnalyticalV2ValidationError,
+            chunked_sequence,
+            fetch_metrics_chunked,
+            find_transitive_metric_ancestor_ids,
+            topological_sort_metrics,
+        )
+        from investment_analyst.storage.errors import RecordNotFoundError
+        from investment_analyst.storage.metric_v2 import recalculate_metric_result_id
+
+        # 1. Transitively resolve all external metric dependencies in chunks <= 256
+        all_metric_models: dict[UUID, MetricResult] = dict(hydrated)
+        external_seeds: set[UUID] = {
+            dep
+            for m in hydrated.values()
+            for dep in m.input_metric_result_ids
+            if dep not in all_metric_models
+        }
+        if external_seeds:
+            transitive_ids = find_transitive_metric_ancestor_ids(self._connection, external_seeds)
+            needed_ids = external_seeds | transitive_ids
+            try:
+                fetched_ancestors = fetch_metrics_chunked(self._connection, list(needed_ids))
+            except RecordNotFoundError as error:
+                raise MetricV2Error(f"metric v2 references a missing metric: {error}") from error
+
+            for dep in needed_ids:
+                if dep not in fetched_ancestors:
+                    raise MetricV2Error(f"metric v2 references a missing metric {dep}")
+                dep_m = fetched_ancestors[dep]
+                if recalculate_metric_result_id(dep_m) != dep_m.result_id:
+                    raise MetricV2Error(
+                        f"metric v2 ancestor {dep} identity does not match its semantic preimage"
+                    )
+                all_metric_models[dep] = dep_m
+
+        # Verify DAG acyclicity across all requested metrics and transitive ancestors
+        try:
+            topological_sort_metrics(list(all_metric_models.values()))
+        except AnalyticalV2ValidationError as error:
+            raise MetricV2Error(str(error)) from error
+
+        # Verify edge consistency (asset matching and PIT availability) across all dependencies
+        for m in all_metric_models.values():
+            for dep in m.input_metric_result_ids:
+                dep_m = all_metric_models[dep]
+                if dep_m.asset_id != m.asset_id:
+                    raise MetricV2Error(f"metric v2 references a foreign metric {dep}")
+                if dep_m.available_at > m.available_at:
+                    raise MetricV2Error(f"metric v2 references a future metric {dep}")
+
+        # 2. Collect observation IDs and evidence set IDs across all metrics in DAG
         all_obs_ids: set[str] = set()
-        all_dep_ids: set[str] = set()
         all_ev_ids: set[UUID] = set()
 
-        for result in hydrated.values():
+        for result in all_metric_models.values():
             seen_obs: set[str] = set()
             for obs_id in result.input_observation_ids:
                 key = str(obs_id)
@@ -862,36 +912,37 @@ class RawV2Staging:
                 seen_obs.add(key)
                 all_obs_ids.add(key)
 
-            seen_deps: set[str] = set()
-            for dep_id in result.input_metric_result_ids:
-                key = str(dep_id)
-                if key in seen_deps:
-                    raise MetricV2Error("metric v2 metric inputs must be unique")
-                seen_deps.add(key)
-                if key == str(result.result_id):
-                    raise MetricV2Error("metric v2 dependency cycle is not allowed")
-                all_dep_ids.add(key)
-
             reference = result.parameters.get("evidence_set_id")
             if reference is not None:
                 all_ev_ids.add(UUID(str(reference)))
 
-        # 2. Batch load unique evidence sets, members, and segments without observation fetch
+        # 3. Batch load unique evidence sets, members, and segments without observation fetch
         ev_sets: dict[UUID, EvidenceSet] = {}
         ev_lineages: dict[UUID, tuple[UUID, ...]] = {}
         ev_store: EvidenceSetV2Store | None = None
         if all_ev_ids:
-            ensure_evidence_v2_tables(self._connection, create=False)
+            from investment_analyst.storage.evidence_set_v2 import (
+                EvidenceSetV2Error,
+                EvidenceSetV2Store,
+                ensure_evidence_v2_tables,
+            )
+
+            try:
+                ensure_evidence_v2_tables(self._connection, create=False)
+            except EvidenceSetV2Error as error:
+                missing_id = next(iter(all_ev_ids))
+                raise MetricV2Error(
+                    f"metric v2 references a missing evidence set {missing_id}"
+                ) from error
             ev_store = EvidenceSetV2Store(self._connection)
             ev_sets, ev_lineages = ev_store.get_sets_and_lineages(all_ev_ids)
             for identifiers in ev_lineages.values():
                 for ident in identifiers:
                     all_obs_ids.add(str(ident))
 
-        # 3. Batch fetch ALL unique observations (metric + evidence set inputs) in chunks <= 256
+        # 4. Batch fetch ALL unique observations (metric + evidence set inputs) in chunks <= 256
         obs_map: dict[str, tuple[str, str, str, datetime]] = {}
         if all_obs_ids:
-            from investment_analyst.storage.analytical_v2_validation import chunked_sequence
             from investment_analyst.storage.diagnostic_v2 import _parse_instant_text
 
             for chunk in chunked_sequence(list(all_obs_ids), 256):
@@ -910,23 +961,6 @@ class RawV2Staging:
                         _parse_instant_text(r[4]),
                     )
 
-        # 4. Batch fetch metric dependencies in chunks <= 256
-        dep_map: dict[str, tuple[str, datetime]] = {}
-        if all_dep_ids:
-            from investment_analyst.storage.analytical_v2_validation import chunked_sequence
-            from investment_analyst.storage.diagnostic_v2 import _parse_instant_text
-            from investment_analyst.storage.metric_v2 import METRIC_V2_TABLE
-
-            for chunk in chunked_sequence(list(all_dep_ids), 256):
-                placeholders = ", ".join("?" for _ in chunk)
-                rows = self._connection.execute(
-                    f"SELECT result_id, asset_id, available_at FROM {METRIC_V2_TABLE} "
-                    f"WHERE result_id IN ({placeholders})",
-                    list(chunk),
-                ).fetchall()
-                for r in rows:
-                    dep_map[str(r[0])] = (str(r[1]), _parse_instant_text(r[2]))
-
         # 5. Verify evidence set lineages against obs_map once per unique set
         ev_map: dict[UUID, tuple[list[str], datetime]] = {}
         if all_ev_ids and ev_store is not None:
@@ -938,8 +972,7 @@ class RawV2Staging:
                 )
 
         # 6. Verify each metric against pre-fetched lookup maps
-        resolved: dict[UUID, MetricResult] = {}
-        for rid, result in hydrated.items():
+        for result in all_metric_models.values():
             for obs_id in result.input_observation_ids:
                 key = str(obs_id)
                 if key not in obs_map:
@@ -950,19 +983,11 @@ class RawV2Staging:
                 if obs_avail > result.available_at:
                     raise MetricV2Error(f"metric v2 references a future observation {key}")
 
-            for dep_id in result.input_metric_result_ids:
-                key = str(dep_id)
-                if key not in dep_map:
-                    raise MetricV2Error(f"metric v2 references a missing metric {key}")
-                dep_asset, dep_avail = dep_map[key]
-                if dep_asset != result.asset_id:
-                    raise MetricV2Error(f"metric v2 references a foreign metric {key}")
-                if dep_avail > result.available_at:
-                    raise MetricV2Error(f"metric v2 references a future metric {key}")
-
             reference = result.parameters.get("evidence_set_id")
             if reference is not None:
                 ev_id = UUID(str(reference))
+                if ev_id not in ev_map:
+                    raise MetricV2Error(f"metric v2 references a missing evidence set {ev_id}")
                 ordered_text, stored_available_at = ev_map[ev_id]
                 input_text = [str(item) for item in result.input_observation_ids]
                 if ordered_text != input_text and (
@@ -972,9 +997,7 @@ class RawV2Staging:
                 if stored_available_at > result.available_at:
                     raise MetricV2Error("metric v2 evidence is not visible at the result")
 
-            resolved[rid] = result
-
-        return resolved
+        return {rid: all_metric_models[rid] for rid in hydrated}
 
     def resolve_metric_lineage(self, result: MetricResult) -> MetricResult:
         """Verify inputs and shared evidence before returning one metric."""
@@ -1042,7 +1065,14 @@ class RawV2Staging:
             parameters,
         ).fetchall()
         ordered = [UUID(row[0]) for row in rows]
-        return [self.get_metrics([result_id])[result_id] for result_id in ordered]
+        from investment_analyst.storage.analytical_v2_validation import chunked_sequence
+
+        results: list[MetricResult] = []
+        for chunk in chunked_sequence(ordered, 256):
+            batch = self.get_metrics(chunk)
+            for rid in chunk:
+                results.append(batch[rid])
+        return results
 
     def save_evidence_segments(self, segments: Collection[EvidenceSegment]) -> int:
         """Persist shared hourly segments idempotently under the writer lock."""

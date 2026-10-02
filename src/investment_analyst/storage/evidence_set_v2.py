@@ -382,10 +382,11 @@ class EvidenceSetV2Store:
 
     def save_set(self, evidence_set: EvidenceSet) -> bool:
         """Persist one set with ordered members; content drift fails closed."""
+        segments_map = self.get_segments(evidence_set.segment_ids)
         try:
             verify_evidence_set(
                 evidence_set,
-                [self.get_segment(segment_id) for segment_id in evidence_set.segment_ids],
+                [segments_map[segment_id] for segment_id in evidence_set.segment_ids],
             )
         except EvidenceSetVerificationError as error:
             raise EvidenceSetV2Error("evidence set v2 lineage does not verify") from error
@@ -396,11 +397,16 @@ class EvidenceSetV2Store:
             [key],
         ).fetchall()
         members = self._connection.execute(
-            f"SELECT segment_id FROM {EVIDENCE_SET_V2_MEMBERS_TABLE} "
+            f"SELECT position, segment_id FROM {EVIDENCE_SET_V2_MEMBERS_TABLE} "
             "WHERE evidence_set_id = ? ORDER BY position",
             [key],
         ).fetchall()
-        stored_members = [UUID(row[0]) for row in members]
+        positions = [int(row[0]) for row in members]
+        if positions != list(range(len(positions))):
+            raise EvidenceSetV2Error(
+                f"evidence set v2 {key!r} members have non-contiguous positions: {positions}"
+            )
+        stored_members = [UUID(row[1]) for row in members]
         if rows:
             if row_to_evidence_set(rows[0], segment_ids=stored_members) != evidence_set:
                 raise RecordConflictError(f"evidence set v2 {key!r} already has different content")
@@ -468,20 +474,29 @@ class EvidenceSetV2Store:
             if str(sid) not in set_rows:
                 raise EvidenceSetV2Error(f"evidence set v2 {sid} was not found")
 
-        members_by_set: dict[UUID, list[UUID]] = {sid: [] for sid in ordered}
+        members_by_set: dict[UUID, list[tuple[int, UUID]]] = {sid: [] for sid in ordered}
         all_segment_ids: set[UUID] = set()
         for chunk in chunked_sequence(ordered, MAX_CHUNK_SIZE):
             placeholders = ", ".join("?" for _ in chunk)
             rows = self._connection.execute(
-                f"SELECT evidence_set_id, segment_id FROM {EVIDENCE_SET_V2_MEMBERS_TABLE} "
+                "SELECT evidence_set_id, position, segment_id "
+                f"FROM {EVIDENCE_SET_V2_MEMBERS_TABLE} "
                 f"WHERE evidence_set_id IN ({placeholders}) ORDER BY evidence_set_id, position",
                 [str(item) for item in chunk],
             ).fetchall()
             for r in rows:
                 s_id = UUID(str(r[0]))
-                seg_id = UUID(str(r[1]))
-                members_by_set[s_id].append(seg_id)
+                pos = int(r[1])
+                seg_id = UUID(str(r[2]))
+                members_by_set[s_id].append((pos, seg_id))
                 all_segment_ids.add(seg_id)
+
+        for sid, member_list in members_by_set.items():
+            positions = [p for p, _ in member_list]
+            if positions != list(range(len(member_list))):
+                raise EvidenceSetV2Error(
+                    f"evidence set v2 {sid} members have non-contiguous positions: {positions}"
+                )
 
         segments_map = self.get_segments(all_segment_ids)
 
@@ -489,7 +504,7 @@ class EvidenceSetV2Store:
         lineages_map: dict[UUID, tuple[UUID, ...]] = {}
 
         for sid in ordered:
-            seg_ids = members_by_set[sid]
+            seg_ids = [seg_id for _, seg_id in members_by_set[sid]]
             evidence_set = row_to_evidence_set(set_rows[str(sid)], segment_ids=seg_ids)
             segs = [segments_map[seg_id] for seg_id in seg_ids]
             try:
@@ -577,7 +592,8 @@ class EvidenceSetV2Store:
         observation_cache: Mapping[str, tuple[str, str, str, datetime]] | None = None,
     ) -> tuple[UUID, ...]:
         """Verify segments, hash, shape, availability and every observation."""
-        segments = [self.get_segment(segment_id) for segment_id in evidence_set.segment_ids]
+        segments_map = self.get_segments(evidence_set.segment_ids)
+        segments = [segments_map[segment_id] for segment_id in evidence_set.segment_ids]
         try:
             identifiers = resolve_evidence_set(evidence_set, segments)
         except EvidenceSetVerificationError as error:
@@ -616,6 +632,7 @@ __all__ = [
     "EVIDENCE_SEGMENT_V2_TABLE",
     "EVIDENCE_SET_V2_MEMBERS_TABLE",
     "EVIDENCE_SET_V2_TABLE",
+    "EvidenceSet",
     "EvidenceSetV2Error",
     "EvidenceSetV2Store",
     "ensure_evidence_v2_tables",

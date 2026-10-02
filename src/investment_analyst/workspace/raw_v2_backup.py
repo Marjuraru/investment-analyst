@@ -1227,24 +1227,48 @@ class RawV2StagingBackupService:
                     break
                 for row in rows:
                     result_id = _UUID(str(row[0]))
-                    obs_links = connection.execute(
-                        "SELECT observation_id FROM metric_v2_observation_links "
+                    obs_link_rows = connection.execute(
+                        "SELECT position, observation_id FROM metric_v2_observation_links "
                         "WHERE result_id = ? ORDER BY position",
                         [str(result_id)],
                     ).fetchall()
-                    met_links = connection.execute(
-                        "SELECT input_result_id FROM metric_v2_metric_links "
+                    obs_positions = [int(r[0]) for r in obs_link_rows]
+                    if obs_positions != list(range(len(obs_positions))):
+                        raise RawV2BackupError(
+                            "restored metric observation links have non-contiguous positions"
+                        )
+                    obs_links = [r[1] for r in obs_link_rows]
+
+                    met_link_rows = connection.execute(
+                        "SELECT position, input_result_id FROM metric_v2_metric_links "
                         "WHERE result_id = ? ORDER BY position",
                         [str(result_id)],
                     ).fetchall()
+                    met_positions = [int(r[0]) for r in met_link_rows]
+                    if met_positions != list(range(len(met_positions))):
+                        raise RawV2BackupError(
+                            "restored metric dependency links have non-contiguous positions"
+                        )
+                    met_links = [r[1] for r in met_link_rows]
+
                     try:
                         result = row_to_metric(
                             tuple(row),
-                            observation_ids=[_UUID(str(item[0])) for item in obs_links],
-                            metric_ids=[_UUID(str(item[0])) for item in met_links],
+                            observation_ids=[_UUID(str(item)) for item in obs_links],
+                            metric_ids=[_UUID(str(item)) for item in met_links],
                         )
                     except MetricV2Error as error:
                         raise RawV2BackupError("restored metric row is corrupt") from error
+
+                    from investment_analyst.storage.metric_v2 import (
+                        recalculate_metric_result_id,
+                    )
+
+                    if recalculate_metric_result_id(result) != result.result_id:
+                        raise RawV2BackupError(
+                            "restored metric identity does not match its semantic preimage"
+                        )
+
                     for observation_id in result.input_observation_ids:
                         obs_rows = connection.execute(
                             "SELECT asset_id, available_at FROM normalized_observations_v2 "
@@ -1279,15 +1303,21 @@ class RawV2StagingBackupService:
                         ).fetchall()
                         if not set_rows:
                             raise RawV2BackupError("restored metric lineage is missing")
-                        members = connection.execute(
-                            "SELECT segment_id FROM evidence_set_v2_members "
+                        member_rows = connection.execute(
+                            "SELECT position, segment_id FROM evidence_set_v2_members "
                             "WHERE evidence_set_id = ? ORDER BY position",
                             [str(reference)],
                         ).fetchall()
+                        mem_positions = [int(r[0]) for r in member_rows]
+                        if mem_positions != list(range(len(mem_positions))):
+                            raise RawV2BackupError(
+                                "restored evidence set members have non-contiguous positions"
+                            )
+                        members = [r[1] for r in member_rows]
                         try:
                             stored_set = row_to_evidence_set(
                                 tuple(set_rows[0]),
-                                segment_ids=[_UUID(str(item[0])) for item in members],
+                                segment_ids=[_UUID(str(item)) for item in members],
                             )
                         except EvidenceSetV2Error as error:
                             raise RawV2BackupError("restored metric lineage is corrupt") from error

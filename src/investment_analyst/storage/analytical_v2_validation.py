@@ -206,6 +206,40 @@ def topological_sort_metrics(results: Sequence[MetricResult]) -> list[MetricResu
     return [by_id[mid_str] for mid_str in sorted_ids]
 
 
+def find_transitive_metric_ancestor_ids(
+    connection: DuckDBPyConnection,
+    seed_ids: Collection[UUID],
+) -> set[UUID]:
+    """Find all transitive ancestor metric IDs reachable from seed_ids via
+    metric_v2_metric_links.
+    """
+    ordered = tuple(sorted(set(seed_ids), key=str))
+    if not ordered:
+        return set()
+    all_ancestors: set[UUID] = set()
+    for chunk in chunked_sequence(ordered, MAX_CHUNK_SIZE):
+        placeholders = ", ".join("?" for _ in chunk)
+        params = [str(item) for item in chunk]
+        rows = connection.execute(
+            f"""
+            WITH RECURSIVE anc(ancestor_id) AS (
+                SELECT input_result_id
+                FROM {_METRIC_METRIC_LINKS}
+                WHERE result_id IN ({placeholders})
+                UNION
+                SELECT l.input_result_id
+                FROM {_METRIC_METRIC_LINKS} l
+                JOIN anc a ON l.result_id = a.ancestor_id
+            )
+            SELECT DISTINCT ancestor_id FROM anc
+            """,
+            params,
+        ).fetchall()
+        for r in rows:
+            all_ancestors.add(UUID(str(r[0])))
+    return all_ancestors
+
+
 def fetch_metrics_chunked(
     connection: DuckDBPyConnection,
     result_ids: Collection[UUID],
@@ -378,26 +412,24 @@ def fetch_diagnostics_chunked(
             for _, mid, _, _, _ in ev_list:
                 cited_metric_ids.add(mid)
 
-        # Verify cited metrics in chunks <= 256
-        cited_metric_info: dict[UUID, tuple[str, datetime, str]] = {}
-        for m_chunk in chunked_sequence(sorted(cited_metric_ids, key=str), MAX_CHUNK_SIZE):
-            m_placeholders = ", ".join("?" for _ in m_chunk)
-            m_rows = connection.execute(
-                f"SELECT result_id, asset_id, available_at, metric_key "
-                f"FROM {_METRIC_TABLE} WHERE result_id IN ({m_placeholders})",
-                [str(item) for item in m_chunk],
-            ).fetchall()
-            for r_id, a_id, avail, key in m_rows:
-                cited_metric_info[UUID(str(r_id))] = (
-                    str(a_id),
-                    parse_instant_utc(avail, "metric available_at"),
-                    str(key),
-                )
+        # Hydrate and verify cited metrics in chunks <= 256 using fetch_metrics_chunked
+        cited_metrics_by_id: dict[UUID, MetricResult] = {}
+        if cited_metric_ids:
+            cited_metrics_by_id = fetch_metrics_chunked(
+                connection, sorted(cited_metric_ids, key=str)
+            )
 
-        # Check all cited metrics exist
+        from investment_analyst.storage.metric_v2 import recalculate_metric_result_id
+
+        # Check all cited metrics exist and have valid canonical identity
         for mid in cited_metric_ids:
-            if mid not in cited_metric_info:
+            if mid not in cited_metrics_by_id:
                 raise RecordNotFoundError(f"diagnostic references missing metric {mid}")
+            m_res = cited_metrics_by_id[mid]
+            if recalculate_metric_result_id(m_res) != m_res.result_id:
+                raise AnalyticalV2ValidationError(
+                    f"diagnostic cited metric {mid} identity does not match its semantic preimage"
+                )
 
         # Assemble diagnostics
         for did in chunk:
@@ -426,16 +458,16 @@ def fetch_diagnostics_chunked(
                 )
                 comp_mids = [item[1] for item in comp_link_items]
                 for mid in comp_mids:
-                    m_asset, m_avail, _ = cited_metric_info[mid]
-                    if m_asset != asset_id:
+                    m_res = cited_metrics_by_id[mid]
+                    if m_res.asset_id != asset_id:
                         raise AnalyticalV2ValidationError(
                             f"diagnostic for {asset_id} references foreign metric {mid} "
-                            f"belonging to {m_asset}"
+                            f"belonging to {m_res.asset_id}"
                         )
-                    if m_avail > available_at:
+                    if m_res.available_at > available_at:
                         raise AnalyticalV2ValidationError(
                             f"diagnostic available at {available_at.isoformat()} references future "
-                            f"metric {mid} available at {m_avail.isoformat()}"
+                            f"metric {mid} available at {m_res.available_at.isoformat()}"
                         )
                 components.append(
                     DiagnosticComponent(
@@ -453,16 +485,16 @@ def fetch_diagnostics_chunked(
             validate_link_positions([e[0] for e in e_list], "diagnostic evidence")
             evidence: list[DiagnosticEvidence] = []
             for _ev_pos, mid, dir_text, contrib, reason in e_list:
-                m_asset, m_avail, _ = cited_metric_info[mid]
-                if m_asset != asset_id:
+                m_res = cited_metrics_by_id[mid]
+                if m_res.asset_id != asset_id:
                     raise AnalyticalV2ValidationError(
                         f"diagnostic for {asset_id} references foreign metric {mid} "
-                        f"belonging to {m_asset}"
+                        f"belonging to {m_res.asset_id}"
                     )
-                if m_avail > available_at:
+                if m_res.available_at > available_at:
                     raise AnalyticalV2ValidationError(
                         f"diagnostic available at {available_at.isoformat()} references future "
-                        f"metric {mid} available at {m_avail.isoformat()}"
+                        f"metric {mid} available at {m_res.available_at.isoformat()}"
                     )
                 evidence.append(
                     DiagnosticEvidence(
@@ -491,7 +523,10 @@ def fetch_diagnostics_chunked(
             )
 
             # Validate domain consistency
-            metric_keys = {mid: cited_metric_info[mid][2] for mid in cited_metric_ids}
+            diag_mids = [mid for comp in components for mid in comp.metric_result_ids] + [
+                ev.metric_result_id for ev in evidence
+            ]
+            metric_keys = {mid: cited_metrics_by_id[mid].metric_key for mid in diag_mids}
             validate_diagnostic_internal_consistency(diag, metric_keys)
             results[did] = diag
 
@@ -578,46 +613,43 @@ def fetch_snapshots_chunked(
             for ev in diag.evidence:
                 all_metric_ids.add(ev.metric_result_id)
 
-        # Fetch metric metadata (asset, avail, key, evidence_set_id) in chunks <= 256
-        metric_info: dict[UUID, tuple[str, datetime, str, str | None]] = {}
-        for m_chunk in chunked_sequence(sorted(all_metric_ids, key=str), MAX_CHUNK_SIZE):
-            m_placeholders = ", ".join("?" for _ in m_chunk)
-            m_rows = connection.execute(
-                f"SELECT result_id, asset_id, available_at, metric_key, evidence_set_id "
-                f"FROM {_METRIC_TABLE} WHERE result_id IN ({m_placeholders})",
-                [str(item) for item in m_chunk],
-            ).fetchall()
-            for r_id, a_id, avail, key, es_id in m_rows:
-                metric_info[UUID(str(r_id))] = (
-                    str(a_id),
-                    parse_instant_utc(avail, "metric available_at"),
-                    str(key),
-                    str(es_id) if es_id is not None else None,
-                )
+        # Hydrate and verify cited metrics in chunks <= 256 using fetch_metrics_chunked
+        metrics_by_id: dict[UUID, MetricResult] = {}
+        if all_metric_ids:
+            metrics_by_id = fetch_metrics_chunked(connection, sorted(all_metric_ids, key=str))
+
+        from investment_analyst.storage.metric_v2 import recalculate_metric_result_id
 
         for mid in all_metric_ids:
-            if mid not in metric_info:
+            if mid not in metrics_by_id:
                 raise RecordNotFoundError(f"snapshot references missing metric {mid}")
-
-        # Collect all referenced EvidenceSets
-        all_es_ids: set[str] = {info[3] for info in metric_info.values() if info[3] is not None}
-        es_info: dict[str, tuple[str, datetime, str]] = {}
-        for es_chunk in chunked_sequence(sorted(all_es_ids), MAX_CHUNK_SIZE):
-            es_placeholders = ", ".join("?" for _ in es_chunk)
-            es_rows = connection.execute(
-                f"SELECT evidence_set_id, asset_id, available_at, canonical_hash "
-                f"FROM {_ES_TABLE} WHERE evidence_set_id IN ({es_placeholders})",
-                list(es_chunk),
-            ).fetchall()
-            for e_id, a_id, avail, c_hash in es_rows:
-                es_info[str(e_id)] = (
-                    str(a_id),
-                    parse_instant_utc(avail, "evidence set available_at"),
-                    str(c_hash),
+            m_res = metrics_by_id[mid]
+            if recalculate_metric_result_id(m_res) != m_res.result_id:
+                raise AnalyticalV2ValidationError(
+                    f"snapshot cited metric {mid} identity does not match its semantic preimage"
                 )
 
+        # Collect all referenced EvidenceSets from metrics
+        all_es_ids: set[UUID] = set()
+        for m_res in metrics_by_id.values():
+            ref = m_res.parameters.get("evidence_set_id")
+            if ref is not None:
+                all_es_ids.add(UUID(str(ref)))
+
+        from investment_analyst.storage.evidence_set_v2 import (
+            EvidenceSet,
+            EvidenceSetV2Store,
+            ensure_evidence_v2_tables,
+        )
+
+        es_by_id: dict[UUID, EvidenceSet] = {}
+        if all_es_ids:
+            ensure_evidence_v2_tables(connection, create=False)
+            ev_store = EvidenceSetV2Store(connection)
+            es_by_id = ev_store.get_sets(sorted(all_es_ids, key=str))
+
         for es_id in all_es_ids:
-            if es_id not in es_info:
+            if es_id not in es_by_id:
                 raise RecordNotFoundError(
                     f"snapshot metric references missing evidence set {es_id}"
                 )
@@ -640,22 +672,23 @@ def fetch_snapshots_chunked(
             diag_ids = tuple(d[1] for d in d_list)
 
             # Check direct metrics
-            snap_es_ids: set[str] = set()
+            snap_es_ids: set[UUID] = set()
             for mid in direct_mids:
-                m_asset, m_avail, m_key, es_id = metric_info[mid]
-                if m_asset != asset_id:
+                m_res = metrics_by_id[mid]
+                if m_res.asset_id != asset_id:
                     raise AnalyticalV2ValidationError(
                         f"snapshot for {asset_id} references foreign metric {mid} "
-                        f"belonging to {m_asset}"
+                        f"belonging to {m_res.asset_id}"
                     )
-                if m_avail > known_at:
+                if m_res.available_at > known_at:
                     raise AnalyticalV2ValidationError(
                         f"snapshot cut at {known_at.isoformat()} references future metric "
-                        f"{mid} available at {m_avail.isoformat()}"
+                        f"{mid} available at {m_res.available_at.isoformat()}"
                     )
-                validate_metric_key_for_domain(m_key, domain)
-                if es_id:
-                    snap_es_ids.add(es_id)
+                validate_metric_key_for_domain(m_res.metric_key, domain)
+                ref = m_res.parameters.get("evidence_set_id")
+                if ref is not None:
+                    snap_es_ids.add(UUID(str(ref)))
 
             # Check diagnostics and collect their metrics' evidence sets
             for did in diag_ids:
@@ -677,26 +710,27 @@ def fetch_snapshots_chunked(
                 for ev in diag.evidence:
                     diag_mids.add(ev.metric_result_id)
                 for mid in diag_mids:
-                    _, _, m_key, es_id = metric_info[mid]
-                    validate_metric_key_for_domain(m_key, domain)
-                    if es_id:
-                        snap_es_ids.add(es_id)
+                    m_res = metrics_by_id[mid]
+                    validate_metric_key_for_domain(m_res.metric_key, domain)
+                    ref = m_res.parameters.get("evidence_set_id")
+                    if ref is not None:
+                        snap_es_ids.add(UUID(str(ref)))
 
             # Resolve and verify EvidenceSets for this snapshot
             snap_es_hashes: list[str] = []
-            for es_id in sorted(snap_es_ids):
-                es_asset, es_avail, es_hash = es_info[es_id]
-                if es_asset != asset_id:
+            for es_id in sorted(snap_es_ids, key=str):
+                es = es_by_id[es_id]
+                if es.asset_id != asset_id:
                     raise AnalyticalV2ValidationError(
                         f"snapshot for {asset_id} references foreign evidence set {es_id} "
-                        f"belonging to {es_asset}"
+                        f"belonging to {es.asset_id}"
                     )
-                if es_avail > known_at:
+                if es.available_at > known_at:
                     raise AnalyticalV2ValidationError(
                         f"snapshot cut at {known_at.isoformat()} references future evidence set "
-                        f"{es_id} available at {es_avail.isoformat()}"
+                        f"{es_id} available at {es.available_at.isoformat()}"
                     )
-                snap_es_hashes.append(es_hash)
+                snap_es_hashes.append(es.canonical_hash)
 
             expected_digest = canonical_evidence_set_digest(snap_es_hashes)
             if expected_digest != evidence_set_digest:

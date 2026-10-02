@@ -483,7 +483,7 @@ class DiagnosticV2Store:
         """Hydrate typed DiagnosticResults, verifying components, links and cited metrics."""
         try:
             return fetch_diagnostics_chunked(self._connection, diagnostic_ids)
-        except AnalyticalV2ValidationError as error:
+        except (AnalyticalV2ValidationError, MetricV2Error) as error:
             raise DiagnosticV2Error(str(error)) from error
 
     def list_diagnostics(
