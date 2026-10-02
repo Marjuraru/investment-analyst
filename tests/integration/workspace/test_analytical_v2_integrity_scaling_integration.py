@@ -730,24 +730,18 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
     from investment_analyst.storage.analytical_v2_validation import chunked_sequence
 
     staging = _staging(tmp_path, "staging-multiasset")
-    base_time = datetime(2026, 8, 1, 0, 0, tzinfo=UTC)
+    base_time = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
     asset_target = "equity:us:aapl"
 
     with staging:
-        # 1. Target fixtures: one complete-day segment shared by every metric.
-        target_observations = [
-            _seed_observation(
-                staging,
-                base_time + timedelta(hours=hour),
-                asset_target,
-            )
-            for hour in range(24)
-        ]
-        seg_target = build_evidence_segments(target_observations)
+        # 1. One shared observation, segment, and EvidenceSet keep the test's
+        # hydrated lineage unique while the graph itself scales to 513 metrics.
+        obs_target = _seed_observation(staging, base_time, asset_target)
+        seg_target = build_evidence_segments([obs_target])
         staging.save_evidence_segments(seg_target)
-        es_target = build_evidence_set(target_observations, segments=seg_target)
+        es_target = build_evidence_set([obs_target], segments=seg_target)
         staging.save_evidence_set(es_target)
-        metric_base_time = base_time + timedelta(days=1)
+        metric_base_time = base_time
 
         # Seed another observation with different source and cut for target asset to test isolation
         _seed_observation(
@@ -776,7 +770,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 available_at=moment,
                 computed_at=moment,
                 parameters={"idx": i, "evidence_set_id": str(es_target.evidence_set_id)},
-                input_observation_ids=[obs.observation_id for obs in target_observations],
+                input_observation_ids=[obs_target.observation_id],
                 input_metric_result_ids=[],
                 algorithm_version="v1",
                 quality=DataQuality.VALID,
@@ -1006,8 +1000,8 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             assert proxy.table_rows.get("diagnostic_v2_evidence", 0) == K
             assert proxy.table_rows.get("analysis_snapshots_v2", 0) == K
             assert proxy.table_rows.get("metric_results_v2", 0) == K
-            assert proxy.table_rows.get("metric_v2_observation_links", 0) == 24 * K
-            assert proxy.table_rows.get("normalized_observations_v2", 0) == 24
+            assert proxy.table_rows.get("metric_v2_observation_links", 0) == K
+            assert proxy.table_rows.get("normalized_observations_v2", 0) == 1
             assert proxy.table_rows.get("evidence_sets_v2", 0) == 1
             assert proxy.table_rows.get("evidence_set_v2_members", 0) == len(es_target.segment_ids)
             assert proxy.table_rows.get("evidence_segments_v2", 0) == len(es_target.segment_ids)
@@ -1117,8 +1111,8 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             assert baseline_durations_m[K] > 0 and after_durations_m[K] > 0
             assert len(proxy.queries) <= loose_bound
             assert proxy.table_rows.get("metric_results_v2", 0) == K
-            assert proxy.table_rows.get("metric_v2_observation_links", 0) == 24 * K
-            assert proxy.table_rows.get("normalized_observations_v2", 0) == 24
+            assert proxy.table_rows.get("metric_v2_observation_links", 0) == K
+            assert proxy.table_rows.get("normalized_observations_v2", 0) == 1
             assert proxy.table_counts.get("normalized_observations_v2", 0) == 1
             assert proxy.table_rows.get("evidence_sets_v2", 0) == 1
             assert proxy.table_counts.get("evidence_sets_v2", 0) == 1
@@ -1149,8 +1143,8 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             assert proxy.table_rows.get("diagnostic_v2_component_metric_links", 0) == K
             assert proxy.table_rows.get("diagnostic_v2_evidence", 0) == K
             assert proxy.table_rows.get("metric_results_v2", 0) == K
-            assert proxy.table_rows.get("metric_v2_observation_links", 0) == 24 * K
-            assert proxy.table_rows.get("normalized_observations_v2", 0) == 24
+            assert proxy.table_rows.get("metric_v2_observation_links", 0) == K
+            assert proxy.table_rows.get("normalized_observations_v2", 0) == 1
             assert proxy.table_rows.get("evidence_sets_v2", 0) == 1
             assert proxy.table_rows.get("evidence_set_v2_members", 0) == len(es_target.segment_ids)
             assert proxy.table_rows.get("evidence_segments_v2", 0) == len(es_target.segment_ids)
@@ -1182,8 +1176,8 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             assert proxy.table_rows.get("analysis_snapshot_v2_diagnostic_links", 0) == K
             assert proxy.table_rows.get("diagnostic_results_v2", 0) == K
             assert proxy.table_rows.get("metric_results_v2", 0) == K
-            assert proxy.table_rows.get("metric_v2_observation_links", 0) == 24 * K
-            assert proxy.table_rows.get("normalized_observations_v2", 0) == 24
+            assert proxy.table_rows.get("metric_v2_observation_links", 0) == K
+            assert proxy.table_rows.get("normalized_observations_v2", 0) == 1
             assert proxy.table_rows.get("evidence_sets_v2", 0) == 1
             assert proxy.table_rows.get("evidence_set_v2_members", 0) == len(es_target.segment_ids)
             assert proxy.table_rows.get("evidence_segments_v2", 0) == len(es_target.segment_ids)
@@ -1212,8 +1206,8 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             assert proxy.table_rows.get("diagnostic_v2_evidence", 0) == K
             assert proxy.table_rows.get("analysis_snapshots_v2", 0) == K
             assert proxy.table_rows.get("metric_results_v2", 0) == K
-            assert proxy.table_rows.get("metric_v2_observation_links", 0) == 24 * K
-            assert proxy.table_rows.get("normalized_observations_v2", 0) == 24
+            assert proxy.table_rows.get("metric_v2_observation_links", 0) == K
+            assert proxy.table_rows.get("normalized_observations_v2", 0) == 1
             assert proxy.table_rows.get("evidence_sets_v2", 0) == 1
             assert proxy.table_rows.get("evidence_set_v2_members", 0) == len(es_target.segment_ids)
             assert proxy.table_rows.get("evidence_segments_v2", 0) == len(es_target.segment_ids)
@@ -1225,7 +1219,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         staging._connection.execute(
             "UPDATE normalized_observations_v2 SET asset_id = 'equity:us:corrupt' "
             "WHERE observation_id = ?",
-            [str(target_observations[0].observation_id)],
+            [str(obs_target.observation_id)],
         )
         proxy.active = True
         with pytest.raises(StorageError, match="foreign observation"):
@@ -1233,7 +1227,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         proxy.active = False
         staging._connection.execute(
             "UPDATE normalized_observations_v2 SET asset_id = ? WHERE observation_id = ?",
-            [asset_target, str(target_observations[0].observation_id)],
+            [asset_target, str(obs_target.observation_id)],
         )
         proxy.active = True
 
@@ -1265,15 +1259,15 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         )
         staging.save_metrics([m_extra])
 
-        # Batch get: target_metrics[0] (uses the 24-row es_target) +
+        # Batch get: target_metrics[0] (uses es_target) +
         # m_extra (uses obs_extra directly, NOT in es_target)
         proxy.clear()
         batch_res = staging.get_metrics([target_metrics[0].result_id, m_extra.result_id])
         assert len(batch_res) == 2
         assert batch_res[target_metrics[0].result_id] == target_metrics[0]
         assert batch_res[m_extra.result_id] == m_extra
-        # Exactly 25 unique observations read in one chunk (the target day + obs_extra).
-        assert proxy.table_rows.get("normalized_observations_v2", 0) == 25
+        # Exactly 2 unique observations read in one chunk (EvidenceSet + direct input).
+        assert proxy.table_rows.get("normalized_observations_v2", 0) == 2
         assert proxy.table_counts.get("normalized_observations_v2", 0) == 1
         assert proxy.table_rows.get("evidence_sets_v2", 0) == 1
 
@@ -1281,7 +1275,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         proxy.clear()
         batch_res2 = staging.get_metrics([target_metrics[0].result_id, m_extra.result_id])
         assert len(batch_res2) == 2
-        assert proxy.table_rows.get("normalized_observations_v2", 0) == 25
+        assert proxy.table_rows.get("normalized_observations_v2", 0) == 2
         assert proxy.table_counts.get("normalized_observations_v2", 0) == 1
 
         # Corruption after first call fails closed on second call
@@ -1313,7 +1307,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 available_at=metric_base_time,
                 computed_at=metric_base_time,
                 parameters={"evidence_set_id": str(es_target.evidence_set_id)},
-                input_observation_ids=[obs.observation_id for obs in target_observations],
+                input_observation_ids=[obs_target.observation_id],
                 input_metric_result_ids=[],
                 algorithm_version="v1",
                 quality=DataQuality.VALID,
@@ -1334,7 +1328,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 available_at=metric_base_time,
                 computed_at=metric_base_time,
                 parameters={"evidence_set_id": str(es_target.evidence_set_id)},
-                input_observation_ids=[obs.observation_id for obs in target_observations],
+                input_observation_ids=[obs_target.observation_id],
                 input_metric_result_ids=[r.result_id for r in shared_roots],
                 algorithm_version="v1",
                 quality=DataQuality.VALID,
@@ -1355,7 +1349,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 available_at=metric_base_time,
                 computed_at=metric_base_time,
                 parameters={"evidence_set_id": str(es_target.evidence_set_id)},
-                input_observation_ids=[obs.observation_id for obs in target_observations],
+                input_observation_ids=[obs_target.observation_id],
                 input_metric_result_ids=[
                     shared_intermediates[i % 16].result_id,
                     shared_intermediates[(i + 1) % 16].result_id,
@@ -1411,7 +1405,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 available_at=moment,
                 computed_at=moment,
                 parameters={"evidence_set_id": str(es_target.evidence_set_id)},
-                input_observation_ids=[obs.observation_id for obs in target_observations],
+                input_observation_ids=[obs_target.observation_id],
                 input_metric_result_ids=[deep_chain[-1].result_id] if deep_chain else [],
                 algorithm_version="v1",
                 quality=DataQuality.VALID,
