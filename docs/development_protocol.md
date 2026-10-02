@@ -393,6 +393,11 @@ writer roles; `$build` es el dispatcher y `BUILD` genérico es inválido. `BUILD
 governance enumeradas, exige `R3`/`CRITICAL`/`HUMAN`/`route_effect: NONE` y valida un authority
 snapshot de la base declarada. El snapshot contiene el SHA base y los digests de AGENTS, protocolo,
 skills y guard; los bytes candidatos nunca se usan como autoridad antes del merge.
+La clasificación y la admisión del writer reutilizan `_is_governance_path` como frontera única;
+únicamente `tests/unit/test_workflow_guard.py` y
+`tests/unit/test_development_workflow_contract.py` son excepciones para probar ese contrato. Cada
+ruta modificada sigue requiriendo su propia entrada y digest de base, o `nuevo` cuando corresponda,
+sin solaparse con superficies protegidas o prohibidas.
 
 Cada Work Block declara exactamente un JSON canónico `workflow-acceptance-manifest-v1` con
 `schema_version`, `route_effect` e items de ID único. Cada item tiene `kind` (`acceptance`,

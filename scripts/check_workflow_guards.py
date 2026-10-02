@@ -71,12 +71,6 @@ _REQUIREMENT_KINDS = frozenset(
         "route_transition",
     }
 )
-_GOVERNANCE_WRITER_PATHS = GOVERNANCE_PATHS | frozenset(
-    {
-        "tests/unit/test_workflow_guard.py",
-        "tests/unit/test_development_workflow_contract.py",
-    }
-)
 _AUTHORITY_PATHS = (
     "AGENTS.md",
     "docs/development_protocol.md",
@@ -645,8 +639,9 @@ def _validate_scope(
         if allow_value is not None:
             if allow_value == "nuevo" and item.status != "added":
                 raise GuardFailure(f"new allowlist path is not added: {item.path}")
-            if allow_value != "nuevo" and item.status == "added":
-                raise GuardFailure(f"existing allowlist path is added: {item.path}")
+            if allow_value != "nuevo" and item.status in {"added", "renamed"}:
+                action = "added" if item.status == "added" else "renamed"
+                raise GuardFailure(f"existing allowlist path is {action}: {item.path}")
             consumed.append(item.path)
 
     if metadata.writer_role in {"BUILD_PRODUCT", "UI_WORKER"} and governance:
@@ -660,9 +655,10 @@ def _validate_scope(
         ):
             raise GuardFailure("governance writer requires R3/CRITICAL/HUMAN/NONE")
         for path in paths:
-            if path not in _GOVERNANCE_WRITER_PATHS and not path.startswith(
-                (".agents/rules/", ".agents/skills/", ".github/ISSUE_TEMPLATE/")
-            ):
+            if not _is_governance_path(path) and path not in {
+                "tests/unit/test_workflow_guard.py",
+                "tests/unit/test_development_workflow_contract.py",
+            }:
                 raise GuardFailure(f"governance writer cannot modify product path: {path}")
     if metadata.route_effect == "NONE" and (
         "docs/basic_functional_release_plan.md" in paths or "docs/product_roadmap.md" in paths

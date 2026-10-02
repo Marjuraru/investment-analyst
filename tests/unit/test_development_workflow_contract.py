@@ -191,6 +191,18 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "id: owner" not in template
 
 
+def test_governance_writer_frontier_has_one_authoritative_classifier() -> None:
+    guard = _read("scripts/check_workflow_guards.py")
+    protocol = _read("docs/development_protocol.md")
+
+    assert "def _is_governance_path(path: str) -> bool:" in guard
+    assert "if not _is_governance_path(path)" in guard
+    assert "_GOVERNANCE_WRITER_PATHS" not in guard
+    assert "reutilizan `_is_governance_path` como frontera única" in protocol
+    assert "tests/unit/test_workflow_guard.py" in protocol
+    assert "tests/unit/test_development_workflow_contract.py" in protocol
+
+
 def test_canonical_skill_basenames_and_ui_frontier_are_unique() -> None:
     skill_paths = sorted((ROOT / ".agents" / "skills").glob("*/SKILL.md"))
     basenames = [path.parent.name for path in skill_paths]
