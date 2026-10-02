@@ -41,6 +41,7 @@ from investment_analyst.storage.analytical_v2_validation import (
     validate_keyset_cursor,
     validate_keyset_limit,
     validate_link_positions,
+    verify_metrics_dag_and_lineage,
 )
 from investment_analyst.storage.errors import (
     RecordConflictError,
@@ -283,6 +284,8 @@ class DiagnosticV2Store:
 
         try:
             cited_metrics_by_id = fetch_metrics_chunked(self._connection, all_cited_mids)
+            if cited_metrics_by_id:
+                verify_metrics_dag_and_lineage(self._connection, cited_metrics_by_id)
         except RecordNotFoundError as error:
             raise RecordNotFoundError(f"diagnostic references missing metric: {error}") from error
         except (AnalyticalV2ValidationError, MetricV2Error) as error:

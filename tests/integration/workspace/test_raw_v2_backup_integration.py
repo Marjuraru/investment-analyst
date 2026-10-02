@@ -1464,3 +1464,172 @@ def test_restore_rejects_tampered_metric_or_position_gap_without_promotion(
     ):
         service.restore(backup_tampered_obs_links, dest_obs_links)
     assert not dest_obs_links.exists()
+
+
+def test_restore_rejects_future_metric_dependency_and_inconsistent_evidence_set(
+    tmp_path: Path,
+) -> None:
+    """Restore rejects future metric dependencies and mismatched EvidenceSet members."""
+    import hashlib
+    import shutil
+
+    from investment_analyst.analytics.evidence_set import (
+        build_evidence_segments,
+        build_evidence_set,
+    )
+    from investment_analyst.analytics.metric_identity_v2 import (
+        metric_result_id_from_model_v2,
+    )
+    from investment_analyst.core.models import (
+        DataFrequency,
+        DataQuality,
+        MetricResult,
+        NormalizedObservation,
+    )
+    from investment_analyst.workspace.raw_v2_backup import (
+        BACKUP_MANIFEST_NAME,
+        RawV2StagingBackupManifest,
+        RawV2StagingBackupService,
+        _backup_id,
+    )
+
+    staging = _staging(tmp_path, "source-staging-restore-tamper")
+    base = datetime(2026, 8, 1, tzinfo=UTC)
+    asset_id = "equity:us:aapl"
+
+    with staging:
+        raw = RawRecord(
+            record_id=uuid4(),
+            asset_id=asset_id,
+            source=SourceReference(source_id="alpaca:feed", record_key="obs-1", retrieved_at=base),
+            event_time=base,
+            available_at=base,
+            received_at=base,
+            payload={"v": 1},
+            schema_version="test-v1",
+        )
+        staging.save(raw)
+        obs1 = NormalizedObservation(
+            observation_id=uuid4(),
+            raw_record_id=raw.record_id,
+            asset_id=asset_id,
+            field_name="close",
+            value=Decimal("150.00"),
+            unit="USD",
+            frequency=DataFrequency.HOUR_1,
+            observed_at=base,
+            available_at=base,
+            normalized_at=base,
+            source=raw.source,
+            quality=DataQuality.VALID,
+            transformation_version="1.0.0",
+        )
+        staging.save_observations([obs1])
+        segs = build_evidence_segments([obs1])
+        staging.save_evidence_segments(segs)
+        es = build_evidence_set([obs1], segments=segs)
+        staging.save_evidence_set(es)
+
+        m1_cand = MetricResult(
+            result_id=uuid4(),
+            asset_id=asset_id,
+            metric_key="market.close.price",
+            value=Decimal("150.00"),
+            unit="USD",
+            as_of=base,
+            available_at=base,
+            computed_at=base,
+            parameters={"evidence_set_id": str(es.evidence_set_id)},
+            input_observation_ids=[obs1.observation_id],
+            input_metric_result_ids=[],
+            algorithm_version="v1",
+            quality=DataQuality.VALID,
+        )
+        m1 = m1_cand.model_copy(update={"result_id": metric_result_id_from_model_v2(m1_cand)})
+
+        child_time = base + timedelta(hours=1)
+        m2_cand = MetricResult(
+            result_id=uuid4(),
+            asset_id=asset_id,
+            metric_key="market.sma.20",
+            value=Decimal("151.00"),
+            unit="USD",
+            as_of=child_time,
+            available_at=child_time,
+            computed_at=child_time,
+            parameters={},
+            input_observation_ids=[obs1.observation_id],
+            input_metric_result_ids=[m1.result_id],
+            algorithm_version="v1",
+            quality=DataQuality.VALID,
+        )
+        m2 = m2_cand.model_copy(update={"result_id": metric_result_id_from_model_v2(m2_cand)})
+        staging.save_metrics([m1, m2])
+
+        service = RawV2StagingBackupService()
+        valid_backup = tmp_path / "valid-backup-future-dep"
+        service.create(staging, staging._connection, valid_backup)
+
+    def _update_manifest_hash(backup_dir: Path) -> None:
+        manifest_file = backup_dir / BACKUP_MANIFEST_NAME
+        manifest_data = RawV2StagingBackupManifest.model_validate_json(
+            manifest_file.read_text(encoding="utf-8")
+        )
+        db_path = backup_dir / "raw-v2-index.duckdb"
+        new_sha = hashlib.sha256(db_path.read_bytes()).hexdigest()
+        new_size = db_path.stat().st_size
+        updated_files = tuple(
+            item.model_copy(update={"sha256": new_sha, "size_bytes": new_size})
+            if item.path == "raw-v2-index.duckdb"
+            else item
+            for item in manifest_data.files
+        )
+        new_bid = _backup_id(
+            manifest_data.staging_id,
+            updated_files,
+            manifest_data.counts,
+            manifest_data.observation_counts,
+            manifest_data.schema_version,
+            manifest_data.metric_counts,
+            manifest_data.analysis_counts,
+        )
+        manifest_file.write_text(
+            manifest_data.model_copy(
+                update={"files": updated_files, "backup_id": new_bid}
+            ).model_dump_json(),
+            encoding="utf-8",
+        )
+
+    # 1. Tamper parent metric available_at to be in the future (after child available_at)
+    backup_tampered_future = tmp_path / "backup-tampered-future"
+    shutil.copytree(valid_backup, backup_tampered_future)
+    conn = duckdb.connect(str(backup_tampered_future / "raw-v2-index.duckdb"))
+    future_iso = (child_time + timedelta(days=5)).isoformat()
+    conn.execute(
+        "UPDATE metric_results_v2 SET available_at = ? WHERE result_id = ?",
+        [future_iso, str(m1.result_id)],
+    )
+    conn.close()
+    _update_manifest_hash(backup_tampered_future)
+
+    dest_future = tmp_path / "promoted-future"
+    with pytest.raises(RawV2BackupError):
+        service.restore(backup_tampered_future, dest_future)
+    assert not dest_future.exists()
+
+    # 2. Tamper metric observation links so metric inputs don't match evidence set
+    backup_tampered_es = tmp_path / "backup-tampered-es-mismatch"
+    shutil.copytree(valid_backup, backup_tampered_es)
+    conn = duckdb.connect(str(backup_tampered_es / "raw-v2-index.duckdb"))
+    other_obs_id = str(uuid4())
+    conn.execute(
+        "UPDATE metric_v2_observation_links SET observation_id = ? WHERE result_id = ?",
+        [other_obs_id, str(m1.result_id)],
+    )
+    conn.close()
+    _update_manifest_hash(backup_tampered_es)
+
+    dest_es = tmp_path / "promoted-es-mismatch"
+    with pytest.raises(RawV2BackupError):
+        service.restore(backup_tampered_es, dest_es)
+    assert not dest_es.exists()

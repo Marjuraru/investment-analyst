@@ -26,7 +26,6 @@ from investment_analyst.analytics.evidence_set import (
     EvidenceSet,
     EvidenceSetVerificationError,
     resolve_evidence_set,
-    verify_evidence_set,
 )
 from investment_analyst.storage.analytical_v2_validation import (
     MAX_CHUNK_SIZE,
@@ -382,14 +381,7 @@ class EvidenceSetV2Store:
 
     def save_set(self, evidence_set: EvidenceSet) -> bool:
         """Persist one set with ordered members; content drift fails closed."""
-        segments_map = self.get_segments(evidence_set.segment_ids)
-        try:
-            verify_evidence_set(
-                evidence_set,
-                [segments_map[segment_id] for segment_id in evidence_set.segment_ids],
-            )
-        except EvidenceSetVerificationError as error:
-            raise EvidenceSetV2Error("evidence set v2 lineage does not verify") from error
+        self.verify_set_lineage(evidence_set)
         key = str(evidence_set.evidence_set_id)
         columns = ", ".join(_SET_V2_COLUMNS)
         rows = self._connection.execute(

@@ -16,7 +16,7 @@ Implements:
 from __future__ import annotations
 
 import collections
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Final
@@ -311,6 +311,182 @@ def fetch_metrics_chunked(
     return results
 
 
+def verify_metrics_dag_and_lineage(
+    connection: DuckDBPyConnection,
+    metrics: Collection[MetricResult] | Mapping[UUID, MetricResult],
+) -> dict[UUID, MetricResult]:
+    """Transitively resolve and strictly verify all metrics, ancestors,
+    observations and EvidenceSets in bounded chunks <= 256.
+
+    Verifies:
+    1. Ancestor closure discovery via DuckDB CTE in chunks <= 256.
+    2. Recalculated UUIDv8 canonical identity for all ancestors.
+    3. DAG acyclicity across all seeds and ancestors.
+    4. Edge consistency: matching asset and PIT availability (available_at <= metric.available_at).
+    5. Direct observation verification across all seeds and ancestors:
+       - observation exists in normalized_observations_v2
+       - matching asset_id
+       - available_at <= metric.available_at
+    6. EvidenceSet verification across all seeds and ancestors:
+       - evidence set exists in evidence_sets_v2
+       - matching asset_id
+       - available_at <= metric.available_at
+       - evidence set observation members match metric.input_observation_ids 1:1
+       - evidence set segment and observation lineages verify cleanly
+    """
+    seed_map = dict(metrics) if isinstance(metrics, Mapping) else {m.result_id: m for m in metrics}
+
+    if not seed_map:
+        return {}
+
+    from investment_analyst.storage.metric_v2 import (
+        MetricV2Error,
+        recalculate_metric_result_id,
+    )
+
+    all_metric_models: dict[UUID, MetricResult] = dict(seed_map)
+    external_seeds: set[UUID] = {
+        dep
+        for m in seed_map.values()
+        for dep in m.input_metric_result_ids
+        if dep not in all_metric_models
+    }
+    if external_seeds:
+        transitive_ids = find_transitive_metric_ancestor_ids(connection, external_seeds)
+        needed_ids = external_seeds | transitive_ids
+        try:
+            fetched_ancestors = fetch_metrics_chunked(connection, list(needed_ids))
+        except RecordNotFoundError as error:
+            raise MetricV2Error(f"metric v2 dependency is not persisted: {error}") from error
+
+        for dep in needed_ids:
+            if dep not in fetched_ancestors:
+                raise MetricV2Error(f"metric v2 dependency {dep} is not persisted")
+            dep_m = fetched_ancestors[dep]
+            if recalculate_metric_result_id(dep_m) != dep_m.result_id:
+                raise MetricV2Error(
+                    f"metric v2 ancestor {dep} identity does not match its semantic preimage"
+                )
+            all_metric_models[dep] = dep_m
+
+    # Verify DAG acyclicity across all metrics (seeds + ancestors)
+    try:
+        topological_sort_metrics(list(all_metric_models.values()))
+    except AnalyticalV2ValidationError as error:
+        raise MetricV2Error(str(error)) from error
+
+    # Verify edge consistency (asset matching and PIT availability) across all dependencies
+    for m in all_metric_models.values():
+        for dep in m.input_metric_result_ids:
+            dep_m = all_metric_models[dep]
+            if dep_m.asset_id != m.asset_id:
+                raise MetricV2Error(f"metric v2 references a foreign metric {dep}")
+            if dep_m.available_at > m.available_at:
+                raise MetricV2Error(f"metric v2 references a future metric {dep}")
+
+    # Collect observation IDs and evidence set IDs across ALL metrics in DAG
+    all_obs_ids: set[str] = set()
+    all_ev_ids: set[UUID] = set()
+
+    for result in all_metric_models.values():
+        seen_obs: set[str] = set()
+        for obs_id in result.input_observation_ids:
+            key = str(obs_id)
+            if key in seen_obs:
+                raise MetricV2Error("metric v2 observation inputs must be unique")
+            seen_obs.add(key)
+            all_obs_ids.add(key)
+
+        reference = result.parameters.get("evidence_set_id")
+        if reference is not None:
+            all_ev_ids.add(UUID(str(reference)))
+
+    # Batch load unique evidence sets, members, and segments
+    ev_sets: dict[UUID, EvidenceSet] = {}
+    ev_lineages: dict[UUID, tuple[UUID, ...]] = {}
+    ev_store: EvidenceSetV2Store | None = None
+    if all_ev_ids:
+        from investment_analyst.storage.evidence_set_v2 import (
+            EvidenceSet,
+            EvidenceSetV2Error,
+            EvidenceSetV2Store,
+            ensure_evidence_v2_tables,
+        )
+
+        try:
+            ensure_evidence_v2_tables(connection, create=False)
+        except EvidenceSetV2Error as error:
+            missing_id = next(iter(all_ev_ids))
+            raise MetricV2Error(
+                f"metric v2 references a missing evidence set {missing_id}"
+            ) from error
+        ev_store = EvidenceSetV2Store(connection)
+        ev_sets, ev_lineages = ev_store.get_sets_and_lineages(all_ev_ids)
+        for identifiers in ev_lineages.values():
+            for ident in identifiers:
+                all_obs_ids.add(str(ident))
+
+    # Batch fetch ALL unique observations (metric + evidence set inputs) in chunks <= 256
+    obs_map: dict[str, tuple[str, str, str, datetime]] = {}
+    if all_obs_ids:
+        for chunk in chunked_sequence(list(all_obs_ids), MAX_CHUNK_SIZE):
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = connection.execute(
+                f"SELECT observation_id, asset_id, source_id, field_name, available_at "
+                f"FROM {_OBS_TABLE} "
+                f"WHERE observation_id IN ({placeholders})",
+                list(chunk),
+            ).fetchall()
+            for r in rows:
+                obs_map[str(r[0])] = (
+                    str(r[1]),
+                    str(r[2]),
+                    str(r[3]),
+                    parse_instant_utc(r[4], "observation available_at"),
+                )
+
+    # Verify evidence set observation lineages against obs_map
+    if all_ev_ids and ev_store is not None:
+        try:
+            ev_store.verify_observation_lineages(ev_sets.values(), ev_lineages, obs_map)
+        except EvidenceSetV2Error as error:
+            raise MetricV2Error(str(error)) from error
+
+    # Verify direct observations for EVERY metric in the DAG
+    for m in all_metric_models.values():
+        for oid in m.input_observation_ids:
+            oid_str = str(oid)
+            if oid_str not in obs_map:
+                raise MetricV2Error(f"metric v2 references a missing observation {oid_str}")
+            obs_asset, _, _, obs_avail = obs_map[oid_str]
+            if obs_asset != m.asset_id:
+                raise MetricV2Error(f"metric v2 references a foreign observation {oid_str}")
+            if obs_avail > m.available_at:
+                raise MetricV2Error(f"metric v2 references a future observation {oid_str}")
+
+    # Verify EvidenceSet parameters for EVERY metric in the DAG
+    for m in all_metric_models.values():
+        ref = m.parameters.get("evidence_set_id")
+        if ref is not None:
+            es_id = UUID(str(ref))
+            if es_id not in ev_sets:
+                raise MetricV2Error(f"metric v2 references a missing evidence set {es_id}")
+            es = ev_sets[es_id]
+            if es.asset_id != m.asset_id:
+                raise MetricV2Error(f"metric v2 references a foreign evidence set {es_id}")
+            if es.available_at > m.available_at:
+                raise MetricV2Error(f"metric v2 references a future evidence set {es_id}")
+            es_obs = ev_lineages[es_id]
+            if set(es_obs) != set(m.input_observation_ids) or len(es_obs) != len(
+                m.input_observation_ids
+            ):
+                raise MetricV2Error(
+                    "metric v2 observation inputs do not match evidence set members"
+                )
+
+    return all_metric_models
+
+
 def fetch_diagnostics_chunked(
     connection: DuckDBPyConnection,
     diagnostic_ids: Collection[UUID],
@@ -418,18 +594,12 @@ def fetch_diagnostics_chunked(
             cited_metrics_by_id = fetch_metrics_chunked(
                 connection, sorted(cited_metric_ids, key=str)
             )
+            verify_metrics_dag_and_lineage(connection, cited_metrics_by_id)
 
-        from investment_analyst.storage.metric_v2 import recalculate_metric_result_id
-
-        # Check all cited metrics exist and have valid canonical identity
+        # Check all cited metrics exist
         for mid in cited_metric_ids:
             if mid not in cited_metrics_by_id:
                 raise RecordNotFoundError(f"diagnostic references missing metric {mid}")
-            m_res = cited_metrics_by_id[mid]
-            if recalculate_metric_result_id(m_res) != m_res.result_id:
-                raise AnalyticalV2ValidationError(
-                    f"diagnostic cited metric {mid} identity does not match its semantic preimage"
-                )
 
         # Assemble diagnostics
         for did in chunk:
@@ -617,17 +787,11 @@ def fetch_snapshots_chunked(
         metrics_by_id: dict[UUID, MetricResult] = {}
         if all_metric_ids:
             metrics_by_id = fetch_metrics_chunked(connection, sorted(all_metric_ids, key=str))
-
-        from investment_analyst.storage.metric_v2 import recalculate_metric_result_id
+            verify_metrics_dag_and_lineage(connection, metrics_by_id)
 
         for mid in all_metric_ids:
             if mid not in metrics_by_id:
                 raise RecordNotFoundError(f"snapshot references missing metric {mid}")
-            m_res = metrics_by_id[mid]
-            if recalculate_metric_result_id(m_res) != m_res.result_id:
-                raise AnalyticalV2ValidationError(
-                    f"snapshot cited metric {mid} identity does not match its semantic preimage"
-                )
 
         # Collect all referenced EvidenceSets from metrics
         all_es_ids: set[UUID] = set()

@@ -51,6 +51,8 @@ from investment_analyst.storage.analytical_v2_validation import MAX_CHUNK_SIZE
 from investment_analyst.storage.diagnostic_v2 import (
     DiagnosticV2Error,
 )
+from investment_analyst.storage.errors import StorageError
+from investment_analyst.storage.evidence_set_v2 import EvidenceSetV2Error
 from investment_analyst.storage.metric_v2 import MetricV2Error
 from investment_analyst.storage.raw_v2 import RawV2Staging
 
@@ -2077,3 +2079,305 @@ def test_list_metrics_pagination_and_bounded_queries(tmp_path: Path) -> None:
         # Distinctly bounded without N+1 (513 queries would be N+1; actual is <= 30)
         assert len(proxy.queries) <= 16 + 64 * math.ceil(513 / MAX_CHUNK_SIZE)
         assert len(proxy.queries) < 50
+
+
+def test_save_evidence_set_rejects_missing_foreign_future_observation_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    """EvidenceSet save validates observations: rejects missing, foreign, future,
+    and is idempotent.
+    """
+    staging = _staging(tmp_path, "staging-ev-set-validation")
+    base_time = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    asset_id = "equity:us:aapl"
+
+    with staging:
+        obs1 = _seed_observation(
+            staging, base_time, asset_id, field_name="close", source_id="alpaca:feed"
+        )
+        obs2 = _seed_observation(
+            staging,
+            base_time + timedelta(hours=1),
+            asset_id,
+            field_name="close",
+            source_id="alpaca:feed",
+        )
+
+        segs = build_evidence_segments([obs1, obs2])
+        staging.save_evidence_segments(segs)
+        valid_set = build_evidence_set([obs1, obs2], segments=segs)
+
+        # 1. Valid save succeeds and returns True; saving again returns False (idempotent)
+        assert staging.save_evidence_set(valid_set) is True
+        assert staging.save_evidence_set(valid_set) is False
+
+        # 2. Missing observation
+        missing_obs = NormalizedObservation(
+            observation_id=uuid4(),
+            raw_record_id=uuid4(),
+            asset_id=asset_id,
+            field_name="close",
+            value=Decimal("100"),
+            unit="USD",
+            frequency=DataFrequency.HOUR_1,
+            observed_at=base_time,
+            available_at=base_time,
+            normalized_at=base_time,
+            source=obs1.source,
+            quality=DataQuality.VALID,
+            transformation_version="1.0.0",
+        )
+        missing_segs = build_evidence_segments([missing_obs])
+        staging.save_evidence_segments(missing_segs)
+        set_missing = build_evidence_set([missing_obs], segments=missing_segs)
+        with pytest.raises(EvidenceSetV2Error, match="missing observation"):
+            staging.save_evidence_set(set_missing)
+
+        # 3. Foreign observation (different asset)
+        foreign_obs = _seed_observation(
+            staging, base_time, "equity:us:msft", field_name="close", source_id="alpaca:feed"
+        )
+        foreign_segs = build_evidence_segments([foreign_obs])
+        staging.save_evidence_segments(foreign_segs)
+        set_foreign = build_evidence_set([foreign_obs], segments=foreign_segs)
+        set_foreign_aapl = set_foreign.model_copy(update={"asset_id": asset_id})
+        with pytest.raises(EvidenceSetV2Error):
+            staging.save_evidence_set(set_foreign_aapl)
+
+        # 4. Future observation (obs available_at > set available_at)
+        future_obs = _seed_observation(
+            staging,
+            base_time + timedelta(days=1),
+            asset_id,
+            field_name="close",
+            source_id="alpaca:feed",
+        )
+        future_segs = build_evidence_segments([future_obs])
+        staging.save_evidence_segments(future_segs)
+        set_future = build_evidence_set([future_obs], segments=future_segs)
+        set_future_early = set_future.model_copy(update={"available_at": base_time})
+        with pytest.raises(EvidenceSetV2Error, match="future observation|does not verify"):
+            staging.save_evidence_set(set_future_early)
+
+
+def test_save_metrics_rejects_child_when_parent_has_missing_or_corrupt_observation(
+    tmp_path: Path,
+) -> None:
+    """save_metrics checks entire ancestor DAG: fails if ancestor observation
+    is missing or corrupt.
+    """
+    staging = _staging(tmp_path, "staging-metric-ancestor-obs")
+    base_time = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    asset_id = "equity:us:aapl"
+
+    with staging:
+        obs_parent = _seed_observation(staging, base_time, asset_id)
+        obs_child = _seed_observation(staging, base_time + timedelta(hours=1), asset_id)
+
+        # Create and save parent metric
+        parent_cand = MetricResult(
+            result_id=uuid4(),
+            asset_id=asset_id,
+            metric_key="market.close.price",
+            value=Decimal("100"),
+            unit="USD",
+            as_of=base_time,
+            available_at=base_time,
+            computed_at=base_time,
+            parameters={},
+            input_observation_ids=[obs_parent.observation_id],
+            input_metric_result_ids=[],
+            algorithm_version="v1",
+            quality=DataQuality.VALID,
+        )
+        parent = parent_cand.model_copy(
+            update={"result_id": metric_result_id_from_model_v2(parent_cand)}
+        )
+        staging.save_metrics([parent])
+
+        # Create child metric depending on parent
+        child_time = base_time + timedelta(hours=2)
+        child_cand = MetricResult(
+            result_id=uuid4(),
+            asset_id=asset_id,
+            metric_key="market.sma.20",
+            value=Decimal("101"),
+            unit="USD",
+            as_of=child_time,
+            available_at=child_time,
+            computed_at=child_time,
+            parameters={},
+            input_observation_ids=[obs_child.observation_id],
+            input_metric_result_ids=[parent.result_id],
+            algorithm_version="v1",
+            quality=DataQuality.VALID,
+        )
+        child = child_cand.model_copy(
+            update={"result_id": metric_result_id_from_model_v2(child_cand)}
+        )
+
+        # Now corrupt/delete the parent's observation from normalized_observations_v2
+        staging._connection.execute(
+            "DELETE FROM normalized_observations_v2 WHERE observation_id = ?",
+            [str(obs_parent.observation_id)],
+        )
+
+        # Saving child must fail closed because parent's ancestor observation is missing
+        with pytest.raises(MetricV2Error, match="missing observation"):
+            staging.save_metrics([child])
+
+
+def test_save_and_get_diagnostics_reject_corrupt_ancestor_observation(
+    tmp_path: Path,
+) -> None:
+    """save_diagnostics and get_diagnostics verify cited metrics full DAG and observations."""
+    staging = _staging(tmp_path, "staging-diag-ancestor-obs")
+    base_time = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    asset_id = "equity:us:aapl"
+
+    with staging:
+        obs_parent = _seed_observation(staging, base_time, asset_id)
+        obs_leaf = _seed_observation(staging, base_time + timedelta(hours=1), asset_id)
+
+        # Parent metric
+        parent_cand = MetricResult(
+            result_id=uuid4(),
+            asset_id=asset_id,
+            metric_key="market.close.price",
+            value=Decimal("100"),
+            unit="USD",
+            as_of=base_time,
+            available_at=base_time,
+            computed_at=base_time,
+            parameters={},
+            input_observation_ids=[obs_parent.observation_id],
+            input_metric_result_ids=[],
+            algorithm_version="v1",
+            quality=DataQuality.VALID,
+        )
+        parent = parent_cand.model_copy(
+            update={"result_id": metric_result_id_from_model_v2(parent_cand)}
+        )
+
+        # Leaf metric
+        leaf_time = base_time + timedelta(hours=2)
+        leaf_cand = MetricResult(
+            result_id=uuid4(),
+            asset_id=asset_id,
+            metric_key="market.sma.20",
+            value=Decimal("101"),
+            unit="USD",
+            as_of=leaf_time,
+            available_at=leaf_time,
+            computed_at=leaf_time,
+            parameters={},
+            input_observation_ids=[obs_leaf.observation_id],
+            input_metric_result_ids=[parent.result_id],
+            algorithm_version="v1",
+            quality=DataQuality.VALID,
+        )
+        leaf = leaf_cand.model_copy(update={"result_id": metric_result_id_from_model_v2(leaf_cand)})
+        staging.save_metrics([parent, leaf])
+
+        # Delete parent's observation
+        staging._connection.execute(
+            "DELETE FROM normalized_observations_v2 WHERE observation_id = ?",
+            [str(obs_parent.observation_id)],
+        )
+
+        diag = DiagnosticResult(
+            diagnostic_id=uuid4(),
+            asset_id=asset_id,
+            mode=DiagnosticMode.MARKET,
+            verdict=DiagnosticVerdict.POSITIVE,
+            final_score=Decimal("80.00"),
+            confidence=Decimal("0.90"),
+            as_of=leaf_time,
+            available_at=leaf_time,
+            computed_at=leaf_time,
+            algorithm_version="v1",
+            summary="test summary",
+            quality=DataQuality.VALID,
+            components=[
+                DiagnosticComponent(
+                    component_key="momentum",
+                    score=Decimal("80.00"),
+                    weight=Decimal("1.00"),
+                    weighted_contribution=Decimal("80.00"),
+                    metric_result_ids=[leaf.result_id],
+                    explanation="momentum test",
+                )
+            ],
+            evidence=[
+                DiagnosticEvidence(
+                    metric_result_id=leaf.result_id,
+                    direction=EvidenceDirection.SUPPORTS,
+                    contribution=Decimal("80.00"),
+                    reason="leaf metric",
+                )
+            ],
+        )
+
+        # save_diagnostics must reject because cited metric ancestor has missing observation
+        with pytest.raises(DiagnosticV2Error, match="missing observation"):
+            staging.save_diagnostics([diag])
+
+
+def test_save_and_get_snapshots_reject_corrupt_ancestor_observation_and_corrupt_evidence_set(
+    tmp_path: Path,
+) -> None:
+    """save_snapshots and get_snapshots verify full DAG and EvidenceSets via get_sets."""
+    staging = _staging(tmp_path, "staging-snap-ancestor-obs")
+    base_time = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    asset_id = "equity:us:aapl"
+
+    with staging:
+        obs1 = _seed_observation(staging, base_time, asset_id)
+        segs = build_evidence_segments([obs1])
+        staging.save_evidence_segments(segs)
+        es = build_evidence_set([obs1], segments=segs)
+        staging.save_evidence_set(es)
+
+        metric_cand = MetricResult(
+            result_id=uuid4(),
+            asset_id=asset_id,
+            metric_key="market.close.price",
+            value=Decimal("100"),
+            unit="USD",
+            as_of=base_time,
+            available_at=base_time,
+            computed_at=base_time,
+            parameters={"evidence_set_id": str(es.evidence_set_id)},
+            input_observation_ids=[obs1.observation_id],
+            input_metric_result_ids=[],
+            algorithm_version="v1",
+            quality=DataQuality.VALID,
+        )
+        metric = metric_cand.model_copy(
+            update={"result_id": metric_result_id_from_model_v2(metric_cand)}
+        )
+        staging.save_metrics([metric])
+
+        # Corrupt EvidenceSet observation
+        staging._connection.execute(
+            "DELETE FROM normalized_observations_v2 WHERE observation_id = ?",
+            [str(obs1.observation_id)],
+        )
+
+        snap = build_analysis_snapshot(
+            asset_id=asset_id,
+            domain="market",
+            known_at=base_time,
+            policy_version="v1",
+            metric_ids=[metric.result_id],
+            diagnostic_ids=[],
+            evidence_set_hashes=[es.canonical_hash],
+            created_at=base_time,
+        )
+
+        # save_snapshots must reject because EvidenceSet / metric observation is missing
+        with pytest.raises(
+            (AnalysisSnapshotV2Error, MetricV2Error, StorageError),
+            match="missing observation|missing evidence set",
+        ):
+            staging.save_analysis_snapshots([snap])

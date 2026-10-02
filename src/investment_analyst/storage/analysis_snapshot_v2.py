@@ -42,13 +42,18 @@ from investment_analyst.storage.analytical_v2_validation import (
     fetch_snapshots_chunked,
     validate_keyset_cursor,
     validate_keyset_limit,
+    verify_metrics_dag_and_lineage,
 )
 from investment_analyst.storage.errors import (
     RecordConflictError,
     RecordNotFoundError,
     StorageError,
 )
-from investment_analyst.storage.evidence_set_v2 import EvidenceSetV2Error
+from investment_analyst.storage.evidence_set_v2 import (
+    EvidenceSetV2Error,
+    EvidenceSetV2Store,
+    ensure_evidence_v2_tables,
+)
 from investment_analyst.storage.metric_v2 import MetricV2Error
 
 ANALYSIS_SNAPSHOT_V2_TABLE: Final[str] = "analysis_snapshots_v2"
@@ -325,37 +330,39 @@ class AnalysisSnapshotV2Store:
         # 4. Hydrate and verify cited metrics in chunks <= 256 using fetch_metrics_chunked
         try:
             metrics_by_id = fetch_metrics_chunked(self._connection, all_metric_ids)
+            if metrics_by_id:
+                verify_metrics_dag_and_lineage(self._connection, metrics_by_id)
         except RecordNotFoundError as error:
             raise RecordNotFoundError(f"snapshot references missing metric: {error}") from error
         except (AnalyticalV2ValidationError, MetricV2Error) as error:
             raise AnalysisSnapshotV2Error(str(error)) from error
 
-        # 5. Gather all referenced EvidenceSets across all cited metrics in chunks <= 256
-        all_es_ids = {
-            str(m.parameters["evidence_set_id"])
+        # 5. Gather and verify all referenced EvidenceSets across all cited metrics
+        all_es_uuids = {
+            UUID(str(m.parameters["evidence_set_id"]))
             for m in metrics_by_id.values()
             if m.parameters.get("evidence_set_id")
         }
         es_info: dict[str, tuple[str, datetime, str]] = {}
-        for es_chunk in chunked_sequence(sorted(all_es_ids), MAX_CHUNK_SIZE):
-            es_placeholders = ", ".join("?" for _ in es_chunk)
-            rows = self._connection.execute(
-                f"SELECT evidence_set_id, asset_id, available_at, canonical_hash "
-                f"FROM evidence_sets_v2 WHERE evidence_set_id IN ({es_placeholders})",
-                list(es_chunk),
-            ).fetchall()
-            for e_id, a_id, avail, c_hash in rows:
-                es_info[str(e_id)] = (
-                    str(a_id),
-                    _parse_instant_text(avail),
-                    str(c_hash),
-                )
-
-        for es_id in all_es_ids:
-            if es_id not in es_info:
+        if all_es_uuids:
+            try:
+                ensure_evidence_v2_tables(self._connection, create=False)
+                ev_store = EvidenceSetV2Store(self._connection)
+                es_by_id = ev_store.get_sets(sorted(all_es_uuids, key=str))
+            except RecordNotFoundError as error:
                 raise RecordNotFoundError(
-                    f"snapshot metric references missing evidence set {es_id}"
-                )
+                    f"snapshot metric references missing evidence set: {error}"
+                ) from error
+            except EvidenceSetV2Error as error:
+                raise AnalysisSnapshotV2Error(str(error)) from error
+
+            for es_uuid in all_es_uuids:
+                if es_uuid not in es_by_id:
+                    raise RecordNotFoundError(
+                        f"snapshot metric references missing evidence set {es_uuid}"
+                    )
+                es = es_by_id[es_uuid]
+                es_info[str(es_uuid)] = (es.asset_id, es.available_at, es.canonical_hash)
 
         # 6. Verify each snapshot
         for item in snapshots:

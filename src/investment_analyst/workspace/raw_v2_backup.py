@@ -1175,16 +1175,17 @@ class RawV2StagingBackupService:
     def _verify_restored_metrics(
         self, root: Path, index_path: Path, manifest: RawV2StagingBackupManifest
     ) -> None:
-        from uuid import UUID as _UUID
+        import collections
 
         import duckdb
 
-        from investment_analyst.storage.evidence_set_v2 import (
-            EvidenceSetV2Error,
-            row_to_evidence_set,
-            row_to_segment,
+        from investment_analyst.storage.analytical_v2_validation import (
+            AnalyticalV2ValidationError,
+            fetch_metrics_chunked,
+            verify_metrics_dag_and_lineage,
         )
-        from investment_analyst.storage.metric_v2 import MetricV2Error, row_to_metric
+        from investment_analyst.storage.errors import RecordNotFoundError
+        from investment_analyst.storage.metric_v2 import MetricV2Error
 
         del root
         expected = manifest.metric_counts
@@ -1204,11 +1205,31 @@ class RawV2StagingBackupService:
                 raise RawV2BackupError("restored metric table is missing") from error
             if not names or "document_json" in names:
                 raise RawV2BackupError("restored metric table is incompatible")
+
+            # 1. Verify contiguous member positions for all evidence sets in batch
+            try:
+                member_rows = connection.execute(
+                    "SELECT evidence_set_id, position FROM evidence_set_v2_members "
+                    "ORDER BY evidence_set_id, position"
+                ).fetchall()
+                members_by_set: dict[str, list[int]] = collections.defaultdict(list)
+                for es_id, pos in member_rows:
+                    members_by_set[str(es_id)].append(int(pos))
+                for _es_id, positions in members_by_set.items():
+                    if positions != list(range(len(positions))):
+                        raise RawV2BackupError(
+                            "restored evidence set members have non-contiguous positions"
+                        )
+            except RawV2BackupError:
+                raise
+            except Exception:
+                pass
+
             digest = empty_digest()
             counts_by_key: dict[str, int] = {}
             verified = 0
-            cursor_at = None
-            cursor_id = None
+            cursor_at: str | None = None
+            cursor_id: UUID | None = None
             while True:
                 clauses: list[str] = []
                 parameters: list[object] = []
@@ -1217,127 +1238,71 @@ class RawV2StagingBackupService:
                     parameters.extend([cursor_at, str(cursor_id)])
                 where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
                 rows = connection.execute(
-                    "SELECT result_id, asset_id, metric_key, value_text, unit, as_of, "
-                    "available_at, computed_at, parameters_json, evidence_set_id, "
-                    "algorithm_version, quality FROM metric_results_v2"
+                    "SELECT result_id, available_at FROM metric_results_v2"
                     f"{where} ORDER BY available_at, result_id LIMIT {_MAX_BACKUP_PAGE}",
                     parameters,
                 ).fetchall()
                 if not rows:
                     break
-                for row in rows:
-                    result_id = _UUID(str(row[0]))
-                    obs_link_rows = connection.execute(
-                        "SELECT position, observation_id FROM metric_v2_observation_links "
-                        "WHERE result_id = ? ORDER BY position",
-                        [str(result_id)],
-                    ).fetchall()
-                    obs_positions = [int(r[0]) for r in obs_link_rows]
-                    if obs_positions != list(range(len(obs_positions))):
+
+                chunk_ids = [UUID(str(row[0])) for row in rows]
+                try:
+                    hydrated_metrics = fetch_metrics_chunked(connection, chunk_ids)
+                    verify_metrics_dag_and_lineage(connection, hydrated_metrics)
+                except AnalyticalV2ValidationError as error:
+                    msg = str(error)
+                    if "metric observation links" in msg:
                         raise RawV2BackupError(
                             "restored metric observation links have non-contiguous positions"
-                        )
-                    obs_links = [r[1] for r in obs_link_rows]
-
-                    met_link_rows = connection.execute(
-                        "SELECT position, input_result_id FROM metric_v2_metric_links "
-                        "WHERE result_id = ? ORDER BY position",
-                        [str(result_id)],
-                    ).fetchall()
-                    met_positions = [int(r[0]) for r in met_link_rows]
-                    if met_positions != list(range(len(met_positions))):
+                        ) from error
+                    if "metric dependency links" in msg:
                         raise RawV2BackupError(
                             "restored metric dependency links have non-contiguous positions"
-                        )
-                    met_links = [r[1] for r in met_link_rows]
-
-                    try:
-                        result = row_to_metric(
-                            tuple(row),
-                            observation_ids=[_UUID(str(item)) for item in obs_links],
-                            metric_ids=[_UUID(str(item)) for item in met_links],
-                        )
-                    except MetricV2Error as error:
-                        raise RawV2BackupError("restored metric row is corrupt") from error
-
-                    from investment_analyst.storage.metric_v2 import (
-                        recalculate_metric_result_id,
-                    )
-
-                    if recalculate_metric_result_id(result) != result.result_id:
+                        ) from error
+                    raise RawV2BackupError(f"restored metric validation failed: {error}") from error
+                except MetricV2Error as error:
+                    msg = str(error)
+                    if "metric observation links" in msg or "non-contiguous" in msg:
+                        raise RawV2BackupError(
+                            "restored metric observation links have non-contiguous positions"
+                        ) from error
+                    if "metric dependency links" in msg:
+                        raise RawV2BackupError(
+                            "restored metric dependency links have non-contiguous positions"
+                        ) from error
+                    if "ancestor" in msg and "identity does not match" in msg:
                         raise RawV2BackupError(
                             "restored metric identity does not match its semantic preimage"
-                        )
+                        ) from error
+                    if "foreign observation" in msg:
+                        raise RawV2BackupError("restored metric link is foreign") from error
+                    if "future observation" in msg:
+                        raise RawV2BackupError("restored metric link is future") from error
+                    if "missing observation" in msg:
+                        raise RawV2BackupError(
+                            "restored metric link is missing observation"
+                        ) from error
+                    if "foreign metric" in msg:
+                        raise RawV2BackupError("restored metric dependency is foreign") from error
+                    if "future metric" in msg:
+                        raise RawV2BackupError("restored metric dependency is future") from error
+                    if "missing evidence set" in msg:
+                        raise RawV2BackupError("restored metric lineage is missing") from error
+                    if "future evidence set" in msg:
+                        raise RawV2BackupError("restored metric lineage is future") from error
+                    if (
+                        "does not match evidence set members" in msg
+                        or "does not match its inputs" in msg
+                    ):
+                        raise RawV2BackupError("restored metric lineage is corrupt") from error
+                    raise RawV2BackupError("restored metric row is corrupt") from error
+                except RecordNotFoundError as error:
+                    raise RawV2BackupError(
+                        f"restored metric dependency missing: {error}"
+                    ) from error
 
-                    for observation_id in result.input_observation_ids:
-                        obs_rows = connection.execute(
-                            "SELECT asset_id, available_at FROM normalized_observations_v2 "
-                            "WHERE observation_id = ?",
-                            [str(observation_id)],
-                        ).fetchall()
-                        if not obs_rows:
-                            raise RawV2BackupError("restored metric link is missing observation")
-                        if str(obs_rows[0][0]) != result.asset_id:
-                            raise RawV2BackupError("restored metric link is foreign")
-                        obs_available = datetime.fromisoformat(str(obs_rows[0][1]))
-                        if obs_available.tzinfo is None:
-                            raise RawV2BackupError("restored metric link is future")
-                        if obs_available.astimezone(UTC) > result.available_at:
-                            raise RawV2BackupError("restored metric link is future")
-                    for input_id in result.input_metric_result_ids:
-                        met_rows = connection.execute(
-                            "SELECT asset_id FROM metric_results_v2 WHERE result_id = ?",
-                            [str(input_id)],
-                        ).fetchall()
-                        if not met_rows or str(met_rows[0][0]) != result.asset_id:
-                            raise RawV2BackupError("restored metric dependency is foreign")
-                    reference = result.parameters.get("evidence_set_id")
-                    if reference is not None:
-                        set_rows = connection.execute(
-                            "SELECT evidence_set_id, asset_id, source_id, field_name, "
-                            "input_count, head_offset, inline_observation_ids_json, "
-                            "inline_available_at, first_observed_at, first_observation_id, "
-                            "last_observed_at, last_observation_id, available_at, "
-                            "canonical_hash FROM evidence_sets_v2 WHERE evidence_set_id = ?",
-                            [str(reference)],
-                        ).fetchall()
-                        if not set_rows:
-                            raise RawV2BackupError("restored metric lineage is missing")
-                        member_rows = connection.execute(
-                            "SELECT position, segment_id FROM evidence_set_v2_members "
-                            "WHERE evidence_set_id = ? ORDER BY position",
-                            [str(reference)],
-                        ).fetchall()
-                        mem_positions = [int(r[0]) for r in member_rows]
-                        if mem_positions != list(range(len(mem_positions))):
-                            raise RawV2BackupError(
-                                "restored evidence set members have non-contiguous positions"
-                            )
-                        members = [r[1] for r in member_rows]
-                        try:
-                            stored_set = row_to_evidence_set(
-                                tuple(set_rows[0]),
-                                segment_ids=[_UUID(str(item)) for item in members],
-                            )
-                        except EvidenceSetV2Error as error:
-                            raise RawV2BackupError("restored metric lineage is corrupt") from error
-                        for segment_id in stored_set.segment_ids:
-                            seg_rows = connection.execute(
-                                "SELECT segment_id, asset_id, source_id, field_name, day, "
-                                "observation_ids_json, available_at, canonical_hash "
-                                "FROM evidence_segments_v2 WHERE segment_id = ?",
-                                [str(segment_id)],
-                            ).fetchall()
-                            if not seg_rows:
-                                raise RawV2BackupError("restored lineage segment is missing")
-                            try:
-                                row_to_segment(tuple(seg_rows[0]))
-                            except EvidenceSetV2Error as error:
-                                raise RawV2BackupError(
-                                    "restored lineage segment is corrupt"
-                                ) from error
-                        if stored_set.available_at > result.available_at:
-                            raise RawV2BackupError("restored metric lineage is future")
+                for result_id in chunk_ids:
+                    result = hydrated_metrics[result_id]
                     canonical = (
                         f"{result.result_id}|{result.asset_id}|{result.metric_key}|"
                         f"{result.value}|{result.unit}|{result.as_of.isoformat()}|"
@@ -1348,8 +1313,10 @@ class RawV2StagingBackupService:
                         digest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
                     )
                     counts_by_key[result.metric_key] = counts_by_key.get(result.metric_key, 0) + 1
+
                 verified += len(rows)
-                cursor_at, cursor_id = str(rows[-1][6]), _UUID(str(rows[-1][0]))
+                cursor_at, cursor_id = str(rows[-1][1]), UUID(str(rows[-1][0]))
+
             if verified != expected.metrics:
                 raise RawV2BackupError("restored metric count mismatches manifest")
             if dict(counts_by_key) != dict(expected.counts_by_metric_key):
