@@ -19,7 +19,7 @@ import collections
 from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Final
+from typing import TYPE_CHECKING, Final
 from uuid import UUID
 
 from duckdb import DuckDBPyConnection
@@ -49,6 +49,9 @@ from investment_analyst.storage.errors import (
     RecordNotFoundError,
     StorageError,
 )
+
+if TYPE_CHECKING:
+    from investment_analyst.storage.evidence_set_v2 import EvidenceSegment, EvidenceSet
 
 MAX_CHUNK_SIZE: Final[int] = 256
 _METRIC_TABLE = "metric_results_v2"
@@ -98,6 +101,46 @@ def _get_evidence_v2_symbols() -> tuple[object, ...]:
             ensure_evidence_v2_tables,
         )
     return _evidence_v2_symbols
+
+
+class AnalyticalV2ValidationContext:
+    """Deduplicate resolved analytical lineage for one storage operation only."""
+
+    def __init__(self) -> None:
+        self.metrics_by_id: dict[UUID, MetricResult] = {}
+        self.diagnostics_by_id: dict[UUID, DiagnosticResult] = {}
+        self.evidence_sets_by_id: dict[UUID, EvidenceSet] = {}
+        self.evidence_lineages_by_id: dict[UUID, tuple[UUID, ...]] = {}
+        self.segments_by_id: dict[UUID, EvidenceSegment] = {}
+        self.observations_by_id: dict[str, tuple[str, str, str, datetime]] = {}
+
+    def resolve_metrics(
+        self,
+        connection: DuckDBPyConnection,
+        metric_ids: Collection[UUID],
+    ) -> dict[UUID, MetricResult]:
+        """Fetch and validate only metric IDs not already resolved in this operation."""
+        ordered_ids = tuple(sorted(set(metric_ids), key=str))
+        missing_ids = [mid for mid in ordered_ids if mid not in self.metrics_by_id]
+        if missing_ids:
+            fetched = fetch_metrics_chunked(connection, missing_ids)
+            verify_metrics_dag_and_lineage(connection, fetched, context=self)
+
+        absent_ids = [mid for mid in ordered_ids if mid not in self.metrics_by_id]
+        if absent_ids:
+            raise RecordNotFoundError(f"metric v2 {absent_ids[0]} was not found")
+        return {mid: self.metrics_by_id[mid] for mid in ordered_ids}
+
+    def require_evidence_sets(
+        self,
+        evidence_set_ids: Collection[UUID],
+    ) -> dict[UUID, EvidenceSet]:
+        """Return already verified EvidenceSets or fail if a caller omitted a reference."""
+        ordered_ids = tuple(sorted(set(evidence_set_ids), key=str))
+        missing_ids = [sid for sid in ordered_ids if sid not in self.evidence_sets_by_id]
+        if missing_ids:
+            raise RecordNotFoundError(f"evidence set {missing_ids[0]} was not resolved")
+        return {sid: self.evidence_sets_by_id[sid] for sid in ordered_ids}
 
 
 class AnalyticalV2ValidationError(StorageError):
@@ -349,6 +392,8 @@ def fetch_metrics_chunked(
 def verify_metrics_dag_and_lineage(
     connection: DuckDBPyConnection,
     metrics: Collection[MetricResult] | Mapping[UUID, MetricResult],
+    *,
+    context: AnalyticalV2ValidationContext | None = None,
 ) -> dict[UUID, MetricResult]:
     """Transitively resolve and strictly verify all metrics, ancestors,
     observations and EvidenceSets in bounded chunks <= 256.
@@ -375,94 +420,144 @@ def verify_metrics_dag_and_lineage(
         return {}
 
     MetricV2Error, recalculate_metric_result_id, _ = _get_metric_v2_symbols()
+    validation_context = context if context is not None else AnalyticalV2ValidationContext()
+    for metric_id, metric in seed_map.items():
+        cached = validation_context.metrics_by_id.get(metric_id)
+        if cached is not None and cached != metric:
+            raise MetricV2Error(f"metric v2 {metric_id} changed during one validation operation")
 
-    all_metric_models: dict[UUID, MetricResult] = dict(seed_map)
-    external_seeds: set[UUID] = {
-        dep
-        for m in seed_map.values()
-        for dep in m.input_metric_result_ids
-        if dep not in all_metric_models
+    new_seed_map = {
+        metric_id: metric
+        for metric_id, metric in seed_map.items()
+        if metric_id not in validation_context.metrics_by_id
+    }
+    pending_metric_models: dict[UUID, MetricResult] = dict(new_seed_map)
+    all_metric_models = dict(validation_context.metrics_by_id)
+    all_metric_models.update(seed_map)
+
+    external_seeds = {
+        dependency_id
+        for metric in new_seed_map.values()
+        for dependency_id in metric.input_metric_result_ids
+        if dependency_id not in all_metric_models
     }
     if external_seeds:
-        transitive_ids = find_transitive_metric_ancestor_ids(connection, external_seeds)
-        needed_ids = external_seeds | transitive_ids
+        ancestor_ids = find_transitive_metric_ancestor_ids(connection, external_seeds)
+        needed_ids = external_seeds | ancestor_ids
+        missing_ancestor_ids = needed_ids.difference(all_metric_models)
         try:
-            fetched_ancestors = fetch_metrics_chunked(connection, list(needed_ids))
+            fetched_ancestors = fetch_metrics_chunked(connection, missing_ancestor_ids)
         except RecordNotFoundError as error:
             raise MetricV2Error(f"metric v2 dependency is not persisted: {error}") from error
 
-        for dep in needed_ids:
-            if dep not in fetched_ancestors:
-                raise MetricV2Error(f"metric v2 dependency {dep} is not persisted")
-            dep_m = fetched_ancestors[dep]
-            if recalculate_metric_result_id(dep_m) != dep_m.result_id:
+        for dependency_id in missing_ancestor_ids:
+            dependency = fetched_ancestors.get(dependency_id)
+            if dependency is None:
+                raise MetricV2Error(f"metric v2 dependency {dependency_id} is not persisted")
+            if recalculate_metric_result_id(dependency) != dependency.result_id:
                 raise MetricV2Error(
-                    f"metric v2 ancestor {dep} identity does not match its semantic preimage"
+                    f"metric v2 ancestor {dependency_id} identity does not match "
+                    "its semantic preimage"
                 )
-            all_metric_models[dep] = dep_m
+            pending_metric_models[dependency_id] = dependency
+            all_metric_models[dependency_id] = dependency
 
-    # Verify DAG acyclicity across all metrics (seeds + ancestors)
-    try:
-        topological_sort_metrics(list(all_metric_models.values()))
-    except AnalyticalV2ValidationError as error:
-        raise MetricV2Error(str(error)) from error
+    # Validate only newly reached edges and nodes. Dependencies already in the
+    # operation context have had their own identity, edges and ancestors checked.
+    pending_ids = set(pending_metric_models)
+    pending_in_degree = dict.fromkeys(pending_ids, 0)
+    pending_children: dict[UUID, list[UUID]] = collections.defaultdict(list)
+    for metric_id, metric in pending_metric_models.items():
+        for dependency_id in metric.input_metric_result_ids:
+            dependency = all_metric_models.get(dependency_id)
+            if dependency is None:
+                raise MetricV2Error(f"metric v2 dependency {dependency_id} is not persisted")
+            if dependency.asset_id != metric.asset_id:
+                raise MetricV2Error(f"metric v2 references a foreign metric {dependency_id}")
+            if dependency.available_at > metric.available_at:
+                raise MetricV2Error(f"metric v2 references a future metric {dependency_id}")
+            if dependency_id in pending_ids:
+                pending_in_degree[metric_id] += 1
+                pending_children[dependency_id].append(metric_id)
 
-    # Verify edge consistency (asset matching and PIT availability) across all dependencies
-    for m in all_metric_models.values():
-        for dep in m.input_metric_result_ids:
-            dep_m = all_metric_models[dep]
-            if dep_m.asset_id != m.asset_id:
-                raise MetricV2Error(f"metric v2 references a foreign metric {dep}")
-            if dep_m.available_at > m.available_at:
-                raise MetricV2Error(f"metric v2 references a future metric {dep}")
+    ready = collections.deque(
+        sorted(
+            (metric_id for metric_id, degree in pending_in_degree.items() if degree == 0),
+            key=str,
+        )
+    )
+    visited_count = 0
+    while ready:
+        metric_id = ready.popleft()
+        visited_count += 1
+        for child_id in pending_children.get(metric_id, []):
+            pending_in_degree[child_id] -= 1
+            if pending_in_degree[child_id] == 0:
+                ready.append(child_id)
+    if visited_count != len(pending_metric_models):
+        cyclic_ids = sorted(
+            (str(metric_id) for metric_id, degree in pending_in_degree.items() if degree > 0)
+        )
+        raise MetricV2Error(f"metric dependency cycle detected among metrics: {cyclic_ids}")
 
-    # Collect observation IDs and evidence set IDs across ALL metrics in DAG
-    all_obs_ids: set[str] = set()
-    all_ev_ids: set[UUID] = set()
-
-    for result in all_metric_models.values():
-        seen_obs: set[str] = set()
-        for obs_id in result.input_observation_ids:
-            key = str(obs_id)
-            if key in seen_obs:
+    # Resolve only new EvidenceSets and reuse already verified segments within
+    # this operation. A subsequent operation always starts with an empty context.
+    new_evidence_set_ids: set[UUID] = set()
+    new_observation_ids: set[str] = set()
+    for metric in pending_metric_models.values():
+        seen_observation_ids: set[str] = set()
+        for observation_id in metric.input_observation_ids:
+            key = str(observation_id)
+            if key in seen_observation_ids:
                 raise MetricV2Error("metric v2 observation inputs must be unique")
-            seen_obs.add(key)
-            all_obs_ids.add(key)
+            seen_observation_ids.add(key)
+            if key not in validation_context.observations_by_id:
+                new_observation_ids.add(key)
 
-        reference = result.parameters.get("evidence_set_id")
+        reference = metric.parameters.get("evidence_set_id")
         if reference is not None:
-            all_ev_ids.add(UUID(str(reference)))
+            evidence_set_id = UUID(str(reference))
+            if evidence_set_id not in validation_context.evidence_sets_by_id:
+                new_evidence_set_ids.add(evidence_set_id)
 
-    # Batch load unique evidence sets, members, and segments
-    ev_sets: dict[UUID, EvidenceSet] = {}
-    ev_lineages: dict[UUID, tuple[UUID, ...]] = {}
-    ev_store: EvidenceSetV2Store | None = None
-    if all_ev_ids:
+    new_evidence_sets: dict[UUID, EvidenceSet] = {}
+    new_evidence_lineages: dict[UUID, tuple[UUID, ...]] = {}
+    new_segments = dict(validation_context.segments_by_id)
+    evidence_store: EvidenceSetV2Store | None = None
+    if new_evidence_set_ids:
         (
-            EvidenceSet,
+            _,
             EvidenceSetV2Error,
             EvidenceSetV2Store,
             ensure_evidence_v2_tables,
         ) = _get_evidence_v2_symbols()
-
         try:
             ensure_evidence_v2_tables(connection, create=False)
         except EvidenceSetV2Error as error:
-            missing_id = next(iter(all_ev_ids))
+            missing_id = min(new_evidence_set_ids, key=str)
             raise MetricV2Error(
                 f"metric v2 references a missing evidence set {missing_id}"
             ) from error
-        ev_store = EvidenceSetV2Store(connection)
-        ev_sets, ev_lineages = ev_store.get_sets_and_lineages(all_ev_ids)
-        for identifiers in ev_lineages.values():
-            for ident in identifiers:
-                all_obs_ids.add(str(ident))
+        evidence_store = EvidenceSetV2Store(connection)
+        try:
+            new_evidence_sets, new_evidence_lineages = evidence_store.get_sets_and_lineages(
+                new_evidence_set_ids,
+                segment_cache=new_segments,
+            )
+        except EvidenceSetV2Error as error:
+            raise MetricV2Error(str(error)) from error
+        for identifiers in new_evidence_lineages.values():
+            new_observation_ids.update(
+                str(identifier)
+                for identifier in identifiers
+                if str(identifier) not in validation_context.observations_by_id
+            )
 
-    # Batch fetch ALL unique observations (metric + evidence set inputs) in chunks <= 256
-    obs_map: dict[str, tuple[str, str, str, datetime]] = {}
-    if all_obs_ids:
+    observations = dict(validation_context.observations_by_id)
+    if new_observation_ids:
         use_fallback = False
-        for chunk in chunked_sequence(list(all_obs_ids), MAX_CHUNK_SIZE):
+        ordered_observation_ids = sorted(new_observation_ids)
+        for chunk in chunked_sequence(ordered_observation_ids, MAX_CHUNK_SIZE):
             placeholders = ", ".join("?" for _ in chunk)
             if not use_fallback:
                 try:
@@ -472,12 +567,12 @@ def verify_metrics_dag_and_lineage(
                         f"WHERE observation_id IN ({placeholders})",
                         list(chunk),
                     ).fetchall()
-                    for r in rows:
-                        obs_map[str(r[0])] = (
-                            str(r[1]),
-                            str(r[2]),
-                            str(r[3]),
-                            parse_instant_utc(r[4], "observation available_at"),
+                    for row in rows:
+                        observations[str(row[0])] = (
+                            str(row[1]),
+                            str(row[2]),
+                            str(row[3]),
+                            parse_instant_utc(row[4], "observation available_at"),
                         )
                     continue
                 except Exception:
@@ -489,60 +584,85 @@ def verify_metrics_dag_and_lineage(
                 f"WHERE observation_id IN ({placeholders})",
                 list(chunk),
             ).fetchall()
-            for r in rows:
-                obs_map[str(r[0])] = (
-                    str(r[1]),
+            for row in rows:
+                observations[str(row[0])] = (
+                    str(row[1]),
                     "",
                     "",
-                    parse_instant_utc(r[2], "observation available_at"),
+                    parse_instant_utc(row[2], "observation available_at"),
                 )
 
-    # Verify evidence set observation lineages against obs_map
-    if all_ev_ids and ev_store is not None:
+    evidence_sets = dict(validation_context.evidence_sets_by_id)
+    evidence_sets.update(new_evidence_sets)
+    evidence_lineages = dict(validation_context.evidence_lineages_by_id)
+    evidence_lineages.update(new_evidence_lineages)
+    if new_evidence_sets and evidence_store is not None:
         try:
-            ev_store.verify_observation_lineages(ev_sets.values(), ev_lineages, obs_map)
+            evidence_store.verify_observation_lineages(
+                new_evidence_sets.values(), new_evidence_lineages, observations
+            )
         except EvidenceSetV2Error as error:
             raise MetricV2Error(str(error)) from error
 
-    # Verify direct observations for EVERY metric in the DAG
-    for m in all_metric_models.values():
-        for oid in m.input_observation_ids:
-            oid_str = str(oid)
-            if oid_str not in obs_map:
-                raise MetricV2Error(f"metric v2 references a missing observation {oid_str}")
-            obs_asset, _, _, obs_avail = obs_map[oid_str]
-            if obs_asset != m.asset_id:
-                raise MetricV2Error(f"metric v2 references a foreign observation {oid_str}")
-            if obs_avail > m.available_at:
-                raise MetricV2Error(f"metric v2 references a future observation {oid_str}")
+    for metric in pending_metric_models.values():
+        for observation_id in metric.input_observation_ids:
+            key = str(observation_id)
+            fact = observations.get(key)
+            if fact is None:
+                raise MetricV2Error(f"metric v2 references a missing observation {key}")
+            observation_asset, _, _, observation_available_at = fact
+            if observation_asset != metric.asset_id:
+                raise MetricV2Error(f"metric v2 references a foreign observation {key}")
+            if observation_available_at > metric.available_at:
+                raise MetricV2Error(f"metric v2 references a future observation {key}")
 
-    # Verify EvidenceSet parameters for EVERY metric in the DAG
-    es_obs_set_by_id = {k: set(v) for k, v in ev_lineages.items()}
-    for m in all_metric_models.values():
-        ref = m.parameters.get("evidence_set_id")
-        if ref is not None:
-            es_id = UUID(str(ref))
-            if es_id not in ev_sets:
-                raise MetricV2Error(f"metric v2 references a missing evidence set {es_id}")
-            es = ev_sets[es_id]
-            if es.asset_id != m.asset_id:
-                raise MetricV2Error(f"metric v2 references a foreign evidence set {es_id}")
-            if es.available_at > m.available_at:
-                raise MetricV2Error(f"metric v2 references a future evidence set {es_id}")
-            es_obs_set = es_obs_set_by_id[es_id]
-            if es_obs_set != set(m.input_observation_ids) or len(ev_lineages[es_id]) != len(
-                m.input_observation_ids
-            ):
-                raise MetricV2Error(
-                    "metric v2 observation inputs do not match evidence set members"
-                )
+    for metric in pending_metric_models.values():
+        reference = metric.parameters.get("evidence_set_id")
+        if reference is None:
+            continue
+        evidence_set_id = UUID(str(reference))
+        evidence_set = evidence_sets.get(evidence_set_id)
+        lineage = evidence_lineages.get(evidence_set_id)
+        if evidence_set is None or lineage is None:
+            raise MetricV2Error(f"metric v2 references a missing evidence set {evidence_set_id}")
+        if evidence_set.asset_id != metric.asset_id:
+            raise MetricV2Error(f"metric v2 references a foreign evidence set {evidence_set_id}")
+        if evidence_set.available_at > metric.available_at:
+            raise MetricV2Error(f"metric v2 references a future evidence set {evidence_set_id}")
+        if set(lineage) != set(metric.input_observation_ids) or len(lineage) != len(
+            metric.input_observation_ids
+        ):
+            raise MetricV2Error("metric v2 observation inputs do not match evidence set members")
 
-    return all_metric_models
+    validation_context.metrics_by_id.update(pending_metric_models)
+    validation_context.evidence_sets_by_id.update(new_evidence_sets)
+    validation_context.evidence_lineages_by_id.update(new_evidence_lineages)
+    validation_context.segments_by_id.update(new_segments)
+    validation_context.observations_by_id.update(
+        {key: observations[key] for key in new_observation_ids if key in observations}
+    )
+
+    # Return only each seed's reachable DAG, even when the context also contains
+    # nodes resolved for earlier pages in the same operation.
+    reachable: dict[UUID, MetricResult] = {}
+    pending_ids_to_visit = list(seed_map)
+    while pending_ids_to_visit:
+        metric_id = pending_ids_to_visit.pop()
+        if metric_id in reachable:
+            continue
+        metric = validation_context.metrics_by_id.get(metric_id)
+        if metric is None:
+            raise MetricV2Error(f"metric v2 {metric_id} was not resolved")
+        reachable[metric_id] = metric
+        pending_ids_to_visit.extend(metric.input_metric_result_ids)
+    return reachable
 
 
 def fetch_diagnostics_chunked(
     connection: DuckDBPyConnection,
     diagnostic_ids: Collection[UUID],
+    *,
+    validation_context: AnalyticalV2ValidationContext | None = None,
 ) -> dict[UUID, DiagnosticResult]:
     """Hydrate DiagnosticResult models in chunks of <= 256 without N+1 queries.
 
@@ -552,8 +672,22 @@ def fetch_diagnostics_chunked(
     if not ordered_ids:
         return {}
 
+    operation_context = (
+        validation_context if validation_context is not None else AnalyticalV2ValidationContext()
+    )
+    missing_ids = tuple(
+        diagnostic_id
+        for diagnostic_id in ordered_ids
+        if diagnostic_id not in operation_context.diagnostics_by_id
+    )
+    if not missing_ids:
+        return {
+            diagnostic_id: operation_context.diagnostics_by_id[diagnostic_id]
+            for diagnostic_id in ordered_ids
+        }
+
     results: dict[UUID, DiagnosticResult] = {}
-    id_chunks = chunked_sequence(ordered_ids, MAX_CHUNK_SIZE)
+    id_chunks = chunked_sequence(missing_ids, MAX_CHUNK_SIZE)
 
     for chunk in id_chunks:
         chunk_str = [str(item) for item in chunk]
@@ -641,13 +775,9 @@ def fetch_diagnostics_chunked(
             for _, mid, _, _, _ in ev_list:
                 cited_metric_ids.add(mid)
 
-        # Hydrate and verify cited metrics in chunks <= 256 using fetch_metrics_chunked
-        cited_metrics_by_id: dict[UUID, MetricResult] = {}
-        if cited_metric_ids:
-            cited_metrics_by_id = fetch_metrics_chunked(
-                connection, sorted(cited_metric_ids, key=str)
-            )
-            verify_metrics_dag_and_lineage(connection, cited_metrics_by_id)
+        # Resolve through the caller's operation context so metrics and their
+        # reachable EvidenceSet lineage are reused by snapshot validation.
+        cited_metrics_by_id = operation_context.resolve_metrics(connection, cited_metric_ids)
 
         # Check all cited metrics exist
         for mid in cited_metric_ids:
@@ -753,12 +883,19 @@ def fetch_diagnostics_chunked(
             validate_diagnostic_internal_consistency(diag, metric_keys)
             results[did] = diag
 
-    return results
+    operation_context.diagnostics_by_id.update(results)
+    return {
+        diagnostic_id: operation_context.diagnostics_by_id[diagnostic_id]
+        for diagnostic_id in ordered_ids
+    }
 
 
 def fetch_snapshots_chunked(
     connection: DuckDBPyConnection,
     snapshot_ids: Collection[UUID],
+    *,
+    validation_context: AnalyticalV2ValidationContext | None = None,
+    snapshot_rows_by_id: Mapping[UUID, tuple[object, ...]] | None = None,
 ) -> dict[UUID, AnalysisSnapshot]:
     """Hydrate AnalysisSnapshot models in chunks of <= 256 without N+1 queries.
 
@@ -768,6 +905,9 @@ def fetch_snapshots_chunked(
     if not ordered_ids:
         return {}
 
+    operation_context = (
+        validation_context if validation_context is not None else AnalyticalV2ValidationContext()
+    )
     results: dict[UUID, AnalysisSnapshot] = {}
     id_chunks = chunked_sequence(ordered_ids, MAX_CHUNK_SIZE)
 
@@ -775,15 +915,24 @@ def fetch_snapshots_chunked(
         chunk_str = [str(item) for item in chunk]
         placeholders = ", ".join("?" for _ in chunk)
 
-        # 1. Snapshot rows
-        rows = connection.execute(
-            f"SELECT snapshot_id, asset_id, domain, known_at, policy_version, "
-            f"evidence_set_digest, created_at "
-            f"FROM {_SNAP_TABLE} WHERE snapshot_id IN ({placeholders})",
-            chunk_str,
-        ).fetchall()
+        # 1. Snapshot rows; reuse rows already read by an idempotent save operation.
+        rows_by_id = {
+            str(snapshot_id): row
+            for snapshot_id, row in (snapshot_rows_by_id or {}).items()
+            if snapshot_id in chunk
+        }
+        missing_snapshot_ids = [sid for sid in chunk if str(sid) not in rows_by_id]
+        if missing_snapshot_ids:
+            missing_ids_str = [str(sid) for sid in missing_snapshot_ids]
+            missing_placeholders = ", ".join("?" for _ in missing_snapshot_ids)
+            rows = connection.execute(
+                f"SELECT snapshot_id, asset_id, domain, known_at, policy_version, "
+                f"evidence_set_digest, created_at "
+                f"FROM {_SNAP_TABLE} WHERE snapshot_id IN ({missing_placeholders})",
+                missing_ids_str,
+            ).fetchall()
+            rows_by_id.update({str(row[0]): row for row in rows})
 
-        rows_by_id = {str(row[0]): row for row in rows}
         for sid in chunk:
             if str(sid) not in rows_by_id:
                 raise RecordNotFoundError(f"analysis snapshot {sid} not found")
@@ -817,7 +966,11 @@ def fetch_snapshots_chunked(
                 all_cited_diag_ids.add(did)
 
         # Hydrate all cited diagnostics using chunked fetch
-        diagnostics_by_id = fetch_diagnostics_chunked(connection, all_cited_diag_ids)
+        diagnostics_by_id = fetch_diagnostics_chunked(
+            connection,
+            all_cited_diag_ids,
+            validation_context=operation_context,
+        )
 
         # Collect all metric IDs: direct + diagnostic
         direct_metric_ids_by_snap: dict[str, list[UUID]] = {}
@@ -836,11 +989,9 @@ def fetch_snapshots_chunked(
             for ev in diag.evidence:
                 all_metric_ids.add(ev.metric_result_id)
 
-        # Hydrate and verify cited metrics in chunks <= 256 using fetch_metrics_chunked
-        metrics_by_id: dict[UUID, MetricResult] = {}
-        if all_metric_ids:
-            metrics_by_id = fetch_metrics_chunked(connection, sorted(all_metric_ids, key=str))
-            verify_metrics_dag_and_lineage(connection, metrics_by_id)
+        # Direct and diagnostic-cited metrics share the operation context, so
+        # an overlapping ID and its lineage are resolved only once.
+        metrics_by_id = operation_context.resolve_metrics(connection, all_metric_ids)
 
         for mid in all_metric_ids:
             if mid not in metrics_by_id:
@@ -853,18 +1004,7 @@ def fetch_snapshots_chunked(
             if ref is not None:
                 all_es_ids.add(UUID(str(ref)))
 
-        (
-            EvidenceSet,
-            _,
-            EvidenceSetV2Store,
-            ensure_evidence_v2_tables,
-        ) = _get_evidence_v2_symbols()
-
-        es_by_id: dict[UUID, EvidenceSet] = {}
-        if all_es_ids:
-            ensure_evidence_v2_tables(connection, create=False)
-            ev_store = EvidenceSetV2Store(connection)
-            es_by_id = ev_store.get_sets(sorted(all_es_ids, key=str))
+        es_by_id = operation_context.require_evidence_sets(all_es_ids)
 
         for es_id in all_es_ids:
             if es_id not in es_by_id:

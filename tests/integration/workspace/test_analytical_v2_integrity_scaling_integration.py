@@ -730,16 +730,24 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
     from investment_analyst.storage.analytical_v2_validation import chunked_sequence
 
     staging = _staging(tmp_path, "staging-multiasset")
-    base_time = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+    base_time = datetime(2026, 8, 1, 0, 0, tzinfo=UTC)
     asset_target = "equity:us:aapl"
 
     with staging:
-        # 1. Target fixtures: observation and shared EvidenceSet
-        obs_target = _seed_observation(staging, base_time, asset_target)
-        seg_target = build_evidence_segments([obs_target])
+        # 1. Target fixtures: one complete-day segment shared by every metric.
+        target_observations = [
+            _seed_observation(
+                staging,
+                base_time + timedelta(hours=hour),
+                asset_target,
+            )
+            for hour in range(24)
+        ]
+        seg_target = build_evidence_segments(target_observations)
         staging.save_evidence_segments(seg_target)
-        es_target = build_evidence_set([obs_target], segments=seg_target)
+        es_target = build_evidence_set(target_observations, segments=seg_target)
         staging.save_evidence_set(es_target)
+        metric_base_time = base_time + timedelta(days=1)
 
         # Seed another observation with different source and cut for target asset to test isolation
         _seed_observation(
@@ -757,7 +765,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         # Create 513 metrics, 513 diagnostics, and 513 snapshots for asset_target
         # Metrics share the exact same evidence_set_id pointing to es_target
         for i in range(513):
-            moment = base_time + timedelta(minutes=i)
+            moment = metric_base_time + timedelta(minutes=i)
             cand_m = MetricResult(
                 result_id=uuid4(),
                 asset_id=asset_target,
@@ -768,7 +776,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 available_at=moment,
                 computed_at=moment,
                 parameters={"idx": i, "evidence_set_id": str(es_target.evidence_set_id)},
-                input_observation_ids=[obs_target.observation_id],
+                input_observation_ids=[obs.observation_id for obs in target_observations],
                 input_metric_result_ids=[],
                 algorithm_version="v1",
                 quality=DataQuality.VALID,
@@ -933,6 +941,10 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         baseline_table_counts_m = {}
         baseline_table_counts_d = {}
         baseline_table_counts_s = {}
+        baseline_queries_save_s = {}
+        baseline_rows_save_s = {}
+        baseline_table_counts_save_s = {}
+        baseline_table_rows_save_s = {}
         baseline_table_rows_m = {}
         baseline_table_rows_d = {}
         baseline_table_rows_s = {}
@@ -941,6 +953,9 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         baseline_durations_s = {}
 
         for K in (1, 256, 257, 513):
+            expected_chunks = math.ceil(K / MAX_CHUNK_SIZE)
+            loose_bound = 16 + 64 * expected_chunks
+
             # 1. get_metrics baseline
             proxy.clear()
             t0 = time.perf_counter()
@@ -972,6 +987,30 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             baseline_rows_s[K] = proxy.rows_fetched
             baseline_table_counts_s[K] = dict(proxy.table_counts)
             baseline_table_rows_s[K] = dict(proxy.table_rows)
+
+            # 4. Reuse snapshot batch: direct and diagnostic citations must share
+            # one operation-local metric and evidence-lineage resolution.
+            proxy.clear()
+            save_receipt = staging.save_analysis_snapshots(target_snaps[:K])
+            assert save_receipt.created_count == 0
+            assert save_receipt.reused_count == K
+            baseline_queries_save_s[K] = len(proxy.queries)
+            baseline_rows_save_s[K] = proxy.rows_fetched
+            baseline_table_counts_save_s[K] = dict(proxy.table_counts)
+            baseline_table_rows_save_s[K] = dict(proxy.table_rows)
+            assert len(proxy.queries) <= loose_bound
+            assert all(size <= 256 for size in proxy.param_chunks)
+            assert proxy.table_rows.get("diagnostic_results_v2", 0) == K
+            assert proxy.table_rows.get("diagnostic_v2_components", 0) == K
+            assert proxy.table_rows.get("diagnostic_v2_component_metric_links", 0) == K
+            assert proxy.table_rows.get("diagnostic_v2_evidence", 0) == K
+            assert proxy.table_rows.get("analysis_snapshots_v2", 0) == K
+            assert proxy.table_rows.get("metric_results_v2", 0) == K
+            assert proxy.table_rows.get("metric_v2_observation_links", 0) == 24 * K
+            assert proxy.table_rows.get("normalized_observations_v2", 0) == 24
+            assert proxy.table_rows.get("evidence_sets_v2", 0) == 1
+            assert proxy.table_rows.get("evidence_set_v2_members", 0) == len(es_target.segment_ids)
+            assert proxy.table_rows.get("evidence_segments_v2", 0) == len(es_target.segment_ids)
 
         # 4. Deactivate proxy tracking while seeding foreign rows
         proxy.active = False
@@ -1078,8 +1117,8 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             assert baseline_durations_m[K] > 0 and after_durations_m[K] > 0
             assert len(proxy.queries) <= loose_bound
             assert proxy.table_rows.get("metric_results_v2", 0) == K
-            assert proxy.table_rows.get("metric_v2_observation_links", 0) == K
-            assert proxy.table_rows.get("normalized_observations_v2", 0) == 1
+            assert proxy.table_rows.get("metric_v2_observation_links", 0) == 24 * K
+            assert proxy.table_rows.get("normalized_observations_v2", 0) == 24
             assert proxy.table_counts.get("normalized_observations_v2", 0) == 1
             assert proxy.table_rows.get("evidence_sets_v2", 0) == 1
             assert proxy.table_counts.get("evidence_sets_v2", 0) == 1
@@ -1110,6 +1149,11 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             assert proxy.table_rows.get("diagnostic_v2_component_metric_links", 0) == K
             assert proxy.table_rows.get("diagnostic_v2_evidence", 0) == K
             assert proxy.table_rows.get("metric_results_v2", 0) == K
+            assert proxy.table_rows.get("metric_v2_observation_links", 0) == 24 * K
+            assert proxy.table_rows.get("normalized_observations_v2", 0) == 24
+            assert proxy.table_rows.get("evidence_sets_v2", 0) == 1
+            assert proxy.table_rows.get("evidence_set_v2_members", 0) == len(es_target.segment_ids)
+            assert proxy.table_rows.get("evidence_segments_v2", 0) == len(es_target.segment_ids)
             assert proxy.table_counts.get("diagnostic_results_v2", 0) <= expected_chunks
             assert proxy.table_counts.get("diagnostic_v2_components", 0) <= expected_chunks
             assert (
@@ -1137,7 +1181,12 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
             assert proxy.table_rows.get("analysis_snapshot_v2_metric_links", 0) == K
             assert proxy.table_rows.get("analysis_snapshot_v2_diagnostic_links", 0) == K
             assert proxy.table_rows.get("diagnostic_results_v2", 0) == K
-            assert proxy.table_rows.get("metric_results_v2", 0) == 2 * K
+            assert proxy.table_rows.get("metric_results_v2", 0) == K
+            assert proxy.table_rows.get("metric_v2_observation_links", 0) == 24 * K
+            assert proxy.table_rows.get("normalized_observations_v2", 0) == 24
+            assert proxy.table_rows.get("evidence_sets_v2", 0) == 1
+            assert proxy.table_rows.get("evidence_set_v2_members", 0) == len(es_target.segment_ids)
+            assert proxy.table_rows.get("evidence_segments_v2", 0) == len(es_target.segment_ids)
             assert proxy.table_counts.get("analysis_snapshots_v2", 0) <= expected_chunks
             assert proxy.table_counts.get("analysis_snapshot_v2_metric_links", 0) <= expected_chunks
             assert (
@@ -1145,6 +1194,48 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 <= expected_chunks
             )
             assert all(size <= 256 for size in proxy.param_chunks)
+
+            # 4. Saving/reusing the same snapshot batch must preserve the same
+            # unique-lineage read cardinality after unrelated rows are present.
+            proxy.clear()
+            save_receipt = staging.save_analysis_snapshots(target_snaps[:K])
+            assert save_receipt.created_count == 0
+            assert save_receipt.reused_count == K
+            assert len(proxy.queries) == baseline_queries_save_s[K]
+            assert len(proxy.queries) <= loose_bound
+            assert proxy.rows_fetched == baseline_rows_save_s[K]
+            assert proxy.table_counts == baseline_table_counts_save_s[K]
+            assert proxy.table_rows == baseline_table_rows_save_s[K]
+            assert proxy.table_rows.get("diagnostic_results_v2", 0) == K
+            assert proxy.table_rows.get("diagnostic_v2_components", 0) == K
+            assert proxy.table_rows.get("diagnostic_v2_component_metric_links", 0) == K
+            assert proxy.table_rows.get("diagnostic_v2_evidence", 0) == K
+            assert proxy.table_rows.get("analysis_snapshots_v2", 0) == K
+            assert proxy.table_rows.get("metric_results_v2", 0) == K
+            assert proxy.table_rows.get("metric_v2_observation_links", 0) == 24 * K
+            assert proxy.table_rows.get("normalized_observations_v2", 0) == 24
+            assert proxy.table_rows.get("evidence_sets_v2", 0) == 1
+            assert proxy.table_rows.get("evidence_set_v2_members", 0) == len(es_target.segment_ids)
+            assert proxy.table_rows.get("evidence_segments_v2", 0) == len(es_target.segment_ids)
+            assert all(size <= 256 for size in proxy.param_chunks)
+
+        # A later operation creates a fresh context and must detect corruption
+        # introduced after the earlier successful snapshot reads.
+        proxy.active = False
+        staging._connection.execute(
+            "UPDATE normalized_observations_v2 SET asset_id = 'equity:us:corrupt' "
+            "WHERE observation_id = ?",
+            [str(target_observations[0].observation_id)],
+        )
+        proxy.active = True
+        with pytest.raises(StorageError, match="foreign observation"):
+            staging.get_analysis_snapshots([target_snaps[0].snapshot_id])
+        proxy.active = False
+        staging._connection.execute(
+            "UPDATE normalized_observations_v2 SET asset_id = ? WHERE observation_id = ?",
+            [asset_target, str(target_observations[0].observation_id)],
+        )
+        proxy.active = True
 
         # 5b. Direct observation outside EvidenceSet and per-operation cache lifecycle
         obs_extra = _seed_observation(
@@ -1174,15 +1265,15 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         )
         staging.save_metrics([m_extra])
 
-        # Batch get: target_metrics[0] (uses es_target with obs_target) +
+        # Batch get: target_metrics[0] (uses the 24-row es_target) +
         # m_extra (uses obs_extra directly, NOT in es_target)
         proxy.clear()
         batch_res = staging.get_metrics([target_metrics[0].result_id, m_extra.result_id])
         assert len(batch_res) == 2
         assert batch_res[target_metrics[0].result_id] == target_metrics[0]
         assert batch_res[m_extra.result_id] == m_extra
-        # Exactly 2 unique observations read in a single chunk (obs_target + obs_extra)
-        assert proxy.table_rows.get("normalized_observations_v2", 0) == 2
+        # Exactly 25 unique observations read in one chunk (the target day + obs_extra).
+        assert proxy.table_rows.get("normalized_observations_v2", 0) == 25
         assert proxy.table_counts.get("normalized_observations_v2", 0) == 1
         assert proxy.table_rows.get("evidence_sets_v2", 0) == 1
 
@@ -1190,7 +1281,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         proxy.clear()
         batch_res2 = staging.get_metrics([target_metrics[0].result_id, m_extra.result_id])
         assert len(batch_res2) == 2
-        assert proxy.table_rows.get("normalized_observations_v2", 0) == 2
+        assert proxy.table_rows.get("normalized_observations_v2", 0) == 25
         assert proxy.table_counts.get("normalized_observations_v2", 0) == 1
 
         # Corruption after first call fails closed on second call
@@ -1218,11 +1309,11 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 metric_key=f"market.dag.shared_root_{i}",
                 value=Decimal(str(i)),
                 unit="USD",
-                as_of=base_time,
-                available_at=base_time,
-                computed_at=base_time,
+                as_of=metric_base_time,
+                available_at=metric_base_time,
+                computed_at=metric_base_time,
                 parameters={"evidence_set_id": str(es_target.evidence_set_id)},
-                input_observation_ids=[obs_target.observation_id],
+                input_observation_ids=[obs.observation_id for obs in target_observations],
                 input_metric_result_ids=[],
                 algorithm_version="v1",
                 quality=DataQuality.VALID,
@@ -1239,11 +1330,11 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 metric_key=f"market.dag.shared_inter_{i}",
                 value=Decimal(str(i)),
                 unit="USD",
-                as_of=base_time,
-                available_at=base_time,
-                computed_at=base_time,
+                as_of=metric_base_time,
+                available_at=metric_base_time,
+                computed_at=metric_base_time,
                 parameters={"evidence_set_id": str(es_target.evidence_set_id)},
-                input_observation_ids=[obs_target.observation_id],
+                input_observation_ids=[obs.observation_id for obs in target_observations],
                 input_metric_result_ids=[r.result_id for r in shared_roots],
                 algorithm_version="v1",
                 quality=DataQuality.VALID,
@@ -1260,11 +1351,11 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 metric_key=f"market.dag.shared_leaf_{i}",
                 value=Decimal(str(i)),
                 unit="USD",
-                as_of=base_time,
-                available_at=base_time,
-                computed_at=base_time,
+                as_of=metric_base_time,
+                available_at=metric_base_time,
+                computed_at=metric_base_time,
                 parameters={"evidence_set_id": str(es_target.evidence_set_id)},
-                input_observation_ids=[obs_target.observation_id],
+                input_observation_ids=[obs.observation_id for obs in target_observations],
                 input_metric_result_ids=[
                     shared_intermediates[i % 16].result_id,
                     shared_intermediates[(i + 1) % 16].result_id,
@@ -1309,7 +1400,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
         # 513-node sequential dependency chain without RecursionError
         deep_chain = []
         for i in range(513):
-            moment = base_time + timedelta(seconds=i)
+            moment = metric_base_time + timedelta(seconds=i)
             c = MetricResult(
                 result_id=uuid4(),
                 asset_id=asset_target,
@@ -1320,7 +1411,7 @@ def test_multiasset_reads_are_paged_and_do_not_hydrate_unrelated_history(
                 available_at=moment,
                 computed_at=moment,
                 parameters={"evidence_set_id": str(es_target.evidence_set_id)},
-                input_observation_ids=[obs_target.observation_id],
+                input_observation_ids=[obs.observation_id for obs in target_observations],
                 input_metric_result_ids=[deep_chain[-1].result_id] if deep_chain else [],
                 algorithm_version="v1",
                 quality=DataQuality.VALID,

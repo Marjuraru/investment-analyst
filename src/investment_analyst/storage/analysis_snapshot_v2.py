@@ -35,24 +35,18 @@ from investment_analyst.analytics.analysis_snapshot import (
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.storage.analytical_v2_validation import (
     MAX_CHUNK_SIZE,
+    AnalyticalV2ValidationContext,
     AnalyticalV2ValidationError,
     chunked_sequence,
     fetch_diagnostics_chunked,
-    fetch_metrics_chunked,
     fetch_snapshots_chunked,
     validate_keyset_cursor,
     validate_keyset_limit,
-    verify_metrics_dag_and_lineage,
 )
 from investment_analyst.storage.errors import (
     RecordConflictError,
     RecordNotFoundError,
     StorageError,
-)
-from investment_analyst.storage.evidence_set_v2 import (
-    EvidenceSetV2Error,
-    EvidenceSetV2Store,
-    ensure_evidence_v2_tables,
 )
 from investment_analyst.storage.metric_v2 import MetricV2Error
 
@@ -314,9 +308,14 @@ class AnalysisSnapshotV2Store:
 
         # 2. Gather cited diagnostics across the batch and hydrate them in chunks <= 256
         all_cited_diag_ids = {did for s in snapshots for did in s.diagnostic_ids}
+        validation_context = AnalyticalV2ValidationContext()
         try:
-            diags_by_id = fetch_diagnostics_chunked(self._connection, all_cited_diag_ids)
-        except AnalyticalV2ValidationError as error:
+            diags_by_id = fetch_diagnostics_chunked(
+                self._connection,
+                all_cited_diag_ids,
+                validation_context=validation_context,
+            )
+        except (AnalyticalV2ValidationError, MetricV2Error) as error:
             raise AnalysisSnapshotV2Error(str(error)) from error
 
         # 3. Gather all cited metric IDs (both direct and from diagnostics)
@@ -327,17 +326,15 @@ class AnalysisSnapshotV2Store:
             for ev in diag.evidence:
                 all_metric_ids.add(ev.metric_result_id)
 
-        # 4. Hydrate and verify cited metrics in chunks <= 256 using fetch_metrics_chunked
+        # 4. Resolve cited metrics through the same operation context used for diagnostics.
         try:
-            metrics_by_id = fetch_metrics_chunked(self._connection, all_metric_ids)
-            if metrics_by_id:
-                verify_metrics_dag_and_lineage(self._connection, metrics_by_id)
+            metrics_by_id = validation_context.resolve_metrics(self._connection, all_metric_ids)
         except RecordNotFoundError as error:
             raise RecordNotFoundError(f"snapshot references missing metric: {error}") from error
         except (AnalyticalV2ValidationError, MetricV2Error) as error:
             raise AnalysisSnapshotV2Error(str(error)) from error
 
-        # 5. Gather and verify all referenced EvidenceSets across all cited metrics
+        # 5. Reuse EvidenceSets already checked with the reachable metric lineage.
         all_es_uuids = {
             UUID(str(m.parameters["evidence_set_id"]))
             for m in metrics_by_id.values()
@@ -345,22 +342,9 @@ class AnalysisSnapshotV2Store:
         }
         es_info: dict[str, tuple[str, datetime, str]] = {}
         if all_es_uuids:
-            try:
-                ensure_evidence_v2_tables(self._connection, create=False)
-                ev_store = EvidenceSetV2Store(self._connection)
-                es_by_id = ev_store.get_sets(sorted(all_es_uuids, key=str))
-            except RecordNotFoundError as error:
-                raise RecordNotFoundError(
-                    f"snapshot metric references missing evidence set: {error}"
-                ) from error
-            except EvidenceSetV2Error as error:
-                raise AnalysisSnapshotV2Error(str(error)) from error
+            es_by_id = validation_context.require_evidence_sets(all_es_uuids)
 
             for es_uuid in all_es_uuids:
-                if es_uuid not in es_by_id:
-                    raise RecordNotFoundError(
-                        f"snapshot metric references missing evidence set {es_uuid}"
-                    )
                 es = es_by_id[es_uuid]
                 es_info[str(es_uuid)] = (es.asset_id, es.available_at, es.canonical_hash)
 
@@ -477,7 +461,12 @@ class AnalysisSnapshotV2Store:
 
         if existing_rows:
             existing_snaps = fetch_snapshots_chunked(
-                self._connection, [UUID(k) for k in existing_rows]
+                self._connection,
+                [UUID(k) for k in existing_rows],
+                validation_context=validation_context,
+                snapshot_rows_by_id={
+                    UUID(snapshot_id): row for snapshot_id, row in existing_rows.items()
+                },
             )
             for item in snapshots:
                 k = str(item.snapshot_id)
@@ -573,7 +562,7 @@ class AnalysisSnapshotV2Store:
         """Hydrate typed AnalysisSnapshots, verifying links and cited references."""
         try:
             return fetch_snapshots_chunked(self._connection, snapshot_ids)
-        except (AnalyticalV2ValidationError, MetricV2Error, EvidenceSetV2Error) as error:
+        except (AnalyticalV2ValidationError, MetricV2Error) as error:
             raise AnalysisSnapshotV2Error(str(error)) from error
 
     def get_snapshot(self, snapshot_id: UUID) -> AnalysisSnapshot:

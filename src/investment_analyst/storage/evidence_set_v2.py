@@ -441,9 +441,16 @@ class EvidenceSetV2Store:
         return self.get_segments([segment_id])[segment_id]
 
     def get_sets_and_lineages(
-        self, evidence_set_ids: Collection[UUID]
+        self,
+        evidence_set_ids: Collection[UUID],
+        *,
+        segment_cache: dict[UUID, EvidenceSegment] | None = None,
     ) -> tuple[dict[UUID, EvidenceSet], dict[UUID, tuple[UUID, ...]]]:
-        """Batch load unique sets, members, and segments without observation fetch."""
+        """Batch load unique sets, members, and segments without observation fetch.
+
+        ``segment_cache`` may be shared by one validation operation so overlapping
+        EvidenceSets do not hydrate the same verified segment more than once.
+        """
         ordered = sorted(set(evidence_set_ids), key=str)
         if not ordered:
             return {}, {}
@@ -487,7 +494,12 @@ class EvidenceSetV2Store:
                     f"evidence set v2 {sid} members have non-contiguous positions: {positions}"
                 )
 
-        segments_map = self.get_segments(all_segment_ids)
+        segments_map = segment_cache if segment_cache is not None else {}
+        missing_segment_ids = all_segment_ids.difference(segments_map)
+        segments_map.update(self.get_segments(missing_segment_ids))
+        for segment_id in all_segment_ids:
+            if segment_id not in segments_map:
+                raise EvidenceSetV2Error(f"evidence segment v2 {segment_id} was not found")
 
         sets_map: dict[UUID, EvidenceSet] = {}
         lineages_map: dict[UUID, tuple[UUID, ...]] = {}
