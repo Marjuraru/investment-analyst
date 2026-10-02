@@ -106,7 +106,7 @@ def _setup_metrics_and_evidence(
     m1_candidate = MetricResult(
         result_id=uuid4(),
         asset_id=asset_id,
-        metric_key="funding.sum_1h",
+        metric_key="crypto.derivatives.funding.sum_1h",
         value=Decimal("1.50"),
         unit="rate",
         as_of=base_time + timedelta(hours=23),
@@ -126,7 +126,7 @@ def _setup_metrics_and_evidence(
     m2_candidate = MetricResult(
         result_id=uuid4(),
         asset_id=asset_id,
-        metric_key="funding.mean_1h",
+        metric_key="crypto.derivatives.funding.mean_1h",
         value=Decimal("0.0625"),
         unit="rate",
         as_of=base_time + timedelta(hours=23),

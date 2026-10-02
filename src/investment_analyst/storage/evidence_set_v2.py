@@ -14,7 +14,8 @@ availability and observations before rehydrating any metric.
 
 from __future__ import annotations
 
-from collections.abc import Collection
+import json
+from collections.abc import Collection, Mapping
 from datetime import UTC, date, datetime
 from uuid import UUID
 
@@ -26,7 +27,10 @@ from investment_analyst.analytics.evidence_set import (
     EvidenceSet,
     EvidenceSetVerificationError,
     resolve_evidence_set,
-    verify_evidence_set,
+)
+from investment_analyst.storage.analytical_v2_validation import (
+    MAX_CHUNK_SIZE,
+    chunked_sequence,
 )
 from investment_analyst.storage.errors import RecordConflictError, StorageError
 
@@ -87,8 +91,6 @@ def _parse_optional_instant(value: object) -> datetime | None:
 
 
 def _ids_text(identifiers: tuple[UUID, ...] | list[UUID]) -> str:
-    import json
-
     return json.dumps(
         [str(identifier) for identifier in identifiers],
         separators=(",", ":"),
@@ -97,8 +99,6 @@ def _ids_text(identifiers: tuple[UUID, ...] | list[UUID]) -> str:
 
 
 def _parse_ids_text(value: object) -> tuple[UUID, ...]:
-    import json
-
     try:
         parsed = json.loads(str(value))
     except (ValueError, TypeError) as error:
@@ -347,16 +347,17 @@ class EvidenceSetV2Store:
         if not ordered:
             return 0
         keys = tuple(str(item.segment_id) for item in ordered)
-        placeholders = ", ".join("?" for _ in keys)
         columns = ", ".join(_SEGMENT_V2_COLUMNS)
-        existing = {
-            str(row[0]): row
-            for row in self._connection.execute(
+        existing: dict[str, tuple[object, ...]] = {}
+        for chunk in chunked_sequence(keys, MAX_CHUNK_SIZE):
+            placeholders = ", ".join("?" for _ in chunk)
+            chunk_rows = self._connection.execute(
                 f"SELECT {columns} FROM {EVIDENCE_SEGMENT_V2_TABLE} "
                 f"WHERE segment_id IN ({placeholders})",
-                list(keys),
+                list(chunk),
             ).fetchall()
-        }
+            for row in chunk_rows:
+                existing[str(row[0])] = row
         created = 0
         for segment in ordered:
             key = str(segment.segment_id)
@@ -377,13 +378,7 @@ class EvidenceSetV2Store:
 
     def save_set(self, evidence_set: EvidenceSet) -> bool:
         """Persist one set with ordered members; content drift fails closed."""
-        try:
-            verify_evidence_set(
-                evidence_set,
-                [self.get_segment(segment_id) for segment_id in evidence_set.segment_ids],
-            )
-        except EvidenceSetVerificationError as error:
-            raise EvidenceSetV2Error("evidence set v2 lineage does not verify") from error
+        self.verify_set_lineage(evidence_set)
         key = str(evidence_set.evidence_set_id)
         columns = ", ".join(_SET_V2_COLUMNS)
         rows = self._connection.execute(
@@ -391,11 +386,16 @@ class EvidenceSetV2Store:
             [key],
         ).fetchall()
         members = self._connection.execute(
-            f"SELECT segment_id FROM {EVIDENCE_SET_V2_MEMBERS_TABLE} "
+            f"SELECT position, segment_id FROM {EVIDENCE_SET_V2_MEMBERS_TABLE} "
             "WHERE evidence_set_id = ? ORDER BY position",
             [key],
         ).fetchall()
-        stored_members = [UUID(row[0]) for row in members]
+        positions = [int(row[0]) for row in members]
+        if positions != list(range(len(positions))):
+            raise EvidenceSetV2Error(
+                f"evidence set v2 {key!r} members have non-contiguous positions: {positions}"
+            )
+        stored_members = [UUID(row[1]) for row in members]
         if rows:
             if row_to_evidence_set(rows[0], segment_ids=stored_members) != evidence_set:
                 raise RecordConflictError(f"evidence set v2 {key!r} already has different content")
@@ -414,70 +414,218 @@ class EvidenceSetV2Store:
             )
         return True
 
+    def get_segments(self, segment_ids: Collection[UUID]) -> dict[UUID, EvidenceSegment]:
+        """Hydrate and verify unique segments in bounded chunks <= 256."""
+        ordered = sorted(set(segment_ids), key=str)
+        if not ordered:
+            return {}
+        columns = ", ".join(_SEGMENT_V2_COLUMNS)
+        segments: dict[UUID, EvidenceSegment] = {}
+        for chunk in chunked_sequence(ordered, MAX_CHUNK_SIZE):
+            placeholders = ", ".join("?" for _ in chunk)
+            chunk_rows = self._connection.execute(
+                f"SELECT {columns} FROM {EVIDENCE_SEGMENT_V2_TABLE} "
+                f"WHERE segment_id IN ({placeholders})",
+                [str(item) for item in chunk],
+            ).fetchall()
+            for row in chunk_rows:
+                seg = row_to_segment(row)
+                segments[seg.segment_id] = seg
+        for sid in ordered:
+            if sid not in segments:
+                raise EvidenceSetV2Error(f"evidence segment v2 {sid} was not found")
+        return segments
+
     def get_segment(self, segment_id: UUID) -> EvidenceSegment:
         """Hydrate and verify one segment with its strict identity."""
-        columns = ", ".join(_SEGMENT_V2_COLUMNS)
-        rows = self._connection.execute(
-            f"SELECT {columns} FROM {EVIDENCE_SEGMENT_V2_TABLE} WHERE segment_id = ?",
-            [str(segment_id)],
-        ).fetchall()
-        if not rows:
-            raise EvidenceSetV2Error(f"evidence segment v2 {segment_id} was not found")
-        return row_to_segment(rows[0])
+        return self.get_segments([segment_id])[segment_id]
+
+    def get_sets_and_lineages(
+        self,
+        evidence_set_ids: Collection[UUID],
+        *,
+        segment_cache: dict[UUID, EvidenceSegment] | None = None,
+    ) -> tuple[dict[UUID, EvidenceSet], dict[UUID, tuple[UUID, ...]]]:
+        """Batch load unique sets, members, and segments without observation fetch.
+
+        ``segment_cache`` may be shared by one validation operation so overlapping
+        EvidenceSets do not hydrate the same verified segment more than once.
+        """
+        ordered = sorted(set(evidence_set_ids), key=str)
+        if not ordered:
+            return {}, {}
+        columns = ", ".join(_SET_V2_COLUMNS)
+        set_rows: dict[str, tuple[object, ...]] = {}
+        for chunk in chunked_sequence(ordered, MAX_CHUNK_SIZE):
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._connection.execute(
+                f"SELECT {columns} FROM {EVIDENCE_SET_V2_TABLE} "
+                f"WHERE evidence_set_id IN ({placeholders})",
+                [str(item) for item in chunk],
+            ).fetchall()
+            for r in rows:
+                set_rows[str(r[0])] = r
+
+        for sid in ordered:
+            if str(sid) not in set_rows:
+                raise EvidenceSetV2Error(f"evidence set v2 {sid} was not found")
+
+        members_by_set: dict[UUID, list[tuple[int, UUID]]] = {sid: [] for sid in ordered}
+        all_segment_ids: set[UUID] = set()
+        for chunk in chunked_sequence(ordered, MAX_CHUNK_SIZE):
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._connection.execute(
+                "SELECT evidence_set_id, position, segment_id "
+                f"FROM {EVIDENCE_SET_V2_MEMBERS_TABLE} "
+                f"WHERE evidence_set_id IN ({placeholders}) ORDER BY evidence_set_id, position",
+                [str(item) for item in chunk],
+            ).fetchall()
+            for r in rows:
+                s_id = UUID(str(r[0]))
+                pos = int(r[1])
+                seg_id = UUID(str(r[2]))
+                members_by_set[s_id].append((pos, seg_id))
+                all_segment_ids.add(seg_id)
+
+        for sid, member_list in members_by_set.items():
+            positions = [p for p, _ in member_list]
+            if positions != list(range(len(member_list))):
+                raise EvidenceSetV2Error(
+                    f"evidence set v2 {sid} members have non-contiguous positions: {positions}"
+                )
+
+        segments_map = segment_cache if segment_cache is not None else {}
+        missing_segment_ids = all_segment_ids.difference(segments_map)
+        segments_map.update(self.get_segments(missing_segment_ids))
+        for segment_id in all_segment_ids:
+            if segment_id not in segments_map:
+                raise EvidenceSetV2Error(f"evidence segment v2 {segment_id} was not found")
+
+        sets_map: dict[UUID, EvidenceSet] = {}
+        lineages_map: dict[UUID, tuple[UUID, ...]] = {}
+
+        for sid in ordered:
+            seg_ids = [seg_id for _, seg_id in members_by_set[sid]]
+            evidence_set = row_to_evidence_set(set_rows[str(sid)], segment_ids=seg_ids)
+            segs = [segments_map[seg_id] for seg_id in seg_ids]
+            try:
+                identifiers = resolve_evidence_set(evidence_set, segs)
+            except EvidenceSetVerificationError as error:
+                raise EvidenceSetV2Error("evidence set v2 lineage does not verify") from error
+            sets_map[sid] = evidence_set
+            lineages_map[sid] = identifiers
+
+        return sets_map, lineages_map
+
+    def verify_observation_lineages(
+        self,
+        evidence_sets: Collection[EvidenceSet],
+        lineages: Mapping[UUID, tuple[UUID, ...]],
+        observation_cache: Mapping[str, tuple[str, str, str, datetime]],
+    ) -> None:
+        """Verify that observations for each set match asset, source, field, and visibility."""
+        for evidence_set in evidence_sets:
+            identifiers = lineages[evidence_set.evidence_set_id]
+            for identifier in identifiers:
+                row = observation_cache.get(str(identifier))
+                if row is None:
+                    raise EvidenceSetV2Error(
+                        f"evidence set v2 references a missing observation {identifier}"
+                    )
+                obs_asset, obs_source, obs_field, obs_avail = row
+                if (
+                    obs_asset != evidence_set.asset_id
+                    or obs_source != evidence_set.source_id
+                    or obs_field != evidence_set.field_name
+                ):
+                    raise EvidenceSetV2Error(
+                        f"evidence set v2 references a foreign observation {identifier}"
+                    )
+                if obs_avail > evidence_set.available_at:
+                    raise EvidenceSetV2Error(
+                        f"evidence set v2 references a future observation {identifier}"
+                    )
+
+    def get_sets(
+        self,
+        evidence_set_ids: Collection[UUID],
+        *,
+        observation_cache: Mapping[str, tuple[str, str, str, datetime]] | None = None,
+    ) -> dict[UUID, EvidenceSet]:
+        """Hydrate and verify multiple sets against members and observations in bounded chunks."""
+        sets_map, lineages_map = self.get_sets_and_lineages(evidence_set_ids)
+        if not sets_map:
+            return {}
+        if observation_cache is None:
+            all_obs: set[UUID] = set()
+            for identifiers in lineages_map.values():
+                all_obs.update(identifiers)
+            ordered_obs = sorted(all_obs, key=str)
+            obs_map: dict[str, tuple[str, str, str, datetime]] = {}
+            for chunk in chunked_sequence(ordered_obs, MAX_CHUNK_SIZE):
+                placeholders = ", ".join("?" for _ in chunk)
+                chunk_rows = self._connection.execute(
+                    "SELECT observation_id, asset_id, source_id, field_name, available_at "
+                    "FROM normalized_observations_v2 "
+                    f"WHERE observation_id IN ({placeholders})",
+                    [str(item) for item in chunk],
+                ).fetchall()
+                for r in chunk_rows:
+                    obs_map[str(r[0])] = (
+                        str(r[1]),
+                        str(r[2]),
+                        str(r[3]),
+                        _parse_instant_text(r[4]),
+                    )
+            self.verify_observation_lineages(sets_map.values(), lineages_map, obs_map)
+        else:
+            self.verify_observation_lineages(sets_map.values(), lineages_map, observation_cache)
+        return sets_map
 
     def get_set(self, evidence_set_id: UUID) -> EvidenceSet:
         """Hydrate and verify one set against its members and observations."""
-        columns = ", ".join(_SET_V2_COLUMNS)
-        rows = self._connection.execute(
-            f"SELECT {columns} FROM {EVIDENCE_SET_V2_TABLE} WHERE evidence_set_id = ?",
-            [str(evidence_set_id)],
-        ).fetchall()
-        if not rows:
-            raise EvidenceSetV2Error(f"evidence set v2 {evidence_set_id} was not found")
-        members = self._connection.execute(
-            f"SELECT segment_id FROM {EVIDENCE_SET_V2_MEMBERS_TABLE} "
-            "WHERE evidence_set_id = ? ORDER BY position",
-            [str(evidence_set_id)],
-        ).fetchall()
-        segment_ids = [UUID(row[0]) for row in members]
-        evidence_set = row_to_evidence_set(rows[0], segment_ids=segment_ids)
-        self.verify_set_lineage(evidence_set)
-        return evidence_set
+        return self.get_sets([evidence_set_id])[evidence_set_id]
 
-    def verify_set_lineage(self, evidence_set: EvidenceSet) -> tuple[UUID, ...]:
+    def verify_set_lineage(
+        self,
+        evidence_set: EvidenceSet,
+        *,
+        observation_cache: Mapping[str, tuple[str, str, str, datetime]] | None = None,
+    ) -> tuple[UUID, ...]:
         """Verify segments, hash, shape, availability and every observation."""
-        segments = [self.get_segment(segment_id) for segment_id in evidence_set.segment_ids]
+        segments_map = self.get_segments(evidence_set.segment_ids)
+        segments = [segments_map[segment_id] for segment_id in evidence_set.segment_ids]
         try:
             identifiers = resolve_evidence_set(evidence_set, segments)
         except EvidenceSetVerificationError as error:
             raise EvidenceSetV2Error("evidence set v2 lineage does not verify") from error
         ordered = tuple(sorted(set(identifiers), key=str))
-        placeholders = ", ".join("?" for _ in ordered)
-        rows = self._connection.execute(
-            "SELECT observation_id, asset_id, source_id, field_name, available_at "
-            "FROM normalized_observations_v2 "
-            f"WHERE observation_id IN ({placeholders})",
-            [str(item) for item in ordered],
-        ).fetchall()
-        indexed = {str(row[0]): row for row in rows}
-        for identifier in identifiers:
-            row = indexed.get(str(identifier))
-            if row is None:
-                raise EvidenceSetV2Error(
-                    f"evidence set v2 references a missing observation {identifier}"
+        if not ordered:
+            return identifiers
+        if observation_cache is not None:
+            self.verify_observation_lineages(
+                [evidence_set], {evidence_set.evidence_set_id: identifiers}, observation_cache
+            )
+            return identifiers
+        obs_map: dict[str, tuple[str, str, str, datetime]] = {}
+        for chunk in chunked_sequence(ordered, MAX_CHUNK_SIZE):
+            placeholders = ", ".join("?" for _ in chunk)
+            chunk_rows = self._connection.execute(
+                "SELECT observation_id, asset_id, source_id, field_name, available_at "
+                "FROM normalized_observations_v2 "
+                f"WHERE observation_id IN ({placeholders})",
+                [str(item) for item in chunk],
+            ).fetchall()
+            for row in chunk_rows:
+                obs_map[str(row[0])] = (
+                    str(row[1]),
+                    str(row[2]),
+                    str(row[3]),
+                    _parse_instant_text(row[4]),
                 )
-            if (
-                str(row[1]) != evidence_set.asset_id
-                or str(row[2]) != evidence_set.source_id
-                or str(row[3]) != evidence_set.field_name
-            ):
-                raise EvidenceSetV2Error(
-                    f"evidence set v2 references a foreign observation {identifier}"
-                )
-            if _parse_instant_text(row[4]) > evidence_set.available_at:
-                raise EvidenceSetV2Error(
-                    f"evidence set v2 references a future observation {identifier}"
-                )
+        self.verify_observation_lineages(
+            [evidence_set], {evidence_set.evidence_set_id: identifiers}, obs_map
+        )
         return identifiers
 
 
@@ -485,6 +633,7 @@ __all__ = [
     "EVIDENCE_SEGMENT_V2_TABLE",
     "EVIDENCE_SET_V2_MEMBERS_TABLE",
     "EVIDENCE_SET_V2_TABLE",
+    "EvidenceSet",
     "EvidenceSetV2Error",
     "EvidenceSetV2Store",
     "ensure_evidence_v2_tables",

@@ -1,15 +1,36 @@
 """Unit tests for the raw v2 staging backup inventory bounds."""
 
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 import duckdb
 import pytest
 
+from investment_analyst.core.models import RawRecord, SourceReference
 from investment_analyst.storage.raw_v2 import RawV2Staging
 from investment_analyst.workspace.raw_v2_backup import (
     RawV2BackupError,
     RawV2StagingBackupService,
 )
+
+
+def _record(*, record_id=None, payload=None, schema_version="unit-v1") -> RawRecord:
+    now = datetime(2026, 7, 10, 16, 0, tzinfo=UTC)
+    return RawRecord(
+        record_id=record_id or uuid4(),
+        asset_id="equity:us:aapl",
+        source=SourceReference(
+            source_id="test:staging",
+            record_key="staging-fixture",
+            retrieved_at=now,
+        ),
+        event_time=now,
+        available_at=now,
+        received_at=now,
+        payload=payload if payload is not None else {"close": "210.50"},
+        schema_version=schema_version,
+    )
 
 
 def _staging(tmp_path: Path, name: str = "staging") -> RawV2Staging:
@@ -22,8 +43,6 @@ def _staging(tmp_path: Path, name: str = "staging") -> RawV2Staging:
 def test_backup_inventory_pages_are_bounded(tmp_path: Path) -> None:
     staging = _staging(tmp_path)
     with staging:
-        from tests.unit.storage.test_raw_v2 import _record
-
         records = [_record() for _ in range(5)]
         staging.save_many(records)
         connection = staging._connection
@@ -42,8 +61,6 @@ def test_legacy_raw_only_manifest_remains_readable(tmp_path: Path) -> None:
 
     staging = _staging(tmp_path)
     with staging:
-        from tests.unit.storage.test_raw_v2 import _record
-
         staging.save(_record())
         manifest = RawV2StagingBackupService().create(
             staging, staging._connection, tmp_path / "backup"
@@ -60,8 +77,6 @@ def test_backup_rejects_external_or_memory_index(tmp_path: Path) -> None:
 
     staging = _staging(tmp_path)
     with staging:
-        from tests.unit.storage.test_raw_v2 import _record
-
         staging.save(_record())
         external = duckdb.connect(":memory:")
         with pytest.raises(RawV2BackupError, match="single file|connected database"):
@@ -96,8 +111,6 @@ def test_legacy_v1_v2_manifests_remain_readable(tmp_path: Path) -> None:
 
     staging = _staging(tmp_path)
     with staging:
-        from tests.unit.storage.test_raw_v2 import _record
-
         staging.save(_record())
         manifest = RawV2StagingBackupService().create(
             staging, staging._connection, tmp_path / "backup"

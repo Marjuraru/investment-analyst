@@ -836,32 +836,28 @@ class RawV2Staging:
         self._require_open()
         ensure_metric_v2_tables(self._connection, create=False)
         hydrated = MetricV2Store(self._connection).get_many(tuple(result_ids))
-        resolved: dict[UUID, MetricResult] = {}
-        for key, result in hydrated.items():
-            resolved[key] = self.resolve_metric_lineage(result)
-        return resolved
+        return self._resolve_metrics_lineage_batch(hydrated)
 
-    def resolve_metric_lineage(self, result: MetricResult) -> MetricResult:
-        """Verify inputs and shared evidence before returning one metric."""
-        from investment_analyst.storage.metric_v2 import require_metric_inputs_visible
+    def _resolve_metrics_lineage_batch(
+        self, hydrated: dict[UUID, MetricResult]
+    ) -> dict[UUID, MetricResult]:
+        """Verify inputs and shared evidence for a batch of metrics without N+1 queries."""
+        if not hydrated:
+            return {}
 
         self._require_open()
         ensure_metric_v2_tables(self._connection, create=False)
-        require_metric_inputs_visible(self._connection, result)
-        reference = result.parameters.get("evidence_set_id")
-        if reference is not None:
-            ensure_evidence_v2_tables(self._connection, create=False)
-            stored = EvidenceSetV2Store(self._connection).get_set(UUID(str(reference)))
-            ordered = EvidenceSetV2Store(self._connection).verify_set_lineage(stored)
-            ordered_text = [str(item) for item in ordered]
-            input_text = [str(item) for item in result.input_observation_ids]
-            if ordered_text != input_text and (
-                set(ordered_text) != set(input_text) or len(ordered_text) != len(input_text)
-            ):
-                raise MetricV2Error("metric v2 evidence lineage does not match its inputs")
-            if stored.available_at > result.available_at:
-                raise MetricV2Error("metric v2 evidence is not visible at the result")
-        return result
+
+        from investment_analyst.storage.analytical_v2_validation import (
+            verify_metrics_dag_and_lineage,
+        )
+
+        all_metric_models = verify_metrics_dag_and_lineage(self._connection, hydrated)
+        return {rid: all_metric_models[rid] for rid in hydrated}
+
+    def resolve_metric_lineage(self, result: MetricResult) -> MetricResult:
+        """Verify inputs and shared evidence before returning one metric."""
+        return self._resolve_metrics_lineage_batch({result.result_id: result})[result.result_id]
 
     def list_metric_inventory_page(
         self,
@@ -925,7 +921,14 @@ class RawV2Staging:
             parameters,
         ).fetchall()
         ordered = [UUID(row[0]) for row in rows]
-        return [self.get_metrics([result_id])[result_id] for result_id in ordered]
+        from investment_analyst.storage.analytical_v2_validation import chunked_sequence
+
+        results: list[MetricResult] = []
+        for chunk in chunked_sequence(ordered, 256):
+            batch = self.get_metrics(chunk)
+            for rid in chunk:
+                results.append(batch[rid])
+        return results
 
     def save_evidence_segments(self, segments: Collection[EvidenceSegment]) -> int:
         """Persist shared hourly segments idempotently under the writer lock."""
@@ -983,6 +986,9 @@ class RawV2Staging:
         mode: DiagnosticMode | None = None,
         as_of: datetime | None = None,
         available_to: datetime | None = None,
+        cursor_at: datetime | str | None = None,
+        cursor_id: UUID | str | None = None,
+        limit: int | None = None,
     ) -> list[DiagnosticResult]:
         """Hydrate typed PIT diagnostics in stable order."""
         self._require_open()
@@ -993,6 +999,9 @@ class RawV2Staging:
             mode=mode,
             as_of=as_of,
             available_to=available_to,
+            cursor_at=cursor_at,
+            cursor_id=cursor_id,
+            limit=limit,
         )
 
     def save_analysis_snapshots(self, snapshots: Collection[AnalysisSnapshot]) -> BatchWriteReceipt:
@@ -1011,12 +1020,24 @@ class RawV2Staging:
         ensure_analysis_snapshot_v2_tables(self._connection, create=False)
         return AnalysisSnapshotV2Store(self._connection).get_snapshot(snapshot_id)
 
+    def get_analysis_snapshots(
+        self, snapshot_ids: Collection[UUID]
+    ) -> dict[UUID, AnalysisSnapshot]:
+        """Hydrate typed analysis snapshots with verified links and cited references."""
+        self._require_open()
+        ensure_metric_v2_tables(self._connection, create=False)
+        ensure_analysis_snapshot_v2_tables(self._connection, create=False)
+        return AnalysisSnapshotV2Store(self._connection).get_snapshots(snapshot_ids)
+
     def list_analysis_snapshots(
         self,
         *,
         asset_id: str | None = None,
         domain: str | None = None,
         known_to: datetime | None = None,
+        cursor_at: datetime | str | None = None,
+        cursor_id: UUID | str | None = None,
+        limit: int | None = None,
     ) -> list[AnalysisSnapshot]:
         """Hydrate typed PIT analysis snapshots in stable order."""
         self._require_open()
@@ -1026,6 +1047,9 @@ class RawV2Staging:
             asset_id=asset_id,
             domain=domain,
             known_to=known_to,
+            cursor_at=cursor_at,
+            cursor_id=cursor_id,
+            limit=limit,
         )
 
     def _ensure_optional_analytical_tables(self, *, create: bool) -> None:
