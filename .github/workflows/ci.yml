@@ -58,6 +58,8 @@ jobs:
         run: >-
           uv run --locked --extra dev python -m pytest
           --cov=investment_analyst --cov-report=term-missing
+          --assert=plain --verbose --durations=30 --durations-min=1.0
+          --junitxml="${{ runner.temp }}/pytest-results.xml"
 
       - name: Audit locked environment
         run: >-
