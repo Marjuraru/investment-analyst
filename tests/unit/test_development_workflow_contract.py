@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import shlex
 import subprocess
+import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +17,39 @@ FULL_SHA = "a" * 40
 
 def _read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def _workflow_step_command(workflow: str, step_name: str) -> str:
+    lines = workflow.splitlines()
+    marker = f"      - name: {step_name}"
+    start = lines.index(marker)
+    end = next(
+        (
+            index
+            for index in range(start + 1, len(lines))
+            if lines[index].startswith("      - name:")
+        ),
+        len(lines),
+    )
+    step_lines = lines[start:end]
+    run_index = next(
+        (index for index, line in enumerate(step_lines) if line.startswith("        run:")),
+        None,
+    )
+    if run_index is None:
+        raise AssertionError(f"missing run command for workflow step: {step_name}")
+
+    run_value = step_lines[run_index].split(":", maxsplit=1)[1].strip()
+    if run_value not in {">-", "|"}:
+        return run_value
+
+    command_lines: list[str] = []
+    for line in step_lines[run_index + 1 :]:
+        if line.strip() and len(line) - len(line.lstrip()) < 10:
+            break
+        if line.strip():
+            command_lines.append(line.strip())
+    return " ".join(command_lines)
 
 
 def _frontmatter_value(text: str, key: str) -> str:
@@ -189,6 +226,132 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "id: acceptance_manifest" in template
     assert "workflow-acceptance-manifest-v1" in template
     assert "id: owner" not in template
+
+
+def test_governance_writer_frontier_has_one_authoritative_classifier() -> None:
+    guard = _read("scripts/check_workflow_guards.py")
+    protocol = _read("docs/development_protocol.md")
+
+    assert "def _is_governance_path(path: str) -> bool:" in guard
+    assert "if not _is_governance_path(path)" in guard
+    assert "_GOVERNANCE_WRITER_PATHS" not in guard
+    assert "reutilizan `_is_governance_path` como frontera única" in protocol
+    assert "tests/unit/test_workflow_guard.py" in protocol
+    assert "tests/unit/test_development_workflow_contract.py" in protocol
+
+
+def test_ci_preserves_complete_assertions_coverage_and_failure_gate() -> None:
+    workflow = _read(".github/workflows/ci.yml")
+    project = _read("pyproject.toml")
+
+    assert "  pull_request:\n" in workflow
+    assert "  push:\n    branches:\n      - main\n" in workflow
+    assert "  workflow_dispatch:\n" in workflow
+    assert "name: Python 3.12 quality" in workflow
+    assert "runs-on: ubuntu-24.04" in workflow
+    assert "timeout-minutes: 20" in workflow
+    assert "permissions:\n  contents: read" in workflow
+    assert 'UV_VERSION: "0.11.29"' in workflow
+    assert "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" in workflow
+    assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1" in workflow
+
+    step_names = [
+        line.removeprefix("      - name: ")
+        for line in workflow.splitlines()
+        if line.startswith("      - name: ")
+    ]
+    assert step_names == [
+        "Check out repository",
+        "Set up Python 3.12",
+        "Install pinned uv",
+        "Verify dependency lock",
+        "Synchronize locked development environment",
+        "Run Ruff lint",
+        "Check Ruff formatting",
+        "Run test suite with coverage gate",
+        "Audit locked environment",
+    ]
+
+    assert _workflow_step_command(workflow, "Verify dependency lock") == "uv lock --check"
+    assert (
+        _workflow_step_command(workflow, "Synchronize locked development environment")
+        == "uv sync --locked --extra dev"
+    )
+    assert (
+        _workflow_step_command(workflow, "Run Ruff lint")
+        == "uv run --locked --extra dev python -m ruff check ."
+    )
+    assert (
+        _workflow_step_command(workflow, "Check Ruff formatting")
+        == "uv run --locked --extra dev python -m ruff format --check ."
+    )
+
+    pytest_argv = shlex.split(_workflow_step_command(workflow, "Run test suite with coverage gate"))
+    pytest_prefix = ["uv", "run", "--locked", "--extra", "dev", "python", "-m", "pytest"]
+    assert pytest_argv[: len(pytest_prefix)] == pytest_prefix
+    assert set(pytest_argv[len(pytest_prefix) :]) == {
+        "--cov=investment_analyst",
+        "--cov-report=term-missing",
+        "--assert=plain",
+        "--verbose",
+        "--durations=30",
+        "--durations-min=1.0",
+        "--junitxml=${{ runner.temp }}/pytest-results.xml",
+    }
+
+    assert "[tool.coverage.run]\nbranch = true" in project
+    assert "[tool.coverage.report]\nfail_under = 82.0" in project
+    assert (
+        _workflow_step_command(workflow, "Audit locked environment")
+        == "uv run --locked --extra dev pip-audit --local --skip-editable --progress-spinner off"
+    )
+    for forbidden in (
+        "continue-on-error:",
+        "|| true",
+        "python -O",
+        "PYTHONOPTIMIZE",
+        "sys.modules",
+        "pytest-xdist",
+        "pytest-rerunfailures",
+    ):
+        assert forbidden not in workflow
+
+
+def test_ci_plain_assert_failure_is_not_hidden(tmp_path: Path) -> None:
+    failing_test = tmp_path / "test_assertion_probe.py"
+    junit_report = tmp_path / "pytest-results.xml"
+    failing_test.write_text(
+        "def test_plain_assert_is_active():\n    assert False, 'plain assertion probe'\n",
+        encoding="utf-8",
+    )
+    child_environment = os.environ.copy()
+    child_environment.pop("PYTHONOPTIMIZE", None)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--assert=plain",
+            "--verbose",
+            f"--junitxml={junit_report}",
+            str(failing_test),
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=child_environment,
+    )
+
+    assert result.returncode != 0
+    assert junit_report.is_file()
+    report = ET.parse(junit_report).getroot()
+    cases = report.findall(".//testcase")
+    failures = report.findall(".//failure")
+    assert len(cases) == 1
+    assert len(failures) == 1
+    assert "plain assertion probe" in (failures[0].text or "")
 
 
 def test_canonical_skill_basenames_and_ui_frontier_are_unique() -> None:

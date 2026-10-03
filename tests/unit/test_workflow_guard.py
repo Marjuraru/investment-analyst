@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -21,6 +22,7 @@ _SPEC.loader.exec_module(_MODULE)
 from check_workflow_guards import (  # noqa: E402
     GOVERNANCE_PATHS,
     GOVERNANCE_PREFIXES,
+    AuthoritySnapshot,
     ChangedPath,
     CheckSnapshot,
     CommentSnapshot,
@@ -32,6 +34,7 @@ from check_workflow_guards import (  # noqa: E402
     ScopeEvidence,
     SmokeSnapshot,
     _validate_audit_independence,
+    _validate_scope,
     evaluate,
     parse_acceptance_manifest,
     parse_declared_scope,
@@ -69,34 +72,65 @@ def _issue(body: str) -> IssueSnapshot:
     return IssueSnapshot(58, "OPEN", frozenset({"workflow:active"}), body)
 
 
-def _manifest() -> str:
-    return """
-```json
-{"schema_version":"workflow-acceptance-manifest-v1","route_effect":"NONE","items":[{"id":"A1","kind":"acceptance","requirements":["live_probe:unit"]}]}
-```
-"""
+def _manifest(route_effect: str = "NONE") -> str:
+    requirements = ["live_probe:unit"]
+    if route_effect != "NONE":
+        requirements.append(f"route_transition:DEV-7:{route_effect}")
+    manifest = {
+        "schema_version": "workflow-acceptance-manifest-v1",
+        "route_effect": route_effect,
+        "items": [{"id": "A1", "kind": "acceptance", "requirements": requirements}],
+    }
+    return f"\n```json\n{json.dumps(manifest, separators=(',', ':'))}\n```\n"
 
 
 def _body(
     profile: str = "CRITICAL",
     policy: str = "HUMAN",
     writer_role: str = "BUILD_PRODUCT",
+    risk: str = "R3",
+    route_effect: str = "NONE",
 ) -> str:
     return (
         f"""<!-- development-workflow:work-block-v1 -->
 
 - **Work Block ID:** `DEV-7`.
-- **Risk:** `R3`.
+- **Risk:** `{risk}`.
 - **Profile:** `{profile}`.
 - **finalize_policy:** `{policy}`.
-- **route_effect:** `NONE`.
+- **route_effect:** `{route_effect}`.
 - **Base remota exacta:** `origin/main@{BASE_SHA}`.
 - **Expected branch:** `codex/dev-7-finalize-policy-guard`.
 - **Writer role:** `{writer_role}`.
 """
-        + _manifest()
+        + _manifest(route_effect)
         + _scope_body()
     )
+
+
+def _governance_writer_body(
+    paths: tuple[str, ...],
+    *,
+    profile: str = "CRITICAL",
+    policy: str = "HUMAN",
+    risk: str = "R3",
+    route_effect: str = "NONE",
+    writer_role: str = "BUILD_GOVERNANCE",
+) -> str:
+    body = _body(
+        profile=profile,
+        policy=policy,
+        writer_role=writer_role,
+        risk=risk,
+        route_effect=route_effect,
+    )
+    previous_allowlist = (
+        f"- `scripts/check_workflow_guards.py` — `{DECLARED_DIGEST}`.\n"
+        "- `.github/CODEOWNERS` — `nuevo`.\n"
+    )
+    entries = "".join(f"- `{path}` — `{DECLARED_DIGEST}`.\n" for path in paths)
+    assert previous_allowlist in body
+    return body.replace(previous_allowlist, entries, 1)
 
 
 def _pr() -> PullRequestSnapshot:
@@ -201,6 +235,7 @@ def _snapshot(
     requested_changes: bool | None = False,
     open_threads: int | None = 0,
     changed_paths: tuple[ChangedPath, ...] = (),
+    authority_snapshot: AuthoritySnapshot | None = None,
 ) -> GuardSnapshot:
     return GuardSnapshot(
         issue=_issue(body or _body()),
@@ -216,6 +251,7 @@ def _snapshot(
         viewer_permission="WRITE",
         base_protected=True,
         scope_evidence=ScopeEvidence(changed_paths, {}, {}),
+        authority_snapshot=authority_snapshot,
     )
 
 
@@ -1016,6 +1052,167 @@ def test_human_receipt_is_exact_sha_fresh_and_needs_no_self_review() -> None:
     rejected = evaluate(_snapshot(body=body, comments=(*comments, stale)))
     assert rejected.decision == "GUARD FAILURE"
     assert "stale" in rejected.reasons[0]
+
+
+def test_governance_writer_accepts_declared_governance_surfaces() -> None:
+    representative_paths = tuple(f"{prefix}frontier_probe.yml" for prefix in GOVERNANCE_PREFIXES)
+    test_paths = (
+        "tests/unit/test_workflow_guard.py",
+        "tests/unit/test_development_workflow_contract.py",
+    )
+    paths = tuple(sorted(set(GOVERNANCE_PATHS).union(representative_paths, test_paths)))
+    body = _governance_writer_body(paths)
+    scope = _validate_scope(
+        parse_work_block(body),
+        body,
+        ScopeEvidence(tuple(ChangedPath(path, "modified") for path in paths), {}, {}),
+    )
+
+    assert scope.changed_path_count == len(paths)
+    assert scope.consumed_allowlist_paths == paths
+    assert scope.governance_paths == tuple(
+        sorted(set(GOVERNANCE_PATHS).union(representative_paths))
+    )
+
+
+def test_governance_frontier_rejects_invalid_role_policy_scope_and_paths() -> None:
+    def validate(body: str, path: str, status: str = "modified") -> None:
+        _validate_scope(
+            parse_work_block(body),
+            body,
+            ScopeEvidence((ChangedPath(path, status),), {}, {}),
+        )
+
+    workflow_path = ".github/workflows/ci.yml"
+    for writer_role in ("BUILD_PRODUCT", "UI_WORKER"):
+        body = _governance_writer_body((workflow_path,), writer_role=writer_role)
+        with pytest.raises(ValueError, match="product writer cannot modify governance path"):
+            validate(body, workflow_path)
+
+    invalid_metadata = (
+        {"risk": "R0"},
+        {"risk": "R1"},
+        {"risk": "R2"},
+        {"profile": "FAST"},
+        {"profile": "STANDARD"},
+        {"profile": "FAST", "policy": "AUTO"},
+        {"profile": "STANDARD", "policy": "AUTO"},
+        {"route_effect": "ADVANCES"},
+        {"route_effect": "COMPLETES"},
+    )
+    for metadata in invalid_metadata:
+        body = _governance_writer_body(("scripts/check_workflow_guards.py",), **metadata)
+        with pytest.raises(ValueError):
+            validate(body, "scripts/check_workflow_guards.py")
+
+    unknown_role = _governance_writer_body(
+        ("scripts/check_workflow_guards.py",), writer_role="BUILD"
+    )
+    with pytest.raises(ValueError, match="writer role is unknown"):
+        validate(unknown_role, "scripts/check_workflow_guards.py")
+
+    with pytest.raises(ValueError, match="changed path is absent from strict allowlist"):
+        validate(
+            _governance_writer_body(("scripts/check_workflow_guards.py",)),
+            "docs/product_roadmap.md",
+        )
+
+    product_path = "docs/unrelated_product.md"
+    with pytest.raises(ValueError, match="governance writer cannot modify product path"):
+        validate(_governance_writer_body((product_path,)), product_path)
+
+    for near_miss in (
+        ".agents/skills-extra/build/SKILL.md",
+        ".github/workflows-extra/ci.yml",
+        ".github/ISSUE_TEMPLATE-extra/template.yml",
+    ):
+        body = _governance_writer_body((near_miss,))
+        with pytest.raises(ValueError, match="governance writer cannot modify product path"):
+            validate(body, near_miss)
+
+    for status, reason in (
+        ("added", "existing allowlist path is added"),
+        ("renamed", "existing allowlist path is renamed"),
+    ):
+        body = _governance_writer_body(("scripts/check_workflow_guards.py",))
+        with pytest.raises(ValueError, match=reason):
+            validate(body, "scripts/check_workflow_guards.py", status)
+
+    for status in ("modified", "renamed"):
+        body = _governance_writer_body((".github/CODEOWNERS",)).replace(
+            f"- `.github/CODEOWNERS` — `{DECLARED_DIGEST}`.",
+            "- `.github/CODEOWNERS` — `nuevo`.",
+        )
+        with pytest.raises(ValueError, match="new allowlist path is not added"):
+            validate(body, ".github/CODEOWNERS", status)
+
+    denied_body = _governance_writer_body((workflow_path,)).replace(
+        "- `src/**` — `deny`.",
+        "- `src/**` — `deny`.\n- `.github/workflows/**` — `deny`.",
+    )
+    with pytest.raises(ValueError, match="allowlist overlaps prohibited surface"):
+        validate(denied_body, workflow_path)
+
+    immutable_body = _governance_writer_body((workflow_path,)).replace(
+        "### Superficies del repositorio no modificables — deny por ruta cambiada\n",
+        "### Superficies del repositorio no modificables — deny por ruta cambiada\n\n"
+        f"- `{workflow_path}` — `{DECLARED_DIGEST}`.\n",
+    )
+    with pytest.raises(ValueError, match="allowlist overlaps immutable surface"):
+        validate(immutable_body, workflow_path)
+
+
+def test_governance_frontier_requires_exact_base_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_contents = {path: f"base bytes for {path}".encode() for path in _MODULE._AUTHORITY_PATHS}
+    queries: list[tuple[str, str]] = []
+
+    def git_bytes(arguments: tuple[str, ...], label: str) -> bytes:
+        assert label == "authority base file"
+        assert len(arguments) == 2 and arguments[0] == "show"
+        base_sha, path = arguments[1].split(":", maxsplit=1)
+        queries.append((base_sha, path))
+        assert base_sha == BASE_SHA
+        return base_contents[path]
+
+    monkeypatch.setattr(_MODULE, "_git_bytes", git_bytes)
+    body = _governance_writer_body(("scripts/check_workflow_guards.py",))
+    base_digests = {
+        path: hashlib.sha256(content).hexdigest() for path, content in base_contents.items()
+    }
+    valid_authority = AuthoritySnapshot(BASE_SHA, base_digests)
+    valid_snapshot = _snapshot(body=body, authority_snapshot=valid_authority)
+
+    accepted = evaluate(valid_snapshot, phase="build")
+
+    assert accepted.decision == "READY"
+    assert queries == [(BASE_SHA, path) for path in _MODULE._AUTHORITY_PATHS]
+
+    candidate_digests = dict(base_digests)
+    candidate_digests["scripts/check_workflow_guards.py"] = hashlib.sha256(
+        b"candidate bytes"
+    ).hexdigest()
+    incomplete_digests = dict(base_digests)
+    incomplete_digests.pop("scripts/check_workflow_guards.py")
+    expanded_digests = {**base_digests, "unlisted/path": DECLARED_DIGEST}
+    altered_digests = dict(base_digests)
+    altered_digests["scripts/check_workflow_guards.py"] = DECLARED_DIGEST
+    invalid_authorities = (
+        (None, "requires a base authority snapshot"),
+        (AuthoritySnapshot(HISTORICAL_SHA, base_digests), "base SHA differs"),
+        (AuthoritySnapshot(BASE_SHA, incomplete_digests), "paths are incomplete or expanded"),
+        (AuthoritySnapshot(BASE_SHA, expanded_digests), "paths are incomplete or expanded"),
+        (AuthoritySnapshot(BASE_SHA, candidate_digests), "digest differs from base"),
+        (AuthoritySnapshot(BASE_SHA, altered_digests), "digest differs from base"),
+    )
+    for authority, reason in invalid_authorities:
+        result = evaluate(
+            replace(valid_snapshot, authority_snapshot=authority),
+            phase="build",
+        )
+        assert result.decision == "GUARD FAILURE"
+        assert reason in result.reasons[0]
 
 
 def test_product_writer_rejects_governance_and_governance_rejects_product() -> None:
