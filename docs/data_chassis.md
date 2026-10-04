@@ -121,8 +121,9 @@ existente más allá de sus propios campos opcionales.
   `read_only=True` y `octet_length(encode(document_json))` (bytes UTF-8 exactos; el baseline publicó
   `strlen`, equivalente para documentos ASCII); y el desglose de duración en ejecución del trabajo
   (`job_execution_ms`), consulta (`query_ms`), residuo no atribuido del colector (`collector_unattributed_ms`),
-  persistencia (`persistence_ms`) y verificación (`verification_ms`), medido con **un solo reloj** y reconciliado de forma
-  exacta con la duración total del ciclo (`total_ms`).
+  persistencia (`persistence_ms`) y verificación (`verification_ms`). El reloj del colector mide su ventana y
+  reconcilia exactamente las fases con `total_ms`; la duración del job sólo usa timestamps del scheduler si
+  encajan cronológicamente dentro de esa ventana.
 - **Cota explícita:** 90 snapshots diarios retenidos. Los registros del día abierto se anexan sin
   reescribir el archivo completo y sólo se pliegan al snapshot compacto cuando el día UTC cierra.
 - **No intrusivo:** el colector abre el motor únicamente en `read_only=True`, no introduce una
@@ -156,11 +157,13 @@ existente más allá de sus propios campos opcionales.
   alguna; por eso se captura al escribir y no se reconstruye después en el informe. Si el intento no
   reporta filas creadas, o si las tablas crecieron más de lo que el intento declara haber creado, la
   clasificación **se omite** en vez de inventarse.
-- **Overhead propio medido:** `collector_overhead_ms` registra, en milisegundos y con el mismo reloj
-  único, la parte de la ventana medida que consumió el propio instrumento (lectura, compactación,
-  verificación y residuo), separada de `job_execution_ms` (la ejecución del trabajo). La relación
-  `collector_overhead_ms + job_execution_ms == total_ms` se valida en el contrato (con compatibilidad
-  para `network_ms` en registros v1 históricos).
+- **Overhead propio medido:** cuando los timestamps del scheduler caben cronológicamente en la ventana
+  del colector, `collector_overhead_ms` registra la parte consumida por el instrumento, separada de
+  `job_execution_ms`, y el contrato valida que ambas sumen `total_ms` (con compatibilidad para
+  `network_ms` en registros v1 históricos). Si los relojes no son compatibles, el registro terminal
+  se conserva, `job_execution_ms` queda en cero porque el contrato entero no representa “desconocido”,
+  el intervalo queda en `collector_unattributed_ms` y `collector_overhead_ms` es `null`; no se inventa
+  una duración ni una atribución entre relojes.
 - **Campos opcionales:** la extensión de `storage-observability-v1` es aditiva y con valor por
   defecto; un registro escrito sin ellos sigue parseando sin error. El contrato diario
   `storage-observability-daily-snapshot-v1` conserva exactamente sus campos.
@@ -860,11 +863,68 @@ límites usan además K=513 y la validación usa una cadena de 1.024 métricas.
 Todo el almacenamiento del smoke fue temporal; el staging v2 sigue aislado y
 el workspace permanente no se migró ni modificó.
 
-Cola compacta de 5 elementos para los siguientes bloques de la ruta:
-1. `DATA-CHASSIS-35`: Persistencia por lotes y validación acotada en v1/v2 (ESTE BLOQUE).
-2. `DATA-CHASSIS-36`: Checkpoints verificables y reanudación PIT de series recursivas diarias (EMA, RSI, ATR, MACD).
-3. `DATA-CHASSIS-37`: Pipeline de migración analítica masiva raw v1 → staging v2 con progreso por lotes reanudable.
-4. `DATA-CHASSIS-38`: Sustrato de lectura y escritura columnar Parquet para series históricas y evidencias.
-5. `DATA-CHASSIS-39`: Cutover y activación productiva de workspace v2 con verificación bidireccional y liberación segura de tablas legadas v1.
+## Cierre operativo durable, causas tipadas y medición comparable (DATA-CHASSIS-36 / #323)
 
-Sin checkpoints de series temporales, migración masiva, adopción productiva de staging v2, Parquet, cutover ni liberación física de almacenamiento del host.
+Este candidato añade observabilidad operativa local para decidir el siguiente trabajo de contención. No cambia los contratos financieros, la BD productiva, los límites del servicio ni el planificador de adquisición.
+
+- **A1 — resultado terminal durable primero**: cada intento guarda su resultado terminal con el mismo attempt_id, estado, telemetría y completed_at antes de notificar observadores o cerrar la medición. Si esa escritura falla, el scheduler conserva su recuperación vigente y no simula un resultado durable. Un fallo de observación no repite el proveedor ni cambia el éxito o fallo ya guardado. El colector recibe los instantes de terminación del job y persistencia terminal para que el coste posterior no se cuente como duración de adquisición.
+- **A2 — observadores independientes**: se intenta entregar a todos los observadores en orden incluso si fallan anteriores. El scheduler agrupa los fallos con un mensaje seguro y reintenta sólo los índices que fallaron en ese intento dentro del proceso; elimina el seguimiento cuando concluye la entrega. No hay recibo durable por observador ni garantía exactly-once auxiliar ante SIGKILL. La recuperación durable y el progreso financiero mantienen sus contratos actuales.
+- **A3 — causas cerradas**: Alpaca diario y SEC Submissions/documentos exponen reason_code desde puntos de fallo revisados. La interfaz sólo acepta códigos de tipos conocidos dentro del vocabulario cerrado; no analiza mensajes ni atributos arbitrarios. Preserva tipo, causa interna y prioridad de HTTP, credenciales y transporte. Los registros antiguos con reason_code=None siguen siendo legibles y no se reescriben.
+- **A4 — muestras locales v2**: scripts/memory_sampler.py lee una lista fija de propiedades systemd, /proc y cgroup v2; no lee DuckDB, el workspace ni variables de entorno. El JSON mantiene RSS/HWM y aliases legados y añade memory.current/peak/stat/events, swap, PSI, límites y una identidad de proceso/cgroup. Los valores ausentes son null con un motivo acotado; release_sha distingue known, unknown e incoherent. La cadencia predeterminada es 5 segundos y la retención 14 días por fecha America/Lima; sólo se podan archivos mem-YYYY-MM-DD.jsonl reconocidos.
+- **Sonda de ciclo**: scripts/cycle_probe.py mantiene legibles muestras v1 y v2, normaliza aliases, separa intentos por attempt_id y elimina duplicados entre snapshots y segmentos del journal. El día se evalúa en America/Lima. Sólo declara cierre cuando el overview indica scheduler habilitado, todos los jobs contabilizados, cero en ejecución y ningún scheduled_next_run_at o scheduled_next_retry_at dentro del día. Timeout o overview incompleto queda como parcial. Conserva intentos sin muestra e intervalos no atribuidos; una coincidencia temporal no se presenta como causalidad.
+- **Comparabilidad de memoria**: pico, neto, rango y deltas por intento se calculan sólo con identidad completa coincidente: PID, process_starttime_ticks, boot_id y cgroup_generation. Un cambio de identidad, reset o campo insuficiente rompe la serie y deja el motivo explícito; no se calcula un delta entre puntos inconexos. Se incluyen duración y coste del colector y diferencias de release/base. Un reporte previo sirve de baseline sólo si su día es anterior y su ciclo está cerrado; una captura puntual no se convierte en serie.
+- **Compatibilidad y límites**: se preservan los lectores storage-observability-v1/v2, sin migración, schema financiero ni reescritura histórica. Las lecturas DuckDB del colector son read-only, con límite predeterminado de 5 segundos. El escaneo de bytes de documentos ocurre como máximo una vez por día UTC; los cierres posteriores sólo cuentan filas. Los artefactos de operación no tienen available_at y no alimentan métricas, diagnósticos ni candidatos.
+
+### Tabla de emisión de reason_code
+
+| Códigos | Punto de emisión |
+| --- | --- |
+| alpaca_configuration_invalid, alpaca_credentials_invalid | Validación de configuración/credenciales al construir o configurar el cliente Alpaca, antes de consultar el endpoint. |
+| alpaca_symbol_invalid, alpaca_request_range_invalid | Validación del ticker y de los extremos/intervalo antes de crear la solicitud de barras. |
+| alpaca_http_transport, alpaca_http_status | Frontera de solicitud HTTP: excepción de transporte frente a respuesta con estado no exitoso. |
+| alpaca_response_too_large, alpaca_json_invalid, alpaca_response_structure_invalid | Límites y parseo de respuesta: tamaño, JSON inválido y forma/campos/paginación estructuralmente inválidos. |
+| alpaca_symbol_mismatch | Validación de que el símbolo de la respuesta corresponde al solicitado. |
+| alpaca_pagination_invalid | Cursor/token repetido, inválido o incoherente entre páginas. |
+| alpaca_bar_invalid | Validación de cada barra: timestamp, Decimal, campos requeridos y coherencia OHLCV. |
+| sec_submissions_fetch_failed | Frontera de descarga de Submissions cuando no existe una causa SEC más específica. |
+| sec_submissions_snapshot_invalid, sec_submissions_snapshot_read_failed, sec_submissions_snapshot_persist_failed, sec_submissions_snapshot_conflict | Validación del snapshot, lectura/repositorio, escritura/verificación genérica o conflicto de identidad determinista, respectivamente. |
+| sec_document_request_invalid, sec_document_selection_missing, sec_document_selection_invalid | Validación de la solicitud documental y selección de filing/documento objetivo. |
+| sec_document_snapshot_missing, sec_document_snapshot_read_failed, sec_document_snapshot_invalid, sec_document_snapshot_ambiguous | Lectura del snapshot SEC: ausencia, error de lectura, contrato inválido o más de una revisión elegible. |
+| sec_document_fetch_failed | Descarga del documento SEC después de validar solicitud, snapshot y selección. |
+| sec_document_revision_read_failed, sec_document_revision_ambiguous, sec_document_revision_conflict, sec_document_revision_verify_failed | Búsqueda de revisiones existentes, selección ambigua, identidad incompatible o relectura/verificación posterior a persistir. |
+| sec_document_blob_persist_failed, sec_document_revision_persist_failed | Escritura del blob del documento y persistencia de metadata de revisión, respectivamente. |
+| sec_primary_document_refresh_failed | Fallback de la fachada de refresh sólo cuando no se conserva un código interno más específico. |
+
+Los códigos se refieren a la etapa conocida; un StorageError genérico no se transforma en checksum/conflicto inventado. La fachada SEC conserva la causa más específica conocida. Los reason_code de SMV/FRED y otras rutas ya soportadas continúan intactos.
+
+### Benchmark ABBA del colector
+
+Se comparó la base exacta d54de57f07c70769baf66eb6e046b784ae14c298 con el candidato cuyo colector tiene SHA-256 c3e95ae0ca0a394e315924025d356dd91c09430472e09bff7879d3f76bbec6c6, en Python 3.12.3 / DuckDB 1.5.4 y orden A(base) → B(candidato) → B(candidato) → A(base). Las cuatro ejecuciones usaron la misma BD scratch de SHA-256 fdf6e5771f402d7e3a4f01a2e646c7f4ea7020ff38356eb3734fbf89121afc01: cuatro tablas documentales, 16 filas deterministas por tabla. Cada ejecución usó un state_root nuevo. «Frío» significa primer cierre que mide document_bytes; «caliente», segundo intento del mismo día que omite esa medición de bytes. No significa caché de páginas fría/caliente del sistema operativo.
+
+Tiempos de pared externos por fase, en milisegundos; las consultas SELECT se cuentan sin los dos SET de configuración por conexión:
+
+| Ejecución | Frío begin / complete | Caliente begin / complete | SELECT por fase: frío begin / complete; caliente begin / complete |
+| --- | ---: | ---: | ---: |
+| A1 base | 17,014 / 21,040 | 14,521 / 15,646 | 5 / 5; 5 / 5 |
+| B1 candidato | 14,568 / 17,587 | 15,584 / 17,023 | 5 / 5; 5 / 5 |
+| B2 candidato | 15,396 / 16,838 | 15,149 / 16,227 | 5 / 5; 5 / 5 |
+| A2 base | 15,179 / 16,735 | 16,221 / 16,416 | 5 / 5; 5 / 5 |
+
+Coste total por muestra (begin + complete, sin callable ni duración simulada del job): A1 38,054/30,167 ms frío/caliente; B1 32,155/32,607 ms; B2 32,234/31,376 ms; A2 31,914/32,637 ms. Es coste del colector por intento, no del ciclo completo con proveedor.
+
+En cada fase, las cinco SELECT son una lectura de information_schema más cuatro lecturas, una por tabla; base y candidato conservan el mismo conteo. El SHA-256 de la serialización de `table_bytes` fue idéntico en las cuatro ejecuciones: 426b79b42dc7632edd480cad5b8626a9976371471c0cb26ca404fa695c232831. El hash de la BD permaneció fdf6e5771f402d7e3a4f01a2e646c7f4ea7020ff38356eb3734fbf89121afc01 antes y después; cada artefacto tuvo dos intentos, y el caliente no volvió a emitir `table_bytes`. Las variaciones de pared se solapan: el experimento no demuestra una mejora de latencia ni menos consultas. La ganancia de este cambio es preservar el resultado ante relojes de ciclo incompatibles sin atribuirles duraciones falsas, no una aceleración medida.
+
+### Probe read-only del runtime observado
+
+El 2026-10-04T22:34:24Z, runtime-identity observó investment-analyst con PID 293, process_starttime_ticks 262, release SHA e276526871bd2efa7ddae3a4efc35d0d769b2c71 y cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/investment-analyst.service, generación 534ac143-f8fc-4f4c-a094-26ffd12f31c5:92823602a55d47ca86e2bdf5238d0f0c:25:2591. El release vivo no coincide con la base del BUILD; el candidato no está desplegado. La comparación con cycle-2026-10-04.json quedó inconclusa porque ese reporte aún no incluye runtime_identity. El probe informó workspace_accessed=false, database_accessed=false y writes_performed=false. Esto verifica identificación segura, no adopción ni mejora de memoria.
+
+### Cola de ruta después de DATA-CHASSIS-36
+
+DATA-CHASSIS permanece NEXT; este candidato ADVANCES sin completar la ruta:
+
+1. Próximo scope desde main: checkpoints persistibles de series recursivas diarias y adopción incremental/lecturas que compartan esa frontera, reordenados con evidencia viva y sin heredar autorización.
+2. Migración analítica v1 → staging v2 verificable y reanudable por lotes.
+3. Parquet sólo si un benchmark nuevo demuestra necesidad y coste aceptable; no es un objetivo automático.
+4. Activación/cutover con verificación bidireccional y recuperación probada; cualquier limpieza física requiere inventario y autorización estrecha posterior.
+
+No hay checkpoints productivos, migración masiva, adopción de staging v2, despliegue del sampler, cambios de unidades, cutover ni liberación de almacenamiento del host en este candidato.

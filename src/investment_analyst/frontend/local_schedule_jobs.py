@@ -96,11 +96,16 @@ from investment_analyst.application.sec_institutional_history_models import (
     SecInstitutionalHistoryRequest,
     SecInstitutionalHistorySummary,
 )
+from investment_analyst.application.sec_submissions_refresh import SecSubmissionsRefreshError
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
 from investment_analyst.providers.asset_config import ProviderConfigurationError
 from investment_analyst.providers.crypto.coinbase_exchange import CoinbaseExchangeError
 from investment_analyst.providers.crypto.deribit import DeribitError
+from investment_analyst.providers.failure_reasons import is_known_provider_failure_reason
+from investment_analyst.providers.fundamentals.sec_document_pipeline import (
+    SecDocumentPipelineError,
+)
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarError
 from investment_analyst.providers.http import (
     RETRYABLE_HTTP_STATUS_CODES,
@@ -1111,9 +1116,22 @@ def _provider_status_code(chain: tuple[BaseException, ...]) -> int | None:
 
 
 def _provider_reason_code(chain: tuple[BaseException, ...]) -> str | None:
+    """Transfer only declared codes from the reviewed provider error types."""
     for item in chain:
-        code = getattr(item, "reason_code", None)
-        if isinstance(code, str) and code:
+        if not isinstance(
+            item,
+            (
+                AlpacaStockError,
+                DeribitError,
+                SmvOpenDataError,
+                SecPrimaryDocumentRefreshError,
+                SecSubmissionsRefreshError,
+                SecDocumentPipelineError,
+            ),
+        ):
+            continue
+        code = item.reason_code
+        if is_known_provider_failure_reason(code):
             return code
     return None
 

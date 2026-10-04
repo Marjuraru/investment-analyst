@@ -11,7 +11,11 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from pydantic import ValidationError
 
-from investment_analyst.providers.http import HttpResponse
+from investment_analyst.providers.http import (
+    HttpRequestError,
+    HttpRequestFailureKind,
+    HttpResponse,
+)
 from investment_analyst.providers.market.alpaca_pipeline import (
     AlpacaMarketFetchReceipt,
     alpaca_fetch_receipt_id,
@@ -35,6 +39,7 @@ class QueueTransport:
 
     def __init__(self, bodies: list[bytes]) -> None:
         self.bodies = list(bodies)
+        self.statuses: list[int] = []
         self.calls: list[tuple[str, Mapping[str, str], float]] = []
 
     def get(
@@ -45,7 +50,8 @@ class QueueTransport:
         timeout_seconds: float,
     ) -> HttpResponse:
         self.calls.append((url, dict(headers), timeout_seconds))
-        return HttpResponse(status_code=200, body=self.bodies.pop(0), headers={}, url=url)
+        status = self.statuses.pop(0) if self.statuses else 200
+        return HttpResponse(status_code=status, body=self.bodies.pop(0), headers={}, url=url)
 
 
 def _credentials() -> AlpacaCredentials:
@@ -277,6 +283,61 @@ def test_rejects_naive_and_invalid_ranges() -> None:
         client.fetch_daily_bars("AAPL", END, END)
     with pytest.raises(AlpacaStockError, match="invalid format"):
         client.fetch_daily_bars("invalid symbol", START, END)
+
+
+def test_failure_points_expose_closed_reason_codes_and_preserve_transport_cause() -> None:
+    with pytest.raises(AlpacaStockError) as credentials_error:
+        AlpacaCredentials(api_key="", secret_key="secret")
+    assert credentials_error.value.reason_code == "alpaca_credentials_invalid"
+
+    with pytest.raises(AlpacaStockError) as configuration_error:
+        AlpacaStockClient(QueueTransport([]), _credentials(), base_url="https://example.test")
+    assert configuration_error.value.reason_code == "alpaca_configuration_invalid"
+
+    client = _client(QueueTransport([b"{"]))
+    with pytest.raises(AlpacaStockError) as json_error:
+        client.fetch_daily_bars("AAPL", START, END)
+    assert json_error.value.reason_code == "alpaca_json_invalid"
+
+    malformed = _client(QueueTransport([b'{"bars": {}, "next_page_token": null}']))
+    with pytest.raises(AlpacaStockError) as shape_error:
+        malformed.fetch_daily_bars("AAPL", START, END)
+    assert shape_error.value.reason_code == "alpaca_response_structure_invalid"
+
+    status_transport = QueueTransport([b"{}"])
+    status_transport.statuses = [503]
+    with pytest.raises(AlpacaStockError) as status_error:
+        _client(status_transport).fetch_daily_bars("AAPL", START, END)
+    assert status_error.value.reason_code == "alpaca_http_status"
+    assert status_error.value.status_code == 503
+
+    page_cycle = _client(
+        QueueTransport(
+            [
+                _document_with_bars([], "same-page"),
+                _document_with_bars([], "same-page"),
+            ]
+        )
+    )
+    with pytest.raises(AlpacaStockError) as pagination_error:
+        page_cycle.fetch_daily_bars("AAPL", START, END)
+    assert pagination_error.value.reason_code == "alpaca_pagination_invalid"
+
+    class FailingTransport:
+        def get(self, url, *, headers, timeout_seconds):
+            del headers, timeout_seconds
+            raise HttpRequestError(
+                url,
+                "simulated-secret transport detail",
+                failure_kind=HttpRequestFailureKind.TRANSPORT,
+            )
+
+    with pytest.raises(AlpacaStockError) as transport_error:
+        AlpacaStockClient(FailingTransport(), _credentials(), clock=lambda: NOW).fetch_daily_bars(
+            "AAPL", START, END
+        )
+    assert transport_error.value.reason_code == "alpaca_http_transport"
+    assert isinstance(transport_error.value.__cause__, HttpRequestError)
 
 
 def test_source_contains_no_trading_endpoint_urls() -> None:

@@ -27,6 +27,7 @@ from investment_analyst.application.sec_declared_activity_refresh_models import 
     SecDeclaredActivityRefreshRequest,
     SecDeclaredActivityRefreshSummary,
 )
+from investment_analyst.application.sec_document_refresh import SecPrimaryDocumentRefreshError
 from investment_analyst.application.sec_fundamental_refresh import (
     SecIssuerFundamentalKnownAtTooEarlyError,
 )
@@ -757,6 +758,57 @@ def test_failure_without_a_declared_code_is_unchanged_from_today() -> None:
     assert failure.retryable is False
     assert failure.reason_code is None
     assert failure.message == "scheduled provider payload or refresh contract is invalid"
+
+
+def test_unknown_or_spoofed_reason_codes_are_not_persisted() -> None:
+    class UnreviewedError(RuntimeError):
+        reason_code = "deribit_funding_row_limit_exceeded"
+
+    spoofed = schedule_jobs_module._classified_provider_error(
+        UnreviewedError("provider response contains sensitive text")
+    ).failure
+    unknown = schedule_jobs_module._classified_provider_error(
+        DeribitError("provider text", reason_code="Bearer simulated-secret")
+    ).failure
+
+    assert spoofed.reason_code is None
+    assert unknown.reason_code is None
+    assert "sensitive" not in spoofed.message
+    assert "simulated-secret" not in unknown.message
+
+
+def test_sec_reason_code_does_not_change_existing_failure_policy() -> None:
+    error = SecPrimaryDocumentRefreshError(
+        "sensitive SEC response body",
+        reason_code="sec_document_fetch_failed",
+    )
+
+    failure = schedule_jobs_module._classified_provider_error(error).failure
+
+    assert failure.category is ScheduledJobFailureCategory.UNEXPECTED
+    assert failure.retryable is False
+    assert failure.reason_code == "sec_document_fetch_failed"
+    assert "sensitive" not in failure.message
+
+
+def test_alpaca_transport_reason_survives_wrapping_without_changing_retry_policy() -> None:
+    cause = HttpRequestError(
+        "https://data.alpaca.markets/v2/stocks/AAPL/bars",
+        "simulated secret transport body",
+        failure_kind=HttpRequestFailureKind.TRANSPORT,
+    )
+    error = AlpacaStockError(
+        "Alpaca Market Data request failed",
+        reason_code="alpaca_http_transport",
+    )
+    error.__cause__ = cause
+
+    failure = schedule_jobs_module._classified_provider_error(error).failure
+
+    assert failure.category is ScheduledJobFailureCategory.TRANSPORT
+    assert failure.retryable is True
+    assert failure.reason_code == "alpaca_http_transport"
+    assert "simulated secret" not in failure.message
 
 
 def test_every_existing_failure_path_keeps_its_category_and_retry_policy() -> None:

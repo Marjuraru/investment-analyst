@@ -11,6 +11,7 @@ from investment_analyst.providers.fundamentals.sec_document_client import SecPri
 from investment_analyst.providers.fundamentals.sec_document_pipeline import (
     SecDocumentImportRequest,
     SecDocumentPipeline,
+    SecDocumentPipelineError,
 )
 from investment_analyst.providers.fundamentals.sec_edgar import APPLE_CIK, APPLE_TICKER
 from investment_analyst.storage import LocalStorage, StoragePaths
@@ -91,8 +92,11 @@ def test_second_provider_failure_keeps_first_document_persisted(tmp_path: Path) 
             storage, _Client(fail_second=True), configuration=_configuration()
         )
 
-        with pytest.raises(RuntimeError, match="second fetch"):
+        with pytest.raises(SecDocumentPipelineError) as raised:
             pipeline.run(SecDocumentImportRequest(forms=("10-K", "10-Q")))
+
+        assert raised.value.reason_code == "sec_document_fetch_failed"
+        assert isinstance(raised.value.__cause__, RuntimeError)
 
         assert storage.raw_records.count(schema_version="sec-document-revision-v2") == 1
         assert storage.observations.count() == 0

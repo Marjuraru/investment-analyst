@@ -135,3 +135,52 @@ could not read valid workspace or operational state.
 
 The runner performs descriptive analysis only. It does not use an LLM, execute orders, manage
 money, or produce an investment recommendation.
+
+## Muestreo operacional de memoria y adopción del probe
+
+El sampler y cycle probe de DATA-CHASSIS-36 son herramientas operativas locales. El sampler lee una lista fija de propiedades de systemd, /proc y cgroup v2; no abre DuckDB ni el workspace. El reporte normal del ciclo consulta el overview HTTP local, captura systemd/proc/cgroup y lee estado/journal y la BD en read-only; espera el cierre del scheduler, así que se reserva para la aceptación operacional posterior al merge. El BUILD sólo ejecuta la identidad read-only; no copia scripts al runtime ni instala/modifica unidades.
+
+Desde la raíz del repositorio, estas comprobaciones no escriben muestras ni reportes:
+
+    PYTHONPATH=src .venv/bin/python scripts/cycle_probe.py runtime-identity
+    PYTHONPATH=src .venv/bin/python scripts/memory_sampler.py --no-write --json
+
+runtime-identity imprime identidad actual y metadata del último reporte, sin abrir la BD/workspace ni escribir. --no-write captura y muestra una muestra y sale. El probe comparó el runtime vivo observado el 2026-10-04 con el SHA e276526871bd2efa7ddae3a4efc35d0d769b2c71; la referencia cycle-2026-10-04.json no tenía runtime_identity, por lo que el resultado fue inconcluso. No usar el modo report como diagnóstico rápido: espera el cierre diario y escribe cycle-<día-Lima>.json/.md; repetirlo el mismo día reemplaza esos dos archivos. cycle_probe.py despacha por primer argumento y no define --help; usar sólo los modos documentados runtime-identity, baseline o report.
+
+### Adopción después del merge y aprobación operativa
+
+Instalar los dos scripts juntos en el directorio ops del runtime aceptado, porque cycle_probe carga memory_sampler desde su mismo directorio. Antes de activarlos, comparar los archivos de origen y destino contra el commit exacto integrado:
+
+    sha256sum scripts/cycle_probe.py scripts/memory_sampler.py
+    sha256sum /home/marjuraru/.local/share/investment-analyst/ops/cycle_probe.py /home/marjuraru/.local/share/investment-analyst/ops/memory_sampler.py
+
+Los hashes de cada par deben coincidir con el SHA integrado. Revisar localmente las unidades de systemd para confirmar que ejecutan esos paths, que no modifican la unidad del producto ni sus límites, y que no contienen credenciales. Consultar sólo metadatos no secretos de la unidad/timer:
+
+    systemctl --user show investment-analyst-memory-sampler.timer --property=LoadState,ActiveState,LastTriggerUSec,NextElapseUSecRealtime,Result
+    systemctl --user list-timers --all investment-analyst-memory-sampler.timer
+
+Primero verificar desde el directorio del repositorio, sin escribir:
+
+    PYTHONPATH=src .venv/bin/python /home/marjuraru/.local/share/investment-analyst/ops/cycle_probe.py runtime-identity
+    PYTHONPATH=src .venv/bin/python /home/marjuraru/.local/share/investment-analyst/ops/memory_sampler.py --no-write --json
+
+Una muestra puntual escrita, sólo durante esa aceptación:
+
+    PYTHONPATH=src .venv/bin/python /home/marjuraru/.local/share/investment-analyst/ops/memory_sampler.py --once --json
+
+Se anexa a ops/samples/mem-<fecha-America-Lima>.jsonl; el default conserva 14 días de muestras. El reporte de ciclo se ejecuta una vez después de que el scheduler pruebe que terminó el día:
+
+    PYTHONPATH=src .venv/bin/python /home/marjuraru/.local/share/investment-analyst/ops/cycle_probe.py report
+
+Ese reporte escribe en ops/reports; consulta el overview local y lee estado/journal y DuckDB en read-only. No convertirlo en una tarea frecuente: el coste de una lectura completa de BD no pertenece al sampler por muestra.
+
+Si el timer elegido usa Persistent=true, debe ser de calendario con OnCalendar=: systemd ignora Persistent para timers sólo monotónicos. Tras reanudar una laptop o activar un timer con intervalos vencidos, varios vencimientos durante la inactividad producen una sola activación; se registra un punto nuevo, no se reconstruye el historial ausente. No basar una comparación en huecos rellenados. Revisar además AccuracySec para que su tolerancia sea compatible con la cadencia configurada. Referencia: [systemd.timer(5)](https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html).
+
+### Rollback
+
+Para la unidad con el nombre adoptado, detener y deshabilitar sólo el timer del sampler:
+
+    systemctl --user disable --now investment-analyst-memory-sampler.timer
+    systemctl --user stop investment-analyst-memory-sampler.service
+
+Si la unidad tiene otro nombre, sustituirlo por el nombre verificado en systemd. Conservar ops/samples y ops/reports para auditoría; no borrar reportes, muestras, estado del scheduler, workspace ni base de datos. Este rollback no cambia ni reinicia investment-analyst. El despliegue y la activación siguen pendientes de la aceptación exact-SHA posterior al merge.

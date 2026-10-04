@@ -736,6 +736,84 @@ def test_scheduler_emits_storage_observability_without_changing_persisted_state(
     assert record.durations.total_ms == 0
 
 
+def test_scheduler_persists_terminal_result_before_notification_and_observation(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    events: list[str] = []
+
+    class RecordingStore(MultiAssetScheduleStateStore):
+        def write_attempt_from_state(self, state, attempt):  # type: ignore[no-untyped-def]
+            if attempt.status is not ScheduledJobAttemptStatus.RUNNING:
+                events.append("terminal")
+            return super().write_attempt_from_state(state, attempt)
+
+    class RecordingCollector(StorageObservabilityCollector):
+        def complete_attempt(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            events.append("collector")
+            return super().complete_attempt(*args, **kwargs)
+
+    collector = RecordingCollector(
+        state_root=tmp_path / "state",
+        database_path=tmp_path / "missing.duckdb",
+        clock=lambda: now,
+    )
+
+    def observe(_: ScheduledJobAttempt) -> None:
+        events.append("observer")
+
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(_definition("terminal-order"), _execution),),
+        RecordingStore(tmp_path / "schedule.json"),
+        observer=observe,
+        clock=lambda: now,
+        storage_observability=collector,
+    )
+
+    result = scheduler.tick()
+
+    assert result[0].status is ScheduledJobAttemptStatus.SUCCEEDED
+    assert events == ["terminal", "observer", "collector"]
+
+
+def test_scheduler_does_not_notify_when_terminal_persistence_fails(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    notifications: list[ScheduledJobAttempt] = []
+    collector_completions: list[bool] = []
+
+    class FailingTerminalStore(MultiAssetScheduleStateStore):
+        def write_attempt_from_state(self, state, attempt):  # type: ignore[no-untyped-def]
+            if attempt.status is not ScheduledJobAttemptStatus.RUNNING:
+                raise OSError("simulated-secret")
+            return super().write_attempt_from_state(state, attempt)
+
+    class RecordingCollector(StorageObservabilityCollector):
+        def complete_attempt(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            collector_completions.append(True)
+            return super().complete_attempt(*args, **kwargs)
+
+    store = FailingTerminalStore(tmp_path / "schedule.json")
+    collector = RecordingCollector(
+        state_root=tmp_path / "state",
+        database_path=tmp_path / "missing.duckdb",
+        clock=lambda: now,
+    )
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(_definition("terminal-failure"), _execution),),
+        store,
+        observer=notifications.append,
+        clock=lambda: now,
+        storage_observability=collector,
+    )
+
+    with pytest.raises(OSError, match="simulated-secret"):
+        scheduler.tick()
+
+    assert notifications == []
+    assert collector_completions == []
+    assert store.load().attempts[0].status is ScheduledJobAttemptStatus.RUNNING
+
+
 def test_persisted_scheduler_contracts_remain_unchanged(tmp_path: Path) -> None:
     now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
     store = MultiAssetScheduleStateStore(tmp_path / "persisted.json")

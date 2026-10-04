@@ -19,14 +19,23 @@ from investment_analyst.evidence.sec_documents.repository import (
     revision_to_raw_record,
 )
 from investment_analyst.providers.asset_config import SecAssetConfiguration
+from investment_analyst.providers.failure_reasons import ProviderFailureReason
 from investment_analyst.providers.fundamentals.sec_document_client import SecDocumentClient
 from investment_analyst.providers.fundamentals.sec_fact_models import SUBMISSIONS_SCHEMA_VERSION
-from investment_analyst.providers.fundamentals.sec_filing_index import SecFilingIndex
+from investment_analyst.providers.fundamentals.sec_filing_index import (
+    AmbiguousSecFilingError,
+    SecFilingIndex,
+    SecFilingIndexError,
+)
 from investment_analyst.storage import LocalStorage, StorageError
 
 
 class SecDocumentPipelineError(StorageError):
     """An import request is inconsistent with persisted submissions evidence."""
+
+    def __init__(self, message: str, *, reason_code: str | None = None) -> None:
+        self.reason_code = reason_code
+        super().__init__(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,15 +46,27 @@ class SecDocumentImportRequest:
 
     def __post_init__(self) -> None:
         if bool(self.forms) == bool(self.accessions):
-            raise SecDocumentPipelineError("provide exactly one of forms or accessions")
+            raise SecDocumentPipelineError(
+                "provide exactly one of forms or accessions",
+                reason_code=ProviderFailureReason.SEC_DOCUMENT_REQUEST_INVALID,
+            )
         if self.limit_per_form < 1:
-            raise SecDocumentPipelineError("limit_per_form must be positive")
+            raise SecDocumentPipelineError(
+                "limit_per_form must be positive",
+                reason_code=ProviderFailureReason.SEC_DOCUMENT_REQUEST_INVALID,
+            )
         if len(set(self.forms)) != len(self.forms) or len(set(self.accessions)) != len(
             self.accessions
         ):
-            raise SecDocumentPipelineError("document selection contains duplicate values")
+            raise SecDocumentPipelineError(
+                "document selection contains duplicate values",
+                reason_code=ProviderFailureReason.SEC_DOCUMENT_SELECTION_INVALID,
+            )
         if any(form not in FINANCIAL_SEC_FORMS for form in self.forms):
-            raise SecDocumentPipelineError("document selection includes an unsupported SEC form")
+            raise SecDocumentPipelineError(
+                "document selection includes an unsupported SEC form",
+                reason_code=ProviderFailureReason.SEC_DOCUMENT_SELECTION_INVALID,
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,20 +126,37 @@ class SecDocumentPipeline:
     def run(self, request: SecDocumentImportRequest) -> SecDocumentImportSummary:
         self._storage.require_open()
         submissions = self._latest_submissions()
-        index = SecFilingIndex.from_raw_record(submissions, self._configuration)
+        try:
+            index = SecFilingIndex.from_raw_record(submissions, self._configuration)
+        except AmbiguousSecFilingError as error:
+            raise SecDocumentPipelineError(
+                "persisted SEC submissions snapshot has ambiguous filing identity",
+                reason_code=ProviderFailureReason.SEC_DOCUMENT_SNAPSHOT_AMBIGUOUS,
+            ) from error
+        except SecFilingIndexError as error:
+            raise SecDocumentPipelineError(
+                "persisted SEC submissions snapshot failed index validation",
+                reason_code=ProviderFailureReason.SEC_DOCUMENT_SNAPSHOT_INVALID,
+            ) from error
         filings = self._select(index, request)
         repository = SecDocumentRepository(self._storage.raw_records, self._storage.documents)
-        self._storage.sources.upsert(
-            SourceDefinition(
-                source_id=SEC_DOCUMENT_SOURCE_ID,
-                provider_name="U.S. Securities and Exchange Commission",
-                dataset_name="EDGAR primary filing documents",
-                source_type=SourceType.DOCUMENTS,
-                base_url="https://www.sec.gov",
-                is_official=True,
-                coverage_notes="Selected primary 10-K, 10-Q, 20-F, and 40-F filings only.",
+        try:
+            self._storage.sources.upsert(
+                SourceDefinition(
+                    source_id=SEC_DOCUMENT_SOURCE_ID,
+                    provider_name="U.S. Securities and Exchange Commission",
+                    dataset_name="EDGAR primary filing documents",
+                    source_type=SourceType.DOCUMENTS,
+                    base_url="https://www.sec.gov",
+                    is_official=True,
+                    coverage_notes="Selected primary 10-K, 10-Q, 20-F, and 40-F filings only.",
+                )
             )
-        )
+        except StorageError as error:
+            raise SecDocumentPipelineError(
+                "SEC document source persistence failed",
+                reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_PERSIST_FAILED,
+            ) from error
         created = reused = blobs_created = blobs_reused = document_fetch_calls = 0
         revisions: list[SecDocumentRevision] = []
         accessions_fetched: list[str] = []
@@ -141,46 +179,91 @@ class SecDocumentPipeline:
                 filing=filing,
                 name=metadata.primary_document,
             )
-            existing_candidates = repository.list_revisions(
-                asset_id=self._configuration.asset_id,
-                known_at=datetime.max.replace(tzinfo=UTC),
-                accession=metadata.accession_number,
-            )
+            try:
+                existing_candidates = repository.list_revisions(
+                    asset_id=self._configuration.asset_id,
+                    known_at=datetime.max.replace(tzinfo=UTC),
+                    accession=metadata.accession_number,
+                )
+            except StorageError as error:
+                raise SecDocumentPipelineError(
+                    "SEC document revision lookup failed",
+                    reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_READ_FAILED,
+                ) from error
             if existing_candidates:
                 if len(existing_candidates) != 1:
-                    raise SecDocumentPipelineError("existing SEC document accession is ambiguous")
+                    raise SecDocumentPipelineError(
+                        "existing SEC document accession is ambiguous",
+                        reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_AMBIGUOUS,
+                    )
                 existing = existing_candidates[0]
                 if (
                     existing.asset_id != self._configuration.asset_id
                     or existing.document != document
                 ):
-                    raise SecDocumentPipelineError("existing SEC document revision conflicts")
-                repository.verify_revision(existing)
+                    raise SecDocumentPipelineError(
+                        "existing SEC document revision conflicts",
+                        reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_CONFLICT,
+                    )
+                try:
+                    repository.verify_revision(existing)
+                except StorageError as error:
+                    raise SecDocumentPipelineError(
+                        "existing SEC document revision could not be verified",
+                        reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_VERIFY_FAILED,
+                    ) from error
                 revisions.append(existing)
                 accessions_reused.append(metadata.accession_number)
                 reused += 1
                 blobs_reused += 1
                 continue
-            response = self._client.fetch(document)
+            try:
+                response = self._client.fetch(document)
+            except Exception as error:  # noqa: BLE001 - keep provider failure as the cause
+                raise SecDocumentPipelineError(
+                    "SEC primary document fetch failed",
+                    reason_code=ProviderFailureReason.SEC_DOCUMENT_FETCH_FAILED,
+                ) from error
             document_fetch_calls += 1
             revision_id = SecDocumentRevision.expected_id(
                 document.document_id, response.sha256, REVISION_SCHEMA_VERSION_V2
             )
-            existing = repository.get_revision(revision_id)
+            try:
+                existing = repository.get_revision(revision_id)
+            except StorageError as error:
+                raise SecDocumentPipelineError(
+                    "SEC document revision lookup failed",
+                    reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_READ_FAILED,
+                ) from error
             if existing is not None:
                 if (
                     existing.asset_id != self._configuration.asset_id
                     or existing.document != document
                     or existing.content_sha256 != response.sha256
                 ):
-                    raise SecDocumentPipelineError("existing SEC document revision conflicts")
-                repository.verify_revision(existing)
+                    raise SecDocumentPipelineError(
+                        "existing SEC document revision conflicts",
+                        reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_CONFLICT,
+                    )
+                try:
+                    repository.verify_revision(existing)
+                except StorageError as error:
+                    raise SecDocumentPipelineError(
+                        "existing SEC document revision could not be verified",
+                        reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_VERIFY_FAILED,
+                    ) from error
                 revisions.append(existing)
                 accessions_reused.append(metadata.accession_number)
                 reused += 1
                 blobs_reused += 1
                 continue
-            receipt = self._storage.documents.put(response.content)
+            try:
+                receipt = self._storage.documents.put(response.content)
+            except StorageError as error:
+                raise SecDocumentPipelineError(
+                    "SEC document blob persistence failed",
+                    reason_code=ProviderFailureReason.SEC_DOCUMENT_BLOB_PERSIST_FAILED,
+                ) from error
             revision = SecDocumentRevision(
                 revision_id=revision_id,
                 asset_id=self._configuration.asset_id,
@@ -194,8 +277,20 @@ class SecDocumentPipeline:
                 source_url=response.url,
                 revision_schema_version=REVISION_SCHEMA_VERSION_V2,
             )
-            self._storage.raw_records.save(revision_to_raw_record(revision))
-            repository.verify_revision(revision)
+            try:
+                self._storage.raw_records.save(revision_to_raw_record(revision))
+            except StorageError as error:
+                raise SecDocumentPipelineError(
+                    "SEC document revision persistence failed",
+                    reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_PERSIST_FAILED,
+                ) from error
+            try:
+                repository.verify_revision(revision)
+            except StorageError as error:
+                raise SecDocumentPipelineError(
+                    "SEC document revision could not be verified",
+                    reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_VERIFY_FAILED,
+                ) from error
             revisions.append(revision)
             accessions_fetched.append(metadata.accession_number)
             created += 1
@@ -215,13 +310,22 @@ class SecDocumentPipeline:
         )
 
     def _latest_submissions(self):
-        records = self._storage.raw_records.list(
-            asset_id=self._configuration.asset_id,
-            source_id=self._configuration.submissions_source_id,
-            schema_version=SUBMISSIONS_SCHEMA_VERSION,
-        )
+        try:
+            records = self._storage.raw_records.list(
+                asset_id=self._configuration.asset_id,
+                source_id=self._configuration.submissions_source_id,
+                schema_version=SUBMISSIONS_SCHEMA_VERSION,
+            )
+        except StorageError as error:
+            raise SecDocumentPipelineError(
+                "persisted SEC submissions snapshot could not be read",
+                reason_code=ProviderFailureReason.SEC_DOCUMENT_SNAPSHOT_READ_FAILED,
+            ) from error
         if not records:
-            raise SecDocumentPipelineError("no persisted SEC submissions snapshot is eligible")
+            raise SecDocumentPipelineError(
+                "no persisted SEC submissions snapshot is eligible",
+                reason_code=ProviderFailureReason.SEC_DOCUMENT_SNAPSHOT_MISSING,
+            )
         return max(
             records,
             key=lambda item: (item.available_at, item.received_at, str(item.record_id)),
@@ -236,7 +340,8 @@ class SecDocumentPipeline:
                     selected.append(by_accession[accession])
                 except KeyError as error:
                     raise SecDocumentPipelineError(
-                        "requested accession is absent or ineligible"
+                        "requested accession is absent or ineligible",
+                        reason_code=ProviderFailureReason.SEC_DOCUMENT_SELECTION_MISSING,
                     ) from error
             return tuple(
                 sorted(selected, key=lambda item: (item.acceptance_at, item.accession_number))
