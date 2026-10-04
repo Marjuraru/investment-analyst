@@ -12,6 +12,11 @@ from duckdb import DuckDBPyConnection
 
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import RawRecord
+from investment_analyst.storage.bounded_insert import (
+    BoundedInsertTable,
+    insert_bounded,
+    write_transaction,
+)
 from investment_analyst.storage.errors import (
     RecordConflictError,
     RecordNotFoundError,
@@ -239,17 +244,12 @@ class JsonRawRecordRepository:
                     chunk_reused.append(rid)
 
         if insert_rows:
-            columns = (
-                "record_id, asset_id, source_id, event_time, available_at, received_at, "
-                "relative_path, checksum_sha256, schema_version, document_json"
-            )
-            row_placeholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            values_clause = ", ".join(row_placeholder for _ in insert_rows)
-            params = [val for row_data in insert_rows for val in row_data]
-            self._connection.execute(
-                f"INSERT INTO raw_record_index ({columns}) VALUES {values_clause}",
-                params,
-            )
+            with write_transaction(self._connection):
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.RAW_RECORD_INDEX,
+                    insert_rows,
+                )
 
         return chunk_created, chunk_reused
 

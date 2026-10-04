@@ -39,6 +39,11 @@ from investment_analyst.storage.analytical_v2_validation import (
     topological_sort_metrics,
     verify_metrics_dag_and_lineage,
 )
+from investment_analyst.storage.bounded_insert import (
+    BoundedInsertTable,
+    insert_bounded,
+    write_transaction,
+)
 from investment_analyst.storage.errors import (
     RecordConflictError,
     RecordNotFoundError,
@@ -489,26 +494,33 @@ class MetricV2Store:
 
         # 7. Insert new rows in topological order
         reused_set = {str(uid) for uid in reused}
-        in_tx = False
-        try:
-            self._connection.execute("BEGIN TRANSACTION")
-            in_tx = True
-        except Exception:
-            pass
+        metric_rows: list[list[object]] = []
+        observation_link_rows: list[list[object]] = []
+        metric_link_rows: list[list[object]] = []
+        for metric in sorted_batch:
+            if str(metric.result_id) in reused_set:
+                continue
+            row, observation_ids, dependency_ids = metric_to_row(metric)
+            metric_rows.append(row)
+            for position, observation_id in enumerate(observation_ids):
+                observation_link_rows.append([str(metric.result_id), position, observation_id])
+            for position, dependency_id in enumerate(dependency_ids):
+                metric_link_rows.append([str(metric.result_id), position, dependency_id])
+            created.append(metric.result_id)
 
-        try:
-            for m in sorted_batch:
-                if str(m.result_id) in reused_set:
-                    continue
-                row, obs_ids, dep_ids = metric_to_row(m)
-                self._insert_one(row, obs_ids, dep_ids)
-                created.append(m.result_id)
-            if in_tx:
-                self._connection.execute("COMMIT")
-        except Exception:
-            if in_tx:
-                self._connection.execute("ROLLBACK")
-            raise
+        if metric_rows:
+            with write_transaction(self._connection):
+                insert_bounded(self._connection, BoundedInsertTable.METRICS_V2, metric_rows)
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.METRIC_OBSERVATION_LINKS_V2,
+                    observation_link_rows,
+                )
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.METRIC_METRIC_LINKS_V2,
+                    metric_link_rows,
+                )
 
         return BatchWriteReceipt(
             created_ids=tuple(created),
@@ -535,28 +547,6 @@ class MetricV2Store:
             [str(result_id)],
         ).fetchall()
         return [UUID(row[0]) for row in rows]
-
-    def _insert_one(
-        self, row: list[object], observation_ids: list[UUID], metric_ids: list[UUID]
-    ) -> None:
-        columns = ", ".join(_METRIC_V2_COLUMNS)
-        placeholders = ", ".join("?" for _ in row)
-        self._connection.execute(
-            f"INSERT INTO {METRIC_V2_TABLE} ({columns}) VALUES ({placeholders})",
-            row,
-        )
-        for position, observation_id in enumerate(observation_ids):
-            self._connection.execute(
-                f"INSERT INTO {METRIC_V2_OBSERVATION_LINKS_TABLE} "
-                "(result_id, position, observation_id) VALUES (?, ?, ?)",
-                [str(row[0]), position, str(observation_id)],
-            )
-        for position, metric_id in enumerate(metric_ids):
-            self._connection.execute(
-                f"INSERT INTO {METRIC_V2_METRIC_LINKS_TABLE} "
-                "(result_id, position, input_result_id) VALUES (?, ?, ?)",
-                [str(row[0]), position, str(metric_id)],
-            )
 
 
 def recalculate_metric_result_id(metric: MetricResult) -> UUID:

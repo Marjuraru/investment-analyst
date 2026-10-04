@@ -414,7 +414,9 @@ def verify_metrics_dag_and_lineage(
        - evidence set observation members match metric.input_observation_ids 1:1
        - evidence set segment and observation lineages verify cleanly
     """
-    seed_map = dict(metrics) if isinstance(metrics, Mapping) else {m.result_id: m for m in metrics}
+    seed_map: Mapping[UUID, MetricResult] = (
+        metrics if isinstance(metrics, Mapping) else {m.result_id: m for m in metrics}
+    )
 
     if not seed_map:
         return {}
@@ -432,19 +434,20 @@ def verify_metrics_dag_and_lineage(
         if metric_id not in validation_context.metrics_by_id
     }
     pending_metric_models: dict[UUID, MetricResult] = dict(new_seed_map)
-    all_metric_models = dict(validation_context.metrics_by_id)
-    all_metric_models.update(seed_map)
 
     external_seeds = {
         dependency_id
         for metric in new_seed_map.values()
         for dependency_id in metric.input_metric_result_ids
-        if dependency_id not in all_metric_models
+        if dependency_id not in pending_metric_models
+        and dependency_id not in validation_context.metrics_by_id
     }
     if external_seeds:
         ancestor_ids = find_transitive_metric_ancestor_ids(connection, external_seeds)
         needed_ids = external_seeds | ancestor_ids
-        missing_ancestor_ids = needed_ids.difference(all_metric_models)
+        missing_ancestor_ids = needed_ids.difference(pending_metric_models).difference(
+            validation_context.metrics_by_id
+        )
         try:
             fetched_ancestors = fetch_metrics_chunked(connection, missing_ancestor_ids)
         except RecordNotFoundError as error:
@@ -460,7 +463,6 @@ def verify_metrics_dag_and_lineage(
                     "its semantic preimage"
                 )
             pending_metric_models[dependency_id] = dependency
-            all_metric_models[dependency_id] = dependency
 
     # Validate only newly reached edges and nodes. Dependencies already in the
     # operation context have had their own identity, edges and ancestors checked.
@@ -469,7 +471,9 @@ def verify_metrics_dag_and_lineage(
     pending_children: dict[UUID, list[UUID]] = collections.defaultdict(list)
     for metric_id, metric in pending_metric_models.items():
         for dependency_id in metric.input_metric_result_ids:
-            dependency = all_metric_models.get(dependency_id)
+            dependency = pending_metric_models.get(dependency_id)
+            if dependency is None:
+                dependency = validation_context.metrics_by_id.get(dependency_id)
             if dependency is None:
                 raise MetricV2Error(f"metric v2 dependency {dependency_id} is not persisted")
             if dependency.asset_id != metric.asset_id:
@@ -522,7 +526,7 @@ def verify_metrics_dag_and_lineage(
 
     new_evidence_sets: dict[UUID, EvidenceSet] = {}
     new_evidence_lineages: dict[UUID, tuple[UUID, ...]] = {}
-    new_segments = dict(validation_context.segments_by_id)
+    new_segments = validation_context.segments_by_id
     evidence_store: EvidenceSetV2Store | None = None
     if new_evidence_set_ids:
         (
@@ -553,49 +557,30 @@ def verify_metrics_dag_and_lineage(
                 if str(identifier) not in validation_context.observations_by_id
             )
 
-    observations = dict(validation_context.observations_by_id)
+    new_observations: dict[str, tuple[str, str, str, datetime]] = {}
     if new_observation_ids:
-        use_fallback = False
         ordered_observation_ids = sorted(new_observation_ids)
         for chunk in chunked_sequence(ordered_observation_ids, MAX_CHUNK_SIZE):
             placeholders = ", ".join("?" for _ in chunk)
-            if not use_fallback:
-                try:
-                    rows = connection.execute(
-                        f"SELECT observation_id, asset_id, source_id, field_name, available_at "
-                        f"FROM {_OBS_TABLE} "
-                        f"WHERE observation_id IN ({placeholders})",
-                        list(chunk),
-                    ).fetchall()
-                    for row in rows:
-                        observations[str(row[0])] = (
-                            str(row[1]),
-                            str(row[2]),
-                            str(row[3]),
-                            parse_instant_utc(row[4], "observation available_at"),
-                        )
-                    continue
-                except Exception:
-                    use_fallback = True
-
             rows = connection.execute(
-                f"SELECT observation_id, asset_id, available_at "
+                f"SELECT observation_id, asset_id, source_id, field_name, available_at "
                 f"FROM {_OBS_TABLE} "
                 f"WHERE observation_id IN ({placeholders})",
                 list(chunk),
             ).fetchall()
             for row in rows:
-                observations[str(row[0])] = (
+                new_observations[str(row[0])] = (
                     str(row[1]),
-                    "",
-                    "",
-                    parse_instant_utc(row[2], "observation available_at"),
+                    str(row[2]),
+                    str(row[3]),
+                    parse_instant_utc(row[4], "observation available_at"),
                 )
 
-    evidence_sets = dict(validation_context.evidence_sets_by_id)
-    evidence_sets.update(new_evidence_sets)
-    evidence_lineages = dict(validation_context.evidence_lineages_by_id)
-    evidence_lineages.update(new_evidence_lineages)
+    evidence_sets = collections.ChainMap(new_evidence_sets, validation_context.evidence_sets_by_id)
+    evidence_lineages = collections.ChainMap(
+        new_evidence_lineages, validation_context.evidence_lineages_by_id
+    )
+    observations = collections.ChainMap(new_observations, validation_context.observations_by_id)
     if new_evidence_sets and evidence_store is not None:
         try:
             evidence_store.verify_observation_lineages(
@@ -637,25 +622,11 @@ def verify_metrics_dag_and_lineage(
     validation_context.metrics_by_id.update(pending_metric_models)
     validation_context.evidence_sets_by_id.update(new_evidence_sets)
     validation_context.evidence_lineages_by_id.update(new_evidence_lineages)
-    validation_context.segments_by_id.update(new_segments)
-    validation_context.observations_by_id.update(
-        {key: observations[key] for key in new_observation_ids if key in observations}
-    )
+    validation_context.observations_by_id.update(new_observations)
 
-    # Return only each seed's reachable DAG, even when the context also contains
-    # nodes resolved for earlier pages in the same operation.
-    reachable: dict[UUID, MetricResult] = {}
-    pending_ids_to_visit = list(seed_map)
-    while pending_ids_to_visit:
-        metric_id = pending_ids_to_visit.pop()
-        if metric_id in reachable:
-            continue
-        metric = validation_context.metrics_by_id.get(metric_id)
-        if metric is None:
-            raise MetricV2Error(f"metric v2 {metric_id} was not resolved")
-        reachable[metric_id] = metric
-        pending_ids_to_visit.extend(metric.input_metric_result_ids)
-    return reachable
+    # The required return value is the requested seed set. The complete reachable
+    # graph remains operation-scoped in the context without copying its prefix per page.
+    return {metric_id: validation_context.metrics_by_id[metric_id] for metric_id in seed_map}
 
 
 def fetch_diagnostics_chunked(

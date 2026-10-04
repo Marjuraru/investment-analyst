@@ -69,7 +69,8 @@ def _connection(tmp_path: Path) -> object:
     )
     connection.execute(
         "CREATE TABLE normalized_observations_v2 ("
-        "observation_id VARCHAR PRIMARY KEY, asset_id VARCHAR, available_at VARCHAR)"
+        "observation_id VARCHAR PRIMARY KEY, asset_id VARCHAR, available_at VARCHAR, "
+        "source_id VARCHAR, field_name VARCHAR)"
     )
     ensure_metric_v2_tables(connection, create=True)
     return connection
@@ -84,8 +85,16 @@ def _seed_observations(connection: object, count: int) -> list[NormalizedObserva
             [str(raw.record_id), raw.source.source_id],
         )
         connection.execute(
-            "INSERT INTO normalized_observations_v2 VALUES (?, ?, ?)",
-            [str(observation.observation_id), observation.asset_id, moment_text(observation)],
+            "INSERT INTO normalized_observations_v2 "
+            "(observation_id, asset_id, available_at, source_id, field_name) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                str(observation.observation_id),
+                observation.asset_id,
+                moment_text(observation),
+                observation.source.source_id,
+                observation.field_name,
+            ],
         )
         observations.append(observation)
     return observations
@@ -180,8 +189,16 @@ def test_missing_future_or_foreign_reference_fails_closed(tmp_path: Path) -> Non
     future_id = uuid4()
     future_moment = observations[0].available_at + timedelta(days=30)
     connection.execute(
-        "INSERT INTO normalized_observations_v2 VALUES (?, ?, ?)",
-        [str(future_id), "crypto:btc-usd", future_moment.astimezone(UTC).isoformat()],
+        "INSERT INTO normalized_observations_v2 "
+        "(observation_id, asset_id, available_at, source_id, field_name) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [
+            str(future_id),
+            "crypto:btc-usd",
+            future_moment.astimezone(UTC).isoformat(),
+            "deribit:funding",
+            "funding_rate",
+        ],
     )
     candidate = _metric(observations).model_copy(
         update={"input_observation_ids": [future_id, observations[1].observation_id]}

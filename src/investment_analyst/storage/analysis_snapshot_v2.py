@@ -43,6 +43,11 @@ from investment_analyst.storage.analytical_v2_validation import (
     validate_keyset_cursor,
     validate_keyset_limit,
 )
+from investment_analyst.storage.bounded_insert import (
+    BoundedInsertTable,
+    insert_bounded,
+    write_transaction,
+)
 from investment_analyst.storage.errors import (
     RecordConflictError,
     RecordNotFoundError,
@@ -513,48 +518,23 @@ class AnalysisSnapshotV2Store:
                 diag_link_rows.append([snap_id_str, pos, str(did)])
             created_ids.append(item.snapshot_id)
 
-        in_tx = False
-        try:
-            self._connection.execute("BEGIN TRANSACTION")
-            in_tx = True
-        except Exception:
-            pass
-
-        try:
-            if snap_rows:
-                self._connection.executemany(
-                    f"""
-                    INSERT INTO {ANALYSIS_SNAPSHOT_V2_TABLE} (
-                        snapshot_id, asset_id, domain, known_at,
-                        policy_version, evidence_set_digest, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
+        if snap_rows:
+            with write_transaction(self._connection):
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.SNAPSHOTS_V2,
                     snap_rows,
                 )
-            if metric_link_rows:
-                self._connection.executemany(
-                    f"""
-                    INSERT INTO {ANALYSIS_SNAPSHOT_V2_METRIC_LINKS_TABLE} (
-                        snapshot_id, position, metric_result_id
-                    ) VALUES (?, ?, ?)
-                    """,
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.SNAPSHOT_METRIC_LINKS_V2,
                     metric_link_rows,
                 )
-            if diag_link_rows:
-                self._connection.executemany(
-                    f"""
-                    INSERT INTO {ANALYSIS_SNAPSHOT_V2_DIAGNOSTIC_LINKS_TABLE} (
-                        snapshot_id, position, diagnostic_id
-                    ) VALUES (?, ?, ?)
-                    """,
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.SNAPSHOT_DIAGNOSTIC_LINKS_V2,
                     diag_link_rows,
                 )
-            if in_tx:
-                self._connection.execute("COMMIT")
-        except Exception:
-            if in_tx:
-                self._connection.execute("ROLLBACK")
-            raise
 
         return BatchWriteReceipt(created_ids=tuple(created_ids), reused_ids=tuple(reused_ids))
 

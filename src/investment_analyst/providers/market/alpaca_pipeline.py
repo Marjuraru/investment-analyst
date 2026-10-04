@@ -316,25 +316,41 @@ class AlpacaHistoricalPipeline:
                 stored_record = self._storage.raw_records.get(candidate.record_id)
                 raw_reused += 1
             except RecordNotFoundError:
-                self._storage.raw_records.save(candidate)
-                stored_record = self._storage.raw_records.get(candidate.record_id)
-                raw_created += 1
+                receipt = self._storage.raw_records.save_many([candidate])
+                persisted_records = self._storage.raw_records.get_many([candidate.record_id])
+                stored_record = persisted_records[candidate.record_id]
+                if stored_record != candidate:
+                    raise StorageError(
+                        "Alpaca raw record batch round-trip verification failed"
+                    ) from None
+                raw_created += receipt.created_count
+                raw_reused += receipt.reused_count
             stored_records.append(stored_record)
 
-            for observation in bar_to_observations(
+            candidates = bar_to_observations(
                 bar,
                 stored_record,
                 normalized_at=normalized_at,
                 configuration=self._configuration,
-            ):
-                try:
-                    stored_observation = self._storage.observations.get(observation.observation_id)
-                    observations_reused += 1
-                except RecordNotFoundError:
-                    self._storage.observations.save(observation)
-                    stored_observation = self._storage.observations.get(observation.observation_id)
-                    observations_created += 1
-                stored_observations.append(stored_observation)
+            )
+            existing = self._storage.observations.get_existing(
+                [item.observation_id for item in candidates]
+            )
+            observations_to_save = [
+                item for item in candidates if item.observation_id not in existing
+            ]
+            receipt = self._storage.observations.save_many(observations_to_save)
+            persisted = self._storage.observations.get_many(
+                [item.observation_id for item in candidates]
+            )
+            expected = {
+                item.observation_id: existing.get(item.observation_id, item) for item in candidates
+            }
+            if persisted != expected:
+                raise StorageError("Alpaca observation batch round-trip verification failed")
+            observations_created += receipt.created_count
+            observations_reused += len(existing) + receipt.reused_count
+            stored_observations.extend(persisted[item.observation_id] for item in candidates)
             check_operation_cancelled()
 
         self._verify_traceability(stored_records, stored_observations)
@@ -387,9 +403,13 @@ class AlpacaHistoricalPipeline:
             stored = self._storage.raw_records.get(candidate.record_id)
             created, reused = 0, 1
         except RecordNotFoundError:
-            self._storage.raw_records.save(candidate)
-            stored = self._storage.raw_records.get(candidate.record_id)
-            created, reused = 1, 0
+            write_receipt = self._storage.raw_records.save_many([candidate])
+            stored = self._storage.raw_records.get_many([candidate.record_id])[candidate.record_id]
+            if stored != candidate:
+                raise StorageError(
+                    "Alpaca coverage receipt round-trip verification failed"
+                ) from None
+            created, reused = write_receipt.created_count, write_receipt.reused_count
         decoded = alpaca_fetch_receipt_from_raw_record(stored)
         if decoded is None:
             raise StorageError("persisted Alpaca coverage receipt could not be decoded")
@@ -423,8 +443,6 @@ class AlpacaHistoricalPipeline:
         counts = Counter(observation.raw_record_id for observation in observations)
 
         for record in records:
-            if self._storage.raw_records.get(record.record_id) != record:
-                raise StorageError("Alpaca raw record round-trip verification failed")
             if (
                 record.asset_id != self._configuration.asset_id
                 or record.source.source_id != self._configuration.source_id
@@ -446,8 +464,6 @@ class AlpacaHistoricalPipeline:
             record = record_by_id.get(observation.raw_record_id)
             if record is None:
                 raise StorageError("Alpaca observation references a missing raw record")
-            if self._storage.observations.get(observation.observation_id) != observation:
-                raise StorageError("Alpaca observation round-trip verification failed")
             if (
                 observation.asset_id != self._configuration.asset_id
                 or record.asset_id != observation.asset_id

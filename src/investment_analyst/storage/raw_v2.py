@@ -41,6 +41,12 @@ from investment_analyst.storage.analysis_snapshot_v2 import (
     AnalysisSnapshotV2Store,
     ensure_analysis_snapshot_v2_tables,
 )
+from investment_analyst.storage.analytical_v2_validation import chunked_sequence
+from investment_analyst.storage.bounded_insert import (
+    BoundedInsertTable,
+    insert_bounded,
+    write_transaction,
+)
 from investment_analyst.storage.diagnostic_v2 import (
     DiagnosticV2Store,
     ensure_diagnostic_v2_tables,
@@ -511,23 +517,27 @@ class RawV2Staging:
             else:
                 chunk_reused.append(record_id)
         if insert_rows:
-            row_placeholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            values_clause = ", ".join(row_placeholder for _ in insert_rows)
-            params = [value for row_data in insert_rows for value in row_data]
-            self._connection.execute(
-                f"INSERT INTO {_INDEX_TABLE} ({columns}) VALUES {values_clause}",
-                params,
-            )
+            with write_transaction(self._connection):
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.RAW_V2_INDEX,
+                    insert_rows,
+                )
         return chunk_created, chunk_reused
 
     def _select_rows(self, record_ids: Sequence[UUID]) -> list[tuple[object, ...]]:
         self._require_open()
         columns = ", ".join(_INDEX_COLUMNS)
-        placeholders = ", ".join("?" for _ in record_ids)
-        return self._connection.execute(
-            f"SELECT {columns} FROM {_INDEX_TABLE} WHERE record_id IN ({placeholders})",
-            [str(record_id) for record_id in record_ids],
-        ).fetchall()
+        rows: list[tuple[object, ...]] = []
+        for chunk in chunked_sequence(record_ids, 256):
+            placeholders = ", ".join("?" for _ in chunk)
+            rows.extend(
+                self._connection.execute(
+                    f"SELECT {columns} FROM {_INDEX_TABLE} WHERE record_id IN ({placeholders})",
+                    [str(record_id) for record_id in chunk],
+                ).fetchall()
+            )
+        return rows
 
     def _hydrate(self, record_id: UUID, row: tuple[object, ...]) -> RawRecord:
         (
