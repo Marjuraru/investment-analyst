@@ -15,7 +15,6 @@ from investment_analyst.core.models import RawRecord
 from investment_analyst.storage.bounded_insert import (
     BoundedInsertTable,
     insert_bounded,
-    write_transaction,
 )
 from investment_analyst.storage.errors import (
     RecordConflictError,
@@ -244,12 +243,11 @@ class JsonRawRecordRepository:
                     chunk_reused.append(rid)
 
         if insert_rows:
-            with write_transaction(self._connection):
-                insert_bounded(
-                    self._connection,
-                    BoundedInsertTable.RAW_RECORD_INDEX,
-                    insert_rows,
-                )
+            insert_bounded(
+                self._connection,
+                BoundedInsertTable.RAW_RECORD_INDEX,
+                insert_rows,
+            )
 
         return chunk_created, chunk_reused
 
