@@ -179,15 +179,16 @@ def test_cancellation_after_one_complete_bar_preserves_unit_and_retry_is_idempot
 ) -> None:
     control = OperationControl()
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
-        original_save = storage.observations.save
+        original_save_many = storage.observations.save_many
 
-        def save_and_cancel(observation):
-            stored = original_save(observation)
-            if observation.field_name == "vwap":
+        def save_many_and_cancel(observations):
+            batch = list(observations)
+            receipt = original_save_many(batch)
+            if any(item.field_name == "vwap" for item in batch):
                 control.cancel()
-            return stored
+            return receipt
 
-        monkeypatch.setattr(storage.observations, "save", save_and_cancel)
+        monkeypatch.setattr(storage.observations, "save_many", save_many_and_cancel)
         pipeline, _ = _pipeline(storage)
         with operation_control_scope(control), pytest.raises(OperationCancelledError):
             pipeline.run(START, END)

@@ -43,6 +43,11 @@ from investment_analyst.storage.analytical_v2_validation import (
     validate_link_positions,
     verify_metrics_dag_and_lineage,
 )
+from investment_analyst.storage.bounded_insert import (
+    BoundedInsertTable,
+    insert_bounded,
+    write_transaction,
+)
 from investment_analyst.storage.errors import (
     RecordConflictError,
     RecordNotFoundError,
@@ -425,60 +430,28 @@ class DiagnosticV2Store:
 
             created_ids.append(item.diagnostic_id)
 
-        in_tx = False
-        try:
-            self._connection.execute("BEGIN TRANSACTION")
-            in_tx = True
-        except Exception:
-            pass
-
-        try:
-            if diag_rows:
-                self._connection.executemany(
-                    f"""
-                    INSERT INTO {DIAGNOSTIC_V2_TABLE} (
-                        diagnostic_id, asset_id, mode, verdict, final_score_text,
-                        confidence_text, as_of, available_at, computed_at,
-                        algorithm_version, summary, quality
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
+        if diag_rows:
+            with write_transaction(self._connection):
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.DIAGNOSTICS_V2,
                     diag_rows,
                 )
-            if comp_rows:
-                self._connection.executemany(
-                    f"""
-                    INSERT INTO {DIAGNOSTIC_V2_COMPONENTS_TABLE} (
-                        diagnostic_id, position, component_key, score_text,
-                        weight_text, weighted_contribution_text, explanation
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.DIAGNOSTIC_COMPONENTS_V2,
                     comp_rows,
                 )
-            if link_rows:
-                self._connection.executemany(
-                    f"""
-                    INSERT INTO {DIAGNOSTIC_V2_COMPONENT_METRIC_LINKS_TABLE} (
-                        diagnostic_id, component_position, link_position, metric_result_id
-                    ) VALUES (?, ?, ?, ?)
-                    """,
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.DIAGNOSTIC_COMPONENT_METRIC_LINKS_V2,
                     link_rows,
                 )
-            if ev_rows:
-                self._connection.executemany(
-                    f"""
-                    INSERT INTO {DIAGNOSTIC_V2_EVIDENCE_TABLE} (
-                        diagnostic_id, position, metric_result_id, direction,
-                        contribution_text, reason
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.DIAGNOSTIC_EVIDENCE_V2,
                     ev_rows,
                 )
-            if in_tx:
-                self._connection.execute("COMMIT")
-        except Exception:
-            if in_tx:
-                self._connection.execute("ROLLBACK")
-            raise
 
         return BatchWriteReceipt(created_ids=tuple(created_ids), reused_ids=tuple(reused_ids))
 

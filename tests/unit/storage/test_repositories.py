@@ -696,6 +696,39 @@ def test_partial_metric_read_returns_present_results_without_raising(storage) ->
     assert storage.metric_results.get_existing([]) == {}
 
 
+def test_observation_existing_read_is_absence_tolerant_and_paged(storage) -> None:
+    raw_record = make_raw_record()
+    storage.raw_records.save(raw_record)
+    observation = make_observation(raw_record_id=raw_record.record_id)
+    storage.observations.save_many([observation])
+
+    class _StatementRecordingConnection:
+        def __init__(self, target) -> None:
+            self._target = target
+            self.queries: list[tuple[str, list]] = []
+
+        def execute(self, query: str, parameters=None):
+            self.queries.append((query, parameters or []))
+            return self._target.execute(query, parameters)
+
+        def __getattr__(self, name: str):
+            return getattr(self._target, name)
+
+    recording = _StatementRecordingConnection(storage.observations._connection)
+    storage.observations._connection = recording
+    candidates = [observation.observation_id, *(uuid4() for _ in range(599))]
+
+    existing = storage.observations.get_existing(candidates)
+
+    assert existing == {observation.observation_id: observation}
+    assert len(recording.queries) == 3
+    assert [len(parameters) for _, parameters in recording.queries] == [256, 256, 88]
+    assert all("IN (" in query for query, _ in recording.queries)
+    assert storage.observations.get_existing([]) == {}
+    with pytest.raises(RecordNotFoundError):
+        storage.observations.get_many([observation.observation_id, uuid4()])
+
+
 def test_partial_metric_read_is_emitted_in_bounded_chunks(storage) -> None:
     raw_record = make_raw_record()
     storage.raw_records.save(raw_record)

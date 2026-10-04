@@ -32,6 +32,11 @@ from investment_analyst.storage.analytical_v2_validation import (
     MAX_CHUNK_SIZE,
     chunked_sequence,
 )
+from investment_analyst.storage.bounded_insert import (
+    BoundedInsertTable,
+    insert_bounded,
+    write_transaction,
+)
 from investment_analyst.storage.errors import RecordConflictError, StorageError
 
 EVIDENCE_SEGMENT_V2_TABLE = "evidence_segments_v2"
@@ -358,7 +363,7 @@ class EvidenceSetV2Store:
             ).fetchall()
             for row in chunk_rows:
                 existing[str(row[0])] = row
-        created = 0
+        insert_rows: list[list[object]] = []
         for segment in ordered:
             key = str(segment.segment_id)
             row = _segment_row(segment)
@@ -368,13 +373,15 @@ class EvidenceSetV2Store:
                         f"evidence segment v2 {key!r} already has different content"
                     )
                 continue
-            placeholders_row = ", ".join("?" for _ in row)
-            self._connection.execute(
-                f"INSERT INTO {EVIDENCE_SEGMENT_V2_TABLE} ({columns}) VALUES ({placeholders_row})",
-                row,
-            )
-            created += 1
-        return created
+            insert_rows.append(row)
+        if insert_rows:
+            with write_transaction(self._connection):
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.EVIDENCE_SEGMENTS_V2,
+                    insert_rows,
+                )
+        return len(insert_rows)
 
     def save_set(self, evidence_set: EvidenceSet) -> bool:
         """Persist one set with ordered members; content drift fails closed."""
@@ -401,16 +408,16 @@ class EvidenceSetV2Store:
                 raise RecordConflictError(f"evidence set v2 {key!r} already has different content")
             return False
         row = _set_row(evidence_set)
-        placeholders_row = ", ".join("?" for _ in row)
-        self._connection.execute(
-            f"INSERT INTO {EVIDENCE_SET_V2_TABLE} ({columns}) VALUES ({placeholders_row})",
-            row,
-        )
-        for position, segment_id in enumerate(evidence_set.segment_ids):
-            self._connection.execute(
-                f"INSERT INTO {EVIDENCE_SET_V2_MEMBERS_TABLE} "
-                "(evidence_set_id, position, segment_id) VALUES (?, ?, ?)",
-                [key, position, str(segment_id)],
+        member_rows = [
+            [key, position, segment_id]
+            for position, segment_id in enumerate(evidence_set.segment_ids)
+        ]
+        with write_transaction(self._connection):
+            insert_bounded(self._connection, BoundedInsertTable.EVIDENCE_SETS_V2, [row])
+            insert_bounded(
+                self._connection,
+                BoundedInsertTable.EVIDENCE_SET_MEMBERS_V2,
+                member_rows,
             )
         return True
 

@@ -21,6 +21,11 @@ from investment_analyst.core.models import (
     NormalizedObservation,
     SourceDefinition,
 )
+from investment_analyst.storage.bounded_insert import (
+    BoundedInsertTable,
+    insert_bounded,
+    write_transaction,
+)
 from investment_analyst.storage.errors import RecordConflictError, RecordNotFoundError
 from investment_analyst.storage.serialization import canonical_json_text, model_from_json
 
@@ -307,6 +312,17 @@ class DuckDBObservationRepository:
             model_type=NormalizedObservation,
         )
 
+    def get_existing(self, observation_ids: Collection[UUID]) -> dict[UUID, NormalizedObservation]:
+        """Return persisted observations while tolerating absent identifiers."""
+        return _get_existing_documents(
+            self._connection,
+            table="normalized_observations",
+            key_column="observation_id",
+            identifiers=observation_ids,
+            model_type=NormalizedObservation,
+            chunk_size=_OBSERVATION_IMPORT_PAGE_LIMIT,
+        )
+
     def save_many(self, observations: Collection[NormalizedObservation]) -> BatchWriteReceipt:
         if not observations:
             return BatchWriteReceipt()
@@ -324,13 +340,24 @@ class DuckDBObservationRepository:
                 seen_in_batch[key] = doc
 
         ordered_keys = tuple(sorted(seen_in_batch.keys()))
-        placeholders = ", ".join("?" for _ in ordered_keys)
-        query = (
-            "SELECT observation_id, document_json FROM normalized_observations "
-            f"WHERE observation_id IN ({placeholders})"
-        )
-        rows = self._connection.execute(query, list(ordered_keys)).fetchall()  # noqa: S608
-        existing = {row[0]: row[1] for row in rows}
+        existing: dict[str, str] = {}
+        previous_transaction_id: int | None = None
+        for offset in range(0, len(ordered_keys), _OBSERVATION_IMPORT_PAGE_LIMIT):
+            id_chunk = ordered_keys[offset : offset + _OBSERVATION_IMPORT_PAGE_LIMIT]
+            placeholders = ", ".join("?" for _ in id_chunk)
+            previous_transaction_id, stored_ids, stored_documents = self._connection.execute(
+                "SELECT current_transaction_id(), list(observation_id), list(document_json) "
+                "FROM normalized_observations "
+                f"WHERE observation_id IN ({placeholders})",
+                list(id_chunk),
+            ).fetchone()  # noqa: S608
+            if stored_ids is not None and stored_documents is not None:
+                existing.update(
+                    {
+                        str(identifier): str(document)
+                        for identifier, document in zip(stored_ids, stored_documents, strict=True)
+                    }
+                )
 
         created_ids: list[UUID] = []
         reused_ids: list[UUID] = []
@@ -357,32 +384,30 @@ class DuckDBObservationRepository:
                     reused_ids.append(obs.observation_id)
 
         if items_to_insert:
-            columns = (
-                "observation_id, raw_record_id, asset_id, field_name, frequency, "
-                "observed_at, period_end, available_at, quality, document_json"
-            )
-            row_placeholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            values_clause = ", ".join(row_placeholder for _ in items_to_insert)
-            params: list[object] = []
-            for obs in items_to_insert:
-                params.extend(
-                    [
-                        str(obs.observation_id),
-                        str(obs.raw_record_id),
-                        obs.asset_id,
-                        obs.field_name,
-                        obs.frequency.value,
-                        obs.observed_at,
-                        obs.period_end,
-                        obs.available_at,
-                        obs.quality.value,
-                        seen_in_batch[str(obs.observation_id)],
-                    ]
+            insert_rows = [
+                [
+                    str(obs.observation_id),
+                    str(obs.raw_record_id),
+                    obs.asset_id,
+                    obs.field_name,
+                    obs.frequency.value,
+                    obs.observed_at,
+                    obs.period_end,
+                    obs.available_at,
+                    obs.quality.value,
+                    seen_in_batch[str(obs.observation_id)],
+                ]
+                for obs in items_to_insert
+            ]
+            with write_transaction(
+                self._connection,
+                previous_transaction_id=previous_transaction_id,
+            ):
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.NORMALIZED_OBSERVATIONS,
+                    insert_rows,
                 )
-            self._connection.execute(
-                f"INSERT INTO normalized_observations ({columns}) VALUES {values_clause}",
-                params,
-            )
 
         return BatchWriteReceipt(
             created_ids=tuple(created_ids),
@@ -902,30 +927,21 @@ class DuckDBMetricResultRepository:
                     reused_ids.append(result.result_id)
 
         if items_to_insert:
-            columns = (
-                "result_id, asset_id, metric_key, as_of, available_at, "
-                "computed_at, quality, document_json"
-            )
-            row_placeholder = "(?, ?, ?, ?, ?, ?, ?, ?)"
-            values_clause = ", ".join(row_placeholder for _ in items_to_insert)
-            params: list[object] = []
-            for item in items_to_insert:
-                params.extend(
-                    [
-                        str(item.result_id),
-                        item.asset_id,
-                        item.metric_key,
-                        item.as_of,
-                        item.available_at,
-                        item.computed_at,
-                        item.quality.value,
-                        seen_in_batch[str(item.result_id)],
-                    ]
-                )
-            self._connection.execute(
-                f"INSERT INTO metric_results ({columns}) VALUES {values_clause}",
-                params,
-            )
+            insert_rows = [
+                [
+                    str(item.result_id),
+                    item.asset_id,
+                    item.metric_key,
+                    item.as_of,
+                    item.available_at,
+                    item.computed_at,
+                    item.quality.value,
+                    seen_in_batch[str(item.result_id)],
+                ]
+                for item in items_to_insert
+            ]
+            with write_transaction(self._connection):
+                insert_bounded(self._connection, BoundedInsertTable.METRIC_RESULTS, insert_rows)
 
         return BatchWriteReceipt(
             created_ids=tuple(created_ids),
@@ -1121,31 +1137,26 @@ class DuckDBDiagnosticResultRepository:
                     reused_ids.append(result.diagnostic_id)
 
         if items_to_insert:
-            columns = (
-                "diagnostic_id, asset_id, mode, verdict, as_of, available_at, "
-                "computed_at, quality, document_json"
-            )
-            row_placeholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            values_clause = ", ".join(row_placeholder for _ in items_to_insert)
-            params: list[object] = []
-            for item in items_to_insert:
-                params.extend(
-                    [
-                        str(item.diagnostic_id),
-                        item.asset_id,
-                        item.mode.value,
-                        item.verdict.value,
-                        item.as_of,
-                        item.available_at,
-                        item.computed_at,
-                        item.quality.value,
-                        seen_in_batch[str(item.diagnostic_id)],
-                    ]
+            insert_rows = [
+                [
+                    str(item.diagnostic_id),
+                    item.asset_id,
+                    item.mode.value,
+                    item.verdict.value,
+                    item.as_of,
+                    item.available_at,
+                    item.computed_at,
+                    item.quality.value,
+                    seen_in_batch[str(item.diagnostic_id)],
+                ]
+                for item in items_to_insert
+            ]
+            with write_transaction(self._connection):
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.DIAGNOSTIC_RESULTS,
+                    insert_rows,
                 )
-            self._connection.execute(
-                f"INSERT INTO diagnostic_results ({columns}) VALUES {values_clause}",
-                params,
-            )
 
         return BatchWriteReceipt(
             created_ids=tuple(created_ids),

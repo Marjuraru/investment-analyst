@@ -12,6 +12,7 @@ closed.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from uuid import UUID
@@ -20,6 +21,12 @@ from duckdb import DuckDBPyConnection
 
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import DataFrequency, NormalizedObservation
+from investment_analyst.storage.analytical_v2_validation import MAX_CHUNK_SIZE
+from investment_analyst.storage.bounded_insert import (
+    BoundedInsertTable,
+    insert_bounded,
+    write_transaction,
+)
 from investment_analyst.storage.errors import (
     RecordConflictError,
     RecordNotFoundError,
@@ -241,18 +248,31 @@ def require_raw_reference(
     connection: DuckDBPyConnection, observation: NormalizedObservation
 ) -> None:
     """Require the linked raw v2 row to exist with a matching source."""
-    rows = connection.execute(
-        "SELECT source_id FROM raw_v2_index WHERE record_id = ?",
-        [str(observation.raw_record_id)],
-    ).fetchall()
-    if not rows:
-        raise ObservationV2Error(
-            f"observation v2 references a missing raw record {observation.raw_record_id}"
-        )
-    if str(rows[0][0]) != observation.source.source_id:
-        raise ObservationV2Error(
-            f"observation v2 references a foreign raw record {observation.raw_record_id}"
-        )
+    require_raw_references(connection, [observation])
+
+
+def require_raw_references(
+    connection: DuckDBPyConnection,
+    observations: Collection[NormalizedObservation],
+) -> None:
+    """Verify raw record references by source in bounded ID pages."""
+    expected = {str(item.raw_record_id): item.source.source_id for item in observations}
+    ordered_ids = sorted(expected)
+    persisted: dict[str, str] = {}
+    for start in range(0, len(ordered_ids), MAX_CHUNK_SIZE):
+        id_chunk = ordered_ids[start : start + MAX_CHUNK_SIZE]
+        placeholders = ", ".join("?" for _ in id_chunk)
+        rows = connection.execute(
+            f"SELECT record_id, source_id FROM raw_v2_index WHERE record_id IN ({placeholders})",
+            id_chunk,
+        ).fetchall()
+        persisted.update({str(row[0]): str(row[1]) for row in rows})
+    for record_id, source_id in expected.items():
+        stored_source_id = persisted.get(record_id)
+        if stored_source_id is None:
+            raise ObservationV2Error(f"observation v2 references a missing raw record {record_id}")
+        if stored_source_id != source_id:
+            raise ObservationV2Error(f"observation v2 references a foreign raw record {record_id}")
 
 
 def require_observation_ids(
@@ -297,19 +317,21 @@ class ObservationV2Store:
                 )
             canonical[key] = observation
         ordered_keys = tuple(sorted(canonical))
-        placeholders = ", ".join("?" for _ in ordered_keys)
         columns = ", ".join(_OBSERVATION_V2_COLUMNS)
-        existing = {
-            str(row[0]): row
-            for row in self._connection.execute(
+        existing: dict[str, tuple[object, ...]] = {}
+        for start in range(0, len(ordered_keys), MAX_CHUNK_SIZE):
+            id_chunk = ordered_keys[start : start + MAX_CHUNK_SIZE]
+            placeholders = ", ".join("?" for _ in id_chunk)
+            rows = self._connection.execute(
                 f"SELECT {columns} FROM {OBSERVATION_V2_TABLE} "
                 f"WHERE observation_id IN ({placeholders})",
-                list(ordered_keys),
+                list(id_chunk),
             ).fetchall()
-        }
+            existing.update({str(row[0]): row for row in rows})
         created: list[UUID] = []
         reused: list[UUID] = []
         inserts: list[list[object]] = []
+        references_to_check: list[NormalizedObservation] = []
         seen: set[str] = set()
         for observation in ordered:
             key = str(observation.observation_id)
@@ -319,25 +341,26 @@ class ObservationV2Store:
                     raise RecordConflictError(
                         f"observation v2 identifier {key!r} already has different content"
                     )
-                require_raw_reference(self._connection, row_to_observation(existing[key]))
+                references_to_check.append(row_to_observation(existing[key]))
                 if key not in seen:
                     reused.append(observation.observation_id)
                     seen.add(key)
             else:
-                require_raw_reference(self._connection, observation)
+                references_to_check.append(observation)
                 if key not in seen:
                     created.append(observation.observation_id)
                     inserts.append(row)
                     seen.add(key)
                 else:
                     reused.append(observation.observation_id)
+        require_raw_references(self._connection, references_to_check)
         if inserts:
-            values = ", ".join(f"({', '.join('?' for _ in row)})" for row in inserts)
-            params = [value for row in inserts for value in row]
-            self._connection.execute(
-                f"INSERT INTO {OBSERVATION_V2_TABLE} ({columns}) VALUES {values}",
-                params,
-            )
+            with write_transaction(self._connection):
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.OBSERVATIONS_V2,
+                    inserts,
+                )
         return BatchWriteReceipt(
             created_ids=tuple(created),
             reused_ids=tuple(reused),
@@ -352,13 +375,16 @@ class ObservationV2Store:
         if not ordered:
             return {}
         columns = ", ".join(_OBSERVATION_V2_COLUMNS)
-        placeholders = ", ".join("?" for _ in ordered)
-        rows = self._connection.execute(
-            f"SELECT {columns} FROM {OBSERVATION_V2_TABLE} "
-            f"WHERE observation_id IN ({placeholders})",
-            [str(observation_id) for observation_id in ordered],
-        ).fetchall()
-        indexed = {UUID(row[0]): row for row in rows}
+        indexed: dict[UUID, tuple[object, ...]] = {}
+        for start in range(0, len(ordered), MAX_CHUNK_SIZE):
+            id_chunk = ordered[start : start + MAX_CHUNK_SIZE]
+            placeholders = ", ".join("?" for _ in id_chunk)
+            rows = self._connection.execute(
+                f"SELECT {columns} FROM {OBSERVATION_V2_TABLE} "
+                f"WHERE observation_id IN ({placeholders})",
+                [str(observation_id) for observation_id in id_chunk],
+            ).fetchall()
+            indexed.update({UUID(str(row[0])): row for row in rows})
         missing = missing_observation_ids(ordered, set(indexed))
         if missing is not None:
             raise_missing_observation(missing)
@@ -366,8 +392,7 @@ class ObservationV2Store:
             observation_id: row_to_observation(indexed[observation_id])
             for observation_id in ordered
         }
-        for observation in hydrated.values():
-            require_raw_reference(self._connection, observation)
+        require_raw_references(self._connection, hydrated.values())
         return hydrated
 
 
@@ -381,5 +406,6 @@ __all__ = [
     "observation_v2_table_exists",
     "require_observation_ids",
     "require_raw_reference",
+    "require_raw_references",
     "row_to_observation",
 ]

@@ -803,11 +803,68 @@ promesa de reducción de RSS.
 - **Coste computacional acotado O(salida + grafo + lineage)**: la persistencia y lectura en staging v2 escala estrictamente en función del volumen de entidades emitidas y del grafo local de dependencias y segmentos referenciados, manteniendo límites de defensa acotados. Excluyendo consultas de introspección de esquemas, los conteos observados de filas leídas por tabla (`table_rows`) y modelos hidratados coinciden exactamente con la cardinalidad del objetivo, sin escaneos completos de tablas ni hidratación de historia ajena.
 - **Aclaración del estado del chasis**: la persistencia v2 permanece confinada al staging aislado y no reduce bytes productivos en el DuckDB v1 ni en el host mientras no se ejecute el cutover del workspace; el camino productivo raw v1 conserva su doble persistencia (archivos en disco + `document_json`). La ruta `DATA-CHASSIS` no se considera finalizada y continúa su curso hacia la contención y reemplazo de v1.
 
-Cola compacta de 5 elementos para los siguientes bloques de la ruta:
-1. `DATA-CHASSIS-34`: Integridad analítica v2, pertenencia de dominio, paginación keyset y escalado acotado (ESTE BLOQUE).
-2. `DATA-CHASSIS-35`: Checkpoints verificables y reanudación PIT O(1) para series recursivas diarias (EMA, RSI, ATR, MACD).
-3. `DATA-CHASSIS-36`: Pipeline de migración analítica masiva (raw v1 -> staging v2) para 1,67 M de métricas y diagnósticos con progreso por lotes reanudable.
-4. `DATA-CHASSIS-37`: Sustrato de lectura y escritura columnar Parquet para series analíticas históricas y compresión de evidencias.
-5. `DATA-CHASSIS-38`: Cutover y activación productiva de workspace v2 con verificación bidireccional y liberación física segura de tablas legadas v1.
+## Persistencia por lotes y validación acotada (`DATA-CHASSIS-35`)
 
-Sin checkpoints de series temporales (EMA/RSI/ATR/MACD), adopción productiva de staging v2, alteración del esquema de almacenamiento v1 ni liberación física de almacenamiento del host.
+`DATA-CHASSIS-35` reduce el trabajo de persistencia e hidratación sin cambiar
+identidades, contratos de workspace, schema, fórmulas ni semántica point-in-time:
+
+- **A1 — transporte de inserción acotado**: un registro fijo de tablas y columnas
+  de v1/v2 convierte filas tipadas en una sola entrada JSON por ejecución de
+  hasta 256 filas. Valida el lote antes de escribir, conserva el orden, texto
+  Decimal exacto y UTC, rechaza `float` y fechas naive, y mantiene la atomicidad
+  de cada unidad sin apropiarse de una transacción activa del llamador.
+- **A2 — ingesta de mercado v1**: Alpaca y Coinbase leen primero las identidades
+  existentes, conservan el raw original y su `retrieved_at`, insertan raws y
+  observaciones ausentes mediante `save_many` y verifican en lote con `get_many`.
+  Los recibos vacíos e idempotentes conservan su comportamiento y la cobertura
+  IEX sigue explícitamente limitada a una bolsa.
+- **A3 — persistencia analítica v2**: métricas y enlaces, diagnósticos y
+  componentes/evidencias, snapshots y referencias, EvidenceSets e índice raw
+  usan inserciones acotadas. Las lecturas de IDs y referencias también se
+  dividen en páginas de hasta 256; las validaciones de tipos, identidad, DAG,
+  activo, fuente, `available_at`, conflictos e integridad siguen siendo
+  estrictas.
+- **A4 — contexto de validación por operación**: la resolución conserva una
+  sola copia de los modelos y referencias alcanzables y reutiliza mapas como
+  `ChainMap` durante esa operación. Una operación posterior inicia contexto
+  vacío y vuelve a consultar DuckDB, por lo que una corrupción posterior sigue
+  fallando cerrado. La búsqueda de fuente y campo para observaciones es
+  obligatoria; errores SQL o de esquema no se convierten en una omisión.
+
+El smoke comparativo se hizo en dos repeticiones por perfil, en un único proceso
+Python 3.12.3 / DuckDB 1.5.4, con el orden base → candidato → candidato → base
+y base exacta `b8664d5be2767f28a52adc5b548e38b4cf6a2531`, con un
+workspace scratch nuevo para cada repetición y 257 entidades enlazadas. Separó
+preparación, persistencia raw/observaciones/métricas/diagnósticos/snapshots,
+validación del DAG y lecturas. Los hashes canónicos de raws, observaciones,
+métricas, diagnósticos y snapshots fueron idénticos en los cuatro recorridos.
+
+| Fase | Ejecuciones lógicas base → candidato | Mediana base → candidato | Cociente de duración base/candidato |
+| --- | ---: | ---: | ---: |
+| Raw v1, escritura inicial | 2 → 7 | 271 ms → 85 ms | 3,20× |
+| Observaciones v1, escritura inicial | 2 → 7 | 219 ms → 45 ms | 4,84× |
+| Raw v2, escritura inicial | 2 → 7 | 345 ms → 153 ms | 2,26× |
+| Observaciones v2 | 260 → 11 | 512 ms → 74 ms | 6,96× |
+| Métricas v2, escritura y validación | 791 → 28 | 1.045 ms → 116 ms | 9,05× |
+| Diagnósticos v2, escritura y validación | 1.063 → 45 | 1.268 ms → 201 ms | 6,31× |
+| Snapshots v2, escritura y validación | 816 → 53 | 1.085 ms → 415 ms | 2,62× |
+| Validación del DAG alcanzable | 8 → 8 | 108 ms → 106 ms | 1,02× |
+| Lectura conjunta v2 | 326 → 72 | 1.026 ms → 905 ms | 1,13× |
+
+Las ejecuciones lógicas cuentan una ejecución por `execute` y una por cada
+parámetro de `executemany`; no son mediciones de latencia de producción. El RSS
+se muestreó dentro de cada fase: los deltas no bajaron uniformemente (por
+ejemplo, raw v1 pasó de 5.392 a 14.044 KiB y snapshots v2 de 11.562 a 12.892
+KiB), así que este smoke no afirma una reducción general de RSS. Los tests de
+límites usan además K=513 y la validación usa una cadena de 1.024 métricas.
+Todo el almacenamiento del smoke fue temporal; el staging v2 sigue aislado y
+el workspace permanente no se migró ni modificó.
+
+Cola compacta de 5 elementos para los siguientes bloques de la ruta:
+1. `DATA-CHASSIS-35`: Persistencia por lotes y validación acotada en v1/v2 (ESTE BLOQUE).
+2. `DATA-CHASSIS-36`: Checkpoints verificables y reanudación PIT de series recursivas diarias (EMA, RSI, ATR, MACD).
+3. `DATA-CHASSIS-37`: Pipeline de migración analítica masiva raw v1 → staging v2 con progreso por lotes reanudable.
+4. `DATA-CHASSIS-38`: Sustrato de lectura y escritura columnar Parquet para series históricas y evidencias.
+5. `DATA-CHASSIS-39`: Cutover y activación productiva de workspace v2 con verificación bidireccional y liberación segura de tablas legadas v1.
+
+Sin checkpoints de series temporales, migración masiva, adopción productiva de staging v2, Parquet, cutover ni liberación física de almacenamiento del host.
