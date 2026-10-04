@@ -9,6 +9,7 @@ import duckdb
 import pytest
 from pydantic import ValidationError
 
+import investment_analyst.application.storage_observability as storage_observability_module
 from investment_analyst.application.multi_asset_scheduler import (
     MultiAssetScheduler,
     MultiAssetScheduleStateStore,
@@ -24,6 +25,7 @@ from investment_analyst.application.storage_observability import (
     StorageObservabilityCollector,
     StorageObservabilityDurations,
     StorageObservabilityDurationsV1,
+    StorageObservabilityError,
     StorageObservabilityGrowthClassification,
     StorageObservabilityRecord,
     StorageObservabilityRecordV1,
@@ -240,6 +242,49 @@ def test_stage_durations_reconcile_with_total_duration(tmp_path: Path) -> None:
             collector_unattributed_ms=1,
             persistence_ms=1,
             verification_ms=1,
+        )
+
+
+def test_terminal_state_persistence_is_outside_job_and_query_durations(tmp_path: Path) -> None:
+    clock = _ScriptedClock(_BASE)
+    collector = _collector(tmp_path, clock=clock)
+    handle = collector.begin_attempt(job_id=_JOB_ID, attempt_id=_ATTEMPT_ID)
+    execution_completed_at = _BASE + timedelta(seconds=5)
+    result_persisted_at = _BASE + timedelta(seconds=9)
+    clock.advance_to(_BASE + timedelta(seconds=10))
+
+    record = collector.complete_attempt(
+        handle,
+        _observation(),
+        execution_completed_at=execution_completed_at,
+        result_persisted_at=result_persisted_at,
+    )
+
+    assert record.observed_at == execution_completed_at
+    assert record.durations.job_execution_ms == 3_000
+    assert record.durations.query_ms == 3_000
+    assert record.durations.total_ms == 13_000
+    assert record.durations.collector_unattributed_ms >= 4_000
+    assert record.collector_overhead_ms == record.durations.total_ms - 3_000
+
+
+def test_collector_rejects_naive_or_reversed_explicit_timestamps(tmp_path: Path) -> None:
+    collector = _collector(tmp_path)
+    handle = collector.begin_attempt(job_id=_JOB_ID, attempt_id=_ATTEMPT_ID)
+    with pytest.raises(StorageObservabilityError, match="timezone-aware"):
+        collector.complete_attempt(
+            handle,
+            _observation(),
+            execution_completed_at=datetime(2026, 9, 16, 12),
+        )
+
+    later = _BASE + timedelta(seconds=2)
+    with pytest.raises(StorageObservabilityError, match="predates"):
+        collector.complete_attempt(
+            handle,
+            _observation(),
+            execution_completed_at=later,
+            result_persisted_at=_BASE,
         )
 
 
@@ -1005,3 +1050,41 @@ def test_existing_artifact_lines_are_never_rewritten(tmp_path: Path) -> None:
     assert len(state.records) == 2
     assert isinstance(state.records[0], StorageObservabilityRecordV1)
     assert isinstance(state.records[1], StorageObservabilityRecord)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), True, "5"])
+def test_measurement_timeout_must_be_a_finite_positive_number(
+    tmp_path: Path, timeout: object
+) -> None:
+    with pytest.raises(ValueError, match="measurement timeout"):
+        StorageObservabilityCollector(
+            state_root=tmp_path / "state",
+            database_path=tmp_path / "missing.duckdb",
+            measurement_timeout_seconds=timeout,  # type: ignore[arg-type]
+        )
+
+
+def test_measurement_deadline_interrupts_only_the_read_connection(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeConnection:
+        def interrupt(self) -> None:
+            calls.append("interrupt")
+
+    class ImmediateTimer:
+        def __init__(self, interval, function) -> None:
+            assert interval == 0.25
+            self.function = function
+
+        def start(self) -> None:
+            self.function()
+
+        def cancel(self) -> None:
+            calls.append("cancel")
+
+    monkeypatch.setattr(storage_observability_module.threading, "Timer", ImmediateTimer)
+
+    with storage_observability_module._measurement_deadline(FakeConnection(), 0.25):
+        calls.append("query")
+
+    assert calls == ["interrupt", "query", "cancel"]

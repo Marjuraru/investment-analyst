@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import pathlib
 import sys
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 # Cargar dinamicamente scripts/cycle_probe.py como modulo para pruebas unitarias.
 SCRIPT_PATH = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "cycle_probe.py"
@@ -14,6 +17,18 @@ assert spec is not None and spec.loader is not None
 cycle_probe = importlib.util.module_from_spec(spec)
 sys.modules["cycle_probe"] = cycle_probe
 spec.loader.exec_module(cycle_probe)
+
+
+def _with_identity(sample: dict, **identity_overrides: object) -> dict:
+    identity = {
+        "process_starttime_ticks": 1000,
+        "boot_id": "boot-a",
+        "cgroup_generation": "cgroup-a",
+        "release_sha": "a" * 40,
+        "release_sha_state": "known",
+    }
+    identity.update(identity_overrides)
+    return {**sample, **identity}
 
 
 def test_peak_is_within_cycle_and_lists_all_overlapping_jobs() -> None:
@@ -145,94 +160,114 @@ def test_coverage_pid_and_counter_reset_are_explicit() -> None:
     # Inicio gap = 5s <= 10s, Fin gap = 5s <= 10s, huecos internos = 5s <= 15s.
     for sec in range(5, 50, 5):
         samples.append(
-            {
-                "at": f"2026-09-24T07:00:{sec:02d}Z",
-                "VmRSS": 100_000_000 + sec * 100_000,
-                "pid": 501,
-                "high_events": 10 + sec // 5,
-            }
+            _with_identity(
+                {
+                    "at": f"2026-09-24T07:00:{sec:02d}Z",
+                    "VmRSS": 100_000_000 + sec * 100_000,
+                    "pid": 501,
+                    "high_events": 10 + sec // 5,
+                }
+            )
         )
 
     # 2. job-gap-start: primera muestra a 07:10:15 (gap inicio = 15s > 10s)
     samples.append(
-        {
-            "at": "2026-09-24T07:10:15Z",
-            "VmRSS": 200_000_000,
-            "pid": 502,
-            "high_events": 20,
-        }
+        _with_identity(
+            {
+                "at": "2026-09-24T07:10:15Z",
+                "VmRSS": 200_000_000,
+                "pid": 502,
+                "high_events": 20,
+            }
+        )
     )
     samples.append(
-        {
-            "at": "2026-09-24T07:10:35Z",
-            "VmRSS": 210_000_000,
-            "pid": 502,
-            "high_events": 20,
-        }
+        _with_identity(
+            {
+                "at": "2026-09-24T07:10:35Z",
+                "VmRSS": 210_000_000,
+                "pid": 502,
+                "high_events": 20,
+            }
+        )
     )
 
     # 3. job-gap-internal: muestras a 07:20:05, salto a 07:20:30 (hueco 25s > 15s), luego 07:20:55
     samples.append(
-        {
-            "at": "2026-09-24T07:20:05Z",
-            "VmRSS": 300_000_000,
-            "pid": 503,
-            "high_events": 30,
-        }
+        _with_identity(
+            {
+                "at": "2026-09-24T07:20:05Z",
+                "VmRSS": 300_000_000,
+                "pid": 503,
+                "high_events": 30,
+            }
+        )
     )
     samples.append(
-        {
-            "at": "2026-09-24T07:20:30Z",
-            "VmRSS": 310_000_000,
-            "pid": 503,
-            "high_events": 30,
-        }
+        _with_identity(
+            {
+                "at": "2026-09-24T07:20:30Z",
+                "VmRSS": 310_000_000,
+                "pid": 503,
+                "high_events": 30,
+            }
+        )
     )
     samples.append(
-        {
-            "at": "2026-09-24T07:20:55Z",
-            "VmRSS": 320_000_000,
-            "pid": 503,
-            "high_events": 30,
-        }
+        _with_identity(
+            {
+                "at": "2026-09-24T07:20:55Z",
+                "VmRSS": 320_000_000,
+                "pid": 503,
+                "high_events": 30,
+            }
+        )
     )
 
     # 4. job-uncovered: ninguna muestra entre 07:30 y 07:31
 
     # 5. job-pid-change: cambio de PID de 601 a 602
     samples.append(
-        {
-            "at": "2026-09-24T07:40:05Z",
-            "VmRSS": 400_000_000,
-            "pid": 601,
-            "high_events": 40,
-        }
+        _with_identity(
+            {
+                "at": "2026-09-24T07:40:05Z",
+                "VmRSS": 400_000_000,
+                "pid": 601,
+                "high_events": 40,
+            }
+        )
     )
     samples.append(
-        {
-            "at": "2026-09-24T07:40:25Z",
-            "VmRSS": 420_000_000,
-            "pid": 602,
-            "high_events": 40,
-        }
+        _with_identity(
+            {
+                "at": "2026-09-24T07:40:25Z",
+                "VmRSS": 420_000_000,
+                "pid": 602,
+                "high_events": 40,
+            }
+        )
     )
 
     # 6. job-counter-reset: contador cgroup disminuye de 50 a 5
     samples.append(
-        {
-            "at": "2026-09-24T07:50:05Z",
-            "VmRSS": 500_000_000,
-            "pid": 701,
-            "high_events": 50,
-        }
+        _with_identity(
+            {
+                "at": "2026-09-24T07:50:05Z",
+                "VmRSS": 500_000_000,
+                "pid": 701,
+                "high_events": 50,
+            }
+        )
     )
     samples.append(
-        {
-            "at": "2026-09-24T07:50:25Z",
-            "VmRSS": 510_000_000,
-            "pid": 701,
-            "high_events": 5,
-        }
+        _with_identity(
+            {
+                "at": "2026-09-24T07:50:25Z",
+                "VmRSS": 510_000_000,
+                "pid": 701,
+                "high_events": 5,
+            }
+        )
     )
 
     result = cycle_probe.memory_by_job("2026-09-24", jobs, samples_data=samples)
@@ -310,7 +345,8 @@ def test_uncovered_cycle_and_non_memory_report_compatibility() -> None:
     assert res["job_during_peak"] is None
     assert res["jobs_during_peak"] == []
     assert set(res["jobs_without_samples"]) == {"job-early-1", "job-early-2"}
-    assert res["by_job"] == []
+    assert {item["coverage"] for item in res["by_job"]} == {"none"}
+    assert len(res["by_job"]) == 2
 
     # Compatibilidad de render_summary con ausencia de muestras en ciclo:
     mock_payload = {
@@ -424,12 +460,14 @@ def test_overlap_and_counter_are_observations_not_causal_claims() -> None:
     ]
 
     samples = [
-        {
-            "at": "2026-09-24T07:07:00Z",
-            "VmRSS": 2_500_000_000,
-            "pid": 200,
-            "high_events": 15,
-        }
+        _with_identity(
+            {
+                "at": "2026-09-24T07:07:00Z",
+                "VmRSS": 2_500_000_000,
+                "pid": 200,
+                "high_events": 15,
+            }
+        )
     ]
 
     res = cycle_probe.memory_by_job("2026-09-24", jobs, samples_data=samples)
@@ -448,9 +486,10 @@ def test_overlap_and_counter_are_observations_not_causal_claims() -> None:
             for term in forbidden_terms:
                 assert term not in key.lower()
 
-    # 3. high_events_delta es un conteo, no segundos:
+    # 3. No se calcula un delta con una sola muestra ni identidad incompleta.
     for item in res["by_job"]:
-        assert item["high_events_delta"] == 0  # 15 - 15 = 0 eventos
+        assert item["high_events_delta"] is None
+        assert item["high_events_reason"] == "insufficient_samples"
 
     # 4. El resumen legible declara explicitamente la naturaleza observacional:
     payload = {
@@ -466,4 +505,383 @@ def test_overlap_and_counter_are_observations_not_causal_claims() -> None:
     )
     assert expected_overlap_str in summary
     assert "memoria causada" in summary.lower()
-    assert "son un contador acumulado, no segundos" in summary.lower()
+    assert "son eventos acumulados, no segundos" in summary.lower()
+
+
+def test_cycle_uses_lima_local_date_and_emits_only_safe_failure_fields(
+    monkeypatch,
+) -> None:
+    records = [
+        {
+            "attempt_id": "a-1",
+            "attempt_number": 1,
+            "local_date": "2026-09-24",
+            "definition": {"job_id": "job-explicit"},
+            "status": "failed",
+            "started_at": "2026-09-24T04:30:00Z",
+            "completed_at": "2026-09-24T04:31:00Z",
+            "failure": {
+                "category": "provider_unavailable",
+                "reason_code": "sec_submissions_fetch_failed",
+                "message": "secret response body must not appear",
+            },
+        },
+        {
+            "attempt_id": "a-2",
+            "attempt_number": 2,
+            "definition": {"job_id": "job-legacy"},
+            "status": "succeeded",
+            "started_at": "2026-09-25T02:00:00Z",
+            "completed_at": "2026-09-25T02:01:00Z",
+        },
+        {
+            "attempt_id": "a-3",
+            "local_date": "2026-09-23",
+            "definition": {"job_id": "job-other-day"},
+            "started_at": "2026-09-24T07:00:00Z",
+            "completed_at": "2026-09-24T07:01:00Z",
+        },
+    ]
+    monkeypatch.setattr(cycle_probe, "journal_records", lambda journal_dir=None: records)
+
+    result = cycle_probe.cycle("2026-09-24")
+
+    assert result["attempts"] == 2
+    assert {job["job_id"] for job in result["all_jobs"]} == {"job-explicit", "job-legacy"}
+    failed = next(job for job in result["all_jobs"] if job["job_id"] == "job-explicit")
+    assert failed["attempt_id"] == "a-1"
+    assert failed["attempt_number"] == 1
+    assert failed["failure"] == {
+        "category": "provider_unavailable",
+        "reason_code": "sec_submissions_fetch_failed",
+    }
+    assert "secret" not in json.dumps(result)
+
+
+def test_wait_for_cycle_uses_scheduler_state_and_lima_day_boundaries() -> None:
+    now = datetime(2026, 9, 24, 12, tzinfo=UTC)
+    overview = {
+        "scheduler_enabled": True,
+        "scheduled_job_count": 24,
+        "scheduled_running_count": 0,
+        # Exactly the next Lima day's midnight; it is outside the requested interval.
+        "scheduled_next_run_at": "2026-09-25T05:00:00Z",
+        "scheduled_next_retry_at": None,
+    }
+
+    result = cycle_probe.wait_for_cycle(
+        "2026-09-24",
+        timeout_seconds=1,
+        overview_fn=lambda: overview,
+        now_fn=lambda: now,
+        monotonic_fn=lambda: 0.0,
+        sleep_fn=lambda seconds: None,
+    )
+
+    assert result["completed"] is True
+    assert result["scheduled_job_count"] == 24
+    assert result["log"][0]["next_run_in_target_day"] is False
+
+
+def test_wait_for_cycle_returns_partial_when_retry_remains_inside_lima_day() -> None:
+    elapsed = [0.0]
+
+    def sleep(seconds: float) -> None:
+        elapsed[0] += seconds
+
+    overview = {
+        "scheduler_enabled": True,
+        "scheduled_job_count": 24,
+        "scheduled_running_count": 0,
+        "scheduled_next_run_at": None,
+        "scheduled_next_retry_at": "2026-09-25T04:59:00Z",
+    }
+    result = cycle_probe.wait_for_cycle(
+        "2026-09-24",
+        timeout_seconds=1,
+        poll_seconds=0.5,
+        overview_fn=lambda: overview,
+        now_fn=lambda: datetime(2026, 9, 24, 12, tzinfo=UTC),
+        monotonic_fn=lambda: elapsed[0],
+        sleep_fn=sleep,
+    )
+
+    assert result["completed"] is False
+    assert result["reason"] == "timeout"
+    assert result["log"][-1]["next_retry_in_target_day"] is True
+    assert elapsed[0] == 1
+
+
+def test_v2_memory_deltas_require_full_runtime_identity_and_preserve_attempts() -> None:
+    base = {
+        "pid": 321,
+        "process_starttime_ticks": 12345,
+        "boot_id": "boot-a",
+        "cgroup_generation": "cgroup-a",
+        "release_sha": "a" * 40,
+        "release_sha_state": "known",
+        "sample_interval_seconds": 5,
+    }
+    jobs = [
+        {
+            "job_id": "sec-submissions",
+            "attempt_id": "attempt-a",
+            "attempt_number": 1,
+            "status": "failed",
+            "started_at": "2026-09-24T07:00:00Z",
+            "completed_at": "2026-09-24T07:00:10Z",
+            "failure": {"category": "provider_unavailable", "reason_code": "sec_fetch_failed"},
+        },
+        {
+            "job_id": "sec-submissions",
+            "attempt_id": "attempt-b",
+            "attempt_number": 2,
+            "status": "succeeded",
+            "started_at": "2026-09-24T07:00:20Z",
+            "completed_at": "2026-09-24T07:00:30Z",
+        },
+        {
+            "job_id": "uncovered",
+            "attempt_id": "attempt-c",
+            "attempt_number": 1,
+            "status": "succeeded",
+            "started_at": "2026-09-24T07:01:00Z",
+            "completed_at": "2026-09-24T07:01:10Z",
+        },
+    ]
+    samples = [
+        {
+            **base,
+            "at": "2026-09-24T07:00:02Z",
+            "VmRSS": 1000,
+            "memory_current_bytes": 900,
+            "memory_peak_bytes": 1200,
+            "memory_events": {"high": 4, "max": 1, "oom": 0, "oom_kill": 0},
+        },
+        {
+            **base,
+            "at": "2026-09-24T07:00:07Z",
+            "VmRSS": 1200,
+            "memory_current_bytes": 700,
+            "memory_peak_bytes": 1500,
+            "memory_events": {"high": 6, "max": 1, "oom": 0, "oom_kill": 0},
+        },
+        {
+            **base,
+            "at": "2026-09-24T07:00:22Z",
+            "VmRSS": 1300,
+            "memory_current_bytes": 800,
+            "memory_peak_bytes": 1600,
+            "memory_events": {"high": 6, "max": 1, "oom": 0, "oom_kill": 0},
+        },
+        {
+            **base,
+            "at": "2026-09-24T07:00:27Z",
+            "VmRSS": 1400,
+            "memory_current_bytes": 850,
+            "memory_peak_bytes": 1800,
+            "memory_events": {"high": 7, "max": 1, "oom": 0, "oom_kill": 0},
+        },
+    ]
+    result = cycle_probe.memory_by_job(
+        "2026-09-24",
+        jobs,
+        samples_data=samples,
+        observability_rows=[
+            {
+                "attempt_id": "attempt-a",
+                "durations": {"network_ms": 12, "persistence_ms": 3},
+                "collector_overhead_ms": 2,
+            }
+        ],
+    )
+
+    by_attempt = {item["attempt_id"]: item for item in result["by_job"]}
+    assert set(by_attempt) == {"attempt-a", "attempt-b", "attempt-c"}
+    assert by_attempt["attempt-a"]["rss_net"] == 200
+    assert by_attempt["attempt-a"]["memory_current_delta_bytes"] == -200
+    assert by_attempt["attempt-a"]["memory_peak_delta_bytes"] == 300
+    assert by_attempt["attempt-a"]["high_events_delta"] == 2
+    assert by_attempt["attempt-a"]["collector_durations_ms"] == {
+        "network_ms": 12,
+        "persistence_ms": 3,
+    }
+    assert by_attempt["attempt-a"]["failure_reason_code"] == "sec_fetch_failed"
+    assert by_attempt["attempt-b"]["high_events_delta"] == 1
+    assert by_attempt["attempt-c"]["coverage"] == "none"
+    assert result["jobs_without_samples"] == ["attempt-c"]
+    assert result["capture_kind"] == "series"
+    assert result["comparable"] is True
+    assert result["release_sha"] == "a" * 40
+
+
+def test_memory_series_refuses_deltas_across_process_cgroup_or_release_changes() -> None:
+    job = {
+        "job_id": "job",
+        "attempt_id": "attempt",
+        "attempt_number": 1,
+        "started_at": "2026-09-24T07:00:00Z",
+        "completed_at": "2026-09-24T07:00:10Z",
+    }
+    first = {
+        "at": "2026-09-24T07:00:02Z",
+        "pid": 1,
+        "process_starttime_ticks": 10,
+        "boot_id": "boot-a",
+        "cgroup_generation": "group-a",
+        "release_sha": "a" * 40,
+        "VmRSS": 100,
+        "memory_events": {"high": 9},
+    }
+    second = {
+        **first,
+        "at": "2026-09-24T07:00:07Z",
+        "VmRSS": 200,
+        "memory_events": {"high": 12},
+    }
+    legacy = {key: value for key, value in first.items() if key != "process_starttime_ticks"}
+    legacy["at"] = "2026-09-24T07:00:07Z"
+    for changed, reason in (
+        ({**second, "pid": 2}, "pid_changed"),
+        ({**second, "process_starttime_ticks": 11}, "process_restarted"),
+        ({**second, "boot_id": "boot-b"}, "boot_changed"),
+        ({**second, "cgroup_generation": "group-b"}, "cgroup_generation_changed"),
+    ):
+        entry = cycle_probe.memory_by_job("2026-09-24", [job], samples_data=[first, changed])[
+            "by_job"
+        ][0]
+        assert entry["rss_net"] is None
+        assert entry["rss_net_reason"] == reason
+    legacy_result = cycle_probe.memory_by_job("2026-09-24", [job], samples_data=[first, legacy])[
+        "by_job"
+    ][0]
+    assert legacy_result["rss_net"] is None
+    assert legacy_result["rss_net_reason"] == "identity_incomplete"
+
+    mixed_release = cycle_probe.memory_by_job(
+        "2026-09-24", [job], samples_data=[first, {**second, "release_sha": "b" * 40}]
+    )
+    assert mixed_release["release_identity_state"] == "mixed"
+    assert mixed_release["comparable"] is False
+    assert mixed_release["comparison_reason"] == "release_identity_unavailable"
+
+
+def test_previous_snapshot_skips_baselines_open_reports_and_unknown_releases(
+    tmp_path: pathlib.Path,
+) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    sha_a = "a" * 40
+    sha_b = "b" * 40
+    (reports / "baseline-2026-10-02.json").write_text(
+        json.dumps({"day": "2026-10-02", "runtime_identity": {"observed": {"release_sha": sha_a}}}),
+        encoding="utf-8",
+    )
+    (reports / "cycle-2026-10-01.json").write_text(
+        json.dumps(
+            {
+                "day": "2026-10-01",
+                "wait": {"completed": True},
+                "runtime_identity": {"observed": {"release_sha": sha_b}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (reports / "cycle-2026-10-03.json").write_text(
+        json.dumps(
+            {
+                "day": "2026-10-03",
+                "wait": {"completed": False},
+                "runtime_identity": {"observed": {"release_sha": sha_a}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (reports / "cycle-2026-10-02.json").write_text(
+        json.dumps(
+            {
+                "day": "2026-10-02",
+                "wait": {"completed": True},
+                "runtime_identity": {"observed": {"release_sha": None}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    chosen = cycle_probe.previous_snapshot("2026-10-04", reports)
+
+    assert chosen is not None
+    assert chosen[0] == "cycle-2026-10-01.json"
+    assert chosen[1]["day"] == "2026-10-01"
+
+
+def test_runtime_identity_probe_compares_metadata_without_writing(tmp_path: pathlib.Path) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    sha = "a" * 40
+    report_path = reports / "cycle-2026-10-03.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "day": "2026-10-03",
+                "wait": {"completed": True},
+                "runtime_identity": {
+                    "observed": {
+                        "release_sha": sha,
+                        "release_sha_state": "known",
+                        "pid": 22,
+                        "process_starttime_ticks": 500,
+                        "boot_id": "boot-a",
+                        "cgroup_path": "/user.slice/service",
+                        "cgroup_generation": "generation-a",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_mtime = report_path.stat().st_mtime_ns
+    sample = SimpleNamespace(
+        at="2026-10-04T01:00:00Z",
+        service="investment-analyst",
+        pid=22,
+        process_starttime_ticks=500,
+        boot_id="boot-a",
+        cgroup_path="/user.slice/service",
+        cgroup_generation="generation-a",
+        service_invocation_id="invocation",
+        release_sha=sha,
+        release_sha_state="known",
+        memory_current_bytes=1,
+        memory_peak_bytes=2,
+        memory_high_limit_bytes=3,
+        memory_max_limit_bytes=4,
+        memory_swap_max_limit_bytes=None,
+        missing_reasons={},
+    )
+
+    result = cycle_probe.runtime_identity_read_only(reports_dir=reports, sample=sample)
+
+    assert result["comparison"]["state"] == "match"
+    assert result["comparison"]["release_match"] is True
+    assert result["workspace_accessed"] is False
+    assert result["database_accessed"] is False
+    assert result["writes_performed"] is False
+    assert report_path.stat().st_mtime_ns == original_mtime
+    assert list(reports.iterdir()) == [report_path]
+
+
+def test_runtime_identity_cli_mode_does_not_create_report_directory(monkeypatch, tmp_path) -> None:
+    target = tmp_path / "reports-do-not-create"
+    monkeypatch.setattr(cycle_probe, "REPORTS", target)
+    monkeypatch.setattr(
+        cycle_probe,
+        "runtime_identity_read_only",
+        lambda: {"schema_version": "runtime-identity-read-only-v1", "writes_performed": False},
+    )
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+
+    assert cycle_probe.main(["runtime-identity"]) == 0
+    assert json.loads(output.getvalue())["writes_performed"] is False
+    assert not target.exists()

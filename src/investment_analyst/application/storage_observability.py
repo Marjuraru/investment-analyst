@@ -40,10 +40,12 @@ revision instead of being inferred from the tables afterwards.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -618,6 +620,35 @@ def _milliseconds(delta: timedelta) -> int:
     return delta // timedelta(microseconds=_MICROSECONDS_PER_MILLISECOND)
 
 
+def _aware_utc(value: datetime) -> datetime:
+    """Normalize explicit lifecycle timestamps without accepting naive values."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise StorageObservabilityError("observation timestamps must be timezone-aware")
+    return value.astimezone(UTC)
+
+
+@contextmanager
+def _measurement_deadline(
+    connection: duckdb.DuckDBPyConnection,
+    timeout_seconds: float,
+) -> Iterator[None]:
+    """Interrupt read-only table measurements when their explicit deadline expires."""
+    finished = threading.Event()
+
+    def interrupt_if_running() -> None:
+        if not finished.is_set():
+            connection.interrupt()
+
+    timer = threading.Timer(timeout_seconds, interrupt_if_running)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield
+    finally:
+        finished.set()
+        timer.cancel()
+
+
 def _line(payload: dict[str, object]) -> str:
     """Render one deterministic compact artifact line."""
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -647,11 +678,20 @@ class StorageObservabilityCollector:
         state_root: Path,
         database_path: Path,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        measurement_timeout_seconds: float = 5.0,
     ) -> None:
+        if (
+            isinstance(measurement_timeout_seconds, bool)
+            or not isinstance(measurement_timeout_seconds, (int, float))
+            or not math.isfinite(measurement_timeout_seconds)
+            or measurement_timeout_seconds <= 0
+        ):
+            raise ValueError("measurement timeout must be finite and greater than zero")
         self._artifact_path = storage_observability_artifact_path(state_root)
         self._database_path = Path(database_path).expanduser().resolve(strict=False)
         self._wal_path = Path(f"{self._database_path}.wal")
         self._clock = clock
+        self._measurement_timeout_seconds = measurement_timeout_seconds
         self._lock = threading.RLock()
 
     @property
@@ -688,6 +728,9 @@ class StorageObservabilityCollector:
         self,
         handle: StorageObservationHandle,
         observation: ScheduledJobObservation,
+        *,
+        execution_completed_at: datetime | None = None,
+        result_persisted_at: datetime | None = None,
     ) -> StorageObservabilityRecord:
         """Close one observation window, persist its record, and verify the append."""
         with self._lock:
@@ -695,7 +738,14 @@ class StorageObservabilityCollector:
                 raise StorageObservabilityError("observation window was already completed")
             if observation.attempt_id != handle.attempt_id or observation.job_id != handle.job_id:
                 raise StorageObservabilityError("observation correlation does not match its window")
-            execution_completed_at = self._now()
+            execution_completed_at = _aware_utc(
+                execution_completed_at if execution_completed_at is not None else self._now()
+            )
+            result_persisted_at = _aware_utc(
+                result_persisted_at if result_persisted_at is not None else execution_completed_at
+            )
+            if result_persisted_at < execution_completed_at:
+                raise StorageObservabilityError("durable result time predates job completion")
             database_bytes_after = _file_bytes(self._database_path)
             wal_bytes_after = _file_bytes(self._wal_path)
             measured_at = self._now()
@@ -722,6 +772,7 @@ class StorageObservabilityCollector:
                 queried_at=queried_at,
                 persisted_at=persisted_at,
                 calculated_at=calculated_at,
+                result_persisted_at=result_persisted_at,
             )
             record = StorageObservabilityRecord(
                 observed_at=execution_completed_at,
@@ -761,12 +812,13 @@ class StorageObservabilityCollector:
         queried_at: datetime,
         persisted_at: datetime,
         calculated_at: datetime,
+        result_persisted_at: datetime,
     ) -> StorageObservabilityDurations:
         """Reconcile every measured stage with one clock and whole milliseconds."""
         verification_ms = _milliseconds(handle.verified_at - handle.opened_at)
         query_ms = (
             _milliseconds(handle.execution_started_at - handle.verified_at)
-            + _milliseconds(measured_at - execution_completed_at)
+            + _milliseconds(measured_at - max(execution_completed_at, result_persisted_at))
             + _milliseconds(queried_at - measured_at)
         )
         job_execution_ms = _milliseconds(execution_completed_at - handle.execution_started_at)
@@ -792,21 +844,23 @@ class StorageObservabilityCollector:
             return ()
         connection = self._open_read_only_engine()
         try:
-            measured: list[StorageObservabilityTableBytes] = []
-            for name in _document_table_names(connection):
-                row = connection.execute(
-                    f'SELECT count(*), coalesce(sum(octet_length(encode("{_DOCUMENT_COLUMN}"))), 0)'
-                    f' FROM "{name}"'
-                ).fetchone()
-                if row is None:
-                    raise StorageObservabilityError("engine did not return a table measurement")
-                measured.append(
-                    StorageObservabilityTableBytes(
-                        table_name=name,
-                        row_count=int(row[0]),
-                        document_bytes=int(row[1]),
+            with _measurement_deadline(connection, self._measurement_timeout_seconds):
+                measured: list[StorageObservabilityTableBytes] = []
+                for name in _document_table_names(connection):
+                    row = connection.execute(
+                        f"SELECT count(*), "
+                        f'coalesce(sum(octet_length(encode("{_DOCUMENT_COLUMN}"))), 0)'
+                        f' FROM "{name}"'
+                    ).fetchone()
+                    if row is None:
+                        raise StorageObservabilityError("engine did not return a table measurement")
+                    measured.append(
+                        StorageObservabilityTableBytes(
+                            table_name=name,
+                            row_count=int(row[0]),
+                            document_bytes=int(row[1]),
+                        )
                     )
-                )
         except duckdb.Error as error:
             raise StorageObservabilityError("read-only engine measurement failed") from error
         finally:
@@ -819,10 +873,11 @@ class StorageObservabilityCollector:
             return ()
         connection = self._open_read_only_engine()
         try:
-            measured = tuple(
-                (name, _table_row_count(connection, name))
-                for name in _document_table_names(connection)
-            )
+            with _measurement_deadline(connection, self._measurement_timeout_seconds):
+                measured = tuple(
+                    (name, _table_row_count(connection, name))
+                    for name in _document_table_names(connection)
+                )
         except duckdb.Error as error:
             raise StorageObservabilityError("read-only engine measurement failed") from error
         finally:

@@ -1,0 +1,101 @@
+"""Closed vocabulary of safe provider failure reasons exposed to operations."""
+
+from enum import StrEnum
+
+
+class ProviderFailureReason(StrEnum):
+    """Internal bounded codes; never derived from exception text or provider payloads."""
+
+    ALPACA_CONFIGURATION_INVALID = "alpaca_configuration_invalid"
+    ALPACA_CREDENTIALS_INVALID = "alpaca_credentials_invalid"
+    ALPACA_HTTP_STATUS = "alpaca_http_status"
+    ALPACA_HTTP_TRANSPORT = "alpaca_http_transport"
+    ALPACA_RESPONSE_TOO_LARGE = "alpaca_response_too_large"
+    ALPACA_JSON_INVALID = "alpaca_json_invalid"
+    ALPACA_RESPONSE_STRUCTURE_INVALID = "alpaca_response_structure_invalid"
+    ALPACA_SYMBOL_INVALID = "alpaca_symbol_invalid"
+    ALPACA_SYMBOL_MISMATCH = "alpaca_symbol_mismatch"
+    ALPACA_PAGINATION_INVALID = "alpaca_pagination_invalid"
+    ALPACA_BAR_INVALID = "alpaca_bar_invalid"
+    ALPACA_REQUEST_RANGE_INVALID = "alpaca_request_range_invalid"
+
+    SEC_SUBMISSIONS_FETCH_FAILED = "sec_submissions_fetch_failed"
+    SEC_SUBMISSIONS_SNAPSHOT_INVALID = "sec_submissions_snapshot_invalid"
+    SEC_SUBMISSIONS_SNAPSHOT_READ_FAILED = "sec_submissions_snapshot_read_failed"
+    SEC_SUBMISSIONS_SNAPSHOT_PERSIST_FAILED = "sec_submissions_snapshot_persist_failed"
+    SEC_SUBMISSIONS_SNAPSHOT_CONFLICT = "sec_submissions_snapshot_conflict"
+    SEC_DOCUMENT_REQUEST_INVALID = "sec_document_request_invalid"
+    SEC_DOCUMENT_SNAPSHOT_MISSING = "sec_document_snapshot_missing"
+    SEC_DOCUMENT_SNAPSHOT_READ_FAILED = "sec_document_snapshot_read_failed"
+    SEC_DOCUMENT_SNAPSHOT_INVALID = "sec_document_snapshot_invalid"
+    SEC_DOCUMENT_SNAPSHOT_AMBIGUOUS = "sec_document_snapshot_ambiguous"
+    SEC_DOCUMENT_SELECTION_MISSING = "sec_document_selection_missing"
+    SEC_DOCUMENT_SELECTION_INVALID = "sec_document_selection_invalid"
+    SEC_DOCUMENT_FETCH_FAILED = "sec_document_fetch_failed"
+    SEC_DOCUMENT_REVISION_READ_FAILED = "sec_document_revision_read_failed"
+    SEC_DOCUMENT_REVISION_AMBIGUOUS = "sec_document_revision_ambiguous"
+    SEC_DOCUMENT_REVISION_CONFLICT = "sec_document_revision_conflict"
+    SEC_DOCUMENT_BLOB_PERSIST_FAILED = "sec_document_blob_persist_failed"
+    SEC_DOCUMENT_REVISION_PERSIST_FAILED = "sec_document_revision_persist_failed"
+    SEC_DOCUMENT_REVISION_VERIFY_FAILED = "sec_document_revision_verify_failed"
+    SEC_PRIMARY_DOCUMENT_REFRESH_FAILED = "sec_primary_document_refresh_failed"
+
+    DERIBIT_FUNDING_RESULT_NOT_LIST = "deribit_funding_result_not_list"
+    DERIBIT_FUNDING_ROW_LIMIT_EXCEEDED = "deribit_funding_row_limit_exceeded"
+    DERIBIT_FUNDING_CONFLICTING_TIMESTAMP = "deribit_funding_conflicting_timestamp"
+    DERIBIT_FUNDING_DUPLICATE_TIMESTAMP = "deribit_funding_duplicate_timestamp"
+    DERIBIT_FUNDING_INTERVAL_UNCLOSED = "deribit_funding_interval_unclosed"
+    DERIBIT_DVOL_RESULT_NOT_DICT = "deribit_dvol_result_not_dict"
+    DERIBIT_DVOL_RESULT_SHAPE_UNEXPECTED = "deribit_dvol_result_shape_unexpected"
+    DERIBIT_DVOL_DATA_NOT_LIST = "deribit_dvol_data_not_list"
+    DERIBIT_DVOL_ROW_LIMIT_EXCEEDED = "deribit_dvol_row_limit_exceeded"
+    DERIBIT_DVOL_CONFLICTING_CANDLES = "deribit_dvol_conflicting_candles"
+    DERIBIT_DVOL_CONTINUATION_CYCLED = "deribit_dvol_continuation_cycled"
+    DERIBIT_DVOL_CONTINUATION_INVALID_RANGE = "deribit_dvol_continuation_invalid_range"
+    DERIBIT_DVOL_INTERVAL_UNCLOSED = "deribit_dvol_interval_unclosed"
+    DERIBIT_SUMMARY_RESULT_NOT_SINGLE_ROW = "deribit_summary_result_not_single_row"
+    DERIBIT_SUMMARY_CLOCK_LEAD_EXCEEDED = "deribit_summary_clock_lead_exceeded"
+
+    SMV_NO_CONFIGURED_EVIDENCE = "smv_no_configured_evidence"
+    SMV_RESULT_HEADER_MISSING = "smv_result_header_missing"
+    SMV_RESULT_HTML_INVALID = "smv_result_html_invalid"
+    SMV_QUERY_ECHO_MISMATCH = "smv_query_echo_mismatch"
+    SMV_EXACT_NAME_NOT_FOUND = "smv_exact_name_not_found"
+    SMV_RESULT_TABLE_MISSING = "smv_result_table_missing"
+    SMV_RESULT_TABLE_AMBIGUOUS = "smv_result_table_ambiguous"
+    SMV_COMPANY_HEADERS_CHANGED = "smv_company_headers_changed"
+    SMV_SECURITY_HEADERS_CHANGED = "smv_security_headers_changed"
+    SMV_COMPANY_ROW_WIDTH = "smv_company_row_width"
+    SMV_COMPANY_NAME_MISMATCH = "smv_company_name_mismatch"
+    SMV_SECURITY_ROW_WIDTH = "smv_security_row_width"
+    SMV_SECURITY_NAME_MISMATCH = "smv_security_name_mismatch"
+    SMV_SECURITY_CURRENCY_UNSUPPORTED = "smv_security_currency_unsupported"
+    SMV_SECURITY_QUOTE_INCOMPLETE = "smv_security_quote_incomplete"
+    SMV_FORM_HTML_INVALID = "smv_form_html_invalid"
+    SMV_FORM_STATE_MISSING = "smv_form_state_missing"
+    SMV_REQUIRED_FIELD_EMPTY = "smv_required_field_empty"
+    SMV_DATE_FIELD_EMPTY = "smv_date_field_empty"
+    SMV_DATE_FIELD_INVALID = "smv_date_field_invalid"
+    SMV_DECIMAL_FIELD_EMPTY = "smv_decimal_field_empty"
+    SMV_DECIMAL_FIELD_INVALID = "smv_decimal_field_invalid"
+    SMV_GET_HTTP_STATUS = "smv_get_http_status"
+    SMV_GET_TRUNCATED = "smv_get_truncated"
+    SMV_GET_REDIRECT = "smv_get_redirect"
+    SMV_GET_CONTENT_TYPE = "smv_get_content_type"
+    SMV_GET_UTF8 = "smv_get_utf8"
+    SMV_POST_HTTP_STATUS = "smv_post_http_status"
+    SMV_POST_TRUNCATED = "smv_post_truncated"
+    SMV_POST_REDIRECT = "smv_post_redirect"
+    SMV_POST_CONTENT_TYPE = "smv_post_content_type"
+    SMV_POST_UTF8 = "smv_post_utf8"
+
+
+_SAFE_PROVIDER_FAILURE_REASONS = frozenset(item.value for item in ProviderFailureReason)
+
+
+def is_known_provider_failure_reason(value: object) -> bool:
+    """Return whether ``value`` is one of the declared operational codes."""
+    return isinstance(value, str) and value in _SAFE_PROVIDER_FAILURE_REASONS
+
+
+__all__ = ["ProviderFailureReason", "is_known_provider_failure_reason"]

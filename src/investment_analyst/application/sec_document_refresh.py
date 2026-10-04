@@ -13,6 +13,10 @@ from investment_analyst.application.sec_submissions_refresh import (
 )
 from investment_analyst.evidence.sec_documents.models import SEC_DOCUMENT_SOURCE_ID
 from investment_analyst.providers.asset_config import SecAssetConfiguration
+from investment_analyst.providers.failure_reasons import (
+    ProviderFailureReason,
+    is_known_provider_failure_reason,
+)
 from investment_analyst.providers.fundamentals.sec_document_pipeline import (
     SecDocumentImportRequest,
     SecDocumentImportSummary,
@@ -23,13 +27,21 @@ from investment_analyst.providers.fundamentals.sec_edgar import (
     SecEdgarClient,
     SecEdgarDocument,
 )
-from investment_analyst.providers.fundamentals.sec_filing_index import SecFilingIndex
+from investment_analyst.providers.fundamentals.sec_filing_index import (
+    AmbiguousSecFilingError,
+    SecFilingIndex,
+    SecFilingIndexError,
+)
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import StorageError
 
 
 class SecPrimaryDocumentRefreshError(RuntimeError):
     """A fresh SEC snapshot or its document coverage cannot be safely reconciled."""
+
+    def __init__(self, message: str, *, reason_code: str | None = None) -> None:
+        self.reason_code = reason_code
+        super().__init__(message)
 
 
 class _IssuerSnapshotClient(Protocol):
@@ -72,7 +84,10 @@ class SecPrimaryDocumentRefreshService:
         """Persist one current Submissions snapshot, then fill only missing documents."""
         self._storage.require_open()
         if request.asset_id != self._configuration.asset_id:
-            raise SecPrimaryDocumentRefreshError("request asset_id does not match SEC issuer")
+            raise SecPrimaryDocumentRefreshError(
+                "request asset_id does not match SEC issuer",
+                reason_code=ProviderFailureReason.SEC_DOCUMENT_REQUEST_INVALID,
+            )
         snapshot = self._persist_fresh_submissions()
         submissions, checked_at, created, reused = (
             snapshot.record,
@@ -80,7 +95,18 @@ class SecPrimaryDocumentRefreshService:
             snapshot.created,
             snapshot.reused,
         )
-        index = SecFilingIndex.from_raw_record(submissions, self._configuration)
+        try:
+            index = SecFilingIndex.from_raw_record(submissions, self._configuration)
+        except AmbiguousSecFilingError as error:
+            raise SecPrimaryDocumentRefreshError(
+                "SEC submissions snapshot has ambiguous filing identity",
+                reason_code=ProviderFailureReason.SEC_DOCUMENT_SNAPSHOT_AMBIGUOUS,
+            ) from error
+        except SecFilingIndexError as error:
+            raise SecPrimaryDocumentRefreshError(
+                "SEC submissions snapshot failed filing selection",
+                reason_code=ProviderFailureReason.SEC_DOCUMENT_SNAPSHOT_INVALID,
+            ) from error
         forms = tuple(sorted(self._configuration.supported_forms))
         by_form = {form: tuple(item for item in index.all() if item.form == form) for form in forms}
         forms_missing = tuple(form for form in forms if not by_form[form])
@@ -100,7 +126,9 @@ class SecPrimaryDocumentRefreshService:
             )
         except (SecDocumentPipelineError, StorageError, ValueError) as error:
             raise SecPrimaryDocumentRefreshError(
-                "primary document coverage could not be verified"
+                "primary document coverage could not be verified",
+                reason_code=_specific_reason_code(error)
+                or ProviderFailureReason.SEC_PRIMARY_DOCUMENT_REFRESH_FAILED,
             ) from error
         if documents is None:
             revisions_created = revisions_reused = blobs_created = blobs_reused = calls = 0
@@ -145,7 +173,26 @@ class SecPrimaryDocumentRefreshService:
         try:
             return self._submissions_service.persist_fresh_snapshot()
         except SecSubmissionsRefreshError as error:
-            raise SecPrimaryDocumentRefreshError(str(error)) from error
+            raise SecPrimaryDocumentRefreshError(
+                "fresh SEC Submissions snapshot could not be reconciled",
+                reason_code=_specific_reason_code(error)
+                or ProviderFailureReason.SEC_SUBMISSIONS_FETCH_FAILED,
+            ) from error
+
+
+def _specific_reason_code(error: BaseException) -> str | None:
+    """Preserve the deepest declared SEC reason without reading free-form attributes."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(
+            current,
+            (SecPrimaryDocumentRefreshError, SecSubmissionsRefreshError, SecDocumentPipelineError),
+        ) and is_known_provider_failure_reason(current.reason_code):
+            return current.reason_code
+        current = current.__cause__
+    return None
 
 
 def build_sec_primary_document_refresh_service(

@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from investment_analyst.application.sec_document_refresh import SecPrimaryDocumentRefreshService
+from investment_analyst.application.sec_document_refresh import (
+    SecPrimaryDocumentRefreshError,
+    SecPrimaryDocumentRefreshService,
+)
 from investment_analyst.application.sec_document_refresh_models import (
     SecPrimaryDocumentRefreshRequest,
 )
@@ -242,3 +245,24 @@ def test_shared_fresh_submissions_helper_preserves_sec_corpus_25_contract(
         )
         with pytest.raises(SecSubmissionsRefreshError, match="conflicts"):
             contradicting.persist_fresh_snapshot()
+
+
+def test_refresh_retains_safe_submissions_failure_reason_and_cause(tmp_path: Path) -> None:
+    secret = "response-body-simulated-secret"
+
+    class FailedIssuer:
+        def fetch_submissions(self):
+            raise RuntimeError(secret)
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        service = _service(storage, FailedIssuer(), _DocumentClient())
+
+        with pytest.raises(SecPrimaryDocumentRefreshError) as raised:
+            service.run(SecPrimaryDocumentRefreshRequest(asset_id="equity:us:aapl"))
+
+    error = raised.value
+    assert error.reason_code == "sec_submissions_fetch_failed"
+    assert secret not in str(error)
+    assert isinstance(error.__cause__, SecSubmissionsRefreshError)
+    assert error.__cause__.reason_code == "sec_submissions_fetch_failed"
+    assert isinstance(error.__cause__.__cause__, RuntimeError)

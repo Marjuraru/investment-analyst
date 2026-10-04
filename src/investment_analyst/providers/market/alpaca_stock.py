@@ -9,7 +9,8 @@ from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from urllib.parse import urlencode, urlsplit
 
-from investment_analyst.providers.http import HttpTransport
+from investment_analyst.providers.failure_reasons import ProviderFailureReason
+from investment_analyst.providers.http import HttpRequestError, HttpTransport
 
 OFFICIAL_BASE_URL = "https://data.alpaca.markets"
 FEED = "iex"
@@ -26,8 +27,15 @@ _SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9.-]{0,15}$")
 class AlpacaStockError(ValueError):
     """Invalid Alpaca request parameters, credentials, or response data."""
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        reason_code: str | None = None,
+    ) -> None:
         self.status_code = status_code
+        self.reason_code = reason_code
         super().__init__(message)
 
 
@@ -42,7 +50,10 @@ class AlpacaCredentials:
         api_key = self.api_key.strip()
         secret_key = self.secret_key.strip()
         if not api_key or not secret_key:
-            raise AlpacaStockError("Alpaca API key and secret must not be empty")
+            raise AlpacaStockError(
+                "Alpaca API key and secret must not be empty",
+                reason_code=ProviderFailureReason.ALPACA_CREDENTIALS_INVALID,
+            )
         object.__setattr__(self, "api_key", api_key)
         object.__setattr__(self, "secret_key", secret_key)
 
@@ -67,42 +78,72 @@ class AlpacaStockBar:
 
     def __post_init__(self) -> None:
         if not _SYMBOL_PATTERN.fullmatch(self.symbol):
-            raise AlpacaStockError("Alpaca symbol has an invalid format")
+            raise AlpacaStockError(
+                "Alpaca symbol has an invalid format",
+                reason_code=ProviderFailureReason.ALPACA_SYMBOL_INVALID,
+            )
         timestamp = _utc_datetime(self.timestamp, field_name="timestamp")
         object.__setattr__(self, "timestamp", timestamp)
 
         raw_values = dict(self.raw_values)
         if set(raw_values) != _REQUIRED_BAR_FIELDS:
-            raise AlpacaStockError("raw_values must contain t, o, h, l, c, v, n, and vw")
+            raise AlpacaStockError(
+                "raw_values must contain t, o, h, l, c, v, n, and vw",
+                reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+            )
         if any(not isinstance(value, str) for value in raw_values.values()):
-            raise AlpacaStockError("raw_values must preserve provider values as strings")
+            raise AlpacaStockError(
+                "raw_values must preserve provider values as strings",
+                reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+            )
         parsed_timestamp = _parse_timestamp(raw_values["t"])
         parsed_decimals = tuple(
             _parse_decimal(raw_values[field], field_name=field)
             for field in ("o", "h", "l", "c", "v", "n", "vw")
         )
         if parsed_timestamp != timestamp or parsed_decimals != self._decimal_values():
-            raise AlpacaStockError("raw_values do not match the parsed bar fields")
+            raise AlpacaStockError(
+                "raw_values do not match the parsed bar fields",
+                reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+            )
         object.__setattr__(self, "raw_values", MappingProxyType(raw_values))
 
         prices = (self.open, self.high, self.low, self.close, self.vwap)
         if not all(value.is_finite() for value in (*prices, self.volume, self.trade_count)):
-            raise AlpacaStockError("bar values must be finite")
+            raise AlpacaStockError(
+                "bar values must be finite",
+                reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+            )
         if any(value <= 0 for value in prices):
-            raise AlpacaStockError("bar prices must be positive")
+            raise AlpacaStockError(
+                "bar prices must be positive",
+                reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+            )
         if self.volume < 0:
-            raise AlpacaStockError("bar volume must not be negative")
+            raise AlpacaStockError(
+                "bar volume must not be negative",
+                reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+            )
         if self.trade_count < 0 or self.trade_count != self.trade_count.to_integral_value():
-            raise AlpacaStockError("trade_count must be a non-negative integer")
+            raise AlpacaStockError(
+                "trade_count must be a non-negative integer",
+                reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+            )
         if self.low > self.high:
-            raise AlpacaStockError("bar low must not exceed high")
+            raise AlpacaStockError(
+                "bar low must not exceed high",
+                reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+            )
         for value, label in (
             (self.open, "open"),
             (self.close, "close"),
             (self.vwap, "vwap"),
         ):
             if not self.low <= value <= self.high:
-                raise AlpacaStockError(f"bar {label} must be within low and high")
+                raise AlpacaStockError(
+                    f"bar {label} must be within low and high",
+                    reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+                )
 
     def _decimal_values(
         self,
@@ -147,11 +188,20 @@ class AlpacaStockClient:
         normalized_base = base_url.rstrip("/")
         parsed_base = urlsplit(normalized_base)
         if parsed_base.scheme.lower() != "https" or parsed_base.hostname != "data.alpaca.markets":
-            raise AlpacaStockError("Alpaca base_url must use https://data.alpaca.markets")
+            raise AlpacaStockError(
+                "Alpaca base_url must use https://data.alpaca.markets",
+                reason_code=ProviderFailureReason.ALPACA_CONFIGURATION_INVALID,
+            )
         if parsed_base.path not in ("", "/") or parsed_base.query or parsed_base.fragment:
-            raise AlpacaStockError("Alpaca base_url must not contain a path, query, or fragment")
+            raise AlpacaStockError(
+                "Alpaca base_url must not contain a path, query, or fragment",
+                reason_code=ProviderFailureReason.ALPACA_CONFIGURATION_INVALID,
+            )
         if timeout_seconds <= 0:
-            raise AlpacaStockError("timeout_seconds must be greater than zero")
+            raise AlpacaStockError(
+                "timeout_seconds must be greater than zero",
+                reason_code=ProviderFailureReason.ALPACA_CONFIGURATION_INVALID,
+            )
         self._transport = transport
         self._credentials = credentials
         self._base_url = normalized_base
@@ -166,14 +216,23 @@ class AlpacaStockClient:
     ) -> AlpacaStockFetchResult:
         """Fetch all pages, then validate, filter, order, and deduplicate one symbol."""
         if not _SYMBOL_PATTERN.fullmatch(symbol):
-            raise AlpacaStockError("Alpaca symbol has an invalid format")
+            raise AlpacaStockError(
+                "Alpaca symbol has an invalid format",
+                reason_code=ProviderFailureReason.ALPACA_SYMBOL_INVALID,
+            )
         requested_start = _utc_datetime(start, field_name="start")
         requested_end = _utc_datetime(end, field_name="end")
         if requested_start >= requested_end:
-            raise AlpacaStockError("start must be earlier than end")
+            raise AlpacaStockError(
+                "start must be earlier than end",
+                reason_code=ProviderFailureReason.ALPACA_REQUEST_RANGE_INVALID,
+            )
         now = _utc_datetime(self._clock(), field_name="clock result")
         if requested_end > now:
-            raise AlpacaStockError("future bar ranges are not allowed")
+            raise AlpacaStockError(
+                "future bar ranges are not allowed",
+                reason_code=ProviderFailureReason.ALPACA_REQUEST_RANGE_INVALID,
+            )
 
         request_urls: list[str] = []
         bars_by_timestamp: dict[datetime, AlpacaStockBar] = {}
@@ -183,21 +242,31 @@ class AlpacaStockClient:
         for _page_number in range(_MAX_PAGES):
             if page_token is not None:
                 if page_token in seen_tokens:
-                    raise AlpacaStockError("Alpaca pagination token cycle detected")
+                    raise AlpacaStockError(
+                        "Alpaca pagination token cycle detected",
+                        reason_code=ProviderFailureReason.ALPACA_PAGINATION_INVALID,
+                    )
                 seen_tokens.add(page_token)
             request_url = self._build_request_url(
                 symbol, requested_start, requested_end, page_token
             )
-            response = self._transport.get(
-                request_url,
-                headers=self._headers(),
-                timeout_seconds=self._timeout_seconds,
-            )
+            try:
+                response = self._transport.get(
+                    request_url,
+                    headers=self._headers(),
+                    timeout_seconds=self._timeout_seconds,
+                )
+            except HttpRequestError as error:
+                raise AlpacaStockError(
+                    "Alpaca Market Data request failed",
+                    reason_code=ProviderFailureReason.ALPACA_HTTP_TRANSPORT,
+                ) from error
             request_urls.append(request_url)
             if response.status_code != 200:
                 raise AlpacaStockError(
                     f"Alpaca Market Data returned HTTP {response.status_code}",
                     status_code=response.status_code,
+                    reason_code=ProviderFailureReason.ALPACA_HTTP_STATUS,
                 )
             page_bars, next_page_token = _parse_page(symbol, response.body)
             for bar in page_bars:
@@ -208,15 +277,22 @@ class AlpacaStockClient:
                     bars_by_timestamp[bar.timestamp] = bar
                 elif existing != bar:
                     raise AlpacaStockError(
-                        f"conflicting {symbol} bars were returned for {bar.timestamp.isoformat()}"
+                        f"conflicting {symbol} bars were returned for {bar.timestamp.isoformat()}",
+                        reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
                     )
             if next_page_token is None:
                 break
             if next_page_token == page_token or next_page_token in seen_tokens:
-                raise AlpacaStockError("Alpaca pagination token cycle detected")
+                raise AlpacaStockError(
+                    "Alpaca pagination token cycle detected",
+                    reason_code=ProviderFailureReason.ALPACA_PAGINATION_INVALID,
+                )
             page_token = next_page_token
         else:
-            raise AlpacaStockError("Alpaca response exceeded the defensive page limit")
+            raise AlpacaStockError(
+                "Alpaca response exceeded the defensive page limit",
+                reason_code=ProviderFailureReason.ALPACA_PAGINATION_INVALID,
+            )
 
         retrieved_at = _utc_datetime(self._clock(), field_name="clock result")
         bars = tuple(bars_by_timestamp[key] for key in sorted(bars_by_timestamp))
@@ -262,17 +338,26 @@ class AlpacaStockClient:
 
 def _utc_datetime(value: datetime, *, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
-        raise AlpacaStockError(f"{field_name} must include timezone information")
+        raise AlpacaStockError(
+            f"{field_name} must include timezone information",
+            reason_code=ProviderFailureReason.ALPACA_REQUEST_RANGE_INVALID,
+        )
     return value.astimezone(UTC)
 
 
 def _reject_json_constant(value: str) -> str:
-    raise AlpacaStockError(f"non-finite JSON number is not allowed: {value}")
+    raise AlpacaStockError(
+        "non-finite JSON number is not allowed",
+        reason_code=ProviderFailureReason.ALPACA_JSON_INVALID,
+    )
 
 
 def _parse_page(symbol: str, body: bytes) -> tuple[tuple[AlpacaStockBar, ...], str | None]:
     if len(body) > _MAX_RESPONSE_BYTES:
-        raise AlpacaStockError("Alpaca response body is unexpectedly large")
+        raise AlpacaStockError(
+            "Alpaca response body is unexpectedly large",
+            reason_code=ProviderFailureReason.ALPACA_RESPONSE_TOO_LARGE,
+        )
     try:
         decoded = json.loads(
             body,
@@ -281,41 +366,77 @@ def _parse_page(symbol: str, body: bytes) -> tuple[tuple[AlpacaStockBar, ...], s
             parse_constant=_reject_json_constant,
         )
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AlpacaStockError("Alpaca returned invalid JSON") from error
+        raise AlpacaStockError(
+            "Alpaca returned invalid JSON",
+            reason_code=ProviderFailureReason.ALPACA_JSON_INVALID,
+        ) from error
     if not isinstance(decoded, dict):
-        raise AlpacaStockError("Alpaca bar response must be an object")
+        raise AlpacaStockError(
+            "Alpaca bar response must be an object",
+            reason_code=ProviderFailureReason.ALPACA_RESPONSE_STRUCTURE_INVALID,
+        )
     if any(key in decoded for key in ("error", "errors")):
-        raise AlpacaStockError("Alpaca response contains a provider error")
+        raise AlpacaStockError(
+            "Alpaca response contains a provider error",
+            reason_code=ProviderFailureReason.ALPACA_RESPONSE_STRUCTURE_INVALID,
+        )
     if "bars" not in decoded:
-        raise AlpacaStockError("Alpaca response bars are missing")
+        raise AlpacaStockError(
+            "Alpaca response bars are missing",
+            reason_code=ProviderFailureReason.ALPACA_RESPONSE_STRUCTURE_INVALID,
+        )
     bars_value = decoded["bars"]
     if bars_value is None:
         bars: list[object] = []
     elif isinstance(bars_value, list):
         bars = bars_value
     else:
-        raise AlpacaStockError("Alpaca response bars must be a list or null")
+        raise AlpacaStockError(
+            "Alpaca response bars must be a list or null",
+            reason_code=ProviderFailureReason.ALPACA_RESPONSE_STRUCTURE_INVALID,
+        )
     response_symbol = decoded.get("symbol")
     if response_symbol is not None and response_symbol != symbol:
-        raise AlpacaStockError("Alpaca response symbol does not match the request")
+        raise AlpacaStockError(
+            "Alpaca response symbol does not match the request",
+            reason_code=ProviderFailureReason.ALPACA_SYMBOL_MISMATCH,
+        )
     if bars and response_symbol != symbol:
-        raise AlpacaStockError("non-empty Alpaca responses must identify the requested symbol")
+        raise AlpacaStockError(
+            "non-empty Alpaca responses must identify the requested symbol",
+            reason_code=ProviderFailureReason.ALPACA_RESPONSE_STRUCTURE_INVALID,
+        )
     if len(bars) > _MAX_BARS_PER_RESPONSE:
-        raise AlpacaStockError("Alpaca returned an unjustified number of bars")
+        raise AlpacaStockError(
+            "Alpaca returned an unjustified number of bars",
+            reason_code=ProviderFailureReason.ALPACA_RESPONSE_STRUCTURE_INVALID,
+        )
     next_page_token = decoded.get("next_page_token")
     if next_page_token is not None and not isinstance(next_page_token, str):
-        raise AlpacaStockError("next_page_token must be a string or null")
+        raise AlpacaStockError(
+            "next_page_token must be a string or null",
+            reason_code=ProviderFailureReason.ALPACA_RESPONSE_STRUCTURE_INVALID,
+        )
     if next_page_token == "":
-        raise AlpacaStockError("next_page_token must not be empty")
+        raise AlpacaStockError(
+            "next_page_token must not be empty",
+            reason_code=ProviderFailureReason.ALPACA_RESPONSE_STRUCTURE_INVALID,
+        )
     return tuple(_parse_bar(symbol, bar) for bar in bars), next_page_token
 
 
 def _parse_bar(symbol: str, value: object) -> AlpacaStockBar:
     if not isinstance(value, dict):
-        raise AlpacaStockError("each Alpaca bar must be an object")
+        raise AlpacaStockError(
+            "each Alpaca bar must be an object",
+            reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+        )
     if not _REQUIRED_BAR_FIELDS.issubset(value):
         missing = sorted(_REQUIRED_BAR_FIELDS.difference(value))
-        raise AlpacaStockError(f"Alpaca bar is missing required fields: {', '.join(missing)}")
+        raise AlpacaStockError(
+            f"Alpaca bar is missing required fields: {', '.join(missing)}",
+            reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+        )
     raw_values = {
         field: _raw_text(value[field], field_name=field) for field in _REQUIRED_BAR_FIELDS
     }
@@ -336,7 +457,10 @@ def _parse_bar(symbol: str, value: object) -> AlpacaStockBar:
 
 def _raw_text(value: object, *, field_name: str) -> str:
     if isinstance(value, bool) or not isinstance(value, str):
-        raise AlpacaStockError(f"Alpaca field {field_name} has an invalid JSON type")
+        raise AlpacaStockError(
+            f"Alpaca field {field_name} has an invalid JSON type",
+            reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+        )
     return value
 
 
@@ -344,9 +468,15 @@ def _parse_decimal(value: str, *, field_name: str) -> Decimal:
     try:
         number = Decimal(value)
     except InvalidOperation as error:
-        raise AlpacaStockError(f"Alpaca field {field_name} is not numeric") from error
+        raise AlpacaStockError(
+            f"Alpaca field {field_name} is not numeric",
+            reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+        ) from error
     if not number.is_finite():
-        raise AlpacaStockError(f"Alpaca field {field_name} must be finite")
+        raise AlpacaStockError(
+            f"Alpaca field {field_name} must be finite",
+            reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+        )
     return number
 
 
@@ -354,7 +484,13 @@ def _parse_timestamp(value: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as error:
-        raise AlpacaStockError("Alpaca bar timestamp is invalid") from error
+        raise AlpacaStockError(
+            "Alpaca bar timestamp is invalid",
+            reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+        ) from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise AlpacaStockError("Alpaca bar timestamp must include timezone information")
+        raise AlpacaStockError(
+            "Alpaca bar timestamp must include timezone information",
+            reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+        )
     return parsed.astimezone(UTC)

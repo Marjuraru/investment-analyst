@@ -1219,9 +1219,14 @@ class MultiAssetScheduler:
                 )
             }
         )
-        self._complete_storage_observation(storage_observation, completed)
         state = self._store.write_attempt_from_state(state, completed)
+        result_persisted_at = self._now()
         self._notify(completed)
+        self._complete_storage_observation(
+            storage_observation,
+            completed,
+            result_persisted_at=result_persisted_at,
+        )
         return completed, state
 
     def _recover_interrupted(
@@ -1454,6 +1459,8 @@ class MultiAssetScheduler:
         self,
         handle: StorageObservationHandle | None,
         attempt: ScheduledJobAttempt,
+        *,
+        result_persisted_at: datetime | None = None,
     ) -> None:
         """Close one storage observation without ever disturbing the measured job."""
         if handle is None or self._storage_observability is None:
@@ -1472,6 +1479,8 @@ class MultiAssetScheduler:
                     rows_created=execution.created_count if execution else None,
                     rows_reused=execution.reused_count if execution else None,
                 ),
+                execution_completed_at=attempt.completed_at,
+                result_persisted_at=result_persisted_at,
             )
         except Exception:  # noqa: BLE001
             self._storage_observability_issue = "storage observability could not record its result"
