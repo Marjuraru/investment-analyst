@@ -121,8 +121,9 @@ existente más allá de sus propios campos opcionales.
   `read_only=True` y `octet_length(encode(document_json))` (bytes UTF-8 exactos; el baseline publicó
   `strlen`, equivalente para documentos ASCII); y el desglose de duración en ejecución del trabajo
   (`job_execution_ms`), consulta (`query_ms`), residuo no atribuido del colector (`collector_unattributed_ms`),
-  persistencia (`persistence_ms`) y verificación (`verification_ms`), medido con **un solo reloj** y reconciliado de forma
-  exacta con la duración total del ciclo (`total_ms`).
+  persistencia (`persistence_ms`) y verificación (`verification_ms`). El reloj del colector mide su ventana y
+  reconcilia exactamente las fases con `total_ms`; la duración del job sólo usa timestamps del scheduler si
+  encajan cronológicamente dentro de esa ventana.
 - **Cota explícita:** 90 snapshots diarios retenidos. Los registros del día abierto se anexan sin
   reescribir el archivo completo y sólo se pliegan al snapshot compacto cuando el día UTC cierra.
 - **No intrusivo:** el colector abre el motor únicamente en `read_only=True`, no introduce una
@@ -156,11 +157,13 @@ existente más allá de sus propios campos opcionales.
   alguna; por eso se captura al escribir y no se reconstruye después en el informe. Si el intento no
   reporta filas creadas, o si las tablas crecieron más de lo que el intento declara haber creado, la
   clasificación **se omite** en vez de inventarse.
-- **Overhead propio medido:** `collector_overhead_ms` registra, en milisegundos y con el mismo reloj
-  único, la parte de la ventana medida que consumió el propio instrumento (lectura, compactación,
-  verificación y residuo), separada de `job_execution_ms` (la ejecución del trabajo). La relación
-  `collector_overhead_ms + job_execution_ms == total_ms` se valida en el contrato (con compatibilidad
-  para `network_ms` en registros v1 históricos).
+- **Overhead propio medido:** cuando los timestamps del scheduler caben cronológicamente en la ventana
+  del colector, `collector_overhead_ms` registra la parte consumida por el instrumento, separada de
+  `job_execution_ms`, y el contrato valida que ambas sumen `total_ms` (con compatibilidad para
+  `network_ms` en registros v1 históricos). Si los relojes no son compatibles, el registro terminal
+  se conserva, `job_execution_ms` queda en cero porque el contrato entero no representa “desconocido”,
+  el intervalo queda en `collector_unattributed_ms` y `collector_overhead_ms` es `null`; no se inventa
+  una duración ni una atribución entre relojes.
 - **Campos opcionales:** la extensión de `storage-observability-v1` es aditiva y con valor por
   defecto; un registro escrito sin ellos sigue parseando sin error. El contrato diario
   `storage-observability-daily-snapshot-v1` conserva exactamente sus campos.
@@ -896,20 +899,20 @@ Los códigos se refieren a la etapa conocida; un StorageError genérico no se tr
 
 ### Benchmark ABBA del colector
 
-Se comparó la base exacta d54de57f07c70769baf66eb6e046b784ae14c298 con el código candidato en un proceso Python 3.12.3 / DuckDB 1.5.4, orden A(base) → B(candidato) → B(candidato) → A(base). Las cuatro ejecuciones usaron la misma BD scratch de SHA-256 f7d2ca0af8efa12682313ac0534fc76564722a23191d5efdfc5fc61c94dd9a08: cuatro tablas documentales, 16 filas deterministas por tabla. Cada ejecución usó un state_root nuevo. «Frío» significa primer cierre que mide document_bytes; «caliente», segundo intento del mismo día que omite esa medición de bytes. No significa caché de páginas fría/caliente del sistema operativo.
+Se comparó la base exacta d54de57f07c70769baf66eb6e046b784ae14c298 con el candidato cuyo colector tiene SHA-256 c3e95ae0ca0a394e315924025d356dd91c09430472e09bff7879d3f76bbec6c6, en Python 3.12.3 / DuckDB 1.5.4 y orden A(base) → B(candidato) → B(candidato) → A(base). Las cuatro ejecuciones usaron la misma BD scratch de SHA-256 fdf6e5771f402d7e3a4f01a2e646c7f4ea7020ff38356eb3734fbf89121afc01: cuatro tablas documentales, 16 filas deterministas por tabla. Cada ejecución usó un state_root nuevo. «Frío» significa primer cierre que mide document_bytes; «caliente», segundo intento del mismo día que omite esa medición de bytes. No significa caché de páginas fría/caliente del sistema operativo.
 
 Tiempos de pared externos por fase, en milisegundos; las consultas SELECT se cuentan sin los dos SET de configuración por conexión:
 
 | Ejecución | Frío begin / complete | Caliente begin / complete | SELECT por fase: frío begin / complete; caliente begin / complete |
 | --- | ---: | ---: | ---: |
-| A1 base | 18,907 / 19,767 | 16,492 / 18,464 | 5 / 5; 5 / 5 |
-| B1 candidato | 17,239 / 20,477 | 16,965 / 18,742 | 5 / 5; 5 / 5 |
-| B2 candidato | 16,741 / 20,702 | 20,583 / 21,796 | 5 / 5; 5 / 5 |
-| A2 base | 20,001 / 22,193 | 18,347 / 19,367 | 5 / 5; 5 / 5 |
+| A1 base | 17,014 / 21,040 | 14,521 / 15,646 | 5 / 5; 5 / 5 |
+| B1 candidato | 14,568 / 17,587 | 15,584 / 17,023 | 5 / 5; 5 / 5 |
+| B2 candidato | 15,396 / 16,838 | 15,149 / 16,227 | 5 / 5; 5 / 5 |
+| A2 base | 15,179 / 16,735 | 16,221 / 16,416 | 5 / 5; 5 / 5 |
 
-Coste total por muestra (begin + complete, sin callable ni duración simulada del job): A1 38,674/34,956 ms frío/caliente; B1 37,716/35,707 ms; B2 37,443/42,379 ms; A2 42,194/37,714 ms. Es coste del colector por intento, no del ciclo completo con proveedor.
+Coste total por muestra (begin + complete, sin callable ni duración simulada del job): A1 38,054/30,167 ms frío/caliente; B1 32,155/32,607 ms; B2 32,234/31,376 ms; A2 31,914/32,637 ms. Es coste del colector por intento, no del ciclo completo con proveedor.
 
-En cada fase, las cinco SELECT son una lectura de information_schema más cuatro lecturas, una por tabla; base y candidato conservan el mismo conteo. El SHA-256 de la serialización de table_bytes fue idéntico en las cuatro ejecuciones: 2c464a164931d8f1e7863c749bc038970da090be9e36a15314abf2f044d6f6b6. El hash de la BD permaneció igual antes/después; cada artefacto tuvo dos intentos, y el caliente no volvió a emitir table_bytes. Las variaciones de pared se solapan: el experimento no demuestra una mejora de latencia ni menos consultas. La ganancia de este cambio es la atribución temporal correcta y el límite de lectura, no una aceleración medida.
+En cada fase, las cinco SELECT son una lectura de information_schema más cuatro lecturas, una por tabla; base y candidato conservan el mismo conteo. El SHA-256 de la serialización de `table_bytes` fue idéntico en las cuatro ejecuciones: 426b79b42dc7632edd480cad5b8626a9976371471c0cb26ca404fa695c232831. El hash de la BD permaneció fdf6e5771f402d7e3a4f01a2e646c7f4ea7020ff38356eb3734fbf89121afc01 antes y después; cada artefacto tuvo dos intentos, y el caliente no volvió a emitir `table_bytes`. Las variaciones de pared se solapan: el experimento no demuestra una mejora de latencia ni menos consultas. La ganancia de este cambio es preservar el resultado ante relojes de ciclo incompatibles sin atribuirles duraciones falsas, no una aceleración medida.
 
 ### Probe read-only del runtime observado
 

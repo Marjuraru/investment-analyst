@@ -268,6 +268,29 @@ def test_terminal_state_persistence_is_outside_job_and_query_durations(tmp_path:
     assert record.collector_overhead_ms == record.durations.total_ms - 3_000
 
 
+def test_collector_does_not_mix_incompatible_lifecycle_clocks(tmp_path: Path) -> None:
+    clock = _ScriptedClock(_BASE + timedelta(days=30))
+    collector = _collector(tmp_path, clock=clock)
+    handle = collector.begin_attempt(job_id=_JOB_ID, attempt_id=_ATTEMPT_ID)
+    execution_completed_at = _BASE + timedelta(seconds=5)
+    result_persisted_at = _BASE + timedelta(seconds=9)
+    clock.advance_to(_BASE + timedelta(days=30, seconds=10))
+
+    record = collector.complete_attempt(
+        handle,
+        _observation(),
+        execution_completed_at=execution_completed_at,
+        result_persisted_at=result_persisted_at,
+    )
+
+    assert record.observed_at == execution_completed_at
+    assert record.durations.job_execution_ms == 0
+    assert record.durations.query_ms == 2_000
+    assert record.durations.collector_unattributed_ms == 9_000
+    assert record.collector_overhead_ms is None
+    assert record.durations.total_ms == 13_000
+
+
 def test_collector_rejects_naive_or_reversed_explicit_timestamps(tmp_path: Path) -> None:
     collector = _collector(tmp_path)
     handle = collector.begin_attempt(job_id=_JOB_ID, attempt_id=_ATTEMPT_ID)

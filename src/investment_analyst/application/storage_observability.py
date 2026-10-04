@@ -23,11 +23,12 @@ into the five durations of the storage observability contract:
   and the created/reused classification are derived; it absorbs whole-millisecond rounding so the
   five stages reconcile exactly.
 
-Every duration comes from one clock and the five stages reconcile exactly with ``total_ms``,
-so no second clock can disagree with the recorded breakdown. ``collector_overhead_ms`` records,
-separately from the measured job stage (``job_execution_ms``), the share of that same window
-the instrument itself consumed, so the cost of observing one attempt never hides inside the cost
-of running it.
+The collector measures its own window with one clock, and the five stages reconcile exactly with
+``total_ms``. Scheduler lifecycle timestamps are used for ``job_execution_ms`` only when they fit
+inside that measured window in chronological order. If they do not, the terminal record is still
+preserved, the job duration is not inferred (zero in the existing integer contract), the interval
+remains unattributed, and ``collector_overhead_ms`` is ``None``. Otherwise, that field records the
+share of the same window the instrument itself consumed, separately from the measured job stage.
 
 The same window also classifies the row growth the attempt produced. The collector measures the
 exact row count per document table before the execution and again when it closes, and partitions
@@ -749,6 +750,12 @@ class StorageObservabilityCollector:
             database_bytes_after = _file_bytes(self._database_path)
             wal_bytes_after = _file_bytes(self._wal_path)
             measured_at = self._now()
+            lifecycle_timing_consistent = (
+                handle.execution_started_at
+                <= execution_completed_at
+                <= result_persisted_at
+                <= measured_at
+            )
             state = self._load_state()
             record_day = execution_completed_at.date()
             has_table_bytes_today = any(
@@ -772,7 +779,14 @@ class StorageObservabilityCollector:
                 queried_at=queried_at,
                 persisted_at=persisted_at,
                 calculated_at=calculated_at,
-                result_persisted_at=result_persisted_at,
+                result_persisted_at=(
+                    result_persisted_at if lifecycle_timing_consistent else measured_at
+                ),
+                job_execution_ms_override=(
+                    _milliseconds(execution_completed_at - handle.execution_started_at)
+                    if lifecycle_timing_consistent
+                    else 0
+                ),
             )
             record = StorageObservabilityRecord(
                 observed_at=execution_completed_at,
@@ -795,7 +809,11 @@ class StorageObservabilityCollector:
                     rows_after=table_rows_after,
                     table_bytes=table_bytes,
                 ),
-                collector_overhead_ms=durations.total_ms - durations.job_execution_ms,
+                collector_overhead_ms=(
+                    durations.total_ms - durations.job_execution_ms
+                    if lifecycle_timing_consistent
+                    else None
+                ),
                 durations=durations,
             )
             self._append_line(record)
@@ -813,15 +831,20 @@ class StorageObservabilityCollector:
         persisted_at: datetime,
         calculated_at: datetime,
         result_persisted_at: datetime,
+        job_execution_ms_override: int | None = None,
     ) -> StorageObservabilityDurations:
-        """Reconcile every measured stage with one clock and whole milliseconds."""
+        """Reconcile collector reads and the compatible job interval in whole milliseconds."""
         verification_ms = _milliseconds(handle.verified_at - handle.opened_at)
         query_ms = (
             _milliseconds(handle.execution_started_at - handle.verified_at)
             + _milliseconds(measured_at - max(execution_completed_at, result_persisted_at))
             + _milliseconds(queried_at - measured_at)
         )
-        job_execution_ms = _milliseconds(execution_completed_at - handle.execution_started_at)
+        job_execution_ms = (
+            _milliseconds(execution_completed_at - handle.execution_started_at)
+            if job_execution_ms_override is None
+            else job_execution_ms_override
+        )
         persistence_ms = _milliseconds(persisted_at - queried_at)
         total_ms = _milliseconds(calculated_at - handle.opened_at)
         collector_unattributed_ms = total_ms - (
