@@ -212,6 +212,19 @@ muestras) y no escribe en el workspace ni invoca proveedores ni scheduler:
   de PID lo deja en `null` con `rss_net_reason="pid_changed"`. `high_events_delta` es un conteo entero
   de eventos cgroup; si el contador se reinicia, queda en `null` con `high_events_reason="counter_reset"`.
   Ningún campo presenta RSS como heap o consumo causado por un trabajo, ni eventos como segundos.
+- **Ventana de memoria:** conteo, identidad de proceso, release y comparabilidad usan sólo las
+  muestras dentro del ciclo, delimitado por intentos terminales válidos. Las muestras de días
+  adyacentes permanecen fuera de esas cifras. Un cambio real de identidad dentro del ciclo mantiene
+  la ruptura y deja los deltas no comparables.
+- **Cobertura del colector:** el informe enlaza intentos terminales y registros por `attempt_id` y
+  presenta esperados, observados y ausentes. La ausencia no se interpreta como cero bytes ni cero
+  crecimiento. El último reason_code cerrado disponible se muestra sin atribuirlo a un intento
+  antiguo; el coste de jobs, el coste conocido del colector y los intervalos entre jobs quedan
+  separados, sin adjudicar estos últimos al colector.
+- **Coste lógico:** `table_bytes=()` en los registros nuevos significa que el hook por intento sólo
+  midió stat de DuckDB/WAL y conteos exactos de filas. El reporte posterior al cierre ejecuta una
+  sola lectura lógica completa; el baseline manual conserva esa lectura y la CLI
+  `storage-observability-report-v1` no cambia.
 
 ### Wrapper, temporizador e instalación local segura
 

@@ -13,7 +13,7 @@ into the five durations of the storage observability contract:
 - ``verification``: loading and validating the previously persisted artifact at cycle start
   by the collector.
 - ``query``: local measurement reads by the collector, namely the physical database and WAL sizes
-  and the read-only engine query for exact document bytes per table.
+  and exact row counts by document table. Logical document bytes are outside this per-attempt phase.
 - ``job_execution``: the measured execution window of the job callable, where job execution
   happens. A single opaque callable cannot be sub-attributed from this surface without provider
   instrumentation.
@@ -33,7 +33,8 @@ share of the same window the instrument itself consumed, separately from the mea
 The same window also classifies the row growth the attempt produced. The collector measures the
 exact row count per document table before the execution and again when it closes, and partitions
 the created rows the attempt reports into new evidence rows, revisions and derived rows, with the
-growth observed outside those two families left explicitly unclassified. Rewriting one identity
+growth observed outside those two families left explicitly unclassified. Per-attempt records leave
+``table_bytes`` empty to mean logical bytes were not measured in this phase. Rewriting one identity
 in place adds no row, so the part of the created count that no table gained is reported as a
 revision instead of being inferred from the tables afterwards.
 """
@@ -67,6 +68,26 @@ _EVIDENCE_TABLES = frozenset({"raw_record_index", "normalized_observations"})
 _DERIVED_TABLES = frozenset({"metric_results", "diagnostic_results"})
 _COLLECTOR_MEMORY_LIMIT = "256MB"
 _COLLECTOR_THREADS = 1
+StorageObservabilityFailureReason = Literal[
+    "measurement_timeout",
+    "engine_unavailable",
+    "engine_error",
+    "artifact_invalid",
+    "artifact_unreadable",
+    "artifact_write_failed",
+    "collector_error",
+]
+_ALLOWED_FAILURE_REASONS = frozenset(
+    {
+        "measurement_timeout",
+        "engine_unavailable",
+        "engine_error",
+        "artifact_invalid",
+        "artifact_unreadable",
+        "artifact_write_failed",
+        "collector_error",
+    }
+)
 
 
 def storage_observability_artifact_path(state_root: Path) -> Path:
@@ -76,6 +97,17 @@ def storage_observability_artifact_path(state_root: Path) -> Path:
 
 class StorageObservabilityError(RuntimeError):
     """Carry one sanitized observability failure into the caller boundary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: StorageObservabilityFailureReason = "collector_error",
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = (
+            reason_code if reason_code in _ALLOWED_FAILURE_REASONS else "collector_error"
+        )
 
 
 class StorageObservabilityTableBytes(ContractModel):
@@ -758,23 +790,17 @@ class StorageObservabilityCollector:
             )
             state = self._load_state()
             record_day = execution_completed_at.date()
-            has_table_bytes_today = any(
-                record.observed_at.date() == record_day and bool(record.table_bytes)
-                for record in state.records
-            )
-            if not has_table_bytes_today:
-                table_bytes = self._measure_table_bytes()
-                table_rows_after = tuple((item.table_name, item.row_count) for item in table_bytes)
-            else:
-                table_bytes = ()
-                table_rows_after = self._measure_table_row_counts()
+            table_bytes: tuple[StorageObservabilityTableBytes, ...] = ()
+            table_rows_after = self._measure_table_row_counts()
             queried_at = self._now()
             self._compact(state, record_day)
             persisted_at = self._now()
             calculated_at = self._now()
             durations = self._durations(
                 handle,
-                execution_completed_at=execution_completed_at,
+                execution_completed_at=(
+                    execution_completed_at if lifecycle_timing_consistent else measured_at
+                ),
                 measured_at=measured_at,
                 queried_at=queried_at,
                 persisted_at=persisted_at,
@@ -862,7 +888,7 @@ class StorageObservabilityCollector:
         )
 
     def _measure_table_bytes(self) -> tuple[StorageObservabilityTableBytes, ...]:
-        """Measure exact document bytes and rows per table with a read-only engine."""
+        """Measure exact document bytes and rows for an explicit full measurement."""
         if not self._database_path.exists():
             return ()
         connection = self._open_read_only_engine()
@@ -884,8 +910,14 @@ class StorageObservabilityCollector:
                             document_bytes=int(row[1]),
                         )
                     )
+        except duckdb.InterruptException as error:
+            raise StorageObservabilityError(
+                "read-only engine measurement timed out", reason_code="measurement_timeout"
+            ) from error
         except duckdb.Error as error:
-            raise StorageObservabilityError("read-only engine measurement failed") from error
+            raise StorageObservabilityError(
+                "read-only engine measurement failed", reason_code="engine_error"
+            ) from error
         finally:
             connection.close()
         return tuple(measured)
@@ -901,8 +933,14 @@ class StorageObservabilityCollector:
                     (name, _table_row_count(connection, name))
                     for name in _document_table_names(connection)
                 )
+        except duckdb.InterruptException as error:
+            raise StorageObservabilityError(
+                "read-only engine measurement timed out", reason_code="measurement_timeout"
+            ) from error
         except duckdb.Error as error:
-            raise StorageObservabilityError("read-only engine measurement failed") from error
+            raise StorageObservabilityError(
+                "read-only engine measurement failed", reason_code="engine_error"
+            ) from error
         finally:
             connection.close()
         return measured
@@ -920,7 +958,8 @@ class StorageObservabilityCollector:
             return connection
         except duckdb.Error as error:
             raise StorageObservabilityError(
-                "read-only engine measurement is unavailable"
+                "read-only engine measurement is unavailable",
+                reason_code="engine_unavailable",
             ) from error
 
     def _compact(self, state: StorageObservabilityState, record_day: date) -> None:
@@ -959,19 +998,36 @@ class StorageObservabilityCollector:
         self, record: StorageObservabilityRecord | StorageObservabilityRecordV1
     ) -> None:
         """Append one compact line without rewriting the retained history."""
-        self._artifact_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.artifact_path.open("a", encoding="utf-8") as stream:
-            stream.write(f"{_line(record.to_json_dict())}\n")
+        try:
+            self._artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.artifact_path.open("a", encoding="utf-8") as stream:
+                stream.write(f"{_line(record.to_json_dict())}\n")
+        except OSError as error:
+            raise StorageObservabilityError(
+                "observability artifact could not be written",
+                reason_code="artifact_write_failed",
+            ) from error
 
     def _rewrite(self, lines: Sequence[str]) -> None:
         """Replace the bounded artifact atomically after a closed day is folded."""
-        self._artifact_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.artifact_path.with_name(f"{self.artifact_path.name}.tmp")
         try:
+            self._artifact_path.parent.mkdir(parents=True, exist_ok=True)
             temporary.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
             os.replace(temporary, self.artifact_path)
+        except (OSError, UnicodeError) as error:
+            raise StorageObservabilityError(
+                "observability artifact could not be compacted",
+                reason_code="artifact_write_failed",
+            ) from error
         finally:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as error:
+                raise StorageObservabilityError(
+                    "observability artifact could not be compacted",
+                    reason_code="artifact_write_failed",
+                ) from error
 
     def _verify_append(
         self, record: StorageObservabilityRecord | StorageObservabilityRecordV1
@@ -990,9 +1046,16 @@ class StorageObservabilityCollector:
             return StorageObservabilityState()
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError as error:
-            raise StorageObservabilityError("observability artifact is unreadable") from error
-        return parse_storage_observability_state(text)
+        except (OSError, UnicodeError) as error:
+            raise StorageObservabilityError(
+                "observability artifact is unreadable", reason_code="artifact_unreadable"
+            ) from error
+        try:
+            return parse_storage_observability_state(text)
+        except (StorageObservabilityError, ValueError) as error:
+            raise StorageObservabilityError(
+                "observability artifact is invalid", reason_code="artifact_invalid"
+            ) from error
 
     def _now(self) -> datetime:
         value = self._clock()
@@ -1037,6 +1100,7 @@ __all__ = [
     "StorageObservabilityDurationsV1",
     "StorageObservabilityDurationsV2",
     "StorageObservabilityError",
+    "StorageObservabilityFailureReason",
     "StorageObservabilityGrowthClassification",
     "StorageObservabilityRecord",
     "StorageObservabilityRecordV1",

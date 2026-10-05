@@ -337,9 +337,11 @@ def test_uncovered_cycle_and_non_memory_report_compatibility() -> None:
     ]
 
     res = cycle_probe.memory_by_job("2026-09-24", jobs, samples_data=samples_late)
-    assert res["present"] is True
-    assert res["sample_count"] == 3
+    assert res["present"] is False
+    assert res["sample_count"] == 0
     assert res["cycle_sample_count"] == 0
+    assert res["loaded_sample_count"] == 3
+    assert res["external_sample_count"] == 3
     assert res["rss_peak"] is None
     assert res["rss_peak_at"] is None
     assert res["job_during_peak"] is None
@@ -348,7 +350,6 @@ def test_uncovered_cycle_and_non_memory_report_compatibility() -> None:
     assert {item["coverage"] for item in res["by_job"]} == {"none"}
     assert len(res["by_job"]) == 2
 
-    # Compatibilidad de render_summary con ausencia de muestras en ciclo:
     mock_payload = {
         "day": "2026-09-24",
         "wait": {"completed": True},
@@ -399,6 +400,145 @@ def test_uncovered_cycle_and_non_memory_report_compatibility() -> None:
     assert "- trabajo en curso durante el pico: ninguno" in summary
     assert "- trabajos sin muestra en su intervalo: 2" in summary
     assert "## 13F" in summary
+
+
+def test_cycle_identity_ignores_samples_outside_the_job_window() -> None:
+    job = {
+        "job_id": "job",
+        "attempt_id": "attempt-a",
+        "started_at": "2026-09-24T07:00:00Z",
+        "completed_at": "2026-09-24T07:10:00Z",
+    }
+    identity = {
+        "pid": 123,
+        "process_starttime_ticks": 456,
+        "boot_id": "boot-cycle",
+        "cgroup_generation": "cgroup-cycle",
+        "release_sha": "a" * 40,
+        "release_sha_state": "known",
+        "VmRSS": 1000,
+    }
+    samples = [
+        {"at": "2026-09-23T23:59:55Z", **identity, "pid": 999, "release_sha": "b" * 40},
+        {"at": "2026-09-24T07:02:00Z", **identity},
+        {"at": "2026-09-24T07:08:00Z", **identity, "VmRSS": 1200},
+        {"at": "2026-09-24T08:00:00Z", **identity, "pid": 999, "release_sha": "b" * 40},
+    ]
+
+    result = cycle_probe.memory_by_job("2026-09-24", [job], samples_data=samples)
+
+    assert result["sample_count"] == result["cycle_sample_count"] == 2
+    assert result["loaded_sample_count"] == 4
+    assert result["external_sample_count"] == 2
+    assert result["comparable"] is True
+    assert result["release_sha"] == "a" * 40
+    assert result["first_sample_at"] == "2026-09-24T07:02:00+00:00"
+
+    changed_inside = cycle_probe.memory_by_job(
+        "2026-09-24",
+        [job],
+        samples_data=[samples[1], {**samples[2], "pid": 124}],
+    )
+    assert changed_inside["comparable"] is False
+    assert changed_inside["comparison_reason"] == "process_or_cgroup_identity_changed"
+
+
+def test_observability_coverage_joins_terminal_attempt_ids_without_filling_absence(
+    tmp_path: pathlib.Path,
+) -> None:
+    attempts = [
+        {
+            "job_id": "a",
+            "attempt_id": "attempt-a",
+            "status": "succeeded",
+            "started_at": "2026-09-24T07:00:00Z",
+            "completed_at": "2026-09-24T07:00:10Z",
+            "seconds": 10.0,
+        },
+        {
+            "job_id": "b",
+            "attempt_id": "attempt-b",
+            "status": "failed",
+            "started_at": "2026-09-24T07:00:15Z",
+            "completed_at": "2026-09-24T07:00:20Z",
+            "seconds": 5.0,
+        },
+        {
+            "job_id": "legacy",
+            "status": "skipped",
+            "started_at": "2026-09-24T07:00:25Z",
+            "completed_at": "2026-09-24T07:00:25Z",
+            "seconds": 0.0,
+        },
+        {"job_id": "running", "attempt_id": "attempt-running", "status": "running"},
+    ]
+    artifact = tmp_path / "absent-storage-observability.jsonl"
+    result = cycle_probe.observability(
+        "2026-09-24",
+        artifact,
+        cycle_data={"all_jobs": attempts},
+        scheduler_status={"available": True, "reason_code": "measurement_timeout"},
+    )
+
+    coverage = result["coverage"]
+    assert coverage["state"] == "partial"
+    assert coverage["expected_terminal_attempts"] == 2
+    assert coverage["terminal_attempts_without_identity"] == 1
+    assert coverage["observed_attempts"] == 0
+    assert coverage["missing_attempts"] == 3
+    assert coverage["missing_attempt_ids"] == ["attempt-a", "attempt-b"]
+    assert coverage["collector_overhead_ms_known"] is None
+    assert coverage["collector_overhead_ms_unknown_attempts"] == 3
+    assert coverage["latest_scheduler_reason_code"] == "measurement_timeout"
+    assert coverage["inter_job_gap_seconds"] == 10.0
+    assert len(coverage["inter_job_gaps"]) == 2
+    assert coverage["inter_job_gap_attribution"] == "unknown"
+
+    matched = cycle_probe._observability_coverage(
+        {"all_jobs": attempts},
+        {
+            "today": [
+                {
+                    "attempt_id": "attempt-a",
+                    "durations": {"total_ms": 100, "job_execution_ms": 75},
+                    "collector_overhead_ms": 25,
+                }
+            ]
+        },
+    )
+    assert matched["observed_attempts"] == 1
+    assert matched["missing_attempts"] == 2
+    assert matched["missing_attempt_ids"] == ["attempt-b"]
+    assert matched["collector_overhead_ms_known"] == 25
+    assert matched["collector_overhead_ms_unknown_attempts"] == 2
+
+    overlapping = cycle_probe._observability_coverage(
+        {
+            "all_jobs": [
+                {
+                    "attempt_id": "long",
+                    "status": "succeeded",
+                    "started_at": "2026-09-24T08:00:00Z",
+                    "completed_at": "2026-09-24T08:10:00Z",
+                },
+                {
+                    "attempt_id": "short-a",
+                    "status": "succeeded",
+                    "started_at": "2026-09-24T08:01:00Z",
+                    "completed_at": "2026-09-24T08:02:00Z",
+                },
+                {
+                    "attempt_id": "short-b",
+                    "status": "succeeded",
+                    "started_at": "2026-09-24T08:03:00Z",
+                    "completed_at": "2026-09-24T08:04:00Z",
+                },
+            ]
+        },
+        {"today": []},
+    )
+    assert overlapping["inter_job_gaps"] == []
+    assert overlapping["inter_job_gap_seconds"] == 0
 
 
 def test_memory_probe_never_writes_workspace_or_calls_providers(tmp_path: pathlib.Path) -> None:

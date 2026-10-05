@@ -24,6 +24,8 @@ from investment_analyst.application.operational_state import AaplOperationalStat
 from investment_analyst.application.storage_observability import (
     ScheduledJobObservation,
     StorageObservabilityCollector,
+    StorageObservabilityError,
+    StorageObservabilityFailureReason,
     StorageObservationHandle,
 )
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
@@ -1004,6 +1006,7 @@ class MultiAssetScheduler:
         self._observer_issue: str | None = None
         self._storage_observability = storage_observability
         self._storage_observability_issue: str | None = None
+        self._storage_observability_failure_reason: StorageObservabilityFailureReason | None = None
         self._pending_notifications: dict[UUID, ScheduledJobAttempt] = {}
 
     def status(self) -> MultiAssetSchedulerStatus:
@@ -1275,6 +1278,12 @@ class MultiAssetScheduler:
             issues = (*issues, self._observer_issue)
         if self._storage_observability_issue is not None:
             issues = (*issues, self._storage_observability_issue)
+        if self._storage_observability_failure_reason is not None:
+            issues = (
+                *issues,
+                "storage observability failure reason: "
+                f"{self._storage_observability_failure_reason}",
+            )
         return MultiAssetSchedulerStatus(
             jobs=statuses,
             due_count=sum(item.due for item in statuses),
@@ -1449,10 +1458,11 @@ class MultiAssetScheduler:
             return None
         try:
             return self._storage_observability.begin_attempt(job_id=job_id, attempt_id=attempt_id)
-        except Exception:  # noqa: BLE001
+        except Exception as error:  # noqa: BLE001
             self._storage_observability_issue = (
                 "storage observability could not open its measurement"
             )
+            self._storage_observability_failure_reason = self._storage_failure_reason(error)
             return None
 
     def _complete_storage_observation(
@@ -1482,10 +1492,19 @@ class MultiAssetScheduler:
                 execution_completed_at=attempt.completed_at,
                 result_persisted_at=result_persisted_at,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as error:  # noqa: BLE001
             self._storage_observability_issue = "storage observability could not record its result"
+            self._storage_observability_failure_reason = self._storage_failure_reason(error)
         else:
             self._storage_observability_issue = None
+            self._storage_observability_failure_reason = None
+
+    @staticmethod
+    def _storage_failure_reason(error: Exception) -> StorageObservabilityFailureReason:
+        """Expose only a closed reason code; never forward exception text to status."""
+        if isinstance(error, StorageObservabilityError):
+            return error.reason_code
+        return "collector_error"
 
     @staticmethod
     def _attempts_for(
