@@ -40,6 +40,7 @@ from investment_analyst.storage.analytical_v2_validation import (
     chunked_sequence,
     fetch_diagnostics_chunked,
     fetch_snapshots_chunked,
+    market_artifact_digests_for_metrics,
     validate_keyset_cursor,
     validate_keyset_limit,
 )
@@ -70,6 +71,14 @@ ANALYSIS_SNAPSHOT_V2_COLUMNS: Final[tuple[str, ...]] = (
 )
 _FULL_SNAPSHOT_V2_COLUMNS: Final[tuple[str, ...]] = (*ANALYSIS_SNAPSHOT_V2_COLUMNS, "inserted_at")
 MAX_SNAPSHOT_V2_PAGE: Final[int] = 256
+
+
+def canonical_snapshot_artifact_digest(
+    evidence_set_hashes: Collection[str],
+    market_artifact_hashes: Collection[str] = (),
+) -> str:
+    """Digest EvidenceSets plus tagged reachable daily evidence/checkpoints."""
+    return canonical_evidence_set_digest(tuple(evidence_set_hashes) + tuple(market_artifact_hashes))
 
 
 class AnalysisSnapshotV2Error(StorageError):
@@ -357,6 +366,7 @@ class AnalysisSnapshotV2Store:
         for item in snapshots:
             known_at = item.known_at.astimezone(UTC)
             snap_es_ids: set[str] = set()
+            snap_market_metric_ids: set[UUID] = set(item.metric_ids)
 
             # Verify direct metrics
             for mid in item.metric_ids:
@@ -413,6 +423,7 @@ class AnalysisSnapshotV2Store:
                     diag_mids.update(comp.metric_result_ids)
                 for ev in diag.evidence:
                     diag_mids.add(ev.metric_result_id)
+                snap_market_metric_ids.update(diag_mids)
                 for mid in diag_mids:
                     if mid not in metrics_by_id:
                         raise RecordNotFoundError(
@@ -443,7 +454,15 @@ class AnalysisSnapshotV2Store:
                     )
                 snap_es_hashes.append(es_hash)
 
-            expected_digest = canonical_evidence_set_digest(snap_es_hashes)
+            try:
+                market_hashes = market_artifact_digests_for_metrics(
+                    self._connection,
+                    snap_market_metric_ids,
+                    validation_context=validation_context,
+                )
+            except (AnalyticalV2ValidationError, MetricV2Error) as error:
+                raise AnalysisSnapshotV2Error(str(error)) from error
+            expected_digest = canonical_snapshot_artifact_digest(snap_es_hashes, market_hashes)
             if expected_digest != item.evidence_set_digest:
                 raise AnalysisSnapshotV2Error(
                     f"snapshot evidence_set_digest {item.evidence_set_digest} does not match "

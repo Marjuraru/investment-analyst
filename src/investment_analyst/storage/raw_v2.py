@@ -17,19 +17,34 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
 
 from duckdb import DuckDBPyConnection
-from pydantic import ValidationError
+from pydantic import ConfigDict, Field, ValidationError
 
 from investment_analyst.analytics.analysis_snapshot import AnalysisSnapshot
 from investment_analyst.analytics.evidence_set import EvidenceSegment, EvidenceSet
+from investment_analyst.analytics.market.daily_evidence import (
+    DailyEvidenceFieldGroup,
+    DailyEvidencePrefix,
+)
+from investment_analyst.analytics.market.incremental_state import (
+    AtrParameters,
+    EmaParameters,
+    MacdParameters,
+    MarketRecursiveCheckpoint,
+    RecursiveParameters,
+    RsiParameters,
+)
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import (
+    DataFrequency,
+    DataQuality,
     DiagnosticMode,
     DiagnosticResult,
     MetricResult,
@@ -66,9 +81,11 @@ from investment_analyst.storage.metric_v2 import (
     MetricV2Error,
     MetricV2Store,
     ensure_metric_v2_tables,
+    metric_v2_table_exists,
 )
 from investment_analyst.storage.observation_v2 import (
     MAX_OBSERVATION_V2_PAGE,
+    OBSERVATION_V2_COLUMNS,
     ObservationV2Error,
     ObservationV2Store,
     ensure_observation_v2_table,
@@ -105,6 +122,85 @@ _INDEX_COLUMNS = (
 _FULL_INDEX_COLUMNS = (*_INDEX_COLUMNS, "inserted_at")
 
 _OPEN_WRITERS: set[str] = set()
+
+
+class MarketObservationProjection(ContractModel):
+    """SQL projection of one daily observation and its raw-index metadata."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    observation_id: UUID
+    raw_record_id: UUID
+    asset_id: str
+    field_name: str
+    value: Decimal
+    unit: str
+    frequency: DataFrequency
+    observed_at: UTCDateTime
+    period_start: UTCDateTime | None
+    period_end: UTCDateTime | None
+    available_at: UTCDateTime
+    normalized_at: UTCDateTime
+    source_id: str
+    source_record_key: str | None
+    source_retrieved_at: UTCDateTime
+    source_raw_uri: str | None
+    source_checksum_sha256: str | None
+    quality: DataQuality
+    transformation_version: str
+    raw_asset_id: str
+    raw_source_id: str
+    raw_event_time: UTCDateTime
+    raw_available_at: UTCDateTime
+    raw_checksum_sha256: str
+
+    def canonical_row(self) -> tuple[str | None, ...]:
+        """Return the complete stored observation projection in stable column order."""
+        return (
+            str(self.observation_id),
+            str(self.raw_record_id),
+            self.asset_id,
+            self.field_name,
+            str(self.value),
+            self.unit,
+            self.frequency.value,
+            _instant_text(self.observed_at),
+            _instant_text(self.period_start),
+            _instant_text(self.period_end),
+            _instant_text(self.available_at),
+            _instant_text(self.normalized_at),
+            self.source_id,
+            self.source_record_key,
+            _instant_text(self.source_retrieved_at),
+            self.source_raw_uri,
+            self.source_checksum_sha256,
+            self.quality.value,
+            self.transformation_version,
+        )
+
+
+class MarketObservationGroupProjection(ContractModel):
+    """One complete available observation group for a raw market record."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    raw_record_id: UUID
+    raw_asset_id: str
+    raw_source_id: str
+    raw_event_time: UTCDateTime
+    raw_available_at: UTCDateTime
+    raw_checksum_sha256: str
+    observations: tuple[MarketObservationProjection, ...] = Field(min_length=1)
+
+
+class MarketObservationPage(ContractModel):
+    """Bounded keyset page of full raw-record observation groups."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    groups: tuple[MarketObservationGroupProjection, ...]
+    next_observed_at: UTCDateTime | None = None
+    next_raw_record_id: UUID | None = None
 
 
 class RawV2StagingError(StorageError):
@@ -803,6 +899,221 @@ class RawV2Staging:
             if isinstance(observation, NormalizedObservation)
         ]
 
+    def list_market_observation_page(
+        self,
+        *,
+        asset_id: str,
+        source_id: str,
+        start: datetime,
+        end: datetime,
+        known_at: datetime,
+        limit: int,
+        after_observed_at: datetime | None = None,
+        after_raw_record_id: UUID | None = None,
+    ) -> MarketObservationPage:
+        """Return at most 256 PIT daily raw-record groups from SQL projections.
+
+        This read path does not deserialize historical ``RawRecord`` or
+        ``NormalizedObservation`` objects. The caller can compare projection
+        digests with persisted prefix nodes and hydrate blobs only for bars it
+        must newly calculate.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 256:
+            raise RawV2StagingError("market observation page limit must be between 1 and 256")
+        for label, instant in (("start", start), ("end", end), ("known_at", known_at)):
+            if instant.tzinfo is None or instant.utcoffset() is None:
+                raise RawV2StagingError(f"market observation {label} must be timezone-aware")
+        if start >= end:
+            raise RawV2StagingError("market observation range must be non-empty")
+        if (after_observed_at is None) != (after_raw_record_id is None):
+            raise RawV2StagingError("market observation cursor requires both fields together")
+        if after_observed_at is not None and (
+            after_observed_at.tzinfo is None or after_observed_at.utcoffset() is None
+        ):
+            raise RawV2StagingError("market observation cursor must be timezone-aware")
+        self._require_open()
+        ensure_observation_v2_table(self._connection, create=False)
+        cursor_sql = ""
+        cursor_parameters: list[object] = []
+        if after_observed_at is not None and after_raw_record_id is not None:
+            cursor_sql = " AND (observed_at, raw_record_id) > (?, ?)"
+            cursor_parameters = [
+                _instant_text(after_observed_at),
+                str(after_raw_record_id),
+            ]
+        candidate_rows = self._connection.execute(
+            "SELECT observed_at, raw_record_id FROM normalized_observations_v2 "
+            "WHERE asset_id = ? AND source_id = ? AND frequency = ? "
+            "AND observed_at IS NOT NULL AND observed_at >= ? AND observed_at < ? "
+            "AND available_at <= ?"
+            f"{cursor_sql} "
+            "GROUP BY observed_at, raw_record_id "
+            "ORDER BY observed_at, raw_record_id LIMIT ?",
+            [
+                asset_id,
+                source_id,
+                DataFrequency.DAY_1.value,
+                _instant_text(start),
+                _instant_text(end),
+                _instant_text(known_at),
+                *cursor_parameters,
+                limit,
+            ],
+        ).fetchall()
+        if not candidate_rows:
+            return MarketObservationPage(groups=())
+        candidates = [(str(row[0]), UUID(str(row[1]))) for row in candidate_rows]
+        raw_ids = tuple(dict.fromkeys(record_id for _, record_id in candidates))
+        projection_columns = ", ".join(f"o.{name}" for name in OBSERVATION_V2_COLUMNS)
+        placeholders = ", ".join("?" for _ in raw_ids)
+        rows = self._connection.execute(
+            f"SELECT {projection_columns}, r.asset_id, r.source_id, r.event_time, "
+            "r.available_at, r.checksum_sha256 "
+            "FROM normalized_observations_v2 AS o "
+            "LEFT JOIN raw_v2_index AS r ON r.record_id = o.raw_record_id "
+            f"WHERE o.raw_record_id IN ({placeholders}) "
+            "AND o.asset_id = ? AND o.source_id = ? AND o.frequency = ? "
+            "AND o.observed_at IS NOT NULL AND o.observed_at >= ? AND o.observed_at < ? "
+            "AND o.available_at <= ? "
+            "ORDER BY o.observed_at, o.raw_record_id, o.field_name, o.observation_id",
+            [
+                *(str(item) for item in raw_ids),
+                asset_id,
+                source_id,
+                DataFrequency.DAY_1.value,
+                _instant_text(start),
+                _instant_text(end),
+                _instant_text(known_at),
+            ],
+        ).fetchall()
+        if not rows:
+            raise ObservationV2Error("market observation SQL projection disappeared")
+
+        grouped: dict[UUID, list[MarketObservationProjection]] = {
+            record_id: [] for record_id in raw_ids
+        }
+        raw_metadata: dict[UUID, tuple[str, str, datetime, datetime, str]] = {}
+        for row in rows:
+            if len(row) != len(OBSERVATION_V2_COLUMNS) + 5:
+                raise ObservationV2Error("market observation SQL projection is malformed")
+            observation_id = UUID(str(row[0]))
+            raw_record_id = UUID(str(row[1]))
+            if raw_record_id not in grouped:
+                raise ObservationV2Error("market observation SQL returned an unrequested record")
+            raw_event_time = _parse_instant_text(row[21])
+            raw_available_at = _parse_instant_text(row[22])
+            raw_checksum = row[23]
+            raw_asset_id = row[19]
+            raw_source_id = row[20]
+            if (
+                raw_asset_id is None
+                or raw_source_id is None
+                or raw_event_time is None
+                or raw_available_at is None
+                or not isinstance(raw_checksum, str)
+            ):
+                raise ObservationV2Error("market observation raw index reference is missing")
+            metadata = (
+                str(raw_asset_id),
+                str(raw_source_id),
+                raw_event_time,
+                raw_available_at,
+                raw_checksum,
+            )
+            previous_metadata = raw_metadata.get(raw_record_id)
+            if previous_metadata is not None and previous_metadata != metadata:
+                raise ObservationV2Error("market observation raw index projection changed")
+            raw_metadata[raw_record_id] = metadata
+            try:
+                value = Decimal(str(row[4]))
+            except (InvalidOperation, ValueError, TypeError) as error:
+                raise ObservationV2Error("market observation SQL value is not Decimal") from error
+            if not value.is_finite():
+                raise ObservationV2Error("market observation SQL value must be finite")
+            projection = MarketObservationProjection(
+                observation_id=observation_id,
+                raw_record_id=raw_record_id,
+                asset_id=str(row[2]),
+                field_name=str(row[3]),
+                value=value,
+                unit=str(row[5]),
+                frequency=DataFrequency(str(row[6])),
+                observed_at=_parse_instant_text(row[7]),
+                period_start=_parse_instant_text(row[8]),
+                period_end=_parse_instant_text(row[9]),
+                available_at=_parse_instant_text(row[10]),
+                normalized_at=_parse_instant_text(row[11]),
+                source_id=str(row[12]),
+                source_record_key=str(row[13]) if row[13] is not None else None,
+                source_retrieved_at=_parse_instant_text(row[14]),
+                source_raw_uri=str(row[15]) if row[15] is not None else None,
+                source_checksum_sha256=str(row[16]) if row[16] is not None else None,
+                quality=DataQuality(str(row[17])),
+                transformation_version=str(row[18]),
+                raw_asset_id=metadata[0],
+                raw_source_id=metadata[1],
+                raw_event_time=metadata[2],
+                raw_available_at=metadata[3],
+                raw_checksum_sha256=metadata[4],
+            )
+            grouped[raw_record_id].append(projection)
+        groups: list[MarketObservationGroupProjection] = []
+        for _, raw_record_id in candidates:
+            metadata = raw_metadata.get(raw_record_id)
+            observations = grouped.get(raw_record_id, [])
+            if metadata is None or not observations:
+                raise ObservationV2Error("market observation candidate group is incomplete")
+            groups.append(
+                MarketObservationGroupProjection(
+                    raw_record_id=raw_record_id,
+                    raw_asset_id=metadata[0],
+                    raw_source_id=metadata[1],
+                    raw_event_time=metadata[2],
+                    raw_available_at=metadata[3],
+                    raw_checksum_sha256=metadata[4],
+                    observations=tuple(observations),
+                )
+            )
+        last_observed_at, last_raw_record_id = candidates[-1]
+        return MarketObservationPage(
+            groups=tuple(groups),
+            next_observed_at=_parse_instant_text(last_observed_at),
+            next_raw_record_id=last_raw_record_id,
+        )
+
+    def earliest_market_observation_timestamp(
+        self,
+        *,
+        asset_id: str,
+        source_id: str,
+        end: datetime,
+        known_at: datetime,
+    ) -> datetime | None:
+        """Return the earliest eligible daily input before an exclusive end cut."""
+        for label, instant in (("end", end), ("known_at", known_at)):
+            if instant.tzinfo is None or instant.utcoffset() is None:
+                raise RawV2StagingError(f"market history {label} must be timezone-aware")
+        self._require_open()
+        ensure_observation_v2_table(self._connection, create=False)
+        row = self._connection.execute(
+            "SELECT MIN(observed_at) FROM normalized_observations_v2 "
+            "WHERE asset_id = ? AND source_id = ? AND frequency = ? "
+            "AND observed_at IS NOT NULL AND observed_at < ? AND available_at <= ?",
+            [
+                asset_id,
+                source_id,
+                DataFrequency.DAY_1.value,
+                _instant_text(end),
+                _instant_text(known_at),
+            ],
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        timestamp = _parse_instant_text(row[0])
+        if timestamp is None:
+            raise ObservationV2Error("earliest daily market timestamp is malformed")
+        return timestamp
+
     def verify_observation_row(self, observation_id: UUID) -> NormalizedObservation:
         """Hydrate and verify one observation row with its raw reference."""
         hydrated = self.get_observations([observation_id])
@@ -826,6 +1137,131 @@ class RawV2Staging:
             raise ObservationV2Error("observation v2 raw reference is missing or foreign")
         return observation
 
+    def ensure_market_incremental_tables(self, *, create: bool) -> None:
+        """Require or create both append-only daily evidence and checkpoint groups."""
+        self._require_open()
+        from investment_analyst.storage.daily_evidence_v2 import (
+            ensure_daily_evidence_v2_tables,
+        )
+        from investment_analyst.storage.market_checkpoint_v2 import (
+            ensure_market_checkpoint_v2_tables,
+        )
+
+        ensure_daily_evidence_v2_tables(self._connection, create=create)
+        ensure_market_checkpoint_v2_tables(self._connection, create=create)
+
+    def save_daily_evidence_prefixes(
+        self, prefixes: Collection[DailyEvidencePrefix]
+    ) -> BatchWriteReceipt:
+        """Persist append-only daily evidence nodes through the staging writer."""
+        self._require_writable()
+        from investment_analyst.storage.daily_evidence_v2 import (
+            DailyEvidenceV2Error,
+            DailyEvidenceV2Store,
+        )
+
+        typed = tuple(prefixes)
+        if any(not isinstance(item, DailyEvidencePrefix) for item in typed):
+            raise DailyEvidenceV2Error("daily evidence save requires DailyEvidencePrefix")
+        return DailyEvidenceV2Store(self._connection).save_many(typed)
+
+    def get_daily_evidence_prefixes(
+        self, prefix_ids: Collection[UUID]
+    ) -> dict[UUID, DailyEvidencePrefix]:
+        """Load and verify append-only daily evidence nodes."""
+        self._require_open()
+        from investment_analyst.storage.daily_evidence_v2 import DailyEvidenceV2Store
+
+        return DailyEvidenceV2Store(self._connection).get_many(prefix_ids)
+
+    def list_daily_evidence_page(
+        self,
+        *,
+        asset_id: str,
+        source_id: str,
+        field_group: DailyEvidenceFieldGroup,
+        known_at: datetime,
+        limit: int,
+        after_timestamp: datetime | None = None,
+        after_prefix_id: UUID | None = None,
+    ) -> tuple[DailyEvidencePrefix, ...]:
+        """Read one bounded scope page of verified daily evidence prefixes."""
+        self._require_open()
+        from investment_analyst.storage.daily_evidence_v2 import DailyEvidenceV2Store
+
+        return DailyEvidenceV2Store(self._connection).list_scope_page(
+            asset_id=asset_id,
+            source_id=source_id,
+            field_group=field_group,
+            known_at=known_at,
+            limit=limit,
+            after_timestamp=after_timestamp,
+            after_prefix_id=after_prefix_id,
+        )
+
+    def save_market_recursive_checkpoints(
+        self,
+        checkpoints: Collection[MarketRecursiveCheckpoint],
+        *,
+        verified_prefixes: Mapping[UUID, DailyEvidencePrefix] | None = None,
+    ) -> BatchWriteReceipt:
+        """Persist typed recurrence checkpoints through the staging writer."""
+        self._require_writable()
+        from investment_analyst.storage.market_checkpoint_v2 import (
+            MarketCheckpointV2Error,
+            MarketCheckpointV2Store,
+        )
+
+        typed = tuple(checkpoints)
+        if any(not isinstance(item, MarketRecursiveCheckpoint) for item in typed):
+            raise MarketCheckpointV2Error("checkpoint save requires MarketRecursiveCheckpoint")
+        return MarketCheckpointV2Store(self._connection).save_many(
+            typed,
+            verified_prefixes=verified_prefixes,
+        )
+
+    def get_market_recursive_checkpoints(
+        self,
+        checkpoint_ids: Collection[UUID],
+        *,
+        verified_prefixes: Mapping[UUID, DailyEvidencePrefix] | None = None,
+    ) -> dict[UUID, MarketRecursiveCheckpoint]:
+        """Load and verify typed recurrence checkpoints."""
+        self._require_open()
+        from investment_analyst.storage.market_checkpoint_v2 import MarketCheckpointV2Store
+
+        return MarketCheckpointV2Store(self._connection).get_many(
+            checkpoint_ids,
+            verified_prefixes=verified_prefixes,
+        )
+
+    def find_market_checkpoints_for_prefixes(
+        self,
+        prefix_ids: Collection[UUID],
+        parameters: RecursiveParameters,
+        *,
+        known_at: datetime,
+        verified_prefixes: Mapping[UUID, DailyEvidencePrefix] | None = None,
+    ) -> dict[UUID, MarketRecursiveCheckpoint]:
+        """Find compatible, available checkpoint states for known prefix IDs."""
+        self._require_open()
+        from investment_analyst.storage.market_checkpoint_v2 import (
+            MarketCheckpointV2Error,
+            MarketCheckpointV2Store,
+        )
+
+        if not isinstance(
+            parameters,
+            (EmaParameters, RsiParameters, AtrParameters, MacdParameters),
+        ):
+            raise MarketCheckpointV2Error("checkpoint parameter contract is invalid")
+        return MarketCheckpointV2Store(self._connection).find_for_prefixes(
+            prefix_ids,
+            parameters,
+            known_at=known_at,
+            verified_prefixes=verified_prefixes,
+        )
+
     def save_metrics(self, results: Collection[MetricResult]) -> BatchWriteReceipt:
         """Persist typed metric results with verified lineage under the writer lock."""
         from investment_analyst.core.models import MetricResult as MetricResultModel
@@ -847,6 +1283,46 @@ class RawV2Staging:
         ensure_metric_v2_tables(self._connection, create=False)
         hydrated = MetricV2Store(self._connection).get_many(tuple(result_ids))
         return self._resolve_metrics_lineage_batch(hydrated)
+
+    def find_market_metric_candidates(
+        self,
+        *,
+        asset_id: str,
+        metric_keys: Collection[str],
+        timestamps: Collection[datetime],
+    ) -> dict[UUID, MetricResult]:
+        """Load verified metric rows for bounded output timestamps and metric families."""
+        self._require_open()
+        if not metric_v2_table_exists(self._connection):
+            return {}
+        ensure_metric_v2_tables(self._connection, create=False)
+        keys = tuple(sorted(set(metric_keys)))
+        instants = tuple(sorted(set(timestamps)))
+        if not keys or not instants:
+            return {}
+        for instant in instants:
+            if instant.tzinfo is None or instant.utcoffset() is None:
+                raise RawV2StagingError("market metric candidate timestamps must be aware")
+        found: set[UUID] = set()
+        for key_chunk in chunked_sequence(keys, 240):
+            key_placeholders = ", ".join("?" for _ in key_chunk)
+            for timestamp_chunk in chunked_sequence(instants, 240):
+                time_placeholders = ", ".join("?" for _ in timestamp_chunk)
+                rows = self._connection.execute(
+                    "SELECT result_id FROM metric_results_v2 "
+                    f"WHERE asset_id = ? AND metric_key IN ({key_placeholders}) "
+                    f"AND as_of IN ({time_placeholders})",
+                    [
+                        asset_id,
+                        *key_chunk,
+                        *(_instant_text(instant) for instant in timestamp_chunk),
+                    ],
+                ).fetchall()
+                found.update(UUID(str(row[0])) for row in rows)
+        output: dict[UUID, MetricResult] = {}
+        for identifier_chunk in chunked_sequence(tuple(sorted(found, key=str)), 256):
+            output.update(self.get_metrics(identifier_chunk))
+        return output
 
     def _resolve_metrics_lineage_batch(
         self, hydrated: dict[UUID, MetricResult]
@@ -1068,17 +1544,34 @@ class RawV2Staging:
             analysis_snapshot_v2_tables_exist,
             ensure_analysis_snapshot_v2_tables,
         )
+        from investment_analyst.storage.daily_evidence_v2 import (
+            daily_evidence_v2_tables_exist,
+            ensure_daily_evidence_v2_tables,
+        )
         from investment_analyst.storage.diagnostic_v2 import (
             diagnostic_v2_tables_exist,
             ensure_diagnostic_v2_tables,
         )
         from investment_analyst.storage.evidence_set_v2 import evidence_v2_tables_exist
+        from investment_analyst.storage.market_checkpoint_v2 import (
+            ensure_market_checkpoint_v2_tables,
+            market_checkpoint_v2_tables_exist,
+        )
         from investment_analyst.storage.metric_v2 import metric_v2_table_exists
 
         has_metrics = metric_v2_table_exists(self._connection)
         has_evidence = evidence_v2_tables_exist(self._connection)
         has_diagnostics = diagnostic_v2_tables_exist(self._connection)
         has_snapshots = analysis_snapshot_v2_tables_exist(self._connection)
+        has_daily_evidence = daily_evidence_v2_tables_exist(self._connection)
+        has_market_checkpoints = market_checkpoint_v2_tables_exist(self._connection)
+        if has_daily_evidence != has_market_checkpoints:
+            raise RawV2StagingError(
+                "market incremental evidence and checkpoint schema must be present together"
+            )
+        if has_daily_evidence:
+            ensure_daily_evidence_v2_tables(self._connection, create=False)
+            ensure_market_checkpoint_v2_tables(self._connection, create=False)
         if create:
             if has_metrics:
                 ensure_metric_v2_tables(self._connection, create=True)

@@ -184,6 +184,26 @@ def _alpha(window: int) -> Decimal:
         return Decimal("2") / Decimal(window + 1)
 
 
+def decimal34_mean(values: Sequence[Decimal]) -> Decimal:
+    """Return the exact arithmetic mean under the canonical Decimal34 context."""
+    if not values:
+        raise ValueError("mean requires at least one value")
+    if any(not value.is_finite() for value in values):
+        raise ValueError("mean values must be finite")
+    with localcontext(Context(prec=34)):
+        return sum(values, Decimal("0")) / Decimal(len(values))
+
+
+def ema_step(previous: Decimal, current: Decimal, window: int) -> Decimal:
+    """Apply one canonical Decimal34 EMA recurrence step."""
+    window = _validate_window(window)
+    if not previous.is_finite() or not current.is_finite():
+        raise ValueError("EMA step values must be finite")
+    with localcontext(Context(prec=34)):
+        alpha = _alpha(window)
+        return alpha * current + (Decimal("1") - alpha) * previous
+
+
 def _prefix_ids(ordered: Sequence[MarketBar]) -> tuple[UUID, ...]:
     try:
         return tuple(bar.observation_ids["close"] for bar in ordered)
@@ -202,8 +222,7 @@ def seed_checkpoint(
     window = _validate_window(window)
     ordered = _ordered_scope_bars(bars, asset_id=asset_id, source_id=source_id, window=window)
     seed_bars = ordered[:window]
-    with localcontext(Context(prec=34)):
-        value = sum((bar.close for bar in seed_bars), Decimal("0")) / Decimal(window)
+    value = decimal34_mean(tuple(bar.close for bar in seed_bars))
     prefix_ids = _prefix_ids(seed_bars)
     prefix_hash = canonical_prefix_hash(prefix_ids)
     available_at = max(bar.available_at for bar in seed_bars)
@@ -280,13 +299,11 @@ def resume(
     tail = ordered[checkpoint.prefix_length :]
     if not tail:
         return checkpoint
-    alpha = _alpha(checkpoint.window)
-    with localcontext(Context(prec=34)):
-        value = checkpoint.value
-        available_at = checkpoint.available_at
-        for current in tail:
-            value = alpha * current.close + (Decimal("1") - alpha) * value
-            available_at = max(current.available_at, available_at)
+    value = checkpoint.value
+    available_at = checkpoint.available_at
+    for current in tail:
+        value = ema_step(value, current.close, checkpoint.window)
+        available_at = max(current.available_at, available_at)
     prefix_ids = (*_prefix_ids(ordered[: checkpoint.prefix_length]), *_prefix_ids(tail))
     extended = ordered[: checkpoint.prefix_length] + tail
     prefix_hash = canonical_prefix_hash(prefix_ids)
@@ -327,13 +344,11 @@ def full_checkpoint(
     tail = ordered[checkpoint.prefix_length :]
     if not tail:
         return checkpoint
-    alpha = _alpha(window)
-    with localcontext(Context(prec=34)):
-        value = checkpoint.value
-        available_at = checkpoint.available_at
-        for current in tail:
-            value = alpha * current.close + (Decimal("1") - alpha) * value
-            available_at = max(current.available_at, available_at)
+    value = checkpoint.value
+    available_at = checkpoint.available_at
+    for current in tail:
+        value = ema_step(value, current.close, window)
+        available_at = max(current.available_at, available_at)
     prefix_ids = _prefix_ids(ordered)
     return IncrementalEmaCheckpoint(
         checkpoint_id=checkpoint_identity(

@@ -928,3 +928,56 @@ DATA-CHASSIS permanece NEXT; este candidato ADVANCES sin completar la ruta:
 4. Activación/cutover con verificación bidireccional y recuperación probada; cualquier limpieza física requiere inventario y autorización estrecha posterior.
 
 No hay checkpoints productivos, migración masiva, adopción de staging v2, despliegue del sampler, cambios de unidades, cutover ni liberación de almacenamiento del host en este candidato.
+
+### Procesamiento incremental diario persistido en staging (`DATA-CHASSIS-37` / #327)
+
+El candidato añade `IncrementalMarketService` sobre un `RawV2Staging` ya abierto, sin cambiar el
+pipeline v1, el scheduler ni el runtime productivo. `HistoricalMarketDataV2Service.iter_pages()`
+selecciona revisiones visibles al corte por páginas de hasta 256; el estado canónico empieza en la
+primera historia elegible, aunque la presentación solicite un `start` posterior. Las llamadas
+full, backfill y continuación recorren la misma transición por barra y preservan timestamps
+irregulares.
+
+La evidencia diaria `market-daily-evidence-prefix-v1` comparte nodos append-only de cierre y
+high/low/cierre entre las recurrencias. `MarketRecursiveCheckpoint` persiste estados Decimal34 de
+EMA, RSI, ATR y MACD; incorpora warm-up, parámetros, `seed_start`, disponibilidad y referencia al
+prefijo. Las métricas conservan sus dependencias directas y referencias a prefix/checkpoint. Una
+revisión visible en el corte crea una rama de prefijos y checkpoints nuevos; el corte anterior
+mantiene su historia y las ventanas finitas se recalculan en su halo dependiente. Los links de
+checkpoint a métricas se pueden reparar tras una interrupción entre la escritura durable de la
+métrica y la actualización del link.
+
+El recibo adicional informa filas candidatas/seleccionadas, prefijos y checkpoints creados o
+reutilizados, pasos de recurrencia, resultados, tamaños de lote, modelos de barra hidratados,
+ventana finita y duraciones separadas para selección, verificación/persistencia de lineage, lookup,
+transición, cálculo y validación DAG/persistencia. Estos contadores describen una ejecución; no
+prometen complejidad total O(delta) porque la verificación PIT del metadata histórico continúa
+siendo lineal y acotada en memoria.
+
+El backup staging pasa a `raw-v2-staging-backup-manifest-v5` cuando hay prefijos/checkpoints y liga
+sus conteos y digests al inventario previo. Los manifests v1–v4 conservan su lectura/restauración.
+La prueba scratch interrumpe el cálculo tras una página durable, crea backup v5, rechaza una copia
+corrupta antes de promover destino y reanuda con los mismos IDs/valores que la corrida continua.
+La compatibilidad observada fue Python 3.12.3 / DuckDB 1.5.4.
+
+El smoke scratch `scripts/smoke_market_incremental_v2.py` registra tres perfiles: equivalencia,
+revisión y cortes; backup/restore/reanudación; y escala/aislamiento. Sobre IEX sintético ejecuta
+N=257 y N=1537, deltas 0/1/3, 32 activos ajenos (2048 barras), contadores SQL, bytes lógicos/físicos,
+tiempos de fase y RSS. Para N=1537 el pase inicial seleccionó 1537 barras, hidrató 1556 modelos
+(incluidos 19 modelos repetidos como halo entre páginas), creó 9222 checkpoints en siete páginas,
+emitió 840 métricas para las últimas 40 fechas solicitadas y midió ~8,8 s de servicio en este
+entorno. El delta=0 creó cero filas; delta=1 hidrató 20 barras (un dato nuevo más el halo finito de
+19), y delta=3 hidrató 22. Tras sumar los 2048 registros ajenos, la repetición siguió hidratando
+cero barras objetivo. Son observaciones scratch sin umbrales operacionales; no demuestran mejora del
+ciclo productivo, reducción de RSS del servicio desplegado ni cutover.
+
+La cobertura de integración también ejecuta ETF IEX y Coinbase BTC-USD diaria con calendario
+irregular y compara los valores finitos contra el motor Decimal canónico. La etapa 5 avanza con un
+servicio persistido funcional y verificable en staging, pero permanece abierta: no hay migración
+analítica masiva, adopción de consumidores, activación/cutover productivo, backup Drive restaurado,
+features desacopladas ni evidencia operacional nueva. Ninguna fila v1 se rebautiza como v2 y los
+datos anteriores siguen siendo append-only.
+
+Transición propuesta: `DATA-CHASSIS` permanece `NEXT`, `route_effect: ADVANCES`. Tras integrar este
+candidato, la próxima frontera es la migración analítica v1 → staging v2 verificable y reanudable;
+la activación/cutover con recuperación bidireccional permanece posterior y requiere su autorización.

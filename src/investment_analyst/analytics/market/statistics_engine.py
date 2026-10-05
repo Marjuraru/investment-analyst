@@ -2,6 +2,8 @@
 
 import json
 from collections import Counter
+from collections.abc import Collection
+from datetime import datetime
 from decimal import Context, Decimal, localcontext
 from uuid import UUID
 
@@ -108,26 +110,8 @@ class MarketStatisticsEngine:
         zero_skips: dict[str, int] = {}
 
         with localcontext(Context(prec=34)):
-            calculations.extend(self._simple_returns(series, warmups))
-            for window in request.sma_windows:
-                calculations.extend(self._sma(series, window, warmups))
-            calculations.extend(self._volatility(series, request.volatility_window, warmups))
             calculations.extend(
-                self._relative_volume(
-                    series,
-                    request.relative_volume_window,
-                    warmups,
-                    zero_skips,
-                )
-            )
-            calculations.extend(
-                self._bollinger(
-                    series,
-                    request.bollinger_window,
-                    request.bollinger_multiplier,
-                    warmups,
-                    zero_skips,
-                )
+                self._finite_window_calculations(series, request, warmups, zero_skips)
             )
             for window in request.ema_windows:
                 calculations.extend(self._ema(series, window, warmups))
@@ -148,6 +132,65 @@ class MarketStatisticsEngine:
             zero_denominator_skips=dict(sorted(zero_skips.items())),
             traceability_verified=True,
         )
+
+    def compute_finite_windows(
+        self,
+        series: MarketBarSeries,
+        request: MarketStatisticsRequest,
+        *,
+        output_timestamps: Collection[datetime] | None = None,
+    ) -> tuple[MetricCalculation, ...]:
+        """Compute only finite-window metrics over a bounded verified bar slice."""
+        self._validate_inputs(series, request)
+        warmups: dict[str, int] = {}
+        zero_skips: dict[str, int] = {}
+        with localcontext(Context(prec=34)):
+            calculations = self._finite_window_calculations(
+                series,
+                request,
+                warmups,
+                zero_skips,
+                output_timestamps,
+            )
+        calculations.sort(
+            key=lambda item: (item.as_of, item.metric_key, _parameter_sort_key(item.parameters))
+        )
+        return tuple(calculations)
+
+    def _finite_window_calculations(
+        self,
+        series: MarketBarSeries,
+        request: MarketStatisticsRequest,
+        warmups: dict[str, int],
+        zero_skips: dict[str, int],
+        output_timestamps: Collection[datetime] | None = None,
+    ) -> list[MetricCalculation]:
+        """Share canonical v1 finite-window formulas with paged v2 execution."""
+        output = None if output_timestamps is None else set(output_timestamps)
+        calculations = self._simple_returns(series, warmups, output)
+        for window in request.sma_windows:
+            calculations.extend(self._sma(series, window, warmups, output))
+        calculations.extend(self._volatility(series, request.volatility_window, warmups, output))
+        calculations.extend(
+            self._relative_volume(
+                series,
+                request.relative_volume_window,
+                warmups,
+                zero_skips,
+                output,
+            )
+        )
+        calculations.extend(
+            self._bollinger(
+                series,
+                request.bollinger_window,
+                request.bollinger_multiplier,
+                warmups,
+                zero_skips,
+                output,
+            )
+        )
+        return calculations
 
     @staticmethod
     def _validate_inputs(series: MarketBarSeries, request: MarketStatisticsRequest) -> None:
@@ -184,6 +227,7 @@ class MarketStatisticsEngine:
     def _simple_returns(
         series: MarketBarSeries,
         warmups: dict[str, int],
+        output_timestamps: set[datetime] | None = None,
     ) -> list[MetricCalculation]:
         bars = series.bars
         warmups[SIMPLE_RETURN_KEY] = min(len(bars), 1)
@@ -191,6 +235,8 @@ class MarketStatisticsEngine:
         output: list[MetricCalculation] = []
         for index in range(1, len(bars)):
             previous, current = bars[index - 1], bars[index]
+            if output_timestamps is not None and current.timestamp not in output_timestamps:
+                continue
             value = current.close / previous.close - Decimal("1")
             output.append(
                 MetricCalculation(
@@ -219,6 +265,7 @@ class MarketStatisticsEngine:
         series: MarketBarSeries,
         window: int,
         warmups: dict[str, int],
+        output_timestamps: set[datetime] | None = None,
     ) -> list[MetricCalculation]:
         key = _detail_key(SMA_KEY, window)
         warmups[key] = min(len(series.bars), window - 1)
@@ -226,6 +273,8 @@ class MarketStatisticsEngine:
         output: list[MetricCalculation] = []
         for end_index in range(window - 1, len(series.bars)):
             bars = series.bars[end_index - window + 1 : end_index + 1]
+            if output_timestamps is not None and bars[-1].timestamp not in output_timestamps:
+                continue
             value = sum((bar.close for bar in bars), Decimal("0")) / Decimal(window)
             output.append(
                 MetricCalculation(
@@ -254,6 +303,7 @@ class MarketStatisticsEngine:
         series: MarketBarSeries,
         window: int,
         warmups: dict[str, int],
+        output_timestamps: set[datetime] | None = None,
     ) -> list[MetricCalculation]:
         key = _detail_key(VOLATILITY_KEY, window)
         warmups[key] = min(len(series.bars), window)
@@ -261,6 +311,8 @@ class MarketStatisticsEngine:
         output: list[MetricCalculation] = []
         for end_index in range(window, len(series.bars)):
             bars = series.bars[end_index - window : end_index + 1]
+            if output_timestamps is not None and bars[-1].timestamp not in output_timestamps:
+                continue
             returns = tuple(
                 bars[index].close / bars[index - 1].close - Decimal("1")
                 for index in range(1, len(bars))
@@ -298,6 +350,7 @@ class MarketStatisticsEngine:
         window: int,
         warmups: dict[str, int],
         zero_skips: dict[str, int],
+        output_timestamps: set[datetime] | None = None,
     ) -> list[MetricCalculation]:
         key = _detail_key(RELATIVE_VOLUME_KEY, window)
         warmups[key] = min(len(series.bars), window)
@@ -306,6 +359,8 @@ class MarketStatisticsEngine:
         output: list[MetricCalculation] = []
         for current_index in range(window, len(series.bars)):
             bars = series.bars[current_index - window : current_index + 1]
+            if output_timestamps is not None and bars[-1].timestamp not in output_timestamps:
+                continue
             baseline = bars[:-1]
             historical_mean = sum((bar.volume for bar in baseline), Decimal("0")) / Decimal(window)
             if historical_mean == 0:
@@ -340,6 +395,7 @@ class MarketStatisticsEngine:
         multiplier: Decimal,
         warmups: dict[str, int],
         zero_skips: dict[str, int],
+        output_timestamps: set[datetime] | None = None,
     ) -> list[MetricCalculation]:
         """Compute population-standard-deviation Bollinger values over close windows."""
         keys = (
@@ -355,6 +411,8 @@ class MarketStatisticsEngine:
         output: list[MetricCalculation] = []
         for end_index in range(window - 1, len(series.bars)):
             bars = series.bars[end_index - window + 1 : end_index + 1]
+            if output_timestamps is not None and bars[-1].timestamp not in output_timestamps:
+                continue
             middle = sum((bar.close for bar in bars), Decimal("0")) / Decimal(window)
             variance = sum(((bar.close - middle) ** 2 for bar in bars), Decimal("0")) / Decimal(
                 window

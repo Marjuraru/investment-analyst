@@ -16,6 +16,7 @@ Implements:
 from __future__ import annotations
 
 import collections
+import hashlib
 from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -389,6 +390,268 @@ def fetch_metrics_chunked(
     return results
 
 
+def verify_market_metric_references(
+    connection: DuckDBPyConnection,
+    metrics: Collection[MetricResult],
+) -> None:
+    """Verify direct daily-prefix and recursive-checkpoint metric references."""
+    referenced: dict[UUID, tuple[UUID, UUID]] = {}
+    metric_by_id = {item.result_id: item for item in metrics}
+    for metric in metric_by_id.values():
+        prefix_value = metric.parameters.get("daily_evidence_prefix_id")
+        checkpoint_value = metric.parameters.get("market_checkpoint_id")
+        if (prefix_value is None) != (checkpoint_value is None):
+            raise AnalyticalV2ValidationError(
+                "market metrics must reference both a daily prefix and a checkpoint"
+            )
+        if prefix_value is None:
+            continue
+        try:
+            referenced[metric.result_id] = (
+                UUID(str(prefix_value)),
+                UUID(str(checkpoint_value)),
+            )
+        except (ValueError, TypeError, AttributeError) as error:
+            raise AnalyticalV2ValidationError(
+                "market metric evidence references must be UUIDs"
+            ) from error
+    if not referenced:
+        return
+
+    from investment_analyst.analytics.market.daily_evidence import DailyEvidenceFieldGroup
+    from investment_analyst.analytics.market.incremental_ema import (
+        ALGORITHM_VERSION as EMA_V2_ALGORITHM,
+    )
+    from investment_analyst.analytics.market.incremental_recursive import (
+        ATR_ALGORITHM_VERSION as ATR_V2_ALGORITHM,
+    )
+    from investment_analyst.analytics.market.incremental_recursive import (
+        MACD_ALGORITHM_VERSION as MACD_V2_ALGORITHM,
+    )
+    from investment_analyst.analytics.market.incremental_recursive import (
+        RSI_ALGORITHM_VERSION as RSI_V2_ALGORITHM,
+    )
+    from investment_analyst.analytics.market.incremental_state import (
+        AtrParameters,
+        AtrState,
+        EmaParameters,
+        EmaState,
+        MacdParameters,
+        MacdState,
+        RsiParameters,
+        RsiState,
+    )
+    from investment_analyst.storage.daily_evidence_v2 import (
+        DailyEvidenceV2Error,
+        DailyEvidenceV2Store,
+    )
+    from investment_analyst.storage.market_checkpoint_v2 import (
+        MarketCheckpointV2Error,
+        MarketCheckpointV2Store,
+    )
+
+    prefix_ids = tuple({prefix_id for prefix_id, _ in referenced.values()})
+    checkpoint_ids = tuple({checkpoint_id for _, checkpoint_id in referenced.values()})
+    try:
+        prefixes = DailyEvidenceV2Store(connection).get_many(prefix_ids)
+        checkpoints = MarketCheckpointV2Store(connection).get_many(checkpoint_ids)
+    except (DailyEvidenceV2Error, MarketCheckpointV2Error, RecordNotFoundError) as error:
+        raise AnalyticalV2ValidationError(str(error)) from error
+    if set(prefixes) != set(prefix_ids):
+        raise AnalyticalV2ValidationError("market metric references a missing daily prefix")
+    if set(checkpoints) != set(checkpoint_ids):
+        raise AnalyticalV2ValidationError("market metric references a missing checkpoint")
+
+    expected_family_by_key = {
+        "market.technical.ema": "ema",
+        "market.technical.rsi.average_gain": "rsi",
+        "market.technical.rsi.average_loss": "rsi",
+        "market.technical.rsi": "rsi",
+        "market.technical.true_range": "atr",
+        "market.technical.atr": "atr",
+        "market.technical.macd.line": "macd",
+        "market.technical.macd.signal": "macd",
+        "market.technical.macd.histogram": "macd",
+    }
+    expected_algorithm_by_family = {
+        "ema": EMA_V2_ALGORITHM,
+        "rsi": RSI_V2_ALGORITHM,
+        "atr": ATR_V2_ALGORITHM,
+        "macd": MACD_V2_ALGORITHM,
+    }
+    for metric_id, (prefix_id, checkpoint_id) in referenced.items():
+        metric = metric_by_id[metric_id]
+        prefix = prefixes[prefix_id]
+        checkpoint = checkpoints[checkpoint_id]
+        family = expected_family_by_key.get(metric.metric_key)
+        if family is None:
+            raise AnalyticalV2ValidationError(
+                f"metric {metric.metric_key!r} cannot reference a market checkpoint"
+            )
+        parameters = checkpoint.parameters
+        if not isinstance(
+            parameters,
+            (AtrParameters, EmaParameters, MacdParameters, RsiParameters),
+        ):
+            raise AnalyticalV2ValidationError("market checkpoint parameters are invalid")
+        expected_group = (
+            DailyEvidenceFieldGroup.HIGH_LOW_CLOSE
+            if family == "atr"
+            else DailyEvidenceFieldGroup.CLOSE
+        )
+        expected_parameters: dict[str, int] = {}
+        expected_value: Decimal | None = None
+        if isinstance(parameters, EmaParameters) and isinstance(checkpoint.state, EmaState):
+            expected_parameters = {"window": parameters.window}
+            expected_value = checkpoint.state.value
+        elif isinstance(parameters, RsiParameters) and isinstance(checkpoint.state, RsiState):
+            expected_parameters = {"window": parameters.window}
+            if metric.metric_key == "market.technical.rsi.average_gain":
+                expected_value = checkpoint.state.average_gain
+            elif metric.metric_key == "market.technical.rsi.average_loss":
+                expected_value = checkpoint.state.average_loss
+            else:
+                expected_value = checkpoint.state.value
+        elif isinstance(parameters, AtrParameters) and isinstance(checkpoint.state, AtrState):
+            expected_parameters = {"window": parameters.window}
+            expected_value = (
+                checkpoint.state.true_range
+                if metric.metric_key == "market.technical.true_range"
+                else checkpoint.state.value
+            )
+        elif isinstance(parameters, MacdParameters) and isinstance(checkpoint.state, MacdState):
+            expected_parameters = {
+                "fast_window": parameters.fast_window,
+                "slow_window": parameters.slow_window,
+                "signal_window": parameters.signal_window,
+            }
+            expected_value = {
+                "market.technical.macd.line": checkpoint.state.line,
+                "market.technical.macd.signal": checkpoint.state.signal,
+                "market.technical.macd.histogram": checkpoint.state.histogram,
+            }[metric.metric_key]
+        expected_input_ids = (
+            prefix.observation_ids[:2]
+            if family == "atr" and metric.metric_key == "market.technical.true_range"
+            else prefix.observation_ids
+        )
+        mismatches = []
+        if checkpoint.family != family:
+            mismatches.append("family")
+        if metric.algorithm_version != expected_algorithm_by_family[family]:
+            mismatches.append("metric_algorithm")
+        if checkpoint.algorithm_version != metric.algorithm_version:
+            mismatches.append("checkpoint_algorithm")
+        if expected_value is None or metric.value != expected_value:
+            mismatches.append("value")
+        if any(metric.parameters.get(key) != value for key, value in expected_parameters.items()):
+            mismatches.append("parameters")
+        if not set(expected_input_ids).issubset(metric.input_observation_ids):
+            mismatches.append("observation_inputs")
+        if checkpoint.asset_id != metric.asset_id:
+            mismatches.append("checkpoint_asset")
+        if checkpoint.source_id != metric.parameters.get("source_id"):
+            mismatches.append("source")
+        if prefix.asset_id != metric.asset_id:
+            mismatches.append("prefix_asset")
+        if prefix.source_id != checkpoint.source_id:
+            mismatches.append("prefix_source")
+        if prefix.field_group is not expected_group:
+            mismatches.append("field_group")
+        if checkpoint.daily_prefix_id != prefix.prefix_id:
+            mismatches.append("prefix_id")
+        if checkpoint.daily_prefix_hash != prefix.prefix_hash:
+            mismatches.append("prefix_hash")
+        if checkpoint.as_of != metric.as_of:
+            mismatches.append("checkpoint_as_of")
+        if prefix.timestamp != metric.as_of:
+            mismatches.append("prefix_timestamp")
+        if checkpoint.available_at != metric.available_at:
+            mismatches.append("checkpoint_available_at")
+        if prefix.available_at != metric.available_at:
+            mismatches.append("prefix_available_at")
+        if checkpoint.state.quality is not metric.quality:
+            mismatches.append("quality")
+        if mismatches:
+            raise AnalyticalV2ValidationError(
+                f"metric {metric_id} ({metric.metric_key}) market checkpoint or prefix "
+                "is inconsistent: "
+                f"{', '.join(mismatches)}"
+            )
+        # Reverse links are optional: a crash may leave a durable metric before
+        # its checkpoint association is appended. The direct metric references
+        # above remain mandatory and are sufficient to resume and repair links.
+
+
+def market_artifact_digests_for_metrics(
+    connection: DuckDBPyConnection,
+    seed_metric_ids: Collection[UUID],
+    *,
+    validation_context: AnalyticalV2ValidationContext,
+) -> tuple[str, ...]:
+    """Return tagged prefix and checkpoint hashes reachable from cited metrics."""
+    ordered_seed_ids = tuple(sorted(set(seed_metric_ids), key=str))
+    if not ordered_seed_ids:
+        return ()
+    try:
+        validation_context.resolve_metrics(connection, ordered_seed_ids)
+    except (AnalyticalV2ValidationError, RecordNotFoundError):
+        raise
+    reachable_ids: set[UUID] = set()
+    pending = list(ordered_seed_ids)
+    while pending:
+        metric_id = pending.pop()
+        if metric_id in reachable_ids:
+            continue
+        metric = validation_context.metrics_by_id.get(metric_id)
+        if metric is None:
+            raise RecordNotFoundError(f"metric v2 {metric_id} was not resolved")
+        reachable_ids.add(metric_id)
+        pending.extend(metric.input_metric_result_ids)
+    metrics = tuple(validation_context.metrics_by_id[item] for item in reachable_ids)
+    verify_market_metric_references(connection, metrics)
+    prefix_ids: set[UUID] = set()
+    checkpoint_ids: set[UUID] = set()
+    for metric in metrics:
+        prefix_value = metric.parameters.get("daily_evidence_prefix_id")
+        checkpoint_value = metric.parameters.get("market_checkpoint_id")
+        if (prefix_value is None) != (checkpoint_value is None):
+            raise AnalyticalV2ValidationError(
+                "market metrics must reference both a daily prefix and a checkpoint"
+            )
+        if prefix_value is not None and checkpoint_value is not None:
+            try:
+                prefix_ids.add(UUID(str(prefix_value)))
+                checkpoint_ids.add(UUID(str(checkpoint_value)))
+            except (ValueError, TypeError, AttributeError) as error:
+                raise AnalyticalV2ValidationError(
+                    "market metric evidence references must be UUIDs"
+                ) from error
+    if not prefix_ids and not checkpoint_ids:
+        return ()
+    from investment_analyst.analytics.market.incremental_state import (
+        market_checkpoint_content_hash,
+    )
+    from investment_analyst.storage.daily_evidence_v2 import DailyEvidenceV2Store
+    from investment_analyst.storage.market_checkpoint_v2 import MarketCheckpointV2Store
+
+    prefixes = DailyEvidenceV2Store(connection).get_many(prefix_ids)
+    checkpoints = MarketCheckpointV2Store(connection).get_many(checkpoint_ids)
+    if set(prefixes) != prefix_ids or set(checkpoints) != checkpoint_ids:
+        raise AnalyticalV2ValidationError("market snapshot references a missing lineage artifact")
+    digests = [
+        hashlib.sha256(f"daily_evidence_prefix:{item.prefix_hash}".encode("ascii")).hexdigest()
+        for item in prefixes.values()
+    ]
+    digests.extend(
+        hashlib.sha256(
+            f"market_recursive_checkpoint:{market_checkpoint_content_hash(item)}".encode("ascii")
+        ).hexdigest()
+        for item in checkpoints.values()
+    )
+    return tuple(sorted(set(digests)))
+
+
 def verify_metrics_dag_and_lineage(
     connection: DuckDBPyConnection,
     metrics: Collection[MetricResult] | Mapping[UUID, MetricResult],
@@ -618,6 +881,11 @@ def verify_metrics_dag_and_lineage(
             metric.input_observation_ids
         ):
             raise MetricV2Error("metric v2 observation inputs do not match evidence set members")
+
+    try:
+        verify_market_metric_references(connection, tuple(pending_metric_models.values()))
+    except AnalyticalV2ValidationError as error:
+        raise MetricV2Error(str(error)) from error
 
     validation_context.metrics_by_id.update(pending_metric_models)
     validation_context.evidence_sets_by_id.update(new_evidence_sets)
@@ -1002,6 +1270,7 @@ def fetch_snapshots_chunked(
 
             # Check direct metrics
             snap_es_ids: set[UUID] = set()
+            snap_market_metric_ids: set[UUID] = set(direct_mids)
             for mid in direct_mids:
                 m_res = metrics_by_id[mid]
                 if m_res.asset_id != asset_id:
@@ -1038,6 +1307,7 @@ def fetch_snapshots_chunked(
                     diag_mids.update(comp.metric_result_ids)
                 for ev in diag.evidence:
                     diag_mids.add(ev.metric_result_id)
+                snap_market_metric_ids.update(diag_mids)
                 for mid in diag_mids:
                     m_res = metrics_by_id[mid]
                     validate_metric_key_for_domain(m_res.metric_key, domain)
@@ -1061,7 +1331,12 @@ def fetch_snapshots_chunked(
                     )
                 snap_es_hashes.append(es.canonical_hash)
 
-            expected_digest = canonical_evidence_set_digest(snap_es_hashes)
+            market_hashes = market_artifact_digests_for_metrics(
+                connection,
+                snap_market_metric_ids,
+                validation_context=operation_context,
+            )
+            expected_digest = canonical_evidence_set_digest(tuple(snap_es_hashes) + market_hashes)
             if expected_digest != evidence_set_digest:
                 raise AnalyticalV2ValidationError(
                     f"snapshot evidence_set_digest {evidence_set_digest} does not match "
