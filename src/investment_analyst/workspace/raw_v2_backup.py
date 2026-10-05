@@ -56,6 +56,7 @@ RAW_V2_BACKUP_MANIFEST_SCHEMA = "raw-v2-staging-backup-manifest-v1"
 RAW_V2_BACKUP_MANIFEST_SCHEMA_V2 = "raw-v2-staging-backup-manifest-v2"
 RAW_V2_BACKUP_MANIFEST_SCHEMA_V3 = "raw-v2-staging-backup-manifest-v3"
 RAW_V2_BACKUP_MANIFEST_SCHEMA_V4 = "raw-v2-staging-backup-manifest-v4"
+RAW_V2_BACKUP_MANIFEST_SCHEMA_V5 = "raw-v2-staging-backup-manifest-v5"
 BACKUP_MANIFEST_NAME = "raw-v2-staging-backup-manifest.json"
 _IMPORT_STATE_FILENAME = "raw-v2-import-state.json"
 _OBSERVATION_IMPORT_STATE_FILENAME = "observation-v2-import-state.json"
@@ -140,6 +141,19 @@ class RawV2BackupAnalysisCounts(ContractModel):
     snapshot_digest: NonEmptyStr
 
 
+class RawV2BackupIncrementalCounts(ContractModel):
+    """Verified daily prefix/checkpoint tables and their ordered link digests."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    daily_prefixes: int = Field(ge=0)
+    daily_prefix_observation_links: int = Field(ge=0)
+    daily_prefix_digest: NonEmptyStr
+    recursive_checkpoints: int = Field(ge=0)
+    checkpoint_metric_links: int = Field(ge=0)
+    checkpoint_digest: NonEmptyStr
+
+
 class RawV2StagingBackupManifest(ContractModel):
     """Versioned inventory used to verify a staging backup before activation.
 
@@ -150,6 +164,8 @@ class RawV2StagingBackupManifest(ContractModel):
     shared lineage digest; v1 and v2 backups stay readable and restorable.
     Schema ``v4`` additionally binds the typed diagnostic and snapshot
     inventory with their verified links and digests.
+    Schema ``v5`` additionally binds daily evidence prefixes and recursive
+    checkpoint state with their observation/metric links and digests.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -159,6 +175,7 @@ class RawV2StagingBackupManifest(ContractModel):
         "raw-v2-staging-backup-manifest-v2",
         "raw-v2-staging-backup-manifest-v3",
         "raw-v2-staging-backup-manifest-v4",
+        "raw-v2-staging-backup-manifest-v5",
     ] = RAW_V2_BACKUP_MANIFEST_SCHEMA
     backup_id: UUID
     staging_id: NonEmptyStr
@@ -173,6 +190,7 @@ class RawV2StagingBackupManifest(ContractModel):
     observation_counts: RawV2BackupObservationCounts | None = None
     metric_counts: RawV2BackupMetricCounts | None = None
     analysis_counts: RawV2BackupAnalysisCounts | None = None
+    incremental_counts: RawV2BackupIncrementalCounts | None = None
 
     @model_validator(mode="after")
     def validate_inventory(self) -> RawV2StagingBackupManifest:
@@ -181,7 +199,18 @@ class RawV2StagingBackupManifest(ContractModel):
             raise ValueError("backup inventory must be non-empty, unique, and sorted")
         if BACKUP_MANIFEST_NAME in paths:
             raise ValueError("backup inventory must not contain its own manifest")
-        if self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V4:
+        if self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V5:
+            expected_id = _backup_id(
+                self.staging_id,
+                self.files,
+                self.counts,
+                self.observation_counts,
+                self.schema_version,
+                self.metric_counts,
+                self.analysis_counts,
+                self.incremental_counts,
+            )
+        elif self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V4:
             expected_id = _backup_id(
                 self.staging_id,
                 self.files,
@@ -212,6 +241,15 @@ class RawV2StagingBackupManifest(ContractModel):
             expected_id = _legacy_backup_id(self.staging_id, self.files, self.counts)
         if self.backup_id != expected_id:
             raise ValueError("backup identity does not match its inventory")
+        if self.incremental_counts is not None:
+            prefixes = self.incremental_counts.daily_prefixes
+            prefix_links = self.incremental_counts.daily_prefix_observation_links
+            checkpoints = self.incremental_counts.recursive_checkpoints
+            checkpoint_links = self.incremental_counts.checkpoint_metric_links
+            if not prefixes <= prefix_links <= 3 * prefixes:
+                raise ValueError("daily evidence prefix and observation link counts are invalid")
+            if checkpoints == 0 and checkpoint_links != 0:
+                raise ValueError("checkpoint metric links require checkpoints")
         if (self.checkpoint_format is None) != (self.checkpoint_digest is None):
             raise ValueError("checkpoint version and digest travel together")
         if (self.observation_checkpoint_format is None) != (
@@ -225,6 +263,18 @@ class RawV2StagingBackupManifest(ContractModel):
                 raise ValueError("v4 manifest requires metric counts")
             if self.analysis_counts is None:
                 raise ValueError("v4 manifest requires analysis counts")
+            if self.incremental_counts is not None:
+                raise ValueError("v4 manifest must not carry incremental counts")
+        elif self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V5:
+            if self.incremental_counts is None:
+                raise ValueError("v5 manifest requires incremental counts")
+            if (
+                self.incremental_counts.daily_prefix_observation_links > 0
+                and self.observation_counts is None
+            ):
+                raise ValueError("v5 daily prefix links require observation counts")
+            if self.incremental_counts.checkpoint_metric_links > 0 and self.metric_counts is None:
+                raise ValueError("v5 checkpoint metric links require metric counts")
         elif self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V3:
             if self.observation_counts is None:
                 raise ValueError("v3 manifest requires observation counts")
@@ -232,6 +282,8 @@ class RawV2StagingBackupManifest(ContractModel):
                 raise ValueError("v3 manifest requires metric counts")
             if self.analysis_counts is not None:
                 raise ValueError("v3 manifest must not carry analysis counts")
+            if self.incremental_counts is not None:
+                raise ValueError("v3 manifest must not carry incremental counts")
         elif self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V2:
             if self.observation_counts is None:
                 raise ValueError("v2 manifest requires observation counts")
@@ -239,6 +291,8 @@ class RawV2StagingBackupManifest(ContractModel):
                 raise ValueError("v2 manifest must not carry metric counts")
             if self.analysis_counts is not None:
                 raise ValueError("v2 manifest must not carry analysis counts")
+            if self.incremental_counts is not None:
+                raise ValueError("v2 manifest must not carry incremental counts")
         else:
             if self.observation_counts is not None:
                 raise ValueError("v1 manifest must not carry observation counts")
@@ -246,6 +300,8 @@ class RawV2StagingBackupManifest(ContractModel):
                 raise ValueError("v1 manifest must not carry metric counts")
             if self.analysis_counts is not None:
                 raise ValueError("v1 manifest must not carry analysis counts")
+            if self.incremental_counts is not None:
+                raise ValueError("v1 manifest must not carry incremental counts")
             if self.observation_checkpoint_format is not None:
                 raise ValueError("v1 manifest must not carry observation checkpoint")
         return self
@@ -262,6 +318,7 @@ def _backup_id(
     schema_version: str = RAW_V2_BACKUP_MANIFEST_SCHEMA,
     metric_counts: RawV2BackupMetricCounts | None = None,
     analysis_counts: RawV2BackupAnalysisCounts | None = None,
+    incremental_counts: RawV2BackupIncrementalCounts | None = None,
 ) -> UUID:
     payload: dict[str, object] = {
         "staging_id": staging_id,
@@ -276,6 +333,13 @@ def _backup_id(
     if schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V4:
         payload["analysis_counts"] = (
             analysis_counts.model_dump(mode="json") if analysis_counts else None
+        )
+    if schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V5:
+        payload["analysis_counts"] = (
+            analysis_counts.model_dump(mode="json") if analysis_counts else None
+        )
+        payload["incremental_counts"] = (
+            incremental_counts.model_dump(mode="json") if incremental_counts else None
         )
     document = json.dumps(
         payload,
@@ -414,7 +478,36 @@ class RawV2StagingBackupService:
                 (observation_format, observation_digest) = self._observation_checkpoint_binding(
                     staging_root
                 )
-                if observation_counts is None:
+                incremental_counts = self._count_incremental(connection)
+                if incremental_counts is not None:
+                    metric_counts = self._count_metrics(staging, connection)
+                    analysis_counts = self._count_analysis(staging, connection)
+                    manifest = RawV2StagingBackupManifest(
+                        schema_version=RAW_V2_BACKUP_MANIFEST_SCHEMA_V5,
+                        backup_id=_backup_id(
+                            staging_id,
+                            inventory,
+                            counts,
+                            observation_counts,
+                            RAW_V2_BACKUP_MANIFEST_SCHEMA_V5,
+                            metric_counts,
+                            analysis_counts,
+                            incremental_counts,
+                        ),
+                        staging_id=staging_id,
+                        created_at=datetime.now(UTC),
+                        files=inventory,
+                        checkpoint_format=checkpoint_format,
+                        checkpoint_digest=checkpoint_digest,
+                        counts=counts,
+                        observation_checkpoint_format=observation_format,
+                        observation_checkpoint_digest=observation_digest,
+                        observation_counts=observation_counts,
+                        metric_counts=metric_counts,
+                        analysis_counts=analysis_counts,
+                        incremental_counts=incremental_counts,
+                    )
+                elif observation_counts is None:
                     manifest = RawV2StagingBackupManifest(
                         backup_id=_legacy_backup_id(staging_id, inventory, counts),
                         staging_id=staging_id,
@@ -730,7 +823,12 @@ class RawV2StagingBackupService:
     def _count_metrics(
         self, staging: RawV2Staging, connection: DuckDBPyConnection
     ) -> RawV2BackupMetricCounts | None:
-        from investment_analyst.storage.evidence_set_v2 import EvidenceSetV2Error
+        from investment_analyst.storage.evidence_set_v2 import (
+            EVIDENCE_SEGMENT_V2_TABLE,
+            EVIDENCE_SET_V2_TABLE,
+            EvidenceSetV2Error,
+            ensure_evidence_v2_tables,
+        )
         from investment_analyst.storage.metric_v2 import (
             METRIC_V2_METRIC_LINKS_TABLE,
             METRIC_V2_OBSERVATION_LINKS_TABLE,
@@ -743,7 +841,9 @@ class RawV2StagingBackupService:
         try:
             reader.open()
         except (MetricV2Error, EvidenceSetV2Error, Exception) as error:
-            if "metric v2 index table is missing" in str(error):
+            if "metric v2 index table is missing" in str(error) and not metric_v2_table_exists(
+                connection
+            ):
                 return None
             raise
         if not metric_v2_table_exists(connection):
@@ -779,8 +879,29 @@ class RawV2StagingBackupService:
                 cursor_at, cursor_id = last.available_at, last.result_id
             if metrics == 0:
                 return None
-            segments = connection.execute("SELECT count(*) FROM evidence_segments_v2").fetchone()
-            sets = connection.execute("SELECT count(*) FROM evidence_sets_v2").fetchone()
+            evidence_tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT table_name FROM information_schema.tables WHERE table_name IN (?, ?)",
+                    [EVIDENCE_SEGMENT_V2_TABLE, EVIDENCE_SET_V2_TABLE],
+                ).fetchall()
+            }
+            if evidence_tables:
+                ensure_evidence_v2_tables(connection, create=False)
+                segments = connection.execute(
+                    f"SELECT count(*) FROM {EVIDENCE_SEGMENT_V2_TABLE}"
+                ).fetchone()
+                sets = connection.execute(
+                    f"SELECT count(*) FROM {EVIDENCE_SET_V2_TABLE}"
+                ).fetchone()
+            else:
+                evidence_references = connection.execute(
+                    f"SELECT count(*) FROM {METRIC_V2_TABLE} WHERE evidence_set_id IS NOT NULL"
+                ).fetchone()
+                if evidence_references is None or int(evidence_references[0]) != 0:
+                    raise RawV2BackupError("metric backup references missing evidence tables")
+                segments = (0,)
+                sets = (0,)
             lineage_rows = connection.execute(
                 f"SELECT evidence_set_id, result_id FROM {METRIC_V2_TABLE} "
                 "WHERE evidence_set_id IS NOT NULL ORDER BY evidence_set_id"
@@ -812,7 +933,9 @@ class RawV2StagingBackupService:
         except (MetricV2Error, EvidenceSetV2Error):
             raise
         except Exception as error:
-            if "metric v2 index table is missing" in str(error) or "does not exist" in str(error):
+            if (
+                "metric v2 index table is missing" in str(error) or "does not exist" in str(error)
+            ) and not metric_v2_table_exists(connection):
                 return None
             raise
         finally:
@@ -943,6 +1066,162 @@ class RawV2StagingBackupService:
                 return None
             raise
 
+    def _count_incremental(
+        self, connection: DuckDBPyConnection
+    ) -> RawV2BackupIncrementalCounts | None:
+        from investment_analyst.storage.daily_evidence_v2 import (
+            DAILY_PREFIX_OBSERVATION_LINKS_TABLE,
+            DAILY_PREFIX_TABLE,
+            DailyEvidenceV2Error,
+            DailyEvidenceV2Store,
+            daily_evidence_v2_tables_exist,
+            ensure_daily_evidence_v2_tables,
+        )
+        from investment_analyst.storage.market_checkpoint_v2 import (
+            CHECKPOINT_METRIC_LINKS_TABLE,
+            MARKET_CHECKPOINT_TABLE,
+            MarketCheckpointV2Error,
+            MarketCheckpointV2Store,
+            ensure_market_checkpoint_v2_tables,
+            market_checkpoint_v2_tables_exist,
+        )
+
+        has_prefix_tables = daily_evidence_v2_tables_exist(connection)
+        has_checkpoint_tables = market_checkpoint_v2_tables_exist(connection)
+        if not has_prefix_tables and not has_checkpoint_tables:
+            return None
+        if has_prefix_tables != has_checkpoint_tables:
+            raise RawV2BackupError("incremental market tables are only partially present")
+
+        try:
+            ensure_daily_evidence_v2_tables(connection, create=False)
+            ensure_market_checkpoint_v2_tables(connection, create=False)
+            prefix_store = DailyEvidenceV2Store(connection)
+            checkpoint_store = MarketCheckpointV2Store(connection)
+            prefix_digest = empty_digest()
+            prefix_count = 0
+            prefix_link_count = 0
+            prefix_cursor: UUID | None = None
+            while True:
+                prefix_ids = prefix_store.list_ids_page(
+                    limit=_MAX_BACKUP_PAGE,
+                    after_prefix_id=prefix_cursor,
+                )
+                if not prefix_ids:
+                    break
+                prefixes = prefix_store.get_many(prefix_ids)
+                if set(prefixes) != set(prefix_ids):
+                    raise RawV2BackupError("daily evidence backup page lost a prefix")
+                parents = prefix_store.get_many(
+                    tuple(
+                        prefix.parent_prefix_id
+                        for prefix in prefixes.values()
+                        if prefix.parent_prefix_id is not None
+                    )
+                )
+                for prefix_id in prefix_ids:
+                    prefix = prefixes[prefix_id]
+                    parent_id = prefix.parent_prefix_id
+                    if parent_id is not None:
+                        parent = parents.get(parent_id)
+                        if (
+                            parent is None
+                            or parent.prefix_hash != prefix.parent_hash
+                            or parent.length + 1 != prefix.length
+                            or parent.asset_id != prefix.asset_id
+                            or parent.source_id != prefix.source_id
+                            or parent.frequency != prefix.frequency
+                            or parent.field_group != prefix.field_group
+                            or parent.timestamp >= prefix.timestamp
+                            or parent.available_at > prefix.available_at
+                        ):
+                            raise RawV2BackupError("daily evidence backup chain is incomplete")
+                    canonical = json.dumps(
+                        prefix.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    prefix_digest = extend_digest(
+                        prefix_digest,
+                        hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+                    )
+                    prefix_count += 1
+                    prefix_link_count += len(prefix.observation_ids)
+                prefix_cursor = prefix_ids[-1]
+
+            checkpoint_digest = empty_digest()
+            checkpoint_count = 0
+            checkpoint_link_count = 0
+            checkpoint_cursor: UUID | None = None
+            while True:
+                checkpoint_ids = checkpoint_store.list_ids_page(
+                    limit=_MAX_BACKUP_PAGE,
+                    after_checkpoint_id=checkpoint_cursor,
+                )
+                if not checkpoint_ids:
+                    break
+                checkpoints = checkpoint_store.get_many(checkpoint_ids)
+                if set(checkpoints) != set(checkpoint_ids):
+                    raise RawV2BackupError("checkpoint backup page lost a checkpoint")
+                for checkpoint_id in checkpoint_ids:
+                    checkpoint = checkpoints[checkpoint_id]
+                    canonical = json.dumps(
+                        checkpoint.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    checkpoint_digest = extend_digest(
+                        checkpoint_digest,
+                        hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+                    )
+                    checkpoint_count += 1
+                    checkpoint_link_count += len(checkpoint.metric_references)
+                checkpoint_cursor = checkpoint_ids[-1]
+
+            observed_prefix_links = connection.execute(
+                f"SELECT count(*) FROM {DAILY_PREFIX_OBSERVATION_LINKS_TABLE}"
+            ).fetchone()
+            observed_checkpoint_links = connection.execute(
+                f"SELECT count(*) FROM {CHECKPOINT_METRIC_LINKS_TABLE}"
+            ).fetchone()
+            if (
+                observed_prefix_links is None
+                or int(observed_prefix_links[0]) != prefix_link_count
+                or observed_checkpoint_links is None
+                or int(observed_checkpoint_links[0]) != checkpoint_link_count
+            ):
+                raise RawV2BackupError("incremental market link inventory is inconsistent")
+
+            prefix_rows = connection.execute(
+                f"SELECT count(*) FROM {DAILY_PREFIX_TABLE}"
+            ).fetchone()
+            checkpoint_rows = connection.execute(
+                f"SELECT count(*) FROM {MARKET_CHECKPOINT_TABLE}"
+            ).fetchone()
+            if (
+                prefix_rows is None
+                or int(prefix_rows[0]) != prefix_count
+                or checkpoint_rows is None
+                or int(checkpoint_rows[0]) != checkpoint_count
+            ):
+                raise RawV2BackupError("incremental market row inventory is inconsistent")
+            return RawV2BackupIncrementalCounts(
+                daily_prefixes=prefix_count,
+                daily_prefix_observation_links=prefix_link_count,
+                daily_prefix_digest=prefix_digest,
+                recursive_checkpoints=checkpoint_count,
+                checkpoint_metric_links=checkpoint_link_count,
+                checkpoint_digest=checkpoint_digest,
+            )
+        except RawV2BackupError:
+            raise
+        except (DailyEvidenceV2Error, MarketCheckpointV2Error) as error:
+            raise RawV2BackupError("incremental market inventory failed verification") from error
+
     def _verify_backup_directory(self, root: Path, manifest: RawV2StagingBackupManifest) -> None:
         _reject_symlinks(root)
         expected = {item.path: item for item in manifest.files}
@@ -1015,7 +1294,33 @@ class RawV2StagingBackupService:
             if state.format == "raw-v2-import-state-v1" and state.staging_id is not None:
                 raise RawV2BackupError("restored checkpoint mixes portable and legacy bindings")
         observation_state_path = root / _OBSERVATION_IMPORT_STATE_FILENAME
-        if manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V4:
+        if manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V5:
+            if manifest.incremental_counts is None:
+                raise RawV2BackupError("restored v5 manifest is missing incremental counts")
+            if not observation_state_path.is_file() or observation_state_path.is_symlink():
+                if manifest.observation_checkpoint_format is not None:
+                    raise RawV2BackupError("restored observation checkpoint is missing")
+            else:
+                try:
+                    observation_state = ObservationV2ImportState.model_validate_json(
+                        observation_state_path.read_text(encoding="utf-8")
+                    )
+                except ValueError as error:
+                    raise RawV2BackupError("restored observation state is incompatible") from error
+                if manifest.observation_checkpoint_format != observation_state.format:
+                    raise RawV2BackupError("restored observation checkpoint mismatches backup")
+                if manifest.observation_checkpoint_digest != _sha256_streaming(
+                    observation_state_path
+                ):
+                    raise RawV2BackupError("restored observation checkpoint mismatches backup")
+            if manifest.observation_counts is not None:
+                self._verify_restored_observations(root, index_path, manifest)
+            if manifest.metric_counts is not None:
+                self._verify_restored_metrics(root, index_path, manifest)
+            if manifest.analysis_counts is not None:
+                self._verify_restored_analysis(root, index_path, manifest)
+            self._verify_restored_incremental(index_path, manifest)
+        elif manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V4:
             if (
                 manifest.observation_counts is None
                 or manifest.metric_counts is None
@@ -1084,6 +1389,22 @@ class RawV2StagingBackupService:
             self._verify_restored_observations(root, index_path, manifest)
         elif observation_state_path.exists():
             raise RawV2BackupError("restored v1 backup must not carry observation state")
+
+    def _verify_restored_incremental(
+        self, index_path: Path, manifest: RawV2StagingBackupManifest
+    ) -> None:
+        import duckdb
+
+        expected = manifest.incremental_counts
+        if expected is None:
+            raise RawV2BackupError("restored v5 manifest is missing incremental counts")
+        connection = duckdb.connect(str(index_path), read_only=True)
+        try:
+            actual = self._count_incremental(connection)
+            if actual is None or actual != expected:
+                raise RawV2BackupError("restored incremental market inventory mismatches manifest")
+        finally:
+            connection.close()
 
     def _verify_restored_observations(
         self, root: Path, index_path: Path, manifest: RawV2StagingBackupManifest
@@ -1185,7 +1506,13 @@ class RawV2StagingBackupService:
             verify_metrics_dag_and_lineage,
         )
         from investment_analyst.storage.errors import RecordNotFoundError
-        from investment_analyst.storage.metric_v2 import MetricV2Error
+        from investment_analyst.storage.evidence_set_v2 import (
+            EVIDENCE_SEGMENT_V2_TABLE,
+            EVIDENCE_SET_V2_MEMBERS_TABLE,
+            EVIDENCE_SET_V2_TABLE,
+            ensure_evidence_v2_tables,
+        )
+        from investment_analyst.storage.metric_v2 import METRIC_V2_TABLE, MetricV2Error
 
         del root
         expected = manifest.metric_counts
@@ -1323,12 +1650,50 @@ class RawV2StagingBackupService:
                 raise RawV2BackupError("restored metric keys mismatch manifest")
             if digest != expected.corpus_digest:
                 raise RawV2BackupError("restored metric digest mismatches manifest")
-            segments = connection.execute("SELECT count(*) FROM evidence_segments_v2").fetchone()
-            sets = connection.execute("SELECT count(*) FROM evidence_sets_v2").fetchone()
+            evidence_tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_name IN (?, ?, ?)",
+                    [
+                        EVIDENCE_SEGMENT_V2_TABLE,
+                        EVIDENCE_SET_V2_TABLE,
+                        EVIDENCE_SET_V2_MEMBERS_TABLE,
+                    ],
+                ).fetchall()
+            }
+            lineage_digest = empty_digest()
+            if evidence_tables:
+                ensure_evidence_v2_tables(connection, create=False)
+                segments = connection.execute(
+                    f"SELECT count(*) FROM {EVIDENCE_SEGMENT_V2_TABLE}"
+                ).fetchone()
+                sets = connection.execute(
+                    f"SELECT count(*) FROM {EVIDENCE_SET_V2_TABLE}"
+                ).fetchone()
+                lineage_rows = connection.execute(
+                    f"SELECT evidence_set_id, result_id FROM {METRIC_V2_TABLE} "
+                    "WHERE evidence_set_id IS NOT NULL ORDER BY evidence_set_id"
+                ).fetchall()
+                for evidence_set_id, result_id in lineage_rows:
+                    lineage_digest = extend_digest(
+                        lineage_digest,
+                        hashlib.sha256(f"{evidence_set_id}:{result_id}".encode()).hexdigest(),
+                    )
+            else:
+                evidence_references = connection.execute(
+                    f"SELECT count(*) FROM {METRIC_V2_TABLE} WHERE evidence_set_id IS NOT NULL"
+                ).fetchone()
+                if evidence_references is None or int(evidence_references[0]) != 0:
+                    raise RawV2BackupError("restored metric evidence tables are missing")
+                segments = (0,)
+                sets = (0,)
             if int(segments[0]) != expected.evidence_segments:
                 raise RawV2BackupError("restored lineage segments mismatch manifest")
             if int(sets[0]) != expected.evidence_sets:
                 raise RawV2BackupError("restored lineage sets mismatch manifest")
+            if lineage_digest != expected.lineage_digest:
+                raise RawV2BackupError("restored metric lineage digest mismatches manifest")
         finally:
             connection.close()
 
@@ -1480,9 +1845,11 @@ __all__ = [
     "RAW_V2_BACKUP_MANIFEST_SCHEMA_V2",
     "RAW_V2_BACKUP_MANIFEST_SCHEMA_V3",
     "RAW_V2_BACKUP_MANIFEST_SCHEMA_V4",
+    "RAW_V2_BACKUP_MANIFEST_SCHEMA_V5",
     "RawV2BackupAnalysisCounts",
     "RawV2BackupCounts",
     "RawV2BackupError",
+    "RawV2BackupIncrementalCounts",
     "RawV2BackupMetricCounts",
     "RawV2StagingBackupManifest",
     "RawV2StagingBackupService",

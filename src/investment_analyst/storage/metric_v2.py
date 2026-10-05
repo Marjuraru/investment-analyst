@@ -37,6 +37,7 @@ from investment_analyst.storage.analytical_v2_validation import (
     chunked_sequence,
     fetch_metrics_chunked,
     topological_sort_metrics,
+    verify_market_metric_references,
     verify_metrics_dag_and_lineage,
 )
 from investment_analyst.storage.bounded_insert import (
@@ -530,7 +531,12 @@ class MetricV2Store:
 
     def get_many(self, result_ids: tuple[UUID, ...] | list[UUID]) -> dict[UUID, MetricResult]:
         """Hydrate verified metrics in deterministic order without N+1 queries."""
-        return fetch_metrics_chunked(self._connection, result_ids)
+        hydrated = fetch_metrics_chunked(self._connection, result_ids)
+        try:
+            verify_market_metric_references(self._connection, tuple(hydrated.values()))
+        except AnalyticalV2ValidationError as error:
+            raise MetricV2Error(str(error)) from error
+        return hydrated
 
     def _link_observation_ids(self, result_id: UUID) -> list[UUID]:
         rows = self._connection.execute(

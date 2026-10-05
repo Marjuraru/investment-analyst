@@ -42,6 +42,10 @@ class BoundedInsertTable(StrEnum):
     EVIDENCE_SETS_V2 = "evidence_sets_v2"
     EVIDENCE_SET_MEMBERS_V2 = "evidence_set_v2_members"
     RAW_V2_INDEX = "raw_v2_index"
+    DAILY_PREFIXES_V2 = "market_daily_prefixes_v2"
+    DAILY_PREFIX_OBSERVATION_LINKS_V2 = "market_daily_prefix_observation_links_v2"
+    MARKET_CHECKPOINTS_V2 = "market_recursive_checkpoints_v2"
+    CHECKPOINT_METRIC_LINKS_V2 = "market_recursive_checkpoint_metric_links_v2"
 
 
 _COLUMN_TYPES: dict[BoundedInsertTable, tuple[tuple[str, str], ...]] = {
@@ -234,6 +238,50 @@ _COLUMN_TYPES: dict[BoundedInsertTable, tuple[tuple[str, str], ...]] = {
         ("schema_version", "VARCHAR"),
         ("projected_manager_cik", "VARCHAR"),
         ("projected_report_id", "VARCHAR"),
+    ),
+    BoundedInsertTable.DAILY_PREFIXES_V2: (
+        ("prefix_id", "VARCHAR"),
+        ("policy_version", "VARCHAR"),
+        ("asset_id", "VARCHAR"),
+        ("source_id", "VARCHAR"),
+        ("frequency", "VARCHAR"),
+        ("field_group", "VARCHAR"),
+        ("timestamp", "VARCHAR"),
+        ("observation_digest", "VARCHAR"),
+        ("parent_prefix_id", "VARCHAR"),
+        ("parent_hash", "VARCHAR"),
+        ("length", "INTEGER"),
+        ("available_at", "VARCHAR"),
+        ("quality", "VARCHAR"),
+        ("prefix_hash", "VARCHAR"),
+    ),
+    BoundedInsertTable.DAILY_PREFIX_OBSERVATION_LINKS_V2: (
+        ("prefix_id", "VARCHAR"),
+        ("position", "INTEGER"),
+        ("observation_id", "VARCHAR"),
+    ),
+    BoundedInsertTable.MARKET_CHECKPOINTS_V2: (
+        ("checkpoint_id", "VARCHAR"),
+        ("policy_version", "VARCHAR"),
+        ("asset_id", "VARCHAR"),
+        ("source_id", "VARCHAR"),
+        ("frequency", "VARCHAR"),
+        ("family", "VARCHAR"),
+        ("algorithm_version", "VARCHAR"),
+        ("parameters_json", "VARCHAR"),
+        ("seed_start", "VARCHAR"),
+        ("as_of", "VARCHAR"),
+        ("available_at", "VARCHAR"),
+        ("daily_prefix_id", "VARCHAR"),
+        ("daily_prefix_hash", "VARCHAR"),
+        ("daily_prefix_length", "INTEGER"),
+        ("state_json", "VARCHAR"),
+    ),
+    BoundedInsertTable.CHECKPOINT_METRIC_LINKS_V2: (
+        ("checkpoint_id", "VARCHAR"),
+        ("position", "INTEGER"),
+        ("metric_key", "VARCHAR"),
+        ("result_id", "VARCHAR"),
     ),
 }
 

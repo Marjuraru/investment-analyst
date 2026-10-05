@@ -1,7 +1,8 @@
 """Point-in-time reconstruction of provider-independent stored market bars."""
 
 from collections import defaultdict
-from collections.abc import Collection
+from collections.abc import Callable, Collection, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
@@ -42,6 +43,58 @@ class AmbiguousRevisionError(MarketHistoryError):
 
 class TraceabilityError(MarketHistoryError):
     """Raised when observations, raw records, assets, sources, or timestamps disagree."""
+
+
+@dataclass(frozen=True, slots=True)
+class LatestRevisionState[Candidate]:
+    """Bounded accumulator for the latest PIT revision of one timestamp."""
+
+    candidate: Candidate | None = None
+    available_at: datetime | None = None
+    latest_ties: int = 0
+    candidates_seen: int = 0
+
+
+def consider_revision[Candidate](
+    state: LatestRevisionState[Candidate],
+    candidate: Candidate,
+    *,
+    available_at: datetime,
+) -> LatestRevisionState[Candidate]:
+    """Update a one-timestamp revision accumulator without storing its history."""
+    if state.candidate is None or state.available_at is None:
+        return LatestRevisionState(candidate, available_at, 1, state.candidates_seen + 1)
+    if available_at > state.available_at:
+        return LatestRevisionState(candidate, available_at, 1, state.candidates_seen + 1)
+    if available_at == state.available_at:
+        return LatestRevisionState(
+            state.candidate,
+            state.available_at,
+            state.latest_ties + 1,
+            state.candidates_seen + 1,
+        )
+    return LatestRevisionState(
+        state.candidate,
+        state.available_at,
+        state.latest_ties,
+        state.candidates_seen + 1,
+    )
+
+
+def require_unambiguous_revision[Candidate](
+    state: LatestRevisionState[Candidate],
+    *,
+    timestamp: datetime,
+) -> Candidate:
+    """Return the unique latest PIT revision or raise the canonical ambiguity error."""
+    if state.candidate is None or state.available_at is None:
+        raise ValueError("revision accumulator must contain a candidate")
+    if state.latest_ties != 1:
+        raise AmbiguousRevisionError(
+            f"timestamp {timestamp} has multiple revisions with available_at "
+            f"{state.available_at.isoformat()}"
+        )
+    return state.candidate
 
 
 class HistoricalMarketDataService:
@@ -239,18 +292,30 @@ class HistoricalMarketDataService:
 
     @staticmethod
     def _select_revisions(candidates: list[MarketBar]) -> tuple[list[MarketBar], int]:
-        by_timestamp: dict[datetime, list[MarketBar]] = defaultdict(list)
-        for candidate in candidates:
-            by_timestamp[candidate.timestamp].append(candidate)
+        return select_point_in_time_revisions(
+            candidates,
+            timestamp=lambda item: item.timestamp,
+            available_at=lambda item: item.available_at,
+        )
 
-        selected: list[MarketBar] = []
-        for timestamp, versions in by_timestamp.items():
-            latest_available = max(version.available_at for version in versions)
-            latest = [version for version in versions if version.available_at == latest_available]
-            if len(latest) != 1:
-                raise AmbiguousRevisionError(
-                    f"timestamp {timestamp} has multiple revisions with available_at "
-                    f"{latest_available.isoformat()}"
-                )
-            selected.append(latest[0])
-        return selected, len(candidates) - len(selected)
+
+def select_point_in_time_revisions[RevisionCandidate](
+    candidates: Sequence[RevisionCandidate],
+    *,
+    timestamp: Callable[[RevisionCandidate], datetime],
+    available_at: Callable[[RevisionCandidate], datetime],
+) -> tuple[list[RevisionCandidate], int]:
+    """Select one latest available candidate per timestamp using the v1 rule."""
+    by_timestamp: dict[datetime, LatestRevisionState[RevisionCandidate]] = {}
+    for candidate in candidates:
+        at = timestamp(candidate)
+        by_timestamp[at] = consider_revision(
+            by_timestamp.get(at, LatestRevisionState()),
+            candidate,
+            available_at=available_at(candidate),
+        )
+
+    selected: list[RevisionCandidate] = []
+    for at, state in by_timestamp.items():
+        selected.append(require_unambiguous_revision(state, timestamp=at))
+    return selected, len(candidates) - len(selected)

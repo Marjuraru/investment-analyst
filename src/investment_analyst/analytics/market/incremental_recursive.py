@@ -29,6 +29,8 @@ from investment_analyst.analytics.market.incremental_ema import (
     _ordered_scope_bars,
     _prefix_ids,
     canonical_prefix_hash,
+    decimal34_mean,
+    ema_step,
 )
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 from investment_analyst.core.models.enums import DataFrequency, DataQuality
@@ -122,13 +124,30 @@ def _rsi_from_averages(gain: Decimal, loss: Decimal) -> Decimal:
     return Decimal("100") - Decimal("100") / (Decimal("1") + gain / loss)
 
 
+def wilder_average_step(previous: Decimal, current: Decimal, window: int) -> Decimal:
+    """Apply one canonical Decimal34 Wilder-average recurrence step."""
+    window = _validate_window(window, name="window")
+    if not previous.is_finite() or not current.is_finite():
+        raise ValueError("Wilder step values must be finite")
+    with localcontext(Context(prec=34)):
+        return ((Decimal(window - 1) * previous) + current) / Decimal(window)
+
+
 def _true_range(current: MarketBar, previous: MarketBar | None) -> Decimal:
-    if previous is None:
+    return true_range_from_previous_close(current, previous.close if previous is not None else None)
+
+
+def true_range_from_previous_close(
+    current: MarketBar,
+    previous_close: Decimal | None,
+) -> Decimal:
+    """Return canonical true range from one current bar and optional prior close."""
+    if previous_close is None:
         return current.high - current.low
     return max(
         current.high - current.low,
-        abs(current.high - previous.close),
-        abs(current.low - previous.close),
+        abs(current.high - previous_close),
+        abs(current.low - previous_close),
     )
 
 
@@ -418,12 +437,8 @@ def seed_rsi(
             seed_bars[index].close - seed_bars[index - 1].close
             for index in range(1, len(seed_bars))
         )
-        average_gain = sum(
-            (max(change, Decimal("0")) for change in changes), Decimal("0")
-        ) / Decimal(window)
-        average_loss = sum(
-            (max(-change, Decimal("0")) for change in changes), Decimal("0")
-        ) / Decimal(window)
+        average_gain = decimal34_mean(tuple(max(change, Decimal("0")) for change in changes))
+        average_loss = decimal34_mean(tuple(max(-change, Decimal("0")) for change in changes))
         rsi = _rsi_from_averages(average_gain, average_loss)
     prefix_ids = _prefix_ids(seed_bars)
     available_at = _max_available(seed_bars)
@@ -473,7 +488,7 @@ def seed_atr(
             _true_range(current, seed_bars[index - 1] if index else None)
             for index, current in enumerate(seed_bars)
         )
-        atr = sum(ranges, Decimal("0")) / Decimal(window)
+        atr = decimal34_mean(ranges)
     prefix_ids = _prefix_ids(seed_bars)
     available_at = _max_available(seed_bars)
     return IncrementalAtrCheckpoint(
@@ -503,12 +518,10 @@ def seed_atr(
 
 
 def _ema_values(closes: Sequence[Decimal], window: int) -> list[Decimal]:
-    with localcontext(Context(prec=34)):
-        alpha = Decimal("2") / Decimal(window + 1)
-        seed = sum(closes[:window], Decimal("0")) / Decimal(window)
-        values = [seed]
-        for close in closes[window:]:
-            values.append(alpha * close + (Decimal("1") - alpha) * values[-1])
+    seed = decimal34_mean(closes[:window])
+    values = [seed]
+    for close in closes[window:]:
+        values.append(ema_step(values[-1], close, window))
     return values
 
 
@@ -541,7 +554,7 @@ def seed_macd(
     slow_series = _ema_values(closes, slow)
     lines = _macd_line_series(closes, fast, slow)
     with localcontext(Context(prec=34)):
-        signal = sum(lines[:signal_window], Decimal("0")) / Decimal(signal_window)
+        signal = decimal34_mean(lines[:signal_window])
         fast_ema = fast_series[minimum_bars - fast]
         slow_ema = slow_series[minimum_bars - slow]
         line = lines[-1]
@@ -675,12 +688,8 @@ def resume_rsi(
         previous_close = ordered[checkpoint.prefix_length - 1].close
         for current in tail:
             change = current.close - previous_close
-            average_gain = (
-                (Decimal(window - 1) * average_gain) + max(change, Decimal("0"))
-            ) / Decimal(window)
-            average_loss = (
-                (Decimal(window - 1) * average_loss) + max(-change, Decimal("0"))
-            ) / Decimal(window)
+            average_gain = wilder_average_step(average_gain, max(change, Decimal("0")), window)
+            average_loss = wilder_average_step(average_loss, max(-change, Decimal("0")), window)
             previous_close = current.close
             available_at = max(current.available_at, available_at)
         rsi = _rsi_from_averages(average_gain, average_loss)
@@ -738,7 +747,7 @@ def resume_atr(
                 abs(current.high - previous_close),
                 abs(current.low - previous_close),
             )
-            atr = ((Decimal(window - 1) * atr) + true_range) / Decimal(window)
+            atr = wilder_average_step(atr, true_range, window)
             previous_close = current.close
             available_at = max(current.available_at, available_at)
     prefix_ids = (*_prefix_ids(ordered[: checkpoint.prefix_length]), *_prefix_ids(tail))
@@ -785,18 +794,15 @@ def resume_macd(
         checkpoint.fast_window, checkpoint.slow_window, checkpoint.signal_window
     )
     with localcontext(Context(prec=34)):
-        fast_alpha = Decimal("2") / Decimal(fast + 1)
-        slow_alpha = Decimal("2") / Decimal(slow + 1)
-        signal_alpha = Decimal("2") / Decimal(signal_window + 1)
         fast_ema = checkpoint.fast_ema
         slow_ema = checkpoint.slow_ema
         signal = checkpoint.signal
         available_at = checkpoint.available_at
         for current in tail:
-            fast_ema = fast_alpha * current.close + (Decimal("1") - fast_alpha) * fast_ema
-            slow_ema = slow_alpha * current.close + (Decimal("1") - slow_alpha) * slow_ema
+            fast_ema = ema_step(fast_ema, current.close, fast)
+            slow_ema = ema_step(slow_ema, current.close, slow)
             line = fast_ema - slow_ema
-            signal = signal_alpha * line + (Decimal("1") - signal_alpha) * signal
+            signal = ema_step(signal, line, signal_window)
             available_at = max(current.available_at, available_at)
         line = fast_ema - slow_ema
         histogram = line - signal
@@ -862,12 +868,8 @@ def full_rsi(
         previous_close = ordered[checkpoint.prefix_length - 1].close
         for current in tail:
             change = current.close - previous_close
-            average_gain = (
-                (Decimal(window - 1) * average_gain) + max(change, Decimal("0"))
-            ) / Decimal(window)
-            average_loss = (
-                (Decimal(window - 1) * average_loss) + max(-change, Decimal("0"))
-            ) / Decimal(window)
+            average_gain = wilder_average_step(average_gain, max(change, Decimal("0")), window)
+            average_loss = wilder_average_step(average_loss, max(-change, Decimal("0")), window)
             previous_close = current.close
             available_at = max(current.available_at, available_at)
         rsi = _rsi_from_averages(average_gain, average_loss)
@@ -927,7 +929,7 @@ def full_atr(
                 abs(current.high - previous_close),
                 abs(current.low - previous_close),
             )
-            atr = ((Decimal(window - 1) * atr) + true_range) / Decimal(window)
+            atr = wilder_average_step(atr, true_range, window)
             previous_close = current.close
             available_at = max(current.available_at, available_at)
     prefix_ids = _prefix_ids(ordered)
@@ -984,18 +986,15 @@ def full_macd(
     if not tail:
         return checkpoint
     with localcontext(Context(prec=34)):
-        fast_alpha = Decimal("2") / Decimal(fast + 1)
-        slow_alpha = Decimal("2") / Decimal(slow + 1)
-        signal_alpha = Decimal("2") / Decimal(signal_window + 1)
         fast_ema = checkpoint.fast_ema
         slow_ema = checkpoint.slow_ema
         signal = checkpoint.signal
         available_at = checkpoint.available_at
         for current in tail:
-            fast_ema = fast_alpha * current.close + (Decimal("1") - fast_alpha) * fast_ema
-            slow_ema = slow_alpha * current.close + (Decimal("1") - slow_alpha) * slow_ema
+            fast_ema = ema_step(fast_ema, current.close, fast)
+            slow_ema = ema_step(slow_ema, current.close, slow)
             line = fast_ema - slow_ema
-            signal = signal_alpha * line + (Decimal("1") - signal_alpha) * signal
+            signal = ema_step(signal, line, signal_window)
             available_at = max(current.available_at, available_at)
         line = fast_ema - slow_ema
         histogram = line - signal
@@ -1050,12 +1049,14 @@ __all__ = [
     "full_atr",
     "full_macd",
     "full_rsi",
+    "wilder_average_step",
     "resume_atr",
     "resume_macd",
     "resume_rsi",
     "seed_atr",
     "seed_macd",
     "seed_rsi",
+    "true_range_from_previous_close",
     "validate_atr_checkpoint",
     "validate_macd_checkpoint",
     "validate_rsi_checkpoint",
