@@ -113,6 +113,16 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "Terra High" not in protocol
     assert "modelo o cliente" in protocol
     assert "Python 3.12 quality" in protocol
+    normalized_protocol = " ".join(protocol.split())
+    assert protocol.count("## Objetivos, evidencia y frontera de cierre") == 1
+    assert "workflow-goal-review-v1" in protocol
+    assert (
+        "ausencia de medición, día, artefacto o despliegue nunca equivale a cero"
+        in normalized_protocol
+    )
+    assert "Un `UNKNOWN` crítico impide declararlo cumplido" in protocol
+    assert "con adopción, compatibilidad, pruebas negativas e integración" in protocol
+    assert "sólo se permite `runtime_sha: null` si se desconoce" in normalized_protocol
     assert "fallo material de BUILD/FIX" in protocol
     assert "otro comando mutante están prohibidos" in protocol
     assert "transición mecánica explícita" in protocol
@@ -210,6 +220,23 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "Formatter, fixer" in core_rule
     assert "snapshot antes y" in core_rule
     assert "--live --phase finalize" in core_rule
+    normalized_core_rule = " ".join(core_rule.split())
+    assert "Snapshot de PLAN a `2026-10-05T00:15:44+00:00`" in core_rule
+    assert "**7 objetivos, 0 MET, 2 NOT_MET, 5" in core_rule
+    for objective_id in ("DC-Q1", "DC-Q2", "DC-Q3", "DC-Q4", "DC-Q5", "DC-Q6", "DC-Q7"):
+        assert objective_id in core_rule
+    assert "Q1–Q6 conservan su carácter provisional" in core_rule
+    assert "Política propuesta, aún no límite aplicado" in core_rule
+    for closure_criterion in (
+        "igualdad Decimal full/incremental v2",
+        "checkpoints persistidos con invalidación de revisiones",
+        "aislamiento/PIT",
+        "lotes ≤256 sin hidratar filas ajenas",
+        "restore, rollback y v2 activo",
+        "backup Drive restaurado",
+        "features/explicación desacopladas",
+    ):
+        assert closure_criterion in normalized_core_rule
     assert "control-plane-first" in skills["plan"]
     assert "exploración dirigida" in skills["plan"]
     assert "route_effect" in skills["plan"]
@@ -232,6 +259,8 @@ def test_governance_writer_frontier_has_one_authoritative_classifier() -> None:
     guard = _read("scripts/check_workflow_guards.py")
     protocol = _read("docs/development_protocol.md")
 
+    assert guard.count("def parse_goal_review(") == 1
+    assert "def parse_goal_review(body: str) -> GoalReviewSnapshot | None:" in guard
     assert "def _is_governance_path(path: str) -> bool:" in guard
     assert "if not _is_governance_path(path)" in guard
     assert "_GOVERNANCE_WRITER_PATHS" not in guard

@@ -38,6 +38,7 @@ from check_workflow_guards import (  # noqa: E402
     evaluate,
     parse_acceptance_manifest,
     parse_declared_scope,
+    parse_goal_review,
     parse_marker,
     parse_work_block,
 )
@@ -182,6 +183,52 @@ def _body_for_manifest(
         .replace(_manifest(), f"\n```json\n{encoded}\n```\n")
         .replace("- **route_effect:** `NONE`.", f"- **route_effect:** `{route_effect}`.")
     )
+
+
+def _goal_review_data(
+    *,
+    statuses: tuple[str, ...] = (
+        "NOT_MET",
+        "NOT_MET",
+        "UNKNOWN",
+        "UNKNOWN",
+        "UNKNOWN",
+        "UNKNOWN",
+        "UNKNOWN",
+    ),
+    code_sha: str = BASE_SHA,
+) -> dict[str, object]:
+    goals: list[dict[str, object]] = []
+    for index, status in enumerate(statuses, start=1):
+        goals.append(
+            {
+                "id": f"DC-Q{index}",
+                "status": status,
+                "evidence_level": "INTEGRATED" if status == "UNKNOWN" else "OPERATIONAL",
+                "baseline": "baseline value",
+                "current": "current value",
+                "target": "target value",
+                "method": "comparable method",
+                "references": ["docs/data_chassis.md"],
+            }
+        )
+    return {
+        "schema_version": "workflow-goal-review-v1",
+        "phase": "DATA-CHASSIS",
+        "as_of": "2026-10-05T00:15:44+00:00",
+        "code_sha": code_sha,
+        "runtime_sha": "e" * 40,
+        "goals": goals,
+        "counts": {
+            "met": sum(status == "MET" for status in statuses),
+            "not_met": sum(status == "NOT_MET" for status in statuses),
+            "unknown": sum(status == "UNKNOWN" for status in statuses),
+        },
+    }
+
+
+def _body_with_goal_review(review: dict[str, object]) -> str:
+    return _body() + f"\n```json\n{json.dumps(review, separators=(',', ':'))}\n```\n"
 
 
 def _structured_marker(
@@ -982,6 +1029,136 @@ def test_manifest_rejects_unknown_duplicate_and_missing_requirements() -> None:
     ):
         with pytest.raises(ValueError):
             parse_acceptance_manifest(_body_for_manifest(broken))
+
+
+def test_goal_review_validates_counts_and_preserves_legacy_and_json_behavior() -> None:
+    review = _goal_review_data()
+    body = _body_with_goal_review(review)
+    parsed = parse_goal_review(body)
+
+    assert parsed is not None
+    assert parsed.phase == "DATA-CHASSIS"
+    assert parsed.as_of.isoformat() == "2026-10-05T00:15:44+00:00"
+    assert (parsed.counts.met, parsed.counts.not_met, parsed.counts.unknown) == (0, 2, 5)
+    assert len(parsed.goals) == 7
+
+    with_operational_met = parse_goal_review(
+        _body_with_goal_review(_goal_review_data(statuses=("MET", "NOT_MET", "UNKNOWN")))
+    )
+    assert with_operational_met is not None
+    assert with_operational_met.counts.met == 1
+
+    legacy_body = _body()
+    assert parse_goal_review(legacy_body) is None
+    unrelated_json = legacy_body + '\n```json\n{"example":"workflow-goal-review-v1"}\n```\n'
+    assert parse_goal_review(unrelated_json) is None
+    legacy_result = evaluate(_snapshot(body=legacy_body), phase="build")
+    reviewed_result = evaluate(_snapshot(body=body), phase="build")
+    assert reviewed_result.decision == legacy_result.decision
+    assert reviewed_result.as_json() == legacy_result.as_json()
+
+    json_snapshot = replace(_snapshot(body=body), source="json")
+    assert evaluate(json_snapshot, phase="build").decision == "NON_AUTHORITATIVE"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "unknown_top_field",
+        "unknown_goal_field",
+        "duplicate_goal_id",
+        "invalid_status",
+        "invalid_evidence_level",
+        "inflated_count",
+        "boolean_count",
+        "met_scratch",
+        "met_integrated",
+        "met_unknown_current",
+        "naive_timestamp",
+        "non_utc_timestamp",
+        "truncated_code_sha",
+        "truncated_runtime_sha",
+    ),
+)
+def test_goal_review_rejects_invalid_structure_and_unearned_met(mutation: str) -> None:
+    review = _goal_review_data()
+    goals_value = review["goals"]
+    counts_value = review["counts"]
+    assert isinstance(goals_value, list) and isinstance(goals_value[0], dict)
+    assert isinstance(counts_value, dict)
+    first_goal = goals_value[0]
+
+    if mutation == "unknown_top_field":
+        review["unexpected"] = "private review payload"
+    elif mutation == "unknown_goal_field":
+        first_goal["unexpected"] = "private review payload"
+    elif mutation == "duplicate_goal_id":
+        assert isinstance(goals_value[1], dict)
+        goals_value[1]["id"] = first_goal["id"]
+    elif mutation == "invalid_status":
+        first_goal["status"] = "IN_PROGRESS"
+    elif mutation == "invalid_evidence_level":
+        first_goal["evidence_level"] = "VALIDATED"
+    elif mutation == "inflated_count":
+        counts_value["met"] = 1
+    elif mutation == "boolean_count":
+        counts_value["unknown"] = True
+    elif mutation.startswith("met_"):
+        met_review = _goal_review_data(statuses=("MET",))
+        met_goals = met_review["goals"]
+        assert isinstance(met_goals, list) and isinstance(met_goals[0], dict)
+        first_goal = met_goals[0]
+        review = met_review
+        if mutation == "met_scratch":
+            first_goal["evidence_level"] = "SCRATCH"
+        elif mutation == "met_integrated":
+            first_goal["evidence_level"] = "INTEGRATED"
+        else:
+            first_goal["current"] = "UNKNOWN"
+    elif mutation == "naive_timestamp":
+        review["as_of"] = "2026-10-05T00:15:44"
+    elif mutation == "non_utc_timestamp":
+        review["as_of"] = "2026-10-05T05:15:44+05:00"
+    elif mutation == "truncated_code_sha":
+        review["code_sha"] = BASE_SHA[:-1]
+    else:
+        review["runtime_sha"] = "e" * 39
+
+    with pytest.raises(ValueError):
+        parse_goal_review(_body_with_goal_review(review))
+
+
+def test_goal_review_rejects_duplicate_malformed_and_duplicate_key_json() -> None:
+    review = _goal_review_data()
+    block = f"\n```json\n{json.dumps(review, separators=(',', ':'))}\n```\n"
+    with pytest.raises(ValueError, match="at most once"):
+        parse_goal_review(_body() + block + block)
+
+    malformed = '{"schema_version":"workflow-goal-review-v1",}'
+    with pytest.raises(ValueError, match="strict JSON"):
+        parse_goal_review(_body() + f"\n```json\n{malformed}\n```\n")
+
+    duplicated_key = json.dumps(review, separators=(",", ":")).replace(
+        '"phase":"DATA-CHASSIS"', '"phase":"DATA-CHASSIS","phase":"OTHER"', 1
+    )
+    error_body = _body() + f"\n```json\n{duplicated_key}\n```\n"
+    with pytest.raises(ValueError) as captured:
+        parse_goal_review(error_body)
+    assert "strict JSON" in str(captured.value)
+    assert "private review payload" not in str(captured.value)
+
+
+def test_goal_review_code_sha_must_match_declared_base_without_leaking_body() -> None:
+    secret = "SENSITIVE_REVIEW_PAYLOAD_39861"
+    review = _goal_review_data(code_sha="f" * 40)
+    goals = review["goals"]
+    assert isinstance(goals, list) and isinstance(goals[0], dict)
+    goals[0]["method"] = secret
+    result = evaluate(_snapshot(body=_body_with_goal_review(review)), phase="build")
+
+    assert result.decision == "GUARD FAILURE"
+    assert result.reasons == ("goal review code_sha differs from Work Block base",)
+    assert secret not in " ".join(result.reasons)
 
 
 def test_missing_required_artifacts_prevent_audit_pass_regression_135() -> None:

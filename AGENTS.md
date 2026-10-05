@@ -155,6 +155,10 @@ results, and pending risks.
 
 - Read and follow `docs/development_protocol.md` for Work Blocks, profiles, target resolution,
   evidence, handoff, and concise outputs.
+- For planning objectives, evidence maturity, comparable counts, cohesive Work Blocks and closure,
+  use the single method in `docs/development_protocol.md`; the DATA-CHASSIS objective register and
+  its dated snapshot live in `.agents/rules/investment-analyst-core.md`. The shared guard validates
+  only the optional typed review structure and never infers evidence truth or grants permissions.
 - PLAN sigue esta cadena explícita: control plane → estrategia en `docs/product_roadmap.md` → ruta
   táctica en `docs/basic_functional_release_plan.md` → reconciliación con main/GitHub vivos →
   exploración dirigida → un Work Block. Los documentos orientan; main, worktree y GitHub conservan

@@ -16,8 +16,9 @@ import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -59,6 +60,8 @@ GOVERNANCE_PREFIXES = (
 _CHECKPOINT_HEADING = "### Checkpoint dormante — verificación de hash en el primary worktree"
 _IMMUTABLE_HEADING = "### Superficies del repositorio no modificables — deny por ruta cambiada"
 _MANIFEST_SCHEMA = "workflow-acceptance-manifest-v1"
+_GOAL_REVIEW_SCHEMA = "workflow-goal-review-v1"
+_GOAL_REVIEW_HINT = re.compile(r'"schema_version"\s*:\s*"?workflow-goal-review-v1\b')
 _MANIFEST_KINDS = frozenset({"acceptance", "invariant", "negative"})
 _REQUIREMENT_KINDS = frozenset(
     {
@@ -123,6 +126,36 @@ class AcceptanceManifest:
     digest: str
     route_effect: str
     items: tuple[ManifestItem, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GoalReviewGoal:
+    goal_id: str
+    status: Literal["MET", "NOT_MET", "UNKNOWN"]
+    evidence_level: Literal["NONE", "SCRATCH", "INTEGRATED", "DEPLOYED", "OPERATIONAL"]
+    baseline: str
+    current: str
+    target: str
+    method: str
+    references: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GoalReviewCounts:
+    met: int
+    not_met: int
+    unknown: int
+
+
+@dataclass(frozen=True, slots=True)
+class GoalReviewSnapshot:
+    schema_version: Literal["workflow-goal-review-v1"]
+    phase: str
+    as_of: datetime
+    code_sha: str
+    runtime_sha: str | None
+    goals: tuple[GoalReviewGoal, ...]
+    counts: GoalReviewCounts
 
 
 @dataclass(frozen=True, slots=True)
@@ -437,6 +470,165 @@ def parse_acceptance_manifest(body: str) -> AcceptanceManifest:
         hashlib.sha256(_canonical_json(canonical).encode("utf-8")).hexdigest(),
         route_effect,
         tuple(items),
+    )
+
+
+def _goal_review_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise GuardFailure("goal review JSON contains duplicate fields")
+        result[key] = value
+    return result
+
+
+def _goal_review_text(mapping: Mapping[str, object], field: str) -> str:
+    value = mapping.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise GuardFailure(f"goal review {field} must be non-empty text")
+    return value.strip()
+
+
+def _goal_review_sha(value: object, field: str, *, nullable: bool = False) -> str | None:
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str) or FULL_SHA.fullmatch(value) is None:
+        raise GuardFailure(f"goal review {field} must be a complete SHA-1")
+    return value
+
+
+def parse_goal_review(body: str) -> GoalReviewSnapshot | None:
+    """Validate the optional, informational phase-goal snapshot in a Work Block."""
+    candidates: list[Mapping[str, object]] = []
+    for match in re.finditer(r"```json\s*\n(?P<payload>.*?)\n```", body, re.DOTALL):
+        payload = match.group("payload")
+        if _GOAL_REVIEW_HINT.search(payload) is None:
+            continue
+        try:
+            decoded = json.loads(payload, object_pairs_hook=_goal_review_object)
+        except (GuardFailure, json.JSONDecodeError) as error:
+            raise GuardFailure("goal review is not valid strict JSON") from error
+        candidate = _mapping(decoded, "goal review")
+        if candidate.get("schema_version") != _GOAL_REVIEW_SCHEMA:
+            raise GuardFailure("goal review schema_version is invalid")
+        candidates.append(candidate)
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise GuardFailure("goal review must appear at most once")
+
+    review = candidates[0]
+    expected_fields = {
+        "schema_version",
+        "phase",
+        "as_of",
+        "code_sha",
+        "runtime_sha",
+        "goals",
+        "counts",
+    }
+    if set(review) != expected_fields:
+        raise GuardFailure("goal review has unknown or missing fields")
+    phase = _goal_review_text(review, "phase")
+    as_of_text = _goal_review_text(review, "as_of")
+    try:
+        as_of = datetime.fromisoformat(as_of_text.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise GuardFailure("goal review as_of must be an ISO-8601 UTC timestamp") from error
+    if as_of.tzinfo is None or as_of.utcoffset() != timedelta(0):
+        raise GuardFailure("goal review as_of must be timezone-aware UTC")
+    as_of = as_of.astimezone(UTC)
+
+    code_sha = _goal_review_sha(review.get("code_sha"), "code_sha")
+    runtime_sha = _goal_review_sha(review.get("runtime_sha"), "runtime_sha", nullable=True)
+    if code_sha is None:
+        raise GuardFailure("goal review code_sha is missing")
+
+    raw_goals = _sequence(review.get("goals"), "goal review goals")
+    if not 1 <= len(raw_goals) <= 100:
+        raise GuardFailure("goal review must contain between 1 and 100 goals")
+    allowed_statuses = {"MET", "NOT_MET", "UNKNOWN"}
+    allowed_evidence = {"NONE", "SCRATCH", "INTEGRATED", "DEPLOYED", "OPERATIONAL"}
+    goals: list[GoalReviewGoal] = []
+    seen_ids: set[str] = set()
+    for raw_goal in raw_goals:
+        goal = _mapping(raw_goal, "goal review goal")
+        if set(goal) != {
+            "id",
+            "status",
+            "evidence_level",
+            "baseline",
+            "current",
+            "target",
+            "method",
+            "references",
+        }:
+            raise GuardFailure("goal review goal has unknown or missing fields")
+        goal_id = _goal_review_text(goal, "id")
+        status = _goal_review_text(goal, "status")
+        evidence_level = _goal_review_text(goal, "evidence_level")
+        if goal_id in seen_ids:
+            raise GuardFailure("goal review goal IDs must be unique")
+        if status not in allowed_statuses:
+            raise GuardFailure("goal review goal status is invalid")
+        if evidence_level not in allowed_evidence:
+            raise GuardFailure("goal review evidence_level is invalid")
+        baseline = _goal_review_text(goal, "baseline")
+        current = _goal_review_text(goal, "current")
+        target = _goal_review_text(goal, "target")
+        method = _goal_review_text(goal, "method")
+        raw_references = _sequence(goal.get("references"), "goal review references")
+        if not 1 <= len(raw_references) <= 16:
+            raise GuardFailure("goal review references must contain between 1 and 16 values")
+        references: list[str] = []
+        for reference in raw_references:
+            if not isinstance(reference, str) or not reference.strip():
+                raise GuardFailure("goal review reference must be non-empty text")
+            references.append(reference.strip())
+        if status == "MET" and (evidence_level != "OPERATIONAL" or current.upper() == "UNKNOWN"):
+            raise GuardFailure("MET goal requires operational evidence and a known current value")
+        seen_ids.add(goal_id)
+        goals.append(
+            GoalReviewGoal(
+                goal_id,
+                cast(Literal["MET", "NOT_MET", "UNKNOWN"], status),
+                cast(
+                    Literal["NONE", "SCRATCH", "INTEGRATED", "DEPLOYED", "OPERATIONAL"],
+                    evidence_level,
+                ),
+                baseline,
+                current,
+                target,
+                method,
+                tuple(references),
+            )
+        )
+
+    raw_counts = _mapping(review.get("counts"), "goal review counts")
+    if set(raw_counts) != {"met", "not_met", "unknown"}:
+        raise GuardFailure("goal review counts have unknown or missing fields")
+    count_values: dict[str, int] = {}
+    for key in ("met", "not_met", "unknown"):
+        value = raw_counts.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise GuardFailure("goal review counts must be non-negative integers")
+        count_values[key] = value
+    derived_counts = {
+        "met": sum(goal.status == "MET" for goal in goals),
+        "not_met": sum(goal.status == "NOT_MET" for goal in goals),
+        "unknown": sum(goal.status == "UNKNOWN" for goal in goals),
+    }
+    if sum(count_values.values()) != len(goals) or count_values != derived_counts:
+        raise GuardFailure("goal review counts do not match goal statuses")
+
+    return GoalReviewSnapshot(
+        cast(Literal["workflow-goal-review-v1"], _GOAL_REVIEW_SCHEMA),
+        phase,
+        as_of,
+        code_sha,
+        runtime_sha,
+        tuple(goals),
+        GoalReviewCounts(count_values["met"], count_values["not_met"], count_values["unknown"]),
     )
 
 
@@ -1380,8 +1572,11 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
             raise GuardFailure("phase is unknown")
         metadata = _validate_target(snapshot)
         manifest = parse_acceptance_manifest(snapshot.issue.body)
+        goal_review = parse_goal_review(snapshot.issue.body)
         if manifest.route_effect != metadata.route_effect:
             raise GuardFailure("manifest route_effect differs from Work Block")
+        if goal_review is not None and goal_review.code_sha != metadata.base_sha:
+            raise GuardFailure("goal review code_sha differs from Work Block base")
         if snapshot.source == "live":
             if snapshot.scope_evidence is None:
                 raise GuardFailure("live scope evidence is absent")

@@ -32,6 +32,76 @@ La propuesta sólo se vuelve cierta cuando ese PR se integra en main. PLAN falla
 permanece tras un `COMPLETES` cuyo Issue está cerrado, PR fusionado y merge contenido en main; no
 repara ni infiere silenciosamente una transición ambigua.
 
+## Objetivos, evidencia y frontera de cierre
+
+Este protocolo define el único método de evaluación para PLAN, BUILD y AUDIT. Cada objetivo tiene
+un ID estable, fase, baseline, estado actual, meta con unidad, comparador, universo/inventario,
+carga, periodo, método y referencias verificables. Cada medición conserva `as_of`, `code_sha` y,
+cuando aplique, `runtime_sha`. El denominador es la lista de objetivos de esa fase; no cambia entre
+comparaciones salvo una decisión explícita de PLAN que explique la entrada o retiro de IDs. Una
+ausencia de medición, día, artefacto o despliegue nunca equivale a cero.
+
+Un cambio sólo es comparable con su baseline cuando conserva el universo e inventario, unidad,
+entorno, inputs, carga y reglas de inclusión que declara el objetivo. Si difieren, se documentan las
+diferencias y se deja `UNKNOWN`; no se corrige el denominador ni se reconstruye una cifra física a
+partir de una representación lógica. Una fase puede registrar objetivos sin evidencia o con
+evidencia parcial, pero cada ID cuenta una sola vez en el estado de esa fase.
+
+Los niveles de evidencia son `NONE` (sin artefacto verificable), `SCRATCH` (prueba temporal aislada),
+`INTEGRATED` (cambio integrado en el SHA indicado, aún sin despliegue acreditado), `DEPLOYED`
+(release exacto instalado en el entorno declarado) y `OPERATIONAL` (observación completa de ese
+release en el escenario declarado). Estos niveles describen madurez de evidencia y no son una
+puntuación. `MET` requiere evidencia `OPERATIONAL`, comparador válido y valor actual conocido;
+`NOT_MET` requiere evidencia comparable que demuestre que la meta no se cumple. Sin ella el estado
+es `UNKNOWN`, aunque haya código integrado o resultados scratch. Un valor o artefacto ausente nunca
+se completa con cero.
+
+Cuando una fase contiene objetivos, su Work Block publica un único bloque JSON opcional
+`workflow-goal-review-v1`, con exactamente `schema_version`, `phase`, `as_of`, `code_sha`,
+`runtime_sha`, `goals` y `counts`. Cada objetivo contiene exactamente `id`, `status`,
+`evidence_level`, `baseline`, `current`, `target`, `method` y `references`. `as_of` es un timestamp
+con zona UTC; `code_sha` y todo `runtime_sha` conocido son SHA completos de 40 caracteres; sólo se
+permite `runtime_sha: null` si se desconoce. Hay de 1 a 100 IDs únicos y de 1 a 16 referencias por
+objetivo. `counts` contiene enteros no negativos `met`, `not_met` y `unknown`, sin booleanos; la
+suma y distribución deben coincidir exactamente con los objetivos. El `code_sha` coincide con la
+base declarada del Work Block.
+
+El guard compartido valida esa forma estricta y falla cerrado ante JSON duplicado/malformado,
+campos desconocidos o ausentes, IDs repetidos, estados/niveles inválidos, conteos inconsistentes,
+timestamp sin UTC, SHA incompleto o base distinta. Rechaza `MET` sustentado sólo por scratch,
+integración, despliegue sin observación operacional o `current: UNKNOWN`. No calcula cifras,
+comprobadores ni verdad económica; tampoco modifica Profile, policy, `route_effect`, manifest,
+permisos, markers ni terminality. Si el bloque no contiene review, se conserva el comportamiento
+anterior; esto permite evaluar Issues históricos. El guard live sí valida el review presente y
+`--json` sigue siendo siempre `NON_AUTHORITATIVE`. Un mantenimiento sin fase/objetivos aplicables
+declara la no aplicabilidad con una razón, sin inventar un registro.
+
+PLAN fija IDs, comparadores, evidencia esperada, cierre no numérico y alcance completo de la
+capacidad. Agrupa objetivos que comparten una frontera implementable en un Work Block sustancial
+con adopción, compatibilidad, pruebas negativas e integración; no crea microbloques por archivo,
+prueba o documento, ni agrega trabajo ajeno para alargarlo. BUILD implementa sólo ese alcance,
+registra evidencia y reutiliza CI verde para el SHA exacto. El tamaño se decide por la frontera de
+capacidad y gates necesarios; se registran duraciones observadas por SHA para planificar, sin fijar
+una duración mínima ni aumentar scope para ocupar la espera del CI. Un gate operativo post-despliegue
+va a la aceptación futura/PLAN siguiente salvo autorización explícita: espera pasiva no bloquea BUILD
+y no autoriza fingir cumplimiento. AUDIT revisa de manera independiente semántica, método,
+comparabilidad, denominador y SHA; no interpreta fixtures o CI como ahorro operacional. El registro
+es trazabilidad informativa, no una máquina paralela de estados.
+
+La fase sólo se cierra cuando se satisfacen todos sus criterios numéricos y no numéricos. En el
+cierre vigente de DATA-CHASSIS son obligatorios, además del registro Q1–Q7: igualdad Decimal entre
+ejecuciones full e incremental v2; checkpoints persistidos con invalidación por revisión; aislamiento
+y selección point-in-time; lotes de hasta 256 y cero hidratación de filas ajenas; inventario completo
+de migración con restore, rollback y v2 activo; backup de Drive restaurado; y desacoplamiento de
+features y explicación. El conteo de objetivos no sustituye estos gates. No se fija un número
+arbitrario de días/ciclos: se declara evidencia finita por escenario y se identifican ausencias.
+
+Al revisar cierre, clasificar cada pendiente como criterio de aceptación no satisfecho, riesgo nuevo
+crítico u oportunidad opcional. Los dos primeros requieren resolver el criterio o volver a PLAN con
+evidencia y autoridad; las mejoras opcionales se registran para un bloque futuro y no prolongan el
+bloque actual. Un `UNKNOWN` crítico impide declararlo cumplido. Cambios de denominador o criterio
+requieren decisión explícita de PLAN; BUILD y AUDIT no los relajan.
+
 `finalize_policy` sólo admite `AUTO` o `HUMAN`: FAST usa AUTO por defecto; STANDARD usa AUTO tras
 AUDIT PASS; CRITICAL usa HUMAN. Un override HUMAN de FAST/STANDARD requiere justificación en PLAN.
 AUTO en CRITICAL exige instrucción humana explícita y justificación en PLAN. DEV-3 conserva HUMAN.
