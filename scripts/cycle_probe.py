@@ -33,6 +33,7 @@ OPS = pathlib.Path("/home/marjuraru/.local/share/investment-analyst/ops")
 SAMPLES = OPS / "samples"
 REPORTS = OPS / "reports"
 OVERVIEW_URL = "http://127.0.0.1:8765/api/v1/overview"
+STATUS_URL = "http://127.0.0.1:8765/api/overview"
 LIMA = ZoneInfo("America/Lima")
 
 CGROUP = pathlib.Path(
@@ -51,6 +52,35 @@ def _safe(fn, default=None):
 def overview() -> dict:
     with urllib.request.urlopen(OVERVIEW_URL, timeout=15) as response:  # noqa: S310
         return json.loads(response.read().decode("utf-8"))
+
+
+def scheduler_observability_status() -> dict[str, object]:
+    """Read only the scheduler's closed storage-observability reason, if available."""
+    allowed_reasons = {
+        "measurement_timeout",
+        "engine_unavailable",
+        "engine_error",
+        "artifact_invalid",
+        "artifact_unreadable",
+        "artifact_write_failed",
+        "collector_error",
+    }
+    try:
+        with urllib.request.urlopen(STATUS_URL, timeout=15) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001 - status enrichment never blocks a report
+        return {"available": False, "reason_code": None}
+    scheduler = payload.get("scheduler") if isinstance(payload, Mapping) else None
+    issues = scheduler.get("issues") if isinstance(scheduler, Mapping) else None
+    if not isinstance(issues, list):
+        return {"available": False, "reason_code": None}
+    prefix = "storage observability failure reason: "
+    for issue in issues:
+        if isinstance(issue, str) and issue.startswith(prefix):
+            reason = issue.removeprefix(prefix)
+            if reason in allowed_reasons:
+                return {"available": True, "reason_code": reason}
+    return {"available": True, "reason_code": None}
 
 
 def journal_records(journal_dir: pathlib.Path | None = None) -> list[dict]:
@@ -175,18 +205,142 @@ def cycle(day: str, journal_dir: pathlib.Path | None = None) -> dict:
     }
 
 
-def observability(day: str, artifact_path: pathlib.Path | None = None) -> dict:
+def _observability_coverage(
+    cycle_data: Mapping[str, object],
+    observability_data: Mapping[str, object],
+    scheduler_status: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Join terminal attempts to collector records by durable attempt identity."""
+    jobs = cycle_data.get("all_jobs")
+    jobs = jobs if isinstance(jobs, list) else []
+    rows = observability_data.get("today")
+    rows = rows if isinstance(rows, list) else []
+    terminal = [
+        job
+        for job in jobs
+        if isinstance(job, Mapping) and job.get("status") in {"succeeded", "failed", "skipped"}
+    ]
+    expected: dict[str, Mapping[str, object]] = {}
+    unknown_identity = 0
+    for job in terminal:
+        attempt_id = job.get("attempt_id")
+        if isinstance(attempt_id, str) and attempt_id:
+            expected[attempt_id] = job
+        else:
+            unknown_identity += 1
+    observed: dict[str, Mapping[str, object]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        attempt_id = row.get("attempt_id")
+        if isinstance(attempt_id, str) and attempt_id:
+            observed[attempt_id] = row
+    matched_ids = sorted(set(expected).intersection(observed))
+    missing_ids = sorted(set(expected).difference(observed))
+    unexpected_ids = sorted(set(observed).difference(expected))
+
+    def safe_nonnegative_int(value: object) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+    collector_overheads = [
+        overhead
+        for attempt_id in matched_ids
+        if (overhead := safe_nonnegative_int(observed[attempt_id].get("collector_overhead_ms")))
+        is not None
+    ]
+    job_seconds = sum(
+        float(job["seconds"])
+        for job in terminal
+        if isinstance(job.get("seconds"), (int, float))
+        and not isinstance(job.get("seconds"), bool)
+        and job["seconds"] >= 0
+    )
+    intervals: list[dict[str, object]] = []
+    ordered_jobs: list[tuple[dt.datetime, dt.datetime]] = []
+    for job in terminal:
+        started = _utc(job.get("started_at"))
+        completed = _utc(job.get("completed_at"))
+        if started is not None and completed is not None and started <= completed:
+            ordered_jobs.append((started, completed))
+    ordered_jobs.sort()
+    covered_until = ordered_jobs[0][1] if ordered_jobs else None
+    for next_start, next_end in ordered_jobs[1:]:
+        if covered_until is None:
+            covered_until = next_end
+            continue
+        seconds = (next_start - covered_until).total_seconds()
+        if seconds > 0:
+            intervals.append(
+                {
+                    "started_at": covered_until.isoformat(),
+                    "completed_at": next_start.isoformat(),
+                    "seconds": round(seconds, 1),
+                }
+            )
+        covered_until = max(covered_until, next_end)
+    issue_reason = (
+        scheduler_status.get("reason_code")
+        if isinstance(scheduler_status, Mapping)
+        and scheduler_status.get("reason_code")
+        in {
+            "measurement_timeout",
+            "engine_unavailable",
+            "engine_error",
+            "artifact_invalid",
+            "artifact_unreadable",
+            "artifact_write_failed",
+            "collector_error",
+        }
+        else None
+    )
+    expected_count = len(expected)
+    observed_count = len(matched_ids)
+    return {
+        "state": "unknown"
+        if expected_count == 0 and unknown_identity
+        else "complete"
+        if expected_count > 0 and observed_count == expected_count and unknown_identity == 0
+        else "partial"
+        if expected_count > 0 or unknown_identity > 0
+        else "unknown",
+        "expected_terminal_attempts": expected_count,
+        "terminal_attempts_without_identity": unknown_identity,
+        "observed_attempts": observed_count,
+        "missing_attempts": len(missing_ids) + unknown_identity,
+        "missing_attempt_ids": missing_ids,
+        "unexpected_observation_attempt_ids": unexpected_ids,
+        "collector_overhead_ms_known": (sum(collector_overheads) if collector_overheads else None),
+        "collector_overhead_ms_unknown_attempts": expected_count
+        + unknown_identity
+        - len(collector_overheads),
+        "job_execution_seconds_known": round(job_seconds, 3),
+        "inter_job_gaps": intervals,
+        "inter_job_gap_seconds": round(sum(item["seconds"] for item in intervals), 3),
+        "inter_job_gap_attribution": "unknown",
+        "latest_scheduler_reason_code": issue_reason,
+        "latest_scheduler_reason_attribution": "not_assigned_to_attempt",
+    }
+
+
+def observability(
+    day: str,
+    artifact_path: pathlib.Path | None = None,
+    *,
+    cycle_data: Mapping[str, object] | None = None,
+    scheduler_status: Mapping[str, object] | None = None,
+) -> dict:
     target_day = dt.date.fromisoformat(day)
     target_artifact = artifact_path or ARTIFACT
-    if not target_artifact.exists():
-        return {"present": False}
     rows = []
-    for line in target_artifact.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            rows.append(json.loads(line))
+    if target_artifact.exists():
+        for line in target_artifact.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(json.loads(line))
     today = [r for r in rows if _artifact_local_date(r) == target_day]
-    return {
-        "present": True,
+    result = {
+        "present": target_artifact.exists(),
         "total_lines": len(rows),
         "schema_versions": dict(collections.Counter(r.get("schema_version") for r in rows)),
         "today_count": len(today),
@@ -209,9 +363,15 @@ def observability(day: str, artifact_path: pathlib.Path | None = None) -> dict:
             for r in today
         ],
     }
+    if cycle_data is not None:
+        result["coverage"] = _observability_coverage(
+            cycle_data, result, scheduler_status=scheduler_status
+        )
+    return result
 
 
 def database(db_path: pathlib.Path | None = None) -> dict:
+    """Take one post-cycle logical document-size aggregate using a read-only engine."""
     import duckdb
 
     target_db = db_path or DB
@@ -219,24 +379,86 @@ def database(db_path: pathlib.Path | None = None) -> dict:
     connection.execute("set threads=2")
     connection.execute("set memory_limit='512MB'")
     try:
-        by_key = connection.execute(
-            "select metric_key, count(*), sum(strlen(document_json)) "
-            "from metric_results group by 1 order by 3 desc"
+        metric_facts = connection.execute(
+            "WITH facts AS ("
+            " SELECT metric_key, "
+            " json_extract_string(document_json, '$.parameters.window') AS metric_window, "
+            " inserted_at::DATE AS inserted_date, "
+            " octet_length(encode(document_json)) AS document_bytes "
+            " FROM metric_results"
+            ") "
+            "SELECT metric_key, metric_window, inserted_date, "
+            " grouping(metric_key), grouping(metric_window), grouping(inserted_date), "
+            " count(*), sum(document_bytes) "
+            "FROM facts "
+            "GROUP BY GROUPING SETS ((metric_key), (metric_key, metric_window), (inserted_date))"
         ).fetchall()
         tables = connection.execute(
             "select table_name, estimated_size from duckdb_tables() order by 2 desc"
         ).fetchall()
-        windows = connection.execute(
-            "select metric_key, json_extract_string(document_json,'$.parameters.window'), "
-            "count(*), sum(strlen(document_json)) from metric_results "
-            "where metric_key like 'crypto.derivatives%' group by 1,2 order by 4 desc"
-        ).fetchall()
-        recent = connection.execute(
-            "select inserted_at::date, count(*), sum(strlen(document_json)) "
-            "from metric_results where inserted_at >= current_date - 3 group by 1 order by 1 desc"
-        ).fetchall()
+        today = connection.execute("SELECT current_date").fetchone()[0]
     finally:
         connection.close()
+    by_key = sorted(
+        (
+            (metric_key, row_count, document_bytes or 0)
+            for (
+                metric_key,
+                _,
+                _,
+                key_rolled,
+                window_rolled,
+                date_rolled,
+                row_count,
+                document_bytes,
+            ) in metric_facts
+            if key_rolled == 0 and window_rolled == 1 and date_rolled == 1
+        ),
+        key=lambda row: (-row[2], row[0]),
+    )
+    windows = sorted(
+        (
+            (metric_key, metric_window, row_count, document_bytes or 0)
+            for (
+                metric_key,
+                metric_window,
+                _,
+                key_rolled,
+                window_rolled,
+                date_rolled,
+                row_count,
+                document_bytes,
+            ) in metric_facts
+            if key_rolled == 0
+            and window_rolled == 0
+            and date_rolled == 1
+            and isinstance(metric_key, str)
+            and metric_key.startswith("crypto.derivatives")
+        ),
+        key=lambda row: (-row[3], row[0], row[1] or ""),
+    )
+    cutoff = today - dt.timedelta(days=3)
+    recent = sorted(
+        (
+            (inserted_date, row_count, document_bytes or 0)
+            for (
+                _,
+                _,
+                inserted_date,
+                key_rolled,
+                window_rolled,
+                date_rolled,
+                row_count,
+                document_bytes,
+            ) in metric_facts
+            if key_rolled == 1
+            and window_rolled == 1
+            and date_rolled == 0
+            and inserted_date >= cutoff
+        ),
+        key=lambda row: row[0],
+        reverse=True,
+    )
     return {
         "file_bytes": target_db.stat().st_size,
         "metric_rows": sum(r[1] for r in by_key),
@@ -244,7 +466,7 @@ def database(db_path: pathlib.Path | None = None) -> dict:
         "by_metric_key": [{"metric_key": k, "rows": n, "bytes": b or 0} for k, n, b in by_key],
         "tables": [{"table": t, "rows": n} for t, n in tables],
         "crypto_by_window": [
-            {"metric_key": k, "window": w, "rows": n, "bytes": b or 0} for k, w, n, b in windows
+            {"metric_key": k, "window": w, "rows": n, "bytes": b} for k, w, n, b in windows
         ],
         "recent_growth": [{"date": str(d), "rows": n, "bytes": b or 0} for d, n, b in recent],
     }
@@ -402,13 +624,22 @@ def runtime_identity_read_only(
 
 
 def snapshot(day: str) -> dict:
+    cycle_data = _safe(lambda: cycle(day))
+    status_data = _safe(scheduler_observability_status, {"available": False, "reason_code": None})
+    observability_data = _safe(
+        lambda: observability(
+            day,
+            cycle_data=cycle_data if isinstance(cycle_data, Mapping) else None,
+            scheduler_status=status_data if isinstance(status_data, Mapping) else None,
+        )
+    )
     return {
         "captured_at": dt.datetime.now(dt.UTC).isoformat(),
         "day": day,
         "runtime_identity": _safe(lambda: runtime_identity_read_only(), {}),
         "overview": _safe(overview),
-        "cycle": _safe(lambda: cycle(day)),
-        "observability": _safe(lambda: observability(day)),
+        "cycle": cycle_data,
+        "observability": observability_data,
         "database": _safe(database),
         "containment": _safe(containment),
         "institutional": _safe(institutional_cursor),
@@ -656,6 +887,39 @@ def render_summary(payload: dict) -> str:
                 f"| {item.get('collector_overhead_ms')} | `{failure_label}` |"
             )
 
+    coverage = obs.get("coverage") if isinstance(obs, Mapping) else None
+    if isinstance(coverage, Mapping):
+        lines += [
+            "",
+            "### Cobertura del colector por intento",
+            "",
+            f"- estado: {coverage.get('state')}; terminales esperados: "
+            f"{coverage.get('expected_terminal_attempts')}; observados: "
+            f"{coverage.get('observed_attempts')}; ausentes: {coverage.get('missing_attempts')}",
+            f"- overhead de colector conocido: "
+            f"{coverage.get('collector_overhead_ms_known')} ms; "
+            f"tiempo de ejecución de jobs: {coverage.get('job_execution_seconds_known')} s",
+            f"- intervalos entre jobs: {coverage.get('inter_job_gap_seconds')} s; "
+            "atribución: desconocida",
+        ]
+        reason_code = coverage.get("latest_scheduler_reason_code")
+        if reason_code:
+            lines.append(
+                f"- último motivo seguro del scheduler: `{reason_code}`; "
+                "no asignado a un intento concreto"
+            )
+        missing_ids = coverage.get("missing_attempt_ids")
+        if isinstance(missing_ids, list) and missing_ids:
+            lines.append(
+                "- IDs ausentes (máximo 10 mostrados): "
+                + ", ".join(f"`{item}`" for item in missing_ids[:10])
+            )
+        if coverage.get("terminal_attempts_without_identity"):
+            lines.append(
+                "- intentos legacy sin identidad: "
+                f"{coverage.get('terminal_attempts_without_identity')} (UNKNOWN)"
+            )
+
     db_now, db_before = payload.get("database") or {}, base.get("database") or {}
     if "metric_rows" in db_now:
         file_gb_before = round((db_before.get("file_bytes") or 0) / 1e9, 2) if same_release else "-"
@@ -742,8 +1006,9 @@ def render_summary(payload: dict) -> str:
         uncovered_count = len(memory.get("jobs_without_samples") or [])
         lines += [
             "",
-            f"- muestras: {memory.get('sample_count')} cada "
-            f"{memory.get('sample_interval_seconds')} s",
+            f"- muestras del ciclo: {memory.get('sample_count')} cada "
+            f"{memory.get('sample_interval_seconds')} s; externas cargadas y excluidas: "
+            f"{memory.get('external_sample_count', 0)}",
             f"- trabajos sin muestra en su intervalo: {uncovered_count}",
             f"- muestras sin intento simultáneo: {memory.get('unattributed_sample_count', 0)}",
             "",
@@ -1086,7 +1351,7 @@ def memory_by_job(
     attributed = []
     for job, start_at, end_at in valid_jobs:
         job_duration = (end_at - start_at).total_seconds()
-        window = [s for s in samples if start_at <= s["_at"] <= end_at]
+        window = [s for s in cycle_samples if start_at <= s["_at"] <= end_at]
         interval_seconds = _sample_cadence(window)
 
         if not window:
@@ -1225,37 +1490,37 @@ def memory_by_job(
     ]
     runtime_identities = {
         tuple(sample.get(field) for field in _MEMORY_IDENTITY_FIELDS)
-        for sample in samples
+        for sample in cycle_samples
         if all(sample.get(field) is not None for field in _MEMORY_IDENTITY_FIELDS)
     }
     complete_identity_samples = sum(
         all(sample.get(field) is not None for field in _MEMORY_IDENTITY_FIELDS)
-        for sample in samples
+        for sample in cycle_samples
     )
     release_shas = sorted(
         {
             sample["release_sha"]
-            for sample in samples
+            for sample in cycle_samples
             if isinstance(sample.get("release_sha"), str)
             and re.fullmatch(r"[0-9a-f]{40}", sample["release_sha"])
         }
     )
-    release_complete = bool(samples) and all(
-        sample.get("release_sha") in release_shas for sample in samples
+    release_complete = bool(cycle_samples) and all(
+        sample.get("release_sha") in release_shas for sample in cycle_samples
     )
     if len(release_shas) > 1:
         release_state = "mixed"
     elif release_complete and release_shas:
         release_state = "known"
-    elif any(sample.get("release_sha_state") == "incoherent" for sample in samples):
+    elif any(sample.get("release_sha_state") == "incoherent" for sample in cycle_samples):
         release_state = "incoherent"
     else:
         release_state = "unknown"
-    if len(samples) < 2:
+    if len(cycle_samples) < 2:
         comparison_reason = "single_point"
     elif release_state != "known":
         comparison_reason = "release_identity_unavailable"
-    elif complete_identity_samples != len(samples):
+    elif complete_identity_samples != len(cycle_samples):
         comparison_reason = "process_cgroup_identity_incomplete"
     elif len(runtime_identities) != 1:
         comparison_reason = "process_or_cgroup_identity_changed"
@@ -1266,15 +1531,19 @@ def memory_by_job(
     )
     sample_intervals = [
         int(sample["sample_interval_seconds"])
-        for sample in samples
+        for sample in cycle_samples
         if isinstance(sample.get("sample_interval_seconds"), int)
         and not isinstance(sample.get("sample_interval_seconds"), bool)
         and int(sample["sample_interval_seconds"]) > 0
     ]
     return {
-        "present": bool(samples),
-        "reason": None if samples else "no_valid_samples",
-        "capture_kind": "series" if len(samples) >= 2 else "point" if samples else "none",
+        "present": bool(cycle_samples),
+        "reason": None if cycle_samples else "no_valid_samples_in_cycle",
+        "capture_kind": "series"
+        if len(cycle_samples) >= 2
+        else "point"
+        if cycle_samples
+        else "none",
         "comparable": comparison_reason is None,
         "comparison_reason": comparison_reason,
         "release_sha": release_shas[0] if release_state == "known" else None,
@@ -1282,13 +1551,15 @@ def memory_by_job(
         "release_identity_state": release_state,
         "process_identity_count": len(runtime_identities),
         "process_identity_complete_sample_count": complete_identity_samples,
-        "sample_count": len(samples),
+        "sample_count": len(cycle_samples),
         "cycle_sample_count": len(cycle_samples),
+        "loaded_sample_count": len(samples),
+        "external_sample_count": len(samples) - len(cycle_samples),
         "sample_interval_seconds": (
             int(statistics.median(sample_intervals)) if sample_intervals else 5
         ),
-        "first_sample_at": samples[0]["_at"].isoformat() if samples else None,
-        "last_sample_at": samples[-1]["_at"].isoformat() if samples else None,
+        "first_sample_at": cycle_samples[0]["_at"].isoformat() if cycle_samples else None,
+        "last_sample_at": cycle_samples[-1]["_at"].isoformat() if cycle_samples else None,
         "cycle_start_at": cycle_start.isoformat() if cycle_start else None,
         "cycle_end_at": cycle_end.isoformat() if cycle_end else None,
         "rss_peak": rss_peak,

@@ -453,9 +453,7 @@ def test_collector_uses_read_only_engine_and_a_single_writer(
         f"state/{_ARTIFACT_NAME}"
     }
     record = observed.records()[0]
-    assert {item["table_name"] for item in record["table_bytes"]} == set(  # type: ignore[union-attr]
-        _document_table_names(observed.database_path)
-    )
+    assert record["table_bytes"] == []
     assert record["wal_bytes_before"] == record["wal_bytes_after"] == 0
 
 

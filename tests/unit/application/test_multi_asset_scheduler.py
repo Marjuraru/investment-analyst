@@ -731,8 +731,8 @@ def test_scheduler_emits_storage_observability_without_changing_persisted_state(
     assert record.rows_reused == 0
     assert record.evidence_changed is True
     assert record.database_delta_bytes == 0
-    assert tuple(item.table_name for item in record.table_bytes) == ("metric_results",)
-    assert record.table_bytes[0].row_count == 1
+    assert record.table_bytes == ()
+    assert record.growth is not None
     assert record.durations.total_ms == 0
 
 

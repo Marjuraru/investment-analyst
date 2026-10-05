@@ -172,7 +172,16 @@ Se anexa a ops/samples/mem-<fecha-America-Lima>.jsonl; el default conserva 14 d�
 
     PYTHONPATH=src .venv/bin/python /home/marjuraru/.local/share/investment-analyst/ops/cycle_probe.py report
 
-Ese reporte escribe en ops/reports; consulta el overview local y lee estado/journal y DuckDB en read-only. No convertirlo en una tarea frecuente: el coste de una lectura completa de BD no pertenece al sampler por muestra.
+Ese reporte escribe en ops/reports; consulta el overview local y lee estado/journal y DuckDB en read-only. Tras el cierre mide una vez los bytes UTF-8 lógicos de `metric_results` con un agregado; el baseline manual conserva esa medición explícita. Los intentos programados sólo cuentan filas y consultan stat de DB/WAL: no escanean `document_json` por job. No convertir el reporte en una tarea frecuente: la lectura lógica completa pertenece al reporte posterior al cierre, no al sampler por muestra ni al hook de cada intento.
+
+La comprobación reproducible offline del colector y los enlaces al ciclo usa sólo DuckDB y jobs
+sintéticos en un directorio temporal:
+
+    PYTHONPATH=src .venv/bin/python scripts/smoke_operational_observability.py --output /tmp/data-chassis-38-smoke.json
+
+Debe imprimir JSON con los perfiles `operational_observability_cost` y
+`operational_observability_series` en estado `pass`; el fichero queda disponible para adjuntarlo al
+registro del BUILD. El smoke no invoca proveedores ni abre el workspace permanente.
 
 Si el timer elegido usa Persistent=true, debe ser de calendario con OnCalendar=: systemd ignora Persistent para timers sólo monotónicos. Tras reanudar una laptop o activar un timer con intervalos vencidos, varios vencimientos durante la inactividad producen una sola activación; se registra un punto nuevo, no se reconstruye el historial ausente. No basar una comparación en huecos rellenados. Revisar además AccuracySec para que su tolerancia sea compatible con la cadencia configurada. Referencia: [systemd.timer(5)](https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html).
 

@@ -116,10 +116,9 @@ existente más allá de sus propios campos opcionales.
   `extra="forbid"` y sin `Any`. La correlación con la historia existente usa `attempt_id` y `job_id`;
   las filas creadas/reutilizadas se copian por referencia desde la ejecución del intento y **no**
   redefinen `created_count`/`reused_count` de `provider-job-telemetry-v1`.
-- **Hechos medidos por job:** bytes físicos del DuckDB y del WAL antes y después, medidos sobre el
-  sistema de archivos como enteros exactos; bytes lógicos por tabla con el motor abierto en
-  `read_only=True` y `octet_length(encode(document_json))` (bytes UTF-8 exactos; el baseline publicó
-  `strlen`, equivalente para documentos ASCII); y el desglose de duración en ejecución del trabajo
+- **Hechos medidos por intento:** bytes físicos del DuckDB y del WAL antes y después, medidos sobre
+  el sistema de archivos como enteros exactos; conteos exactos de filas por tabla con el motor
+  abierto en `read_only=True`; y el desglose de duración en ejecución del trabajo
   (`job_execution_ms`), consulta (`query_ms`), residuo no atribuido del colector (`collector_unattributed_ms`),
   persistencia (`persistence_ms`) y verificación (`verification_ms`). El reloj del colector mide su ventana y
   reconcilia exactamente las fases con `total_ms`; la duración del job sólo usa timestamps del scheduler si
@@ -128,13 +127,14 @@ existente más allá de sus propios campos opcionales.
   reescribir el archivo completo y sólo se pliegan al snapshot compacto cuando el día UTC cierra.
 - **No intrusivo:** el colector abre el motor únicamente en `read_only=True`, no introduce una
   segunda conexión de escritura y un fallo suyo nunca degrada ni aborta el job medido: se registra
-  como issue operativo del scheduler.
+  como issue operativo del scheduler. La fase por intento no recorre `document_json` ni hidrata
+  documentos financieros.
 - **Límite de atribución declarado y fases honestas (`OBSERVABILITY-1`):** `job_execution_ms`
   (denominado `network_ms` en el contrato v1 original) mide la ventana de ejecución completa del callable del job,
   dentro de la cual el trabajo realiza red, cálculo y persistencia local; una llamada opaca no es sub-atribuible
   desde esta superficie sin instrumentar `providers/http.py` y los pipelines. El colector no estima red ni afirma
   conocer el transporte por separado. Las fases `query_ms`, `persistence_ms` y `verification_ms` son fases del
-  propio colector alrededor del trabajo (medición de tablas, compactación y verificación/carga), y
+  propio colector alrededor del trabajo (conteos de filas, compactación y verificación/carga), y
   `collector_unattributed_ms` (denominado `calculation_ms` en v1) es el residuo no atribuido del colector que
   absorbe el redondeo a milisegundos enteros para reconciliar exactamente. En `OBSERVABILITY-1`, el contrato
   evoluciona a `storage-observability-v2` reflejando estos nombres sin romper la lectura de registros v1 históricos.
@@ -172,6 +172,24 @@ existente más allá de sus propios campos opcionales.
   diarios ya persistidos y declara de forma explícita cada día sin snapshot: nunca interpola, nunca
   rellena con cero y nunca promedia sobre días inexistentes (`mean_daily_bytes_delta` es `None` cuando
   la ventana no tiene días declarados).
+- **Política ligera por intento (`DATA-CHASSIS-38`):** todo registro v2 nuevo conserva
+  `table_bytes=()` para declarar que los bytes lógicos no se midieron en esa fase. `begin_attempt` y
+  `complete_attempt` sólo consultan `stat` de DuckDB/WAL y conteos SQL exactos de filas para medir
+  crecimiento y reconciliar tiempos; nunca llaman al escaneo `SUM(octet_length(encode(document_json)))`,
+  ni siquiera en el primer job del día, tras un error, un reinicio o un cambio de fecha. Los campos
+  `table_bytes` históricos siguen siendo legibles; una ausencia no se reconstruye como cero.
+- **Medida lógica de ciclo:** el reporte operacional del ciclo mide una vez los bytes UTF-8 lógicos
+  después de que cierre el scheduler; el baseline manual mantiene esa misma lectura explícita. El
+  agregado read-only del probe combina sus grupos en una sola consulta y distingue esos bytes del
+  crecimiento físico DuckDB/WAL. La CLI pública `storage-observability-report-v1` conserva sus
+  campos y no abre DuckDB.
+- **Cobertura y causas:** el probe cruza intentos terminales del journal y registros del colector
+  por `attempt_id`. Esperado, observado y ausente son conteos distintos; un intento ausente tiene
+  coste desconocido, no crecimiento cero. El scheduler conserva su issue seguro legado y expone
+  sólo una causa técnica de vocabulario cerrado cuando está disponible. Un motivo vivo sin
+  identidad durable no se asigna a un intento antiguo. Duración conocida del colector, ejecución
+  de jobs e intervalos entre jobs se presentan por separado; un intervalo entre trabajos queda sin
+  atribución.
 - **Alerta de presupuesto operacional:** compara el crecimiento diario medido (bytes físicos del
   DuckDB más WAL) contra un umbral configurable — 30.000.000 bytes por defecto, la meta provisional de
   este documento — sobre los días declarados de la ventana corta, e identifica los días excedidos y el
@@ -872,8 +890,9 @@ Este candidato añade observabilidad operativa local para decidir el siguiente t
 - **A3 — causas cerradas**: Alpaca diario y SEC Submissions/documentos exponen reason_code desde puntos de fallo revisados. La interfaz sólo acepta códigos de tipos conocidos dentro del vocabulario cerrado; no analiza mensajes ni atributos arbitrarios. Preserva tipo, causa interna y prioridad de HTTP, credenciales y transporte. Los registros antiguos con reason_code=None siguen siendo legibles y no se reescriben.
 - **A4 — muestras locales v2**: scripts/memory_sampler.py lee una lista fija de propiedades systemd, /proc y cgroup v2; no lee DuckDB, el workspace ni variables de entorno. El JSON mantiene RSS/HWM y aliases legados y añade memory.current/peak/stat/events, swap, PSI, límites y una identidad de proceso/cgroup. Los valores ausentes son null con un motivo acotado; release_sha distingue known, unknown e incoherent. La cadencia predeterminada es 5 segundos y la retención 14 días por fecha America/Lima; sólo se podan archivos mem-YYYY-MM-DD.jsonl reconocidos.
 - **Sonda de ciclo**: scripts/cycle_probe.py mantiene legibles muestras v1 y v2, normaliza aliases, separa intentos por attempt_id y elimina duplicados entre snapshots y segmentos del journal. El día se evalúa en America/Lima. Sólo declara cierre cuando el overview indica scheduler habilitado, todos los jobs contabilizados, cero en ejecución y ningún scheduled_next_run_at o scheduled_next_retry_at dentro del día. Timeout o overview incompleto queda como parcial. Conserva intentos sin muestra e intervalos no atribuidos; una coincidencia temporal no se presenta como causalidad.
-- **Comparabilidad de memoria**: pico, neto, rango y deltas por intento se calculan sólo con identidad completa coincidente: PID, process_starttime_ticks, boot_id y cgroup_generation. Un cambio de identidad, reset o campo insuficiente rompe la serie y deja el motivo explícito; no se calcula un delta entre puntos inconexos. Se incluyen duración y coste del colector y diferencias de release/base. Un reporte previo sirve de baseline sólo si su día es anterior y su ciclo está cerrado; una captura puntual no se convierte en serie.
-- **Compatibilidad y límites**: se preservan los lectores storage-observability-v1/v2, sin migración, schema financiero ni reescritura histórica. Las lecturas DuckDB del colector son read-only, con límite predeterminado de 5 segundos. El escaneo de bytes de documentos ocurre como máximo una vez por día UTC; los cierres posteriores sólo cuentan filas. Los artefactos de operación no tienen available_at y no alimentan métricas, diagnósticos ni candidatos.
+- **Comparabilidad de memoria**: pico, neto, rango y deltas por intento se calculan sobre muestras dentro del intervalo entre el inicio terminal válido más temprano y el cierre más tardío del ciclo. Muestras adyacentes se pueden cargar para resolver fronteras, pero no entran en el conteo ni en identidad, release o comparabilidad. Sólo una identidad completa coincidente (PID, process_starttime_ticks, boot_id y cgroup_generation) permite deltas; una ruptura interna, reset o campo ausente conserva su motivo y bloquea la comparación.
+- **Compatibilidad y límites**: se preservan los lectores storage-observability-v1/v2, sin migración, schema financiero ni reescritura histórica. Las lecturas DuckDB del colector son read-only, con límite predeterminado de 5 segundos. En intentos nuevos `table_bytes=()` significa «bytes lógicos no medidos»; el hook sólo cuenta filas y consulta stat de DB/WAL. La lectura lógica completa se hace una vez en el reporte post-ciclo o en el baseline explícito. Los artefactos de operación no tienen available_at y no alimentan métricas, diagnósticos ni candidatos.
+- **Cobertura enlazada**: el reporte cruza cada intento terminal del journal con su registro por `attempt_id`, muestra esperados, observados y ausentes, y mantiene ausencias como desconocidas. Puede mostrar el último reason_code seguro del scheduler si existe, pero no lo asigna a un intento histórico sin identidad; también separa duración conocida del colector, tiempo de jobs e intervalos entre ellos sin atribuir estos últimos.
 
 ### Tabla de emisión de reason_code
 

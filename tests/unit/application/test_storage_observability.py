@@ -291,6 +291,30 @@ def test_collector_does_not_mix_incompatible_lifecycle_clocks(tmp_path: Path) ->
     assert record.durations.total_ms == 13_000
 
 
+def test_collector_keeps_scheduler_clock_ahead_interval_unattributed(tmp_path: Path) -> None:
+    collector = _collector(tmp_path, clock=_ScriptedClock(_BASE))
+    handle = collector.begin_attempt(job_id=_JOB_ID, attempt_id=_ATTEMPT_ID)
+
+    record = collector.complete_attempt(
+        handle,
+        _observation(),
+        execution_completed_at=_BASE + timedelta(minutes=5),
+        result_persisted_at=_BASE + timedelta(minutes=5),
+    )
+
+    assert record.durations.job_execution_ms == 0
+    assert record.durations.query_ms >= 0
+    assert record.durations.collector_unattributed_ms >= 0
+    assert record.collector_overhead_ms is None
+    assert record.durations.total_ms == (
+        record.durations.job_execution_ms
+        + record.durations.query_ms
+        + record.durations.collector_unattributed_ms
+        + record.durations.persistence_ms
+        + record.durations.verification_ms
+    )
+
+
 def test_collector_rejects_naive_or_reversed_explicit_timestamps(tmp_path: Path) -> None:
     collector = _collector(tmp_path)
     handle = collector.begin_attempt(job_id=_JOB_ID, attempt_id=_ATTEMPT_ID)
@@ -311,14 +335,13 @@ def test_collector_rejects_naive_or_reversed_explicit_timestamps(tmp_path: Path)
         )
 
 
-def test_logical_bytes_by_table_measured_read_only(tmp_path: Path) -> None:
+def test_explicit_logical_bytes_measurement_is_read_only(tmp_path: Path) -> None:
     database = _database_path(tmp_path)
     _create_database(database)
     original = database.read_bytes()
+    collector = _collector(tmp_path)
 
-    record = _record(tmp_path)
-
-    measured = {item.table_name: item for item in record.table_bytes}
+    measured = {item.table_name: item for item in collector._measure_table_bytes()}
     assert tuple(measured) == ("metric_results", "raw_record_index")
     assert measured["metric_results"].row_count == 2
     assert measured["metric_results"].document_bytes == 12
@@ -391,13 +414,7 @@ def test_growth_is_classified_into_new_revision_and_derived(tmp_path: Path) -> N
         "derived_rows": 1,
         "unclassified_rows": 1,
     }
-    assert {item.table_name: item.row_count for item in record.table_bytes} == {
-        "assets": 1,
-        "diagnostic_results": 0,
-        "metric_results": 1,
-        "normalized_observations": 0,
-        "raw_record_index": 2,
-    }
+    assert record.table_bytes == ()
 
 
 def test_growth_classification_declines_when_the_attempt_does_not_report_rows(
@@ -628,7 +645,7 @@ def test_record_uses_utc_and_exact_integer_bytes(tmp_path: Path) -> None:
         type(record.wal_bytes_before),
         type(record.wal_bytes_after),
     } == {int}
-    assert {type(item.row_count) for item in record.table_bytes} == {int}
+    assert record.table_bytes == ()
     with pytest.raises(ValidationError):
         StorageObservabilityTableBytes(table_name="metric_results", row_count=1.5, document_bytes=1)
     with pytest.raises(ValidationError):
@@ -657,7 +674,7 @@ def test_collector_uses_a_single_writer_and_read_only_measurement(
 
     assert opened == [True, True]
     assert database.read_bytes() == original
-    assert record.table_bytes
+    assert record.table_bytes == ()
     assert sorted(item.name for item in (tmp_path / "state").iterdir()) == [_ARTIFACT_NAME]
 
 
@@ -699,10 +716,20 @@ def test_collector_failure_never_degrades_the_measured_job(tmp_path: Path) -> No
     )
 
     scenarios = (
-        (blocked, "blocked", "storage observability could not open its measurement"),
-        (unwritable, "unwritable", "storage observability could not record its result"),
+        (
+            blocked,
+            "blocked",
+            "storage observability could not open its measurement",
+            "artifact_unreadable",
+        ),
+        (
+            unwritable,
+            "unwritable",
+            "storage observability could not record its result",
+            "artifact_write_failed",
+        ),
     )
-    for collector, label, expected_issue in scenarios:
+    for collector, label, expected_issue, expected_reason in scenarios:
         store = MultiAssetScheduleStateStore(tmp_path / f"schedule-{label}.json")
         scheduler = MultiAssetScheduler(
             (RegisteredScheduledJob(definition, run),),
@@ -716,7 +743,10 @@ def test_collector_failure_never_degrades_the_measured_job(tmp_path: Path) -> No
         assert completed[0].status is ScheduledJobAttemptStatus.SUCCEEDED
         assert completed[0].execution is not None
         assert store.load().attempts[0].status is ScheduledJobAttemptStatus.SUCCEEDED
-        assert scheduler.status().issues == (expected_issue,)
+        assert scheduler.status().issues == (
+            expected_issue,
+            f"storage observability failure reason: {expected_reason}",
+        )
         assert not collector.artifact_path.is_file()
 
 
@@ -734,22 +764,30 @@ def test_measurement_engine_is_bounded_in_memory_and_threads(tmp_path: Path) -> 
         connection.close()
 
 
-def test_document_bytes_are_measured_at_most_once_per_utc_day(tmp_path: Path) -> None:
+def test_document_bytes_are_never_measured_inside_attempts_or_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     database = _database_path(tmp_path)
     _create_classification_database(database)
     clock = _ScriptedClock(_BASE)
     collector = _collector(tmp_path, database_path=database, clock=clock)
+    scans: list[str] = []
 
-    # Attempt 1 on day 1: document bytes are measured
+    def forbidden_scan(self: StorageObservabilityCollector):
+        scans.append("payload")
+        raise AssertionError("attempt path must not scan document_json")
+
+    monkeypatch.setattr(StorageObservabilityCollector, "_measure_table_bytes", forbidden_scan)
+
     id1 = UUID("00000000-0000-4000-8000-000000000001")
     handle1 = collector.begin_attempt(job_id=_JOB_ID, attempt_id=id1)
     record1 = collector.complete_attempt(
         handle1,
         _observation(attempt_id=id1, evidence_changed=True, rows_created=1, rows_reused=0),
     )
-    assert len(record1.table_bytes) > 0
+    assert record1.table_bytes == ()
 
-    # Attempt 2 on day 1 (same UTC day): document bytes are skipped, table_bytes is empty
     id2 = UUID("00000000-0000-4000-8000-000000000002")
     handle2 = collector.begin_attempt(job_id=_JOB_ID, attempt_id=id2)
     record2 = collector.complete_attempt(
@@ -758,21 +796,21 @@ def test_document_bytes_are_measured_at_most_once_per_utc_day(tmp_path: Path) ->
     )
     assert record2.table_bytes == ()
 
-    # Attempt 3 on day 1 (same UTC day): document bytes are skipped again
     id3 = UUID("00000000-0000-4000-8000-000000000003")
-    handle3 = collector.begin_attempt(job_id=_JOB_ID, attempt_id=id3)
-    record3 = collector.complete_attempt(
+    restarted = _collector(tmp_path, database_path=database, clock=clock)
+    handle3 = restarted.begin_attempt(job_id=_JOB_ID, attempt_id=id3)
+    record3 = restarted.complete_attempt(
         handle3,
         _observation(attempt_id=id3, evidence_changed=False, rows_created=0, rows_reused=1),
     )
     assert record3.table_bytes == ()
 
-    # Attempt 4 on day 2 (next UTC day): document bytes are measured again
     next_day = _BASE + timedelta(days=1)
     clock.advance_to(next_day)
     id4 = UUID("00000000-0000-4000-8000-000000000004")
-    handle4 = collector.begin_attempt(job_id=_JOB_ID, attempt_id=id4)
-    record4 = collector.complete_attempt(
+    next_day_collector = _collector(tmp_path, database_path=database, clock=clock)
+    handle4 = next_day_collector.begin_attempt(job_id=_JOB_ID, attempt_id=id4)
+    record4 = next_day_collector.complete_attempt(
         handle4,
         _observation(
             attempt_id=id4,
@@ -782,7 +820,8 @@ def test_document_bytes_are_measured_at_most_once_per_utc_day(tmp_path: Path) ->
             local_date=next_day.date(),
         ),
     )
-    assert len(record4.table_bytes) > 0
+    assert record4.table_bytes == ()
+    assert scans == []
 
 
 def test_growth_classification_uses_row_counts_on_every_attempt(tmp_path: Path) -> None:
@@ -790,7 +829,7 @@ def test_growth_classification_uses_row_counts_on_every_attempt(tmp_path: Path) 
     _create_classification_database(database)
     collector = _collector(tmp_path)
 
-    # Attempt 1: first attempt of day, table_bytes is measured
+    # Attempt 1: the lightweight phase measures rows but omits logical bytes.
     id1 = UUID("00000000-0000-4000-8000-000000000001")
     handle1 = collector.begin_attempt(job_id=_JOB_ID, attempt_id=id1)
     _insert(
@@ -805,7 +844,7 @@ def test_growth_classification_uses_row_counts_on_every_attempt(tmp_path: Path) 
         handle1,
         _observation(attempt_id=id1, evidence_changed=True, rows_created=7, rows_reused=4),
     )
-    assert record1.table_bytes != ()
+    assert record1.table_bytes == ()
     assert record1.growth is not None
     assert record1.growth.new_evidence_rows == 2
     assert record1.growth.derived_rows == 1
