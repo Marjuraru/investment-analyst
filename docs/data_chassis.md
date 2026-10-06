@@ -1094,3 +1094,44 @@ la medición operacional siguen posteriores.
 El candidato propone `route_effect: ADVANCES` y deja DATA-CHASSIS como único
 `NEXT`; el detalle de cierre no numérico está en el
 [`plan de cierre`](data_chassis_closure_plan.md).
+
+## Corrección PIT de SEC y cierre observable del ciclo (`DATA-CHASSIS-41` / #335)
+
+Este bloque adelanta la corrección de ingesta documental y la medición terminal porque el probe del
+ciclo encontró once correcciones de `accepted_at` en cinco emisores y una entrega ausente del
+colector. V3 representa metadata corregida sólo si el mismo activo, CIK, accession y bytes se
+demuestran en snapshots Submissions y un GET actual de Archives; su contrato no admite cambios de
+hash o tamaño. V4 conserva la nueva respuesta completa si la única diferencia respecto del blob
+previo es el script externo terminal exacto definido por el contrato. Cada revisión añade un
+RawRecord, conserva hashes y tamaños completos, y enlaza su prior; no ejecuta ni descarga el script
+ni crea un blob canónico parcial. Ambas versiones conservan UUID de filing/documento, métricas y
+diagnósticos históricos. `available_at` incluye metadata observada, adquisición y disponibilidad del
+prior según la versión. Replay y timeline filtran el corte antes de elegir revisión y muestran cada
+identidad. Backup/restore de workspace v1 y v2 verifica linaje, prueba y blobs completos de v2/v3/v4.
+La ruta vigente está en el [plan de cierre](data_chassis_closure_plan.md).
+
+El colector escribe `storage-observability-v3` para cada intento terminal. Cada registro declara
+medición `complete`, `partial` o `unavailable`, con fase y causa técnica cerradas; toda cuenta no
+conocida permanece `null`, nunca cero. Los lectores aceptan explícitamente v1, v2 y v3 sin cambiar
+líneas anteriores. El snapshot diario v2 acumula contadores separados de mediciones parciales y no
+disponibles; `storage-observability-report-v1` conserva su contrato y sigue mostrando días ausentes
+sin imputar valores.
+
+La lectura usa un único worker efímero acotado, conexión DuckDB `read_only`, un límite de memoria de
+256 MB y un thread. El plazo monotónico empieza antes de obtener el worker y cubre apertura y query;
+un timeout termina y recoge ese proceso acotado. El worker consulta una vez el inventario por tick y
+reutiliza esa estructura inmutable sólo durante su vida acotada; cada frontera ejecuta un SELECT
+combinado con los conteos exactos. La primera frontera ejecuta dos SELECT y las siguientes uno. Se
+registra por separado apertura/SELECT dentro de `query_ms`. El colector conserva la primera envoltura
+terminal congelada y reintenta sólo su append y verificación dentro del proceso; nunca repite el job
+del provider. El scheduler persiste el resultado
+del job primero y deja la entrega observable en retry acotado, incluyendo fallos de apertura, query,
+append y verificación posterior.
+
+La prueba pareada ABBA ejecuta base/candidato/candidato/base en subprocesses frescos para 257 y 1537
+filas y siete tablas. Publica cada muestra, distribución, timing por fase, memoria, SELECTs y salida
+del worker; distingue el primer proceso frío de muestras posteriores y declara que no se limpió el
+page cache. Estas mediciones caracterizan el coste local del colector, no acreditan metas
+operacionales de memoria, disco o duración de un ciclo productivo. El estado de Q1–Q7 sigue en el
+registro canónico y la ruta DATA-CHASSIS conserva `NEXT`; después de #335, PLAN resuelve #42 con
+evidencia viva nueva.

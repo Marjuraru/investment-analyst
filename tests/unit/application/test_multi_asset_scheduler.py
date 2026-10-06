@@ -2,10 +2,12 @@
 
 import json
 import threading
+import time as monotonic_time
 import time as time_module
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import duckdb
 import pytest
@@ -33,6 +35,7 @@ from investment_analyst.application.multi_asset_scheduler import (
 )
 from investment_analyst.application.storage_observability import (
     StorageObservabilityCollector,
+    StorageObservabilityError,
     StorageObservabilityState,
 )
 from investment_analyst.core.operation_control import current_operation_control
@@ -733,7 +736,153 @@ def test_scheduler_emits_storage_observability_without_changing_persisted_state(
     assert record.database_delta_bytes == 0
     assert record.table_bytes == ()
     assert record.growth is not None
-    assert record.durations.total_ms == 0
+    assert record.durations is not None
+    assert record.durations.total_ms >= record.durations.job_execution_ms
+    assert record.durations.query_open_ms + record.durations.query_select_ms <= (
+        record.durations.query_ms
+    )
+
+
+def test_scheduler_measures_job_duration_with_a_monotonic_clock(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    definition = _definition("monotonic-observation")
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        monotonic_time.sleep(0.05)
+        return _execution(invocation, created=1)
+
+    collector = StorageObservabilityCollector(
+        state_root=tmp_path / "state",
+        database_path=tmp_path / "missing.duckdb",
+        clock=lambda: now,
+    )
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(definition, run),),
+        MultiAssetScheduleStateStore(tmp_path / "schedule.json"),
+        clock=lambda: now,
+        storage_observability=collector,
+    )
+
+    attempt = scheduler.tick()[0]
+
+    record = collector.state().records[0]
+    assert attempt.status is ScheduledJobAttemptStatus.SUCCEEDED
+    assert record.durations is not None
+    assert record.durations.job_execution_ms >= 40
+    assert record.durations.total_ms >= record.durations.job_execution_ms
+
+
+def test_collector_retry_writes_the_last_job_envelope_without_rerunning_provider(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    definition = _definition("sec:institutional:13f-history")
+    provider_calls = 0
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        nonlocal provider_calls
+        provider_calls += 1
+        return _execution(invocation, created=1)
+
+    class FailOnceAppendCollector(StorageObservabilityCollector):
+        append_calls = 0
+
+        def _append_line(self, record) -> None:  # type: ignore[no-untyped-def]
+            self.append_calls += 1
+            if self.append_calls == 1:
+                raise StorageObservabilityError(
+                    "simulated transient append fault", reason_code="artifact_write_failed"
+                )
+            super()._append_line(record)
+
+    collector = FailOnceAppendCollector(
+        state_root=tmp_path / "state",
+        database_path=tmp_path / "missing.duckdb",
+        clock=lambda: now,
+    )
+    store = MultiAssetScheduleStateStore(tmp_path / "schedule.json")
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(definition, run),),
+        store,
+        clock=lambda: now,
+        storage_observability=collector,
+        attempt_id_factory=lambda: UUID("00000000-0000-4000-8000-0000000000a2"),
+    )
+
+    first = scheduler.tick()
+    assert first[0].status is ScheduledJobAttemptStatus.SUCCEEDED
+    assert provider_calls == 1
+    assert collector.state().records == ()
+    assert scheduler.status().issues == (
+        "storage observability could not record its result",
+        "storage observability failure reason: artifact_write_failed",
+    )
+
+    second = scheduler.tick()
+
+    assert second == ()
+    assert provider_calls == 1
+    assert collector.append_calls == 2
+    assert len(collector.state().records) == 1
+    assert collector.state().records[0].job_id == "sec:institutional:13f-history"
+    assert scheduler.status().issues == ()
+    assert len(store.load().attempts) == 1
+
+
+def test_restart_recovery_persists_unavailable_without_inventing_boundaries(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    definition = _definition("restart-recovery").model_copy(update={"max_attempts_per_day": 1})
+    local_date = now.astimezone(ZoneInfo(definition.timezone)).date()
+    running = ScheduledJobAttempt(
+        attempt_id=UUID("00000000-0000-4000-8000-0000000000a3"),
+        definition=definition,
+        local_date=local_date,
+        scheduled_for=definition.scheduled_for(local_date),
+        attempt_number=1,
+        status=ScheduledJobAttemptStatus.RUNNING,
+        started_at=now - timedelta(minutes=1),
+    )
+    store = MultiAssetScheduleStateStore(tmp_path / "schedule.json")
+    store.write_attempt_from_state(MultiAssetScheduleState(attempts=()), running)
+    collector = StorageObservabilityCollector(
+        state_root=tmp_path / "state",
+        database_path=tmp_path / "not-created.duckdb",
+        clock=lambda: now,
+    )
+    provider_calls = 0
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        nonlocal provider_calls
+        provider_calls += 1
+        return _execution(invocation)
+
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(definition, run),),
+        store,
+        storage_observability=collector,
+        clock=lambda: now,
+    )
+
+    recovered = scheduler.tick()
+
+    assert len(recovered) == 1
+    assert recovered[0].status is ScheduledJobAttemptStatus.FAILED
+    assert recovered[0].failure is not None
+    assert recovered[0].failure.category is ScheduledJobFailureCategory.INTERRUPTED
+    assert provider_calls == 0
+    record = collector.state().records[0]
+    assert record.attempt_id == running.attempt_id
+    assert record.attempt_status == "failed"
+    assert record.measurement_state == "unavailable"
+    assert record.database_bytes_before is None
+    assert record.database_bytes_after is None
+    assert record.table_rows_before is None
+    assert record.table_rows_after is None
+    assert record.durations is None
+    assert record.failure_phase is None
+    assert record.failure_reason is None
 
 
 def test_scheduler_persists_terminal_result_before_notification_and_observation(

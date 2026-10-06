@@ -4,6 +4,7 @@ import zlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from http.client import IncompleteRead, RemoteDisconnected
 from time import sleep as default_sleep
 from types import MappingProxyType
 from typing import Protocol
@@ -74,7 +75,10 @@ class HttpRequestError(RuntimeError):
     ) -> HttpRequestFailureKind:
         if status_code is not None:
             return HttpRequestFailureKind.HTTP_STATUS
-        if isinstance(cause, (ConnectionError, TimeoutError, URLError)):
+        if isinstance(
+            cause,
+            (ConnectionError, IncompleteRead, RemoteDisconnected, TimeoutError, URLError),
+        ):
             return HttpRequestFailureKind.TRANSPORT
         return HttpRequestFailureKind.UNEXPECTED
 
@@ -248,6 +252,25 @@ class UrlLibHttpTransport:
                 self._wait_before_retry(
                     self._retry_delay(attempt, error.headers.get("Retry-After"))
                 )
+            except (IncompleteRead, RemoteDisconnected) as error:
+                if method == "POST":
+                    raise HttpRequestError(
+                        url,
+                        "the response ended before completion",
+                        method=method,
+                        cause=error,
+                        failure_kind=HttpRequestFailureKind.TRANSPORT,
+                    ) from error
+                if attempt == _MAX_ATTEMPTS - 1:
+                    raise HttpRequestError(
+                        url,
+                        "the response ended before completion and the retry limit was exhausted",
+                        method=method,
+                        cause=error,
+                        failure_kind=HttpRequestFailureKind.TRANSPORT,
+                    ) from error
+                check_operation_cancelled()
+                self._wait_before_retry(self._retry_delay(attempt, None))
             except (TimeoutError, URLError) as error:
                 if attempt == _MAX_ATTEMPTS - 1:
                     raise HttpRequestError(

@@ -20,6 +20,10 @@ from investment_analyst.analytics.cazatiburones.activity_event_repository import
     ActivityEventRepository,
 )
 from investment_analyst.core.models.base import ContractModel, UTCDateTime
+from investment_analyst.evidence.sec_documents.repository import (
+    SecDocumentRepository,
+    verify_document_records,
+)
 from investment_analyst.storage import StorageError
 from investment_analyst.storage.compact_analytical_v2 import CompactAnalyticalStore
 from investment_analyst.workspace.backup import (
@@ -325,6 +329,7 @@ def _verify_v2_workspace(
         cursor_at: datetime | None = None
         cursor_id: UUID | None = None
         verified = 0
+        sec_documents = SecDocumentRepository(storage.raw_records, storage.documents)
         while True:
             page = storage.raw_records.list_import_page(
                 limit=256,
@@ -334,6 +339,9 @@ def _verify_v2_workspace(
             if not page:
                 break
             records = storage.raw_records.get_many(page)
+            if len(records) != len(page):
+                raise WorkspaceV2BackupError("workspace v2 raw page did not resolve exactly")
+            verify_document_records(records.values(), sec_documents)
             verified += len(records)
             last = records[page[-1]]
             cursor_at, cursor_id = last.received_at, last.record_id

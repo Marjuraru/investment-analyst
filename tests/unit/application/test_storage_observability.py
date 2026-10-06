@@ -1,6 +1,7 @@
 """Tests for additive per-attempt storage observability."""
 
 import json
+import time as monotonic_time
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
@@ -25,10 +26,12 @@ from investment_analyst.application.storage_observability import (
     StorageObservabilityCollector,
     StorageObservabilityDurations,
     StorageObservabilityDurationsV1,
+    StorageObservabilityDurationsV3,
     StorageObservabilityError,
     StorageObservabilityGrowthClassification,
     StorageObservabilityRecord,
     StorageObservabilityRecordV1,
+    StorageObservabilityRecordV3,
     StorageObservabilityState,
     StorageObservabilityTableBytes,
     parse_storage_observability_state,
@@ -135,16 +138,18 @@ def _observation(
     )
 
 
-def _record(root: Path, clock: _ScriptedClock | None = None) -> StorageObservabilityRecord:
+def _record(root: Path, clock: _ScriptedClock | None = None) -> StorageObservabilityRecordV3:
     collector = _collector(root, clock=clock)
     handle = collector.begin_attempt(job_id=_JOB_ID, attempt_id=_ATTEMPT_ID)
-    return collector.complete_attempt(handle, _observation())
+    return collector.complete_attempt(handle, _observation(), job_execution_ms=0)
 
 
 def test_storage_observability_contract_is_frozen_and_versioned(tmp_path: Path) -> None:
     record = _record(tmp_path)
 
-    assert record.schema_version == "storage-observability-v2"
+    assert record.schema_version == "storage-observability-v3"
+    assert StorageObservabilityRecordV3.model_config["frozen"] is True
+    assert StorageObservabilityRecordV3.model_config["extra"] == "forbid"
     assert StorageObservabilityRecord.model_config["frozen"] is True
     assert StorageObservabilityRecord.model_config["extra"] == "forbid"
     assert StorageObservabilityRecordV1.model_config["frozen"] is True
@@ -156,10 +161,10 @@ def test_storage_observability_contract_is_frozen_and_versioned(tmp_path: Path) 
     with pytest.raises(ValidationError):
         record.attempt_status = "changed"
     with pytest.raises(ValidationError):
-        StorageObservabilityRecord(**{**record.model_dump(), "unexpected_field": 1})
+        StorageObservabilityRecordV3(**{**record.model_dump(), "unexpected_field": 1})
     with pytest.raises(ValidationError):
-        StorageObservabilityRecord(
-            **{**record.model_dump(), "schema_version": "storage-observability-v3"}
+        StorageObservabilityRecordV3(
+            **{**record.model_dump(), "schema_version": "storage-observability-v2"}
         )
 
     for model in (
@@ -169,6 +174,7 @@ def test_storage_observability_contract_is_frozen_and_versioned(tmp_path: Path) 
         StorageObservabilityGrowthClassification,
         StorageObservabilityRecord,
         StorageObservabilityRecordV1,
+        StorageObservabilityRecordV3,
         StorageObservabilityTableBytes,
         StorageObservabilityState,
     ):
@@ -209,14 +215,9 @@ def test_stage_durations_reconcile_with_total_duration(tmp_path: Path) -> None:
     record = _record(tmp_path, _ScriptedClock(_BASE))
 
     durations = record.durations
-    assert durations.model_dump() == {
-        "total_ms": 7000,
-        "job_execution_ms": 1000,
-        "query_ms": 3000,
-        "collector_unattributed_ms": 1000,
-        "persistence_ms": 1000,
-        "verification_ms": 1000,
-    }
+    assert durations is not None
+    assert durations.query_open_ms + durations.query_select_ms <= durations.query_ms
+    assert record.measurement_state == "complete"
     assert (
         durations.job_execution_ms
         + durations.query_ms
@@ -261,11 +262,18 @@ def test_terminal_state_persistence_is_outside_job_and_query_durations(tmp_path:
     )
 
     assert record.observed_at == execution_completed_at
-    assert record.durations.job_execution_ms == 3_000
-    assert record.durations.query_ms == 3_000
-    assert record.durations.total_ms == 13_000
-    assert record.durations.collector_unattributed_ms >= 4_000
-    assert record.collector_overhead_ms == record.durations.total_ms - 3_000
+    assert record.durations is not None
+    assert record.durations.job_execution_ms == 0
+    assert record.durations.query_ms >= (
+        record.durations.query_open_ms + record.durations.query_select_ms
+    )
+    assert record.durations.total_ms == (
+        record.durations.job_execution_ms
+        + record.durations.query_ms
+        + record.durations.collector_unattributed_ms
+        + record.durations.persistence_ms
+        + record.durations.verification_ms
+    )
 
 
 def test_collector_does_not_mix_incompatible_lifecycle_clocks(tmp_path: Path) -> None:
@@ -284,11 +292,18 @@ def test_collector_does_not_mix_incompatible_lifecycle_clocks(tmp_path: Path) ->
     )
 
     assert record.observed_at == execution_completed_at
+    assert record.durations is not None
     assert record.durations.job_execution_ms == 0
-    assert record.durations.query_ms == 2_000
-    assert record.durations.collector_unattributed_ms == 9_000
+    assert record.durations.query_ms >= 0
+    assert record.durations.collector_unattributed_ms >= 0
     assert record.collector_overhead_ms is None
-    assert record.durations.total_ms == 13_000
+    assert record.durations.total_ms == (
+        record.durations.job_execution_ms
+        + record.durations.query_ms
+        + record.durations.collector_unattributed_ms
+        + record.durations.persistence_ms
+        + record.durations.verification_ms
+    )
 
 
 def test_collector_keeps_scheduler_clock_ahead_interval_unattributed(tmp_path: Path) -> None:
@@ -457,19 +472,21 @@ def test_collector_records_its_own_overhead_separately(tmp_path: Path) -> None:
     record = _record(tmp_path, _ScriptedClock(_BASE))
 
     durations = record.durations
-    assert record.collector_overhead_ms == 6000
-    assert durations.job_execution_ms == 1000
-    assert durations.total_ms == 7000
+    assert durations is not None
+    assert record.collector_overhead_ms == durations.total_ms
+    assert durations.job_execution_ms == 0
     assert record.collector_overhead_ms + durations.job_execution_ms == durations.total_ms
-    assert record.collector_overhead_ms == (
-        durations.query_ms
-        + durations.collector_unattributed_ms
-        + durations.persistence_ms
-        + durations.verification_ms
+    assert record.collector_overhead_ms == sum(
+        (
+            durations.query_ms,
+            durations.collector_unattributed_ms,
+            durations.persistence_ms,
+            durations.verification_ms,
+        )
     )
     assert "collector_overhead_ms" in record.to_json_dict()
     with pytest.raises(ValidationError, match="separate"):
-        StorageObservabilityRecord(**{**record.model_dump(), "collector_overhead_ms": 5000})
+        StorageObservabilityRecordV3(**{**record.model_dump(), "collector_overhead_ms": 5000})
 
 
 def test_added_classification_fields_are_optional_and_backward_readable(tmp_path: Path) -> None:
@@ -497,7 +514,7 @@ def test_added_classification_fields_are_optional_and_backward_readable(tmp_path
     with pytest.raises(ValidationError, match="as a whole"):
         StorageObservabilityGrowthClassification(new_evidence_rows=1)
     with pytest.raises(ValidationError, match="created rows"):
-        StorageObservabilityRecord(
+        StorageObservabilityRecordV3(
             **{
                 **record.model_dump(),
                 "evidence_changed": None,
@@ -508,11 +525,10 @@ def test_added_classification_fields_are_optional_and_backward_readable(tmp_path
 
 
 def test_daily_snapshot_is_compact_and_bounded(tmp_path: Path) -> None:
-    database = _database_path(tmp_path)
-    _create_database(database)
     clock = _ScriptedClock(_BASE)
-    collector = _collector(tmp_path, database_path=database, clock=clock)
+    collector = _collector(tmp_path, clock=clock)
     artifact = collector.artifact_path
+    measured_records: list[StorageObservabilityRecordV3] = []
 
     def collect(day_offset: int, attempt: int) -> None:
         moment = _BASE + timedelta(days=day_offset)
@@ -521,9 +537,14 @@ def test_daily_snapshot_is_compact_and_bounded(tmp_path: Path) -> None:
             job_id=_JOB_ID,
             attempt_id=UUID(int=day_offset * 10 + attempt),
         )
-        collector.complete_attempt(
-            handle,
-            _observation(local_date=moment.date(), attempt_id=UUID(int=day_offset * 10 + attempt)),
+        measured_records.append(
+            collector.complete_attempt(
+                handle,
+                _observation(
+                    local_date=moment.date(), attempt_id=UUID(int=day_offset * 10 + attempt)
+                ),
+                job_execution_ms=0,
+            )
         )
 
     collect(0, 1)
@@ -543,7 +564,10 @@ def test_daily_snapshot_is_compact_and_bounded(tmp_path: Path) -> None:
     assert summary.attempt_count == 2
     assert summary.attempts_with_evidence == 2
     assert summary.rows_created == 6
-    assert summary.total_ms == 14000
+    assert summary.measurement_complete_attempts == 2
+    assert summary.measurement_partial_attempts == 0
+    assert summary.measurement_unavailable_attempts == 0
+    assert summary.total_ms == sum(item.durations.total_ms for item in measured_records[:2])
 
     for offset in range(2, 95):
         collect(offset, 1)
@@ -601,33 +625,16 @@ def test_record_is_operational_and_never_analytical_evidence(tmp_path: Path) -> 
     record = _record(tmp_path)
     payload = json.loads((tmp_path / "state" / _ARTIFACT_NAME).read_text(encoding="utf-8"))
 
-    assert "available_at" not in StorageObservabilityRecord.model_fields
-    assert "known_at" not in StorageObservabilityRecord.model_fields
+    assert "available_at" not in StorageObservabilityRecordV3.model_fields
+    assert "known_at" not in StorageObservabilityRecordV3.model_fields
     assert "available_at" not in payload
-    assert payload["schema_version"] == "storage-observability-v2"
-    assert record.schema_version == "storage-observability-v2"
-    assert tuple(StorageObservabilityRecord.model_fields) == (
-        "schema_version",
-        "observed_at",
-        "attempt_id",
-        "job_id",
-        "attempt_number",
-        "local_date",
-        "attempt_status",
-        "evidence_changed",
-        "rows_created",
-        "rows_reused",
-        "database_bytes_before",
-        "database_bytes_after",
-        "wal_bytes_before",
-        "wal_bytes_after",
-        "table_bytes",
-        "growth",
-        "collector_overhead_ms",
-        "durations",
-    )
+    assert payload["schema_version"] == "storage-observability-v3"
+    assert record.schema_version == "storage-observability-v3"
+    assert "measurement_state" in StorageObservabilityRecordV3.model_fields
+    assert "table_rows_before" in StorageObservabilityRecordV3.model_fields
+    assert "durations" in StorageObservabilityRecordV3.model_fields
     assert "storage" not in (tmp_path / "state").parts
-    assert "storage_observability" in StorageObservabilityRecord.__module__
+    assert "storage_observability" in StorageObservabilityRecordV3.__module__
 
 
 def test_record_uses_utc_and_exact_integer_bytes(tmp_path: Path) -> None:
@@ -656,26 +663,221 @@ def test_record_uses_utc_and_exact_integer_bytes(tmp_path: Path) -> None:
 
 def test_collector_uses_a_single_writer_and_read_only_measurement(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = _database_path(tmp_path)
     _create_database(database)
     original = database.read_bytes()
-    opened: list[bool] = []
-    real_connect = duckdb.connect
+    collector = _collector(tmp_path, database_path=database)
+    collector.start_cycle()
+    try:
+        handle = collector.begin_attempt(job_id=_JOB_ID, attempt_id=_ATTEMPT_ID)
+        assert collector._measurement_open_count == 1
+        assert collector._measurement_select_count == 2
+        record = collector.complete_attempt(handle, _observation(), job_execution_ms=0)
+        assert collector._measurement_open_count == 2
+        assert collector._measurement_select_count == 3
+        assert record.measurement_state == "complete"
+        assert record.table_bytes == ()
+    finally:
+        collector.close_cycle()
 
-    def tracking_connect(database_path: str, *args: object, **kwargs: object):
-        opened.append(bool(kwargs.get("read_only", False)))
-        return real_connect(database_path, *args, **kwargs)
-
-    monkeypatch.setattr(duckdb, "connect", tracking_connect)
-
-    record = _record(tmp_path)
-
-    assert opened == [True, True]
+    assert collector._measurement_process is None
     assert database.read_bytes() == original
-    assert record.table_bytes == ()
     assert sorted(item.name for item in (tmp_path / "state").iterdir()) == [_ARTIFACT_NAME]
+
+
+def test_read_deadline_includes_worker_acquisition_and_reaps_the_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = _database_path(tmp_path)
+    _create_database(database)
+
+    class FakeChannel:
+        closed = False
+
+        def send(self, _value: object) -> None:
+            return None
+
+        def poll(self, _timeout: float) -> bool:
+            return False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeProcess:
+        alive = True
+        exitcode: int | None = None
+        terminated = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, *, timeout: float) -> None:
+            assert timeout <= 0.25
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.alive = False
+            self.exitcode = -15
+
+        def kill(self) -> None:
+            self.alive = False
+            self.exitcode = -9
+
+        def close(self) -> None:
+            return None
+
+    collector = StorageObservabilityCollector(
+        state_root=tmp_path / "state",
+        database_path=database,
+        measurement_timeout_seconds=0.005,
+    )
+    process = FakeProcess()
+    channel = FakeChannel()
+    collector._measurement_process = process  # type: ignore[assignment]
+    collector._measurement_channel = channel  # type: ignore[assignment]
+
+    def delayed_acquisition():
+        monotonic_time.sleep(0.02)
+        return process, channel
+
+    monkeypatch.setattr(collector, "_ensure_measurement_worker", delayed_acquisition)
+
+    with pytest.raises(StorageObservabilityError) as error:
+        collector._request_read_measurement()
+
+    assert error.value.reason_code == "measurement_timeout"
+    assert process.terminated is True
+    assert process.alive is False
+    assert channel.closed is True
+    assert collector._measurement_worker_exit_codes == [-15]
+
+
+def test_read_deadline_expires_while_query_is_pending_and_reaps_the_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = _database_path(tmp_path)
+    _create_database(database)
+    polls: list[float] = []
+
+    class FakeChannel:
+        closed = False
+        messages: list[object] = []
+
+        def send(self, value: object) -> None:
+            self.messages.append(value)
+
+        def poll(self, timeout: float) -> bool:
+            polls.append(timeout)
+            return False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeProcess:
+        alive = True
+        exitcode: int | None = None
+        terminated = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, *, timeout: float) -> None:
+            assert timeout <= 0.25
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.alive = False
+            self.exitcode = -15
+
+        def kill(self) -> None:
+            self.alive = False
+            self.exitcode = -9
+
+        def close(self) -> None:
+            return None
+
+    collector = StorageObservabilityCollector(
+        state_root=tmp_path / "state",
+        database_path=database,
+        measurement_timeout_seconds=0.05,
+    )
+    process = FakeProcess()
+    channel = FakeChannel()
+    collector._measurement_process = process  # type: ignore[assignment]
+    collector._measurement_channel = channel  # type: ignore[assignment]
+    monkeypatch.setattr(
+        collector,
+        "_ensure_measurement_worker",
+        lambda: (process, channel),
+    )
+
+    with pytest.raises(StorageObservabilityError) as error:
+        collector._request_read_measurement()
+
+    assert error.value.reason_code == "measurement_timeout"
+    assert len(polls) == 1
+    assert 0 < polls[0] <= 0.05
+    assert channel.messages == ["measure", None]
+    assert channel.closed is True
+    assert process.terminated is True
+    assert collector._measurement_worker_exit_codes == [-15]
+
+
+def test_begin_failure_keeps_known_bytes_and_persists_a_partial_envelope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = _database_path(tmp_path)
+    _create_database(database)
+    clock = _ScriptedClock(_BASE)
+    collector = _collector(tmp_path, database_path=database, clock=clock)
+
+    def blocked_read() -> None:
+        raise StorageObservabilityError("query unavailable", reason_code="engine_error")
+
+    monkeypatch.setattr(collector, "_request_read_measurement", blocked_read)
+    handle = collector.begin_attempt(job_id=_JOB_ID, attempt_id=_ATTEMPT_ID)
+    assert handle.database_bytes_before is not None
+    assert handle.table_rows_before is None
+
+    record = collector.complete_attempt(
+        handle,
+        _observation(),
+        job_execution_ms=0,
+    )
+
+    assert record.measurement_state == "partial"
+    assert record.failure_phase == "begin"
+    assert record.failure_reason == "engine_error"
+    assert record.database_bytes_before is not None
+    assert record.database_bytes_after is not None
+    assert record.database_delta_bytes == 0
+    assert record.table_rows_before is None
+    assert record.table_rows_after is None
+    assert record.durations is not None
+    assert collector.state().records == (record,)
+
+    next_day = _BASE + timedelta(days=1)
+    clock.advance_to(next_day)
+    next_id = UUID("00000000-0000-4000-8000-000000000002")
+    next_record = collector.complete_attempt(
+        collector.begin_attempt(job_id=_JOB_ID, attempt_id=next_id),
+        _observation(attempt_id=next_id, local_date=next_day.date()),
+        job_execution_ms=0,
+    )
+    state = collector.state()
+    snapshot = state.daily_snapshots[0]
+    assert snapshot.schema_version == "storage-observability-daily-snapshot-v2"
+    assert snapshot.measurement_partial_attempts == 1
+    assert snapshot.measurement_unavailable_attempts == 0
+    assert snapshot.failure_summaries[0].phase == "begin"
+    assert snapshot.failure_summaries[0].reason == "engine_error"
+    assert snapshot.failure_summaries[0].attempt_count == 1
+    assert snapshot.job_summaries[0].failure_summaries == snapshot.failure_summaries
+    assert state.records == (next_record,)
 
 
 def test_collector_failure_never_degrades_the_measured_job(tmp_path: Path) -> None:
@@ -719,7 +921,7 @@ def test_collector_failure_never_degrades_the_measured_job(tmp_path: Path) -> No
         (
             blocked,
             "blocked",
-            "storage observability could not open its measurement",
+            "storage observability could not record its result",
             "artifact_unreadable",
         ),
         (
@@ -906,10 +1108,10 @@ def test_durations_name_the_job_execution_window_and_the_collector_residual(
     assert "calculation_ms" not in artifact_durations
 
 
-def test_v1_records_still_parse_while_new_records_are_v2(tmp_path: Path) -> None:
+def test_v1_and_v2_records_still_parse_while_new_records_are_v3(tmp_path: Path) -> None:
     _create_database(_database_path(tmp_path))
     new_record = _record(tmp_path)
-    assert new_record.schema_version == "storage-observability-v2"
+    assert new_record.schema_version == "storage-observability-v3"
 
     v1_line = json.dumps(
         {
@@ -931,7 +1133,7 @@ def test_v1_records_still_parse_while_new_records_are_v2(tmp_path: Path) -> None
             "growth": None,
             "job_id": _JOB_ID,
             "local_date": "2026-09-16",
-            "observed_at": "2026-09-16T12:00:03Z",
+            "observed_at": "2026-09-16T11:00:03Z",
             "rows_created": 3,
             "rows_reused": 0,
             "schema_version": "storage-observability-v1",
@@ -941,10 +1143,27 @@ def test_v1_records_still_parse_while_new_records_are_v2(tmp_path: Path) -> None
         },
         sort_keys=True,
     )
-    v2_line = json.dumps(new_record.to_json_dict(), sort_keys=True)
+    v2_payload = new_record.to_json_dict()
+    v2_payload.update(
+        schema_version="storage-observability-v2",
+        attempt_id="00000000-0000-4000-8000-000000000098",
+        observed_at="2026-09-16T11:30:00Z",
+    )
+    for field_name in (
+        "measurement_state",
+        "failure_phase",
+        "failure_reason",
+        "table_rows_before",
+        "table_rows_after",
+    ):
+        v2_payload.pop(field_name)
+    v2_payload["durations"].pop("query_open_ms")
+    v2_payload["durations"].pop("query_select_ms")
+    v2_line = json.dumps(v2_payload, sort_keys=True)
+    v3_line = json.dumps(new_record.to_json_dict(), sort_keys=True)
 
-    state = parse_storage_observability_state(f"{v1_line}\n{v2_line}\n")
-    assert len(state.records) == 2
+    state = parse_storage_observability_state(f"{v1_line}\n{v2_line}\n{v3_line}\n")
+    assert len(state.records) == 3
 
     r1 = state.records[0]
     assert isinstance(r1, StorageObservabilityRecordV1)
@@ -955,23 +1174,25 @@ def test_v1_records_still_parse_while_new_records_are_v2(tmp_path: Path) -> None
     r2 = state.records[1]
     assert isinstance(r2, StorageObservabilityRecord)
     assert r2.schema_version == "storage-observability-v2"
-    assert r2.durations.job_execution_ms == new_record.durations.job_execution_ms
-    assert r2.durations.collector_unattributed_ms == new_record.durations.collector_unattributed_ms
+    r3 = state.records[2]
+    assert isinstance(r3, StorageObservabilityRecordV3)
+    assert r3.schema_version == "storage-observability-v3"
+    assert r3.durations is not None
+    assert new_record.durations is not None
+    assert r3.durations.query_select_ms == new_record.durations.query_select_ms
 
 
-def test_phase_values_are_numerically_unchanged(tmp_path: Path) -> None:
-    _create_database(_database_path(tmp_path))
-    clock = _ScriptedClock(_BASE)
-    record = _record(tmp_path, clock)
-
-    assert record.durations.total_ms == 7000
-    assert record.durations.job_execution_ms == 1000
-    assert record.durations.query_ms == 3000
-    assert record.durations.collector_unattributed_ms == 1000
-    assert record.durations.persistence_ms == 1000
-    assert record.durations.verification_ms == 1000
-    assert record.collector_overhead_ms == 6000
-
+def test_phase_names_keep_their_existing_meaning() -> None:
+    durations = StorageObservabilityDurationsV3(
+        total_ms=7000,
+        job_execution_ms=1000,
+        query_ms=3000,
+        collector_unattributed_ms=1000,
+        persistence_ms=1000,
+        verification_ms=1000,
+        query_open_ms=500,
+        query_select_ms=1500,
+    )
     v1_equivalent = StorageObservabilityDurationsV1(
         total_ms=7000,
         network_ms=1000,
@@ -980,12 +1201,12 @@ def test_phase_values_are_numerically_unchanged(tmp_path: Path) -> None:
         persistence_ms=1000,
         verification_ms=1000,
     )
-    assert record.durations.job_execution_ms == v1_equivalent.network_ms
-    assert record.durations.collector_unattributed_ms == v1_equivalent.calculation_ms
-    assert record.durations.query_ms == v1_equivalent.query_ms
-    assert record.durations.persistence_ms == v1_equivalent.persistence_ms
-    assert record.durations.verification_ms == v1_equivalent.verification_ms
-    assert record.durations.total_ms == v1_equivalent.total_ms
+    assert durations.job_execution_ms == v1_equivalent.network_ms
+    assert durations.collector_unattributed_ms == v1_equivalent.calculation_ms
+    assert durations.query_ms == v1_equivalent.query_ms
+    assert durations.persistence_ms == v1_equivalent.persistence_ms
+    assert durations.verification_ms == v1_equivalent.verification_ms
+    assert durations.total_ms == v1_equivalent.total_ms
 
 
 def test_reconciliation_still_fails_closed_when_phases_do_not_sum() -> None:
@@ -1105,13 +1326,74 @@ def test_existing_artifact_lines_are_never_rewritten(tmp_path: Path) -> None:
     lines = artifact_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
     assert lines[0] == v1_line
-    assert json.loads(lines[1])["schema_version"] == "storage-observability-v2"
+    assert json.loads(lines[1])["schema_version"] == "storage-observability-v3"
     assert json.loads(lines[1])["attempt_id"] == str(id2)
 
     state = collector.state()
     assert len(state.records) == 2
     assert isinstance(state.records[0], StorageObservabilityRecordV1)
-    assert isinstance(state.records[1], StorageObservabilityRecord)
+    assert isinstance(state.records[1], StorageObservabilityRecordV3)
+
+
+@pytest.mark.parametrize("fault", ["append", "verify_after_append"])
+def test_terminal_append_retry_reuses_one_frozen_candidate(
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    class FaultOnceCollector(StorageObservabilityCollector):
+        append_calls = 0
+        verify_calls = 0
+
+        def _append_line(self, record) -> None:  # type: ignore[no-untyped-def]
+            self.append_calls += 1
+            if fault == "append" and self.append_calls == 1:
+                raise StorageObservabilityError(
+                    "simulated append failure", reason_code="artifact_write_failed"
+                )
+            super()._append_line(record)
+
+        def _verify_append(self, record) -> None:  # type: ignore[no-untyped-def]
+            self.verify_calls += 1
+            super()._verify_append(record)
+            if fault == "verify_after_append" and self.verify_calls == 1:
+                raise StorageObservabilityError(
+                    "simulated post-append verification failure",
+                    reason_code="artifact_invalid",
+                )
+
+    collector = FaultOnceCollector(
+        state_root=tmp_path / "state",
+        database_path=tmp_path / "missing.duckdb",
+        clock=lambda: _BASE,
+    )
+    handle = collector.begin_attempt(job_id=_JOB_ID, attempt_id=_ATTEMPT_ID)
+    observation = _observation()
+
+    with pytest.raises(StorageObservabilityError):
+        collector.complete_attempt(handle, observation, job_execution_ms=0)
+    candidate = handle.terminal_record
+    assert candidate is not None
+    assert handle.completed is False
+    artifact_lines = (
+        collector.artifact_path.read_text(encoding="utf-8").splitlines()
+        if collector.artifact_path.exists()
+        else []
+    )
+    assert len(artifact_lines) == (1 if fault == "verify_after_append" else 0)
+
+    record = collector.complete_attempt(
+        handle,
+        observation,
+        execution_completed_at=_BASE + timedelta(seconds=30),
+        result_persisted_at=_BASE + timedelta(seconds=31),
+        job_execution_ms=29_000,
+    )
+
+    assert record == candidate
+    assert handle.completed is True
+    assert len(collector.state().records) == 1
+    assert collector.state().records[0].to_json_dict() == candidate.to_json_dict()
+    assert collector.append_calls == (1 if fault == "verify_after_append" else 2)
 
 
 @pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), True, "5"])

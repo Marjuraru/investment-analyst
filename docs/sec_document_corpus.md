@@ -13,6 +13,46 @@ recuperación oficial demostrada y coincide con `retrieved_at`. En
 evidencia v2; el contador `legacy_records_excluded` hace explícita la historia v1 excluida. Una
 ausencia devuelve `missing`, nunca cero ni contenido inventado.
 
+`sec-document-revision-v3` representa una corrección de metadata observada en un snapshot oficial
+Submissions posterior cuando el mismo CIK, activo, accession y contenido conservan identidad. Sólo
+se admite si `accepted_at` cambió y todos los demás campos del documento permanecen iguales. Antes
+del append se verifica una vez el documento actual en Archives contra el SHA-256, tamaño y URL ya
+persistidos. Una diferencia de contenido, metadata adicional, lineage ausente o ambigüedad falla
+cerrado y conserva las revisiones existentes. El nuevo registro guarda `prior_revision_id`, el
+digest canónico de metadata y `metadata_observed_at` del snapshot Submissions. Su disponibilidad es
+`max(filing.accepted_at, metadata_observed_at, retrieved_at)`, por lo que una corrección nunca se
+retrotrae a su fecha oficial corregida. V3 conserva su contrato estrictamente byte-idéntico: nunca
+acepta otro hash o tamaño. La identidad y el RawRecord usan namespaces UUID5 propios de v3; las
+identidades v1/v2 permanecen estables.
+
+`sec-document-revision-v4` representa una respuesta nueva de Archives sólo cuando los bytes
+completos difieren de la respuesta anterior por un único script externo terminal, con una forma muy
+acotada, en un filing HTML. El elemento debe ser exactamente
+`<script type="text/javascript"  src="PATH"></script>` inmediatamente antes de
+`</body></html>` y el mismo whitespace ASCII final. `PATH` debe ser root-relative, tener de 1 a 255
+bytes ASCII de `[A-Za-z0-9_/-]`, empezar con una sola `/` y usar segmentos no vacíos sin `.` ni
+`..`. No se aceptan otros atributos, scripts inline, varios scripts terminales ni cambios en otros
+bytes. El verificador omite sólo ese elemento en vistas efímeras y prueba que el resto de bytes,
+tamaño y SHA-256 coincidan. El RawRecord conserva el hash y tamaño completos actuales; el hash
+anterior también es explícito y cada respuesta completa tiene su blob. `SecTerminalScriptDifference`
+registra el elemento exacto anterior/nuevo, offset y tamaño/hash del core. La prueba no describe el
+comportamiento del script ni la equivalencia del DOM renderizado: nunca descarga ni ejecuta PATH y
+no crea un tercer blob canónico.
+
+V4 enlaza con un prior v2, v3 o v4 y conserva activo, source URL, filing e identidad documental,
+salvo una corrección permitida de `accepted_at`. Su disponibilidad es
+`max(filing.accepted_at, metadata_observed_at, retrieved_at, prior.available_at)`. Una v3 posterior
+a v4 mantiene el mismo hash y tamaño completos de su prior. El replay valida la historia conectada
+sin forks y recalcula cada prueba v4 desde ambos blobs completos después de filtrar
+`available_at <= known_at`; antes del append devuelve revisión y bytes previos y después selecciona
+la nueva respuesta íntegra. Si metadata no cambia, la repetición valida/reutiliza la última revisión
+sin GET Archives ni RawRecord/blob documental equivalente; Submissions sí se vuelve a consultar.
+
+El replay acepta v2, v3 y v4; v1 sigue excluida y contabilizada explícitamente. Los backups de
+formatos 1 y 2 conservan priors, snapshots Submissions y los dos blobs completos de v4 y vuelven a
+verificar la prueba en restore. Lectores anteriores a v3/v4 no soportan esos schemas; se requiere
+una release que los entienda. El formato del workspace y las identidades v1/v2 no cambian.
+
 Los documentos presentados por un declarante que no es un activo del catálogo usan la revisión
 hermana `sec-filer-document-revision-v1`. Conservan el mismo `SecFiling` y
 `SecLogicalDocument`, pero sustituyen el vínculo `asset_id` por el `filer_cik` ya declarado en el
@@ -49,13 +89,16 @@ el escaneo RawRecord paginado existente.
 request estricto sólo admite `asset_id`; hace una comprobación dedicada de Submissions, sin descargar
 Company Facts, evalúa en orden los
 forms declarados por `SecAssetConfiguration` (incluidos `/A`) y elige el filing más reciente de cada
-form compatible. La cobertura sólo significa que cada accession seleccionada tiene exactamente una
-revisión v2 con lineage, hash y tamaño verificados; no afirma cubrir toda la historia SEC.
+form compatible. La cobertura sólo significa que cada accession seleccionada tiene una última
+revisión v2, v3 o v4 con lineage y hashes de blobs completos verificados, además de prueba byte-exact
+para v4; no afirma cubrir toda la historia SEC.
 
 Antes de solicitar Archives, el pipeline busca por `asset_id` y accession. Cero revisiones permite
-un GET; una revisión compatible se verifica y reutiliza sin GET; más de una, metadata contradictoria
-o blob/lineage inválido falla cerrado. Las reruns reutilizan las accessions intactas y un snapshot
-con accession nueva sólo descarga ese delta. No produce observaciones, métricas, diagnósticos,
+un GET; metadata sin cambios valida y reutiliza la última revisión compatible sin GET; un cambio de
+`accepted_at` requiere un GET actual y crea v3 sólo con bytes idénticos o v4 sólo con diferencia del
+script terminal probada. Historias múltiples/forked, metadata contradictoria o blob, lineage o
+prueba inválidos fallan cerrado. Las reruns reutilizan las accessions intactas y un snapshot con
+accession nueva sólo descarga ese delta. No produce observaciones, métricas, diagnósticos,
 screening, texto extraído, embeddings, score ni rutas HTTP/UI.
 
 La comprobación real aislada usa la identidad local, nunca la imprime ni escribe en el workspace
