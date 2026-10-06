@@ -21,7 +21,7 @@ from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid4
 
 from duckdb import DuckDBPyConnection
@@ -97,6 +97,9 @@ from investment_analyst.storage.serialization import (
     model_from_json,
     sha256_hex,
 )
+
+if TYPE_CHECKING:
+    from investment_analyst.storage.historical_analytical_archive import HistoricalAnalyticalArchive
 
 _STAGING_FORMAT = "raw-v2-staging-v1"
 STAGING_FORMAT = _STAGING_FORMAT
@@ -1277,6 +1280,19 @@ class RawV2Staging:
         self._ensure_optional_analytical_tables(create=True)
         return receipt
 
+    def historical_analytical_archive(self, *, create: bool = False) -> HistoricalAnalyticalArchive:
+        """Return the isolated historical archive on this staging connection."""
+        self._require_open()
+        if create:
+            self._require_writable()
+        from investment_analyst.storage.historical_analytical_archive import (
+            HistoricalAnalyticalArchive,
+        )
+
+        archive = HistoricalAnalyticalArchive(self._connection)
+        archive.ensure(create=create)
+        return archive
+
     def get_metrics(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]:
         """Hydrate verified typed metrics with resolved lineage in order."""
         self._require_open()
@@ -1553,6 +1569,10 @@ class RawV2Staging:
             ensure_diagnostic_v2_tables,
         )
         from investment_analyst.storage.evidence_set_v2 import evidence_v2_tables_exist
+        from investment_analyst.storage.historical_analytical_archive import (
+            ensure_historical_analytical_archive_tables,
+            historical_analytical_archive_exists,
+        )
         from investment_analyst.storage.market_checkpoint_v2 import (
             ensure_market_checkpoint_v2_tables,
             market_checkpoint_v2_tables_exist,
@@ -1565,6 +1585,7 @@ class RawV2Staging:
         has_snapshots = analysis_snapshot_v2_tables_exist(self._connection)
         has_daily_evidence = daily_evidence_v2_tables_exist(self._connection)
         has_market_checkpoints = market_checkpoint_v2_tables_exist(self._connection)
+        has_historical_analytical = historical_analytical_archive_exists(self._connection)
         if has_daily_evidence != has_market_checkpoints:
             raise RawV2StagingError(
                 "market incremental evidence and checkpoint schema must be present together"
@@ -1572,6 +1593,8 @@ class RawV2Staging:
         if has_daily_evidence:
             ensure_daily_evidence_v2_tables(self._connection, create=False)
             ensure_market_checkpoint_v2_tables(self._connection, create=False)
+        if has_historical_analytical:
+            ensure_historical_analytical_archive_tables(self._connection, create=False)
         if create:
             if has_metrics:
                 ensure_metric_v2_tables(self._connection, create=True)

@@ -1000,3 +1000,58 @@ datos anteriores siguen siendo append-only.
 Transición propuesta: `DATA-CHASSIS` permanece `NEXT`, `route_effect: ADVANCES`. Tras integrar este
 candidato, la próxima frontera es la migración analítica v1 → staging v2 verificable y reanudable;
 la activación/cutover con recuperación bidireccional permanece posterior y requiere su autorización.
+
+## Archivo e importación del histórico analítico v1 (`DATA-CHASSIS-39` / #331)
+
+`DATA-CHASSIS-39` añade una ruta de archivo para los `MetricResult` y
+`DiagnosticResult` que ya existen en el workspace v1. El destino sigue siendo
+un staging v2 aislado: no cambia el escritor de producción, no selecciona un
+workspace activo y no inicia migración ni cutover.
+
+- **Representación tipada y auditable**: `historical_metric_results` y
+  `historical_diagnostic_results` conservan todos los campos v1, UUID original,
+  parámetros completos (incluidos `known_at` y `run_id`), Decimal exacto como
+  texto y checksum SHA-256 del modelo completo. Componentes, evidencia y links
+  ordenados se almacenan aparte. Los UUIDv8 se comprueban únicamente con
+  `recalculate_metric_result_id`; otras versiones se preservan sin reinterpretar
+  su identidad.
+- **Lineage compartido**: las secuencias ordenadas de UUID son content-addressed
+  y se segmentan en grupos de hasta 256 miembros. Secuencias iguales comparten
+  sus segmentos. El fixture de escala comprueba que 100 métricas que citan los
+  mismos 720 inputs creen una secuencia y tres segmentos, sin repetir los 720
+  miembros por cada métrica.
+- **Importación y reanudación**: la fuente v1 se abre read-only y se verifica
+  junto con los checkpoints raw y de observaciones del mismo workspace y huella
+  de contenido. Cada página keyset contiene como máximo 256 entidades; se
+  escribe, relee y comprueba antes de confirmar su cursor y digest. El checkpoint
+  portable liga el staging, fuente, cursores, fases y digests. Un lote durable
+  cuyo checkpoint aún no se confirmó se verifica y se reutiliza al reanudar.
+  `verify_complete()` permite revisar el origen y el destino sin cambiar estado.
+- **Integridad**: la validación completa recorre las filas por páginas, comprueba
+  checksum y referencias, activo, `available_at`, componentes, citas y ausencia
+  de ciclos. Las consultas PIT conservan el orden keyset y el filtro
+  `available_at <= known_to`; no se hidratan documentos v1 ajenos al lote.
+- **Backup compatible**: si existe archivo analítico, el manifiesto v6 vincula
+  inventarios y digests raw, observaciones, métricas y diagnósticos, además del
+  `staging_id` y checkpoint. Un backup parcial verifica todas las filas durables
+  y el prefijo confirmado, permitiendo referencias pendientes en la cola aún no
+  confirmada; un backup completo vuelve a verificar cada fila y el grafo antes
+  de promover el restore. Los manifiestos v1–v5 conservan su lectura y restore.
+
+El smoke offline `scripts/smoke_historical_analytical_import.py` usa los perfiles
+`historical_analytical_fidelity` (N=257), `historical_analytical_resume` (N=257,
+interrupción durable, backup y reanudación) y `historical_analytical_scale`
+(N=1537). Registra, por fase, páginas, filas, modelos, consultas, secuencias
+creadas/reutilizadas, segmentos, digests, duración, RSS y bytes lógicos y
+físicos separados. La salida JSON incluye el comando, entorno y SHA exacto; los
+tiempos y RSS son descriptivos y no gates. El artifact final del candidato y
+su SHA se conservan en el draft PR. Los resultados son evidencia `SCRATCH`: no
+demuestran ahorro operacional, reducción del workspace productivo ni
+cumplimiento de metas de la ruta.
+
+Tras integrar #331, la ruta conserva un único `NEXT`: PLAN debe resolver desde
+`main` la adopción de repositorios/consumidores y el plan de cutover que lea el
+archivo histórico junto con las escrituras nuevas sin colapsar identidades.
+El ensayo completo con restore/rollback, la activación HUMAN, la limpieza
+inventariada y backup Drive probado son etapas posteriores. Este archivo no
+cierra DATA-CHASSIS ni convierte staging v2 en workspace activo.

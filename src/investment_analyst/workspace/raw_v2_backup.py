@@ -51,12 +51,19 @@ from investment_analyst.storage.raw_v2_import import (
     empty_digest,
     extend_digest,
 )
+from investment_analyst.workspace.historical_analytical_backup import (
+    HistoricalAnalyticalBackupCounts,
+    HistoricalAnalyticalBackupError,
+    inspect_historical_analytical_backup,
+    verify_historical_analytical_backup,
+)
 
 RAW_V2_BACKUP_MANIFEST_SCHEMA = "raw-v2-staging-backup-manifest-v1"
 RAW_V2_BACKUP_MANIFEST_SCHEMA_V2 = "raw-v2-staging-backup-manifest-v2"
 RAW_V2_BACKUP_MANIFEST_SCHEMA_V3 = "raw-v2-staging-backup-manifest-v3"
 RAW_V2_BACKUP_MANIFEST_SCHEMA_V4 = "raw-v2-staging-backup-manifest-v4"
 RAW_V2_BACKUP_MANIFEST_SCHEMA_V5 = "raw-v2-staging-backup-manifest-v5"
+RAW_V2_BACKUP_MANIFEST_SCHEMA_V6 = "raw-v2-staging-backup-manifest-v6"
 BACKUP_MANIFEST_NAME = "raw-v2-staging-backup-manifest.json"
 _IMPORT_STATE_FILENAME = "raw-v2-import-state.json"
 _OBSERVATION_IMPORT_STATE_FILENAME = "observation-v2-import-state.json"
@@ -166,6 +173,8 @@ class RawV2StagingBackupManifest(ContractModel):
     inventory with their verified links and digests.
     Schema ``v5`` additionally binds daily evidence prefixes and recursive
     checkpoint state with their observation/metric links and digests.
+    Schema ``v6`` additionally binds complete or resumable historical v1
+    metric and diagnostic archives to their portable checkpoint.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -176,6 +185,7 @@ class RawV2StagingBackupManifest(ContractModel):
         "raw-v2-staging-backup-manifest-v3",
         "raw-v2-staging-backup-manifest-v4",
         "raw-v2-staging-backup-manifest-v5",
+        "raw-v2-staging-backup-manifest-v6",
     ] = RAW_V2_BACKUP_MANIFEST_SCHEMA
     backup_id: UUID
     staging_id: NonEmptyStr
@@ -191,6 +201,7 @@ class RawV2StagingBackupManifest(ContractModel):
     metric_counts: RawV2BackupMetricCounts | None = None
     analysis_counts: RawV2BackupAnalysisCounts | None = None
     incremental_counts: RawV2BackupIncrementalCounts | None = None
+    historical_analytical_counts: HistoricalAnalyticalBackupCounts | None = None
 
     @model_validator(mode="after")
     def validate_inventory(self) -> RawV2StagingBackupManifest:
@@ -199,7 +210,19 @@ class RawV2StagingBackupManifest(ContractModel):
             raise ValueError("backup inventory must be non-empty, unique, and sorted")
         if BACKUP_MANIFEST_NAME in paths:
             raise ValueError("backup inventory must not contain its own manifest")
-        if self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V5:
+        if self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V6:
+            expected_id = _backup_id(
+                self.staging_id,
+                self.files,
+                self.counts,
+                self.observation_counts,
+                self.schema_version,
+                self.metric_counts,
+                self.analysis_counts,
+                self.incremental_counts,
+                self.historical_analytical_counts,
+            )
+        elif self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V5:
             expected_id = _backup_id(
                 self.staging_id,
                 self.files,
@@ -241,6 +264,11 @@ class RawV2StagingBackupManifest(ContractModel):
             expected_id = _legacy_backup_id(self.staging_id, self.files, self.counts)
         if self.backup_id != expected_id:
             raise ValueError("backup identity does not match its inventory")
+        if (
+            self.schema_version != RAW_V2_BACKUP_MANIFEST_SCHEMA_V6
+            and self.historical_analytical_counts is not None
+        ):
+            raise ValueError("historical analytical counts require a v6 manifest")
         if self.incremental_counts is not None:
             prefixes = self.incremental_counts.daily_prefixes
             prefix_links = self.incremental_counts.daily_prefix_observation_links
@@ -265,6 +293,13 @@ class RawV2StagingBackupManifest(ContractModel):
                 raise ValueError("v4 manifest requires analysis counts")
             if self.incremental_counts is not None:
                 raise ValueError("v4 manifest must not carry incremental counts")
+        elif self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V6:
+            if self.observation_counts is None:
+                raise ValueError("v6 manifest requires observation counts")
+            if self.historical_analytical_counts is None:
+                raise ValueError("v6 manifest requires historical analytical counts")
+            if self.checkpoint_format is None or self.observation_checkpoint_format is None:
+                raise ValueError("v6 manifest requires raw and observation checkpoints")
         elif self.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V5:
             if self.incremental_counts is None:
                 raise ValueError("v5 manifest requires incremental counts")
@@ -293,6 +328,8 @@ class RawV2StagingBackupManifest(ContractModel):
                 raise ValueError("v2 manifest must not carry analysis counts")
             if self.incremental_counts is not None:
                 raise ValueError("v2 manifest must not carry incremental counts")
+            if self.historical_analytical_counts is not None:
+                raise ValueError("v2 manifest must not carry historical analytical counts")
         else:
             if self.observation_counts is not None:
                 raise ValueError("v1 manifest must not carry observation counts")
@@ -302,6 +339,8 @@ class RawV2StagingBackupManifest(ContractModel):
                 raise ValueError("v1 manifest must not carry analysis counts")
             if self.incremental_counts is not None:
                 raise ValueError("v1 manifest must not carry incremental counts")
+            if self.historical_analytical_counts is not None:
+                raise ValueError("legacy manifest must not carry historical analytical counts")
             if self.observation_checkpoint_format is not None:
                 raise ValueError("v1 manifest must not carry observation checkpoint")
         return self
@@ -319,6 +358,7 @@ def _backup_id(
     metric_counts: RawV2BackupMetricCounts | None = None,
     analysis_counts: RawV2BackupAnalysisCounts | None = None,
     incremental_counts: RawV2BackupIncrementalCounts | None = None,
+    historical_analytical_counts: HistoricalAnalyticalBackupCounts | None = None,
 ) -> UUID:
     payload: dict[str, object] = {
         "staging_id": staging_id,
@@ -340,6 +380,18 @@ def _backup_id(
         )
         payload["incremental_counts"] = (
             incremental_counts.model_dump(mode="json") if incremental_counts else None
+        )
+    if schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V6:
+        payload["analysis_counts"] = (
+            analysis_counts.model_dump(mode="json") if analysis_counts else None
+        )
+        payload["incremental_counts"] = (
+            incremental_counts.model_dump(mode="json") if incremental_counts else None
+        )
+        payload["historical_analytical_counts"] = (
+            historical_analytical_counts.model_dump(mode="json")
+            if historical_analytical_counts
+            else None
         )
     document = json.dumps(
         payload,
@@ -479,7 +531,43 @@ class RawV2StagingBackupService:
                     staging_root
                 )
                 incremental_counts = self._count_incremental(connection)
-                if incremental_counts is not None:
+                try:
+                    historical_counts = inspect_historical_analytical_backup(
+                        connection, staging_root, staging_id=staging_id
+                    )
+                except HistoricalAnalyticalBackupError as error:
+                    raise RawV2BackupError(str(error)) from error
+                if historical_counts is not None:
+                    metric_counts = self._count_metrics(staging, connection)
+                    analysis_counts = self._count_analysis(staging, connection)
+                    manifest = RawV2StagingBackupManifest(
+                        schema_version=RAW_V2_BACKUP_MANIFEST_SCHEMA_V6,
+                        backup_id=_backup_id(
+                            staging_id,
+                            inventory,
+                            counts,
+                            observation_counts,
+                            RAW_V2_BACKUP_MANIFEST_SCHEMA_V6,
+                            metric_counts,
+                            analysis_counts,
+                            incremental_counts,
+                            historical_counts,
+                        ),
+                        staging_id=staging_id,
+                        created_at=datetime.now(UTC),
+                        files=inventory,
+                        checkpoint_format=checkpoint_format,
+                        checkpoint_digest=checkpoint_digest,
+                        counts=counts,
+                        observation_checkpoint_format=observation_format,
+                        observation_checkpoint_digest=observation_digest,
+                        observation_counts=observation_counts,
+                        metric_counts=metric_counts,
+                        analysis_counts=analysis_counts,
+                        incremental_counts=incremental_counts,
+                        historical_analytical_counts=historical_counts,
+                    )
+                elif incremental_counts is not None:
                     metric_counts = self._count_metrics(staging, connection)
                     analysis_counts = self._count_analysis(staging, connection)
                     manifest = RawV2StagingBackupManifest(
@@ -1294,7 +1382,43 @@ class RawV2StagingBackupService:
             if state.format == "raw-v2-import-state-v1" and state.staging_id is not None:
                 raise RawV2BackupError("restored checkpoint mixes portable and legacy bindings")
         observation_state_path = root / _OBSERVATION_IMPORT_STATE_FILENAME
-        if manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V5:
+        if manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V6:
+            if manifest.historical_analytical_counts is None:
+                raise RawV2BackupError("restored v6 manifest is missing historical counts")
+            if manifest.observation_counts is None:
+                raise RawV2BackupError("restored v6 manifest is missing observation counts")
+            if not observation_state_path.is_file() or observation_state_path.is_symlink():
+                raise RawV2BackupError("restored v6 observation checkpoint is missing")
+            try:
+                observation_state = ObservationV2ImportState.model_validate_json(
+                    observation_state_path.read_text(encoding="utf-8")
+                )
+            except ValueError as error:
+                raise RawV2BackupError("restored observation state is incompatible") from error
+            if manifest.observation_checkpoint_format != observation_state.format:
+                raise RawV2BackupError("restored observation checkpoint mismatches backup")
+            if manifest.observation_checkpoint_digest != _sha256_streaming(observation_state_path):
+                raise RawV2BackupError("restored observation checkpoint mismatches backup")
+            self._verify_restored_observations(root, index_path, manifest)
+            if manifest.metric_counts is not None:
+                self._verify_restored_metrics(root, index_path, manifest)
+            if manifest.analysis_counts is not None:
+                self._verify_restored_analysis(root, index_path, manifest)
+            if manifest.incremental_counts is not None:
+                self._verify_restored_incremental(index_path, manifest)
+            connection = duckdb.connect(str(index_path), read_only=True)
+            try:
+                verify_historical_analytical_backup(
+                    connection,
+                    root,
+                    staging_id=manifest.staging_id,
+                    expected=manifest.historical_analytical_counts,
+                )
+            except HistoricalAnalyticalBackupError as error:
+                raise RawV2BackupError(str(error)) from error
+            finally:
+                connection.close()
+        elif manifest.schema_version == RAW_V2_BACKUP_MANIFEST_SCHEMA_V5:
             if manifest.incremental_counts is None:
                 raise RawV2BackupError("restored v5 manifest is missing incremental counts")
             if not observation_state_path.is_file() or observation_state_path.is_symlink():
@@ -1846,10 +1970,12 @@ __all__ = [
     "RAW_V2_BACKUP_MANIFEST_SCHEMA_V3",
     "RAW_V2_BACKUP_MANIFEST_SCHEMA_V4",
     "RAW_V2_BACKUP_MANIFEST_SCHEMA_V5",
+    "RAW_V2_BACKUP_MANIFEST_SCHEMA_V6",
     "RawV2BackupAnalysisCounts",
     "RawV2BackupCounts",
     "RawV2BackupError",
     "RawV2BackupIncrementalCounts",
+    "HistoricalAnalyticalBackupCounts",
     "RawV2BackupMetricCounts",
     "RawV2StagingBackupManifest",
     "RawV2StagingBackupService",

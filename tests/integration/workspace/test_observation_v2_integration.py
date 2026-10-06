@@ -1,6 +1,7 @@
 """Integration tests for observation v2 import, backup and PIT."""
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
@@ -10,20 +11,32 @@ import pytest
 from investment_analyst.core.models import (
     DataFrequency,
     DataQuality,
+    DiagnosticComponent,
+    DiagnosticEvidence,
+    DiagnosticMode,
+    DiagnosticResult,
+    DiagnosticVerdict,
+    EvidenceDirection,
+    MetricResult,
     NormalizedObservation,
     RawRecord,
     SourceReference,
 )
 from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.storage.historical_analytical_import import (
+    HistoricalAnalyticalImporter,
+    HistoricalAnalyticalImportError,
+)
 from investment_analyst.storage.observation_v2_import import (
     ObservationV2Importer,
     ObservationV2ImportError,
 )
 from investment_analyst.storage.raw_v2 import RawV2Staging
-from investment_analyst.storage.raw_v2_import import RawV2Importer
+from investment_analyst.storage.raw_v2_import import RawV2Importer, RawV2ImportState
 from investment_analyst.workspace.raw_v2_backup import (
     RawV2StagingBackupService,
 )
+from investment_analyst.workspace.service import WorkspaceService
 
 _TIMESTAMP = datetime(2026, 8, 1, tzinfo=UTC)
 _FUTURE = datetime(2026, 9, 1, tzinfo=UTC)
@@ -98,19 +111,16 @@ def _fingerprint(source: LocalStorage) -> str:
     return digest.hexdigest()
 
 
+def _raw_digest(staging: RawV2Staging) -> str:
+    return RawV2ImportState.model_validate_json(
+        (staging.destination / "raw-v2-import-state.json").read_bytes()
+    ).accumulated_digest
+
+
 def _import_raw(
     source: LocalStorage, staging: RawV2Staging, *, page_limit: int = 2
 ) -> tuple[str, str]:
-    import hashlib
-
-    rows = source.store.connection.execute(
-        "SELECT record_id, checksum_sha256 FROM raw_record_index ORDER BY record_id"
-    ).fetchall()
-    digest = hashlib.sha256()
-    for record_id, checksum in rows:
-        digest.update(str(record_id).encode("utf-8"))
-        digest.update(str(checksum).encode("utf-8"))
-    fingerprint = digest.hexdigest()
+    fingerprint = _fingerprint(source)
     count = source.store.connection.execute("SELECT count(*) FROM raw_record_index").fetchone()
     assert count is not None
     raw_importer = RawV2Importer(
@@ -150,7 +160,7 @@ def test_observation_v2_rejects_missing_or_foreign_raw(tmp_path: Path) -> None:
         with staging:
             workspace_id, _ = _import_raw(source, staging)
             fingerprint = _fingerprint(source)
-            raw_digest = (staging.destination / "raw-v2-import-state.json").read_bytes().hex()[:64]
+            raw_digest = _raw_digest(staging)
             observations = source.observations.get_many(
                 [UUID(int=1001 + index) for index in range(3)]
             )
@@ -164,6 +174,21 @@ def test_observation_v2_rejects_missing_or_foreign_raw(tmp_path: Path) -> None:
                 page_limit=2
             )
             assert complete_first.complete is True
+            raw_state_before = (staging.destination / "raw-v2-import-state.json").read_bytes()
+            observation_state_before = (
+                staging.destination / "observation-v2-import-state.json"
+            ).read_bytes()
+            verified = _importer(
+                source, staging, workspace_id, fingerprint, raw_digest
+            ).verify_complete()
+            assert verified.complete is True
+            assert verified.imported_count == 3
+            assert (staging.destination / "raw-v2-import-state.json").read_bytes() == (
+                raw_state_before
+            )
+            assert (
+                staging.destination / "observation-v2-import-state.json"
+            ).read_bytes() == observation_state_before
             with pytest.raises(ObservationV2ImportError, match="another source"):
                 _importer(source, staging, workspace_id, "0" * 64, raw_digest).run(page_limit=2)
             foreign_raw = _raw_record(999, available_at=_TIMESTAMP).model_copy(
@@ -194,7 +219,7 @@ def test_observation_import_relocates_and_resumes_without_duplicate_ids(
         with staging:
             workspace_id, _ = _import_raw(source, staging)
             fingerprint = _fingerprint(source)
-            raw_digest = (staging.destination / "raw-v2-import-state.json").read_bytes().hex()[:64]
+            raw_digest = _raw_digest(staging)
             importer = _importer(source, staging, workspace_id, fingerprint, raw_digest)
             with pytest.raises(ObservationV2ImportError, match="interrupted"):
                 importer.run(page_limit=2, fail_after_page=0)
@@ -231,7 +256,7 @@ def test_observation_import_rejects_corrupt_prefix_or_source_fingerprint(
         with staging:
             workspace_id, _ = _import_raw(source, staging)
             fingerprint = _fingerprint(source)
-            raw_digest = (staging.destination / "raw-v2-import-state.json").read_bytes().hex()[:64]
+            raw_digest = _raw_digest(staging)
             first = _importer(source, staging, workspace_id, fingerprint, raw_digest).run(
                 page_limit=2
             )
@@ -244,3 +269,149 @@ def test_observation_import_rejects_corrupt_prefix_or_source_fingerprint(
             )
             with pytest.raises(Exception, match="differs|diverged|prefix|corrupt"):
                 _importer(source, staging, workspace_id, fingerprint, raw_digest).run(page_limit=2)
+
+
+def test_historical_analytical_backup_v6_restores_and_resumes_partial_import(
+    tmp_path: Path,
+) -> None:
+    initialization = WorkspaceService().initialize(tmp_path / "source-workspace")
+    source_paths = StoragePaths.from_root(initialization.paths.storage_root)
+    timestamp = datetime(2026, 8, 1, tzinfo=UTC)
+    raw = RawRecord(
+        record_id=UUID(int=5001),
+        asset_id="equity:us:aapl",
+        source=SourceReference(
+            source_id="test:history", record_key="history-1", retrieved_at=timestamp
+        ),
+        event_time=timestamp,
+        available_at=timestamp,
+        received_at=timestamp,
+        payload={"close": "210.50"},
+        schema_version="history-v1",
+    )
+    observation = NormalizedObservation(
+        observation_id=UUID(int=6001),
+        raw_record_id=raw.record_id,
+        asset_id=raw.asset_id or "equity:us:aapl",
+        field_name="close",
+        value=Decimal("210.50"),
+        unit="USD",
+        frequency=DataFrequency.DAY_1,
+        observed_at=timestamp,
+        available_at=timestamp,
+        normalized_at=timestamp,
+        source=raw.source,
+        quality=DataQuality.VALID,
+        transformation_version="1.0.0",
+    )
+    metric = MetricResult(
+        result_id=UUID(int=7001),
+        asset_id="equity:us:aapl",
+        metric_key="market.close_copy",
+        value=Decimal("210.50"),
+        unit="USD",
+        as_of=timestamp,
+        available_at=timestamp,
+        computed_at=timestamp,
+        parameters={"window": 1},
+        input_observation_ids=[observation.observation_id],
+        algorithm_version="1.0.0",
+        quality=DataQuality.VALID,
+    )
+    diagnostic = DiagnosticResult(
+        diagnostic_id=UUID(int=8001),
+        asset_id="equity:us:aapl",
+        mode=DiagnosticMode.MARKET,
+        verdict=DiagnosticVerdict.POSITIVE,
+        final_score=Decimal("80"),
+        confidence=Decimal("0.75"),
+        as_of=timestamp,
+        available_at=timestamp,
+        computed_at=timestamp,
+        components=[
+            DiagnosticComponent(
+                component_key="market_test",
+                score=Decimal("80"),
+                weight=Decimal("1"),
+                weighted_contribution=Decimal("80"),
+                metric_result_ids=[metric.result_id],
+                explanation="Test component.",
+            )
+        ],
+        evidence=[
+            DiagnosticEvidence(
+                metric_result_id=metric.result_id,
+                direction=EvidenceDirection.SUPPORTS,
+                contribution=Decimal("1"),
+                reason="Test evidence.",
+            )
+        ],
+        algorithm_version="1.0.0",
+        summary="Test diagnostic.",
+        quality=DataQuality.VALID,
+    )
+    with LocalStorage(source_paths) as writer:
+        writer.raw_records.save(raw)
+        writer.observations.save(observation)
+        writer.metric_results.save(metric)
+        writer.diagnostics.save(diagnostic)
+
+    service = RawV2StagingBackupService()
+    with LocalStorage(source_paths, read_only=True) as source:
+        staging = _staging(tmp_path, "history-staging")
+        with staging:
+            workspace_id = str(initialization.manifest.workspace_id)
+            fingerprint = "historical-backup-source-fingerprint"
+            raw_summary = RawV2Importer(
+                source,
+                staging,
+                source_workspace_id=workspace_id,
+                source_fingerprint=fingerprint,
+            ).run(page_limit=1)
+            ObservationV2Importer(
+                source,
+                staging,
+                source_workspace_id=workspace_id,
+                source_fingerprint=fingerprint,
+                raw_digest=raw_summary.corpus_digest,
+            ).run(page_limit=1)
+
+            def interrupt_after_metric_commit(point: str) -> None:
+                if point == "after_metric_page_commit_before_state":
+                    raise HistoricalAnalyticalImportError("interrupted for backup test")
+
+            importer = HistoricalAnalyticalImporter(
+                source,
+                staging,
+                page_limit=1,
+                failure_injector=interrupt_after_metric_commit,
+            )
+            with pytest.raises(HistoricalAnalyticalImportError, match="interrupted"):
+                importer.run()
+            partial = service.create(staging, staging._connection, tmp_path / "history-partial")
+            assert partial.schema_version == "raw-v2-staging-backup-manifest-v6"
+            assert partial.historical_analytical_counts is not None
+            assert partial.historical_analytical_counts.complete is False
+            assert partial.historical_analytical_counts.confirmed_metrics == 0
+            assert partial.historical_analytical_counts.metrics == 1
+
+        service.restore(tmp_path / "history-partial", tmp_path / "history-restored")
+        restored_connection = duckdb.connect(
+            str(tmp_path / "history-restored" / "obs-v2-index.duckdb")
+        )
+        restored = RawV2Staging(tmp_path / "history-restored", restored_connection)
+        with restored:
+            resumed = HistoricalAnalyticalImporter(
+                source,
+                restored,
+                page_limit=1,
+            ).run()
+            assert resumed.complete is True
+            assert resumed.metric_count == 1
+            assert resumed.diagnostic_count == 1
+            assert restored.historical_analytical_archive().verify_complete().complete is True
+            complete = service.create(restored, restored._connection, tmp_path / "history-complete")
+            assert complete.historical_analytical_counts is not None
+            assert complete.historical_analytical_counts.complete is True
+
+        service.restore(tmp_path / "history-complete", tmp_path / "history-final")

@@ -71,6 +71,44 @@ def test_metric_and_diagnostic_round_trip(storage) -> None:
     assert recovered_diagnostic.final_score == Decimal("80")
 
 
+def test_historical_import_pages_use_stable_available_time_and_id_keysets(storage) -> None:
+    raw_record = make_raw_record()
+    observation = make_observation(raw_record_id=raw_record.record_id)
+    available_at = datetime(2026, 7, 10, 16, 1, tzinfo=UTC)
+    metrics = [
+        make_metric_result(
+            observation_id=observation.observation_id,
+            result_id=UUID(int=index),
+        ).model_copy(update={"available_at": available_at})
+        for index in (3, 1, 2)
+    ]
+    diagnostics = [
+        make_diagnostic_result(
+            metric_result_id=metrics[0].result_id,
+            diagnostic_id=UUID(int=index),
+        ).model_copy(update={"available_at": available_at})
+        for index in (13, 11, 12)
+    ]
+    storage.metric_results.save_many(metrics)
+    storage.diagnostics.save_many(diagnostics)
+
+    metric_ids = storage.metric_results.list_import_page(limit=2)
+    diagnostic_ids = storage.diagnostics.list_import_page(limit=2)
+
+    assert metric_ids == (UUID(int=1), UUID(int=2))
+    assert storage.metric_results.list_import_page(
+        limit=2, after_available_at=available_at, after_result_id=metric_ids[-1]
+    ) == (UUID(int=3),)
+    assert diagnostic_ids == (UUID(int=11), UUID(int=12))
+    assert storage.diagnostics.list_import_page(
+        limit=2, after_available_at=available_at, after_diagnostic_id=diagnostic_ids[-1]
+    ) == (UUID(int=13),)
+    with pytest.raises(ValueError, match="together"):
+        storage.metric_results.list_import_page(limit=1, after_available_at=available_at)
+    with pytest.raises(ValueError, match="between 1 and 256"):
+        storage.diagnostics.list_import_page(limit=True)
+
+
 def test_metric_result_round_trip_preserves_derived_lineage(storage) -> None:
     raw_record = make_raw_record()
     observation = make_observation(raw_record_id=raw_record.record_id)

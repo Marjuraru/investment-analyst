@@ -674,3 +674,28 @@ Este candidato (DATA-CHASSIS-37 / #327) propone route_effect: ADVANCES sobre DAT
 route_transition:DATA-CHASSIS:ADVANCES
 
 Este candidato (`DATA-CHASSIS-38`/#329) propone route_effect: ADVANCES sobre `DATA-CHASSIS`: evita escaneos de `document_json` en cada intento, mantiene el conteo exacto de filas y deja la medida lógica completa para el reporte post-ciclo; además limita la identidad y comparabilidad de memoria al intervalo de los intentos terminales y muestra cobertura del colector por `attempt_id`, con ausencias explícitas y huecos entre jobs sin atribución. No declara ahorro global de almacenamiento ni altera la historia financiera.
+
+Este candidato (`DATA-CHASSIS-39` / #331) propone `route_effect: ADVANCES`:
+incorpora el archivo histórico tipado de `MetricResult` y `DiagnosticResult`
+v1 al staging v2 con UUID y contenido fieles, secuencias de lineage
+content-addressed, importación/reanudación verificable y backup v6 compatible
+con manifiestos v1–v5. La evidencia scratch se obtiene con
+`PYTHONPATH=src .venv/bin/python scripts/smoke_historical_analytical_import.py
+--output /tmp/data-chassis-39-smoke.json`: perfiles de fidelidad N=257,
+interrupción/restauración/reanudación N=257 y escala N=1537, incluyendo dos
+cortes PIT, 100 métricas con 720 inputs compartidos, componentes/citas, 32
+activos sintéticos y medidas lógicas/físicas separadas. El JSON del smoke
+registra comando, entorno, SHA, páginas, filas, modelos, consultas, segmentos,
+digests, tiempos y RSS; se adjunta completo al draft PR para fijar su SHA
+exacto. Las duraciones y RSS son descriptivas y no constituyen metas ni
+evidencia operacional. El origen permanece read-only y el staging sigue sin
+activación productiva; no hay cutover, borrado ni afirmación de espacio
+liberado.
+
+La ruta conserva un solo `NEXT`: después de integrar #331, PLAN reconcilia
+desde `main` la adopción de repositorios/consumidores y el plan de cutover que
+lea el histórico archivado junto con nuevas escrituras sin colapsar
+identidades. El ensayo completo con restore/rollback, la activación autorizada,
+la limpieza física inventariada y el backup Drive probado quedan posteriores.
+La ruta DATA-CHASSIS permanece abierta y su estado global no cambia por
+evidencia scratch.

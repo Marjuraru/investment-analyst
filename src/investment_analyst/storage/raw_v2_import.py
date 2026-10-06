@@ -242,6 +242,26 @@ class RawV2Importer:
             max_page_hydrated=max_hydrated,
         )
 
+    def verify_complete(self) -> RawV2ImportSummary:
+        """Reverify a completed raw inventory without creating or changing state."""
+        self._require_disjoint_destination()
+        path = self._state_path()
+        if path.is_symlink() or not path.is_file():
+            raise RawV2ImportError("complete raw import state is missing or unsafe")
+        try:
+            state = RawV2ImportState.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise RawV2ImportError("complete raw import state is incompatible") from error
+        self._check_state_binding(state)
+        self._validate_confirmed_prefix(state)
+        return self._verify_completion(
+            state,
+            imported_count=state.confirmed_count,
+            reused_count=0,
+            max_page_requested=state.page_limit,
+            max_page_hydrated=0,
+        )
+
     def _require_disjoint_destination(self) -> None:
         source_root = self._source.paths.root.resolve()
         staging_root = Path(self._destination_key).resolve(strict=False)
@@ -392,6 +412,7 @@ class RawV2Importer:
         counts_by_source: dict[str, int] = {}
         counts_by_schema: dict[str, int] = {}
         verified = 0
+        max_hydrated = max_page_hydrated
         source_at: datetime | None = None
         source_id: UUID | None = None
         staged_at: datetime | None = None
@@ -411,6 +432,7 @@ class RawV2Importer:
                 break
             if not source_page or not staged_page or len(source_page) != len(staged_page):
                 raise RawV2ImportError("staged inventory does not match the source inventory")
+            max_hydrated = max(max_hydrated, len(source_page))
             if [str(record_id) for record_id in staged_page] != [
                 str(record_id) for record_id in source_page
             ]:
@@ -450,7 +472,7 @@ class RawV2Importer:
             counts_by_source=counts_by_source,
             counts_by_schema=counts_by_schema,
             max_page_requested=max_page_requested,
-            max_page_hydrated=max_page_hydrated,
+            max_page_hydrated=max_hydrated,
             traceability_verified=True,
         )
 
