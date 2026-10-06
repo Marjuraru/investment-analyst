@@ -719,7 +719,20 @@ plan fijo 40–45 está en
 [`data_chassis_closure_plan.md`](data_chassis_closure_plan.md).
 
 La ruta DATA-CHASSIS permanece abierta con un único `NEXT`. Tras integrar #333,
-PLAN vuelve a adquirir la evidencia viva y resuelve la frontera sustancial del
-bloque 41 para adopción incremental exacta. Los bloques 41–45 son planificación,
-no Issues activos ni autorización anticipada de BUILD.
+PLAN volvió a adquirir evidencia viva y publicó #335 con una desviación sustancial de secuencia
+motivada por defectos observados en el ciclo SEC/colector. El detalle de cierre vigente mueve la
+adopción incremental exacta al bloque 42. Los bloques posteriores son planificación, no Issues
+activos ni autorización anticipada de BUILD.
+route_transition:DATA-CHASSIS:ADVANCES
+
+Este candidato (`DATA-CHASSIS-41` / #335) propone `route_effect: ADVANCES` sobre
+`DATA-CHASSIS` y deja la fila como único `NEXT`, no `DONE`. El plan vivo detectó once revisiones de
+metadata SEC con cambios exclusivos en `accepted_at` y una ausencia del colector entre 102 intentos
+terminales. Por eso adelanta la corrección PIT del corpus y la entrega observacional íntegra al
+bloque 41; el smoke comprueba cinco emisores, contenido remoto actual, reuso, cortes PIT y restore de
+workspace v1/v2. La adopción incremental analítica previamente prevista se consolida con las
+lecturas filtradas/paginadas en el bloque 42, seguido por migración y cutover en 43, backup Drive en
+44 y aceptación/cierre en 45. Sólo integración en `main` confirma la transición; PLAN 42 deberá
+reconciliar de nuevo el estado vivo. Los resultados de scratch no actualizan Q1–Q7 ni afirman
+mejoras operacionales.
 route_transition:DATA-CHASSIS:ADVANCES

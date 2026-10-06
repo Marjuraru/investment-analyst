@@ -31,7 +31,10 @@ class DocumentContentStore:
     """Store exact bytes once under a SHA-256 path without public mutation APIs."""
 
     def __init__(self, paths: StoragePaths, *, read_only: bool = False) -> None:
-        self._storage_root = paths.root.resolve()
+        try:
+            self._boundary_root = paths.documents_boundary_root
+        except ValueError as error:
+            raise DocumentContentError("document content storage layout is invalid") from error
         self._documents_root = paths.documents_dir
         self._root = self._documents_root / "sha256"
         self._read_only = read_only
@@ -94,18 +97,36 @@ class DocumentContentStore:
 
     def _assert_safe_path(self, target: Path) -> None:
         """Reject ancestor symlinks before any document-store filesystem operation."""
-        for candidate in (
-            self._documents_root,
-            self._root,
-            target.parent.parent,
-            target.parent,
-            target,
+        try:
+            documents_relative = self._documents_root.relative_to(self._boundary_root)
+            target_relative = target.relative_to(self._boundary_root)
+            target.relative_to(self._documents_root)
+        except ValueError as error:
+            raise DocumentContentError(
+                "document content path escapes the configured store"
+            ) from error
+        if (
+            not self._boundary_root.is_absolute()
+            or any(part == ".." for part in documents_relative.parts)
+            or any(part == ".." for part in target_relative.parts)
         ):
+            raise DocumentContentError("document content path escapes the configured store")
+
+        candidates = [self._boundary_root]
+        candidate = self._boundary_root
+        for part in target_relative.parts:
+            candidate = candidate / part
+            candidates.append(candidate)
+        for candidate in candidates:
             if candidate.is_symlink():
                 raise DocumentContentError("document content store cannot use symbolic links")
+
+        boundary_root = self._boundary_root.resolve(strict=False)
+        if boundary_root != self._boundary_root:
+            raise DocumentContentError("document content store cannot use symbolic links")
         documents_root = self._documents_root.resolve(strict=False)
         target_root = target.resolve(strict=False)
-        if not documents_root.is_relative_to(self._storage_root) or not target_root.is_relative_to(
+        if not documents_root.is_relative_to(boundary_root) or not target_root.is_relative_to(
             documents_root
         ):
             raise DocumentContentError("document content path escapes the configured store")
@@ -118,6 +139,7 @@ class DocumentContentStore:
         expected: bytes | None = None,
         size_bytes: int | None = None,
     ) -> None:
+        self._assert_safe_path(path)
         if path.is_symlink() or not path.is_file():
             raise DocumentContentError("document content blob is missing or not a regular file")
         if size_bytes is not None and path.stat().st_size != size_bytes:

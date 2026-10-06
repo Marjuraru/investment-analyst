@@ -10,9 +10,15 @@ from investment_analyst.evidence.sec_documents.models import (
     FINANCIAL_SEC_FORMS,
     REVISION_SCHEMA_VERSION_V2,
     SEC_DOCUMENT_SOURCE_ID,
+    SecAssetDocumentRevision,
+    SecDocumentAcquisitionRevision,
+    SecDocumentMetadataRevision,
     SecDocumentRevision,
     SecFiling,
     SecLogicalDocument,
+    create_sec_terminal_script_difference,
+    same_document_metadata_except_accepted_at,
+    sec_document_metadata_sha256,
 )
 from investment_analyst.evidence.sec_documents.repository import (
     SecDocumentRepository,
@@ -20,7 +26,10 @@ from investment_analyst.evidence.sec_documents.repository import (
 )
 from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.failure_reasons import ProviderFailureReason
-from investment_analyst.providers.fundamentals.sec_document_client import SecDocumentClient
+from investment_analyst.providers.fundamentals.sec_document_client import (
+    SecDocumentClient,
+    SecPrimaryDocumentResponse,
+)
 from investment_analyst.providers.fundamentals.sec_fact_models import SUBMISSIONS_SCHEMA_VERSION
 from investment_analyst.providers.fundamentals.sec_filing_index import (
     AmbiguousSecFilingError,
@@ -77,7 +86,7 @@ class SecDocumentImportSummary:
     revisions_reused: int
     blobs_created: int
     blobs_reused: int
-    revisions: tuple[SecDocumentRevision, ...]
+    revisions: tuple[SecAssetDocumentRevision, ...]
     accessions_fetched: tuple[str, ...] = ()
     accessions_reused: tuple[str, ...] = ()
     document_fetch_calls: int = 0
@@ -158,7 +167,7 @@ class SecDocumentPipeline:
                 reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_PERSIST_FAILED,
             ) from error
         created = reused = blobs_created = blobs_reused = document_fetch_calls = 0
-        revisions: list[SecDocumentRevision] = []
+        revisions: list[SecAssetDocumentRevision] = []
         accessions_fetched: list[str] = []
         accessions_reused: list[str] = []
         for metadata in filings:
@@ -191,16 +200,15 @@ class SecDocumentPipeline:
                     reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_READ_FAILED,
                 ) from error
             if existing_candidates:
-                if len(existing_candidates) != 1:
+                try:
+                    repository.verify_revision_history(existing_candidates)
+                except StorageError as error:
                     raise SecDocumentPipelineError(
-                        "existing SEC document accession is ambiguous",
-                        reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_AMBIGUOUS,
-                    )
-                existing = existing_candidates[0]
-                if (
-                    existing.asset_id != self._configuration.asset_id
-                    or existing.document != document
-                ):
+                        "existing SEC document history could not be verified",
+                        reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_VERIFY_FAILED,
+                    ) from error
+                existing = _latest_existing_revision(existing_candidates)
+                if existing.asset_id != self._configuration.asset_id:
                     raise SecDocumentPipelineError(
                         "existing SEC document revision conflicts",
                         reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_CONFLICT,
@@ -212,10 +220,144 @@ class SecDocumentPipeline:
                         "existing SEC document revision could not be verified",
                         reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_VERIFY_FAILED,
                     ) from error
-                revisions.append(existing)
-                accessions_reused.append(metadata.accession_number)
-                reused += 1
-                blobs_reused += 1
+                if existing.document == document:
+                    revisions.append(existing)
+                    accessions_reused.append(metadata.accession_number)
+                    reused += 1
+                    blobs_reused += 1
+                    continue
+                if not same_document_metadata_except_accepted_at(existing.document, document):
+                    raise SecDocumentPipelineError(
+                        "existing SEC document metadata changed beyond accepted_at",
+                        reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_CONFLICT,
+                    )
+                response = self._fetch_for_metadata_correction(document)
+                document_fetch_calls += 1
+                if response.url != existing.source_url:
+                    raise SecDocumentPipelineError(
+                        "SEC document source changed during metadata correction",
+                        reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_CONFLICT,
+                    )
+                metadata_sha256 = sec_document_metadata_sha256(document)
+                if (
+                    response.sha256 == existing.content_sha256
+                    and response.size_bytes == existing.content_size_bytes
+                ):
+                    try:
+                        receipt = self._storage.documents.put(response.content)
+                    except StorageError as error:
+                        raise SecDocumentPipelineError(
+                            "SEC document blob verification failed during metadata correction",
+                            reason_code=ProviderFailureReason.SEC_DOCUMENT_BLOB_PERSIST_FAILED,
+                        ) from error
+                    if receipt.created or receipt.sha256 != existing.content_sha256:
+                        raise SecDocumentPipelineError(
+                            "SEC document blob changed during metadata correction",
+                            reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_CONFLICT,
+                        )
+                    revision_id = SecDocumentMetadataRevision.expected_id(
+                        document.document_id,
+                        existing.content_sha256,
+                        metadata_sha256,
+                        existing.revision_id,
+                    )
+                    revision: SecAssetDocumentRevision = SecDocumentMetadataRevision(
+                        revision_id=revision_id,
+                        asset_id=self._configuration.asset_id,
+                        document=document,
+                        prior_revision_id=existing.revision_id,
+                        raw_record_id=SecDocumentMetadataRevision.expected_raw_record_id(
+                            revision_id
+                        ),
+                        discovery_raw_record_id=submissions.record_id,
+                        content_sha256=existing.content_sha256,
+                        content_size_bytes=existing.content_size_bytes,
+                        metadata_sha256=metadata_sha256,
+                        metadata_observed_at=submissions.received_at,
+                        available_at=max(
+                            document.filing.accepted_at,
+                            submissions.received_at,
+                            response.retrieved_at,
+                        ),
+                        retrieved_at=response.retrieved_at,
+                        source_url=response.url,
+                    )
+                    blobs_reused += 1
+                else:
+                    prior_content = self._storage.documents.read(existing.content_sha256)
+                    if len(prior_content) != existing.content_size_bytes:
+                        raise SecDocumentPipelineError(
+                            "prior SEC document blob has an invalid size",
+                            reason_code=ProviderFailureReason.SEC_DOCUMENT_BLOB_VERIFY_FAILED,
+                        )
+                    try:
+                        difference = create_sec_terminal_script_difference(
+                            prior_content,
+                            response.content,
+                            document_name=document.name,
+                        )
+                    except ValueError as error:
+                        raise SecDocumentPipelineError(
+                            "SEC document acquisition differs outside the accepted terminal script",
+                            reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_CONFLICT,
+                        ) from error
+                    try:
+                        receipt = self._storage.documents.put(response.content)
+                    except StorageError as error:
+                        raise SecDocumentPipelineError(
+                            "SEC acquisition blob persistence failed",
+                            reason_code=ProviderFailureReason.SEC_DOCUMENT_BLOB_PERSIST_FAILED,
+                        ) from error
+                    revision_id = SecDocumentAcquisitionRevision.expected_id(
+                        document.document_id,
+                        response.sha256,
+                        metadata_sha256,
+                        existing.revision_id,
+                        existing.content_sha256,
+                    )
+                    revision = SecDocumentAcquisitionRevision(
+                        revision_id=revision_id,
+                        asset_id=self._configuration.asset_id,
+                        document=document,
+                        prior_revision_id=existing.revision_id,
+                        raw_record_id=SecDocumentAcquisitionRevision.expected_raw_record_id(
+                            revision_id
+                        ),
+                        discovery_raw_record_id=submissions.record_id,
+                        content_sha256=receipt.sha256,
+                        content_size_bytes=receipt.size_bytes,
+                        prior_content_sha256=existing.content_sha256,
+                        metadata_sha256=metadata_sha256,
+                        metadata_observed_at=submissions.received_at,
+                        available_at=max(
+                            document.filing.accepted_at,
+                            submissions.received_at,
+                            response.retrieved_at,
+                            existing.available_at,
+                        ),
+                        retrieved_at=response.retrieved_at,
+                        source_url=response.url,
+                        terminal_script_difference=difference,
+                    )
+                    blobs_created += int(receipt.created)
+                    blobs_reused += int(not receipt.created)
+                try:
+                    self._storage.raw_records.save(revision_to_raw_record(revision))
+                except StorageError as error:
+                    raise SecDocumentPipelineError(
+                        "SEC metadata revision persistence failed",
+                        reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_PERSIST_FAILED,
+                    ) from error
+                try:
+                    repository.verify_revision(revision)
+                except StorageError as error:
+                    raise SecDocumentPipelineError(
+                        "SEC metadata revision could not be verified",
+                        reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_VERIFY_FAILED,
+                    ) from error
+                revisions.append(revision)
+                accessions_fetched.append(metadata.accession_number)
+                created += 1
                 continue
             try:
                 response = self._client.fetch(document)
@@ -309,6 +451,17 @@ class SecDocumentPipeline:
             document_fetch_calls=document_fetch_calls,
         )
 
+    def _fetch_for_metadata_correction(
+        self, document: SecLogicalDocument
+    ) -> SecPrimaryDocumentResponse:
+        try:
+            return self._client.fetch(document)
+        except Exception as error:  # noqa: BLE001 - preserve provider failure as the cause
+            raise SecDocumentPipelineError(
+                "SEC primary document verification fetch failed",
+                reason_code=ProviderFailureReason.SEC_DOCUMENT_FETCH_FAILED,
+            ) from error
+
     def _latest_submissions(self):
         try:
             records = self._storage.raw_records.list(
@@ -351,3 +504,16 @@ class SecDocumentPipeline:
             candidates = [item for item in index.all() if item.form == form]
             selected.extend(candidates[-request.limit_per_form :])
         return tuple(sorted(selected, key=lambda item: (item.acceptance_at, item.accession_number)))
+
+
+def _latest_existing_revision(
+    revisions: list[SecAssetDocumentRevision],
+) -> SecAssetDocumentRevision:
+    latest_at = max(item.available_at for item in revisions)
+    latest = [item for item in revisions if item.available_at == latest_at]
+    if len({item.revision_id for item in latest}) != 1:
+        raise SecDocumentPipelineError(
+            "existing SEC document revisions are equally available",
+            reason_code=ProviderFailureReason.SEC_DOCUMENT_REVISION_AMBIGUOUS,
+        )
+    return latest[0]

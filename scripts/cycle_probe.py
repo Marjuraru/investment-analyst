@@ -239,6 +239,17 @@ def _observability_coverage(
     missing_ids = sorted(set(expected).difference(observed))
     unexpected_ids = sorted(set(observed).difference(expected))
 
+    measurement_states = collections.Counter(
+        observed[attempt_id].get("measurement_state") for attempt_id in matched_ids
+    )
+    measured_complete = measurement_states["complete"]
+    measured_partial = measurement_states["partial"]
+    measured_unavailable = measurement_states["unavailable"]
+    observed_count = len(matched_ids)
+    measured_unknown = observed_count - (
+        measured_complete + measured_partial + measured_unavailable
+    )
+
     def safe_nonnegative_int(value: object) -> int | None:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return None
@@ -296,7 +307,6 @@ def _observability_coverage(
         else None
     )
     expected_count = len(expected)
-    observed_count = len(matched_ids)
     return {
         "state": "unknown"
         if expected_count == 0 and unknown_identity
@@ -311,6 +321,19 @@ def _observability_coverage(
         "missing_attempts": len(missing_ids) + unknown_identity,
         "missing_attempt_ids": missing_ids,
         "unexpected_observation_attempt_ids": unexpected_ids,
+        "measurement_coverage": {
+            "state": "complete"
+            if observed_count > 0 and measured_complete == observed_count
+            else "partial"
+            if measured_complete + measured_partial > 0
+            else "unavailable"
+            if measured_unavailable > 0
+            else "unknown",
+            "complete_attempts": measured_complete,
+            "partial_attempts": measured_partial,
+            "unavailable_attempts": measured_unavailable,
+            "unknown_attempts": measured_unknown,
+        },
         "collector_overhead_ms_known": (sum(collector_overheads) if collector_overheads else None),
         "collector_overhead_ms_unknown_attempts": expected_count
         + unknown_identity
@@ -350,6 +373,9 @@ def observability(
                 "attempt_id": r.get("attempt_id"),
                 "attempt_number": r.get("attempt_number"),
                 "attempt_status": r.get("attempt_status"),
+                "measurement_state": r.get("measurement_state"),
+                "failure_phase": r.get("failure_phase"),
+                "failure_reason": r.get("failure_reason"),
                 "failure_category": r.get("failure_category"),
                 "failure_reason_code": r.get("failure_reason_code"),
                 "rows_created": r.get("rows_created"),
@@ -359,6 +385,8 @@ def observability(
                 "database_bytes_before": r.get("database_bytes_before"),
                 "database_bytes_after": r.get("database_bytes_after"),
                 "growth": r.get("growth"),
+                "table_rows_before": r.get("table_rows_before"),
+                "table_rows_after": r.get("table_rows_after"),
             }
             for r in today
         ],
@@ -854,15 +882,25 @@ def render_summary(payload: dict) -> str:
 
     obs = payload.get("observability") or {}
     if obs.get("present"):
+        terminal_coverage = obs.get("coverage") or {}
+        measurement_coverage = terminal_coverage.get("measurement_coverage") or {}
         lines += [
             "",
             "## Observabilidad",
             "",
             f"- versiones del artefacto: {obs['schema_versions']}",
+            "- coverage terminal: "
+            f"{terminal_coverage.get('observed_attempts', 0)}/"
+            f"{terminal_coverage.get('expected_terminal_attempts', 0)}; "
+            "medición: "
+            f"complete={measurement_coverage.get('complete_attempts', 0)}, "
+            f"partial={measurement_coverage.get('partial_attempts', 0)}, "
+            f"unavailable={measurement_coverage.get('unavailable_attempts', 0)}, "
+            f"unknown={measurement_coverage.get('unknown_attempts', 0)}",
             "",
         ]
         lines += [
-            "| intento | estado | filas C/R | etapas ms | overhead ms | fallo seguro |",
+            "| intento | estado / medición | filas C/R | etapas ms | overhead ms | fallo seguro |",
             "|---|---|---|---|---|---|",
         ]
         for item in sorted(
@@ -880,8 +918,16 @@ def render_summary(payload: dict) -> str:
                 )
                 or "-"
             )
+            collector_failure = "/".join(
+                value
+                for value in (item.get("failure_phase"), item.get("failure_reason"))
+                if isinstance(value, str) and value
+            )
+            if collector_failure:
+                failure_label = f"{failure_label}; colector={collector_failure}"
             lines.append(
-                f"| `{item['job_id']} #{attempt or '-'}` | {item.get('attempt_status')} "
+                f"| `{item['job_id']} #{attempt or '-'}` | {item.get('attempt_status')} / "
+                f"{item.get('measurement_state') or 'unknown'} "
                 f"| {item.get('rows_created')}/{item.get('rows_reused')} "
                 f"| `{json.dumps(durations, sort_keys=True, separators=(',', ':'))}` "
                 f"| {item.get('collector_overhead_ms')} | `{failure_label}` |"
@@ -889,6 +935,7 @@ def render_summary(payload: dict) -> str:
 
     coverage = obs.get("coverage") if isinstance(obs, Mapping) else None
     if isinstance(coverage, Mapping):
+        measurement = coverage.get("measurement_coverage") or {}
         lines += [
             "",
             "### Cobertura del colector por intento",
@@ -896,6 +943,11 @@ def render_summary(payload: dict) -> str:
             f"- estado: {coverage.get('state')}; terminales esperados: "
             f"{coverage.get('expected_terminal_attempts')}; observados: "
             f"{coverage.get('observed_attempts')}; ausentes: {coverage.get('missing_attempts')}",
+            "- cobertura de medición: "
+            f"{measurement.get('state')}; complete={measurement.get('complete_attempts')}, "
+            f"partial={measurement.get('partial_attempts')}, "
+            f"unavailable={measurement.get('unavailable_attempts')}, "
+            f"unknown={measurement.get('unknown_attempts')}",
             f"- overhead de colector conocido: "
             f"{coverage.get('collector_overhead_ms_known')} ms; "
             f"tiempo de ejecución de jobs: {coverage.get('job_execution_seconds_known')} s",

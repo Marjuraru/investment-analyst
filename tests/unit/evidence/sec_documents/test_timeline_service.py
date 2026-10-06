@@ -63,13 +63,13 @@ def _create_asset_doc(
         record_id=uuid4(),
         asset_id=_ASSET_ID,
         source=SourceReference(
-            source_id="sec-edgar:submissions:aapl",
+            source_id="sec-edgar:aapl:submissions",
             retrieved_at=retrieved,
         ),
         event_time=accepted_at,
         available_at=available,
         received_at=retrieved,
-        payload={"form": form},
+        payload={"document": {"cik": _CIK_AAPL}},
         schema_version="sec-submissions-v1",
     )
     storage.raw_records.save(discovery)

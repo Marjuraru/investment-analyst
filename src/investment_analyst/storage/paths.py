@@ -18,6 +18,25 @@ class StoragePaths:
     format_version: int = 1
     workspace_id: UUID | None = None
 
+    @property
+    def documents_boundary_root(self) -> Path:
+        """Return the trusted boundary that contains document content paths."""
+        if self.format_version == 1:
+            return self.root
+        if self.format_version != 2:
+            raise ValueError("workspace storage format is unsupported")
+
+        workspace_root = self.root.parent.parent
+        if (
+            not self.root.is_absolute()
+            or self.root.name != "v2"
+            or self.root.parent.name != "storage"
+            or any(part == ".." for part in self.root.parts)
+            or self.documents_dir != workspace_root / "data" / "documents"
+        ):
+            raise ValueError("workspace v2 document paths do not match the canonical layout")
+        return workspace_root
+
     @classmethod
     def from_root(cls, root: Path) -> "StoragePaths":
         """Build all storage paths without depending on the process working directory."""

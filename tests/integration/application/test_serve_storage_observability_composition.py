@@ -339,7 +339,7 @@ def test_running_a_job_writes_one_observability_record(
     records = composed.records()
     assert len(records) == 1
     record = records[0]
-    assert record["schema_version"] == "storage-observability-v2"
+    assert record["schema_version"] == "storage-observability-v3"
     assert record["job_id"] == _JOB_ID
     assert record["database_bytes_before"] == database_bytes
     assert record["database_bytes_after"] == database_bytes
@@ -412,8 +412,18 @@ def test_collector_failure_does_not_block_startup_or_alter_the_job(
     assert failing_attempt.execution.model_dump(
         exclude={"effective_known_at"}
     ) == control_attempt.execution.model_dump(exclude={"effective_known_at"})
-    assert not failing.artifact_path.exists()
-    assert "storage observability could not open its measurement" in (
+    assert len(failing.records()) == 1
+    persisted = parse_storage_observability_state(
+        failing.artifact_path.read_text(encoding="utf-8")
+    ).records
+    assert len(persisted) == 1
+    assert persisted[0].measurement_state == "unavailable"
+    assert persisted[0].failure_phase == "begin"
+    assert persisted[0].failure_reason == "collector_error"
+    assert "storage observability measurement is incomplete" in (
+        failing.scheduler().status().issues
+    )
+    assert "storage observability failure reason: collector_error" in (
         failing.scheduler().status().issues
     )
     assert not any(

@@ -26,6 +26,7 @@ from pydantic import ConfigDict, Field, model_validator
 
 from investment_analyst.application.storage_observability import (
     StorageObservabilityDailySnapshot,
+    StorageObservabilityDailySnapshotV2,
     StorageObservabilityError,
     StorageObservabilityState,
     parse_storage_observability_state,
@@ -246,8 +247,13 @@ class StorageObservabilityReportService:
         """Build the deterministic report without writing anything."""
         artifact_present = self._artifact_path.is_file()
         state = self._load_state() if artifact_present else StorageObservabilityState()
-        snapshots = {item.utc_date: item for item in state.daily_snapshots}
-        anchor = as_of if as_of is not None else (max(snapshots) if snapshots else None)
+        snapshots = {
+            item.utc_date: item
+            for item in state.daily_snapshots
+            if _report_compatible_snapshot(item)
+        }
+        retained_dates = tuple(item.utc_date for item in state.daily_snapshots)
+        anchor = as_of if as_of is not None else (max(retained_dates) if retained_dates else None)
         if anchor is None:
             return StorageObservabilityReport(
                 artifact_present=artifact_present,
@@ -287,7 +293,7 @@ def _window(
     window_days: int,
     *,
     anchor: date,
-    snapshots: dict[date, StorageObservabilityDailySnapshot],
+    snapshots: dict[date, StorageObservabilityDailySnapshot | StorageObservabilityDailySnapshotV2],
 ) -> StorageObservabilityReportWindow:
     """Aggregate one inclusive window, declaring every day without a closed snapshot."""
     start = anchor - timedelta(days=window_days - 1)
@@ -312,18 +318,58 @@ def _window(
     )
 
 
-def _day(day: date, snapshot: StorageObservabilityDailySnapshot) -> StorageObservabilityReportDay:
+def _report_compatible_snapshot(
+    snapshot: StorageObservabilityDailySnapshot | StorageObservabilityDailySnapshotV2,
+) -> bool:
+    if isinstance(snapshot, StorageObservabilityDailySnapshot):
+        return True
+    return all(
+        item.database_bytes_delta is not None
+        and item.wal_bytes_delta is not None
+        and item.rows_created is not None
+        and item.rows_reused is not None
+        and item.total_ms is not None
+        for item in snapshot.job_summaries
+    )
+
+
+def _day(
+    day: date,
+    snapshot: StorageObservabilityDailySnapshot | StorageObservabilityDailySnapshotV2,
+) -> StorageObservabilityReportDay:
     """Fold one closed daily snapshot into its measured day."""
+    if isinstance(snapshot, StorageObservabilityDailySnapshot):
+        database_bytes_delta = sum(item.database_bytes_delta for item in snapshot.job_summaries)
+        wal_bytes_delta = sum(item.wal_bytes_delta for item in snapshot.job_summaries)
+        rows_created = sum(item.rows_created for item in snapshot.job_summaries)
+        rows_reused = sum(item.rows_reused for item in snapshot.job_summaries)
+        total_ms = sum(item.total_ms for item in snapshot.job_summaries)
+    else:
+        database_bytes_delta = _required_sum(
+            tuple(item.database_bytes_delta for item in snapshot.job_summaries)
+        )
+        wal_bytes_delta = _required_sum(
+            tuple(item.wal_bytes_delta for item in snapshot.job_summaries)
+        )
+        rows_created = _required_sum(tuple(item.rows_created for item in snapshot.job_summaries))
+        rows_reused = _required_sum(tuple(item.rows_reused for item in snapshot.job_summaries))
+        total_ms = _required_sum(tuple(item.total_ms for item in snapshot.job_summaries))
     return StorageObservabilityReportDay(
         utc_date=day,
         job_count=len(snapshot.job_summaries),
         attempts=sum(item.attempt_count for item in snapshot.job_summaries),
-        database_bytes_delta=sum(item.database_bytes_delta for item in snapshot.job_summaries),
-        wal_bytes_delta=sum(item.wal_bytes_delta for item in snapshot.job_summaries),
-        rows_created=sum(item.rows_created for item in snapshot.job_summaries),
-        rows_reused=sum(item.rows_reused for item in snapshot.job_summaries),
-        total_ms=sum(item.total_ms for item in snapshot.job_summaries),
+        database_bytes_delta=database_bytes_delta,
+        wal_bytes_delta=wal_bytes_delta,
+        rows_created=rows_created,
+        rows_reused=rows_reused,
+        total_ms=total_ms,
     )
+
+
+def _required_sum(values: tuple[int | None, ...]) -> int:
+    if any(value is None for value in values):
+        raise StorageObservabilityReportError("partial snapshot was selected for the public report")
+    return sum(value for value in values if value is not None)
 
 
 def _budget_alert(

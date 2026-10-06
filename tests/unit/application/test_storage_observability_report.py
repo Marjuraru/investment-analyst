@@ -17,7 +17,10 @@ from pydantic import ValidationError
 
 from investment_analyst.application.storage_observability import (
     StorageObservabilityDailyJobSummary,
+    StorageObservabilityDailyJobSummaryV2,
     StorageObservabilityDailySnapshot,
+    StorageObservabilityDailySnapshotV2,
+    StorageObservabilityFailureSummary,
 )
 from investment_analyst.application.storage_observability_report import (
     DEFAULT_BUDGET_BYTES_PER_DAY,
@@ -205,6 +208,57 @@ def test_window_declares_missing_days_instead_of_interpolating(tmp_path: Path) -
     assert week.mean_daily_bytes_delta == 1_000_000
     assert week.attempts == 3
     assert report.retained_days == 3
+
+
+def test_report_v1_marks_a_partial_v2_snapshot_as_a_missing_day(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    partial_day = _ANCHOR
+    failure = StorageObservabilityFailureSummary(
+        phase="end",
+        reason="engine_error",
+        attempt_count=1,
+    )
+    partial = StorageObservabilityDailySnapshotV2(
+        utc_date=partial_day,
+        record_count=1,
+        measurement_complete_attempts=0,
+        measurement_partial_attempts=1,
+        measurement_unavailable_attempts=0,
+        failure_summaries=(failure,),
+        job_summaries=(
+            StorageObservabilityDailyJobSummaryV2(
+                job_id=_JOB_ID,
+                attempt_count=1,
+                attempts_with_evidence=0,
+                measurement_complete_attempts=0,
+                measurement_partial_attempts=1,
+                measurement_unavailable_attempts=0,
+                failure_summaries=(failure,),
+                database_bytes_delta=100,
+                wal_bytes_delta=0,
+                rows_created=None,
+                rows_reused=None,
+                total_ms=12,
+            ),
+        ),
+    )
+    state_root.mkdir(parents=True)
+    artifact = state_root / _ARTIFACT_NAME
+    artifact.write_text(
+        f"{_line(_day_snapshot(partial_day - timedelta(days=1), database_bytes_delta=7))}\n"
+        + json.dumps(partial.to_json_dict(), sort_keys=True, separators=(",", ":"))
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = StorageObservabilityReportService(state_root=state_root).report()
+
+    assert report.anchor_date == partial_day
+    assert report.retained_days == 2
+    week = report.windows[0]
+    assert partial_day in week.missing_days
+    assert all(item.utc_date != partial_day for item in week.days)
+    assert week.database_bytes_delta == 7
 
 
 def test_budget_alert_compares_measured_growth_against_threshold(tmp_path: Path) -> None:

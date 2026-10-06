@@ -7,7 +7,7 @@ from datetime import UTC, datetime, time, timedelta
 from investment_analyst.evidence.sec_documents.models import (
     SEC_DOCUMENT_SCHEMA_VERSION,
     SEC_DOCUMENT_SOURCE_ID,
-    SecDocumentRevision,
+    SecAssetDocumentRevision,
     SecFilerDocumentRevision,
 )
 from investment_analyst.evidence.sec_documents.repository import SecDocumentRepository
@@ -52,6 +52,7 @@ class SecDocumentTimelineService:
                 known_at=query.known_at,
                 accession=query.accession,
             )
+            self._asset_repository.verify_revision_history(asset_revisions)
             for rev in asset_revisions:
                 raw_candidates.append(self._asset_revision_to_entry(rev))
 
@@ -134,7 +135,7 @@ class SecDocumentTimelineService:
         )
 
     @staticmethod
-    def _asset_revision_to_entry(rev: SecDocumentRevision) -> SecDocumentTimelineEntry:
+    def _asset_revision_to_entry(rev: SecAssetDocumentRevision) -> SecDocumentTimelineEntry:
         return SecDocumentTimelineEntry(
             family="asset_document",
             revision_id=rev.revision_id,

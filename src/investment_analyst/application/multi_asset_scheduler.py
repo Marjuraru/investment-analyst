@@ -2,7 +2,9 @@
 
 import hashlib
 import threading
+import time as monotonic_time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -36,6 +38,16 @@ from investment_analyst.core.operation_control import (
 )
 
 _MAX_ATTEMPTS_RETAINED = 100_000
+_MAX_STORAGE_OBSERVATION_WRITES = 3
+
+
+@dataclass
+class _PendingStorageObservation:
+    handle: "StorageObservationHandle"
+    attempt: "ScheduledJobAttempt"
+    result_persisted_at: datetime | None
+    job_execution_ms: int
+    write_attempts: int = 1
 
 
 class ScheduledJobDomain(StrEnum):
@@ -1007,6 +1019,7 @@ class MultiAssetScheduler:
         self._storage_observability = storage_observability
         self._storage_observability_issue: str | None = None
         self._storage_observability_failure_reason: StorageObservabilityFailureReason | None = None
+        self._pending_storage_observations: dict[UUID, _PendingStorageObservation] = {}
         self._pending_notifications: dict[UUID, ScheduledJobAttempt] = {}
 
     def status(self) -> MultiAssetSchedulerStatus:
@@ -1038,10 +1051,21 @@ class MultiAssetScheduler:
         if not self._tick_lock.acquire(blocking=False):
             return ()
         completed: list[ScheduledJobAttempt] = []
+        storage_cycle_started = False
         try:
+            if self._storage_observability is not None:
+                try:
+                    self._storage_observability.start_cycle()
+                    storage_cycle_started = True
+                except Exception as error:  # noqa: BLE001
+                    self._storage_observability_issue = (
+                        "storage observability could not start its measurement cycle"
+                    )
+                    self._storage_observability_failure_reason = self._storage_failure_reason(error)
             if operation_control is not None:
                 operation_control.raise_if_cancelled()
             self._retry_notifications()
+            self._retry_storage_observations()
             now = self._now()
             jobs = self._jobs_snapshot()
             state = self._recover_interrupted(now, self._store.load(), completed)
@@ -1072,6 +1096,14 @@ class MultiAssetScheduler:
                     self._release_active_job(job_id)
             return tuple(completed)
         finally:
+            if storage_cycle_started and self._storage_observability is not None:
+                try:
+                    self._storage_observability.close_cycle()
+                except Exception as error:  # noqa: BLE001
+                    self._storage_observability_issue = (
+                        "storage observability could not stop its measurement worker"
+                    )
+                    self._storage_observability_failure_reason = self._storage_failure_reason(error)
             self._tick_lock.release()
 
     def run_forever(
@@ -1120,8 +1152,13 @@ class MultiAssetScheduler:
             started_at=now,
         )
         state = self._store.write_attempt_from_state(state, running)
-        storage_observation = self._begin_storage_observation(definition.job_id, attempt_id)
+        storage_observation = self._begin_storage_observation(
+            definition.job_id,
+            attempt_id,
+            observed_at=running.started_at,
+        )
         memory_watchdog: JobMemoryWatchdog | None = None
+        job_started_monotonic_ns = monotonic_time.perf_counter_ns()
         if operation_control is None and self._memory_budget.ceiling_bytes is not None:
             operation_control = OperationControl()
         try:
@@ -1214,6 +1251,9 @@ class MultiAssetScheduler:
                 completed_at=self._now(),
                 execution=execution,
             )
+        job_execution_ms = (
+            max(monotonic_time.perf_counter_ns() - job_started_monotonic_ns, 0) // 1_000_000
+        )
         completed = completed.model_copy(
             update={
                 "telemetry": _attempt_telemetry(
@@ -1229,6 +1269,7 @@ class MultiAssetScheduler:
             storage_observation,
             completed,
             result_persisted_at=result_persisted_at,
+            job_execution_ms=job_execution_ms,
         )
         return completed, state
 
@@ -1259,6 +1300,22 @@ class MultiAssetScheduler:
             recovered = recovered.model_copy(update={"telemetry": _attempt_telemetry(recovered)})
             state = self._store.write_attempt_from_state(state, recovered)
             self._notify(recovered)
+            if self._storage_observability is not None:
+                recovery_handle = self._storage_observability.unavailable_handle(
+                    ScheduledJobObservation(
+                        attempt_id=recovered.attempt_id,
+                        job_id=job_id,
+                        attempt_number=recovered.attempt_number,
+                        local_date=recovered.local_date,
+                        attempt_status=recovered.status.value,
+                    ),
+                    observed_at=now,
+                )
+                self._complete_storage_observation(
+                    recovery_handle,
+                    recovered,
+                    result_persisted_at=now,
+                )
             completed.append(recovered)
         return state
 
@@ -1448,10 +1505,25 @@ class MultiAssetScheduler:
         for attempt in tuple(self._pending_notifications.values()):
             self._notify(attempt)
 
+    def _retry_storage_observations(self) -> None:
+        """Retry frozen collector candidates once per tick, never rerunning the provider."""
+        for pending in tuple(
+            self._pending_storage_observations[key]
+            for key in sorted(self._pending_storage_observations, key=str)
+        ):
+            self._complete_storage_observation(
+                pending.handle,
+                pending.attempt,
+                result_persisted_at=pending.result_persisted_at,
+                job_execution_ms=pending.job_execution_ms,
+            )
+
     def _begin_storage_observation(
         self,
         job_id: str,
         attempt_id: UUID,
+        *,
+        observed_at: datetime,
     ) -> StorageObservationHandle | None:
         """Open one storage observation without ever disturbing the measured job."""
         if self._storage_observability is None:
@@ -1463,7 +1535,15 @@ class MultiAssetScheduler:
                 "storage observability could not open its measurement"
             )
             self._storage_observability_failure_reason = self._storage_failure_reason(error)
-            return None
+            try:
+                return self._storage_observability.failed_begin_handle(
+                    job_id,
+                    attempt_id,
+                    observed_at=observed_at,
+                    error=error,
+                )
+            except Exception:  # noqa: BLE001
+                return None
 
     def _complete_storage_observation(
         self,
@@ -1471,13 +1551,14 @@ class MultiAssetScheduler:
         attempt: ScheduledJobAttempt,
         *,
         result_persisted_at: datetime | None = None,
+        job_execution_ms: int = 0,
     ) -> None:
         """Close one storage observation without ever disturbing the measured job."""
         if handle is None or self._storage_observability is None:
             return
         execution = attempt.execution
         try:
-            self._storage_observability.complete_attempt(
+            record = self._storage_observability.complete_attempt(
                 handle,
                 ScheduledJobObservation(
                     attempt_id=attempt.attempt_id,
@@ -1491,13 +1572,39 @@ class MultiAssetScheduler:
                 ),
                 execution_completed_at=attempt.completed_at,
                 result_persisted_at=result_persisted_at,
+                job_execution_ms=job_execution_ms,
             )
         except Exception as error:  # noqa: BLE001
             self._storage_observability_issue = "storage observability could not record its result"
             self._storage_observability_failure_reason = self._storage_failure_reason(error)
+            if handle is not None:
+                existing = self._pending_storage_observations.get(attempt.attempt_id)
+                write_attempts = 1 if existing is None else existing.write_attempts + 1
+                if write_attempts < _MAX_STORAGE_OBSERVATION_WRITES:
+                    self._pending_storage_observations[attempt.attempt_id] = (
+                        _PendingStorageObservation(
+                            handle=handle,
+                            attempt=attempt,
+                            result_persisted_at=result_persisted_at,
+                            job_execution_ms=job_execution_ms,
+                            write_attempts=write_attempts,
+                        )
+                    )
+                else:
+                    self._pending_storage_observations.pop(attempt.attempt_id, None)
         else:
-            self._storage_observability_issue = None
-            self._storage_observability_failure_reason = None
+            self._pending_storage_observations.pop(attempt.attempt_id, None)
+            if not self._pending_storage_observations:
+                if record.measurement_state == "complete":
+                    self._storage_observability_issue = None
+                    self._storage_observability_failure_reason = None
+                else:
+                    self._storage_observability_issue = (
+                        "storage observability measurement is incomplete"
+                    )
+                    self._storage_observability_failure_reason = (
+                        record.failure_reason or "collector_error"
+                    )
 
     @staticmethod
     def _storage_failure_reason(error: Exception) -> StorageObservabilityFailureReason:

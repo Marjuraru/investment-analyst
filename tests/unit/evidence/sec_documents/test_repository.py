@@ -1,3 +1,4 @@
+import hashlib
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -8,12 +9,17 @@ from investment_analyst.core.models import RawRecord, SourceReference
 from investment_analyst.evidence.sec_documents.models import (
     SEC_DOCUMENT_SCHEMA_VERSION,
     SEC_DOCUMENT_SOURCE_ID,
+    SecDocumentAcquisitionRevision,
+    SecDocumentMetadataRevision,
     SecDocumentRevision,
     SecFiling,
     SecLogicalDocument,
+    create_sec_terminal_script_difference,
+    sec_document_metadata_sha256,
 )
 from investment_analyst.evidence.sec_documents.repository import (
     SecDocumentRepository,
+    revision_from_raw_record,
     revision_to_raw_record,
 )
 from investment_analyst.storage import LocalStorage, StorageError, StoragePaths
@@ -72,7 +78,12 @@ def _submissions(
 
 
 def _v2_revision(
-    *, checksum: str, accepted_at: datetime, retrieved_at: datetime, discovery_id
+    *,
+    checksum: str,
+    accepted_at: datetime,
+    retrieved_at: datetime,
+    discovery_id,
+    content_size_bytes: int = 4,
 ) -> SecDocumentRevision:
     filing = SecFiling(
         filing_id=SecFiling.expected_id("0000320193", "0000320193-25-000001"),
@@ -99,11 +110,90 @@ def _v2_revision(
         raw_record_id=SecDocumentRevision.expected_raw_record_id(revision_id),
         discovery_raw_record_id=discovery_id,
         content_sha256=checksum,
-        content_size_bytes=4,
+        content_size_bytes=content_size_bytes,
         available_at=accepted_at,
         retrieved_at=retrieved_at,
         source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/annual.htm",
         revision_schema_version="sec-document-revision-v2",
+    )
+
+
+def _acquisition_revision(
+    *,
+    prior: SecDocumentRevision | SecDocumentMetadataRevision | SecDocumentAcquisitionRevision,
+    prior_content: bytes,
+    current_content: bytes,
+    observed_at: datetime,
+    retrieved_at: datetime,
+    discovery_id,
+) -> SecDocumentAcquisitionRevision:
+    document = prior.document
+    metadata_sha256 = sec_document_metadata_sha256(document)
+    current_checksum = hashlib.sha256(current_content).hexdigest()
+    proof = create_sec_terminal_script_difference(
+        prior_content,
+        current_content,
+        document_name=document.name,
+    )
+    revision_id = SecDocumentAcquisitionRevision.expected_id(
+        document.document_id,
+        current_checksum,
+        metadata_sha256,
+        prior.revision_id,
+        prior.content_sha256,
+    )
+    return SecDocumentAcquisitionRevision(
+        revision_id=revision_id,
+        asset_id=prior.asset_id,
+        document=document,
+        prior_revision_id=prior.revision_id,
+        raw_record_id=SecDocumentAcquisitionRevision.expected_raw_record_id(revision_id),
+        discovery_raw_record_id=discovery_id,
+        content_sha256=current_checksum,
+        content_size_bytes=len(current_content),
+        prior_content_sha256=prior.content_sha256,
+        metadata_sha256=metadata_sha256,
+        metadata_observed_at=observed_at,
+        available_at=max(
+            document.filing.accepted_at, observed_at, retrieved_at, prior.available_at
+        ),
+        retrieved_at=retrieved_at,
+        source_url=prior.source_url,
+        terminal_script_difference=proof,
+    )
+
+
+def _metadata_revision(
+    *,
+    prior: SecDocumentRevision | SecDocumentMetadataRevision,
+    accepted_at: datetime,
+    metadata_observed_at: datetime,
+    retrieved_at: datetime,
+    discovery_id,
+) -> SecDocumentMetadataRevision:
+    filing = prior.document.filing.model_copy(update={"accepted_at": accepted_at})
+    document = prior.document.model_copy(update={"filing": filing})
+    metadata_sha256 = sec_document_metadata_sha256(document)
+    revision_id = SecDocumentMetadataRevision.expected_id(
+        document.document_id,
+        prior.content_sha256,
+        metadata_sha256,
+        prior.revision_id,
+    )
+    return SecDocumentMetadataRevision(
+        revision_id=revision_id,
+        asset_id=prior.asset_id,
+        document=document,
+        prior_revision_id=prior.revision_id,
+        raw_record_id=SecDocumentMetadataRevision.expected_raw_record_id(revision_id),
+        discovery_raw_record_id=discovery_id,
+        content_sha256=prior.content_sha256,
+        content_size_bytes=prior.content_size_bytes,
+        metadata_sha256=metadata_sha256,
+        metadata_observed_at=metadata_observed_at,
+        available_at=max(accepted_at, metadata_observed_at, retrieved_at),
+        retrieved_at=retrieved_at,
+        source_url=prior.source_url,
     )
 
 
@@ -264,3 +354,287 @@ def test_v2_lineage_rejects_discovery_received_after_document_retrieval(tmp_path
         repository = SecDocumentRepository(storage.raw_records, storage.documents)
         with pytest.raises(StorageError, match="received after the revision was retrieved"):
             repository.verify_revision(revision)
+
+
+def test_metadata_revision_is_append_only_point_in_time_and_restores_shared_blob(
+    tmp_path: Path,
+) -> None:
+    accepted_before = datetime(2025, 1, 31, 23, tzinfo=UTC)
+    accepted_after = datetime(2025, 2, 1, 1, tzinfo=UTC)
+    prior_observed = datetime(2025, 2, 1, tzinfo=UTC)
+    prior_retrieved = datetime(2025, 2, 1, 1, tzinfo=UTC)
+    metadata_observed = datetime(2025, 2, 2, tzinfo=UTC)
+    metadata_retrieved = datetime(2025, 2, 3, tzinfo=UTC)
+    prior_discovery_id = uuid4()
+    metadata_discovery_id = uuid4()
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(prior_discovery_id, prior_observed))
+        receipt = storage.documents.put(b"one!")
+        prior = _v2_revision(
+            checksum=receipt.sha256,
+            accepted_at=accepted_before,
+            retrieved_at=prior_retrieved,
+            discovery_id=prior_discovery_id,
+        )
+        storage.raw_records.save(revision_to_raw_record(prior))
+        storage.raw_records.save(_submissions(metadata_discovery_id, metadata_observed))
+        corrected = _metadata_revision(
+            prior=prior,
+            accepted_at=accepted_after,
+            metadata_observed_at=metadata_observed,
+            retrieved_at=metadata_retrieved,
+            discovery_id=metadata_discovery_id,
+        )
+        raw_record = revision_to_raw_record(corrected)
+        storage.raw_records.save(raw_record)
+
+        repository = SecDocumentRepository(storage.raw_records, storage.documents)
+        before_correction = repository.replay(
+            asset_id="equity:us:aapl",
+            known_at=datetime(2025, 2, 2, 12, tzinfo=UTC),
+            accession="0000320193-25-000001",
+            include_content=True,
+        )
+        after_correction = repository.replay(
+            asset_id="equity:us:aapl",
+            known_at=datetime(2025, 2, 4, tzinfo=UTC),
+            accession="0000320193-25-000001",
+            include_content=True,
+        )
+        repository.verify_revision(corrected)
+        decoded = revision_from_raw_record(raw_record)
+
+    assert before_correction.revision == prior
+    assert before_correction.content == b"one!"
+    assert after_correction.revision == corrected
+    assert after_correction.revision.document.filing.accepted_at == accepted_after
+    assert after_correction.content == b"one!"
+    assert decoded == corrected
+    assert raw_record.schema_version == "sec-document-revision-v3"
+    assert raw_record.payload["kind"] == "sec_document_metadata_revision"
+    assert receipt.created
+
+
+def test_metadata_revision_rejects_missing_prior_and_metadata_tampering(tmp_path: Path) -> None:
+    observed_at = datetime(2025, 2, 2, tzinfo=UTC)
+    retrieved_at = datetime(2025, 2, 3, tzinfo=UTC)
+    discovery_id = uuid4()
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(discovery_id, observed_at))
+        receipt = storage.documents.put(b"one!")
+        prior = _v2_revision(
+            checksum=receipt.sha256,
+            accepted_at=datetime(2025, 1, 31, tzinfo=UTC),
+            retrieved_at=observed_at,
+            discovery_id=discovery_id,
+        )
+        missing_prior = _metadata_revision(
+            prior=prior,
+            accepted_at=datetime(2025, 2, 1, tzinfo=UTC),
+            metadata_observed_at=observed_at,
+            retrieved_at=retrieved_at,
+            discovery_id=discovery_id,
+        )
+        repository = SecDocumentRepository(storage.raw_records, storage.documents)
+        storage.raw_records.save(revision_to_raw_record(missing_prior))
+
+        with pytest.raises(StorageError, match="prior is missing"):
+            repository.verify_revision(missing_prior)
+
+        tampered_payload = dict(revision_to_raw_record(missing_prior).payload)
+        tampered_revision = dict(tampered_payload["revision"])
+        tampered_revision["metadata_sha256"] = "0" * 64
+        tampered_payload["revision"] = tampered_revision
+        tampered_record = revision_to_raw_record(missing_prior).model_copy(
+            update={"payload": tampered_payload}
+        )
+        with pytest.raises(StorageError, match="revision is malformed"):
+            revision_from_raw_record(tampered_record)
+
+
+def test_v3_rejects_changed_content_hash_even_with_valid_revision_identity(tmp_path: Path) -> None:
+    prior_discovery_id = uuid4()
+    current_discovery_id = uuid4()
+    observed_at = datetime(2025, 2, 2, tzinfo=UTC)
+    accepted_at = datetime(2025, 2, 1, tzinfo=UTC)
+    prior_content = b"prior"
+    changed_content = b"other"
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(prior_discovery_id, observed_at))
+        storage.raw_records.save(_submissions(current_discovery_id, observed_at))
+        prior_blob = storage.documents.put(prior_content)
+        changed_blob = storage.documents.put(changed_content)
+        prior = _v2_revision(
+            checksum=prior_blob.sha256,
+            accepted_at=datetime(2025, 1, 31, tzinfo=UTC),
+            retrieved_at=observed_at,
+            discovery_id=prior_discovery_id,
+            content_size_bytes=len(prior_content),
+        )
+        current_document = prior.document.model_copy(
+            update={"filing": prior.document.filing.model_copy(update={"accepted_at": accepted_at})}
+        )
+        metadata_sha256 = sec_document_metadata_sha256(current_document)
+        revision_id = SecDocumentMetadataRevision.expected_id(
+            current_document.document_id,
+            changed_blob.sha256,
+            metadata_sha256,
+            prior.revision_id,
+        )
+        changed_v3 = SecDocumentMetadataRevision(
+            revision_id=revision_id,
+            asset_id=prior.asset_id,
+            document=current_document,
+            prior_revision_id=prior.revision_id,
+            raw_record_id=SecDocumentMetadataRevision.expected_raw_record_id(revision_id),
+            discovery_raw_record_id=current_discovery_id,
+            content_sha256=changed_blob.sha256,
+            content_size_bytes=len(changed_content),
+            metadata_sha256=metadata_sha256,
+            metadata_observed_at=observed_at,
+            available_at=observed_at + timedelta(days=1),
+            retrieved_at=observed_at + timedelta(days=1),
+            source_url=prior.source_url,
+        )
+        storage.raw_records.save(revision_to_raw_record(prior))
+        storage.raw_records.save(revision_to_raw_record(changed_v3))
+        repository = SecDocumentRepository(storage.raw_records, storage.documents)
+
+        with pytest.raises(StorageError, match="metadata revision prior conflicts"):
+            repository.verify_revision(changed_v3)
+
+
+def test_acquisition_revision_preserves_full_blobs_and_recomputes_proof(tmp_path: Path) -> None:
+    accepted_at = datetime(2025, 1, 31, 18, tzinfo=UTC)
+    prior_discovery_id = uuid4()
+    current_discovery_id = uuid4()
+    observed_at = datetime(2025, 2, 2, tzinfo=UTC)
+    retrieved_at = datetime(2025, 2, 3, tzinfo=UTC)
+    prior_content = b"<html><body>filing</body></html>\n"
+    script = b'<script type="text/javascript"  src="/rotated/path"></script>'
+    current_content = prior_content.replace(b"</body>", script + b"</body>")
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(prior_discovery_id, accepted_at))
+        prior_blob = storage.documents.put(prior_content)
+        prior = _v2_revision(
+            checksum=prior_blob.sha256,
+            accepted_at=accepted_at,
+            retrieved_at=accepted_at + timedelta(hours=1),
+            discovery_id=prior_discovery_id,
+            content_size_bytes=len(prior_content),
+        )
+        storage.raw_records.save(revision_to_raw_record(prior))
+        storage.raw_records.save(_submissions(current_discovery_id, observed_at))
+        current_blob = storage.documents.put(current_content)
+        acquired = _acquisition_revision(
+            prior=prior,
+            prior_content=prior_content,
+            current_content=current_content,
+            observed_at=observed_at,
+            retrieved_at=retrieved_at,
+            discovery_id=current_discovery_id,
+        )
+        acquired_raw = revision_to_raw_record(acquired)
+        storage.raw_records.save(acquired_raw)
+
+        repository = SecDocumentRepository(storage.raw_records, storage.documents)
+        repository.verify_revision(acquired)
+        history = repository.list_revisions(
+            asset_id="equity:us:aapl",
+            known_at=datetime(2025, 2, 4, tzinfo=UTC),
+            accession="0000320193-25-000001",
+        )
+        repository.verify_revision_history(history)
+        before = repository.replay(
+            asset_id="equity:us:aapl",
+            known_at=datetime(2025, 2, 2, tzinfo=UTC),
+            accession="0000320193-25-000001",
+            include_content=True,
+        )
+        after = repository.replay(
+            asset_id="equity:us:aapl",
+            known_at=datetime(2025, 2, 4, tzinfo=UTC),
+            accession="0000320193-25-000001",
+            include_content=True,
+        )
+        tampered_payload = dict(acquired_raw.payload)
+        tampered_revision = dict(tampered_payload["revision"])
+        tampered_proof = dict(tampered_revision["terminal_script_difference"])
+        tampered_proof["core_sha256"] = "0" * 64
+        tampered_revision["terminal_script_difference"] = tampered_proof
+        tampered_payload["revision"] = tampered_revision
+        tampered = revision_from_raw_record(
+            acquired_raw.model_copy(update={"payload": tampered_payload})
+        )
+        assert storage.documents.read(prior.content_sha256) == prior_content
+        assert storage.documents.read(acquired.content_sha256) == current_content
+
+        with pytest.raises(StorageError, match="terminal script proof is invalid"):
+            repository.verify_revision(tampered)
+
+    assert current_blob.sha256 == acquired.content_sha256
+    assert current_blob.size_bytes == len(current_content)
+    assert before.revision == prior
+    assert before.content == prior_content
+    assert after.revision == acquired
+    assert after.content == current_content
+
+
+def test_acquisition_history_rejects_divergent_forks(tmp_path: Path) -> None:
+    accepted_at = datetime(2025, 1, 31, 18, tzinfo=UTC)
+    prior_discovery_id = uuid4()
+    acquisition_discovery_id = uuid4()
+    observed_at = datetime(2025, 2, 2, tzinfo=UTC)
+    retrieved_at = datetime(2025, 2, 3, tzinfo=UTC)
+    prior_content = b"<html><body>filing</body></html>\n"
+    first_content = prior_content.replace(
+        b"</body>",
+        b'<script type="text/javascript"  src="/path/one"></script></body>',
+    )
+    second_content = prior_content.replace(
+        b"</body>",
+        b'<script type="text/javascript"  src="/path/two"></script></body>',
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions(prior_discovery_id, accepted_at))
+        prior_blob = storage.documents.put(prior_content)
+        prior = _v2_revision(
+            checksum=prior_blob.sha256,
+            accepted_at=accepted_at,
+            retrieved_at=accepted_at + timedelta(hours=1),
+            discovery_id=prior_discovery_id,
+            content_size_bytes=len(prior_content),
+        )
+        storage.raw_records.save(revision_to_raw_record(prior))
+        storage.raw_records.save(_submissions(acquisition_discovery_id, observed_at))
+        first_blob = storage.documents.put(first_content)
+        second_blob = storage.documents.put(second_content)
+        first = _acquisition_revision(
+            prior=prior,
+            prior_content=prior_content,
+            current_content=first_content,
+            observed_at=observed_at,
+            retrieved_at=retrieved_at,
+            discovery_id=acquisition_discovery_id,
+        )
+        second = _acquisition_revision(
+            prior=prior,
+            prior_content=prior_content,
+            current_content=second_content,
+            observed_at=observed_at,
+            retrieved_at=retrieved_at + timedelta(minutes=1),
+            discovery_id=acquisition_discovery_id,
+        )
+        storage.raw_records.save(revision_to_raw_record(first))
+        storage.raw_records.save(revision_to_raw_record(second))
+
+        repository = SecDocumentRepository(storage.raw_records, storage.documents)
+        with pytest.raises(StorageError, match="divergent forks"):
+            repository.verify_revision_history([prior, first, second])
+
+    assert first_blob.sha256 == first.content_sha256
+    assert second_blob.sha256 == second.content_sha256

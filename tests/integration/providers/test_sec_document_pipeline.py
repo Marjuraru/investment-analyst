@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 
 from investment_analyst.core.models import AssetClass, RawRecord, SourceReference
+from investment_analyst.evidence.sec_documents.repository import SecDocumentRepository
 from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_document_client import SecPrimaryDocumentResponse
 from investment_analyst.providers.fundamentals.sec_document_pipeline import (
@@ -18,15 +19,23 @@ from investment_analyst.storage import LocalStorage, StoragePaths
 
 
 class _Client:
-    def __init__(self, *, fail_second: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_second: bool = False,
+        body_suffix: str = "",
+        retrieved_at: datetime | None = None,
+    ) -> None:
         self._fail_second = fail_second
+        self._body_suffix = body_suffix
+        self._retrieved_at = retrieved_at
         self._calls = 0
 
     def fetch(self, document):
         self._calls += 1
         if self._fail_second and self._calls == 2:
             raise RuntimeError("second fetch failed")
-        body = f"<html>{document.filing.accession}</html>".encode()
+        body = f"<html>{document.filing.accession}{self._body_suffix}</html>".encode()
         return SecPrimaryDocumentResponse(
             content=body,
             sha256=hashlib.sha256(body).hexdigest(),
@@ -35,7 +44,7 @@ class _Client:
                 "https://www.sec.gov/Archives/edgar/data/320193/"
                 f"{document.filing.accession.replace('-', '')}/{document.name}"
             ),
-            retrieved_at=datetime(2025, 2, self._calls, tzinfo=UTC),
+            retrieved_at=self._retrieved_at or datetime(2025, 2, self._calls, tzinfo=UTC),
         )
 
 
@@ -53,15 +62,20 @@ def _configuration() -> SecAssetConfiguration:
     )
 
 
-def _submissions() -> RawRecord:
-    retrieved = datetime(2025, 1, 31, tzinfo=UTC)
+def _submissions(
+    *,
+    accepted_at: str = "2025-01-31T18:00:00.000Z",
+    retrieved_at: datetime = datetime(2025, 1, 31, tzinfo=UTC),
+    primary_document: str = "annual.htm",
+) -> RawRecord:
+    retrieved = retrieved_at
     recent = {
         "accessionNumber": ["0000320193-25-000001", "0000320193-25-000002"],
         "filingDate": ["2025-01-31", "2025-01-31"],
         "reportDate": ["2024-12-31", "2024-09-30"],
-        "acceptanceDateTime": ["2025-01-31T18:00:00.000Z", "2025-01-31T17:00:00.000Z"],
+        "acceptanceDateTime": [accepted_at, "2025-01-31T17:00:00.000Z"],
         "form": ["10-K", "10-Q"],
-        "primaryDocument": ["annual.htm", "quarterly.htm"],
+        "primaryDocument": [primary_document, "quarterly.htm"],
     }
     return RawRecord(
         record_id=uuid4(),
@@ -117,3 +131,121 @@ def test_repeat_reuses_blob_and_revision(tmp_path: Path) -> None:
         assert first.revisions_created == 1
         assert second.revisions_reused == 1
         assert first.revisions[0] == second.revisions[0]
+
+
+def test_accepted_at_correction_appends_v3_and_reuse_skips_archive(tmp_path: Path) -> None:
+    accession = "0000320193-25-000001"
+    request = SecDocumentImportRequest(accessions=(accession,))
+    first_submission = _submissions()
+    metadata_observed = datetime(2025, 2, 4, tzinfo=UTC)
+    corrected_submission = _submissions(
+        accepted_at="2025-02-01T01:00:00.000Z",
+        retrieved_at=metadata_observed,
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(first_submission)
+        first_client = _Client(retrieved_at=datetime(2025, 2, 1, tzinfo=UTC))
+        first = SecDocumentPipeline(storage, first_client, configuration=_configuration()).run(
+            request
+        )
+        prior = first.revisions[0]
+        storage.raw_records.save(corrected_submission)
+
+        correction_client = _Client(retrieved_at=datetime(2025, 2, 5, tzinfo=UTC))
+        corrected = SecDocumentPipeline(
+            storage, correction_client, configuration=_configuration()
+        ).run(request)
+        repeated = SecDocumentPipeline(storage, _Client(), configuration=_configuration()).run(
+            request
+        )
+        replay_before = SecDocumentRepository(storage.raw_records, storage.documents).replay(
+            asset_id="equity:us:aapl",
+            known_at=datetime(2025, 2, 4, 12, tzinfo=UTC),
+            accession=accession,
+        )
+        replay_after = SecDocumentRepository(storage.raw_records, storage.documents).replay(
+            asset_id="equity:us:aapl",
+            known_at=datetime(2025, 2, 6, tzinfo=UTC),
+            accession=accession,
+        )
+
+        assert storage.raw_records.count(schema_version="sec-document-revision-v2") == 1
+        assert storage.raw_records.count(schema_version="sec-document-revision-v3") == 1
+
+    assert corrected.revisions_created == 1
+    assert corrected.revisions_reused == 0
+    assert corrected.blobs_created == 0
+    assert corrected.blobs_reused == 1
+    assert corrected.document_fetch_calls == 1
+    assert correction_client._calls == 1
+    assert corrected.revisions[0].prior_revision_id == prior.revision_id
+    assert corrected.revisions[0].metadata_observed_at == metadata_observed
+    assert corrected.revisions[0].available_at == datetime(2025, 2, 5, tzinfo=UTC)
+    assert repeated.revisions_reused == 1
+    assert repeated.document_fetch_calls == 0
+    assert replay_before.revision == prior
+    assert replay_after.revision == corrected.revisions[0]
+    assert replay_after.revision.document.filing.accepted_at == datetime(2025, 2, 1, 1, tzinfo=UTC)
+
+
+def test_accepted_at_correction_rejects_changed_remote_bytes_without_append(
+    tmp_path: Path,
+) -> None:
+    accession = "0000320193-25-000001"
+    request = SecDocumentImportRequest(accessions=(accession,))
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions())
+        first = SecDocumentPipeline(
+            storage,
+            _Client(retrieved_at=datetime(2025, 2, 1, tzinfo=UTC)),
+            configuration=_configuration(),
+        ).run(request)
+        storage.raw_records.save(
+            _submissions(
+                accepted_at="2025-02-01T01:00:00.000Z",
+                retrieved_at=datetime(2025, 2, 4, tzinfo=UTC),
+            )
+        )
+
+        with pytest.raises(SecDocumentPipelineError) as raised:
+            SecDocumentPipeline(
+                storage,
+                _Client(
+                    body_suffix=" changed",
+                    retrieved_at=datetime(2025, 2, 5, tzinfo=UTC),
+                ),
+                configuration=_configuration(),
+            ).run(request)
+
+        assert raised.value.reason_code == "sec_document_revision_conflict"
+        assert storage.raw_records.count(schema_version="sec-document-revision-v2") == 1
+        assert storage.raw_records.count(schema_version="sec-document-revision-v3") == 0
+        assert storage.raw_records.get(first.revisions[0].raw_record_id).payload["revision"][
+            "revision_id"
+        ] == str(first.revisions[0].revision_id)
+
+
+def test_metadata_change_beyond_accepted_at_fails_before_archive_fetch(tmp_path: Path) -> None:
+    accession = "0000320193-25-000001"
+    request = SecDocumentImportRequest(accessions=(accession,))
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions())
+        first = SecDocumentPipeline(storage, _Client(), configuration=_configuration()).run(request)
+        storage.raw_records.save(
+            _submissions(
+                accepted_at="2025-02-01T01:00:00.000Z",
+                retrieved_at=datetime(2025, 2, 4, tzinfo=UTC),
+                primary_document="renamed.htm",
+            )
+        )
+        client = _Client()
+
+        with pytest.raises(SecDocumentPipelineError) as raised:
+            SecDocumentPipeline(storage, client, configuration=_configuration()).run(request)
+
+        assert raised.value.reason_code == "sec_document_revision_conflict"
+        assert client._calls == 0
+        assert storage.raw_records.count(schema_version="sec-document-revision-v2") == 1
+        assert storage.raw_records.count(schema_version="sec-document-revision-v3") == 0
+        assert first.revisions_created == 1

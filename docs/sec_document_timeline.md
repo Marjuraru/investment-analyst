@@ -9,9 +9,14 @@ para la búsqueda y enumeración determinista de documentos oficiales SEC a un c
 La consulta devuelve revisiones ya persistidas en el almacenamiento local, cubriendo dos familias
 disjuntas sin fusionar identidades ni inferir correspondencias entre activo y declarante:
 
-1. **`asset_document`** (`sec-document-revision-v2`): revisiones vinculadas a un activo corporativo
-   del catálogo (`asset_id`), donde `available_at == filing.accepted_at` representa la disponibilidad
-   pública oficial.
+1. **`asset_document`** (`sec-document-revision-v2`, `v3` y `v4`): revisiones vinculadas a un activo
+   corporativo del catálogo (`asset_id`). En v2, `available_at == filing.accepted_at` representa la
+   disponibilidad pública oficial. V3 registra una corrección de `accepted_at` probada por un
+   Submissions posterior, reutiliza exactamente el blob previo y fija disponibilidad al máximo
+   entre metadata corregida, observación Submissions y verificación remota. V4 conserva una nueva
+   respuesta completa de Archives cuando sólo difiere por el script externo terminal declarado en el
+   [contrato del corpus](sec_document_corpus.md#corpus-documental-sec-primario); enlaza su prior y
+   almacena una prueba recalculable a partir de ambos blobs completos.
 2. **`filer_document`** (`sec-filer-document-revision-v1`): revisiones vinculadas a un declarante
    institucional (`filer_cik`), como filings 13F-HR, sin vínculo a un `asset_id` específico.
 
@@ -24,6 +29,12 @@ sólo si `family == "asset_document"`.
 - **Corte point-in-time:** Una revisión es elegible exclusivamente si `available_at <= known_at`.
   Cualquier documento con disponibilidad posterior al corte queda excluido. La fecha de recepción local
   `retrieved_at` preserva la auditoría de captura y **nunca** se utiliza como criterio de disponibilidad.
+- **Revisiones v3/v4:** El filtro `available_at <= known_at` excluye revisiones futuras antes de
+  seleccionar la historia. Antes de v3 o v4, la línea temporal conserva la revisión previa; después,
+  añade cada identidad y conserva sus hashes/tamaños completos. V3 sólo admite bytes idénticos; un
+  hash distinto requiere una v4 con su prueba terminal verificada. V4 usa la disponibilidad de
+  adquisición y del prior, nunca retrotrae la respuesta nueva a `accepted_at`, y no reemplaza
+  resultados históricos.
 - **Rango público inclusivo:** Los filtros de fecha `available_from` y `available_to` son inclusivos en
   ambos extremos conforme a la regla general del repositorio. Internamente se transforman a un
   intervalo medio-abierto UTC `[from 00:00:00Z, (to + 1 día) 00:00:00Z)`, de modo que una revisión
