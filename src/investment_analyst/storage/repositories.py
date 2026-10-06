@@ -525,6 +525,41 @@ class DuckDBObservationRepository:
         ).fetchall()
         return [UUID(row[0]) for row in rows]
 
+    def select_ids_for_manager_observation_references(
+        self, candidate_ids: Collection[UUID], *, manager: str
+    ) -> list[UUID]:
+        """Select the requested manager from bounded lineage-key projections."""
+        ordered = tuple(dict.fromkeys(candidate_ids))
+        selected: list[UUID] = []
+        for offset in range(0, len(ordered), _OBSERVATION_IMPORT_PAGE_LIMIT):
+            batch = ordered[offset : offset + _OBSERVATION_IMPORT_PAGE_LIMIT]
+            if not batch:
+                continue
+            placeholders = ", ".join("?" for _ in batch)
+            rows = self._connection.execute(
+                "SELECT observation_id, json_extract_string("
+                "json_extract_string(document_json, '$.source.record_key'), "
+                "'$.manager_cik') FROM normalized_observations "
+                f"WHERE observation_id IN ({placeholders})",
+                [str(identifier) for identifier in batch],
+            ).fetchall()
+            indexed = {UUID(str(row[0])): row[1] for row in rows}
+            missing = [identifier for identifier in batch if identifier not in indexed]
+            if missing:
+                raise RecordNotFoundError(
+                    f"selected institutional observation {missing[0]} is absent"
+                )
+            selected.extend(identifier for identifier in batch if indexed[identifier] == manager)
+        return selected
+
+    def field_name(self, observation_id: UUID) -> str | None:
+        """Return one indexed field name without hydrating its observation."""
+        row = self._connection.execute(
+            "SELECT field_name FROM normalized_observations WHERE observation_id = ?",
+            [str(observation_id)],
+        ).fetchone()
+        return str(row[0]) if row is not None else None
+
     def list(
         self,
         *,
@@ -1068,6 +1103,37 @@ class DuckDBMetricResultRepository:
                 [after_available_at, after_available_at, str(after_result_id), limit],
             ).fetchall()
         return tuple(UUID(str(row[0])) for row in rows)
+
+    def list_ids(
+        self,
+        *,
+        asset_id: str | None = None,
+        metric_keys: Collection[str] | None = None,
+        available_to: datetime | None = None,
+    ) -> list[UUID]:
+        """Select metric IDs by closed-set scope and PIT cut before hydration."""
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if asset_id is not None:
+            clauses.append("asset_id = ?")
+            parameters.append(asset_id)
+        if metric_keys is not None:
+            keys = tuple(sorted(set(metric_keys)))
+            if not keys:
+                return []
+            clauses.append(f"metric_key IN ({', '.join('?' for _ in keys)})")
+            parameters.extend(keys)
+        if available_to is not None:
+            if available_to.tzinfo is None or available_to.utcoffset() is None:
+                raise ValueError("available_to must be timezone-aware")
+            clauses.append("available_at <= ?")
+            parameters.append(available_to)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._connection.execute(
+            f"SELECT result_id FROM metric_results{where} ORDER BY available_at, result_id",
+            parameters,
+        ).fetchall()
+        return [UUID(str(row[0])) for row in rows]
 
 
 class DuckDBDiagnosticResultRepository:

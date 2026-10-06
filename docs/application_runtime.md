@@ -23,6 +23,13 @@ The default never uses `/tmp` and does not depend on the current working directo
 not require a workspace manifest and preserves existing persisted identities. No data is copied or
 migrated between layouts.
 
+For `--workspace`, the validated manifest selects the storage format. Format 1 remains the default;
+format 2 uses the same `ApplicationRuntime`, `LocalStorage`, and repository contracts with a typed
+DuckDB index and content-addressed raw files. Creating a v2 workspace requires an explicit
+`WorkspaceService.initialize(..., format_version=2)` call. Existing workspaces are never converted
+by opening them. Exports and documents remain under workspace-managed paths, and workspace v2 backup
+uses its own versioned manifest.
+
 ## Access modes
 
 Commands declare their access explicitly:
@@ -32,8 +39,10 @@ Commands declare their access explicitly:
 - Market-history queries, SEC fundamental queries, and the consolidated Apple diagnostic query use
   `read_only`.
 
-Workspace storage is opened through `WorkspaceService.open_storage`. Legacy storage is constructed
-only inside `ApplicationRuntime`; read-only legacy access uses the same physical DuckDB connection
+Workspace storage is opened through `WorkspaceService.open_storage`. Workspace v2 passes
+`read_only=True` to DuckDB and begins an explicit read-only transaction before schema validation;
+it does not initialize tables, blobs or manifests. Legacy storage is constructed only inside
+`ApplicationRuntime`; read-only legacy access uses the same physical DuckDB connection
 configuration as the local writer, then establishes an explicit `BEGIN TRANSACTION READ ONLY` before
 schema validation or any query. It will not create a database or initialize tables, and can share a
 same-process writer snapshot without seeing uncommitted data. This does not add a multi-process

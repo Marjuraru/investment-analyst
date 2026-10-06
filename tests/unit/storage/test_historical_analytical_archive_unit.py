@@ -90,6 +90,12 @@ def _diagnostic(metric_id: UUID) -> DiagnosticResult:
     )
 
 
+def test_archive_does_not_keep_a_sequence_cache() -> None:
+    archive = HistoricalAnalyticalArchive(duckdb.connect(":memory:"))
+
+    assert not hasattr(archive, "_sequence_cache")
+
+
 def test_metric_round_trip_preserves_uuid5_decimal_parameters_and_shared_720_links() -> None:
     connection = duckdb.connect(":memory:")
     archive = HistoricalAnalyticalArchive(connection)

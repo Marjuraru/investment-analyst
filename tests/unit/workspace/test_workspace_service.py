@@ -127,7 +127,7 @@ def test_manifest_errors_are_typed_and_never_overwritten(tmp_path) -> None:
     wrong_version.mkdir()
     version_document = (
         '{"application":"investment-analyst","workspace_id":'
-        '"11111111-1111-4111-8111-111111111111","format_version":2,'
+        '"11111111-1111-4111-8111-111111111111","format_version":3,'
         '"created_at":"2026-07-14T12:00:00Z"}\n'
     )
     (wrong_version / "manifest.json").write_text(version_document, encoding="utf-8")

@@ -31,7 +31,7 @@ from investment_analyst.storage import LocalStorage, StorageError
 _INSTITUTIONAL_METRIC_KEYS = tuple(
     definition.metric_key for definition in INSTITUTIONAL_METRIC_DEFINITIONS
 )
-_EVENT_METRIC_BATCH_SIZE = 512
+_EVENT_METRIC_BATCH_SIZE = 256
 
 
 class InstitutionalEventService:
@@ -116,36 +116,23 @@ class InstitutionalEventService:
         """
         from investment_analyst.storage.errors import RecordNotFoundError
 
-        clauses: list[str] = ["asset_id = ?"]
-        parameters: list[object] = [asset_id]
-        placeholders = ", ".join("?" for _ in _INSTITUTIONAL_METRIC_KEYS)
-        clauses.append(f"metric_key IN ({placeholders})")
-        parameters.extend(_INSTITUTIONAL_METRIC_KEYS)
-        clauses.append("available_at <= ?")
-        parameters.append(known_at)
-        rows = self._storage.metric_results._connection.execute(
-            "SELECT result_id FROM metric_results"
-            f" WHERE {' AND '.join(clauses)} ORDER BY available_at, result_id",
-            parameters,
-        ).fetchall()
-        candidate_ids = [UUID(row[0]) for row in rows]
+        candidate_ids = self._storage.metric_results.list_ids(
+            asset_id=asset_id,
+            metric_keys=_INSTITUTIONAL_METRIC_KEYS,
+            available_to=known_at,
+        )
         filtered: list[MetricResult] = []
         for offset in range(0, len(candidate_ids), _EVENT_METRIC_BATCH_SIZE):
             batch_ids = candidate_ids[offset : offset + _EVENT_METRIC_BATCH_SIZE]
-            placeholders = ", ".join("?" for _ in batch_ids)
-            selected = self._storage.metric_results._connection.execute(
-                f"SELECT result_id FROM metric_results WHERE result_id IN ({placeholders})",
-                [str(result_id) for result_id in batch_ids],
-            ).fetchall()
-            indexed = {UUID(row[0]) for row in selected}
+            try:
+                indexed = self._storage.metric_results.get_many(batch_ids)
+            except RecordNotFoundError as error:
+                raise StorageError("selected institutional metric is absent") from error
             missing = [result_id for result_id in batch_ids if result_id not in indexed]
             if missing:
                 raise StorageError("selected institutional metric is absent")
             for result_id in batch_ids:
-                try:
-                    item = self._storage.metric_results.get(result_id)
-                except RecordNotFoundError as error:
-                    raise StorageError("selected institutional metric is absent") from error
+                item = indexed[result_id]
                 if item.algorithm_version != INSTITUTIONAL_METRIC_ALGORITHM_VERSION:
                     continue
                 item_mgr = item.parameters.get("manager_cik")

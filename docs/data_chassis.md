@@ -1,5 +1,10 @@
 # Ruta DATA-CHASSIS: Chasis de Datos y Almacenamiento
 
+El plan de cierre vigente y las seis fronteras 40–45 están en
+[`data_chassis_closure_plan.md`](data_chassis_closure_plan.md). El registro Q1–Q7, sus estados y
+comparadores permanecen en [`.agents/rules/investment-analyst-core.md`](../.agents/rules/investment-analyst-core.md);
+la evidencia scratch de este bloque no altera esos objetivos ni cierra la ruta.
+
 Este documento gobierna la ruta técnica transversal `DATA-CHASSIS`.
 Define la arquitectura objetivo, el baseline inicial, las metas provisionales de contención y
 eficiencia, la secuencia de etapas y las restricciones operativas permanentes para la transformación
@@ -1055,3 +1060,32 @@ archivo histórico junto con las escrituras nuevas sin colapsar identidades.
 El ensayo completo con restore/rollback, la activación HUMAN, la limpieza
 inventariada y backup Drive probado son etapas posteriores. Este archivo no
 cierra DATA-CHASSIS ni convierte staging v2 en workspace activo.
+
+## Backend v2 compatible, compacto y recuperable (`DATA-CHASSIS-40` / #333)
+
+El bloque integra un backend de workspace seleccionable por manifiesto y
+`ApplicationRuntime`, con formato 1 como default. El formato 2 expone los
+repositorios existentes sobre índice DuckDB tipado, raw content-addressed,
+archivo analítico histórico sellado y nuevas escrituras `LIVE`; el backup v2
+usa un manifiesto separado. No añade una migración automática ni habilita el
+workspace permanente.
+
+El smoke offline de `scripts/smoke_workspace_v2_backend.py` produce tres
+perfiles y un JSON con SHA, entorno, digests, conteos, límites de página,
+tiempos, RSS y bytes lógicos/físicos separados. En la ejecución Python 3.12.3 /
+DuckDB 1.5.4 del SHA base se midieron: fidelidad de 259 registros por capa;
+interrupción tras una página confirmada, cierre/reapertura y reutilización de
+256 métricas; ambos consumidores institucionales con resultado v1/v2 idéntico
+en dos cortes; restore doble listo y checkpoint preservado; y escala de 1.537
+métricas, con 1.437 ajenas, 100 secuencias funding distintas de 720 inputs,
+páginas de hasta 256 y cero hidratación ajena. Los digests de resultados de
+escala coincidieron. La DB midió 1.060.864 B, el WAL 10.938.171 B, spill
+observado 0 B y RSS máximo del proceso 202.014.720 B; el perfil tomó 62,8 s.
+
+Estas son medidas de scratch de una ejecución, no una comparación de
+inventarios productivos ni una meta de ahorro. El objetivo Q1–Q7 conserva su
+registro canónico. No se copió el workspace real, no hubo cutover ni rollback
+productivo, y el backup Drive y la medición operacional siguen posteriores.
+El candidato propone `route_effect: ADVANCES` y deja DATA-CHASSIS como único
+`NEXT`; el detalle de cierre no numérico está en el
+[`plan de cierre`](data_chassis_closure_plan.md).

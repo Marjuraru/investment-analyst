@@ -11,6 +11,7 @@ from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCD
 
 APPLICATION_NAME = "investment-analyst"
 WORKSPACE_FORMAT_VERSION = 1
+SUPPORTED_WORKSPACE_FORMAT_VERSIONS = (1, 2)
 
 
 class _WorkspaceModel(ContractModel):
@@ -78,7 +79,7 @@ class WorkspaceManifest(_WorkspaceModel):
 
     application: Literal["investment-analyst"] = APPLICATION_NAME
     workspace_id: UUID
-    format_version: Literal[1] = WORKSPACE_FORMAT_VERSION
+    format_version: Literal[1, 2] = WORKSPACE_FORMAT_VERSION
     created_at: UTCDateTime
 
     def to_json_dict(self) -> dict[str, object]:

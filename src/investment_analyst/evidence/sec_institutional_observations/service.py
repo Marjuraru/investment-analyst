@@ -34,7 +34,7 @@ from .models import (
 )
 from .normalizer import normalize_row
 
-_OBSERVATION_SELECTION_BATCH_SIZE = 512
+_OBSERVATION_SELECTION_BATCH_SIZE = 256
 
 _RECORD_KEY_FIELDS = frozenset(
     {
@@ -207,40 +207,20 @@ class InstitutionalObservationService:
         return tuple(self.observation_ids_for_references(selected_ids).values())
 
     def _observation_field_name(self, observation_id: UUID) -> str | None:
-        row = self._storage.observations._connection.execute(
-            "SELECT field_name FROM normalized_observations WHERE observation_id = ?",
-            [str(observation_id)],
-        ).fetchone()
-        return str(row[0]) if row is not None else None
+        return self._storage.observations.field_name(observation_id)
 
     def _select_manager_observation_ids(
         self, candidate_ids: list[UUID], *, manager: str
     ) -> list[UUID]:
         """Select candidate IDs whose persisted lineage declares exactly this manager."""
-        selected: list[UUID] = []
-        for offset in range(0, len(candidate_ids), _OBSERVATION_SELECTION_BATCH_SIZE):
-            batch_ids = candidate_ids[offset : offset + _OBSERVATION_SELECTION_BATCH_SIZE]
-            placeholders = ", ".join("?" for _ in batch_ids)
-            rows = self._storage.observations._connection.execute(
-                "SELECT observation_id, json_extract_string("
-                "json_extract_string(document_json, '$.source.record_key'), "
-                "'$.manager_cik') FROM normalized_observations "
-                f"WHERE observation_id IN ({placeholders})",
-                [str(observation_id) for observation_id in batch_ids],
-            ).fetchall()
-            indexed = {UUID(row[0]): row[1] for row in rows}
-            missing = [
-                observation_id for observation_id in batch_ids if observation_id not in indexed
-            ]
-            if missing:
-                raise InstitutionalObservationLineageError(
-                    "selected institutional observation is absent"
-                )
-            for observation_id in batch_ids:
-                if indexed[observation_id] != manager:
-                    continue
-                selected.append(observation_id)
-        return selected
+        try:
+            return self._storage.observations.select_ids_for_manager_observation_references(
+                candidate_ids, manager=manager
+            )
+        except RecordNotFoundError as error:
+            raise InstitutionalObservationLineageError(
+                "selected institutional observation is absent"
+            ) from error
 
     def observation_ids_for_references(
         self,

@@ -2,6 +2,16 @@
 
 from types import TracebackType
 
+from investment_analyst.core.interfaces.repositories import (
+    AssetRepository,
+    DiagnosticResultRepository,
+    MetricDefinitionRepository,
+    MetricResultRepository,
+    ObservationRepository,
+    RawRecordRepository,
+    SourceDefinitionRepository,
+)
+from investment_analyst.storage.compact_analytical_v2 import CompactAnalyticalStore
 from investment_analyst.storage.document_content import DocumentContentStore
 from investment_analyst.storage.duckdb_store import DuckDBStore
 from investment_analyst.storage.errors import StorageError
@@ -16,6 +26,13 @@ from investment_analyst.storage.repositories import (
     DuckDBObservationRepository,
     DuckDBSourceDefinitionRepository,
 )
+from investment_analyst.storage.workspace_v2 import WorkspaceV2Store
+from investment_analyst.storage.workspace_v2_repositories import (
+    WorkspaceV2DiagnosticResultRepository,
+    WorkspaceV2MetricResultRepository,
+    WorkspaceV2ObservationRepository,
+    WorkspaceV2RawRecordRepository,
+)
 
 
 class LocalStorage:
@@ -24,14 +41,20 @@ class LocalStorage:
     def __init__(self, paths: StoragePaths, *, read_only: bool = False) -> None:
         self.paths = paths
         self.read_only = read_only
-        self.store = DuckDBStore(paths, read_only=read_only)
-        self.assets: DuckDBAssetRepository
-        self.sources: DuckDBSourceDefinitionRepository
-        self.raw_records: JsonRawRecordRepository
-        self.observations: DuckDBObservationRepository
-        self.metric_definitions: DuckDBMetricDefinitionRepository
-        self.metric_results: DuckDBMetricResultRepository
-        self.diagnostics: DuckDBDiagnosticResultRepository
+        self.store: DuckDBStore | WorkspaceV2Store
+        if paths.format_version == 1:
+            self.store = DuckDBStore(paths, read_only=read_only)
+        elif paths.format_version == 2:
+            self.store = WorkspaceV2Store(paths, read_only=read_only)
+        else:
+            raise ValueError("workspace storage format is unsupported")
+        self.assets: AssetRepository
+        self.sources: SourceDefinitionRepository
+        self.raw_records: RawRecordRepository
+        self.observations: ObservationRepository
+        self.metric_definitions: MetricDefinitionRepository
+        self.metric_results: MetricResultRepository
+        self.diagnostics: DiagnosticResultRepository
         self.parquet: ParquetExporter
         self.documents: DocumentContentStore
         self._is_open = False
@@ -49,20 +72,48 @@ class LocalStorage:
         connection = self.store.connection
         self.assets = DuckDBAssetRepository(connection)
         self.sources = DuckDBSourceDefinitionRepository(connection)
-        self.raw_records = JsonRawRecordRepository(
-            self.paths,
-            connection,
-            read_only=self.read_only,
-        )
-        self.observations = DuckDBObservationRepository(connection)
         self.metric_definitions = DuckDBMetricDefinitionRepository(connection)
-        self.metric_results = DuckDBMetricResultRepository(connection)
-        self.diagnostics = DuckDBDiagnosticResultRepository(connection)
-        self.parquet = ParquetExporter(
-            self.paths,
-            connection,
-            read_only=self.read_only,
-        )
+        if self.paths.format_version == 1:
+            self.raw_records = JsonRawRecordRepository(
+                self.paths,
+                connection,
+                read_only=self.read_only,
+            )
+            self.observations = DuckDBObservationRepository(connection)
+            self.metric_results = DuckDBMetricResultRepository(connection)
+            self.diagnostics = DuckDBDiagnosticResultRepository(connection)
+        else:
+            if not isinstance(self.store, WorkspaceV2Store):
+                raise StorageError("workspace v2 store was not selected")
+            compact = CompactAnalyticalStore(connection)
+            self.raw_records = WorkspaceV2RawRecordRepository(self.store.raw_staging, connection)
+            self.observations = WorkspaceV2ObservationRepository(self.store.raw_staging, connection)
+            self.metric_results = WorkspaceV2MetricResultRepository(compact)
+            self.diagnostics = WorkspaceV2DiagnosticResultRepository(compact)
+        if self.paths.format_version == 1:
+            self.parquet = ParquetExporter(
+                self.paths,
+                connection,
+                read_only=self.read_only,
+            )
+        else:
+            if not isinstance(self.raw_records, WorkspaceV2RawRecordRepository):
+                raise StorageError("workspace v2 raw repository was not selected")
+            if not isinstance(self.observations, WorkspaceV2ObservationRepository):
+                raise StorageError("workspace v2 observation repository was not selected")
+            if not isinstance(self.metric_results, WorkspaceV2MetricResultRepository):
+                raise StorageError("workspace v2 metric repository was not selected")
+            if not isinstance(self.diagnostics, WorkspaceV2DiagnosticResultRepository):
+                raise StorageError("workspace v2 diagnostic repository was not selected")
+            self.parquet = ParquetExporter(
+                self.paths,
+                connection,
+                read_only=self.read_only,
+                raw_records=self.raw_records,
+                observations=self.observations,
+                metric_results=self.metric_results,
+                diagnostics=self.diagnostics,
+            )
         self.documents = DocumentContentStore(self.paths, read_only=self.read_only)
         self._is_open = True
         return self
