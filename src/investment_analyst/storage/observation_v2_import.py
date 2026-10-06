@@ -36,6 +36,7 @@ from investment_analyst.storage.observation_v2 import (
     observation_to_row,
 )
 from investment_analyst.storage.raw_v2 import RawV2Staging
+from investment_analyst.storage.raw_v2_import import RawV2Importer, RawV2ImportSummary
 from investment_analyst.storage.serialization import canonical_json_bytes, sha256_hex
 
 OBSERVATION_V2_IMPORT_STATE_FORMAT = "observation-v2-import-state-v1"
@@ -243,6 +244,41 @@ class ObservationV2Importer:
             max_page_hydrated=max_hydrated,
         )
 
+    def verify_complete(self) -> ObservationV2ImportSummary:
+        """Verify raw and observation checkpoints against both live inventories."""
+        self._require_disjoint_destination()
+        raw_summary: RawV2ImportSummary = RawV2Importer(
+            self._source,
+            self._staging,
+            source_workspace_id=self._workspace_id,
+            source_fingerprint=self._fingerprint,
+            clock=self._clock,
+        ).verify_complete()
+        if not raw_summary.complete or raw_summary.corpus_digest != self._raw_digest:
+            raise ObservationV2ImportError("verified raw corpus does not match observation import")
+        path = self._state_path()
+        if path.is_symlink() or not path.is_file():
+            raise ObservationV2ImportError("complete observation import state is missing or unsafe")
+        try:
+            state = ObservationV2ImportState.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise ObservationV2ImportError(
+                "complete observation import state is incompatible"
+            ) from error
+        self._check_state_binding(state)
+        if state.raw_digest != raw_summary.corpus_digest:
+            raise ObservationV2ImportError(
+                "observation checkpoint does not bind to verified raw corpus"
+            )
+        self._validate_confirmed_prefix(state)
+        return self._verify_completion(
+            state,
+            imported_count=state.confirmed_count,
+            reused_count=0,
+            max_page_requested=state.page_limit,
+            max_page_hydrated=0,
+        )
+
     def _require_disjoint_destination(self) -> None:
         source_root = self._source.paths.root.resolve()
         staging_root = Path(self._destination_key).resolve(strict=False)
@@ -399,6 +435,7 @@ class ObservationV2Importer:
         counts_by_source: dict[str, int] = {}
         counts_by_frequency: dict[str, int] = {}
         verified = 0
+        max_hydrated = max_page_hydrated
         source_at: datetime | None = None
         source_id: UUID | None = None
         staged_at: datetime | None = None
@@ -418,6 +455,7 @@ class ObservationV2Importer:
                 break
             if not source_page or not staged_page or len(source_page) != len(staged_page):
                 raise ObservationV2ImportError("staged observations mismatch the source")
+            max_hydrated = max(max_hydrated, len(source_page))
             if [str(item) for item in staged_page] != [str(item) for item in source_page]:
                 raise ObservationV2ImportError("staged observations mismatch the source")
             source_records = self._source.observations.get_many(source_page)
@@ -455,7 +493,7 @@ class ObservationV2Importer:
             counts_by_source=counts_by_source,
             counts_by_frequency=counts_by_frequency,
             max_page_requested=max_page_requested,
-            max_page_hydrated=max_page_hydrated,
+            max_page_hydrated=max_hydrated,
             traceability_verified=True,
         )
 

@@ -66,7 +66,7 @@ def test_import_resume_replays_unconfirmed_batch_idempotently(tmp_path: Path) ->
             assert summary.complete is True
             assert summary.imported_count == 3
             assert summary.max_page_requested == 2
-            assert summary.max_page_hydrated == 1
+            assert summary.max_page_hydrated == 2
             assert sorted(staging.list_record_ids()) == sorted(source.raw_records.list_record_ids())
             rerun = importer.run(page_limit=2)
             assert rerun.complete is True
@@ -102,6 +102,30 @@ def test_import_requires_read_only_source(tmp_path: Path) -> None:
                 source_workspace_id="workspace-1",
                 source_fingerprint="fingerprint-1",
             )
+
+
+def test_verify_complete_is_read_only_and_detects_index_divergence(tmp_path: Path) -> None:
+    source_paths = StoragePaths.from_root(tmp_path / "source")
+    with LocalStorage(source_paths) as writer:
+        _seed(writer, 3)
+    with LocalStorage(source_paths, read_only=True) as source:
+        staging = _staging(tmp_path, "staging")
+        with staging:
+            importer = _importer(source, staging)
+            importer.run(page_limit=2)
+            state_path = staging.destination / "raw-v2-import-state.json"
+            state_before = state_path.read_bytes()
+
+            verified = importer.verify_complete()
+
+            assert verified.complete is True
+            assert verified.imported_count == 3
+            assert verified.max_page_hydrated == 2
+            assert state_path.read_bytes() == state_before
+            staging._connection.execute("DELETE FROM raw_v2_index")
+            with pytest.raises(RawV2ImportError, match="prefix does not match|staged inventory"):
+                importer.verify_complete()
+            assert state_path.read_bytes() == state_before
 
 
 def test_legacy_v1_checkpoint_keeps_same_path_semantics(tmp_path) -> None:

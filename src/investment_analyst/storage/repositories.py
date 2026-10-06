@@ -74,6 +74,22 @@ def _get_many_documents[ModelT: BaseModel](
 
 _GET_EXISTING_CHUNK_SIZE = 1_000
 _OBSERVATION_IMPORT_PAGE_LIMIT = 256
+_ANALYTICAL_IMPORT_PAGE_LIMIT = 256
+
+
+def _validate_analytical_import_page(
+    limit: int, cursor_at: datetime | None, cursor_id: UUID | None
+) -> None:
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1 <= limit <= _ANALYTICAL_IMPORT_PAGE_LIMIT
+    ):
+        raise ValueError("analytical import page limit must be an integer between 1 and 256")
+    if (cursor_at is None) != (cursor_id is None):
+        raise ValueError("analytical import cursor fields must be provided together")
+    if cursor_at is not None and (cursor_at.tzinfo is None or cursor_at.utcoffset() is None):
+        raise ValueError("analytical import cursor time must be timezone-aware")
 
 
 def _get_existing_documents[ModelT: BaseModel](
@@ -1030,6 +1046,29 @@ class DuckDBMetricResultRepository:
         ).fetchone()
         return int(row[0]) if row is not None else 0
 
+    def list_import_page(
+        self,
+        *,
+        limit: int,
+        after_available_at: datetime | None = None,
+        after_result_id: UUID | None = None,
+    ) -> tuple[UUID, ...]:
+        """Return a bounded stable keyset page for verified historical import."""
+        _validate_analytical_import_page(limit, after_available_at, after_result_id)
+        if after_available_at is None:
+            rows = self._connection.execute(
+                "SELECT result_id FROM metric_results ORDER BY available_at, result_id LIMIT ?",
+                [limit],
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                "SELECT result_id FROM metric_results "
+                "WHERE available_at > ? OR (available_at = ? AND result_id > ?) "
+                "ORDER BY available_at, result_id LIMIT ?",
+                [after_available_at, after_available_at, str(after_result_id), limit],
+            ).fetchall()
+        return tuple(UUID(str(row[0])) for row in rows)
+
 
 class DuckDBDiagnosticResultRepository:
     """Append-only DuckDB repository for diagnostic results."""
@@ -1234,3 +1273,27 @@ class DuckDBDiagnosticResultRepository:
             parameters,
         ).fetchone()
         return int(row[0]) if row is not None else 0
+
+    def list_import_page(
+        self,
+        *,
+        limit: int,
+        after_available_at: datetime | None = None,
+        after_diagnostic_id: UUID | None = None,
+    ) -> tuple[UUID, ...]:
+        """Return a bounded stable keyset page for verified historical import."""
+        _validate_analytical_import_page(limit, after_available_at, after_diagnostic_id)
+        if after_available_at is None:
+            rows = self._connection.execute(
+                "SELECT diagnostic_id FROM diagnostic_results "
+                "ORDER BY available_at, diagnostic_id LIMIT ?",
+                [limit],
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                "SELECT diagnostic_id FROM diagnostic_results "
+                "WHERE available_at > ? OR (available_at = ? AND diagnostic_id > ?) "
+                "ORDER BY available_at, diagnostic_id LIMIT ?",
+                [after_available_at, after_available_at, str(after_diagnostic_id), limit],
+            ).fetchall()
+        return tuple(UUID(str(row[0])) for row in rows)
