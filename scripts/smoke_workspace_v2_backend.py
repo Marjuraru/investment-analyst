@@ -485,7 +485,10 @@ def _run_fidelity_and_recovery(scratch: Path) -> dict[str, object]:
     recovered_import = None
     v2_parquet_columns: dict[str, tuple[str, ...]] = {}
     logical_sizes: dict[str, int] = {}
-    raw_payload_bytes = 0
+    historical_archive_logical_sizes: dict[str, int] = {}
+    workspace_database_path: Path | None = None
+    workspace_exports_dir: Path | None = None
+    workspace_raw_dir: Path | None = None
     inspection_counts: dict[str, int] = {}
     export_names = (
         "assets",
@@ -584,10 +587,10 @@ def _run_fidelity_and_recovery(scratch: Path) -> dict[str, object]:
         v2_parquet_columns = {
             table_name: _parquet_columns(storage, table_name) for table_name in export_names
         }
-        logical_sizes = compact.logical_table_bytes()
-        raw_payload_bytes = sum(
-            path.stat().st_size for path in storage.paths.raw_dir.rglob("*") if path.is_file()
-        )
+        logical_sizes = _logical_workspace_table_bytes(storage.store.connection)
+        workspace_database_path = storage.store.paths.database_path
+        workspace_exports_dir = storage.paths.exports_dir
+        workspace_raw_dir = storage.paths.raw_dir
         inspection_counts = {
             "raw": storage.raw_records.count(),
             "observations": storage.observations.count(),
@@ -769,8 +772,54 @@ def _run_fidelity_and_recovery(scratch: Path) -> dict[str, object]:
     finally:
         writer.close()
 
+    historical_archive_logical_sizes = _logical_workspace_table_bytes(source_connection)
     source_staging.close()
     source_connection.close()
+    historical_archive_database_path = source_root / "historical-source.duckdb"
+    historical_archive_wal_path = historical_archive_database_path.with_name(
+        f"{historical_archive_database_path.name}.wal"
+    )
+    historical_archive_raw_dir = source_root / "raw"
+    historical_archive_measurements = {
+        "logical_table_bytes": historical_archive_logical_sizes,
+        "logical_total_bytes": sum(historical_archive_logical_sizes.values()),
+        "database_bytes": historical_archive_database_path.stat().st_size,
+        "wal_bytes": (
+            historical_archive_wal_path.stat().st_size
+            if historical_archive_wal_path.exists()
+            else 0
+        ),
+        "raw_blob_file_bytes": sum(
+            path.stat().st_size for path in historical_archive_raw_dir.rglob("*") if path.is_file()
+        ),
+        "total_file_bytes": sum(
+            path.stat().st_size for path in source_root.rglob("*") if path.is_file()
+        ),
+    }
+    if (
+        workspace_database_path is None
+        or workspace_exports_dir is None
+        or workspace_raw_dir is None
+    ):
+        raise RuntimeError("workspace storage paths were not captured for byte measurement")
+    workspace_wal_path = workspace_database_path.with_name(f"{workspace_database_path.name}.wal")
+    workspace_measurements = {
+        "logical_table_bytes": logical_sizes,
+        "logical_total_bytes": sum(logical_sizes.values()),
+        "database_bytes": workspace_database_path.stat().st_size,
+        "wal_bytes": workspace_wal_path.stat().st_size if workspace_wal_path.exists() else 0,
+        "raw_blob_file_bytes": sum(
+            path.stat().st_size for path in workspace_raw_dir.rglob("*") if path.is_file()
+        ),
+        "parquet_export_file_bytes": sum(
+            path.stat().st_size
+            for path in workspace_exports_dir.glob("*.parquet")
+            if path.is_file()
+        ),
+        "total_file_bytes": sum(
+            path.stat().st_size for path in workspace_root.rglob("*") if path.is_file()
+        ),
+    }
     return {
         "profile": "workspace_v2_fidelity_and_recovery",
         "workspace_format": initialization.manifest.format_version,
@@ -795,8 +844,18 @@ def _run_fidelity_and_recovery(scratch: Path) -> dict[str, object]:
         "institutional_consumers_match_v1": True,
         "parquet_column_names": {key: list(value) for key, value in v2_parquet_columns.items()},
         "parquet_schema_matches_v1": True,
-        "compact_logical_bytes": logical_sizes,
-        "raw_payload_bytes": raw_payload_bytes,
+        "byte_measurements": {
+            "logical_size_policy": {
+                "text_and_json": "UTF-8 payload bytes; blobs use stored bytes",
+                "scalars": "fixed width per non-null value",
+                "nulls": "zero logical payload bytes",
+                "excluded_overhead": (
+                    "row, tuple, index, and storage-block overhead; reported in physical files"
+                ),
+            },
+            "historical_source_archive": historical_archive_measurements,
+            "workspace_v2": workspace_measurements,
+        },
         "backup_schema": manifest.schema_version,
         "backup_file_count": len(manifest.files),
         "double_restore_ready": [result.status for result in restore_results],
@@ -849,10 +908,126 @@ def _scale_observation(
     return raw, observation
 
 
+def _logical_workspace_table_bytes(connection: DuckDBPyConnection) -> dict[str, int]:
+    tables = connection.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = 'main' AND table_type = 'BASE TABLE' ORDER BY table_name"
+    ).fetchall()
+    output: dict[str, int] = {}
+    for row in tables:
+        table_name = str(row[0])
+        columns = connection.execute(
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = 'main' AND table_name = ? ORDER BY ordinal_position",
+            [table_name],
+        ).fetchall()
+        expressions: list[str] = []
+        for column, data_type in columns:
+            name = '"' + str(column).replace('"', '""') + '"'
+            kind = str(data_type).upper()
+            if kind in {"VARCHAR", "JSON"}:
+                expressions.append(f"coalesce(sum(octet_length(encode({name}))), 0)")
+            elif kind == "BLOB":
+                expressions.append(f"coalesce(sum(octet_length({name})), 0)")
+            elif kind == "BOOLEAN" or kind in {"TINYINT", "UTINYINT"}:
+                expressions.append(f"count({name})")
+            elif kind in {"SMALLINT", "USMALLINT"}:
+                expressions.append(f"count({name}) * 2")
+            elif kind in {"INTEGER", "UINTEGER", "FLOAT", "DATE"}:
+                expressions.append(f"count({name}) * 4")
+            elif kind in {
+                "BIGINT",
+                "UBIGINT",
+                "DOUBLE",
+                "TIME",
+                "TIMESTAMP",
+                "TIMESTAMP WITH TIME ZONE",
+            }:
+                expressions.append(f"count({name}) * 8")
+            elif kind == "HUGEINT" or kind == "UUID":
+                expressions.append(f"count({name}) * 16")
+            else:
+                raise RuntimeError(
+                    f"scale logical-size measurement does not support {table_name}.{column} "
+                    f"({data_type})"
+                )
+        if not expressions:
+            output[table_name] = 0
+            continue
+        table = '"' + table_name.replace('"', '""') + '"'
+        result = connection.execute(f"SELECT {' + '.join(expressions)} FROM {table}").fetchone()
+        output[table_name] = int(result[0]) if result is not None else 0
+    return output
+
+
+class _DuckDBQueryCounter:
+    def __init__(self) -> None:
+        self.phase: str | None = None
+        self.counts: dict[str, int] = {}
+
+    def record(self) -> None:
+        if self.phase is not None:
+            self.counts[self.phase] = self.counts.get(self.phase, 0) + 1
+
+
+class _CountingDuckDBConnection:
+    def __init__(
+        self,
+        connection: DuckDBPyConnection,
+        counter: _DuckDBQueryCounter,
+    ) -> None:
+        self._connection = connection
+        self._counter = counter
+
+    def execute(self, query: str, parameters: object | None = None) -> _CountingDuckDBConnection:
+        self._counter.record()
+        if parameters is None:
+            self._connection.execute(query)
+        else:
+            self._connection.execute(query, parameters)
+        return self
+
+    def executemany(
+        self,
+        query: str,
+        parameters: object,
+    ) -> _CountingDuckDBConnection:
+        self._counter.record()
+        self._connection.executemany(query, parameters)
+        return self
+
+    def sql(self, query: str) -> object:
+        self._counter.record()
+        return self._connection.sql(query)
+
+    def query(self, query: str) -> object:
+        self._counter.record()
+        return self._connection.query(query)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._connection, name)
+
+
 def _run_scale(scratch: Path) -> dict[str, object]:
+    scales = (257, 1537)
+    scenarios = [_run_scale_case(scratch, scale_size=size) for size in scales]
+    funding_shares = {
+        str(scenario["counts"]["total_metrics"]): scenario["funding_metric_share"]
+        for scenario in scenarios
+    }
+    return {
+        "profile": "workspace_v2_scale",
+        "mix_rule": "funding_count=round(total_metrics*100/1537); remaining metrics are unrelated",
+        "scenarios": scenarios,
+        "scenario_funding_metric_share": funding_shares,
+        "scenario_sizes": list(scales),
+    }
+
+
+def _run_scale_case(scratch: Path, *, scale_size: int) -> dict[str, object]:
     started = time.perf_counter()
-    workspace_root = scratch / "scale-workspace"
-    service = WorkspaceService(environ={}, home=scratch / "scale-home")
+    workspace_root = scratch / f"scale-workspace-{scale_size}"
+    service = WorkspaceService(environ={}, home=scratch / f"scale-home-{scale_size}")
     initialization = service.initialize(workspace_root, format_version=2)
     runtime = ApplicationRuntime.create_default(workspace_service=service)
     request = StorageLocationRequest(workspace=workspace_root)
@@ -861,9 +1036,11 @@ def _run_scale(scratch: Path) -> dict[str, object]:
     shared_pairs = [
         _scale_observation(index, target_asset, prefix="scale-shared") for index in range(720)
     ]
+    funding_count = round(scale_size * 100 / 1537)
+    unrelated_metric_count = scale_size - funding_count
     unrelated_pairs: list[tuple[RawRecord, NormalizedObservation]] = []
     unrelated_metrics: list[MetricResult] = []
-    for index in range(1437):
+    for index in range(unrelated_metric_count):
         asset_id = unrelated_assets[index % len(unrelated_assets)]
         raw, observation = _scale_observation(index, asset_id, prefix="scale-unrelated")
         unrelated_pairs.append((raw, observation))
@@ -892,7 +1069,7 @@ def _run_scale(scratch: Path) -> dict[str, object]:
         "crypto.derivatives.funding.mean_1h",
     )
     available_at = max(item.available_at for item in shared_observations)
-    for index in range(100):
+    for index in range(funding_count):
         rotated_ids = shared_ids[index:] + shared_ids[:index]
         candidate = MetricResult(
             result_id=uuid4(),
@@ -913,16 +1090,28 @@ def _run_scale(scratch: Path) -> dict[str, object]:
         )
 
     metrics = [*unrelated_metrics, *funding_metrics]
-    spill_directory = workspace_root.parent / "duckdb-temp"
+    spill_directory = workspace_root.parent / f"duckdb-temp-{scale_size}"
     spill_directory.mkdir(parents=True)
     spill_samples: dict[str, int] = {}
+    query_counter = _DuckDBQueryCounter()
+    original_connect = duckdb.connect
+
+    def tracked_connect(*args: object, **kwargs: object) -> _CountingDuckDBConnection:
+        connection = original_connect(*args, **kwargs)
+        return _CountingDuckDBConnection(connection, query_counter)
 
     def sample_spill(phase: str) -> None:
         spill_samples[phase] = sum(
             path.stat().st_size for path in spill_directory.rglob("*") if path.is_file()
         )
 
-    with runtime.open_storage(request, access_mode=WorkspaceAccessMode.READ_WRITE) as storage:
+    connection_patcher = patch.object(duckdb, "connect", side_effect=tracked_connect)
+    connection_patcher.start()
+    query_counter.phase = "workspace_open_and_writes"
+    with runtime.open_storage(
+        request,
+        access_mode=WorkspaceAccessMode.READ_WRITE,
+    ) as storage:
         connection = storage.store.connection
         spill_setting = str(spill_directory).replace("'", "''")
         connection.execute(f"SET temp_directory = '{spill_setting}'")
@@ -963,11 +1152,14 @@ def _run_scale(scratch: Path) -> dict[str, object]:
             selected_hydrated.update(ids)
             return original_get_metrics(ids)
 
+        query_counter.phase = "target_family_query"
+        target_query_started = time.perf_counter()
         with patch.object(compact, "get_metrics", side_effect=track_target_hydration):
             selected = storage.metric_results.list(
                 asset_id=target_asset,
                 metric_keys=funding_keys,
             )
+        target_query_seconds = time.perf_counter() - target_query_started
         sample_spill("after_target_selection")
         expected_target_ids = {item.result_id for item in funding_metrics}
         if {item.result_id for item in selected} != expected_target_ids:
@@ -984,9 +1176,12 @@ def _run_scale(scratch: Path) -> dict[str, object]:
             full_page_sizes.append(len(ids))
             return original_get_metrics(ids)
 
+        query_counter.phase = "full_paged_query"
+        full_query_started = time.perf_counter()
         with patch.object(compact, "get_metrics", side_effect=track_full_hydration):
             all_metrics = storage.metric_results.list()
-        if len(all_metrics) != 1537 or not full_page_sizes or max(full_page_sizes) > 256:
+        full_query_seconds = time.perf_counter() - full_query_started
+        if len(all_metrics) != scale_size or not full_page_sizes or max(full_page_sizes) > 256:
             raise RuntimeError("scale list did not preserve full results in bounded pages")
         sample_spill("after_full_paged_read")
         expected_metrics_by_id = {item.result_id: item for item in metrics}
@@ -999,8 +1194,12 @@ def _run_scale(scratch: Path) -> dict[str, object]:
         actual_result_sha256 = _model_digest(all_metrics)
         if expected_result_sha256 != actual_result_sha256:
             raise RuntimeError("scale metric result digest differs after round trip")
-        compact_bytes = compact.logical_table_bytes()
+        query_counter.phase = "logical_size_measurement"
+        logical_measurement_started = time.perf_counter()
+        logical_table_bytes = _logical_workspace_table_bytes(connection)
+        logical_measurement_seconds = time.perf_counter() - logical_measurement_started
         sample_spill("after_logical_size_measurement")
+        query_counter.phase = "scale_metadata_counts"
         sequence_count = int(
             connection.execute(
                 "SELECT count(*) FROM workspace_analytical_sequences_v2 "
@@ -1014,6 +1213,15 @@ def _run_scale(scratch: Path) -> dict[str, object]:
                 list(funding_keys),
             ).fetchone()[0]
         )
+        funding_parameter_variant_count = int(
+            connection.execute(
+                "SELECT count(DISTINCT parameters_content_id) "
+                "FROM workspace_metric_results_v2 WHERE metric_key IN (?, ?)",
+                list(funding_keys),
+            ).fetchone()[0]
+        )
+        if funding_parameter_variant_count != funding_count:
+            raise RuntimeError("funding metric parameter variants were unexpectedly shared")
         segment_count = int(
             connection.execute("SELECT count(*) FROM workspace_analytical_segments_v2").fetchone()[
                 0
@@ -1024,41 +1232,96 @@ def _run_scale(scratch: Path) -> dict[str, object]:
                 "SELECT coalesce(max(member_count), 0) FROM workspace_analytical_segments_v2"
             ).fetchone()[0]
         )
+        max_hydrated_page_size = max([*selected_pages, *full_page_sizes], default=0)
+        if max_segment_size > 256 or max_hydrated_page_size > 256:
+            raise RuntimeError("scale batch or hydration page exceeded 256 entries")
         database_path = storage.store.paths.database_path
-        database_bytes = database_path.stat().st_size if database_path.exists() else 0
+        database_bytes = database_path.stat().st_size
         wal_path = database_path.with_name(f"{database_path.name}.wal")
         wal_bytes = wal_path.stat().st_size if wal_path.exists() else 0
+        export_names = (
+            "assets",
+            "source_definitions",
+            "metric_definitions",
+            "raw_record_index",
+            "normalized_observations",
+            "metric_results",
+            "diagnostic_results",
+        )
+        query_counter.phase = "parquet_export"
+        parquet_started = time.perf_counter()
+        for table_name in export_names:
+            storage.parquet.export_table(table_name)
+        parquet_seconds = time.perf_counter() - parquet_started
+        parquet_file_bytes = sum(
+            path.stat().st_size
+            for path in storage.paths.exports_dir.glob("*.parquet")
+            if path.is_file()
+        )
+        raw_blob_file_bytes = sum(
+            path.stat().st_size for path in storage.paths.raw_dir.rglob("*") if path.is_file()
+        )
+        workspace_file_bytes = sum(
+            path.stat().st_size for path in workspace_root.rglob("*") if path.is_file()
+        )
         profile_counts = {
             "assets": len(storage.assets.list_all()),
             "unrelated_assets": len(unrelated_assets),
             "unrelated_metrics": len(unrelated_metrics),
             "funding_metrics": len(funding_metrics),
             "total_metrics": len(all_metrics),
+            "funding_metric_share": funding_count / scale_size,
             "raw_records": storage.raw_records.count(),
             "observations": storage.observations.count(),
         }
         sample_spill("before_writer_close")
+    connection_patcher.stop()
     elapsed_seconds = time.perf_counter() - started
     return {
         "profile": "workspace_v2_scale",
+        "scale_size": scale_size,
         "workspace_format": initialization.manifest.format_version,
         "counts": profile_counts,
+        "funding_metric_share": funding_count / scale_size,
         "target_selected_count": len(selected),
         "target_unrelated_hydrated": 0,
         "target_max_hydrated_page": max(selected_pages, default=0),
         "full_list_max_hydrated_page": max(full_page_sizes, default=0),
+        "max_hydrated_page_size": max_hydrated_page_size,
         "shared_inputs_per_funding_metric": 720,
         "funding_sequence_count": funding_sequence_count,
+        "funding_parameter_variant_count": funding_parameter_variant_count,
         "all_metric_input_sequence_count": sequence_count,
         "sequence_segment_count": segment_count,
         "max_sequence_segment_members": max_segment_size,
         "expected_result_sha256": expected_result_sha256,
         "round_trip_result_sha256": actual_result_sha256,
-        "compact_logical_bytes": compact_bytes,
+        "logical_workspace_table_bytes": logical_table_bytes,
+        "logical_size_policy": {
+            "text_and_json": "UTF-8 payload bytes; blobs use stored bytes",
+            "scalars": "fixed width per non-null value",
+            "nulls": "zero logical payload bytes",
+            "excluded_overhead": (
+                "row, tuple, index, and storage-block overhead; reported in physical files"
+            ),
+        },
+        "queries_by_phase": dict(query_counter.counts),
+        "query_counter_policy": (
+            "counts DuckDB connection execute, executemany, sql, and query calls per phase"
+        ),
+        "raw_blob_file_bytes": raw_blob_file_bytes,
+        "parquet_export_file_bytes": parquet_file_bytes,
+        "workspace_file_bytes": workspace_file_bytes,
         "physical_database_bytes": database_bytes,
         "physical_wal_bytes": wal_bytes,
         "spill_temp_directory_bytes_observed_by_phase": spill_samples,
         "spill_temp_directory_bytes_max_observed": max(spill_samples.values(), default=0),
+        "phase_durations_seconds": {
+            "target_family_query": target_query_seconds,
+            "full_paged_query": full_query_seconds,
+            "logical_size_measurement": logical_measurement_seconds,
+            "parquet_export": parquet_seconds,
+        },
         "elapsed_seconds": elapsed_seconds,
         "max_rss_bytes": _max_rss_bytes(),
     }

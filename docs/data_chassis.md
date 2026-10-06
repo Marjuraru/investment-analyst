@@ -1071,21 +1071,26 @@ usa un manifiesto separado. No añade una migración automática ni habilita el
 workspace permanente.
 
 El smoke offline de `scripts/smoke_workspace_v2_backend.py` produce tres
-perfiles y un JSON con SHA, entorno, digests, conteos, límites de página,
-tiempos, RSS y bytes lógicos/físicos separados. En la ejecución Python 3.12.3 /
-DuckDB 1.5.4 del SHA base se midieron: fidelidad de 259 registros por capa;
-interrupción tras una página confirmada, cierre/reapertura y reutilización de
-256 métricas; ambos consumidores institucionales con resultado v1/v2 idéntico
-en dos cortes; restore doble listo y checkpoint preservado; y escala de 1.537
-métricas, con 1.437 ajenas, 100 secuencias funding distintas de 720 inputs,
-páginas de hasta 256 y cero hidratación ajena. Los digests de resultados de
-escala coincidieron. La DB midió 1.060.864 B, el WAL 10.938.171 B, spill
-observado 0 B y RSS máximo del proceso 202.014.720 B; el perfil tomó 62,8 s.
+perfiles y un JSON vinculado al SHA, entorno, digests, conteos, páginas,
+consultas por fase, tiempos, RSS y medidas lógicas/físicas. La fidelidad mide
+las tablas del archivo histórico de entrada y del workspace v2, además de sus
+DB, WAL, blobs, exports y archivos totales. El perfil de escala compara N=257 y
+N=1537 con la misma regla declarada `funding=round(N*100/1537)`, 32 activos
+ajenos y 720 inputs compartidos por métrica funding; cada tamaño produce una
+secuencia y variante de parámetros distintas por métrica. Los dos digests de
+ida y vuelta deben coincidir, las páginas no superan 256 y la selección de
+funding no hidrata métricas ajenas. La medida lógica recorre cada tabla base
+una vez: UTF-8 para texto/JSON, bytes almacenados para blobs, ancho fijo para
+escalares no nulos y cero bytes de payload para NULL. Overhead de fila, índices
+y bloques se excluye de esa suma lógica y queda en los tamaños físicos. DB, WAL,
+blobs raw, Parquet, total de archivos, spill, sentencias SQL por fase, duración
+por fase y RSS se registran por separado. El reporte íntegro, con resultados
+exactos, comando, entorno y digest, queda adjunto al draft PR.
 
-Estas son medidas de scratch de una ejecución, no una comparación de
-inventarios productivos ni una meta de ahorro. El objetivo Q1–Q7 conserva su
-registro canónico. No se copió el workspace real, no hubo cutover ni rollback
-productivo, y el backup Drive y la medición operacional siguen posteriores.
+Estas son medidas de scratch, no una comparación de inventarios productivos ni
+una meta de ahorro. El objetivo Q1–Q7 conserva su registro canónico. No se copió
+el workspace real, no hubo cutover ni rollback productivo, y el backup Drive y
+la medición operacional siguen posteriores.
 El candidato propone `route_effect: ADVANCES` y deja DATA-CHASSIS como único
 `NEXT`; el detalle de cierre no numérico está en el
 [`plan de cierre`](data_chassis_closure_plan.md).
