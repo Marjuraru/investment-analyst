@@ -5,7 +5,8 @@ import hashlib
 import threading
 import time
 from email.message import Message
-from urllib.error import HTTPError
+from http.client import IncompleteRead, RemoteDisconnected
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs
 from urllib.request import Request
 
@@ -65,6 +66,34 @@ def _http_error(status: int, retry_after: str | None = None) -> HTTPError:
     if retry_after is not None:
         headers["Retry-After"] = retry_after
     return HTTPError("https://example.test/data", status, "failure", headers, None)
+
+
+def _connection_termination(kind: str) -> BaseException:
+    if kind == "incomplete_read":
+        return IncompleteRead(b"PARTIAL-SECRET", 99)
+    if kind == "remote_disconnected":
+        return RemoteDisconnected("RAW-DISCONNECT-SECRET")
+    raise AssertionError(f"unsupported connection termination: {kind}")
+
+
+class _ClosingReadFailureResponse(FakeResponse):
+    def __init__(self, failure: BaseException, *, first_chunk: bytes | None = None) -> None:
+        super().__init__(
+            headers={"Content-Encoding": "gzip" if first_chunk is not None else "identity"}
+        )
+        self._failure = failure
+        self._first_chunk = first_chunk
+        self.closed = False
+        self._read_calls = 0
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.closed = True
+
+    def read(self, size: int | None = None) -> bytes:
+        self._read_calls += 1
+        if self._first_chunk is not None and self._read_calls == 1:
+            return self._first_chunk
+        raise self._failure
 
 
 def test_rejects_non_https_url() -> None:
@@ -654,3 +683,258 @@ def test_retry_policy_and_retry_after_are_unchanged(
     assert response.status_code == 200
     assert response.body == b'{"retried": true}'
     assert sleeps == [2.0]
+
+
+@pytest.mark.parametrize("error_kind", ["incomplete_read", "remote_disconnected"])
+@pytest.mark.parametrize("failure_phase", ["open", "identity_read", "gzip_read"])
+def test_get_retries_explicit_response_transport_failures_from_a_clean_response(
+    monkeypatch: pytest.MonkeyPatch,
+    error_kind: str,
+    failure_phase: str,
+) -> None:
+    expected_body = b"the complete response body"
+    failure = _connection_termination(error_kind)
+    partial_gzip = gzip.compress(b"discarded partial response")
+    failed_response: _ClosingReadFailureResponse | None = None
+    attempts = 0
+    sleeps: list[float] = []
+
+    def fake_urlopen(request: Request, timeout: float) -> FakeResponse:
+        nonlocal attempts, failed_response
+        assert request.full_url == "https://example.test/data"
+        assert request.get_method() == "GET"
+        assert timeout == 1.0
+        attempts += 1
+        if attempts == 1:
+            if failure_phase == "open":
+                raise failure
+            failed_response = _ClosingReadFailureResponse(
+                failure,
+                first_chunk=partial_gzip if failure_phase == "gzip_read" else None,
+            )
+            return failed_response
+        headers = (
+            {"Content-Encoding": "gzip"}
+            if failure_phase == "gzip_read"
+            else {"Content-Encoding": "identity"}
+        )
+        response_body = (
+            gzip.compress(expected_body) if failure_phase == "gzip_read" else expected_body
+        )
+        return FakeResponse(body=response_body, headers=headers)
+
+    monkeypatch.setattr(http_module, "urlopen", fake_urlopen)
+    response = UrlLibHttpTransport(sleep=sleeps.append).get(
+        "https://example.test/data",
+        headers={"User-Agent": "PRIVATE-USER-AGENT"},
+        timeout_seconds=1.0,
+    )
+
+    assert response.body == expected_body
+    assert b"discarded partial response" not in response.body
+    assert attempts == 2
+    assert sleeps == [0.1]
+    if failed_response is not None:
+        assert failed_response.closed is True
+
+
+@pytest.mark.parametrize(
+    "failures",
+    [
+        ["incomplete_read", "remote_disconnected", "incomplete_read"],
+        ["http_503", "timeout", "remote_disconnected"],
+    ],
+    ids=["three-response-terminations", "mixed-shared-attempt-budget"],
+)
+def test_get_exhaustion_uses_three_attempts_two_waits_and_safe_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+    failures: list[str],
+) -> None:
+    outcomes: list[BaseException] = []
+    for failure in failures:
+        if failure == "http_503":
+            outcomes.append(_http_error(503))
+        elif failure == "timeout":
+            outcomes.append(TimeoutError("RAW-TIMEOUT-SECRET"))
+        else:
+            outcomes.append(_connection_termination(failure))
+    attempts = 0
+    sleeps: list[float] = []
+
+    def fake_urlopen(request: Request, timeout: float) -> FakeResponse:
+        nonlocal attempts
+        assert request.full_url == "https://example.test/data"
+        assert request.get_method() == "GET"
+        assert timeout == 1.0
+        attempts += 1
+        raise outcomes[attempts - 1]
+
+    monkeypatch.setattr(http_module, "urlopen", fake_urlopen)
+    with pytest.raises(HttpRequestError) as raised:
+        UrlLibHttpTransport(sleep=sleeps.append).get(
+            "https://example.test/data",
+            headers={"User-Agent": "PRIVATE-USER-AGENT", "X-Private": "PRIVATE-HEADER"},
+            timeout_seconds=1.0,
+        )
+
+    assert attempts == 3
+    assert sleeps == [0.1, 0.2]
+    assert raised.value.failure_kind is HttpRequestFailureKind.TRANSPORT
+    assert raised.value.__cause__ is outcomes[-1]
+    assert "retry limit was exhausted" in str(raised.value)
+    for secret in (
+        "PARTIAL-SECRET",
+        "RAW-DISCONNECT-SECRET",
+        "RAW-TIMEOUT-SECRET",
+        "PRIVATE-USER-AGENT",
+        "PRIVATE-HEADER",
+    ):
+        assert secret not in str(raised.value)
+
+
+@pytest.mark.parametrize("error_kind", ["incomplete_read", "remote_disconnected"])
+def test_explicit_response_terminations_are_inferred_as_transport(error_kind: str) -> None:
+    error = HttpRequestError(
+        "https://example.test/data",
+        "response failed",
+        cause=_connection_termination(error_kind),
+    )
+
+    assert error.failure_kind is HttpRequestFailureKind.TRANSPORT
+
+
+@pytest.mark.parametrize("error_kind", ["incomplete_read", "remote_disconnected"])
+def test_post_wraps_explicit_response_termination_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    error_kind: str,
+) -> None:
+    attempts = 0
+    sleeps: list[float] = []
+
+    def fake_urlopen(request: Request, timeout: float) -> FakeResponse:
+        nonlocal attempts
+        assert request.full_url == "https://example.test/query"
+        assert request.get_method() == "POST"
+        assert timeout == 1.0
+        attempts += 1
+        raise _connection_termination(error_kind)
+
+    monkeypatch.setattr(http_module, "urlopen", fake_urlopen)
+    with pytest.raises(HttpRequestError) as raised:
+        UrlLibHttpTransport(sleep=sleeps.append).post_form(
+            "https://example.test/query",
+            headers={"User-Agent": "PRIVATE-USER-AGENT"},
+            fields={"secret": "PRIVATE-POST-FIELD"},
+            timeout_seconds=1.0,
+        )
+
+    assert attempts == 1
+    assert sleeps == []
+    assert raised.value.method == "POST"
+    assert raised.value.failure_kind is HttpRequestFailureKind.TRANSPORT
+    assert "PARTIAL-SECRET" not in str(raised.value)
+    assert "RAW-DISCONNECT-SECRET" not in str(raised.value)
+    assert "PRIVATE-USER-AGENT" not in str(raised.value)
+    assert "PRIVATE-POST-FIELD" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("error_kind", "expected_sleep"),
+    [("http_503", 2.0), ("timeout", 0.1), ("url_error", 0.1)],
+)
+def test_post_keeps_existing_retry_policy_for_other_transient_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    error_kind: str,
+    expected_sleep: float,
+) -> None:
+    if error_kind == "http_503":
+        first_failure: BaseException = _http_error(503, "2")
+    elif error_kind == "timeout":
+        first_failure = TimeoutError("simulated timeout")
+    else:
+        first_failure = URLError("simulated URL failure")
+    attempts = 0
+    sleeps: list[float] = []
+
+    def fake_urlopen(request: Request, timeout: float) -> FakeResponse:
+        nonlocal attempts
+        assert request.full_url == "https://example.test/query"
+        assert request.get_method() == "POST"
+        assert timeout == 1.0
+        attempts += 1
+        if attempts == 1:
+            raise first_failure
+        return FakeResponse(body=b"accepted")
+
+    monkeypatch.setattr(http_module, "urlopen", fake_urlopen)
+    response = UrlLibHttpTransport(sleep=sleeps.append).post_form(
+        "https://example.test/query",
+        headers={},
+        fields={"form": "stable"},
+        timeout_seconds=1.0,
+    )
+
+    assert response.body == b"accepted"
+    assert attempts == 2
+    assert sleeps == [expected_sleep]
+
+
+def test_cancellation_after_response_termination_prevents_get_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    control = OperationControl()
+
+    def fake_urlopen(request: object, timeout: float) -> FakeResponse:
+        nonlocal attempts
+        attempts += 1
+        control.cancel()
+        raise RemoteDisconnected("RAW-DISCONNECT-SECRET")
+
+    monkeypatch.setattr(http_module, "urlopen", fake_urlopen)
+    with operation_control_scope(control), pytest.raises(OperationCancelledError):
+        UrlLibHttpTransport().get(
+            "https://example.test/data",
+            headers={},
+            timeout_seconds=1.0,
+        )
+
+    assert attempts == 1
+
+
+def test_cancellation_during_response_termination_backoff_interrupts_get_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    backoff_started = threading.Event()
+    control = OperationControl()
+    original_wait = OperationControl.wait
+
+    def fake_urlopen(request: object, timeout: float) -> FakeResponse:
+        nonlocal attempts
+        attempts += 1
+        raise IncompleteRead(b"PARTIAL-SECRET", 99)
+
+    def tracked_wait(waiting_control: OperationControl, timeout_seconds: float) -> bool:
+        backoff_started.set()
+        return original_wait(waiting_control, timeout_seconds)
+
+    def cancel_during_backoff() -> None:
+        assert backoff_started.wait(timeout=1)
+        control.cancel()
+
+    monkeypatch.setattr(http_module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(OperationControl, "wait", tracked_wait)
+    cancellation_thread = threading.Thread(target=cancel_during_backoff)
+    cancellation_thread.start()
+    with operation_control_scope(control), pytest.raises(OperationCancelledError):
+        UrlLibHttpTransport().get(
+            "https://example.test/data",
+            headers={},
+            timeout_seconds=1.0,
+        )
+    cancellation_thread.join(timeout=1)
+
+    assert attempts == 1
+    assert backoff_started.is_set()
+    assert not cancellation_thread.is_alive()

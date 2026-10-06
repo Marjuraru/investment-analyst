@@ -1557,6 +1557,7 @@ class MultiAssetScheduler:
         if handle is None or self._storage_observability is None:
             return
         execution = attempt.execution
+        handle.job_execution_ms = job_execution_ms
         try:
             record = self._storage_observability.complete_attempt(
                 handle,
@@ -1572,7 +1573,6 @@ class MultiAssetScheduler:
                 ),
                 execution_completed_at=attempt.completed_at,
                 result_persisted_at=result_persisted_at,
-                job_execution_ms=job_execution_ms,
             )
         except Exception as error:  # noqa: BLE001
             self._storage_observability_issue = "storage observability could not record its result"

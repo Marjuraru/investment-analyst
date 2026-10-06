@@ -867,7 +867,7 @@ class StorageObservabilityDailySnapshotV2(ContractModel):
 
 
 class StorageObservabilityState(ContractModel):
-    """Bounded recovery view of the persisted observability artifact."""
+    """Bounded recovery view of the append-only observability artifact."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -881,20 +881,17 @@ class StorageObservabilityState(ContractModel):
 
     @model_validator(mode="after")
     def validate_state(self) -> StorageObservabilityState:
-        """Keep the retained history bounded, ordered, and uncorrelated by identity."""
+        """Keep snapshots ordered and require unique terminal identities."""
         if len(self.daily_snapshots) > _MAX_RETAINED_DAYS:
             raise ValueError("daily snapshots must stay within the retention bound")
         dates = tuple(item.utc_date for item in self.daily_snapshots)
         if dates != tuple(sorted(set(dates))):
             raise ValueError("daily snapshots must be unique and ordered by date")
-        observed = tuple(item.observed_at for item in self.records)
-        if observed != tuple(sorted(observed)):
-            raise ValueError("records must be ordered by observation time")
         attempt_ids = tuple(item.attempt_id for item in self.records)
         if len(attempt_ids) != len(set(attempt_ids)):
             raise ValueError("records must not repeat an attempt identity")
         if self.records and self.daily_snapshots:
-            open_day = self.records[0].observed_at.date()
+            open_day = min(item.observed_at.date() for item in self.records)
             if any(item.utc_date >= open_day for item in self.daily_snapshots):
                 raise ValueError("closed daily snapshots must precede every open record")
         return self
@@ -1199,6 +1196,7 @@ class StorageObservationHandle:
     opened_monotonic_ns: int
     execution_started_at: datetime | None = None
     execution_started_monotonic_ns: int | None = None
+    job_execution_ms: int | None = None
     verification_ms: int = 0
     query_ms_before: int = 0
     query_open_ms_before: int = 0
@@ -1453,6 +1451,8 @@ class StorageObservabilityCollector:
             )
             if result_persisted_at < execution_completed_at:
                 raise StorageObservabilityError("durable result time predates job completion")
+            if job_execution_ms is None:
+                job_execution_ms = handle.job_execution_ms
             if handle.terminal_record is None:
                 try:
                     collector_closed_at = self._now()

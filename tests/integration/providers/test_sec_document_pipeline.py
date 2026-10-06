@@ -1,6 +1,9 @@
 import hashlib
 from datetime import UTC, datetime
+from email.message import Message
+from http.client import RemoteDisconnected
 from pathlib import Path
+from urllib.request import Request
 from uuid import uuid4
 
 import pytest
@@ -8,14 +11,55 @@ import pytest
 from investment_analyst.core.models import AssetClass, RawRecord, SourceReference
 from investment_analyst.evidence.sec_documents.repository import SecDocumentRepository
 from investment_analyst.providers.asset_config import SecAssetConfiguration
-from investment_analyst.providers.fundamentals.sec_document_client import SecPrimaryDocumentResponse
+from investment_analyst.providers.fundamentals.sec_document_client import (
+    SecDocumentClient,
+    SecPrimaryDocumentResponse,
+)
 from investment_analyst.providers.fundamentals.sec_document_pipeline import (
     SecDocumentImportRequest,
     SecDocumentPipeline,
     SecDocumentPipelineError,
 )
-from investment_analyst.providers.fundamentals.sec_edgar import APPLE_CIK, APPLE_TICKER
+from investment_analyst.providers.fundamentals.sec_edgar import (
+    APPLE_CIK,
+    APPLE_TICKER,
+    SecEdgarIdentity,
+)
+from investment_analyst.providers.http import (
+    HttpRequestError,
+    HttpRequestFailureKind,
+    UrlLibHttpTransport,
+)
 from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.storage.document_content import DocumentContentError
+
+
+class _ArchivesResponse:
+    def __init__(self, url: str, body: bytes) -> None:
+        self.status = 200
+        self.headers = Message()
+        self.headers["Content-Type"] = "text/html"
+        self._url = url
+        self._body = body
+        self._position = 0
+
+    def __enter__(self) -> "_ArchivesResponse":
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        return None
+
+    def read(self, size: int | None = None) -> bytes:
+        if size is None or size < 0:
+            result = self._body[self._position :]
+            self._position = len(self._body)
+            return result
+        result = self._body[self._position : self._position + size]
+        self._position += len(result)
+        return result
+
+    def geturl(self) -> str:
+        return self._url
 
 
 class _Client:
@@ -249,3 +293,96 @@ def test_metadata_change_beyond_accepted_at_fails_before_archive_fetch(tmp_path:
         assert storage.raw_records.count(schema_version="sec-document-revision-v2") == 1
         assert storage.raw_records.count(schema_version="sec-document-revision-v3") == 0
         assert first.revisions_created == 1
+
+
+def test_transport_exhaustion_preserves_progress_and_retry_persists_one_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quarterly_accession = "0000320193-25-000002"
+    annual_accession = "0000320193-25-000001"
+    quarterly_url = (
+        "https://www.sec.gov/Archives/edgar/data/320193/000032019325000002/quarterly.htm"
+    )
+    annual_url = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/annual.htm"
+    quarterly_body = b"exact quarterly document"
+    annual_body = b"exact annual document after transport retries"
+    annual_attempts = 0
+    recover_annual = False
+
+    def fake_urlopen(request: Request, timeout: float) -> _ArchivesResponse:
+        nonlocal annual_attempts
+        if request.full_url == annual_url:
+            annual_attempts += 1
+            if not recover_annual or annual_attempts <= 2:
+                raise RemoteDisconnected("upstream connection detail")
+            return _ArchivesResponse(annual_url, annual_body)
+        if request.full_url == quarterly_url:
+            return _ArchivesResponse(quarterly_url, quarterly_body)
+        raise AssertionError(f"unexpected offline SEC URL: {request.full_url}")
+
+    monkeypatch.setattr("investment_analyst.providers.http.urlopen", fake_urlopen)
+    client = SecDocumentClient(
+        UrlLibHttpTransport(sleep=lambda _: None),
+        SecEdgarIdentity("Investment Analyst tests@example.com"),
+        clock=lambda: datetime(2025, 2, 1, tzinfo=UTC),
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.raw_records.save(_submissions())
+        pipeline = SecDocumentPipeline(storage, client, configuration=_configuration())
+        request = SecDocumentImportRequest(forms=("10-K", "10-Q"))
+        repository = SecDocumentRepository(storage.raw_records, storage.documents)
+        known_at = datetime.max.replace(tzinfo=UTC)
+
+        with pytest.raises(SecDocumentPipelineError) as raised:
+            pipeline.run(request)
+
+        assert raised.value.reason_code == "sec_document_fetch_failed"
+        assert isinstance(raised.value.__cause__, HttpRequestError)
+        assert raised.value.__cause__.failure_kind is HttpRequestFailureKind.TRANSPORT
+        assert annual_attempts == 3
+        assert repository.list_revisions(
+            asset_id="equity:us:aapl",
+            known_at=known_at,
+            accession=quarterly_accession,
+        )
+        assert (
+            repository.list_revisions(
+                asset_id="equity:us:aapl",
+                known_at=known_at,
+                accession=annual_accession,
+            )
+            == []
+        )
+        revisions_after_failure = repository.list_revisions(
+            asset_id="equity:us:aapl",
+            known_at=known_at,
+        )
+        assert len(revisions_after_failure) == 1
+        assert revisions_after_failure[0].document.filing.accession == quarterly_accession
+        assert storage.documents.read(hashlib.sha256(quarterly_body).hexdigest()) == quarterly_body
+        with pytest.raises(DocumentContentError, match="missing or not a regular file"):
+            storage.documents.verify(hashlib.sha256(annual_body).hexdigest())
+
+        annual_attempts = 0
+        recover_annual = True
+        recovered = pipeline.run(request)
+        annual_revisions = repository.list_revisions(
+            asset_id="equity:us:aapl",
+            known_at=known_at,
+            accession=annual_accession,
+        )
+        all_revisions = repository.list_revisions(
+            asset_id="equity:us:aapl",
+            known_at=known_at,
+        )
+
+        assert annual_attempts == 3
+        assert recovered.revisions_created == 1
+        assert recovered.revisions_reused == 1
+        assert recovered.document_fetch_calls == 1
+        assert len(annual_revisions) == 1
+        assert annual_revisions[0].content_sha256 == hashlib.sha256(annual_body).hexdigest()
+        assert len(all_revisions) == 2
+        assert storage.documents.read(annual_revisions[0].content_sha256) == annual_body
