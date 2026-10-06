@@ -130,13 +130,14 @@ def test_event_reads_only_institutional_metric_family(tmp_path: Path) -> None:
         )
         storage.metric_results.save(market_metric)
         hydrated: list[object] = []
-        original_get = storage.metric_results.get
+        original_get_many = storage.metric_results.get_many
 
-        def spy_get(result_id):  # type: ignore[no-untyped-def]
-            hydrated.append(result_id)
-            return original_get(result_id)
+        def spy_get_many(result_ids):  # type: ignore[no-untyped-def]
+            identifiers = tuple(result_ids)
+            hydrated.extend(identifiers)
+            return original_get_many(identifiers)
 
-        storage.metric_results.get = spy_get  # type: ignore[method-assign]
+        storage.metric_results.get_many = spy_get_many  # type: ignore[method-assign]
         service = InstitutionalEventService(storage, clock=lambda: known_at)
         summary = service.materialize(asset_id=_ASSET_ID, manager_cik=_CIK, known_at=known_at)
 

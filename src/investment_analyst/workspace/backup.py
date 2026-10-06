@@ -13,7 +13,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import duckdb
@@ -71,6 +71,9 @@ from investment_analyst.workspace.models import (
     WorkspaceInspection,
 )
 from investment_analyst.workspace.service import WorkspaceError, WorkspaceService
+
+if TYPE_CHECKING:
+    from investment_analyst.workspace.workspace_v2_backup import WorkspaceV2BackupManifest
 
 BACKUP_MANIFEST_NAME = "backup_manifest.json"
 _TRACEABILITY_BATCH_SIZE = 256
@@ -239,8 +242,20 @@ class WorkspaceBackupService:
         self._writer_lock = writer_lock or threading.RLock()
         self._clock = clock
 
-    def create(self, source: Path, destination: Path) -> WorkspaceBackupManifest:
+    def create(
+        self, source: Path, destination: Path
+    ) -> WorkspaceBackupManifest | WorkspaceV2BackupManifest:
         """Publish one complete backup directory only after every hash verifies."""
+        if _manifest_format_version(source) == 2:
+            from investment_analyst.workspace.workspace_v2_backup import (
+                WorkspaceV2BackupService,
+            )
+
+            return WorkspaceV2BackupService(
+                self._workspace_service,
+                writer_lock=self._writer_lock,
+                clock=self._clock,
+            ).create(source, destination)
         source_path = source.expanduser()
         destination_path = destination.expanduser()
         if source_path.is_symlink() or destination_path.is_symlink():
@@ -294,6 +309,16 @@ class WorkspaceBackupService:
         destination_path = destination.expanduser()
         if backup_path.is_symlink() or destination_path.is_symlink():
             raise WorkspaceBackupError("workspace restore paths must not be symbolic links")
+        if _backup_manifest_schema(backup_path) == "workspace-v2-backup-manifest-v1":
+            from investment_analyst.workspace.workspace_v2_backup import (
+                WorkspaceV2BackupService,
+            )
+
+            return WorkspaceV2BackupService(
+                self._workspace_service,
+                writer_lock=self._writer_lock,
+                clock=self._clock,
+            ).restore(backup, destination)
         backup_root = backup_path.resolve()
         destination_root = destination_path.resolve(strict=False)
         if destination_root.exists() and any(destination_root.iterdir()):
@@ -338,6 +363,28 @@ class WorkspaceBackupService:
         if value.tzinfo is None or value.utcoffset() is None:
             raise WorkspaceBackupError("backup clock must be timezone-aware")
         return value.astimezone(UTC)
+
+
+def _manifest_format_version(root: Path) -> int | None:
+    manifest = root.expanduser() / "manifest.json"
+    if manifest.is_symlink() or not manifest.is_file():
+        return None
+    try:
+        value = json.loads(manifest.read_text(encoding="utf-8")).get("format_version")
+    except (OSError, UnicodeError, ValueError, AttributeError):
+        return None
+    return value if type(value) is int else None
+
+
+def _backup_manifest_schema(root: Path) -> str | None:
+    manifest = root.expanduser() / BACKUP_MANIFEST_NAME
+    if manifest.is_symlink() or not manifest.is_file():
+        return None
+    try:
+        value = json.loads(manifest.read_text(encoding="utf-8")).get("schema_version")
+    except (OSError, UnicodeError, ValueError, AttributeError):
+        return None
+    return value if isinstance(value, str) else None
 
 
 def _inventory(root: Path) -> tuple[WorkspaceBackupFile, ...]:

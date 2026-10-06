@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from investment_analyst.storage import LocalStorage, StorageError, StoragePaths
 from investment_analyst.workspace.models import (
     APPLICATION_NAME,
+    SUPPORTED_WORKSPACE_FORMAT_VERSIONS,
     WORKSPACE_FORMAT_VERSION,
     WorkspaceAccessMode,
     WorkspaceInitialization,
@@ -23,12 +24,6 @@ from investment_analyst.workspace.models import (
 
 _WORKSPACE_ENVIRONMENT_VARIABLE = "INVESTMENT_ANALYST_WORKSPACE"
 _XDG_DATA_HOME = "XDG_DATA_HOME"
-_TABLES = {
-    "raw_records": "raw_record_index",
-    "observations": "normalized_observations",
-    "metric_results": "metric_results",
-    "diagnostic_results": "diagnostic_results",
-}
 
 
 class WorkspaceError(RuntimeError):
@@ -125,16 +120,32 @@ class WorkspaceService:
             state_root=normalized / "state",
         )
 
-    def initialize(self, explicit_path: Path | None = None) -> WorkspaceInitialization:
+    def initialize(
+        self,
+        explicit_path: Path | None = None,
+        *,
+        format_version: int | None = None,
+    ) -> WorkspaceInitialization:
         """Create or reuse a compatible workspace and initialize existing storage APIs."""
+        requested_version = WORKSPACE_FORMAT_VERSION if format_version is None else format_version
+        if (
+            isinstance(requested_version, bool)
+            or requested_version not in SUPPORTED_WORKSPACE_FORMAT_VERSIONS
+        ):
+            raise WorkspaceVersionError("workspace format version is not supported")
         paths = self.resolve(explicit_path)
         reused = paths.manifest_path.exists()
         if reused:
             manifest = self._load_manifest(paths)
+            if format_version is not None and manifest.format_version != requested_version:
+                raise WorkspaceVersionError(
+                    "requested workspace format does not match its manifest"
+                )
         else:
             manifest = WorkspaceManifest(
                 workspace_id=uuid4(),
                 created_at=self._clock(),
+                format_version=requested_version,
             )
 
         paths.root.mkdir(parents=True, exist_ok=True)
@@ -142,7 +153,11 @@ class WorkspaceService:
         paths.exports_root.mkdir(parents=True, exist_ok=True)
         paths.state_root.mkdir(parents=True, exist_ok=True)
 
-        storage_paths = StoragePaths.from_root(paths.storage_root)
+        storage_paths = StoragePaths.from_workspace_root(
+            paths.root,
+            format_version=manifest.format_version,
+            workspace_id=manifest.workspace_id,
+        )
         storage = self._open_backend(storage_paths, WorkspaceAccessMode.READ_WRITE)
         storage.close()
 
@@ -160,7 +175,11 @@ class WorkspaceService:
         """Inspect a workspace without creating files, directories, tables, or checkpoints."""
         paths = self.resolve(explicit_path)
         manifest = self._load_manifest(paths)
-        storage_paths = StoragePaths.from_root(paths.storage_root)
+        storage_paths = StoragePaths.from_workspace_root(
+            paths.root,
+            format_version=manifest.format_version,
+            workspace_id=manifest.workspace_id,
+        )
 
         storage_present = paths.storage_root.is_dir()
         database_present = storage_paths.database_path.is_file()
@@ -178,22 +197,19 @@ class WorkspaceService:
         if not parquet_storage_present:
             warnings.append("Parquet export directory is missing")
 
-        counts = {name: 0 for name in _TABLES}
+        counts = {
+            "raw_records": 0,
+            "observations": 0,
+            "metric_results": 0,
+            "diagnostic_results": 0,
+        }
         if database_present:
             storage = self.open_storage(paths, WorkspaceAccessMode.READ_ONLY)
             try:
-                for name, table in _TABLES.items():
-                    try:
-                        row = storage.store.connection.execute(
-                            f"SELECT COUNT(*) FROM {table}"  # noqa: S608
-                        ).fetchone()
-                    except duckdb.Error as error:
-                        raise WorkspaceAccessError(
-                            "workspace storage tables could not be inspected"
-                        ) from error
-                    if row is None:
-                        raise WorkspaceAccessError("workspace count query returned no row")
-                    counts[name] = int(row[0])
+                counts["raw_records"] = storage.raw_records.count()
+                counts["observations"] = storage.observations.count()
+                counts["metric_results"] = storage.metric_results.count()
+                counts["diagnostic_results"] = storage.diagnostics.count()
             finally:
                 storage.close()
 
@@ -222,8 +238,12 @@ class WorkspaceService:
         mode: WorkspaceAccessMode,
     ) -> LocalStorage:
         """Open initialized storage in an explicit read-only or read-write mode."""
-        self._load_manifest(paths)
-        storage_paths = StoragePaths.from_root(paths.storage_root)
+        manifest = self._load_manifest(paths)
+        storage_paths = StoragePaths.from_workspace_root(
+            paths.root,
+            format_version=manifest.format_version,
+            workspace_id=manifest.workspace_id,
+        )
         if mode is WorkspaceAccessMode.READ_ONLY and not storage_paths.database_path.is_file():
             raise WorkspaceNotInitializedError("workspace database is not initialized")
         return self._open_backend(storage_paths, mode)
@@ -257,7 +277,7 @@ class WorkspaceService:
         if application != APPLICATION_NAME:
             raise WorkspaceManifestError("workspace manifest belongs to another application")
         version = raw.get("format_version")
-        if isinstance(version, bool) or version != WORKSPACE_FORMAT_VERSION:
+        if isinstance(version, bool) or version not in SUPPORTED_WORKSPACE_FORMAT_VERSIONS:
             raise WorkspaceVersionError("workspace format version is not supported")
         try:
             return WorkspaceManifest.model_validate_json(text)

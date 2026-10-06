@@ -278,19 +278,11 @@ class SecIssuerFundamentalMetricPipeline:
                 )
 
     def _protected_counts(self) -> tuple[int, int, int]:
-        connection = self._storage.store.connection
-        tables = (
-            "raw_record_index",
-            "normalized_observations",
-            "diagnostic_results",
+        return (
+            self._storage.raw_records.count(),
+            self._storage.observations.count(),
+            self._storage.diagnostics.count(),
         )
-        counts: list[int] = []
-        for table in tables:
-            row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608
-            if row is None:
-                raise SecFundamentalMetricPipelineError(f"could not count protected table {table}")
-            counts.append(int(row[0]))
-        return counts[0], counts[1], counts[2]
 
 
 def _verify_identity(existing: MetricResult, expected: MetricResult) -> None:

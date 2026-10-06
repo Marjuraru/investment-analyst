@@ -314,7 +314,6 @@ class HistoricalAnalyticalArchive:
 
     def __init__(self, connection: DuckDBPyConnection) -> None:
         self._connection = connection
-        self._sequence_cache: dict[tuple[str, tuple[UUID, ...]], str] = {}
 
     def ensure(self, *, create: bool = False) -> None:
         ensure_historical_analytical_archive_tables(self._connection, create=create)
@@ -1027,8 +1026,6 @@ class HistoricalAnalyticalArchive:
                         "historical analytical sequence conflicts with its hash"
                     )
 
-        for sequence_id, (link_type, identifiers) in sequence_values.items():
-            self._sequence_cache[(link_type, identifiers)] = sequence_id
         return tuple(request_ids)
 
     def _load_segments(self, segment_ids: Sequence[str]) -> dict[str, tuple[str, tuple[UUID, ...]]]:

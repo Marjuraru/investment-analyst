@@ -1,7 +1,9 @@
 """Typed repository contracts for core data models."""
 
+from __future__ import annotations
+
 from collections.abc import Collection
-from datetime import datetime
+from datetime import date, datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -11,6 +13,7 @@ from investment_analyst.core.models import (
     Asset,
     ContractModel,
     DataFrequency,
+    DataQuality,
     DiagnosticMode,
     DiagnosticResult,
     MetricDefinition,
@@ -95,6 +98,8 @@ class RawRecordRepository(Protocol):
 
     def save_many(self, records: Collection[RawRecord]) -> BatchWriteReceipt: ...
 
+    def save_batch(self, records: Collection[RawRecord]) -> BatchWriteReceipt: ...
+
     def get(self, record_id: UUID) -> RawRecord: ...
 
     def get_many(self, record_ids: Collection[UUID]) -> dict[UUID, RawRecord]: ...
@@ -110,6 +115,60 @@ class RawRecordRepository(Protocol):
         received_to: datetime | None = None,
     ) -> list[RawRecord]: ...
 
+    def list_record_ids(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        schema_version: str | None = None,
+        available_to: datetime | None = None,
+        received_from: datetime | None = None,
+        received_to: datetime | None = None,
+    ) -> list[UUID]: ...
+
+    def list_import_page(
+        self,
+        *,
+        limit: int,
+        after_received_at: datetime | None = None,
+        after_record_id: UUID | None = None,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        schema_version: str | None = None,
+        available_to: datetime | None = None,
+    ) -> list[UUID]: ...
+
+    def count(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        schema_version: str | None = None,
+        available_to: datetime | None = None,
+        received_from: datetime | None = None,
+        received_to: datetime | None = None,
+    ) -> int: ...
+
+    def available_at_bounds(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        schema_version: str | None = None,
+    ) -> tuple[datetime | None, datetime | None]: ...
+
+    def select_record_ids_by_json_field(
+        self,
+        *,
+        field: str,
+        values: Collection[str],
+        source_id: str | None = None,
+        schema_version: str | None = None,
+        available_to: datetime | None = None,
+    ) -> list[UUID]: ...
+
+    def verify_index_integrity(self, record_ids: Collection[UUID]) -> int: ...
+
 
 class ObservationRepository(Protocol):
     """Append-only persistence operations for normalized observations."""
@@ -117,6 +176,8 @@ class ObservationRepository(Protocol):
     def save(self, observation: NormalizedObservation) -> NormalizedObservation: ...
 
     def save_many(self, observations: Collection[NormalizedObservation]) -> BatchWriteReceipt: ...
+
+    def save_batch(self, observations: Collection[NormalizedObservation]) -> BatchWriteReceipt: ...
 
     def get(self, observation_id: UUID) -> NormalizedObservation: ...
 
@@ -135,7 +196,88 @@ class ObservationRepository(Protocol):
         observed_before: datetime | None = None,
         available_from: datetime | None = None,
         available_to: datetime | None = None,
+        source_id: str | None = None,
+        field_name: str | None = None,
+        field_names: Collection[str] | None = None,
+        quality: DataQuality | None = None,
+        period_end_from: datetime | date | None = None,
+        period_end_to: datetime | date | None = None,
     ) -> list[NormalizedObservation]: ...
+
+    def count(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        field_name: str | None = None,
+        field_names: Collection[str] | None = None,
+        frequency: DataFrequency | None = None,
+        quality: DataQuality | None = None,
+        observed_from: datetime | None = None,
+        observed_before: datetime | None = None,
+        available_from: datetime | None = None,
+        available_to: datetime | None = None,
+        period_end_from: datetime | date | None = None,
+        period_end_to: datetime | date | None = None,
+    ) -> int: ...
+
+    def minimum_available_at(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        frequency: DataFrequency | None = None,
+        quality: DataQuality | None = None,
+        transformation_version: str | None = None,
+    ) -> datetime | None: ...
+
+    def maximum_available_at(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        frequency: DataFrequency | None = None,
+        quality: DataQuality | None = None,
+        transformation_version: str | None = None,
+        observed_from: datetime | None = None,
+        observed_before: datetime | None = None,
+        available_to: datetime | None = None,
+    ) -> datetime | None: ...
+
+    def observed_at_bounds(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        frequency: DataFrequency | None = None,
+        field_name: str | None = None,
+        field_names: Collection[str] | None = None,
+        quality: DataQuality | None = None,
+        observed_from: datetime | None = None,
+        observed_before: datetime | None = None,
+        available_from: datetime | None = None,
+        available_to: datetime | None = None,
+        period_end_from: datetime | date | None = None,
+        period_end_to: datetime | date | None = None,
+    ) -> tuple[datetime | None, datetime | None]: ...
+
+    def list_observation_import_page(
+        self,
+        *,
+        limit: int,
+        after_available_at: datetime | None = None,
+        after_observation_id: UUID | None = None,
+    ) -> list[UUID]: ...
+
+    def list_ids_for_manager_observation_references(
+        self, *, asset_id: str, available_to: datetime | None = None
+    ) -> list[UUID]: ...
+
+    def select_ids_for_manager_observation_references(
+        self, candidate_ids: Collection[UUID], *, manager: str
+    ) -> list[UUID]: ...
+
+    def field_name(self, observation_id: UUID) -> str | None: ...
 
 
 class MetricDefinitionRepository(Protocol):
@@ -155,6 +297,8 @@ class MetricResultRepository(Protocol):
 
     def save_many(self, results: Collection[MetricResult]) -> BatchWriteReceipt: ...
 
+    def save_batch(self, results: Collection[MetricResult]) -> BatchWriteReceipt: ...
+
     def get(self, result_id: UUID) -> MetricResult: ...
 
     def get_many(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]: ...
@@ -171,6 +315,32 @@ class MetricResultRepository(Protocol):
         as_of_to: datetime | None = None,
     ) -> list[MetricResult]: ...
 
+    def count(
+        self,
+        *,
+        asset_id: str | None = None,
+        metric_key: str | None = None,
+        metric_keys: tuple[str, ...] | None = None,
+        as_of_from: datetime | None = None,
+        as_of_to: datetime | None = None,
+    ) -> int: ...
+
+    def list_import_page(
+        self,
+        *,
+        limit: int,
+        after_available_at: datetime | None = None,
+        after_result_id: UUID | None = None,
+    ) -> tuple[UUID, ...]: ...
+
+    def list_ids(
+        self,
+        *,
+        asset_id: str | None = None,
+        metric_keys: Collection[str] | None = None,
+        available_to: datetime | None = None,
+    ) -> list[UUID]: ...
+
 
 class DiagnosticResultRepository(Protocol):
     """Append-only persistence operations for diagnostic results."""
@@ -178,6 +348,8 @@ class DiagnosticResultRepository(Protocol):
     def save(self, result: DiagnosticResult) -> DiagnosticResult: ...
 
     def save_many(self, results: Collection[DiagnosticResult]) -> BatchWriteReceipt: ...
+
+    def save_batch(self, results: Collection[DiagnosticResult]) -> BatchWriteReceipt: ...
 
     def get(self, diagnostic_id: UUID) -> DiagnosticResult: ...
 
@@ -191,3 +363,20 @@ class DiagnosticResultRepository(Protocol):
         as_of_from: datetime | None = None,
         as_of_to: datetime | None = None,
     ) -> list[DiagnosticResult]: ...
+
+    def count(
+        self,
+        *,
+        asset_id: str | None = None,
+        mode: DiagnosticMode | None = None,
+        as_of_from: datetime | None = None,
+        as_of_to: datetime | None = None,
+    ) -> int: ...
+
+    def list_import_page(
+        self,
+        *,
+        limit: int,
+        after_available_at: datetime | None = None,
+        after_diagnostic_id: UUID | None = None,
+    ) -> tuple[UUID, ...]: ...

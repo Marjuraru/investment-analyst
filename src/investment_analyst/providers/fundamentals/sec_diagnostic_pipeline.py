@@ -198,28 +198,17 @@ class SecIssuerFundamentalDiagnosticPipeline:
         )
 
     def _counts(self) -> tuple[int, int, int, int]:
-        tables = (
-            "raw_record_index",
-            "normalized_observations",
-            "metric_results",
-            "diagnostic_results",
-        )
-        counts: list[int] = []
         try:
-            for table in tables:
-                row = self._storage.store.connection.execute(
-                    f"SELECT COUNT(*) FROM {table}"  # noqa: S608
-                ).fetchone()
-                if row is None:
-                    raise SecFundamentalDiagnosticPipelineError(
-                        f"could not count protected table {table}"
-                    )
-                counts.append(int(row[0]))
+            return (
+                self._storage.raw_records.count(),
+                self._storage.observations.count(),
+                self._storage.metric_results.count(),
+                self._storage.diagnostics.count(),
+            )
         except StorageError as error:
             raise SecFundamentalDiagnosticPipelineError(
                 "storage counts could not be read"
             ) from error
-        return counts[0], counts[1], counts[2], counts[3]
 
     @staticmethod
     def _verify_counts(

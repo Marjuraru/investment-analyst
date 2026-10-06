@@ -107,6 +107,15 @@ _STAGING_MARKER_FILENAME = "raw-v2-staging.json"
 _STAGING_LOCK_FILENAME = "raw-v2-staging.lock"
 _BLOB_DIR_PARTS = ("raw", "sha256")
 _INDEX_TABLE = "raw_v2_index"
+WORKSPACE_RAW_JSON_PROJECTIONS_TABLE = "workspace_raw_json_projections_v2"
+_RAW_JSON_PROJECTION_PATHS = {
+    "report_manager": ("report", "manager_cik"),
+    "outcome_filer": ("outcome", "filing", "filer_cik"),
+    "position_report": ("position", "report_id"),
+    "semantics_manager": ("artifact", "manager_cik"),
+    "correspondence_artifact": ("correspondence", "artifact_id"),
+    "correspondence_manager": ("correspondence", "manager_cik"),
+}
 _RAW_V2_BATCH_CHUNK_SIZE = 512
 _DUCKDB_FILE_SUFFIXES = frozenset({".duckdb", ".wal"})
 _INDEX_COLUMNS = (
@@ -260,6 +269,21 @@ def _project_13f_fields(record: RawRecord) -> tuple[str | None, str | None]:
         if isinstance(candidate, str) and candidate.strip():
             report_id = candidate
     return manager_cik, report_id
+
+
+def _project_raw_json_fields(record: RawRecord) -> list[tuple[str, str]]:
+    """Extract the closed selector fields used by existing SEC repositories."""
+    projections: list[tuple[str, str]] = []
+    for field_name, path in _RAW_JSON_PROJECTION_PATHS.items():
+        value: object = record.payload
+        for part in path:
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(part)
+        if isinstance(value, str) and value.strip():
+            projections.append((field_name, value))
+    return projections
 
 
 def _instant_text(value: datetime | None) -> str | None:
@@ -468,6 +492,8 @@ class RawV2Staging:
         source_id: str | None = None,
         schema_version: str | None = None,
         available_to: datetime | None = None,
+        received_from: datetime | None = None,
+        received_to: datetime | None = None,
         manager_cik: str | None = None,
         report_id: str | None = None,
     ) -> list[UUID]:
@@ -487,6 +513,12 @@ class RawV2Staging:
         if available_to is not None:
             clauses.append("available_at <= ?")
             parameters.append(_instant_text(available_to))
+        if received_from is not None:
+            clauses.append("received_at >= ?")
+            parameters.append(_instant_text(received_from))
+        if received_to is not None:
+            clauses.append("received_at <= ?")
+            parameters.append(_instant_text(received_to))
         if manager_cik is not None:
             clauses.append("projected_manager_cik = ?")
             parameters.append(manager_cik)
@@ -500,6 +532,72 @@ class RawV2Staging:
         ).fetchall()
         return [UUID(row[0]) for row in rows]
 
+    def count_records(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        schema_version: str | None = None,
+        available_to: datetime | None = None,
+        received_from: datetime | None = None,
+        received_to: datetime | None = None,
+    ) -> int:
+        """Count matching indexed records without reading content-addressed blobs."""
+        self._require_open()
+        clauses: list[str] = []
+        parameters: list[object] = []
+        for column, value in (
+            ("asset_id", asset_id),
+            ("source_id", source_id),
+            ("schema_version", schema_version),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                parameters.append(value)
+        for column, value, operator in (
+            ("available_at", available_to, "<="),
+            ("received_at", received_from, ">="),
+            ("received_at", received_to, "<="),
+        ):
+            if value is not None:
+                clauses.append(f"{column} {operator} ?")
+                parameters.append(_instant_text(value))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        row = self._connection.execute(
+            f"SELECT count(*) FROM {_INDEX_TABLE}{where}", parameters
+        ).fetchone()
+        if row is None:
+            raise RawV2StagingError("raw v2 indexed record count returned no row")
+        return int(row[0])
+
+    def available_at_bounds(
+        self,
+        *,
+        asset_id: str | None = None,
+        source_id: str | None = None,
+        schema_version: str | None = None,
+    ) -> tuple[datetime | None, datetime | None]:
+        """Return availability edges from the typed raw index without blob reads."""
+        self._require_open()
+        clauses: list[str] = []
+        parameters: list[object] = []
+        for column, value in (
+            ("asset_id", asset_id),
+            ("source_id", source_id),
+            ("schema_version", schema_version),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                parameters.append(value)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        row = self._connection.execute(
+            f"SELECT min(available_at), max(available_at) FROM {_INDEX_TABLE}{where}",
+            parameters,
+        ).fetchone()
+        if row is None:
+            return None, None
+        return _parse_instant_text(row[0]), _parse_instant_text(row[1])
+
     def list_inventory_page(
         self,
         *,
@@ -510,6 +608,8 @@ class RawV2Staging:
         source_id: str | None = None,
         schema_version: str | None = None,
         available_to: datetime | None = None,
+        received_from: datetime | None = None,
+        received_to: datetime | None = None,
         manager_cik: str | None = None,
         report_id: str | None = None,
     ) -> list[UUID]:
@@ -540,6 +640,12 @@ class RawV2Staging:
         if available_to is not None:
             clauses.append("available_at <= ?")
             parameters.append(_instant_text(available_to))
+        if received_from is not None:
+            clauses.append("received_at >= ?")
+            parameters.append(_instant_text(received_from))
+        if received_to is not None:
+            clauses.append("received_at <= ?")
+            parameters.append(_instant_text(received_to))
         if manager_cik is not None:
             clauses.append("projected_manager_cik = ?")
             parameters.append(manager_cik)
@@ -561,6 +667,8 @@ class RawV2Staging:
     def _save_chunk(self, chunk: list[RawRecord]) -> tuple[list[UUID], list[UUID]]:
         chunk_created: list[UUID] = []
         chunk_reused: list[UUID] = []
+        projection_rows: list[tuple[str, str, str]] = []
+        projection_table_exists = self._workspace_projection_table_exists()
         serialized: dict[UUID, tuple[bytes, str]] = {}
         for record in chunk:
             document = canonical_json_bytes(record)
@@ -611,6 +719,11 @@ class RawV2Staging:
                         report_uuid,
                     ]
                 )
+                if projection_table_exists:
+                    projection_rows.extend(
+                        (str(record_id), field_name, field_value)
+                        for field_name, field_value in _project_raw_json_fields(record)
+                    )
                 chunk_created.append(record_id)
                 seen_chunk_keys.add(record_id)
             else:
@@ -622,6 +735,12 @@ class RawV2Staging:
                     BoundedInsertTable.RAW_V2_INDEX,
                     insert_rows,
                 )
+                for offset in range(0, len(projection_rows), 256):
+                    self._connection.executemany(
+                        f"INSERT INTO {WORKSPACE_RAW_JSON_PROJECTIONS_TABLE} "
+                        "(record_id, field_name, field_value) VALUES (?, ?, ?)",
+                        projection_rows[offset : offset + 256],
+                    )
         return chunk_created, chunk_reused
 
     def _select_rows(self, record_ids: Sequence[UUID]) -> list[tuple[object, ...]]:
@@ -667,10 +786,32 @@ class RawV2Staging:
             or _parse_instant_text(received_at) != record.received_at
         ):
             raise RawV2StagingError("raw v2 index metadata does not match its file")
+        if self._workspace_projection_table_exists():
+            projection_rows = self._connection.execute(
+                f"SELECT field_name, field_value FROM {WORKSPACE_RAW_JSON_PROJECTIONS_TABLE} "
+                "WHERE record_id = ?",
+                [str(record_id)],
+            ).fetchall()
+            indexed_projections = {
+                str(field_name): str(field_value) for field_name, field_value in projection_rows
+            }
+            expected_projections = dict(_project_raw_json_fields(record))
+            if indexed_projections != expected_projections:
+                raise RawV2StagingError("raw v2 JSON projection does not match its file")
         manager_cik, report_uuid = _project_13f_fields(record)
         if manager_cik != projected_manager_cik or report_uuid != projected_report_id:
             raise RawV2StagingError("raw v2 index projection does not match its file")
         return record
+
+    def _workspace_projection_table_exists(self) -> bool:
+        return (
+            self._connection.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = 'main' AND table_name = ?",
+                [WORKSPACE_RAW_JSON_PROJECTIONS_TABLE],
+            ).fetchone()
+            is not None
+        )
 
     def _blob_relative_path(self, checksum: str) -> Path:
         if len(checksum) != 64 or any(char not in "0123456789abcdef" for char in checksum):

@@ -1,9 +1,9 @@
 # Workspace local y staging de datos
 
 `investment-analyst` conserva evidencia financiera en un workspace local con
-identidad propia. Su almacenamiento v1 sigue siendo la fuente de lectura de la
-aplicación. Los formatos v2 de esta etapa son staging aislados para importar,
-comparar y respaldar; no se activan como workspace productivo.
+identidad propia. El formato v1 sigue siendo el default. Un manifiesto puede
+seleccionar explícitamente el backend v2 para un workspace nuevo; seleccionar
+ese formato no migra ni activa automáticamente un workspace existente.
 
 ## Directorios y autoridad
 
@@ -12,13 +12,31 @@ su manifiesto y los directorios de storage, exports y estado. La composición de
 la aplicación usa `ApplicationRuntime` y las rutas resueltas por el servicio;
 el comportamiento no depende del directorio actual del proceso.
 
+## Backend seleccionable v2
+
+`WorkspaceService.initialize(..., format_version=2)` crea un manifiesto v2 y
+`ApplicationRuntime` abre el backend indicado por ese manifiesto mediante las
+mismas interfaces `LocalStorage` y repositorios. La API pública y el formato
+default no cambian. El índice DuckDB vive en `storage/v2/index.duckdb`; los
+blobs raw content-addressed viven bajo `storage/v2/raw/`, y exports y documentos
+conservan sus rutas del workspace. El backend tipado guarda observaciones,
+métricas y diagnósticos sin duplicar el modelo completo en `document_json`.
+
+La representación compacta conserva Decimal como texto exacto, parámetros,
+identidades y lineage ordenado por referencias content-addressed y segmentos de
+hasta 256 miembros. El archivo histórico mantiene un sello append-only separado
+de las nuevas escrituras `LIVE`. El backup usa
+`workspace-v2-backup-manifest-v1`, separado de los manifiestos de staging raw.
+El backend v2 admite acceso read-only/read-write; seleccionarlo no implica
+cutover, importación del workspace permanente ni rollback productivo.
+
 El workspace permanente puede contener historia local valiosa. La inspección
 debe ser read-only cuando no se requiere escribir. Los procesos de staging
 reciben un destino nuevo, disjunto de la fuente, y una única conexión escritora.
 Los importadores y servicios de backup usan las abstracciones de storage; no
 editan directamente filas del workspace de origen.
 
-## Importación al staging v2
+## Importación y archivo al backend v2
 
 El staging `raw-v2-staging-v1` mantiene blobs raw con identidad SHA-256 y un
 índice DuckDB tipado. `normalized_observations_v2` conserva las observaciones
@@ -52,6 +70,12 @@ inventarios raw y de observaciones. Si no existe archivo histórico, se conserva
 la versión anterior apropiada; los manifiestos v1–v5 siguen siendo legibles y
 restaurables.
 
+Para un workspace v2, `WorkspaceV2BackupService` inventaría los archivos no
+transitorios y los liga en `workspace-v2-backup-manifest-v1`. Verifica el sello
+histórico y los repositorios v2 antes y después de restaurar. El restore copia
+a un destino nuevo y vuelve a validar checksums, identidad del workspace y
+conteos antes de declararlo listo.
+
 La restauración copia a un destino nuevo, verifica de nuevo cada archivo y la
 estructura tipada, y sólo después promueve el directorio temporal al destino.
 Para un checkpoint parcial verifica todas las filas históricas durables y el
@@ -62,9 +86,9 @@ cerrado y no reemplaza un destino preexistente.
 
 ## Límite de activación
 
-El staging no cambia el workspace activo, no modifica ni borra historia v1, no
-rebautiza resultados antiguos como resultados v2 y no acredita reducción de
-espacio en el host. Migración masiva, comparación bidireccional, cutover,
-rollback productivo y cualquier limpieza requieren sus propios criterios,
-backup verificado y autorización explícita. Las pruebas de smoke usan
-workspaces temporales y no consultan proveedores externos.
+La selección del formato v2 no modifica ni borra historia v1, no rebautiza
+resultados históricos como resultados `LIVE` ni acredita reducción de espacio
+en el host. Migración masiva, comparación bidireccional, cutover, rollback
+productivo y cualquier limpieza requieren sus propios criterios, backup
+verificado y autorización explícita. Las pruebas de smoke usan workspaces
+temporales y no consultan proveedores externos.

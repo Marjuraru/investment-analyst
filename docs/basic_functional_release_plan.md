@@ -699,3 +699,27 @@ identidades. El ensayo completo con restore/rollback, la activación autorizada,
 la limpieza física inventariada y el backup Drive probado quedan posteriores.
 La ruta DATA-CHASSIS permanece abierta y su estado global no cambia por
 evidencia scratch.
+
+Este candidato (`DATA-CHASSIS-40` / #333) propone `route_effect: ADVANCES`:
+integra un backend v2 seleccionable por manifiesto en `WorkspaceService` y
+`ApplicationRuntime`, mantiene los repositorios existentes y consumidores SEC/
+institucionales, y añade escritura analítica tipada compacta junto con archivo
+histórico sellado y backup v2. El smoke offline verifica fidelidad, PIT de dos
+consumidores en dos cortes, cierre/reapertura y reanudación tras una página
+durable, restore doble y escala comparable N=257/1537 con digests exactos,
+mezcla declarada `funding=round(N*100/1537)`, 32 activos ajenos, páginas ≤256 y
+cero modelos ajenos hidratados. La serie funding conserva 720 inputs y crea
+variantes distintas de secuencia y parámetros en ambos tamaños. El JSON mide
+todas las tablas lógicas con UTF-8 para texto, bytes almacenados para blobs y
+anchos fijos para escalares no nulos; separa el archivo histórico de entrada,
+DB, WAL, raw blobs, Parquet, archivos del workspace y spill, y registra consultas,
+tiempos y RSS por fase. La evidencia es scratch: formato 1 sigue default, no hay
+migración real, cutover, backup Drive ni reducción operacional acreditada. El
+plan fijo 40–45 está en
+[`data_chassis_closure_plan.md`](data_chassis_closure_plan.md).
+
+La ruta DATA-CHASSIS permanece abierta con un único `NEXT`. Tras integrar #333,
+PLAN vuelve a adquirir la evidencia viva y resuelve la frontera sustancial del
+bloque 41 para adopción incremental exacta. Los bloques 41–45 son planificación,
+no Issues activos ni autorización anticipada de BUILD.
+route_transition:DATA-CHASSIS:ADVANCES
