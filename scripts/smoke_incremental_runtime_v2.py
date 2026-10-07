@@ -53,7 +53,11 @@ _FAMILY_TESTS = {
         "tests/integration/analytics/test_activity_metric_pipeline_integration.py",
         "tests/integration/analytics/test_activity_event_flow.py",
         "tests/integration/analytics/test_institutional_event_service_integration.py",
+        "tests/integration/application/test_sec_institutional_history_integration.py",
         "tests/unit/analytics/cazatiburones/test_activity_metric_identity.py",
+        "tests/unit/analytics/cazatiburones/test_institutional_event_engine.py",
+        "tests/unit/alerts/test_candidate_notifications.py",
+        "tests/unit/alerts/test_cazatiburones_notifications.py",
     ),
     "access_and_recovery": (
         "tests/unit/analytics/test_analytical_access_unit.py",
