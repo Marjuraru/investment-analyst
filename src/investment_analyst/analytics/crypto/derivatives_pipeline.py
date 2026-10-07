@@ -1,9 +1,11 @@
 """Append-only persistence for provider-independent derivatives metrics."""
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from investment_analyst.analytics.crypto.derivatives_engine import (
+    DVOL_WINDOWS,
+    FUNDING_WINDOWS,
     METRIC_DEFINITIONS,
     CryptoDerivativesMetricEngine,
 )
@@ -42,11 +44,39 @@ class CryptoDerivativesMetricPipeline:
         as_of_before: datetime,
     ) -> CryptoDerivativesMetricPersistenceSummary:
         self._storage.require_open()
-        observations = tuple(
-            self._storage.observations.list(
+        funding_start = (
+            as_of_from - timedelta(hours=max(FUNDING_WINDOWS) - 1)
+            if as_of_from is not None
+            else None
+        )
+        dvol_start = (
+            as_of_from - timedelta(days=max(DVOL_WINDOWS)) if as_of_from is not None else None
+        )
+        observations = (
+            *self._storage.observations.list(
                 asset_id=asset_id,
+                source_id=funding_source_id,
+                field_names=("funding_interest_1h",),
+                observed_from=funding_start,
+                observed_before=as_of_before,
                 available_to=known_at,
-            )
+            ),
+            *self._storage.observations.list(
+                asset_id=asset_id,
+                source_id=dvol_source_id,
+                field_names=("dvol_close",),
+                observed_from=dvol_start,
+                observed_before=as_of_before,
+                available_to=known_at,
+            ),
+            *self._storage.observations.list(
+                asset_id=asset_id,
+                source_id=summary_source_id,
+                field_names=("bid_price", "ask_price", "mid_price"),
+                observed_from=as_of_from,
+                observed_before=as_of_before,
+                available_to=known_at,
+            ),
         )
         computation = self._engine.compute(
             observations,

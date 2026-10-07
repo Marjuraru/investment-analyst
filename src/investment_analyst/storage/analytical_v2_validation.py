@@ -67,9 +67,89 @@ _SNAP_METRIC_LINKS = "analysis_snapshot_v2_metric_links"
 _SNAP_DIAG_LINKS = "analysis_snapshot_v2_diagnostic_links"
 _OBS_TABLE = "normalized_observations_v2"
 _ES_TABLE = "evidence_sets_v2"
+_COMPACT_METRIC_TABLE = "workspace_metric_results_v2"
 
 _metric_v2_symbols: tuple[object, ...] | None = None
 _evidence_v2_symbols: tuple[object, ...] | None = None
+
+
+def _existing_metric_ids(
+    connection: DuckDBPyConnection,
+    table: str,
+    metric_ids: Collection[UUID],
+) -> set[UUID]:
+    """Return persisted metric IDs from one of the two supported v2 stores."""
+    if table not in {_METRIC_TABLE, _COMPACT_METRIC_TABLE}:
+        raise ValueError("unsupported metric v2 table")
+    existing_tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+        ).fetchall()
+    }
+    if table not in existing_tables:
+        return set()
+    output: set[UUID] = set()
+    for chunk in chunked_sequence(tuple(sorted(set(metric_ids), key=str)), MAX_CHUNK_SIZE):
+        placeholders = ", ".join("?" for _ in chunk)
+        rows = connection.execute(
+            f"SELECT result_id FROM {table} WHERE result_id IN ({placeholders})",
+            [str(identifier) for identifier in chunk],
+        ).fetchall()
+        output.update(UUID(str(row[0])) for row in rows)
+    return output
+
+
+class _ConnectionMetricResultLookup:
+    """Resolve persisted metrics from either supported v2 storage representation."""
+
+    def __init__(self, connection: DuckDBPyConnection) -> None:
+        self._connection = connection
+
+    def get_existing(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]:
+        ordered = tuple(sorted(set(result_ids), key=str))
+        raw_ids = _existing_metric_ids(self._connection, _METRIC_TABLE, ordered)
+        compact_ids = _existing_metric_ids(self._connection, _COMPACT_METRIC_TABLE, ordered)
+        duplicate_ids = raw_ids.intersection(compact_ids)
+        if duplicate_ids:
+            duplicate = min(duplicate_ids, key=str)
+            raise StorageError(f"metric v2 {duplicate} exists in both storage representations")
+        output = fetch_metrics_chunked(self._connection, raw_ids) if raw_ids else {}
+        if compact_ids:
+            from investment_analyst.storage.compact_analytical_v2 import CompactAnalyticalStore
+
+            store = CompactAnalyticalStore(self._connection)
+            for chunk in chunked_sequence(tuple(sorted(compact_ids, key=str)), MAX_CHUNK_SIZE):
+                output.update(store.get_metrics(chunk))
+        missing = set(ordered).difference(output)
+        if missing:
+            absent = min(missing, key=str)
+            raise RecordNotFoundError(f"metric v2 {absent} was not found")
+        return output
+
+
+def ensure_snapshot_metric_storage(connection: DuckDBPyConnection) -> None:
+    """Verify the metric backend present in a workspace before snapshot access."""
+    table_names = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+        ).fetchall()
+    }
+    raw_present = _METRIC_TABLE in table_names
+    compact_present = _COMPACT_METRIC_TABLE in table_names
+    if raw_present:
+        from investment_analyst.storage.metric_v2 import ensure_metric_v2_tables
+
+        ensure_metric_v2_tables(connection, create=False)
+    if compact_present:
+        from investment_analyst.storage.compact_analytical_v2 import CompactAnalyticalStore
+
+        CompactAnalyticalStore(connection).ensure(create=False)
+    if not raw_present and not compact_present:
+        from investment_analyst.storage.metric_v2 import ensure_metric_v2_tables
+
+        ensure_metric_v2_tables(connection, create=False)
 
 
 def _get_metric_v2_symbols() -> tuple[object, ...]:
@@ -121,16 +201,217 @@ class AnalyticalV2ValidationContext:
         metric_ids: Collection[UUID],
     ) -> dict[UUID, MetricResult]:
         """Fetch and validate only metric IDs not already resolved in this operation."""
+        MetricV2Error, _, _ = _get_metric_v2_symbols()
         ordered_ids = tuple(sorted(set(metric_ids), key=str))
         missing_ids = [mid for mid in ordered_ids if mid not in self.metrics_by_id]
         if missing_ids:
-            fetched = fetch_metrics_chunked(connection, missing_ids)
-            verify_metrics_dag_and_lineage(connection, fetched, context=self)
+            raw_ids = _existing_metric_ids(connection, _METRIC_TABLE, missing_ids)
+            compact_ids = _existing_metric_ids(connection, _COMPACT_METRIC_TABLE, missing_ids)
+            duplicate_ids = raw_ids.intersection(compact_ids)
+            if duplicate_ids:
+                duplicate = min(duplicate_ids, key=str)
+                raise MetricV2Error(f"metric v2 {duplicate} exists in both storage representations")
+            unknown_ids = set(missing_ids).difference(raw_ids, compact_ids)
+            if unknown_ids:
+                first_missing = min(unknown_ids, key=str)
+                raise RecordNotFoundError(f"metric v2 {first_missing} was not found")
+            if raw_ids:
+                fetched = fetch_metrics_chunked(connection, raw_ids)
+                verify_metrics_dag_and_lineage(connection, fetched, context=self)
+            if compact_ids:
+                self._resolve_compact_metrics(connection, compact_ids)
 
         absent_ids = [mid for mid in ordered_ids if mid not in self.metrics_by_id]
         if absent_ids:
             raise RecordNotFoundError(f"metric v2 {absent_ids[0]} was not found")
         return {mid: self.metrics_by_id[mid] for mid in ordered_ids}
+
+    def _resolve_compact_metrics(
+        self,
+        connection: DuckDBPyConnection,
+        seed_ids: Collection[UUID],
+    ) -> None:
+        """Resolve compact workspace metric lineage with the same strict PIT checks."""
+        from investment_analyst.storage.compact_analytical_v2 import CompactAnalyticalStore
+
+        MetricV2Error, _, _ = _get_metric_v2_symbols()
+        pending = list(sorted(set(seed_ids), key=str))
+        compact_metrics: dict[UUID, MetricResult] = {}
+        raw_dependencies: set[UUID] = set()
+        store = CompactAnalyticalStore(connection)
+        while pending:
+            batch = tuple(
+                identifier
+                for identifier in pending[:MAX_CHUNK_SIZE]
+                if identifier not in compact_metrics and identifier not in self.metrics_by_id
+            )
+            del pending[:MAX_CHUNK_SIZE]
+            if not batch:
+                continue
+            compact_ids = _existing_metric_ids(connection, _COMPACT_METRIC_TABLE, batch)
+            raw_ids = _existing_metric_ids(connection, _METRIC_TABLE, batch)
+            duplicate_ids = compact_ids.intersection(raw_ids)
+            if duplicate_ids:
+                duplicate = min(duplicate_ids, key=str)
+                raise MetricV2Error(f"metric v2 {duplicate} exists in both storage representations")
+            absent = set(batch).difference(compact_ids, raw_ids)
+            if absent:
+                raise RecordNotFoundError(f"metric v2 {min(absent, key=str)} was not found")
+            raw_dependencies.update(raw_ids)
+            compact_batch = set(batch).intersection(compact_ids)
+            if compact_batch:
+                for chunk in chunked_sequence(sorted(compact_batch, key=str), MAX_CHUNK_SIZE):
+                    compact_metrics.update(store.get_metrics(chunk))
+            for identifier in batch:
+                metric = compact_metrics.get(identifier) or self.metrics_by_id.get(identifier)
+                if metric is None:
+                    continue
+                pending.extend(
+                    dependency
+                    for dependency in metric.input_metric_result_ids
+                    if dependency not in compact_metrics and dependency not in self.metrics_by_id
+                )
+
+        if raw_dependencies:
+            self.resolve_metrics(connection, raw_dependencies)
+
+        combined = {**self.metrics_by_id, **compact_metrics}
+        try:
+            topological_sort_metrics(tuple(compact_metrics.values()))
+        except AnalyticalV2ValidationError as error:
+            raise MetricV2Error(str(error)) from error
+        for metric in compact_metrics.values():
+            if len(metric.input_observation_ids) != len(set(metric.input_observation_ids)):
+                raise MetricV2Error("compact metric observation inputs must be unique")
+            for dependency_id in metric.input_metric_result_ids:
+                dependency = combined.get(dependency_id)
+                if dependency is None:
+                    raise MetricV2Error(f"compact metric dependency {dependency_id} is missing")
+                if dependency.asset_id != metric.asset_id:
+                    raise MetricV2Error(
+                        f"compact metric references a foreign metric {dependency_id}"
+                    )
+                if dependency.available_at > metric.available_at:
+                    raise MetricV2Error(
+                        f"compact metric references a future metric {dependency_id}"
+                    )
+
+        evidence_ids: dict[UUID, set[UUID]] = {}
+        for metric in compact_metrics.values():
+            evidence_ref = metric.parameters.get("evidence_set_id")
+            if evidence_ref is None:
+                continue
+            try:
+                evidence_id = UUID(str(evidence_ref))
+            except (ValueError, TypeError, AttributeError) as error:
+                raise MetricV2Error(
+                    "compact metric evidence set reference is not a UUID"
+                ) from error
+            if evidence_id not in self.evidence_sets_by_id:
+                evidence_ids.setdefault(evidence_id, set()).add(metric.result_id)
+
+        new_evidence_sets: dict[UUID, EvidenceSet] = {}
+        new_evidence_lineages: dict[UUID, tuple[UUID, ...]] = {}
+        evidence_store: EvidenceSetV2Store | None = None
+        if evidence_ids:
+            _, EvidenceSetV2Error, EvidenceSetV2Store, ensure_evidence_v2_tables = (
+                _get_evidence_v2_symbols()
+            )
+            try:
+                ensure_evidence_v2_tables(connection, create=False)
+                evidence_store = EvidenceSetV2Store(connection)
+                new_evidence_sets, new_evidence_lineages = evidence_store.get_sets_and_lineages(
+                    evidence_ids,
+                    segment_cache=self.segments_by_id,
+                )
+            except (EvidenceSetV2Error, RecordNotFoundError) as error:
+                raise MetricV2Error("compact metric evidence set could not be verified") from error
+
+        observation_ids = {
+            identifier
+            for metric in compact_metrics.values()
+            for identifier in metric.input_observation_ids
+        }
+        for identifiers in new_evidence_lineages.values():
+            observation_ids.update(identifiers)
+        missing_observation_ids = observation_ids.difference(
+            UUID(identifier) for identifier in self.observations_by_id
+        )
+        new_observations: dict[str, tuple[str, str, str, datetime]] = {}
+        for chunk in chunked_sequence(sorted(missing_observation_ids, key=str), MAX_CHUNK_SIZE):
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = connection.execute(
+                f"SELECT observation_id, asset_id, source_id, field_name, available_at "
+                f"FROM {_OBS_TABLE} WHERE observation_id IN ({placeholders})",
+                [str(identifier) for identifier in chunk],
+            ).fetchall()
+            new_observations.update(
+                {
+                    str(row[0]): (
+                        str(row[1]),
+                        str(row[2]),
+                        str(row[3]),
+                        parse_instant_utc(row[4], "observation available_at"),
+                    )
+                    for row in rows
+                }
+            )
+        observations = collections.ChainMap(new_observations, self.observations_by_id)
+        for metric in compact_metrics.values():
+            for observation_id in metric.input_observation_ids:
+                fact = observations.get(str(observation_id))
+                if fact is None:
+                    raise MetricV2Error(
+                        f"compact metric references missing observation {observation_id}"
+                    )
+                if fact[0] != metric.asset_id:
+                    raise MetricV2Error(
+                        f"compact metric references foreign observation {observation_id}"
+                    )
+                if fact[3] > metric.available_at:
+                    raise MetricV2Error(
+                        f"compact metric references future observation {observation_id}"
+                    )
+
+        evidence_sets = collections.ChainMap(new_evidence_sets, self.evidence_sets_by_id)
+        evidence_lineages = collections.ChainMap(
+            new_evidence_lineages,
+            self.evidence_lineages_by_id,
+        )
+        if evidence_store is not None:
+            try:
+                evidence_store.verify_observation_lineages(
+                    new_evidence_sets.values(), new_evidence_lineages, observations
+                )
+            except EvidenceSetV2Error as error:
+                raise MetricV2Error("compact metric evidence lineage is invalid") from error
+        for metric in compact_metrics.values():
+            evidence_ref = metric.parameters.get("evidence_set_id")
+            if evidence_ref is None:
+                continue
+            evidence_id = UUID(str(evidence_ref))
+            evidence_set = evidence_sets.get(evidence_id)
+            lineage = evidence_lineages.get(evidence_id)
+            if evidence_set is None or lineage is None:
+                raise MetricV2Error(f"compact metric evidence set {evidence_id} is missing")
+            if evidence_set.asset_id != metric.asset_id:
+                raise MetricV2Error(f"compact metric references foreign evidence set {evidence_id}")
+            if evidence_set.available_at > metric.available_at:
+                raise MetricV2Error(f"compact metric references future evidence set {evidence_id}")
+            if set(lineage) != set(metric.input_observation_ids) or len(lineage) != len(
+                metric.input_observation_ids
+            ):
+                raise MetricV2Error("compact metric inputs do not match evidence set members")
+
+        try:
+            verify_market_metric_references(connection, tuple(compact_metrics.values()))
+        except AnalyticalV2ValidationError as error:
+            raise MetricV2Error(str(error)) from error
+
+        self.metrics_by_id.update(compact_metrics)
+        self.evidence_sets_by_id.update(new_evidence_sets)
+        self.evidence_lineages_by_id.update(new_evidence_lineages)
+        self.observations_by_id.update(new_observations)
 
     def require_evidence_sets(
         self,
@@ -454,7 +735,10 @@ def verify_market_metric_references(
     checkpoint_ids = tuple({checkpoint_id for _, checkpoint_id in referenced.values()})
     try:
         prefixes = DailyEvidenceV2Store(connection).get_many(prefix_ids)
-        checkpoints = MarketCheckpointV2Store(connection).get_many(checkpoint_ids)
+        checkpoints = MarketCheckpointV2Store(connection).get_many(
+            checkpoint_ids,
+            metric_results=_ConnectionMetricResultLookup(connection),
+        )
     except (DailyEvidenceV2Error, MarketCheckpointV2Error, RecordNotFoundError) as error:
         raise AnalyticalV2ValidationError(str(error)) from error
     if set(prefixes) != set(prefix_ids):
@@ -636,7 +920,10 @@ def market_artifact_digests_for_metrics(
     from investment_analyst.storage.market_checkpoint_v2 import MarketCheckpointV2Store
 
     prefixes = DailyEvidenceV2Store(connection).get_many(prefix_ids)
-    checkpoints = MarketCheckpointV2Store(connection).get_many(checkpoint_ids)
+    checkpoints = MarketCheckpointV2Store(connection).get_many(
+        checkpoint_ids,
+        metric_results=_ConnectionMetricResultLookup(connection),
+    )
     if set(prefixes) != prefix_ids or set(checkpoints) != checkpoint_ids:
         raise AnalyticalV2ValidationError("market snapshot references a missing lineage artifact")
     digests = [

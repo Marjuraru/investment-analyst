@@ -1,5 +1,6 @@
 """Focused read-only contracts for materialized corporate valuation history."""
 
+from collections.abc import Collection
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -18,8 +19,48 @@ class _Results:
     def __init__(self, results: list[MetricResult]) -> None:
         self._results = results
 
-    def list(self, *, asset_id: str | None = None) -> list[MetricResult]:
-        return [item for item in self._results if asset_id is None or item.asset_id == asset_id]
+    def list_ids(
+        self,
+        *,
+        asset_id: str | None = None,
+        metric_keys: Collection[str] | None = None,
+        available_to: datetime | None = None,
+        parameter_equals: dict[str, str] | None = None,
+        parameter_date_range: tuple[str, str] | None = None,
+        legacy_known_at_to: datetime | None = None,
+    ) -> list[UUID]:
+        selected = []
+        for item in self._results:
+            if asset_id is not None and item.asset_id != asset_id:
+                continue
+            if metric_keys is not None and item.metric_key not in metric_keys:
+                continue
+            if available_to is not None and item.available_at > available_to:
+                continue
+            if any(
+                item.parameters.get(key) != value for key, value in (parameter_equals or {}).items()
+            ):
+                continue
+            if parameter_date_range is not None:
+                valuation_date = item.parameters.get("valuation_date")
+                if not isinstance(valuation_date, str) or not (
+                    parameter_date_range[0] <= valuation_date <= parameter_date_range[1]
+                ):
+                    continue
+            if legacy_known_at_to is not None and item.result_id.version != 8:
+                legacy_cut = item.parameters.get("known_at")
+                try:
+                    parsed = datetime.fromisoformat(str(legacy_cut))
+                except ValueError:
+                    parsed = None
+                if parsed is not None and parsed.tzinfo is not None and parsed > legacy_known_at_to:
+                    continue
+            selected.append(item.result_id)
+        return selected
+
+    def get_many(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]:
+        wanted = set(result_ids)
+        return {item.result_id: item for item in self._results if item.result_id in wanted}
 
 
 class _Storage:

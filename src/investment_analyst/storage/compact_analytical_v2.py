@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict, deque
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal
@@ -16,6 +16,10 @@ from duckdb import DuckDBPyConnection
 from investment_analyst.analytics.analysis_domain import (
     DomainMembershipError,
     validate_diagnostic_internal_consistency,
+)
+from investment_analyst.analytics.analytical_access_models import (
+    MetricIndexEntry,
+    MetricSeriesQuery,
 )
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import (
@@ -41,6 +45,13 @@ from investment_analyst.storage.serialization import canonical_json_bytes, sha25
 _BATCH = 256
 _QUERY_CHUNK = 240
 _ORIGINS = ("HISTORICAL", "LIVE")
+
+
+def _validate_metric_parameter_key(key: str) -> None:
+    if not key or not key.replace("_", "").isalnum() or not key.isascii():
+        raise ValueError("metric parameter keys must be simple ASCII identifiers")
+
+
 _METRIC_TABLE = "workspace_metric_results_v2"
 _DIAGNOSTIC_TABLE = "workspace_diagnostic_results_v2"
 _CONTENT_TABLE = "workspace_analytical_content_v2"
@@ -377,44 +388,144 @@ class CompactAnalyticalStore:
         available_from: datetime | None = None,
         available_to: datetime | None = None,
         origin: Literal["HISTORICAL", "LIVE"] | None = None,
+        as_of_before: datetime | None = None,
+        parameter_equals: Mapping[str, str] | None = None,
+        parameter_date_range: tuple[str, str] | None = None,
+        cut_known_at: datetime | None = None,
+        legacy_known_at_to: datetime | None = None,
     ) -> list[UUID]:
         self.ensure(create=False)
         if metric_key is not None and metric_keys is not None:
             raise ValueError("metric_key and metric_keys cannot be used together")
         clauses: list[str] = []
-        parameters: list[object] = []
+        bindings: list[object] = []
         if asset_id is not None:
-            clauses.append("asset_id = ?")
-            parameters.append(asset_id)
+            clauses.append("m.asset_id = ?")
+            bindings.append(asset_id)
         if metric_key is not None:
-            clauses.append("metric_key = ?")
-            parameters.append(metric_key)
+            clauses.append("m.metric_key = ?")
+            bindings.append(metric_key)
         if metric_keys is not None:
             ordered_keys = tuple(sorted(set(metric_keys)))
             if not ordered_keys:
                 return []
-            clauses.append(f"metric_key IN ({', '.join('?' for _ in ordered_keys)})")
-            parameters.extend(ordered_keys)
+            clauses.append(f"m.metric_key IN ({', '.join('?' for _ in ordered_keys)})")
+            bindings.extend(ordered_keys)
         for column, value, operator in (
-            ("as_of", as_of_from, ">="),
-            ("as_of", as_of_to, "<="),
-            ("available_at", available_from, ">="),
-            ("available_at", available_to, "<="),
+            ("m.as_of", as_of_from, ">="),
+            ("m.as_of", as_of_to, "<="),
+            ("m.available_at", available_from, ">="),
+            ("m.available_at", available_to, "<="),
+            ("m.as_of", as_of_before, "<"),
         ):
             if value is not None:
                 if value.tzinfo is None or value.utcoffset() is None:
                     raise ValueError("metric query instants must be timezone-aware")
                 clauses.append(f"{column} {operator} CAST(? AS TIMESTAMPTZ)")
-                parameters.append(value.astimezone(UTC).isoformat())
+                bindings.append(value.astimezone(UTC).isoformat())
         if origin is not None:
-            clauses.append("origin = ?")
-            parameters.append(origin)
+            clauses.append("m.origin = ?")
+            bindings.append(origin)
+        needs_parameter_content = (
+            bool(parameter_equals)
+            or parameter_date_range is not None
+            or cut_known_at is not None
+            or legacy_known_at_to is not None
+        )
+        for key, value in sorted((parameter_equals or {}).items()):
+            _validate_metric_parameter_key(key)
+            clauses.append(f"json_extract_string(decode(c.value_bytes), '$.{key}') = ?")
+            bindings.append(value)
+        if parameter_date_range is not None:
+            start, end = parameter_date_range
+            if start > end:
+                raise ValueError("parameter date range start must not follow end")
+            clauses.append(
+                "json_extract_string(decode(c.value_bytes), '$.valuation_date') >= ? "
+                "AND json_extract_string(decode(c.value_bytes), '$.valuation_date') <= ?"
+            )
+            bindings.extend((start, end))
+        if cut_known_at is not None:
+            if cut_known_at.tzinfo is None or cut_known_at.utcoffset() is None:
+                raise ValueError("cut_known_at must be timezone-aware")
+            legacy_cut = "json_extract_string(decode(c.value_bytes), '$.known_at')"
+            clauses.append(
+                "(m.id_version = 8 OR (m.id_version <> 8 AND ("
+                f"try_cast({legacy_cut} AS TIMESTAMPTZ) = CAST(? AS TIMESTAMPTZ) OR "
+                f"try_cast({legacy_cut} AS TIMESTAMPTZ) IS NULL OR "
+                f"NOT regexp_matches(coalesce({legacy_cut}, ''), "
+                "'(Z|[+-][0-9]{2}:[0-9]{2})$'))))"
+            )
+            bindings.append(cut_known_at.astimezone(UTC).isoformat())
+        if legacy_known_at_to is not None:
+            if legacy_known_at_to.tzinfo is None or legacy_known_at_to.utcoffset() is None:
+                raise ValueError("legacy_known_at_to must be timezone-aware")
+            legacy_cut = "json_extract_string(decode(c.value_bytes), '$.known_at')"
+            clauses.append(
+                "(m.id_version = 8 OR (m.id_version <> 8 AND ("
+                f"try_cast({legacy_cut} AS TIMESTAMPTZ) <= CAST(? AS TIMESTAMPTZ) OR "
+                f"try_cast({legacy_cut} AS TIMESTAMPTZ) IS NULL OR "
+                f"NOT regexp_matches(coalesce({legacy_cut}, ''), "
+                "'(Z|[+-][0-9]{2}:[0-9]{2})$'))))"
+            )
+            bindings.append(legacy_known_at_to.astimezone(UTC).isoformat())
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        join = (
+            f" JOIN {_CONTENT_TABLE} AS c ON c.content_id = m.parameters_content_id "
+            "AND c.content_kind = 'parameters'"
+            if needs_parameter_content
+            else ""
+        )
         rows = self._connection.execute(
-            f"SELECT result_id FROM {_METRIC_TABLE}{where} ORDER BY as_of, result_id",
-            parameters,
+            f"SELECT m.result_id FROM {_METRIC_TABLE} AS m{join}{where} "
+            "ORDER BY m.as_of, m.result_id",
+            bindings,
         ).fetchall()
         return [UUID(str(row[0])) for row in rows]
+
+    def select_market_metric_ids(
+        self,
+        *,
+        asset_id: str,
+        source_id: str,
+        known_at: datetime,
+        metric_keys: Collection[str],
+        timestamps: Collection[datetime],
+    ) -> list[UUID]:
+        """Select exact daily market candidates before hydrating metric models."""
+        self.ensure(create=False)
+        if known_at.tzinfo is None or known_at.utcoffset() is None:
+            raise ValueError("market metric known_at must be timezone-aware")
+        keys = tuple(sorted(set(metric_keys)))
+        instants = tuple(sorted(set(timestamps)))
+        if not keys or not instants:
+            return []
+        for instant in instants:
+            if instant.tzinfo is None or instant.utcoffset() is None:
+                raise ValueError("market metric timestamps must be timezone-aware")
+        found: set[UUID] = set()
+        for key_chunk in _chunks(keys, 64):
+            key_placeholders = ", ".join("?" for _ in key_chunk)
+            for time_chunk in _chunks(instants, 64):
+                time_placeholders = ", ".join("CAST(? AS TIMESTAMPTZ)" for _ in time_chunk)
+                rows = self._connection.execute(
+                    f"SELECT m.result_id FROM {_METRIC_TABLE} AS m "
+                    f"JOIN {_CONTENT_TABLE} AS c ON c.content_id = m.parameters_content_id "
+                    "WHERE c.content_kind = 'parameters' AND m.asset_id = ? "
+                    f"AND m.metric_key IN ({key_placeholders}) "
+                    f"AND m.as_of IN ({time_placeholders}) "
+                    "AND m.available_at <= CAST(? AS TIMESTAMPTZ) "
+                    "AND json_extract_string(decode(c.value_bytes), '$.source_id') = ?",
+                    [
+                        asset_id,
+                        *key_chunk,
+                        *(item.astimezone(UTC).isoformat() for item in time_chunk),
+                        known_at.astimezone(UTC).isoformat(),
+                        source_id,
+                    ],
+                ).fetchall()
+                found.update(UUID(str(row[0])) for row in rows)
+        return sorted(found, key=str)
 
     def count_metric_results(
         self,
@@ -594,6 +705,60 @@ class CompactAnalyticalStore:
         ).fetchall()
         return [UUID(str(row[0])) for row in rows]
 
+    def list_metric_index_page(self, query: MetricSeriesQuery) -> tuple[MetricIndexEntry, ...]:
+        """Select scope-verified metric index rows without hydrating result documents."""
+        self.ensure(create=False)
+        parameter_json = "decode(p.value_bytes)"
+        clauses = ["m.asset_id = ?"]
+        bindings: list[object] = [query.asset_id]
+        keys = tuple(sorted(set(query.metric_keys)))
+        clauses.append(f"m.metric_key IN ({', '.join('?' for _ in keys)})")
+        bindings.extend(keys)
+        clauses.append("m.available_at <= CAST(? AS TIMESTAMPTZ)")
+        bindings.append(query.known_at.astimezone(UTC).isoformat())
+        for column, value, operator in (
+            ("m.as_of", query.as_of_from, ">="),
+            ("m.as_of", query.as_of_before, "<"),
+        ):
+            if value is not None:
+                clauses.append(f"{column} {operator} CAST(? AS TIMESTAMPTZ)")
+                bindings.append(value.astimezone(UTC).isoformat())
+        for key, value in (("source_id", query.source_id), ("frequency", query.frequency)):
+            if value is not None:
+                clauses.append(f"json_extract_string({parameter_json}, '$.{key}') = ?")
+                bindings.append(value)
+        if query.after is not None:
+            clauses.append("(m.available_at, m.result_id) > (CAST(? AS TIMESTAMPTZ), ?)")
+            bindings.extend(
+                [query.after.available_at.astimezone(UTC).isoformat(), str(query.after.result_id)]
+            )
+        where = " AND ".join(clauses)
+        rows = self._connection.execute(
+            "SELECT m.result_id, m.asset_id, m.metric_key, "
+            "CAST(m.as_of AS VARCHAR), CAST(m.available_at AS VARCHAR), "
+            f"json_extract_string({parameter_json}, '$.source_id'), "
+            f"json_extract_string({parameter_json}, '$.frequency'), "
+            f"json_extract_string({parameter_json}, '$.known_at') "
+            f"FROM {_METRIC_TABLE} m "
+            f"JOIN {_CONTENT_TABLE} p ON p.content_id = m.parameters_content_id "
+            "AND p.content_kind = 'parameters' "
+            f"WHERE {where} ORDER BY m.available_at, m.result_id LIMIT ?",
+            [*bindings, query.limit],
+        ).fetchall()
+        return tuple(
+            MetricIndexEntry(
+                result_id=UUID(str(row[0])),
+                asset_id=str(row[1]),
+                metric_key=str(row[2]),
+                as_of=_instant(row[3]),
+                available_at=_instant(row[4]),
+                source_id=str(row[5]) if row[5] is not None else None,
+                frequency=str(row[6]) if row[6] is not None else None,
+                legacy_known_at=str(row[7]) if row[7] is not None else None,
+            )
+            for row in rows
+        )
+
     def list_diagnostic_ids_page(
         self,
         *,
@@ -667,7 +832,9 @@ class CompactAnalyticalStore:
         existing_ids = {UUID(str(row[0])) for row in existing_rows}
         existing_models = self.get_metrics(existing_ids) if existing_ids else {}
         for identifier, existing in existing_models.items():
-            if existing != unique[identifier]:
+            if existing.model_dump(exclude={"computed_at"}) != unique[identifier].model_dump(
+                exclude={"computed_at"}
+            ):
                 raise RecordConflictError(f"metric identifier {identifier} has conflicting content")
         new_items = [item for identifier, item in unique.items() if identifier not in existing_ids]
         if origin == "HISTORICAL" and new_items and self.historical_seal() is not None:

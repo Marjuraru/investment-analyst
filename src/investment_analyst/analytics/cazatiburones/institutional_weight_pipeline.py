@@ -21,6 +21,7 @@ from investment_analyst.analytics.cazatiburones.institutional_weight_definitions
 from investment_analyst.analytics.cazatiburones.institutional_weight_engine import calculate
 from investment_analyst.analytics.cazatiburones.institutional_weight_identity import (
     expected_weight_result_id,
+    semantic_weight_result_id,
 )
 from investment_analyst.analytics.cazatiburones.institutional_weight_models import (
     InstitutionalWeightRunSummary,
@@ -35,7 +36,7 @@ from investment_analyst.evidence.sec_institutional_observations.service import (
 from investment_analyst.evidence.sec_institutional_semantics.artifact_reader import (
     InstitutionalSemanticsArtifactReader,
 )
-from investment_analyst.storage import RecordNotFoundError, StorageError
+from investment_analyst.storage import StorageError
 
 
 class InstitutionalWeightPipeline:
@@ -117,17 +118,61 @@ class InstitutionalWeightPipeline:
                 )
                 candidates.extend(engine.candidates)
                 skipped.extend(engine.skipped)
+        semantic_v2 = self._storage.paths.format_version == 2
+        result_ids: set[UUID] = set()
+        for candidate in candidates:
+            observation = _observation_by_id(observations, candidate.input_observation_id)
+            if semantic_v2:
+                result_ids.add(
+                    semantic_weight_result_id(
+                        asset_id=candidate.asset_id,
+                        metric_key=candidate.metric_key,
+                        as_of=observation.period_end,
+                        available_at=candidate.available_at,
+                        quality=candidate.quality,
+                        algorithm_version=ALGORITHM_VERSION,
+                        parameters=candidate.parameters,
+                        input_observation_id=candidate.input_observation_id,
+                        known_at=candidate.known_at,
+                    )
+                )
+            else:
+                result_ids.add(
+                    expected_weight_result_id(
+                        asset_id=candidate.asset_id,
+                        metric_key=candidate.metric_key,
+                        known_at=candidate.known_at,
+                        parameters=candidate.parameters,
+                        input_observation_id=candidate.input_observation_id,
+                    )
+                )
+        existing_by_id = self._storage.metric_results.get_existing(result_ids)
         created = reused = 0
         for candidate in candidates:
             observation = _observation_by_id(observations, candidate.input_observation_id)
-            result = MetricResult(
-                result_id=expected_weight_result_id(
+            result_id = (
+                semantic_weight_result_id(
+                    asset_id=candidate.asset_id,
+                    metric_key=candidate.metric_key,
+                    as_of=observation.period_end,
+                    available_at=candidate.available_at,
+                    quality=candidate.quality,
+                    algorithm_version=ALGORITHM_VERSION,
+                    parameters=candidate.parameters,
+                    input_observation_id=candidate.input_observation_id,
+                    known_at=candidate.known_at,
+                )
+                if semantic_v2
+                else expected_weight_result_id(
                     asset_id=candidate.asset_id,
                     metric_key=candidate.metric_key,
                     known_at=candidate.known_at,
                     parameters=candidate.parameters,
                     input_observation_id=candidate.input_observation_id,
-                ),
+                )
+            )
+            result = MetricResult(
+                result_id=result_id,
                 asset_id=candidate.asset_id,
                 metric_key=candidate.metric_key,
                 value=candidate.value,
@@ -140,10 +185,9 @@ class InstitutionalWeightPipeline:
                 algorithm_version=ALGORITHM_VERSION,
                 quality=candidate.quality,
             )
-            try:
-                existing = self._storage.metric_results.get(result.result_id)
-            except RecordNotFoundError:
-                self._storage.metric_results.save(result)
+            existing = existing_by_id.get(result.result_id)
+            if existing is None:
+                self._storage.metric_results.save_many([result])
                 created += 1
             else:
                 if existing.model_dump(exclude={"computed_at"}) != result.model_dump(

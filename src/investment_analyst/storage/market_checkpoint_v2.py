@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
+from typing import Protocol
 from uuid import UUID
 
 from duckdb import DuckDBPyConnection
@@ -16,6 +17,7 @@ from investment_analyst.analytics.market.incremental_state import (
     RecursiveParameters,
 )
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
+from investment_analyst.core.models.metric import MetricResult
 from investment_analyst.storage.analytical_v2_validation import chunked_sequence
 from investment_analyst.storage.bounded_insert import (
     BoundedInsertTable,
@@ -55,6 +57,12 @@ _CHECKPOINT_LINK_COLUMNS = ("checkpoint_id", "position", "metric_key", "result_i
 
 class MarketCheckpointV2Error(ValueError):
     """Raised when a checkpoint schema, state or reference cannot be trusted."""
+
+
+class ExistingMetricLookup(Protocol):
+    """Bounded metric lookup needed to verify checkpoint references."""
+
+    def get_existing(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]: ...
 
 
 def _instant_text(value: datetime) -> str:
@@ -153,14 +161,21 @@ def ensure_market_checkpoint_v2_tables(
 class MarketCheckpointV2Store:
     """Typed append-only checkpoint store and bounded lookup adapter."""
 
-    def __init__(self, connection: DuckDBPyConnection) -> None:
+    def __init__(
+        self,
+        connection: DuckDBPyConnection,
+        *,
+        metric_results: ExistingMetricLookup | None = None,
+    ) -> None:
         self._connection = connection
+        self._metric_results = metric_results
 
     def save_many(
         self,
         checkpoints: Collection[MarketRecursiveCheckpoint],
         *,
         verified_prefixes: Mapping[UUID, DailyEvidencePrefix] | None = None,
+        metric_results: ExistingMetricLookup | None = None,
     ) -> BatchWriteReceipt:
         """Persist verified state only after its prefix and referenced metrics exist."""
         ensure_market_checkpoint_v2_tables(self._connection, create=True)
@@ -197,7 +212,12 @@ class MarketCheckpointV2Store:
             if not _prefix_matches(checkpoint, prefix):
                 raise MarketCheckpointV2Error("checkpoint and daily evidence prefix diverge")
 
-        existing = self.get_many(tuple(canonical), verified_prefixes=prefixes)
+        metric_store = metric_results or self._metric_results
+        existing = self.get_many(
+            tuple(canonical),
+            verified_prefixes=prefixes,
+            metric_results=metric_store,
+        )
         created = tuple(item.checkpoint_id for item in unique if item.checkpoint_id not in existing)
         reused = tuple(item for item in canonical if item in existing)
         for checkpoint_id in reused:
@@ -205,7 +225,7 @@ class MarketCheckpointV2Store:
                 raise RecordConflictError(
                     f"checkpoint identifier {checkpoint_id} already has different state"
                 )
-        self._verify_metric_references(unique)
+        self._verify_metric_references(unique, metric_results=metric_store)
 
         checkpoint_rows = [
             _checkpoint_row(item) for item in unique if item.checkpoint_id not in existing
@@ -230,6 +250,7 @@ class MarketCheckpointV2Store:
         checkpoint_ids: Collection[UUID],
         *,
         verified_prefixes: Mapping[UUID, DailyEvidencePrefix] | None = None,
+        metric_results: ExistingMetricLookup | None = None,
     ) -> dict[UUID, MarketRecursiveCheckpoint]:
         """Hydrate and verify requested checkpoint state in bounded batches."""
         ensure_market_checkpoint_v2_tables(self._connection, create=False)
@@ -312,7 +333,10 @@ class MarketCheckpointV2Store:
         for checkpoint in output.values():
             if not _prefix_matches(checkpoint, prefixes[checkpoint.daily_prefix_id]):
                 raise MarketCheckpointV2Error("checkpoint and daily evidence prefix diverge")
-        self._verify_metric_references(tuple(output.values()))
+        self._verify_metric_references(
+            tuple(output.values()),
+            metric_results=metric_results or self._metric_results,
+        )
         return output
 
     def find_for_prefixes(
@@ -322,6 +346,7 @@ class MarketCheckpointV2Store:
         *,
         known_at: datetime,
         verified_prefixes: Mapping[UUID, DailyEvidencePrefix] | None = None,
+        metric_results: ExistingMetricLookup | None = None,
     ) -> dict[UUID, MarketRecursiveCheckpoint]:
         """Find matching checkpoints for one bounded set of expected prefix IDs."""
         if known_at.tzinfo is None or known_at.utcoffset() is None:
@@ -354,7 +379,11 @@ class MarketCheckpointV2Store:
                     )
                 found[key] = UUID(str(checkpoint_id))
         loaded = (
-            self.get_many(tuple(found.values()), verified_prefixes=verified_prefixes)
+            self.get_many(
+                tuple(found.values()),
+                verified_prefixes=verified_prefixes,
+                metric_results=metric_results or self._metric_results,
+            )
             if found
             else {}
         )
@@ -404,12 +433,38 @@ class MarketCheckpointV2Store:
     def _verify_metric_references(
         self,
         checkpoints: Sequence[MarketRecursiveCheckpoint],
+        *,
+        metric_results: ExistingMetricLookup | None = None,
     ) -> None:
         references: dict[UUID, list[tuple[MarketRecursiveCheckpoint, str]]] = {}
         for checkpoint in checkpoints:
             for item in checkpoint.metric_references:
                 references.setdefault(item.result_id, []).append((checkpoint, item.metric_key))
         if not references:
+            return
+        if metric_results is not None:
+            resolved = {}
+            for chunk in chunked_sequence(tuple(references), MAX_MARKET_CHECKPOINT_PAGE):
+                resolved.update(metric_results.get_existing(chunk))
+            if set(resolved) != set(references):
+                raise MarketCheckpointV2Error("checkpoint references a missing metric result")
+            for result_id, related_checkpoints in references.items():
+                metric = resolved[result_id]
+                parameters = metric.parameters
+                for checkpoint, metric_key in related_checkpoints:
+                    if (
+                        metric.result_id != result_id
+                        or metric.asset_id != checkpoint.asset_id
+                        or metric.metric_key != metric_key
+                        or metric.as_of != checkpoint.as_of
+                        or metric.available_at > checkpoint.available_at
+                        or parameters.get("daily_evidence_prefix_id")
+                        != str(checkpoint.daily_prefix_id)
+                        or parameters.get("market_checkpoint_id") != str(checkpoint.checkpoint_id)
+                    ):
+                        raise MarketCheckpointV2Error(
+                            "checkpoint metric reference is outside its prefix"
+                        )
             return
         metrics: dict[UUID, tuple[object, ...]] = {}
         for chunk in chunked_sequence(tuple(references), MAX_MARKET_CHECKPOINT_PAGE):

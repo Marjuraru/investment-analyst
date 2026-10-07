@@ -13,7 +13,10 @@ from investment_analyst.analytics.market.history_service import (
     AmbiguousRevisionError,
     HistoricalMarketDataService,
 )
-from investment_analyst.analytics.valuation.identity import valuation_result_id
+from investment_analyst.analytics.valuation.identity import (
+    valuation_result_id,
+    valuation_result_id_v2,
+)
 from investment_analyst.analytics.valuation.models import (
     CorporateValuationRequest,
     CorporateValuationSnapshot,
@@ -32,6 +35,7 @@ from investment_analyst.application.analysis_capabilities import (
     FundamentalAnalysisMode,
 )
 from investment_analyst.core.models import DataFrequency, DataQuality, NormalizedObservation
+from investment_analyst.storage.local import LocalStorage
 
 _ALGORITHM = "corporate-valuation-latest-annual-v1-decimal34"
 _DEFINITION_VERSION = "corporate-valuation-definition-v1"
@@ -302,6 +306,9 @@ class CorporateValuationService:
         self._security_unit_basis = security_unit_basis
         self._security_unit_basis_version = security_unit_basis_version
         self._security_unit_market_adjustment = security_unit_market_adjustment
+        self._semantic_identity_v2 = (
+            isinstance(storage, LocalStorage) and storage.paths.format_version == 2
+        )
 
     def query(
         self,
@@ -692,18 +699,38 @@ class CorporateValuationService:
                 available_at=available_at,
                 input_observation_ids=input_ids,
             )
-        result_id = valuation_result_id(
-            request=request,
-            metric_key=definition.metric_key,
-            valuation_as_of=price.timestamp.isoformat(),
-            annual_period_start=(
-                selection.period_start.isoformat() if selection.period_start is not None else None
-            ),
-            annual_period_end=selection.period_end.isoformat(),
-            security_basis_version=security_basis.contract_version,
-            input_observation_ids=input_ids,
-            algorithm_version=definition.algorithm_version,
-        )
+        if available_at is None:
+            raise CorporateValuationError("evaluated valuation metric lacks available_at")
+        if self._semantic_identity_v2:
+            result_id = valuation_result_id_v2(
+                request=request,
+                metric_key=definition.metric_key,
+                valuation_as_of=price.timestamp,
+                available_at=available_at,
+                unit=definition.unit,
+                annual_period_start=selection.period_start,
+                annual_period_end=selection.period_end,
+                security_basis_version=security_basis.contract_version,
+                input_observation_ids=input_ids,
+                algorithm_version=definition.algorithm_version,
+                formula=definition.formula,
+                market_units_per_reported_share=security_basis.market_units_per_reported_share,
+            )
+        else:
+            result_id = valuation_result_id(
+                request=request,
+                metric_key=definition.metric_key,
+                valuation_as_of=price.timestamp.isoformat(),
+                annual_period_start=(
+                    selection.period_start.isoformat()
+                    if selection.period_start is not None
+                    else None
+                ),
+                annual_period_end=selection.period_end.isoformat(),
+                security_basis_version=security_basis.contract_version,
+                input_observation_ids=input_ids,
+                algorithm_version=definition.algorithm_version,
+            )
         return ValuationMetricValue(
             metric_key=definition.metric_key,
             status=ValuationStatus.EVALUATED,

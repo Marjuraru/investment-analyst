@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from investment_analyst.analytics.cazatiburones.activity_metric_identity import (
     expected_activity_metric_result_id,
+    semantic_activity_metric_result_id,
 )
 from investment_analyst.analytics.cazatiburones.activity_metric_models import (
     ActivityMetricCandidate,
@@ -71,3 +72,26 @@ def test_identity_changes_with_parameters() -> None:
         input_observation_ids=ids, parameters={"family": "insider", "participant_cik": "0000000002"}
     )
     assert expected_activity_metric_result_id(first) != expected_activity_metric_result_id(second)
+
+
+def test_semantic_identity_excludes_compatible_cut_but_keeps_evidence() -> None:
+    ids = (uuid4(), uuid4())
+    first = _candidate(input_observation_ids=ids, known_at=_AT)
+    later_cut = _candidate(
+        input_observation_ids=ids,
+        known_at=datetime(2025, 6, 1, tzinfo=UTC),
+        available_at=_AT,
+    )
+    revised_evidence = _candidate(
+        input_observation_ids=(ids[0], uuid4()),
+        known_at=datetime(2025, 6, 1, tzinfo=UTC),
+        available_at=_AT,
+    )
+
+    assert semantic_activity_metric_result_id(first).version == 8
+    assert semantic_activity_metric_result_id(first) == semantic_activity_metric_result_id(
+        later_cut
+    )
+    assert semantic_activity_metric_result_id(first) != semantic_activity_metric_result_id(
+        revised_evidence
+    )

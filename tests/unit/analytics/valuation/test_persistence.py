@@ -17,6 +17,7 @@ from investment_analyst.analytics.valuation import (
     ValuationSnapshotStatus,
     ValuationStatus,
 )
+from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import MetricDefinition, MetricResult
 
 _KNOWN_AT = datetime(2026, 2, 1, tzinfo=UTC)
@@ -43,14 +44,22 @@ class _Results:
         self.rows: list[MetricResult] = []
         self.fail_after = fail_after
 
-    def list(self, *, asset_id: str | None = None) -> list[MetricResult]:
-        return [row for row in self.rows if asset_id is None or row.asset_id == asset_id]
+    def get_existing(self, result_ids: set[UUID]) -> dict[UUID, MetricResult]:
+        return {row.result_id: row for row in self.rows if row.result_id in result_ids}
 
     def save(self, result: MetricResult) -> MetricResult:
         if self.fail_after is not None and len(self.rows) >= self.fail_after:
             raise RuntimeError("simulated compact storage failure without SECRET content")
         self.rows.append(result)
         return result
+
+    def save_many(self, results: list[MetricResult]) -> BatchWriteReceipt:
+        created: list[UUID] = []
+        reused: list[UUID] = []
+        for result in results:
+            self.save(result)
+            created.append(result.result_id)
+        return BatchWriteReceipt(created_ids=tuple(created), reused_ids=tuple(reused))
 
 
 class _Storage:

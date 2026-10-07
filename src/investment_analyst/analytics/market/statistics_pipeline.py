@@ -4,7 +4,12 @@ from collections import Counter
 from datetime import UTC, datetime
 from uuid import UUID
 
+from investment_analyst.analytics.market.bar_schemas import get_market_bar_schema
 from investment_analyst.analytics.market.history_service import HistoricalMarketDataService
+from investment_analyst.analytics.market.incremental_service import (
+    IncrementalMarketRequest,
+    IncrementalMarketService,
+)
 from investment_analyst.analytics.market.statistics_definitions import (
     ATR_KEY,
     EMA_KEY,
@@ -28,10 +33,11 @@ from investment_analyst.analytics.metric_identity_cut import (
     resolve_cut_identity_version,
 )
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
-from investment_analyst.core.models import DataQuality, MetricResult
+from investment_analyst.core.models import DataFrequency, DataQuality, MetricResult
 from investment_analyst.core.operation_control import check_operation_cancelled
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import RecordNotFoundError
+from investment_analyst.storage.workspace_v2 import WorkspaceV2Store
 
 
 class MarketStatisticsPipelineError(RuntimeError):
@@ -80,6 +86,12 @@ class MarketStatisticsPipeline:
         """Execute one idempotent point-in-time statistics run."""
         self._storage.require_open()
         check_operation_cancelled()
+
+        if (
+            isinstance(self._storage.store, WorkspaceV2Store)
+            and get_market_bar_schema(request.query.source_id).frequency is DataFrequency.DAY_1
+        ):
+            return self._run_incremental_v2(request)
 
         series = self._history_service.query(request.query)
         check_operation_cancelled()
@@ -159,6 +171,53 @@ class MarketStatisticsPipeline:
             earliest_as_of=min(as_of_values) if as_of_values else None,
             latest_as_of=max(as_of_values) if as_of_values else None,
             traceability_verified=True,
+        )
+
+    def _run_incremental_v2(
+        self,
+        request: MarketStatisticsRequest,
+    ) -> MarketStatisticsRunSummary:
+        """Use the workspace-owned incremental path for daily format-v2 analytics."""
+        store = self._storage.store
+        if not isinstance(store, WorkspaceV2Store):
+            raise MarketStatisticsPipelineError("workspace v2 storage was not selected")
+        definitions = get_market_statistics_definitions()
+        for definition in definitions:
+            self._storage.metric_definitions.upsert(definition)
+        computed_at = self._clock()
+        if computed_at.tzinfo is None or computed_at.utcoffset() is None:
+            raise MarketStatisticsPipelineError("clock must return a timezone-aware datetime")
+        computed_at = computed_at.astimezone(UTC)
+        receipt = IncrementalMarketService(
+            store.raw_staging,
+            metric_results=self._storage.metric_results,
+        ).run(
+            IncrementalMarketRequest(
+                statistics=request,
+                history_start=request.query.start,
+                history_end=request.query.end,
+                computed_at=computed_at,
+            )
+        )
+        generated = receipt.metrics_created + receipt.metrics_reused
+        return MarketStatisticsRunSummary(
+            asset_id=request.query.asset_id,
+            source_id=request.query.source_id,
+            requested_start=request.query.start,
+            requested_end=request.query.end,
+            known_at=request.query.known_at,
+            computed_at=computed_at,
+            bar_count=receipt.output_bar_count,
+            definitions_upserted=len(definitions),
+            results_generated=generated,
+            results_created=receipt.metrics_created,
+            results_reused=receipt.metrics_reused,
+            result_counts=receipt.result_counts,
+            warmup_counts=receipt.warmup_counts,
+            zero_denominator_skips=receipt.zero_denominator_skips,
+            earliest_as_of=receipt.earliest_as_of,
+            latest_as_of=receipt.latest_as_of,
+            traceability_verified=receipt.traceability_verified,
         )
 
     @staticmethod

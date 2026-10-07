@@ -26,6 +26,10 @@ from investment_analyst.evidence.sec_documents.repository import (
 )
 from investment_analyst.storage import StorageError
 from investment_analyst.storage.compact_analytical_v2 import CompactAnalyticalStore
+from investment_analyst.storage.workspace_incremental_v2 import (
+    WorkspaceIncrementalV2Error,
+    verify_workspace_incremental_v2,
+)
 from investment_analyst.workspace.backup import (
     WorkspaceBackupCounts,
     WorkspaceBackupError,
@@ -368,6 +372,12 @@ def _verify_v2_workspace(
         if verified != expected_counts.observations:
             raise WorkspaceV2BackupError("workspace v2 observation inventory is incomplete")
         CompactAnalyticalStore(storage.store.connection).verify_complete()
+        try:
+            verify_workspace_incremental_v2(storage)
+        except WorkspaceIncrementalV2Error as error:
+            raise WorkspaceV2BackupError(
+                "workspace v2 incremental artifacts failed verification"
+            ) from error
         ActivityEventRepository(storage.paths.processed_dir, read_only=True).verify()
     finally:
         storage.close()

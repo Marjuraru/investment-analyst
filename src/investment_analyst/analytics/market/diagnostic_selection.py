@@ -44,6 +44,7 @@ _REQUIRED_SLOTS = (
     _VOLATILITY_SLOT,
     _RELATIVE_VOLUME_SLOT,
 )
+_METRIC_LOOKUP_BATCH_SIZE = 256
 
 
 class MarketDiagnosticSelectionError(RuntimeError):
@@ -147,35 +148,45 @@ class MarketDiagnosticMetricSelector:
     def candidates(self, request: MarketDiagnosticRequest) -> tuple[MetricResult, ...]:
         """Return deterministically ordered metrics compatible with the request context."""
         self._storage.require_open()
-        output: list[MetricResult] = []
-        for result in self._storage.metric_results.list(
+        candidate_ids = self._storage.metric_results.list_ids(
             asset_id=request.query.asset_id,
             metric_keys=_REQUIRED_METRIC_KEYS,
+            available_to=request.query.known_at,
             as_of_from=request.query.start,
-            as_of_to=request.query.end,
-        ):
-            if result.asset_id != request.query.asset_id:
-                continue
-            if result.metric_key not in _REQUIRED_METRIC_KEYS or not _algorithm_matches(result):
-                continue
-            if not request.query.start <= result.as_of < request.query.end:
-                continue
-            if result.available_at > request.query.known_at:
-                continue
-            source_id = result.parameters.get("source_id")
-            if not isinstance(source_id, str):
-                raise InvalidMetricContextError(
-                    f"metric result {result.result_id} has an invalid source_id parameter"
-                )
-            if source_id != request.query.source_id:
-                continue
-            eligibility = metric_cut_eligibility(result, request.query.known_at)
-            if not eligibility.eligible:
-                _raise_invalid_legacy_known_at(result, eligibility)
-                continue
-            if _slot(result, request) is None:
-                continue
-            output.append(result)
+            as_of_before=request.query.end,
+            parameter_equals={"source_id": request.query.source_id},
+            cut_known_at=request.query.known_at,
+        )
+        output: list[MetricResult] = []
+        for offset in range(0, len(candidate_ids), _METRIC_LOOKUP_BATCH_SIZE):
+            batch_ids = candidate_ids[offset : offset + _METRIC_LOOKUP_BATCH_SIZE]
+            batch = self._storage.metric_results.get_many(batch_ids)
+            if any(result_id not in batch for result_id in batch_ids):
+                raise InvalidMetricContextError("selected market metric is absent")
+            for result_id in batch_ids:
+                result = batch[result_id]
+                if result.asset_id != request.query.asset_id:
+                    continue
+                if result.metric_key not in _REQUIRED_METRIC_KEYS or not _algorithm_matches(result):
+                    continue
+                if not request.query.start <= result.as_of < request.query.end:
+                    continue
+                if result.available_at > request.query.known_at:
+                    continue
+                source_id = result.parameters.get("source_id")
+                if not isinstance(source_id, str):
+                    raise InvalidMetricContextError(
+                        f"metric result {result.result_id} has an invalid source_id parameter"
+                    )
+                if source_id != request.query.source_id:
+                    continue
+                eligibility = metric_cut_eligibility(result, request.query.known_at)
+                if not eligibility.eligible:
+                    _raise_invalid_legacy_known_at(result, eligibility)
+                    continue
+                if _slot(result, request) is None:
+                    continue
+                output.append(result)
         output.sort(
             key=lambda item: (
                 item.as_of,

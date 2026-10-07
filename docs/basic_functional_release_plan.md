@@ -736,3 +736,20 @@ lecturas filtradas/paginadas en el bloque 42, seguido por migración y cutover e
 reconciliar de nuevo el estado vivo. Los resultados de scratch no actualizan Q1–Q7 ni afirman
 mejoras operacionales.
 route_transition:DATA-CHASSIS:ADVANCES
+
+## Adopción incremental y acceso analítico (`DATA-CHASSIS-42` / #337)
+
+El bloque 42 adopta el servicio diario incremental dentro de `ApplicationRuntime` y workspace v2;
+reutiliza métricas por identidad antes de persistir, conserva la identidad UUID5 de v1 y separa los
+IDs semánticos v2 del corte guardado en snapshots. Añade lecturas de series, features, evidencia y
+explicaciones tipadas desde artefactos persistidos, con selección point-in-time y páginas de hasta
+256. Se verifican los seis grupos existentes: mercado, derivados, fundamentales, valoración,
+instituciones/peso y eventos; la adopción se limita a contratos ya representados y no crea señales,
+recomendaciones ni otra capa de decisión.
+
+Los checks y el smoke sintético registran resultados, conteos, linaje, consultas, duraciones y RSS
+por escenario; son evidencia de integración, no comparadores operacionales de Q5–Q7. El cierre del
+bloque requiere el smoke adjunto al draft PR y CI verde para el SHA exacto, además de auditoría
+independiente. `route_effect` es `ADVANCES`: DATA-CHASSIS permanece abierta y conserva un único
+`NEXT`. Los criterios de migración/cutover, backup Drive, medición operacional y cualquier limpieza
+siguen en los bloques 43–45; las oportunidades opcionales se proponen por separado en PLAN.

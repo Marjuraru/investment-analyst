@@ -41,7 +41,10 @@ from investment_analyst.analytics.market.incremental_state import (
     RecursiveParameters,
     RsiParameters,
 )
-from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
+from investment_analyst.core.interfaces.repositories import (
+    BatchWriteReceipt,
+    MetricResultRepository,
+)
 from investment_analyst.core.models import (
     DataFrequency,
     DataQuality,
@@ -56,7 +59,10 @@ from investment_analyst.storage.analysis_snapshot_v2 import (
     AnalysisSnapshotV2Store,
     ensure_analysis_snapshot_v2_tables,
 )
-from investment_analyst.storage.analytical_v2_validation import chunked_sequence
+from investment_analyst.storage.analytical_v2_validation import (
+    chunked_sequence,
+    ensure_snapshot_metric_storage,
+)
 from investment_analyst.storage.bounded_insert import (
     BoundedInsertTable,
     insert_bounded,
@@ -1348,6 +1354,7 @@ class RawV2Staging:
         checkpoints: Collection[MarketRecursiveCheckpoint],
         *,
         verified_prefixes: Mapping[UUID, DailyEvidencePrefix] | None = None,
+        metric_results: MetricResultRepository | None = None,
     ) -> BatchWriteReceipt:
         """Persist typed recurrence checkpoints through the staging writer."""
         self._require_writable()
@@ -1362,6 +1369,7 @@ class RawV2Staging:
         return MarketCheckpointV2Store(self._connection).save_many(
             typed,
             verified_prefixes=verified_prefixes,
+            metric_results=metric_results,
         )
 
     def get_market_recursive_checkpoints(
@@ -1369,6 +1377,7 @@ class RawV2Staging:
         checkpoint_ids: Collection[UUID],
         *,
         verified_prefixes: Mapping[UUID, DailyEvidencePrefix] | None = None,
+        metric_results: MetricResultRepository | None = None,
     ) -> dict[UUID, MarketRecursiveCheckpoint]:
         """Load and verify typed recurrence checkpoints."""
         self._require_open()
@@ -1377,6 +1386,7 @@ class RawV2Staging:
         return MarketCheckpointV2Store(self._connection).get_many(
             checkpoint_ids,
             verified_prefixes=verified_prefixes,
+            metric_results=metric_results,
         )
 
     def find_market_checkpoints_for_prefixes(
@@ -1386,6 +1396,7 @@ class RawV2Staging:
         *,
         known_at: datetime,
         verified_prefixes: Mapping[UUID, DailyEvidencePrefix] | None = None,
+        metric_results: MetricResultRepository | None = None,
     ) -> dict[UUID, MarketRecursiveCheckpoint]:
         """Find compatible, available checkpoint states for known prefix IDs."""
         self._require_open()
@@ -1404,6 +1415,7 @@ class RawV2Staging:
             parameters,
             known_at=known_at,
             verified_prefixes=verified_prefixes,
+            metric_results=metric_results,
         )
 
     def save_metrics(self, results: Collection[MetricResult]) -> BatchWriteReceipt:
@@ -1445,6 +1457,8 @@ class RawV2Staging:
         self,
         *,
         asset_id: str,
+        source_id: str,
+        known_at: datetime,
         metric_keys: Collection[str],
         timestamps: Collection[datetime],
     ) -> dict[UUID, MetricResult]:
@@ -1457,6 +1471,8 @@ class RawV2Staging:
         instants = tuple(sorted(set(timestamps)))
         if not keys or not instants:
             return {}
+        if known_at.tzinfo is None or known_at.utcoffset() is None:
+            raise RawV2StagingError("market metric candidate known_at must be aware")
         for instant in instants:
             if instant.tzinfo is None or instant.utcoffset() is None:
                 raise RawV2StagingError("market metric candidate timestamps must be aware")
@@ -1468,11 +1484,15 @@ class RawV2Staging:
                 rows = self._connection.execute(
                     "SELECT result_id FROM metric_results_v2 "
                     f"WHERE asset_id = ? AND metric_key IN ({key_placeholders}) "
-                    f"AND as_of IN ({time_placeholders})",
+                    f"AND as_of IN ({time_placeholders}) "
+                    "AND CAST(available_at AS TIMESTAMPTZ) <= CAST(? AS TIMESTAMPTZ) "
+                    "AND json_extract_string(parameters_json, '$.source_id') = ?",
                     [
                         asset_id,
                         *key_chunk,
                         *(_instant_text(instant) for instant in timestamp_chunk),
+                        _instant_text(known_at),
+                        source_id,
                     ],
                 ).fetchall()
                 found.update(UUID(str(row[0])) for row in rows)
@@ -1650,7 +1670,7 @@ class RawV2Staging:
     def save_analysis_snapshots(self, snapshots: Collection[AnalysisSnapshot]) -> BatchWriteReceipt:
         """Persist typed analysis snapshots idempotently under the writer lock."""
         self._require_writable()
-        ensure_metric_v2_tables(self._connection, create=False)
+        ensure_snapshot_metric_storage(self._connection)
         ensure_analysis_snapshot_v2_tables(self._connection, create=True)
         receipt = AnalysisSnapshotV2Store(self._connection).save_snapshots(snapshots)
         self._ensure_optional_analytical_tables(create=True)
@@ -1659,7 +1679,7 @@ class RawV2Staging:
     def get_analysis_snapshot(self, snapshot_id: UUID) -> AnalysisSnapshot:
         """Hydrate and verify one analysis snapshot."""
         self._require_open()
-        ensure_metric_v2_tables(self._connection, create=False)
+        ensure_snapshot_metric_storage(self._connection)
         ensure_analysis_snapshot_v2_tables(self._connection, create=False)
         return AnalysisSnapshotV2Store(self._connection).get_snapshot(snapshot_id)
 
@@ -1668,7 +1688,7 @@ class RawV2Staging:
     ) -> dict[UUID, AnalysisSnapshot]:
         """Hydrate typed analysis snapshots with verified links and cited references."""
         self._require_open()
-        ensure_metric_v2_tables(self._connection, create=False)
+        ensure_snapshot_metric_storage(self._connection)
         ensure_analysis_snapshot_v2_tables(self._connection, create=False)
         return AnalysisSnapshotV2Store(self._connection).get_snapshots(snapshot_ids)
 
@@ -1684,7 +1704,7 @@ class RawV2Staging:
     ) -> list[AnalysisSnapshot]:
         """Hydrate typed PIT analysis snapshots in stable order."""
         self._require_open()
-        ensure_metric_v2_tables(self._connection, create=False)
+        ensure_snapshot_metric_storage(self._connection)
         ensure_analysis_snapshot_v2_tables(self._connection, create=False)
         return AnalysisSnapshotV2Store(self._connection).list_snapshots(
             asset_id=asset_id,

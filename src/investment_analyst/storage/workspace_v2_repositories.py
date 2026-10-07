@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from datetime import UTC, date, datetime, time
 from uuid import UUID
 
 from duckdb import DuckDBPyConnection
 
+from investment_analyst.analytics.analytical_access_models import (
+    MetricIndexEntry,
+    MetricSeriesQuery,
+)
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import (
     DataFrequency,
@@ -558,6 +562,31 @@ class WorkspaceV2MetricResultRepository:
     def get_existing(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]:
         return self._compact.get_existing_metrics(result_ids)
 
+    def find_market_metric_candidates(
+        self,
+        *,
+        asset_id: str,
+        source_id: str,
+        known_at: datetime,
+        metric_keys: Collection[str],
+        timestamps: Collection[datetime],
+    ) -> dict[UUID, MetricResult]:
+        """Hydrate only exact, source-scoped market results visible at the requested cut."""
+        identifiers = self._compact.select_market_metric_ids(
+            asset_id=asset_id,
+            source_id=source_id,
+            known_at=known_at,
+            metric_keys=metric_keys,
+            timestamps=timestamps,
+        )
+        output: dict[UUID, MetricResult] = {}
+        for start in range(0, len(identifiers), _PAGE):
+            output.update(self._compact.get_metrics(identifiers[start : start + _PAGE]))
+        return output
+
+    def list_metric_index_page(self, query: MetricSeriesQuery) -> tuple[MetricIndexEntry, ...]:
+        return self._compact.list_metric_index_page(query)
+
     def list(
         self,
         *,
@@ -600,9 +629,23 @@ class WorkspaceV2MetricResultRepository:
         asset_id: str | None = None,
         metric_keys: Collection[str] | None = None,
         available_to: datetime | None = None,
+        as_of_from: datetime | None = None,
+        as_of_before: datetime | None = None,
+        parameter_equals: Mapping[str, str] | None = None,
+        parameter_date_range: tuple[str, str] | None = None,
+        cut_known_at: datetime | None = None,
+        legacy_known_at_to: datetime | None = None,
     ) -> list[UUID]:
         return self._compact.select_metric_ids(
-            asset_id=asset_id, metric_keys=metric_keys, available_to=available_to
+            asset_id=asset_id,
+            metric_keys=metric_keys,
+            available_to=available_to,
+            as_of_from=as_of_from,
+            as_of_before=as_of_before,
+            parameter_equals=parameter_equals,
+            parameter_date_range=parameter_date_range,
+            cut_known_at=cut_known_at,
+            legacy_known_at_to=legacy_known_at_to,
         )
 
     def list_import_page(
