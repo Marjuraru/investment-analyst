@@ -20,5 +20,5 @@ mantiene un único marker exact-SHA y ejecuta el guard común vivo `scripts/chec
 semánticamente el diff material completo, permanece read-only para source/branch/candidato y
 mantiene su marker único. Un PASS con policy AUTO puede continuar sólo a dos guards completos
 `--live --phase finalize`, separados por ready y sin reutilizar snapshots.
-Una policy HUMAN, y siempre CRITICAL salvo excepción humana explícita, termina en HUMAN MERGE. No
+Una policy HUMAN, y CRITICAL salvo autorización tipada verificada desde la base, termina en HUMAN MERGE. No
 inventar comandos, duplicar el algoritmo global ni usar el último Issue/PR como target.

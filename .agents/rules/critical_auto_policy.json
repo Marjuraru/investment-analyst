@@ -1,0 +1,32 @@
+{
+  "schema_version": "critical-auto-policy-v1",
+  "authorizations": [
+    {
+      "authorization_id": "human-data-chassis-finalize-20261007",
+      "granted_at": "2026-10-07T05:45:23.081522+00:00",
+      "human_instruction": "Además, siempre haz que la finalización sea auto y no tenga que hacerlo yo siempre manualmente. Ratificado: Corregir primero el guard para permitir AUTO crítico con autorización explícita.",
+      "purpose": "finalize_only",
+      "writer_role": "BUILD_PRODUCT",
+      "profile": "CRITICAL",
+      "finalize_policy": "AUTO",
+      "route_item": "DATA-CHASSIS",
+      "blocks": [
+        {
+          "id": "DATA-CHASSIS-43",
+          "expected_branch": "codex/data-chassis-43",
+          "route_effect": "ADVANCES"
+        },
+        {
+          "id": "DATA-CHASSIS-44",
+          "expected_branch": "codex/data-chassis-44",
+          "route_effect": "ADVANCES"
+        },
+        {
+          "id": "DATA-CHASSIS-45",
+          "expected_branch": "codex/data-chassis-45",
+          "route_effect": "COMPLETES"
+        }
+      ]
+    }
+  ]
+}

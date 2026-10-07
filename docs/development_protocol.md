@@ -103,8 +103,11 @@ bloque actual. Un `UNKNOWN` crítico impide declararlo cumplido. Cambios de deno
 requieren decisión explícita de PLAN; BUILD y AUDIT no los relajan.
 
 `finalize_policy` sólo admite `AUTO` o `HUMAN`: FAST usa AUTO por defecto; STANDARD usa AUTO tras
-AUDIT PASS; CRITICAL usa HUMAN. Un override HUMAN de FAST/STANDARD requiere justificación en PLAN.
-AUTO en CRITICAL exige instrucción humana explícita y justificación en PLAN. DEV-3 conserva HUMAN.
+AUDIT PASS; CRITICAL usa HUMAN, salvo `BUILD_PRODUCT` con una autorización CRITICAL/AUTO explícita
+en `.agents/rules/critical_auto_policy.json` ya integrada en la base declarada. El guard enlaza el
+ID estructural `Critical AUTO authorization` con base, bytes SHA-256 del ledger, Work Block, rama,
+rol, profile y `route_effect`; nunca lee el ledger candidato, una narración ni un snapshot JSON como
+autoridad. Un override HUMAN de FAST/STANDARD requiere justificación en PLAN. DEV-3 conserva HUMAN.
 
 Scope estima tamaño (`S1`–`S3`) y Risk gobierna el control (`R0`–`R3`). R3, y R2 que toque
 seguridad/permisos, migraciones, schema/storage, identidad, fórmulas financieras, CI o contratos
@@ -175,6 +178,9 @@ head vivo. El conjunto de gobernanza es versionado en el módulo: `AGENTS.md`,
 `docs/development_protocol.md`, `.agents/rules/**`, `.agents/skills/**`,
 `scripts/check_workflow_guards.py`, `.github/workflows/**`, `.github/CODEOWNERS` y
 `.github/ISSUE_TEMPLATE/**`. Una intersección con policy `AUTO` falla cerrado: requiere `HUMAN`.
+La excepción CRITICAL/AUTO sólo admite `BUILD_PRODUCT`, no modifica esa regla de rutas de governance
+y exige el ledger tipado de la base verificada; su ausencia, JSON duplicado, campo desconocido,
+binding distinto o revocación falla cerrado.
 Para `R3`, la declaración `## Strict delta allowlist` es obligatoria y sus rutas existentes llevan
 SHA-256 de base; las creables usan `nuevo`. Las rutas no modificables y los globs prohibidos niegan
 siempre, aun si aparecen en allowlist. El formato y sus tres secciones son parser-owned; skills,
@@ -198,8 +204,8 @@ Markers BUILD stale `PASS`/`FAIL`, múltiples o current+stale fallan cerrado; AU
 rechazan cualquier BUILD stale. `phase=finalize` rechaza cualquier AUDIT stale y sólo acepta el
 marker AUDIT actual. Stale AUDIT no equivalentes o cualquier uso de `head-advanced` fuera de AUDIT
 siguen fail-closed. La skill owner relee y ejecuta de nuevo el guard después de cada reconciliación;
-`CRITICAL` o cualquier policy `HUMAN` sólo puede terminar en `AWAITING HUMAN APPROVAL`; nunca
-autoriza ready, merge o cleanup automático.
+`CRITICAL` sin una autorización CRITICAL/AUTO válida de base, o cualquier policy `HUMAN`, sólo puede
+terminar en `AWAITING HUMAN APPROVAL`; nunca autoriza ready, merge o cleanup automático.
 
 ## Capability envelope y preflight BUILD
 
@@ -263,7 +269,8 @@ contratos, APIs, storage, providers o cualquier expansión de scope.
 
 - FAST: `PLAN → BUILD → gates → FINALIZE → COMPLETE` cuando policy es AUTO.
 - STANDARD: `PLAN → BUILD → AUDIT → PASS → FINALIZE → COMPLETE` cuando policy es AUTO.
-- CRITICAL: `PLAN → BUILD → AUDIT → PASS → AWAITING HUMAN APPROVAL → HUMAN MERGE`.
+- CRITICAL: `PLAN → BUILD → AUDIT → PASS → AWAITING HUMAN APPROVAL → HUMAN MERGE`, salvo la
+  autorización CRITICAL/AUTO tipada y vinculada a base, que continúa al FINALIZE normal tras AUDIT.
 
 No se crean comandos `$merge` ni `$finalize`. Un cambio material de objetivo, scope, arquitectura o
 aceptación vuelve a PLAN; un mismatch de base o rama falla cerrado.
@@ -463,6 +470,10 @@ writer roles; `$build` es el dispatcher y `BUILD` genérico es inválido. `BUILD
 governance enumeradas, exige `R3`/`CRITICAL`/`HUMAN`/`route_effect: NONE` y valida un authority
 snapshot de la base declarada. El snapshot contiene el SHA base y los digests de AGENTS, protocolo,
 skills y guard; los bytes candidatos nunca se usan como autoridad antes del merge.
+La policy CRITICAL/AUTO es un contrato aislado: raíz exacta `schema_version` y `authorizations`,
+IDs únicos, timestamps UTC, enums cerrados y bloques con `id`, `expected_branch` y `route_effect`.
+Sólo autoriza `finalize_only`; no concede escritura de producto, providers, workspace, bypass ni
+auto-merge fuera del FINALIZE ya guardado.
 La clasificación y la admisión del writer reutilizan `_is_governance_path` como frontera única;
 únicamente `tests/unit/test_workflow_guard.py` y
 `tests/unit/test_development_workflow_contract.py` son excepciones para probar ese contrato. Cada
