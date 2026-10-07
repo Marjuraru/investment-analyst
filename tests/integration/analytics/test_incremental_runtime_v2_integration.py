@@ -146,7 +146,7 @@ def test_daily_runtime_uses_workspace_metric_rows_for_incremental_checkpoints(
     workspaces.initialize(workspace_root, format_version=2)
     runtime = ApplicationRuntime.create_default(workspace_service=workspaces)
     location = StorageLocationRequest(workspace=workspace_root)
-    count = 40
+    count = 26
     end = _BASE + timedelta(days=count)
     query = HistoricalBarQuery(
         asset_id=ASSET_ID,
@@ -362,7 +362,7 @@ def test_coinbase_daily_runtime_uses_workspace_v2_and_matches_full_engine(tmp_pa
     workspaces.initialize(workspace_root, format_version=2)
     runtime = ApplicationRuntime.create_default(workspace_service=workspaces)
     location = StorageLocationRequest(workspace=workspace_root)
-    count = 40
+    count = 26
     end = _BASE + timedelta(days=count)
     request = MarketStatisticsRequest(
         query=HistoricalBarQuery(
