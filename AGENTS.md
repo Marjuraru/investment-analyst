@@ -176,7 +176,8 @@ results, and pending risks.
   manifest and working tree resolve uniquely. Generic `BUILD` is not a valid post-rollout writer
   role. `BUILD_GOVERNANCE` requires an authority snapshot verified against its declared base and
   never uses candidate governance bytes as authority before merge.
-  For a FAST Work Block whose effective `finalize_policy` is AUTO, it also authorizes the narrow
+  For a FAST Work Block, or a CRITICAL `BUILD_PRODUCT` Work Block with a verified base-policy
+  authorization, whose effective `finalize_policy` is AUTO, it also authorizes the narrow
   FINALIZE procedure after all live guards pass; otherwise it never authorizes merge,
   ready-for-review, scope expansion, or protected local work.
 - BUILD y AUDIT deben ejecutar `scripts/check_workflow_guards.py` con adquisición viva autoritativa.

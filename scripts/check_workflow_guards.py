@@ -61,6 +61,8 @@ _CHECKPOINT_HEADING = "### Checkpoint dormante — verificación de hash en el p
 _IMMUTABLE_HEADING = "### Superficies del repositorio no modificables — deny por ruta cambiada"
 _MANIFEST_SCHEMA = "workflow-acceptance-manifest-v1"
 _GOAL_REVIEW_SCHEMA = "workflow-goal-review-v1"
+_CRITICAL_AUTO_POLICY_SCHEMA = "critical-auto-policy-v1"
+_CRITICAL_AUTO_POLICY_PATH = ".agents/rules/critical_auto_policy.json"
 _GOAL_REVIEW_HINT = re.compile(r'"schema_version"\s*:\s*"?workflow-goal-review-v1\b')
 _MANIFEST_KINDS = frozenset({"acceptance", "invariant", "negative"})
 _REQUIREMENT_KINDS = frozenset(
@@ -165,6 +167,32 @@ class AuthoritySnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class CriticalAutoBlock:
+    block: str
+    expected_branch: str
+    route_effect: str
+
+
+@dataclass(frozen=True, slots=True)
+class CriticalAutoAuthorization:
+    authorization_id: str
+    purpose: str
+    writer_role: str
+    profile: str
+    policy: str
+    route_item: str
+    blocks: tuple[CriticalAutoBlock, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CriticalAutoEvidence:
+    authorization_id: str
+    base_sha: str
+    policy_sha256: str
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
 class BuildClassification:
     status: str
     terminal: bool
@@ -192,6 +220,7 @@ class WorkBlockMetadata:
     base_sha: str
     expected_branch: str
     writer_role: str
+    critical_auto_authorization: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +312,7 @@ class GuardResult:
     mutation_plan: tuple[str, ...]
     scope: ScopeEvaluation | None = None
     classification: BuildClassification | None = None
+    critical_auto: CriticalAutoEvidence | None = None
 
     def as_json(self) -> dict[str, object]:
         metadata: dict[str, object] | None = None
@@ -319,6 +349,16 @@ class GuardResult:
                 else None
             ),
             "authoritative": self.decision not in {"NON_AUTHORITATIVE", "GUARD FAILURE"},
+            "critical_auto_authorization": (
+                {
+                    "authorization_id": self.critical_auto.authorization_id,
+                    "base_sha": self.critical_auto.base_sha,
+                    "policy_sha256": self.critical_auto.policy_sha256,
+                    "source": self.critical_auto.source,
+                }
+                if self.critical_auto is not None
+                else None
+            ),
             "classification": (
                 {
                     "status": self.classification.status,
@@ -706,6 +746,7 @@ def parse_work_block(body: str) -> WorkBlockMetadata:
         "base remota exacta": "base",
         "expected branch": "expected_branch",
         "writer role": "writer_role",
+        "critical auto authorization": "critical_auto_authorization",
     }
     values: dict[str, str] = {}
     for match in METADATA_FIELD.finditer(body):
@@ -747,14 +788,24 @@ def parse_work_block(body: str) -> WorkBlockMetadata:
         raise GuardFailure("finalize_policy is unknown")
     if route_effect not in {"NONE", "ADVANCES", "COMPLETES"}:
         raise GuardFailure("route_effect is unknown")
-    if profile == "CRITICAL" and policy != "HUMAN":
-        raise GuardFailure("CRITICAL requires finalize_policy HUMAN")
     if writer_role not in {"BUILD_PRODUCT", "BUILD_GOVERNANCE", "UI_WORKER"}:
         raise GuardFailure("writer role is unknown")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", values["block"]):
         raise GuardFailure("Work Block ID is invalid")
     if not re.fullmatch(r"[A-Za-z0-9._/-]+", values["expected_branch"]):
         raise GuardFailure("expected branch is invalid")
+    authorization = values.get("critical_auto_authorization")
+    if authorization is not None and not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._:-]*", authorization
+    ):
+        raise GuardFailure("critical AUTO authorization ID is invalid")
+    if profile == "CRITICAL" and policy == "AUTO":
+        if writer_role != "BUILD_PRODUCT":
+            raise GuardFailure("critical AUTO requires BUILD_PRODUCT")
+        if authorization is None:
+            raise GuardFailure("critical AUTO authorization is absent")
+    elif authorization is not None:
+        raise GuardFailure("critical AUTO authorization is only valid for CRITICAL/AUTO")
     return WorkBlockMetadata(
         block=values["block"],
         risk=risk,
@@ -765,6 +816,147 @@ def parse_work_block(body: str) -> WorkBlockMetadata:
         base_sha=base_match.group("sha"),
         expected_branch=values["expected_branch"],
         writer_role=writer_role,
+        critical_auto_authorization=authorization,
+    )
+
+
+def _critical_auto_policy_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise GuardFailure("critical AUTO policy JSON contains duplicate fields")
+        result[key] = value
+    return result
+
+
+def _critical_auto_text(mapping: Mapping[str, object], field: str) -> str:
+    value = mapping.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise GuardFailure(f"critical AUTO policy {field} must be non-empty text")
+    return value.strip()
+
+
+def _parse_critical_auto_policy(value: bytes) -> tuple[CriticalAutoAuthorization, ...]:
+    try:
+        root = _mapping(
+            json.loads(value.decode("utf-8"), object_pairs_hook=_critical_auto_policy_object),
+            "critical AUTO policy",
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, GuardFailure) as error:
+        raise GuardFailure("critical AUTO policy is not valid strict JSON") from error
+    if set(root) != {"schema_version", "authorizations"}:
+        raise GuardFailure("critical AUTO policy has unknown or missing fields")
+    if root.get("schema_version") != _CRITICAL_AUTO_POLICY_SCHEMA:
+        raise GuardFailure("critical AUTO policy schema_version is invalid")
+    raw_authorizations = _sequence(root.get("authorizations"), "critical AUTO authorizations")
+    if not raw_authorizations:
+        raise GuardFailure("critical AUTO policy authorizations are absent")
+    authorizations: list[CriticalAutoAuthorization] = []
+    seen_authorizations: set[str] = set()
+    seen_blocks: set[str] = set()
+    for raw_authorization in raw_authorizations:
+        authorization = _mapping(raw_authorization, "critical AUTO authorization")
+        required = {
+            "authorization_id",
+            "granted_at",
+            "human_instruction",
+            "purpose",
+            "writer_role",
+            "profile",
+            "finalize_policy",
+            "route_item",
+            "blocks",
+        }
+        if set(authorization) != required:
+            raise GuardFailure("critical AUTO authorization has unknown or missing fields")
+        authorization_id = _critical_auto_text(authorization, "authorization_id")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", authorization_id)
+            or authorization_id in seen_authorizations
+        ):
+            raise GuardFailure("critical AUTO authorization ID is invalid or duplicate")
+        granted_at = _critical_auto_text(authorization, "granted_at")
+        try:
+            granted_at_value = datetime.fromisoformat(granted_at.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise GuardFailure("critical AUTO authorization granted_at is invalid") from error
+        if granted_at_value.tzinfo is None or granted_at_value.utcoffset() != timedelta(0):
+            raise GuardFailure("critical AUTO authorization granted_at must be UTC")
+        _critical_auto_text(authorization, "human_instruction")
+        purpose = _critical_auto_text(authorization, "purpose")
+        writer_role = _critical_auto_text(authorization, "writer_role").upper()
+        profile = _critical_auto_text(authorization, "profile").upper()
+        policy = _critical_auto_text(authorization, "finalize_policy").upper()
+        route_item = _critical_auto_text(authorization, "route_item")
+        if purpose != "finalize_only":
+            raise GuardFailure("critical AUTO authorization purpose is invalid")
+        if writer_role != "BUILD_PRODUCT" or profile != "CRITICAL" or policy != "AUTO":
+            raise GuardFailure("critical AUTO authorization role or policy is invalid")
+        if not re.fullmatch(r"[A-Z][A-Z0-9_-]*", route_item):
+            raise GuardFailure("critical AUTO authorization route_item is invalid")
+        blocks: list[CriticalAutoBlock] = []
+        raw_blocks = _sequence(authorization.get("blocks"), "critical AUTO authorization blocks")
+        if not raw_blocks:
+            raise GuardFailure("critical AUTO authorization blocks are absent")
+        for raw_block in raw_blocks:
+            block = _mapping(raw_block, "critical AUTO authorization block")
+            if set(block) != {"id", "expected_branch", "route_effect"}:
+                raise GuardFailure(
+                    "critical AUTO authorization block has unknown or missing fields"
+                )
+            block_id = _critical_auto_text(block, "id")
+            expected_branch = _critical_auto_text(block, "expected_branch")
+            route_effect = _critical_auto_text(block, "route_effect").upper()
+            if (
+                not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", block_id)
+                or block_id in seen_blocks
+                or not re.fullmatch(r"[A-Za-z0-9._/-]+", expected_branch)
+                or route_effect not in {"NONE", "ADVANCES", "COMPLETES"}
+            ):
+                raise GuardFailure("critical AUTO authorization block is invalid or duplicate")
+            seen_blocks.add(block_id)
+            blocks.append(CriticalAutoBlock(block_id, expected_branch, route_effect))
+        seen_authorizations.add(authorization_id)
+        authorizations.append(
+            CriticalAutoAuthorization(
+                authorization_id, purpose, writer_role, profile, policy, route_item, tuple(blocks)
+            )
+        )
+    return tuple(authorizations)
+
+
+def _critical_auto_evidence(metadata: WorkBlockMetadata) -> CriticalAutoEvidence | None:
+    if metadata.profile != "CRITICAL" or metadata.policy != "AUTO":
+        return None
+    policy_bytes = _git_bytes(
+        ("show", f"{metadata.base_sha}:{_CRITICAL_AUTO_POLICY_PATH}"),
+        "critical AUTO policy base file",
+    )
+    authorization = next(
+        (
+            candidate
+            for candidate in _parse_critical_auto_policy(policy_bytes)
+            if candidate.authorization_id == metadata.critical_auto_authorization
+        ),
+        None,
+    )
+    if authorization is None:
+        raise GuardFailure("critical AUTO authorization is absent from the verified base policy")
+    expected = CriticalAutoBlock(metadata.block, metadata.expected_branch, metadata.route_effect)
+    if (
+        authorization.purpose != "finalize_only"
+        or authorization.writer_role != metadata.writer_role
+        or authorization.profile != metadata.profile
+        or authorization.policy != metadata.policy
+        or not metadata.block.startswith(f"{authorization.route_item}-")
+        or expected not in authorization.blocks
+    ):
+        raise GuardFailure("critical AUTO authorization does not bind the Work Block")
+    return CriticalAutoEvidence(
+        authorization.authorization_id,
+        metadata.base_sha,
+        hashlib.sha256(policy_bytes).hexdigest(),
+        "verified_base",
     )
 
 
@@ -1547,6 +1739,7 @@ def _build_result(
     owner: str | None,
     next_action: str,
     reasons: tuple[str, ...] = (),
+    critical_auto: CriticalAutoEvidence | None = None,
 ) -> GuardResult:
     return GuardResult(
         status,
@@ -1557,6 +1750,7 @@ def _build_result(
         mutation_plan,
         scope,
         _classification(status, terminal, owner, next_action),
+        critical_auto,
     )
 
 
@@ -1567,6 +1761,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
     audit = empty
     mutation_plan: tuple[str, ...] = ()
     scope: ScopeEvaluation | None = None
+    critical_auto: CriticalAutoEvidence | None = None
     try:
         if phase not in {"build", "audit", "finalize"}:
             raise GuardFailure("phase is unknown")
@@ -1582,6 +1777,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
                 raise GuardFailure("live scope evidence is absent")
             scope = _validate_scope(metadata, snapshot.issue.body, snapshot.scope_evidence)
             _validate_authority_snapshot(metadata, snapshot)
+            critical_auto = _critical_auto_evidence(metadata)
         elif snapshot.source == "json":
             return GuardResult(
                 "NON_AUTHORITATIVE", (), metadata, build, audit, mutation_plan, scope
@@ -1599,6 +1795,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
                 terminal=False,
                 owner=metadata.writer_role,
                 next_action="create the expected draft PR from the verified base",
+                critical_auto=critical_auto,
             )
         pull_request = snapshot.pull_request
         markers = _parse_all_markers(snapshot.comments)
@@ -1619,6 +1816,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
                     next_action=(
                         "complete BUILD validation and publish structured exact-SHA evidence"
                     ),
+                    critical_auto=critical_auto,
                 )
             _validate_manifest_requirements(build.marker, manifest, snapshot, scope)
             _validate_checks(snapshot)
@@ -1633,6 +1831,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
                     terminal=False,
                     owner=metadata.writer_role,
                     next_action="execute the required smoke and publish its evidence",
+                    critical_auto=critical_auto,
                 )
             return _build_result(
                 "READY",
@@ -1644,6 +1843,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
                 terminal=True,
                 owner="AUDIT",
                 next_action="start a fresh AUDIT for this exact SHA",
+                critical_auto=critical_auto,
             )
         if build.marker is None or build.marker.status != "PASS":
             raise GuardFailure("BUILD PASS marker is absent or not PASS")
@@ -1653,7 +1853,16 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
             _validate_checks(snapshot)
             if snapshot.smoke.status not in {"PASS"} or not snapshot.smoke.evidence:
                 raise GuardFailure("smoke evidence is absent or not PASS")
-            return GuardResult("AUDIT GUARD PASS", (), metadata, build, audit, mutation_plan, scope)
+            return GuardResult(
+                "AUDIT GUARD PASS",
+                (),
+                metadata,
+                build,
+                audit,
+                mutation_plan,
+                scope,
+                critical_auto=critical_auto,
+            )
         if audit.marker is None or audit.marker.status != "PASS":
             raise GuardFailure("AUDIT PASS marker is absent or not PASS")
         _validate_manifest_requirements(audit.marker, manifest, snapshot, scope)
@@ -1677,16 +1886,39 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
             )
             if receipt is None:
                 return GuardResult(
-                    "AWAITING HUMAN APPROVAL", (), metadata, build, audit, mutation_plan, scope
+                    "AWAITING HUMAN APPROVAL",
+                    (),
+                    metadata,
+                    build,
+                    audit,
+                    mutation_plan,
+                    scope,
+                    critical_auto=critical_auto,
                 )
             if receipt.decision == "REJECT":
                 return GuardResult(
-                    "HUMAN REJECTED", (), metadata, build, audit, mutation_plan, scope
+                    "HUMAN REJECTED",
+                    (),
+                    metadata,
+                    build,
+                    audit,
+                    mutation_plan,
+                    scope,
+                    critical_auto=critical_auto,
                 )
             decision = "HUMAN_FINALIZE_AUTHORIZED"
         else:
             decision = "AUTO_FINALIZE_AUTHORIZED"
-        return GuardResult(decision, (), metadata, build, audit, mutation_plan, scope)
+        return GuardResult(
+            decision,
+            (),
+            metadata,
+            build,
+            audit,
+            mutation_plan,
+            scope,
+            critical_auto=critical_auto,
+        )
     except GuardFailure as error:
         if phase == "build":
             return _build_result(
@@ -1700,9 +1932,17 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
                 owner=None,
                 next_action="stop without changing protected state",
                 reasons=(str(error),),
+                critical_auto=critical_auto,
             )
         return GuardResult(
-            "GUARD FAILURE", (str(error),), metadata, build, audit, mutation_plan, scope
+            "GUARD FAILURE",
+            (str(error),),
+            metadata,
+            build,
+            audit,
+            mutation_plan,
+            scope,
+            critical_auto=critical_auto,
         )
 
 

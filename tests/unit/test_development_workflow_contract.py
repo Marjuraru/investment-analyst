@@ -278,7 +278,7 @@ def test_ci_preserves_complete_assertions_coverage_and_failure_gate() -> None:
     assert "  workflow_dispatch:\n" in workflow
     assert "name: Python 3.12 quality" in workflow
     assert "runs-on: ubuntu-24.04" in workflow
-    assert "timeout-minutes: 20" in workflow
+    assert "timeout-minutes: 30" in workflow
     assert "permissions:\n  contents: read" in workflow
     assert 'UV_VERSION: "0.11.29"' in workflow
     assert "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" in workflow

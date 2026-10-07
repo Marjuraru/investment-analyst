@@ -91,7 +91,11 @@ def _body(
     writer_role: str = "BUILD_PRODUCT",
     risk: str = "R3",
     route_effect: str = "NONE",
+    authorization: str | None = None,
 ) -> str:
+    authorization_line = (
+        f"- **Critical AUTO authorization:** `{authorization}`.\n" if authorization else ""
+    )
     return (
         f"""<!-- development-workflow:work-block-v1 -->
 
@@ -103,6 +107,7 @@ def _body(
 - **Base remota exacta:** `origin/main@{BASE_SHA}`.
 - **Expected branch:** `codex/dev-7-finalize-policy-guard`.
 - **Writer role:** `{writer_role}`.
+{authorization_line}
 """
         + _manifest(route_effect)
         + _scope_body()
@@ -302,14 +307,131 @@ def _snapshot(
     )
 
 
+def _critical_auto_policy(
+    *,
+    block: str = "DEV-7",
+    expected_branch: str = "codex/dev-7-finalize-policy-guard",
+    route_effect: str = "NONE",
+) -> bytes:
+    return json.dumps(
+        {
+            "schema_version": "critical-auto-policy-v1",
+            "authorizations": [
+                {
+                    "authorization_id": "human-dev-7",
+                    "granted_at": "2026-10-07T05:45:23.081522+00:00",
+                    "human_instruction": "Explicit human authorization for this bounded finalize.",
+                    "purpose": "finalize_only",
+                    "writer_role": "BUILD_PRODUCT",
+                    "profile": "CRITICAL",
+                    "finalize_policy": "AUTO",
+                    "route_item": "DEV",
+                    "blocks": [
+                        {
+                            "id": block,
+                            "expected_branch": expected_branch,
+                            "route_effect": route_effect,
+                        }
+                    ],
+                }
+            ],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 def test_metadata_requires_unique_structural_fields_and_human_critical() -> None:
     assert parse_work_block(_body()).policy == "HUMAN"
     with pytest.raises(ValueError, match="duplicate Work Block field"):
         parse_work_block(_body() + "- **Profile:** `STANDARD`.\n")
-    with pytest.raises(ValueError, match="CRITICAL requires"):
+    with pytest.raises(ValueError, match="critical AUTO authorization is absent"):
         parse_work_block(_body(policy="AUTO"))
+    with pytest.raises(ValueError, match="requires BUILD_PRODUCT"):
+        parse_work_block(_body(policy="AUTO", writer_role="UI_WORKER", authorization="human-dev-7"))
+    with pytest.raises(ValueError, match="only valid for CRITICAL/AUTO"):
+        parse_work_block(_body(authorization="human-dev-7"))
     with pytest.raises(ValueError, match="missing Work Block fields"):
         parse_work_block(_body().replace("- **Writer role:** `BUILD_PRODUCT`.\n", ""))
+
+
+def test_critical_auto_requires_a_verified_base_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = _body(policy="AUTO", authorization="human-dev-7")
+    policy = _critical_auto_policy()
+
+    def git_bytes(arguments: tuple[str, ...], label: str) -> bytes:
+        assert label == "critical AUTO policy base file"
+        assert arguments == (
+            "show",
+            f"{BASE_SHA}:{_MODULE._CRITICAL_AUTO_POLICY_PATH}",
+        )
+        return policy
+
+    monkeypatch.setattr(_MODULE, "_git_bytes", git_bytes)
+    result = evaluate(_snapshot(body=body), phase="build")
+
+    assert result.decision == "READY"
+    assert result.critical_auto is not None
+    evidence = result.as_json()["critical_auto_authorization"]
+    assert evidence == {
+        "authorization_id": "human-dev-7",
+        "base_sha": BASE_SHA,
+        "policy_sha256": hashlib.sha256(policy).hexdigest(),
+        "source": "verified_base",
+    }
+    assert "Explicit human authorization" not in json.dumps(result.as_json())
+
+
+def test_committed_critical_auto_policy_is_bounded_to_data_chassis_43_through_45() -> None:
+    policy = (ROOT / ".agents" / "rules" / "critical_auto_policy.json").read_bytes()
+
+    authorizations = _MODULE._parse_critical_auto_policy(policy)
+
+    assert len(authorizations) == 1
+    authorization = authorizations[0]
+    assert authorization.authorization_id == "human-data-chassis-finalize-20261007"
+    assert authorization.purpose == "finalize_only"
+    assert authorization.writer_role == "BUILD_PRODUCT"
+    blocks = [
+        (block.block, block.expected_branch, block.route_effect) for block in authorization.blocks
+    ]
+    assert blocks == [
+        ("DATA-CHASSIS-43", "codex/data-chassis-43", "ADVANCES"),
+        ("DATA-CHASSIS-44", "codex/data-chassis-44", "ADVANCES"),
+        ("DATA-CHASSIS-45", "codex/data-chassis-45", "COMPLETES"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("policy", "reason"),
+    [
+        (_critical_auto_policy(block="DEV-8"), "does not bind the Work Block"),
+        (
+            b'{"schema_version":"critical-auto-policy-v1","schema_version":"critical-auto-policy-v1","authorizations":[]}',
+            "not valid strict JSON",
+        ),
+        (
+            json.dumps({"schema_version": "critical-auto-policy-v1", "authorizations": []}).encode(
+                "utf-8"
+            ),
+            "authorizations are absent",
+        ),
+    ],
+)
+def test_critical_auto_policy_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    policy: bytes,
+    reason: str,
+) -> None:
+    monkeypatch.setattr(_MODULE, "_git_bytes", lambda _arguments, _label: policy)
+
+    result = evaluate(
+        _snapshot(body=_body(policy="AUTO", authorization="human-dev-7")), phase="build"
+    )
+
+    assert result.decision == "GUARD FAILURE"
+    assert reason in result.reasons[0]
 
 
 def test_declared_scope_distinguishes_checkpoint_from_immutable_and_accepts_exact_deny() -> None:
