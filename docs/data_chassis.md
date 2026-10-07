@@ -1135,3 +1135,24 @@ page cache. Estas mediciones caracterizan el coste local del colector, no acredi
 operacionales de memoria, disco o duración de un ciclo productivo. El estado de Q1–Q7 sigue en el
 registro canónico y la ruta DATA-CHASSIS conserva `NEXT`; después de #335, PLAN resuelve #42 con
 evidencia viva nueva.
+
+## Adopción incremental en workspace v2 (`DATA-CHASSIS-42` / #337)
+
+El alcance de #337 incorpora el cálculo diario incremental al pipeline productivo de workspace v2,
+manteniendo el formato 1 y su identidad UUID5 para el camino legado. En v2, las métricas usan
+coordenadas semánticas sin `known_at` ni `computed_at`; cada corte se conserva en un
+`AnalysisSnapshot` independiente con referencias PIT verificables. La nueva interfaz descriptiva
+lee series paginadas, features, evidencia y fórmulas desde resultados persistidos; no calcula
+métricas adicionales ni convierte diagnósticos en señales o recomendaciones.
+
+El backup v2 verifica prefijos diarios, checkpoints recursivos y snapshots cuando estas tablas
+opcionales existen. Un workspace v2 anterior sin ellas continúa siendo válido. El cierre exige los
+escenarios de igualdad full/incremental, revisiones, reuso por familia, lecturas acotadas y
+restore/reanudación declarados en el Work Block, además del smoke ligado al SHA final, CI y auditoría
+independiente. Los resultados de scratch no cambian el estado Q1–Q7.
+
+La autorización humana `AUTO` de este Work Block cubre sólo su publicación y el procedimiento
+FINALIZE después de AUDIT PASS, CI verde exacta y guards vivos. No autoriza la migración ni el cutover
+del workspace permanente. El formato 1 permanece default hasta que el Work Block 43 resuelva y
+valide el inventario, restore, rollback y activación; Drive, limpieza y oportunidades opcionales
+siguen fuera de #337 y requieren el PLAN correspondiente.

@@ -8,10 +8,15 @@ from uuid import UUID
 
 from pydantic import ConfigDict, field_validator, model_validator
 
+from investment_analyst.analytics.analytical_access_service import (
+    AnalyticalAccessService,
+    RepositoryAnalyticalAccessAdapter,
+)
 from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
 from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.core.models.base import ContractModel
 from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.storage.workspace_v2 import WorkspaceV2Store
 from investment_analyst.workspace.models import WorkspaceAccessMode, WorkspacePaths
 from investment_analyst.workspace.service import WorkspaceService
 
@@ -148,6 +153,22 @@ class ApplicationRuntime:
     def provider_resolver(self) -> ProviderAssetContextResolver:
         """Return the provider resolver created once for this runtime."""
         return self._provider_resolver
+
+    def analytical_access(self, storage: LocalStorage) -> AnalyticalAccessService:
+        """Build the descriptive read service over this runtime's open storage facade."""
+        storage.require_open()
+        snapshot_loader = None
+        if storage.paths.format_version == 2:
+            if not isinstance(storage.store, WorkspaceV2Store):
+                raise StorageLocationError("workspace v2 backend was not selected")
+            snapshot_loader = storage.store.raw_staging.get_analysis_snapshot
+        adapter = RepositoryAnalyticalAccessAdapter(
+            storage.metric_results,
+            storage.diagnostics,
+            storage.metric_definitions,
+            snapshot_loader=snapshot_loader,
+        )
+        return AnalyticalAccessService(adapter)
 
     def resolve_storage(
         self,

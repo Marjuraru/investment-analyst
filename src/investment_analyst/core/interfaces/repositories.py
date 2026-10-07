@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from datetime import date, datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from pydantic import model_validator
@@ -22,6 +22,12 @@ from investment_analyst.core.models import (
     RawRecord,
     SourceDefinition,
 )
+
+if TYPE_CHECKING:
+    from investment_analyst.analytics.analytical_access_models import (
+        MetricIndexEntry,
+        MetricSeriesQuery,
+    )
 
 
 class BatchWriteReceipt(ContractModel):
@@ -339,7 +345,15 @@ class MetricResultRepository(Protocol):
         asset_id: str | None = None,
         metric_keys: Collection[str] | None = None,
         available_to: datetime | None = None,
+        as_of_from: datetime | None = None,
+        as_of_before: datetime | None = None,
+        parameter_equals: Mapping[str, str] | None = None,
+        parameter_date_range: tuple[str, str] | None = None,
+        cut_known_at: datetime | None = None,
+        legacy_known_at_to: datetime | None = None,
     ) -> list[UUID]: ...
+
+    def list_metric_index_page(self, query: MetricSeriesQuery) -> tuple[MetricIndexEntry, ...]: ...
 
 
 class DiagnosticResultRepository(Protocol):

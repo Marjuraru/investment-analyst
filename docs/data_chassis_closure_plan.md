@@ -29,6 +29,13 @@ no activa v2 productivo y no acredita ahorro del host.
 | 44 | Backups cifrados e incrementales en Google Drive, reanudables, verificables y restaurables. Drive es destino de archivo, nunca almacenamiento DuckDB activo. | Restore desde Drive a destino vacío con hashes, conteos, PIT y lineage exactos. Dependencias, permisos y cifrado requieren PLAN explícito antes de BUILD. |
 | 45 | Aceptación final, correcciones residuales de gates y limpieza estrechamente autorizada de herramientas y copias. | Q1–Q7 y gates obligatorios satisfechos; recuperación retenida; inventario y autorización de limpieza; bytes lógicos, archivos, espacio Linux y espacio `C:` medidos por separado. |
 
+La adopción de #337 está acotada al formato v2 opt-in y conserva el formato 1 como default hasta
+resolver el inventario y el cutover en el bloque 43. La decisión humana `AUTO` aplica sólo a este
+Work Block: requiere BUILD completo, CI del SHA exacto y AUDIT independiente PASS antes de FINALIZE;
+no adelanta la migración, el backup Drive ni la limpieza. Su transición propuesta es `ADVANCES`, no
+cierre de DATA-CHASSIS. Q1–Q7 mantienen sus estados, comparadores y denominador canónicos. Cualquier
+oportunidad opcional se registra en PLAN y no extiende la aceptación de #337.
+
 ## Gates de cierre que atraviesan los bloques
 
 - Igualdad Decimal entre ejecución completa e incremental v2; checkpoints persistidos e invalidados

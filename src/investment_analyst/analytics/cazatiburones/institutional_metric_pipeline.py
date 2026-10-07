@@ -14,6 +14,7 @@ from investment_analyst.analytics.cazatiburones.institutional_metric_definitions
 from investment_analyst.analytics.cazatiburones.institutional_metric_engine import calculate
 from investment_analyst.analytics.cazatiburones.institutional_metric_identity import (
     expected_institutional_metric_result_id,
+    semantic_institutional_metric_result_id,
 )
 from investment_analyst.analytics.cazatiburones.institutional_metric_models import (
     InstitutionalMetricClose,
@@ -27,7 +28,7 @@ from investment_analyst.evidence.sec_institutional_observations.service import (
 from investment_analyst.evidence.sec_institutional_semantics.artifact_reader import (
     InstitutionalSemanticsArtifactReader,
 )
-from investment_analyst.storage import RecordNotFoundError, StorageError
+from investment_analyst.storage import StorageError
 
 _OBSERVATION_REFERENCE_BATCH_SIZE = 512
 
@@ -86,10 +87,25 @@ class InstitutionalMetricPipeline:
             )
         )
         engine = calculate(asset_id=asset_id, manager_cik=manager, known_at=known_at, closes=closes)
+        semantic_v2 = self._storage.paths.format_version == 2
+        identifiers = {
+            (
+                semantic_institutional_metric_result_id(candidate)
+                if semantic_v2
+                else expected_institutional_metric_result_id(candidate)
+            )
+            for candidate in engine.candidates
+        }
+        existing_by_id = self._storage.metric_results.get_existing(identifiers)
         created = reused = 0
         for candidate in engine.candidates:
+            result_id = (
+                semantic_institutional_metric_result_id(candidate)
+                if semantic_v2
+                else expected_institutional_metric_result_id(candidate)
+            )
             result = MetricResult(
-                result_id=expected_institutional_metric_result_id(candidate),
+                result_id=result_id,
                 asset_id=candidate.asset_id,
                 metric_key=candidate.metric_key,
                 value=candidate.value,
@@ -102,10 +118,9 @@ class InstitutionalMetricPipeline:
                 algorithm_version=ALGORITHM_VERSION,
                 quality=candidate.quality,
             )
-            try:
-                existing = self._storage.metric_results.get(result.result_id)
-            except RecordNotFoundError:
-                self._storage.metric_results.save(result)
+            existing = existing_by_id.get(result.result_id)
+            if existing is None:
+                self._storage.metric_results.save_many([result])
                 created += 1
             else:
                 if existing.model_dump(exclude={"computed_at"}) != result.model_dump(

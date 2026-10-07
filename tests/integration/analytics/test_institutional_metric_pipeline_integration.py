@@ -52,19 +52,6 @@ def test_manager_scoped_inputs_match_full_history_at_two_cuts(tmp_path) -> None:
     from investment_analyst.storage import LocalStorage, StoragePaths
 
     now = datetime(2025, 2, 16, tzinfo=UTC)
-    cover = (
-        b"<edgarSubmission><submissionType>13F-HR</submissionType>"
-        b"<filingManager><name>Manager LLC</name></filingManager>"
-        b"<reportCalendarOrQuarter>12-31-2024</reportCalendarOrQuarter>"
-        b"<tableEntryTotal>1</tableEntryTotal><tableValueTotal>50.10</tableValueTotal>"
-        b"</edgarSubmission>"
-    )
-    table = (
-        b"<informationTable><infoTable><nameOfIssuer>APPLE INC</nameOfIssuer>"
-        b"<titleOfClass>COM</titleOfClass><cusip>037833100</cusip><value>50.10</value>"
-        b"<shrsOrPrnAmt><sshPrnamt>10</sshPrnamt><sshPrnamtType>SH</sshPrnamtType>"
-        b"</shrsOrPrnAmt></infoTable></informationTable>"
-    )
 
     class _Submissions:
         def fetch(self, filer_cik: str):
@@ -89,12 +76,18 @@ def test_manager_scoped_inputs_match_full_history_at_two_cuts(tmp_path) -> None:
                         "name": "Manager LLC",
                         "filings": {
                             "recent": {
-                                "accessionNumber": ["0000950123-25-000001"],
-                                "filingDate": ["2025-02-14"],
-                                "reportDate": ["2024-12-31"],
-                                "acceptanceDateTime": ["2025-02-14T18:00:00Z"],
-                                "form": ["13F-HR"],
-                                "primaryDocument": ["primary_doc.xml"],
+                                "accessionNumber": [
+                                    "0000950123-24-000001",
+                                    "0000950123-25-000001",
+                                ],
+                                "filingDate": ["2024-11-14", "2025-02-14"],
+                                "reportDate": ["2024-09-30", "2024-12-31"],
+                                "acceptanceDateTime": [
+                                    "2024-11-14T18:00:00Z",
+                                    "2025-02-14T18:00:00Z",
+                                ],
+                                "form": ["13F-HR", "13F-HR"],
+                                "primaryDocument": ["primary_doc.xml", "primary_doc.xml"],
                             }
                         },
                     }
@@ -116,7 +109,27 @@ def test_manager_scoped_inputs_match_full_history_at_two_cuts(tmp_path) -> None:
             )
 
         def fetch(self, document: object) -> SecPrimaryDocumentResponse:
-            content = cover if document.name == "primary_doc.xml" else table
+            report_date = document.filing.report_date
+            prior = report_date.isoformat() == "2024-09-30"
+            table_value = "40.10" if prior else "50.10"
+            shares = "8" if prior else "10"
+            if document.name == "primary_doc.xml":
+                report_date_text = report_date.strftime("%m-%d-%Y")
+                content = (
+                    "<edgarSubmission><submissionType>13F-HR</submissionType>"
+                    "<filingManager><name>Manager LLC</name></filingManager>"
+                    f"<reportCalendarOrQuarter>{report_date_text}</reportCalendarOrQuarter>"
+                    f"<tableEntryTotal>1</tableEntryTotal><tableValueTotal>{table_value}</tableValueTotal>"
+                    "</edgarSubmission>"
+                ).encode()
+            else:
+                content = (
+                    "<informationTable><infoTable><nameOfIssuer>APPLE INC</nameOfIssuer>"
+                    "<titleOfClass>COM</titleOfClass><cusip>037833100</cusip>"
+                    f"<value>{table_value}</value><shrsOrPrnAmt><sshPrnamt>{shares}</sshPrnamt>"
+                    "<sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt>"
+                    "</infoTable></informationTable>"
+                ).encode()
             return SecPrimaryDocumentResponse(
                 content=content,
                 sha256=hashlib.sha256(content).hexdigest(),
@@ -133,7 +146,7 @@ def test_manager_scoped_inputs_match_full_history_at_two_cuts(tmp_path) -> None:
                 storage, _Submissions(), _Documents()
             ).run(
                 sec_institutional_holdings_pipeline.SecInstitutionalHoldingsImportRequest(
-                    filer_cik=filer_cik, forms=("13F-HR",)
+                    filer_cik=filer_cik, forms=("13F-HR",), limit_per_form=2
                 )
             )
             manager = "0001067983" if filer_cik == "1067983" else "0001234567"
@@ -217,8 +230,11 @@ def test_manager_scoped_inputs_match_full_history_at_two_cuts(tmp_path) -> None:
             storage.observations.list = observation_lists  # type: ignore[method-assign]
             storage.metric_results.list = metric_lists  # type: ignore[method-assign]
     assert foreign_reports
-    assert first.metrics_created + first.metrics_reused >= 0
-    assert second.metrics_reused >= first.metrics_reused or second.metrics_created == 0
+    assert first.metrics_generated > 0
+    assert first.metrics_created == first.metrics_generated
+    assert first.metrics_reused == 0
+    assert second.metrics_created == 0
+    assert second.metrics_reused == first.metrics_generated
     with LocalStorage(paths, read_only=True) as storage:
         results = storage.metric_results.list(asset_id="equity:us:aapl")
         assert all(result.parameters.get("manager_cik") == "0001067983" for result in results)

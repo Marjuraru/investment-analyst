@@ -9,6 +9,7 @@ from collections.abc import Collection, Iterator, Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 from time import perf_counter_ns
+from typing import Protocol
 from uuid import UUID
 
 from pydantic import ConfigDict, Field, model_validator
@@ -86,6 +87,9 @@ from investment_analyst.analytics.market.statistics_identity import semantic_met
 from investment_analyst.analytics.market.statistics_models import (
     MarketStatisticsRequest,
     MetricCalculation,
+)
+from investment_analyst.core.interfaces.repositories import (
+    MetricResultRepository,
 )
 from investment_analyst.core.models import MetricResult
 from investment_analyst.core.models.base import ContractModel, UTCDateTime
@@ -171,15 +175,41 @@ class IncrementalMarketReceipt(ContractModel):
     metric_dag_persist_elapsed_microseconds: int = Field(ge=0)
     checkpoint_metric_link_elapsed_microseconds: int = Field(ge=0)
     traceability_verified: bool
+    output_bar_count: int = Field(default=0, ge=0)
+    result_counts: dict[str, int] = Field(default_factory=dict)
+    warmup_counts: dict[str, int] = Field(default_factory=dict)
+    zero_denominator_skips: dict[str, int] = Field(default_factory=dict)
+    earliest_as_of: UTCDateTime | None = None
+    latest_as_of: UTCDateTime | None = None
+
+
+class IncrementalMetricResultStore(MetricResultRepository, Protocol):
+    """Typed metric persistence port shared with the owning workspace runtime."""
+
+    def find_market_metric_candidates(
+        self,
+        *,
+        asset_id: str,
+        source_id: str,
+        known_at: datetime,
+        metric_keys: Collection[str],
+        timestamps: Collection[datetime],
+    ) -> dict[UUID, MetricResult]: ...
 
 
 class IncrementalMarketService:
     """Advance append-only daily evidence and Decimal34 checkpoints in bounded pages."""
 
-    def __init__(self, staging: RawV2Staging) -> None:
+    def __init__(
+        self,
+        staging: RawV2Staging,
+        *,
+        metric_results: IncrementalMetricResultStore | None = None,
+    ) -> None:
         if not staging.is_open:
             raise ValueError("raw v2 staging must be open")
         self._staging = staging
+        self._metric_results = metric_results
         self._history = HistoricalMarketDataV2Service(staging)
         self._finite_engine = MarketStatisticsEngine()
 
@@ -229,6 +259,9 @@ class IncrementalMarketService:
         )
 
         totals = defaultdict(int)
+        result_counts: defaultdict[str, int] = defaultdict(int)
+        output_as_of: list[datetime] = []
+        output_bar_count = 0
         first_close_divergence: int | None = None
         first_hlc_divergence: int | None = None
         finite_keys = _finite_metric_keys(request.statistics)
@@ -243,6 +276,12 @@ class IncrementalMarketService:
             totals["discarded_revisions"] += history_page.discarded_revisions
             page_bars = history_page.bars
             totals["selected_bars"] += len(page_bars)
+            output_bars = tuple(
+                item
+                for item in page_bars
+                if output_query.start <= item.timestamp < output_query.end
+            )
+            output_bar_count += len(output_bars)
             if len(page_bars) > 256:
                 raise IncrementalStateError("history service returned a page larger than 256 bars")
 
@@ -297,6 +336,7 @@ class IncrementalMarketService:
                     recurrence,
                     known_at=output_query.known_at,
                     verified_prefixes=verified_prefixes,
+                    metric_results=self._metric_results,
                 )
                 existing_by_key[key] = existing
                 totals["checkpoints_reused"] += len(existing)
@@ -315,23 +355,34 @@ class IncrementalMarketService:
             finite_missing_times: set[datetime] = set()
             started = perf_counter_ns()
             if output_indexes:
-                candidates = self._staging.find_market_metric_candidates(
-                    asset_id=output_query.asset_id,
-                    metric_keys=finite_keys,
-                    timestamps=tuple(page_bars[index].timestamp for index in output_indexes),
+                candidate_query = {
+                    "asset_id": output_query.asset_id,
+                    "source_id": output_query.source_id,
+                    "known_at": output_query.known_at,
+                    "metric_keys": finite_keys,
+                    "timestamps": tuple(page_bars[index].timestamp for index in output_indexes),
+                }
+                candidates = (
+                    self._metric_results.find_market_metric_candidates(**candidate_query)
+                    if self._metric_results is not None
+                    else self._staging.find_market_metric_candidates(**candidate_query)
                 )
                 existing_finite = {_finite_presence_key(item) for item in candidates.values()}
                 prior_projections = [item for _, item in finite_projection_ring]
                 for index in output_indexes:
                     context = [*prior_projections, *page_bars[: index + 1]]
-                    for expected in _finite_expected_keys(
+                    expected_outputs = _finite_expected_keys(
                         page_bars[index],
                         context,
                         request.statistics,
-                    ):
-                        if expected not in existing_finite:
+                    )
+                    for expected in expected_outputs:
+                        if expected in existing_finite:
+                            totals["metrics_reused"] += 1
+                            result_counts[expected[0]] += 1
+                            output_as_of.append(expected[1])
+                        else:
                             finite_missing_times.add(page_bars[index].timestamp)
-                            break
             totals["finite_presence_elapsed_microseconds"] += _elapsed_microseconds(started)
 
             finite_groups = _group_finite_outputs(
@@ -451,7 +502,11 @@ class IncrementalMarketService:
             if page_results:
                 started = perf_counter_ns()
                 for batch in _topological_metric_batches(page_results):
-                    receipt = self._staging.save_metrics(batch)
+                    receipt = (
+                        self._metric_results.save_many(batch)
+                        if self._metric_results is not None
+                        else self._staging.save_metrics(batch)
+                    )
                     totals["metrics_created"] += len(receipt.created_ids)
                     totals["metrics_reused"] += len(receipt.reused_ids)
                     totals["metric_batches"] += 1
@@ -460,6 +515,9 @@ class IncrementalMarketService:
                         len(batch),
                     )
                 totals["metric_dag_persist_elapsed_microseconds"] += _elapsed_microseconds(started)
+                for calculation in page_calculations:
+                    result_counts[calculation.metric_key] += 1
+                    output_as_of.append(calculation.as_of)
                 started = perf_counter_ns()
                 self._append_checkpoint_metric_references(
                     page_calculations,
@@ -541,6 +599,10 @@ class IncrementalMarketService:
                 "checkpoint_metric_link_elapsed_microseconds"
             ],
             traceability_verified=True,
+            output_bar_count=output_bar_count,
+            result_counts=dict(sorted(result_counts.items())),
+            earliest_as_of=min(output_as_of) if output_as_of else None,
+            latest_as_of=max(output_as_of) if output_as_of else None,
         )
 
     def _materialize_projections(
@@ -593,6 +655,7 @@ class IncrementalMarketService:
             self._staging.save_market_recursive_checkpoints(
                 batch,
                 verified_prefixes=verified_prefixes,
+                metric_results=self._metric_results,
             )
 
 

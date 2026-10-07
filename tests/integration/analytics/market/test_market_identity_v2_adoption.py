@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -261,23 +262,47 @@ def _stored_result(
 
 
 def test_new_known_at_without_new_bars_creates_zero_finite_window_metrics(tmp_path) -> None:
-    """A5: a later cut without new evidence reuses every finite-window metric row."""
+    """A4/A5: a later cut reuses every finite metric through bounded repository batches."""
     clock = datetime(2026, 2, 1, tzinfo=UTC)
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
         start, end = _store_coinbase(storage, count=25)
         history = HistoricalMarketDataService(storage)
+        lookup_batches: list[int] = []
+        write_batches: list[int] = []
+        original_get_existing = storage.metric_results.get_existing
+        original_save_many = storage.metric_results.save_many
+
+        def tracked_get_existing(result_ids: Collection[UUID]) -> dict[UUID, MetricResult]:
+            lookup_batches.append(len(result_ids))
+            return original_get_existing(result_ids)
+
+        def tracked_save_many(results: Collection[MetricResult]):
+            write_batches.append(len(results))
+            return original_save_many(results)
+
+        storage.metric_results.get_existing = tracked_get_existing
+        storage.metric_results.save_many = tracked_save_many
+
         first = _pipeline(storage, history, clock).run(_statistics_request(start, end, clock))
         before = _rows(storage)
 
         assert first.results_created == first.results_generated > 0
+        assert sum(lookup_batches) == first.results_generated
+        assert all(size <= 256 for size in lookup_batches)
+        assert sum(write_batches) == first.results_created
+        assert all(size <= 256 for size in write_batches)
         assert {item.metric_key for item in before.values()} >= _FINITE_WINDOW_KEYS
         assert all(item.result_id.version == 8 for item in before.values())
         assert all(item.parameters.get("known_at") is None for item in before.values())
 
         later_cut = clock + timedelta(days=1)
+        prior_lookup_count = len(lookup_batches)
+        prior_write_count = len(write_batches)
         second = _pipeline(storage, history, clock + timedelta(days=2)).run(
             _statistics_request(start, end, later_cut)
         )
+        second_lookup_batches = lookup_batches[prior_lookup_count:]
+        second_write_batches = write_batches[prior_write_count:]
         after = _rows(storage)
         created = {
             item.metric_key for identifier, item in after.items() if identifier not in before
@@ -286,6 +311,9 @@ def test_new_known_at_without_new_bars_creates_zero_finite_window_metrics(tmp_pa
         assert created & _FINITE_WINDOW_KEYS == set()
         assert second.results_created == 0
         assert second.results_reused == second.results_generated == first.results_generated
+        assert sum(second_lookup_batches) == second.results_generated
+        assert all(size <= 256 for size in second_lookup_batches)
+        assert second_write_batches == []
         assert set(after) == set(before)
 
 

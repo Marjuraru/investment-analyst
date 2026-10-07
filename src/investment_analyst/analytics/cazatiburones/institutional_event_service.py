@@ -120,6 +120,7 @@ class InstitutionalEventService:
             asset_id=asset_id,
             metric_keys=_INSTITUTIONAL_METRIC_KEYS,
             available_to=known_at,
+            parameter_equals={"manager_cik": manager_cik},
         )
         filtered: list[MetricResult] = []
         for offset in range(0, len(candidate_ids), _EVENT_METRIC_BATCH_SIZE):

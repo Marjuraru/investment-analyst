@@ -26,6 +26,7 @@ from investment_analyst.analytics.cazatiburones.activity_metric_engine import (
 )
 from investment_analyst.analytics.cazatiburones.activity_metric_identity import (
     expected_activity_metric_result_id,
+    semantic_activity_metric_result_id,
 )
 from investment_analyst.analytics.cazatiburones.activity_metric_models import (
     ActivityMetricCandidate,
@@ -98,6 +99,16 @@ class ActivityMetricPipeline:
             beneficial_statements, observations=observation_index, known_at=known_at
         )
         candidates = insider_result.candidates + beneficial_result.candidates
+        semantic_v2 = self._storage.paths.format_version == 2
+        result_ids = {
+            (
+                semantic_activity_metric_result_id(candidate)
+                if semantic_v2
+                else expected_activity_metric_result_id(candidate)
+            )
+            for candidate in candidates
+        }
+        existing_by_id = self._storage.metric_results.get_existing(result_ids)
         skip_counts: Counter[str] = Counter()
         for skip in insider_result.skipped + beneficial_result.skipped:
             skip_counts[skip.reason] += 1
@@ -106,7 +117,12 @@ class ActivityMetricPipeline:
         created = 0
         reused = 0
         for candidate in candidates:
-            created_here = self._persist(candidate, computed_at=computed_at)
+            created_here = self._persist(
+                candidate,
+                computed_at=computed_at,
+                existing_by_id=existing_by_id,
+                semantic_v2=semantic_v2,
+            )
             if created_here:
                 created += 1
             else:
@@ -124,9 +140,20 @@ class ActivityMetricPipeline:
             skipped_by_reason=dict(skip_counts),
         )
 
-    def _persist(self, candidate: ActivityMetricCandidate, *, computed_at: datetime) -> bool:
+    def _persist(
+        self,
+        candidate: ActivityMetricCandidate,
+        *,
+        computed_at: datetime,
+        existing_by_id: dict[UUID, MetricResult],
+        semantic_v2: bool,
+    ) -> bool:
         """Save one candidate; return True when a new row was created, False when reused."""
-        result_id = expected_activity_metric_result_id(candidate)
+        result_id = (
+            semantic_activity_metric_result_id(candidate)
+            if semantic_v2
+            else expected_activity_metric_result_id(candidate)
+        )
         result = MetricResult(
             result_id=result_id,
             asset_id=candidate.asset_id,
@@ -141,10 +168,9 @@ class ActivityMetricPipeline:
             algorithm_version=candidate.algorithm_version,
             quality=candidate.quality,
         )
-        try:
-            existing = self._storage.metric_results.get(result_id)
-        except RecordNotFoundError:
-            self._storage.metric_results.save(result)
+        existing = existing_by_id.get(result_id)
+        if existing is None:
+            self._storage.metric_results.save_many([result])
             return True
         if _semantic_identity(existing) != _semantic_identity(result):
             raise ActivityMetricIdentityConflictError(

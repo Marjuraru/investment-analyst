@@ -188,6 +188,75 @@ def test_compact_metric_diagnostic_round_trip_and_segment_bounds(tmp_path: Path)
         assert sequence_count == 3
 
 
+def test_compact_metric_id_selection_filters_parameters_cut_and_range(tmp_path: Path) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "workspace", format_version=2)
+    raw, observation = _observation(0)
+    known_at = _BASE + timedelta(days=1)
+
+    def result(
+        *,
+        identity: str,
+        source_id: str,
+        version_two: bool,
+        legacy_cut: datetime = _BASE,
+    ) -> MetricResult:
+        item = MetricResult(
+            result_id=uuid4(),
+            asset_id="crypto:btc-usd",
+            metric_key="market.history.sma",
+            value=Decimal("10"),
+            unit="USD",
+            as_of=_BASE,
+            available_at=_BASE,
+            computed_at=known_at,
+            parameters={
+                "source_id": source_id,
+                "window": 2,
+                **({} if version_two else {"known_at": legacy_cut.isoformat()}),
+            },
+            input_observation_ids=[observation.observation_id],
+            algorithm_version="market-sma-v1-decimal34",
+            quality=DataQuality.VALID,
+        )
+        return item.model_copy(
+            update={
+                "result_id": (
+                    metric_result_id_from_model_v2(item)
+                    if version_two
+                    else uuid5(NAMESPACE_URL, identity)
+                )
+            }
+        )
+
+    matching_v2 = result(identity="matching-v2", source_id="fixture:market", version_two=True)
+    wrong_source_v2 = result(identity="wrong-source", source_id="fixture:other", version_two=True)
+    matching_v1 = result(
+        identity="matching-v1",
+        source_id="fixture:market",
+        version_two=False,
+        legacy_cut=known_at,
+    )
+    other_cut_v1 = result(identity="other-cut-v1", source_id="fixture:market", version_two=False)
+
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        storage.raw_records.save(raw)
+        storage.observations.save(observation)
+        storage.metric_results.save_many([matching_v2, wrong_source_v2, matching_v1, other_cut_v1])
+
+        selected = storage.metric_results.list_ids(
+            asset_id="crypto:btc-usd",
+            metric_keys=("market.history.sma",),
+            available_to=known_at,
+            as_of_from=_BASE - timedelta(days=1),
+            as_of_before=known_at,
+            parameter_equals={"source_id": "fixture:market"},
+            cut_known_at=known_at,
+        )
+
+    assert set(selected) == {matching_v2.result_id, matching_v1.result_id}
+
+
 def test_historical_seal_rejects_new_history_but_accepts_live_rows(tmp_path: Path) -> None:
     service = WorkspaceService(environ={}, home=tmp_path / "home")
     initialized = service.initialize(tmp_path / "workspace", format_version=2)

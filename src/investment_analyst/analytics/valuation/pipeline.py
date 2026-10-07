@@ -1,13 +1,17 @@
 """Append-only persistence for evaluated corporate valuation metrics."""
 
+from collections.abc import Collection
 from typing import Protocol
+from uuid import UUID
 
 from pydantic import ConfigDict, Field
 
+from investment_analyst.analytics.valuation.identity import valuation_result_parameters_v2
 from investment_analyst.analytics.valuation.models import (
     CorporateValuationSnapshot,
     ValuationStatus,
 )
+from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import (
     DataQuality,
     MetricCategory,
@@ -37,9 +41,9 @@ class _DefinitionRepository(Protocol):
 
 
 class _ResultRepository(Protocol):
-    def list(self, *, asset_id: str | None = None) -> list[MetricResult]: ...
+    def get_existing(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]: ...
 
-    def save(self, result: MetricResult) -> MetricResult: ...
+    def save_many(self, results: Collection[MetricResult]) -> BatchWriteReceipt: ...
 
 
 class _Storage(Protocol):
@@ -87,12 +91,15 @@ class CorporateValuationPersistencePipeline:
             else:
                 definitions_reused += 1
 
-        existing_results = {
-            item.result_id: item
-            for item in self._storage.metric_results.list(asset_id=snapshot.asset_id)
+        candidate_ids = {
+            metric.result_id
+            for metric in snapshot.metrics
+            if metric.status is ValuationStatus.EVALUATED and metric.result_id is not None
         }
+        existing_results = self._storage.metric_results.get_existing(candidate_ids)
         created = reused = 0
         definitions = {item.metric_key: item for item in snapshot.definitions}
+        to_save: list[MetricResult] = []
         for metric in snapshot.metrics:
             if metric.status is not ValuationStatus.EVALUATED or metric.value is None:
                 continue
@@ -105,16 +112,19 @@ class CorporateValuationPersistencePipeline:
             ):
                 raise ValueError("evaluated valuation metric lacks persistence metadata")
             definition = definitions[metric.metric_key]
-            result = MetricResult(
-                result_id=metric.result_id,
-                asset_id=snapshot.asset_id,
-                metric_key=metric.metric_key,
-                value=metric.value,
-                unit=definition.unit,
-                as_of=snapshot.valuation_as_of,
-                available_at=metric.available_at,
-                computed_at=snapshot.computed_at,
-                parameters={
+            if metric.result_id.version == 8 and snapshot.security_basis is not None:
+                parameters = valuation_result_parameters_v2(
+                    request=snapshot.request,
+                    annual_period_start=snapshot.annual_period_start,
+                    annual_period_end=snapshot.annual_period_end,
+                    security_basis_version=snapshot.security_basis.contract_version,
+                    formula=definition.formula,
+                    market_units_per_reported_share=(
+                        snapshot.security_basis.market_units_per_reported_share
+                    ),
+                )
+            else:
+                parameters = {
                     "category": MetricCategory.VALUATION.value,
                     "basis": snapshot.request.basis,
                     "known_at": snapshot.known_at.isoformat(),
@@ -130,7 +140,17 @@ class CorporateValuationPersistencePipeline:
                     "market_units_per_reported_share": str(
                         snapshot.security_basis.market_units_per_reported_share
                     ),
-                },
+                }
+            result = MetricResult(
+                result_id=metric.result_id,
+                asset_id=snapshot.asset_id,
+                metric_key=metric.metric_key,
+                value=metric.value,
+                unit=definition.unit,
+                as_of=snapshot.valuation_as_of,
+                available_at=metric.available_at,
+                computed_at=snapshot.computed_at,
+                parameters=parameters,
                 input_observation_ids=list(metric.input_observation_ids),
                 algorithm_version=definition.algorithm_version,
                 quality=DataQuality.VALID,
@@ -145,9 +165,11 @@ class CorporateValuationPersistencePipeline:
                     )
                 reused += 1
                 continue
-            self._storage.metric_results.save(result)
+            to_save.append(result)
             existing_results[result.result_id] = result
             created += 1
+        for result in to_save:
+            self._storage.metric_results.save_many([result])
         return ValuationPersistenceSummary(
             definitions_created=definitions_created,
             definitions_reused=definitions_reused,

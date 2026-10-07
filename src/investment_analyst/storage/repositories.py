@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from datetime import UTC, date, datetime
 from uuid import UUID
 
 from duckdb import DuckDBPyConnection
 from pydantic import BaseModel
 
+from investment_analyst.analytics.analytical_access_models import (
+    MetricIndexEntry,
+    MetricSeriesQuery,
+)
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import (
     Asset,
@@ -864,6 +868,11 @@ class DuckDBMetricDefinitionRepository:
         )
 
 
+def _validate_json_parameter_key(key: str) -> None:
+    if not key or not key.replace("_", "").isalnum() or not key.isascii():
+        raise ValueError("metric parameter keys must be simple ASCII identifiers")
+
+
 class DuckDBMetricResultRepository:
     """Append-only DuckDB repository for metric results."""
 
@@ -1104,34 +1113,138 @@ class DuckDBMetricResultRepository:
             ).fetchall()
         return tuple(UUID(str(row[0])) for row in rows)
 
+    def list_metric_index_page(self, query: MetricSeriesQuery) -> tuple[MetricIndexEntry, ...]:
+        """Select a filtered metric page as index projections before hydration."""
+        clauses = ["asset_id = ?"]
+        bindings: list[object] = [query.asset_id]
+        keys = tuple(sorted(set(query.metric_keys)))
+        clauses.append(f"metric_key IN ({', '.join('?' for _ in keys)})")
+        bindings.extend(keys)
+        clauses.append("available_at <= ?")
+        bindings.append(query.known_at.astimezone(UTC))
+        for column, value, operator in (
+            ("as_of", query.as_of_from, ">="),
+            ("as_of", query.as_of_before, "<"),
+        ):
+            if value is not None:
+                clauses.append(f"{column} {operator} ?")
+                bindings.append(value.astimezone(UTC))
+        for key, value in (("source_id", query.source_id), ("frequency", query.frequency)):
+            if value is not None:
+                clauses.append("json_extract_string(document_json, '$.parameters." + key + "') = ?")
+                bindings.append(value)
+        if query.after is not None:
+            clauses.append("(available_at, result_id) > (CAST(? AS TIMESTAMPTZ), ?)")
+            bindings.extend(
+                [query.after.available_at.astimezone(UTC).isoformat(), str(query.after.result_id)]
+            )
+        where = " AND ".join(clauses)
+        rows = self._connection.execute(
+            "SELECT result_id, asset_id, metric_key, CAST(as_of AS VARCHAR), "
+            "CAST(available_at AS VARCHAR), "
+            "json_extract_string(document_json, '$.parameters.source_id'), "
+            "json_extract_string(document_json, '$.parameters.frequency'), "
+            "json_extract_string(document_json, '$.parameters.known_at') "
+            f"FROM metric_results WHERE {where} ORDER BY available_at, result_id LIMIT ?",
+            [*bindings, query.limit],
+        ).fetchall()
+        return tuple(
+            MetricIndexEntry(
+                result_id=UUID(str(row[0])),
+                asset_id=str(row[1]),
+                metric_key=str(row[2]),
+                as_of=datetime.fromisoformat(str(row[3])).astimezone(UTC),
+                available_at=datetime.fromisoformat(str(row[4])).astimezone(UTC),
+                source_id=str(row[5]) if row[5] is not None else None,
+                frequency=str(row[6]) if row[6] is not None else None,
+                legacy_known_at=str(row[7]) if row[7] is not None else None,
+            )
+            for row in rows
+        )
+
     def list_ids(
         self,
         *,
         asset_id: str | None = None,
         metric_keys: Collection[str] | None = None,
         available_to: datetime | None = None,
+        as_of_from: datetime | None = None,
+        as_of_before: datetime | None = None,
+        parameter_equals: Mapping[str, str] | None = None,
+        parameter_date_range: tuple[str, str] | None = None,
+        cut_known_at: datetime | None = None,
+        legacy_known_at_to: datetime | None = None,
     ) -> list[UUID]:
         """Select metric IDs by closed-set scope and PIT cut before hydration."""
         clauses: list[str] = []
-        parameters: list[object] = []
+        bindings: list[object] = []
         if asset_id is not None:
             clauses.append("asset_id = ?")
-            parameters.append(asset_id)
+            bindings.append(asset_id)
         if metric_keys is not None:
             keys = tuple(sorted(set(metric_keys)))
             if not keys:
                 return []
             clauses.append(f"metric_key IN ({', '.join('?' for _ in keys)})")
-            parameters.extend(keys)
+            bindings.extend(keys)
         if available_to is not None:
             if available_to.tzinfo is None or available_to.utcoffset() is None:
                 raise ValueError("available_to must be timezone-aware")
             clauses.append("available_at <= ?")
-            parameters.append(available_to)
+            bindings.append(available_to.astimezone(UTC))
+        if as_of_from is not None:
+            if as_of_from.tzinfo is None or as_of_from.utcoffset() is None:
+                raise ValueError("as_of_from must be timezone-aware")
+            clauses.append("as_of >= ?")
+            bindings.append(as_of_from.astimezone(UTC))
+        if as_of_before is not None:
+            if as_of_before.tzinfo is None or as_of_before.utcoffset() is None:
+                raise ValueError("as_of_before must be timezone-aware")
+            clauses.append("as_of < ?")
+            bindings.append(as_of_before.astimezone(UTC))
+        for key, value in sorted((parameter_equals or {}).items()):
+            _validate_json_parameter_key(key)
+            clauses.append(f"json_extract_string(document_json, '$.parameters.{key}') = ?")
+            bindings.append(value)
+        if parameter_date_range is not None:
+            start, end = parameter_date_range
+            if start > end:
+                raise ValueError("parameter date range start must not follow end")
+            clauses.append(
+                "json_extract_string(document_json, '$.parameters.valuation_date') >= ? "
+                "AND json_extract_string(document_json, '$.parameters.valuation_date') <= ?"
+            )
+            bindings.extend((start, end))
+        if cut_known_at is not None:
+            if cut_known_at.tzinfo is None or cut_known_at.utcoffset() is None:
+                raise ValueError("cut_known_at must be timezone-aware")
+            legacy_cut = "json_extract_string(document_json, '$.parameters.known_at')"
+            clauses.append(
+                "(substr(result_id, 15, 1) = '8' OR "
+                "(substr(result_id, 15, 1) <> '8' AND ("
+                f"try_cast({legacy_cut} AS TIMESTAMPTZ) = CAST(? AS TIMESTAMPTZ) OR "
+                f"try_cast({legacy_cut} AS TIMESTAMPTZ) IS NULL OR "
+                f"NOT regexp_matches(coalesce({legacy_cut}, ''), "
+                "'(Z|[+-][0-9]{2}:[0-9]{2})$'))))"
+            )
+            bindings.append(cut_known_at.astimezone(UTC).isoformat())
+        if legacy_known_at_to is not None:
+            if legacy_known_at_to.tzinfo is None or legacy_known_at_to.utcoffset() is None:
+                raise ValueError("legacy_known_at_to must be timezone-aware")
+            legacy_cut = "json_extract_string(document_json, '$.parameters.known_at')"
+            clauses.append(
+                "(substr(result_id, 15, 1) = '8' OR "
+                "(substr(result_id, 15, 1) <> '8' AND ("
+                f"try_cast({legacy_cut} AS TIMESTAMPTZ) <= CAST(? AS TIMESTAMPTZ) OR "
+                f"try_cast({legacy_cut} AS TIMESTAMPTZ) IS NULL OR "
+                f"NOT regexp_matches(coalesce({legacy_cut}, ''), "
+                "'(Z|[+-][0-9]{2}:[0-9]{2})$'))))"
+            )
+            bindings.append(legacy_known_at_to.astimezone(UTC).isoformat())
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self._connection.execute(
             f"SELECT result_id FROM metric_results{where} ORDER BY available_at, result_id",
-            parameters,
+            bindings,
         ).fetchall()
         return [UUID(str(row[0])) for row in rows]
 

@@ -417,8 +417,12 @@ def test_only_audited_callers_invoke_v2_rule() -> None:
     """I2: exactly the two audited analytics callers plus the staging validator."""
     src_dir = Path("src/investment_analyst")
     allowed_callers = {
+        "src/investment_analyst/analytics/cazatiburones/activity_metric_identity.py",
+        "src/investment_analyst/analytics/cazatiburones/institutional_metric_identity.py",
+        "src/investment_analyst/analytics/cazatiburones/institutional_weight_identity.py",
         "src/investment_analyst/analytics/crypto/derivatives_identity.py",
         "src/investment_analyst/analytics/market/statistics_identity.py",
+        "src/investment_analyst/analytics/valuation/identity.py",
         "src/investment_analyst/storage/metric_v2.py",
     }
     violating_files: list[str] = []
