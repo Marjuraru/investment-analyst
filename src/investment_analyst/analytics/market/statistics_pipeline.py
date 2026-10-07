@@ -48,6 +48,9 @@ class MetricIdentityConflictError(MarketStatisticsPipelineError):
     """Raised when a deterministic metric ID maps to different analytical content."""
 
 
+_METRIC_BATCH_SIZE = 256
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -119,31 +122,38 @@ class MarketStatisticsPipeline:
             (calculation, semantic_metric_result_id(calculation))
             for calculation in ordered_calculations
         ]
-        identifiers = {identifier for _, identifier in calc_entries}
-        existing_map = self._storage.metric_results.get_existing(identifiers)
-
         created = 0
         reused = 0
-        to_save: list[MetricResult] = []
         stored_results: list[MetricResult] = []
+        receipts: list[BatchWriteReceipt] = []
 
-        for calculation, identifier in calc_entries:
+        for offset in range(0, len(calc_entries), _METRIC_BATCH_SIZE):
             check_operation_cancelled()
-            existing = existing_map.get(identifier)
-            if existing is not None:
-                self._verify_identity(existing, calculation)
-                stored_results.append(existing)
-                reused += 1
-            else:
-                result = self._to_result(calculation, identifier, computed_at)
-                to_save.append(result)
-                stored_results.append(result)
-                created += 1
+            batch = calc_entries[offset : offset + _METRIC_BATCH_SIZE]
+            identifiers = {identifier for _, identifier in batch}
+            existing_map = self._storage.metric_results.get_existing(identifiers)
+            to_save: list[MetricResult] = []
+            for calculation, identifier in batch:
+                existing = existing_map.get(identifier)
+                if existing is not None:
+                    self._verify_identity(existing, calculation)
+                    stored_results.append(existing)
+                    reused += 1
+                else:
+                    result = self._to_result(calculation, identifier, computed_at)
+                    to_save.append(result)
+                    stored_results.append(result)
+                    created += 1
+            if to_save:
+                receipts.append(self._storage.metric_results.save_many(to_save))
 
-        if to_save:
-            receipt = self._storage.metric_results.save_many(to_save)
-        else:
-            receipt = BatchWriteReceipt()
+        receipt = BatchWriteReceipt(
+            created_ids=tuple(identifier for item in receipts for identifier in item.created_ids),
+            reused_ids=tuple(identifier for item in receipts for identifier in item.reused_ids),
+            conflicting_ids=tuple(
+                identifier for item in receipts for identifier in item.conflicting_ids
+            ),
+        )
 
         check_operation_cancelled()
         self._verify_run(
@@ -285,8 +295,12 @@ class MarketStatisticsPipeline:
             if dependency_id not in generated_ids
         }
         if external_dep_ids:
+            ordered_external_ids = sorted(external_dep_ids, key=str)
             try:
-                self._storage.metric_results.get_many(external_dep_ids)
+                for offset in range(0, len(ordered_external_ids), _METRIC_BATCH_SIZE):
+                    self._storage.metric_results.get_many(
+                        ordered_external_ids[offset : offset + _METRIC_BATCH_SIZE]
+                    )
             except RecordNotFoundError as error:
                 raise MarketStatisticsPipelineError(
                     "derived metric dependency is missing"

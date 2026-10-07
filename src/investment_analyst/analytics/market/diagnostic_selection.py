@@ -154,7 +154,6 @@ class MarketDiagnosticMetricSelector:
             available_to=request.query.known_at,
             as_of_from=request.query.start,
             as_of_before=request.query.end,
-            parameter_equals={"source_id": request.query.source_id},
             cut_known_at=request.query.known_at,
         )
         output: list[MetricResult] = []

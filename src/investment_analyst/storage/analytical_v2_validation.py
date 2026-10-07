@@ -77,17 +77,21 @@ def _existing_metric_ids(
     connection: DuckDBPyConnection,
     table: str,
     metric_ids: Collection[UUID],
+    *,
+    existing_tables: Collection[str] | None = None,
 ) -> set[UUID]:
     """Return persisted metric IDs from one of the two supported v2 stores."""
     if table not in {_METRIC_TABLE, _COMPACT_METRIC_TABLE}:
         raise ValueError("unsupported metric v2 table")
-    existing_tables = {
-        str(row[0])
-        for row in connection.execute(
-            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
-        ).fetchall()
-    }
-    if table not in existing_tables:
+    table_names = existing_tables
+    if table_names is None:
+        table_names = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+            ).fetchall()
+        }
+    if table not in table_names:
         return set()
     output: set[UUID] = set()
     for chunk in chunked_sequence(tuple(sorted(set(metric_ids), key=str)), MAX_CHUNK_SIZE):
@@ -98,6 +102,16 @@ def _existing_metric_ids(
         ).fetchall()
         output.update(UUID(str(row[0])) for row in rows)
     return output
+
+
+def _metric_storage_tables(connection: DuckDBPyConnection) -> set[str]:
+    """Return the available v2 metric tables for one lookup operation."""
+    return {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+        ).fetchall()
+    }
 
 
 class _ConnectionMetricResultLookup:
@@ -205,8 +219,19 @@ class AnalyticalV2ValidationContext:
         ordered_ids = tuple(sorted(set(metric_ids), key=str))
         missing_ids = [mid for mid in ordered_ids if mid not in self.metrics_by_id]
         if missing_ids:
-            raw_ids = _existing_metric_ids(connection, _METRIC_TABLE, missing_ids)
-            compact_ids = _existing_metric_ids(connection, _COMPACT_METRIC_TABLE, missing_ids)
+            existing_tables = _metric_storage_tables(connection)
+            raw_metrics = (
+                fetch_metrics_chunked(connection, missing_ids, allow_missing=True)
+                if _METRIC_TABLE in existing_tables
+                else {}
+            )
+            raw_ids = set(raw_metrics)
+            compact_ids = _existing_metric_ids(
+                connection,
+                _COMPACT_METRIC_TABLE,
+                missing_ids,
+                existing_tables=existing_tables,
+            )
             duplicate_ids = raw_ids.intersection(compact_ids)
             if duplicate_ids:
                 duplicate = min(duplicate_ids, key=str)
@@ -216,8 +241,7 @@ class AnalyticalV2ValidationContext:
                 first_missing = min(unknown_ids, key=str)
                 raise RecordNotFoundError(f"metric v2 {first_missing} was not found")
             if raw_ids:
-                fetched = fetch_metrics_chunked(connection, raw_ids)
-                verify_metrics_dag_and_lineage(connection, fetched, context=self)
+                verify_metrics_dag_and_lineage(connection, raw_metrics, context=self)
             if compact_ids:
                 self._resolve_compact_metrics(connection, compact_ids)
 
@@ -239,6 +263,7 @@ class AnalyticalV2ValidationContext:
         compact_metrics: dict[UUID, MetricResult] = {}
         raw_dependencies: set[UUID] = set()
         store = CompactAnalyticalStore(connection)
+        existing_tables = _metric_storage_tables(connection)
         while pending:
             batch = tuple(
                 identifier
@@ -248,8 +273,18 @@ class AnalyticalV2ValidationContext:
             del pending[:MAX_CHUNK_SIZE]
             if not batch:
                 continue
-            compact_ids = _existing_metric_ids(connection, _COMPACT_METRIC_TABLE, batch)
-            raw_ids = _existing_metric_ids(connection, _METRIC_TABLE, batch)
+            compact_ids = _existing_metric_ids(
+                connection,
+                _COMPACT_METRIC_TABLE,
+                batch,
+                existing_tables=existing_tables,
+            )
+            raw_ids = _existing_metric_ids(
+                connection,
+                _METRIC_TABLE,
+                batch,
+                existing_tables=existing_tables,
+            )
             duplicate_ids = compact_ids.intersection(raw_ids)
             if duplicate_ids:
                 duplicate = min(duplicate_ids, key=str)
@@ -603,6 +638,8 @@ def find_transitive_metric_ancestor_ids(
 def fetch_metrics_chunked(
     connection: DuckDBPyConnection,
     result_ids: Collection[UUID],
+    *,
+    allow_missing: bool = False,
 ) -> dict[UUID, MetricResult]:
     """Hydrate MetricResult models in chunks of <= 256 without N+1 queries."""
     _, _, row_to_metric = _get_metric_v2_symbols()
@@ -628,16 +665,21 @@ def fetch_metrics_chunked(
         ).fetchall()
 
         rows_by_id = {str(row[0]): row for row in rows}
-        for mid in chunk:
-            if str(mid) not in rows_by_id:
-                raise RecordNotFoundError(f"metric v2 {mid} was not found")
+        missing = [mid for mid in chunk if str(mid) not in rows_by_id]
+        if missing and not allow_missing:
+            raise RecordNotFoundError(f"metric v2 {missing[0]} was not found")
+        present_ids = tuple(mid for mid in chunk if str(mid) in rows_by_id)
+        if not present_ids:
+            continue
+        present_placeholders = ", ".join("?" for _ in present_ids)
+        present_strings = [str(item) for item in present_ids]
 
         # 2. Observation links
         obs_rows = connection.execute(
             f"SELECT result_id, position, observation_id "
-            f"FROM {_METRIC_OBS_LINKS} WHERE result_id IN ({placeholders}) "
+            f"FROM {_METRIC_OBS_LINKS} WHERE result_id IN ({present_placeholders}) "
             "ORDER BY result_id, position",
-            chunk_str,
+            present_strings,
         ).fetchall()
         obs_by_metric: dict[str, list[tuple[int, UUID]]] = collections.defaultdict(list)
         for r_id, pos, obs_id in obs_rows:
@@ -646,15 +688,15 @@ def fetch_metrics_chunked(
         # 3. Metric links
         met_rows = connection.execute(
             f"SELECT result_id, position, input_result_id "
-            f"FROM {_METRIC_METRIC_LINKS} WHERE result_id IN ({placeholders}) "
+            f"FROM {_METRIC_METRIC_LINKS} WHERE result_id IN ({present_placeholders}) "
             "ORDER BY result_id, position",
-            chunk_str,
+            present_strings,
         ).fetchall()
         met_by_metric: dict[str, list[tuple[int, UUID]]] = collections.defaultdict(list)
         for r_id, pos, dep_id in met_rows:
             met_by_metric[str(r_id)].append((int(pos), UUID(str(dep_id))))
 
-        for mid in chunk:
+        for mid in present_ids:
             mid_str = str(mid)
             row = rows_by_id[mid_str]
 

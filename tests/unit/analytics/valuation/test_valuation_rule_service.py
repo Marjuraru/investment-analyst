@@ -1,5 +1,6 @@
 """Focused PIT and Decimal tests for descriptive valuation rules."""
 
+from collections.abc import Collection
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -22,8 +23,57 @@ class _Results:
     def __init__(self, results: list[MetricResult]) -> None:
         self._results = results
 
-    def list(self, *, asset_id: str | None = None) -> list[MetricResult]:
-        return [item for item in self._results if asset_id is None or item.asset_id == asset_id]
+    def list_ids(
+        self,
+        *,
+        asset_id: str | None = None,
+        metric_keys: Collection[str] | None = None,
+        available_to: datetime | None = None,
+        parameter_equals: dict[str, str] | None = None,
+        parameter_date_range: tuple[str, str] | None = None,
+        legacy_known_at_to: datetime | None = None,
+    ) -> list[UUID]:
+        results = self._results
+        if asset_id is not None:
+            results = [item for item in results if item.asset_id == asset_id]
+        if metric_keys is not None:
+            results = [item for item in results if item.metric_key in metric_keys]
+        if available_to is not None:
+            results = [item for item in results if item.available_at <= available_to]
+        for key, value in (parameter_equals or {}).items():
+            results = [item for item in results if item.parameters.get(key) == value]
+        if parameter_date_range is not None:
+            start, end = parameter_date_range
+            results = [
+                item
+                for item in results
+                if isinstance(item.parameters.get("valuation_date"), str)
+                and start <= str(item.parameters["valuation_date"]) <= end
+            ]
+        if legacy_known_at_to is not None:
+            results = [
+                item
+                for item in results
+                if item.result_id.version == 8 or _legacy_cut_is_visible(item, legacy_known_at_to)
+            ]
+        return [item.result_id for item in results]
+
+    def get_many(self, result_ids: Collection[UUID]) -> dict[UUID, MetricResult]:
+        requested = set(result_ids)
+        return {item.result_id: item for item in self._results if item.result_id in requested}
+
+
+def _legacy_cut_is_visible(result: MetricResult, cut: datetime) -> bool:
+    raw_cut = result.parameters.get("known_at")
+    if not isinstance(raw_cut, str):
+        return True
+    try:
+        available_cut = datetime.fromisoformat(raw_cut.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if available_cut.tzinfo is None or available_cut.utcoffset() is None:
+        return True
+    return available_cut <= cut
 
 
 class _Storage:

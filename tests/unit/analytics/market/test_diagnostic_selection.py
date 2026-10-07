@@ -1,8 +1,9 @@
 """Tests for point-in-time selection of persisted diagnostic metrics."""
 
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -200,14 +201,21 @@ def test_selector_projects_only_the_four_required_metric_keys(tmp_path, monkeypa
     request = make_request()
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
         save_all(storage, complete_metrics())
-        original_list = storage.metric_results.list
+        original_list_ids = storage.metric_results.list_ids
+        original_get_many = storage.metric_results.get_many
         calls: list[dict[str, object]] = []
+        lookup_calls: list[tuple[UUID, ...]] = []
 
-        def tracked_list(**kwargs: object) -> list[MetricResult]:
+        def tracked_list_ids(**kwargs: object) -> list[UUID]:
             calls.append(kwargs)
-            return original_list(**kwargs)
+            return original_list_ids(**kwargs)
 
-        monkeypatch.setattr(storage.metric_results, "list", tracked_list)
+        def tracked_get_many(result_ids: Collection[UUID]) -> dict[UUID, MetricResult]:
+            lookup_calls.append(tuple(result_ids))
+            return original_get_many(result_ids)
+
+        monkeypatch.setattr(storage.metric_results, "list_ids", tracked_list_ids)
+        monkeypatch.setattr(storage.metric_results, "get_many", tracked_get_many)
         candidates = MarketDiagnosticMetricSelector(storage).candidates(request)
 
     assert len(candidates) == 5
@@ -215,10 +223,14 @@ def test_selector_projects_only_the_four_required_metric_keys(tmp_path, monkeypa
         {
             "asset_id": ASSET_ID,
             "metric_keys": REQUIRED_METRIC_KEYS,
+            "available_to": request.query.known_at,
             "as_of_from": request.query.start,
-            "as_of_to": request.query.end,
+            "as_of_before": request.query.end,
+            "cut_known_at": request.query.known_at,
         }
     ]
+    assert len(lookup_calls) == 1
+    assert len(lookup_calls[0]) == 5
 
 
 def test_selector_candidates_are_identical_to_base_for_the_same_request(
