@@ -30,6 +30,7 @@ _FAMILY_TESTS = {
         "tests/integration/analytics/test_incremental_runtime_v2_integration.py",
         "tests/integration/analytics/market/test_market_identity_v2_adoption.py",
         "tests/integration/analytics/test_existing_metric_lookup_by_identity.py",
+        "tests/unit/analytics/market/test_diagnostic_selection.py",
     ),
     "derivatives": (
         "tests/integration/analytics/crypto/test_derivatives_pipeline.py",
@@ -1016,6 +1017,288 @@ def _family_measurement_table(family_results: Mapping[str, object]) -> list[dict
     return table
 
 
+def _family_inventory(family_results: Mapping[str, object]) -> dict[str, object]:
+    """Summarize fixture and product-run coverage without hiding per-run measurements."""
+    measured_runs = _family_measurement_table(family_results)
+    inventory: dict[str, object] = {}
+
+    def measurement_total(rows: Sequence[Mapping[str, object]], field: str) -> int:
+        return sum(
+            value
+            for row in rows
+            if isinstance((value := row.get(field)), int) and not isinstance(value, bool)
+        )
+
+    for family, result in family_results.items():
+        evidence = result.get("family_evidence") if isinstance(result, Mapping) else None
+        evidence_map = evidence if isinstance(evidence, Mapping) else {}
+        tests = evidence_map.get("tests", {})
+        test_map = tests if isinstance(tests, Mapping) else {}
+        runs = [item for item in measured_runs if item.get("family") == family]
+        status_counts = Counter(str(status) for status in test_map.values())
+
+        inventory[family] = {
+            "fixture_kind": "isolated synthetic or deterministic test fixtures",
+            "aggregation_scope": "sum over recorded test invocations, not unique database entities",
+            "test_paths": list(_FAMILY_TESTS[family]),
+            "tests": [
+                {"nodeid": str(nodeid), "status": str(status)}
+                for nodeid, status in sorted(test_map.items())
+            ],
+            "test_status_counts": dict(sorted(status_counts.items())),
+            "product_run_count": len(runs),
+            "input_rows_loaded_total": measurement_total(runs, "input_rows_loaded"),
+            "input_pages_total": measurement_total(runs, "input_page_count"),
+            "candidate_count_total": measurement_total(runs, "candidate_count"),
+            "calculated_candidate_count_total": measurement_total(
+                runs, "calculated_candidate_count"
+            ),
+            "created_count_total": measurement_total(runs, "created_count"),
+            "reused_count_total": measurement_total(runs, "reused_count"),
+            "runs": runs,
+            "identifiers_and_content_sha256": _canonical_digest(
+                [
+                    {
+                        key: row.get(key)
+                        for key in (
+                            "test",
+                            "pipeline",
+                            "candidate_ids_sha256",
+                            "created_ids_sha256",
+                            "reused_ids_sha256",
+                            "content_sha256",
+                        )
+                    }
+                    for row in runs
+                ]
+            ),
+        }
+    return inventory
+
+
+def _market_receipt_evidence(receipt: object) -> dict[str, object]:
+    if not isinstance(receipt, Mapping):
+        raise SmokeError("base/candidate comparison is missing a market receipt")
+    workload_fields = (
+        "selected_bars",
+        "bars_recalculated",
+        "recurrence_steps",
+        "metrics_created",
+        "metrics_reused",
+        "maximum_metric_batch",
+        "history_pages",
+        "bar_models_hydrated",
+        "finite_bar_models_hydrated",
+        "finite_window_calculations",
+        "finite_window_halo",
+    )
+    return {
+        "service_elapsed_microseconds": receipt.get("service_elapsed_microseconds"),
+        "phase_elapsed_microseconds": {
+            key: value
+            for key, value in receipt.items()
+            if key.endswith("_elapsed_microseconds")
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+        },
+        "work": {key: receipt.get(key) for key in workload_fields if key in receipt},
+        "sql": receipt.get("sql"),
+        "rss_high_water_bytes": receipt.get("rss_high_water_bytes"),
+    }
+
+
+def _market_scenarios(profile: Mapping[str, object]) -> dict[str, object]:
+    name = profile.get("profile")
+    if name == "market_incremental_v2_full_delta":
+        return {
+            key: profile.get(key)
+            for key in (
+                "full",
+                "clock_only_repeat",
+                "resume_delta_1",
+                "old_point_in_time_cut",
+                "correction",
+            )
+        }
+    if name == "market_incremental_v2_restore_resume":
+        return {
+            key: profile.get(key)
+            for key in (
+                "uninterrupted",
+                "restore_resume",
+                "backup_create_elapsed_microseconds",
+                "corrupt_restore_validation_elapsed_microseconds",
+                "restore_elapsed_microseconds",
+            )
+        }
+    if name == "market_incremental_v2_scaling":
+        cases = profile.get("cases")
+        if not isinstance(cases, list):
+            raise SmokeError("base/candidate scaling profile has no cases")
+        return {
+            f"N={case.get('history_bars')}": {
+                key: case.get(key)
+                for key in (
+                    "initial_full",
+                    "delta_zero_before_noise",
+                    "delta_zero_after_noise",
+                    "delta_1",
+                    "delta_3",
+                )
+            }
+            for case in cases
+            if isinstance(case, Mapping)
+        }
+    raise SmokeError("base/candidate comparison contains an unknown market profile")
+
+
+def _base_candidate_comparison(
+    *,
+    report_path: str,
+    expected_base_sha: str,
+    expected_base_tree_sha: str,
+    candidate_market: object,
+    repository_root: Path,
+) -> dict[str, object]:
+    path = Path(report_path)
+    if path.is_symlink() or not path.is_file():
+        raise SmokeError("base market smoke report must be a regular, non-symlink file")
+    resolved = path.resolve(strict=True)
+    temporary_root = Path(tempfile.gettempdir()).resolve()
+    if not resolved.is_relative_to(temporary_root) or resolved.is_relative_to(repository_root):
+        raise SmokeError(
+            "base market smoke report must be outside the repository in temporary storage"
+        )
+    try:
+        raw = resolved.read_bytes()
+        baseline = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as error:
+        raise SmokeError("base market smoke report is unreadable or invalid JSON") from error
+    if not isinstance(baseline, Mapping) or not isinstance(candidate_market, Mapping):
+        raise SmokeError("base/candidate market smoke report has an invalid shape")
+    candidate = candidate_market
+    if baseline.get("schema_version") != "market-incremental-v2-smoke-v1":
+        raise SmokeError("base market smoke report has an unsupported schema")
+    if baseline.get("status") != "PASS":
+        raise SmokeError("base market smoke report did not pass")
+    if baseline.get("head_sha") != expected_base_sha:
+        raise SmokeError("base market smoke report SHA differs from the declared base")
+    if baseline.get("tree_sha") != expected_base_tree_sha:
+        raise SmokeError("base market smoke report tree differs from the declared base")
+    if baseline.get("working_tree_paths") != ["scripts/smoke_market_incremental_v2.py"]:
+        raise SmokeError("base smoke checkout contains changes beyond the shared harness")
+    if not baseline.get("worktree_dirty") or baseline.get("code_sha") is not None:
+        raise SmokeError("base smoke report does not identify its shared harness as an overlay")
+    if baseline.get("harness_sha256") != candidate.get("harness_sha256"):
+        raise SmokeError("base and candidate runs did not use the same market smoke harness")
+    if baseline.get("environment") != candidate.get("environment"):
+        raise SmokeError("base and candidate smoke environments are not comparable")
+    if baseline.get("synthetic_data_manifest") != candidate.get("synthetic_data_manifest"):
+        raise SmokeError("base and candidate smoke parameters or synthetic inventory differ")
+    if candidate.get("status") != "PASS" or candidate.get("worktree_dirty"):
+        raise SmokeError("candidate market smoke must pass on its exact clean source SHA")
+    if candidate.get("head_sha") == baseline.get("head_sha"):
+        raise SmokeError("base/candidate comparison resolved both runs to the same SHA")
+
+    baseline_profiles = baseline.get("profiles")
+    candidate_profiles = candidate.get("profiles")
+    if not isinstance(baseline_profiles, list) or not isinstance(candidate_profiles, list):
+        raise SmokeError("base/candidate market report is missing profile results")
+    base_by_name = {
+        str(item.get("profile")): item for item in baseline_profiles if isinstance(item, Mapping)
+    }
+    candidate_by_name = {
+        str(item.get("profile")): item for item in candidate_profiles if isinstance(item, Mapping)
+    }
+    if base_by_name.keys() != candidate_by_name.keys():
+        raise SmokeError("base and candidate smoke profiles differ")
+
+    scenarios: list[dict[str, object]] = []
+
+    def add_pair(name: str, base_receipt: object, candidate_receipt: object) -> None:
+        if isinstance(base_receipt, Mapping) and isinstance(candidate_receipt, Mapping):
+            scenarios.append(
+                {
+                    "scenario": name,
+                    "base": _market_receipt_evidence(base_receipt),
+                    "candidate": _market_receipt_evidence(candidate_receipt),
+                }
+            )
+            return
+        if isinstance(base_receipt, int) and isinstance(candidate_receipt, int):
+            scenarios.append(
+                {
+                    "scenario": name,
+                    "base": {"elapsed_microseconds": base_receipt, "sql": None},
+                    "candidate": {"elapsed_microseconds": candidate_receipt, "sql": None},
+                }
+            )
+            return
+        raise SmokeError(f"base/candidate scenario {name} has mismatched measurement shapes")
+
+    for profile_name in sorted(base_by_name):
+        base_scenarios = _market_scenarios(base_by_name[profile_name])
+        candidate_scenarios = _market_scenarios(candidate_by_name[profile_name])
+        if base_scenarios.keys() != candidate_scenarios.keys():
+            raise SmokeError(f"base/candidate scenarios differ for {profile_name}")
+        for scenario_name in sorted(base_scenarios):
+            if profile_name.endswith("restore_resume") and scenario_name.endswith(
+                "_elapsed_microseconds"
+            ):
+                add_pair(
+                    f"{profile_name}:{scenario_name}",
+                    base_scenarios[scenario_name],
+                    candidate_scenarios[scenario_name],
+                )
+            elif profile_name.endswith("scaling"):
+                base_cases = base_scenarios[scenario_name]
+                candidate_cases = candidate_scenarios[scenario_name]
+                if not isinstance(base_cases, Mapping) or not isinstance(candidate_cases, Mapping):
+                    raise SmokeError("base/candidate scaling scenario has an invalid shape")
+                if base_cases.keys() != candidate_cases.keys():
+                    raise SmokeError(f"base/candidate measurements differ for {scenario_name}")
+                for phase in sorted(base_cases):
+                    add_pair(
+                        f"{profile_name}:{scenario_name}:{phase}",
+                        base_cases[phase],
+                        candidate_cases[phase],
+                    )
+            else:
+                add_pair(
+                    f"{profile_name}:{scenario_name}",
+                    base_scenarios[scenario_name],
+                    candidate_scenarios[scenario_name],
+                )
+
+    return {
+        "status": "PASS",
+        "base": {
+            "sha": baseline["head_sha"],
+            "tree_sha": baseline["tree_sha"],
+            "report_sha256": hashlib.sha256(raw).hexdigest(),
+            "harness_sha256": baseline["harness_sha256"],
+            "worktree_paths": baseline["working_tree_paths"],
+            "started_at": baseline.get("started_at"),
+            "completed_at": baseline.get("completed_at"),
+        },
+        "candidate": {
+            "sha": candidate["head_sha"],
+            "tree_sha": candidate.get("tree_sha"),
+            "harness_sha256": candidate["harness_sha256"],
+            "started_at": candidate.get("started_at"),
+            "completed_at": candidate.get("completed_at"),
+        },
+        "same_environment": True,
+        "same_parameters_and_synthetic_inventory": True,
+        "method": (
+            "same market smoke harness and scenario parameters at declared base and candidate"
+        ),
+        "performance_claim": "descriptive scratch comparison only; Q5 and Q7 remain unclaimed",
+        "scenario_count": len(scenarios),
+        "scenarios": scenarios,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1023,6 +1306,13 @@ def main() -> int:
         required=True,
         help="new JSON evidence file outside the repository and workspace",
     )
+    parser.add_argument(
+        "--baseline-market-report",
+        required=True,
+        help="PASS report from the same market smoke harness running on the declared base SHA",
+    )
+    parser.add_argument("--base-sha", required=True, help="full declared base commit SHA")
+    parser.add_argument("--base-tree-sha", required=True, help="full declared base tree SHA")
     args = parser.parse_args()
     repository_root = Path(__file__).resolve().parents[1]
     output = _output_path(args.output, repository_root)
@@ -1129,7 +1419,27 @@ def main() -> int:
                 missing.append(f"{pipeline}:batch_over_256")
         if missing:
             missing_family_pipelines[family] = sorted(missing)
-    passed = all(item["return_code"] == 0 for item in commands) and not missing_family_pipelines
+    market_smoke = commands[0].get("market_smoke", {}) if commands else {}
+    market_manifest = (
+        market_smoke.get("synthetic_data_manifest", {}) if isinstance(market_smoke, Mapping) else {}
+    )
+    try:
+        base_candidate_comparison = _base_candidate_comparison(
+            report_path=args.baseline_market_report,
+            expected_base_sha=args.base_sha,
+            expected_base_tree_sha=args.base_tree_sha,
+            candidate_market=market_smoke,
+            repository_root=repository_root,
+        )
+        comparison_error = None
+    except SmokeError as error:
+        base_candidate_comparison = None
+        comparison_error = str(error)
+    passed = (
+        all(item["return_code"] == 0 for item in commands)
+        and not missing_family_pipelines
+        and base_candidate_comparison is not None
+    )
     finished_at = datetime.now(UTC)
     document: dict[str, object] = {
         "schema_version": "incremental-runtime-v2-smoke-v1",
@@ -1149,9 +1459,33 @@ def main() -> int:
         "elapsed_microseconds": (perf_counter_ns() - overall_started) // 1_000,
         "orchestrator_rss_high_water_bytes": _rss_high_water_bytes(),
         "scratch": "exclusive temporary directory outside the repository, removed after exit",
+        "synthetic_data_manifest": {
+            "classification": "synthetic inputs and isolated test fixtures",
+            "live_provider_calls": 0,
+            "permanent_workspace_access": False,
+            "random_seed": None,
+            "randomness": (
+                "The market probe uses fixed Decimal/time formulas without a PRNG; some unit "
+                "fixtures use UUIDv4 identifiers, captured in per-run identifier/content digests."
+            ),
+            "market_probe": market_manifest,
+            "inventory_by_family": _family_inventory(family_results),
+            "same_asset_scope_contamination": {
+                "test": (
+                    "tests/unit/analytics/test_analytical_access_unit.py::"
+                    "test_repository_query_excludes_same_asset_source_frequency_and_cut_contamination"
+                ),
+                "asset_id": "equity:us:aapl",
+                "contaminating_rows": 3,
+                "dimensions": ["source_id", "frequency", "legacy known_at cut"],
+                "expected": "excluded before metric hydration",
+            },
+        },
         "families": family_results,
         "family_table": _family_measurement_table(family_results),
         "family_pipeline_gaps": missing_family_pipelines,
+        "base_candidate_comparison": base_candidate_comparison,
+        "base_candidate_comparison_error": comparison_error,
         "commands": commands,
     }
     try:

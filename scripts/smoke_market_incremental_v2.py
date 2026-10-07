@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 import resource
@@ -651,11 +652,13 @@ def _profile_restore_resume(root: Path) -> dict[str, object]:
             raise SmokeAssertionError("the completed first page was not durable after interruption")
 
         backup_path = root / "backup-v5"
+        backup_create_started = perf_counter_ns()
         backup_manifest = RawV2StagingBackupService().create(
             interrupted,
             interrupted_meter.raw,
             backup_path,
         )
+        backup_create_elapsed = (perf_counter_ns() - backup_create_started) // 1_000
         if backup_manifest.schema_version != RAW_V2_BACKUP_MANIFEST_SCHEMA_V5:
             raise SmokeAssertionError("incremental staging backup did not use manifest v5")
 
@@ -668,17 +671,21 @@ def _profile_restore_resume(root: Path) -> dict[str, object]:
             handle.seek(0)
             handle.write(bytes([original[0] ^ 1]))
         corrupt_destination = root / "corrupt-promoted-destination"
+        corrupt_restore_started = perf_counter_ns()
         try:
             RawV2StagingBackupService().restore(corrupt_path, corrupt_destination)
         except RawV2BackupError:
             pass
         else:
             raise SmokeAssertionError("corrupt backup copy was accepted")
+        corrupt_restore_validation_elapsed = (perf_counter_ns() - corrupt_restore_started) // 1_000
         if corrupt_destination.exists():
             raise SmokeAssertionError("corrupt backup created or promoted its destination")
 
         restore_path = root / "restored"
+        restore_started = perf_counter_ns()
         restored_manifest = RawV2StagingBackupService().restore(backup_path, restore_path)
+        restore_elapsed = (perf_counter_ns() - restore_started) // 1_000
         if restored_manifest.backup_id != backup_manifest.backup_id:
             raise SmokeAssertionError("restore changed the backup identity")
         restored, restored_meter = _open_staging(restore_path)
@@ -713,6 +720,9 @@ def _profile_restore_resume(root: Path) -> dict[str, object]:
             },
             "backup_schema": backup_manifest.schema_version,
             "backup_id": str(backup_manifest.backup_id),
+            "backup_create_elapsed_microseconds": backup_create_elapsed,
+            "corrupt_restore_validation_elapsed_microseconds": (corrupt_restore_validation_elapsed),
+            "restore_elapsed_microseconds": restore_elapsed,
             "corrupt_copy_rejected": True,
             "corrupt_destination_promoted": False,
             "uninterrupted": _receipt_summary(
@@ -815,6 +825,8 @@ def _profile_scaling(root: Path) -> dict[str, object]:
             cases.append(
                 {
                     "history_bars": count,
+                    "unrelated_asset_count": 32,
+                    "bars_per_unrelated_asset": 64,
                     "unrelated_bars": noise_rows,
                     "initial_full": _receipt_summary(initial, initial_sql, initial_elapsed),
                     "delta_zero_before_noise": _receipt_summary(
@@ -846,6 +858,12 @@ def _source_metadata() -> dict[str, object]:
             capture_output=True,
             text=True,
         ).stdout.strip()
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             check=True,
@@ -854,12 +872,16 @@ def _source_metadata() -> dict[str, object]:
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         head = "unknown"
+        tree = "unknown"
         status = "unknown"
     worktree_dirty = bool(status.strip())
     return {
         "head_sha": head,
+        "tree_sha": tree,
+        "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "code_sha": None if worktree_dirty else head,
         "worktree_dirty": worktree_dirty,
+        "working_tree_paths": [line[3:] for line in status.splitlines() if len(line) >= 4],
     }
 
 
@@ -888,7 +910,55 @@ def main() -> int:
     code_metadata = _source_metadata()
     document = {
         "schema_version": "market-incremental-v2-smoke-v1",
+        "status": "PASS",
         **code_metadata,
+        "synthetic_data_manifest": {
+            "classification": "synthetic daily market bars generated in-process",
+            "live_provider_calls": 0,
+            "permanent_workspace_access": False,
+            "target": {
+                "asset_id": ASSET_ID,
+                "symbol": "AAPL",
+                "source_id": ALPACA_SOURCE_ID,
+                "provider": "Alpaca Market Data fixture; no network request",
+                "feed": "iex",
+                "adjustment": "all",
+                "frequency": "daily",
+            },
+            "inventory": {
+                "full_delta_profile_history_bars": 257,
+                "restore_resume_profile_history_bars": 257,
+                "scaling_history_bars": [257, 1537],
+                "unrelated_assets_per_scaling_case": 32,
+                "bars_per_unrelated_asset": 64,
+                "unrelated_bars_per_scaling_case": 2048,
+                "scaling_case_count": 2,
+            },
+            "parameters": {
+                "base_timestamp": _BASE.isoformat(),
+                "known_at": _KNOWN_AT.isoformat(),
+                "full_delta_output_start_index": 170,
+                "restore_resume_output_start_index": 225,
+                "scaling_output_start_rule": "max(0, history_bars - 40)",
+                "scaling_deltas": [0, 1, 3],
+                "recursive_windows": list(_WINDOWS),
+                "sma_windows": [5, 10, 20],
+                "volatility_window": 10,
+                "relative_volume_window": 10,
+                "bollinger_window": 20,
+                "rsi_window": 14,
+                "atr_window": 14,
+                "macd_windows": {"fast": 12, "slow": 26, "signal": 9},
+            },
+            "generator": {
+                "timestamps": "base + index days + floor(index / 17) days",
+                "close": "150 + index / 8",
+                "volume": "100 + index",
+                "trade_count": "100 + index",
+                "random_seed": None,
+                "randomness": "none; fixed Decimal formulas, no PRNG",
+            },
+        },
         "command": [sys.executable, "scripts/smoke_market_incremental_v2.py", *sys.argv[1:]],
         "environment": {
             "python": platform.python_version(),

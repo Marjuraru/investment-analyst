@@ -17,6 +17,7 @@ from investment_analyst.analytics.analytical_access_models import (
 from investment_analyst.analytics.analytical_access_service import (
     AnalyticalAccessError,
     AnalyticalAccessService,
+    RepositoryAnalyticalAccessAdapter,
 )
 from investment_analyst.core.models import (
     DataQuality,
@@ -24,6 +25,7 @@ from investment_analyst.core.models import (
     MetricDefinition,
     MetricResult,
 )
+from investment_analyst.storage import LocalStorage, StoragePaths
 
 _START = datetime(2026, 9, 1, tzinfo=UTC)
 _CUT = datetime(2026, 9, 10, tzinfo=UTC)
@@ -54,6 +56,34 @@ def _metrics(*, legacy_parameters: bool, computed_offset: int) -> tuple[MetricRe
             )
         )
     return tuple(output)
+
+
+def _scoped_metric(
+    identifier: int,
+    *,
+    available_at: datetime,
+    source_id: str,
+    frequency: str,
+    legacy_known_at: datetime,
+) -> MetricResult:
+    return MetricResult(
+        result_id=UUID(int=identifier),
+        asset_id="equity:us:aapl",
+        metric_key=_KEY,
+        value=Decimal("99.0"),
+        unit="USD",
+        as_of=available_at,
+        available_at=available_at,
+        computed_at=available_at + timedelta(hours=1),
+        parameters={
+            "source_id": source_id,
+            "frequency": frequency,
+            "known_at": legacy_known_at.isoformat(),
+        },
+        input_observation_ids=[UUID(int=identifier + 100_000)],
+        algorithm_version="ema-decimal34-v2",
+        quality=DataQuality.VALID,
+    )
 
 
 def _definition() -> MetricDefinition:
@@ -280,3 +310,68 @@ def test_metric_index_future_scope_is_rejected_before_metric_hydration() -> None
             )
         )
     assert port.hydrated == []
+
+
+def test_repository_query_excludes_same_asset_source_frequency_and_cut_contamination(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    valid = _metrics(legacy_parameters=True, computed_offset=1)
+    contaminated = (
+        _scoped_metric(
+            30_001,
+            available_at=_START - timedelta(days=3),
+            source_id="source:other",
+            frequency="1Day",
+            legacy_known_at=_CUT,
+        ),
+        _scoped_metric(
+            30_002,
+            available_at=_START - timedelta(days=2),
+            source_id="source:test",
+            frequency="1Week",
+            legacy_known_at=_CUT,
+        ),
+        _scoped_metric(
+            30_003,
+            available_at=_START - timedelta(days=1),
+            source_id="source:test",
+            frequency="1Day",
+            legacy_known_at=_CUT + timedelta(days=1),
+        ),
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        for metric in (*valid, *contaminated):
+            storage.metric_results.save(metric)
+
+        original_get_many = storage.metric_results.get_many
+        hydrated: list[UUID] = []
+
+        def tracked_get_many(result_ids) -> dict[UUID, MetricResult]:
+            identifiers = tuple(result_ids)
+            hydrated.extend(identifiers)
+            return original_get_many(identifiers)
+
+        monkeypatch.setattr(storage.metric_results, "get_many", tracked_get_many)
+        adapter = RepositoryAnalyticalAccessAdapter(
+            storage.metric_results,
+            storage.diagnostics,
+            storage.metric_definitions,
+        )
+        page = AnalyticalAccessService(adapter).metric_series(
+            MetricSeriesQuery(
+                asset_id="equity:us:aapl",
+                domain="market",
+                known_at=_CUT,
+                metric_keys=(_KEY,),
+                source_id="source:test",
+                frequency="1Day",
+                limit=10,
+            )
+        )
+
+    expected_ids = {item.result_id for item in valid}
+    contaminated_ids = {item.result_id for item in contaminated}
+    assert {item.result_id for item in page.items} == expected_ids
+    assert set(hydrated) == expected_ids
+    assert set(hydrated).isdisjoint(contaminated_ids)
