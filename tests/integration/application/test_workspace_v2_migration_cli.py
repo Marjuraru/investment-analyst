@@ -2,13 +2,29 @@
 
 from __future__ import annotations
 
+import errno
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from investment_analyst.workspace.service import WorkspaceService
+from investment_analyst.workspace.workspace_v2_migration import _require_host_capacity
+
+
+@pytest.fixture
+def migration_module():
+    repository = Path(__file__).resolve().parents[3]
+    path = repository / "scripts" / "migrate_workspace_v2.py"
+    spec = importlib.util.spec_from_file_location("migration_capacity_cli", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_budget_measures_roots_without_a_manual_byte_argument(tmp_path: Path) -> None:
@@ -182,3 +198,76 @@ def test_supervisor_records_a_durable_start_and_error_receipt(tmp_path: Path) ->
     assert supervisor["process"]["pid"] > 0
     assert "start_ticks" in supervisor["process"]
     assert supervisor["safe_error"].startswith("workspace-v2-migration:")
+
+
+@pytest.mark.parametrize(
+    "first_failure",
+    [
+        OSError(errno.EAGAIN, "temporary capacity process"),
+        subprocess.CompletedProcess(
+            [], 1, stdout="", stderr="UtilBindVsockAnyPort: socket failed 1"
+        ),
+    ],
+)
+def test_capacity_retries_only_identified_transient_failures(
+    migration_module, monkeypatch, first_failure
+) -> None:
+    attempts = iter(
+        [first_failure, subprocess.CompletedProcess([], 0, stdout="7384997888\n", stderr="")]
+    )
+
+    def run(*args, **kwargs):
+        outcome = next(attempts)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(migration_module.subprocess, "run", run)
+    evidence: list[dict[str, object]] = []
+
+    expected_outcome = "os_error" if isinstance(first_failure, OSError) else "nonzero_exit"
+    assert migration_module._host_free_bytes(evidence.append) == 7_384_997_888
+    assert [entry["outcome"] for entry in evidence] == [expected_outcome, "success"]
+    assert evidence[0]["diagnostic"] in {"transient", "transient_wsl_vsock"}
+
+
+@pytest.mark.parametrize(
+    ("failure", "message", "outcome"),
+    [
+        (
+            subprocess.CompletedProcess([], 1, stdout="", stderr="permanent"),
+            "nonzero exit status",
+            "nonzero_exit",
+        ),
+        (subprocess.TimeoutExpired(["powershell.exe"], 5), "invocation failed", "timeout"),
+        (
+            subprocess.CompletedProcess([], 0, stdout="not-a-number", stderr="secret"),
+            "invalid value",
+            "invalid_output",
+        ),
+    ],
+)
+def test_capacity_fails_closed_with_sanitized_attempt_evidence(
+    migration_module, monkeypatch, failure, message: str, outcome: str
+) -> None:
+    def run(*args, **kwargs):
+        if isinstance(failure, BaseException):
+            raise failure
+        return failure
+
+    monkeypatch.setattr(migration_module.subprocess, "run", run)
+    evidence: list[dict[str, object]] = []
+
+    with pytest.raises(migration_module.WorkspaceV2MigrationError, match=message):
+        migration_module._host_free_bytes(evidence.append)
+    assert evidence[0]["outcome"] == outcome
+    assert "secret" not in str(evidence)
+
+
+def test_capacity_reserve_remains_fail_closed(migration_module) -> None:
+    with pytest.raises(migration_module.WorkspaceV2MigrationError, match="reserve is insufficient"):
+        _require_host_capacity(
+            lambda: 7_384_997_888,
+            reserve_bytes=5_000_000_000,
+            expected_write_bytes=2_500_000_000,
+        )
