@@ -92,6 +92,27 @@ class WorkspaceManifest(_WorkspaceModel):
         }
 
 
+class WorkspaceMigrationIdentity(_WorkspaceModel):
+    """Recoverable binding between a v2 operational target and its v1 logical identity."""
+
+    schema_version: Literal["workspace-v2-migration-identity-v1"] = (
+        "workspace-v2-migration-identity-v1"
+    )
+    source_workspace_id: UUID
+    source_created_at: UTCDateTime
+    source_fingerprint: NonEmptyStr
+    destination_workspace_id: UUID
+
+    def to_json_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "source_workspace_id": str(self.source_workspace_id),
+            "source_created_at": self.source_created_at.isoformat(),
+            "source_fingerprint": self.source_fingerprint,
+            "destination_workspace_id": str(self.destination_workspace_id),
+        }
+
+
 class WorkspaceInitialization(_WorkspaceModel):
     """Outcome of an idempotent workspace initialization."""
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -16,7 +16,11 @@ from pydantic import ConfigDict, Field, field_validator
 from investment_analyst.core.models import DiagnosticResult, MetricResult
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 from investment_analyst.storage.errors import StorageError
-from investment_analyst.storage.historical_analytical_archive import HistoricalAnalyticalArchive
+from investment_analyst.storage.historical_analytical_archive import (
+    HistoricalAnalyticalArchive,
+    HistoricalAnalyticalCursor,
+    HistoricalAnalyticalRowsSummary,
+)
 from investment_analyst.storage.local import LocalStorage
 from investment_analyst.storage.raw_v2 import RawV2Staging
 from investment_analyst.storage.raw_v2_import import extend_digest
@@ -31,8 +35,145 @@ _MAX_PAGE = 256
 _EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
 
 
+def _validate_page_limit(limit: int) -> None:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _MAX_PAGE:
+        raise ValueError("historical analytical page limit must be from 1 to 256")
+
+
 class HistoricalAnalyticalImportError(StorageError):
     """Raised when historical analytical import preconditions or checkpoints fail."""
+
+
+class DirectHistoricalAnalyticalSource:
+    """Read v1 analytical rows in bounded keyset pages without an archive copy."""
+
+    def __init__(self, source: LocalStorage) -> None:
+        source.require_open()
+        if not source.read_only:
+            raise HistoricalAnalyticalImportError("direct historical source must be read-only")
+        self._source = source
+
+    def list_metrics_page(
+        self, *, limit: int, after: HistoricalAnalyticalCursor | None
+    ) -> tuple[MetricResult, ...]:
+        identifiers = self._source.metric_results.list_import_page(
+            limit=limit,
+            after_available_at=after.available_at if after else None,
+            after_result_id=after.identifier if after else None,
+        )
+        records = self._source.metric_results.get_many(identifiers)
+        if len(records) != len(identifiers):
+            raise HistoricalAnalyticalImportError("direct historical metric page is incomplete")
+        return tuple(records[identifier] for identifier in identifiers)
+
+    def list_diagnostics_page(
+        self, *, limit: int, after: HistoricalAnalyticalCursor | None
+    ) -> tuple[DiagnosticResult, ...]:
+        identifiers = self._source.diagnostics.list_import_page(
+            limit=limit,
+            after_available_at=after.available_at if after else None,
+            after_diagnostic_id=after.identifier if after else None,
+        )
+        records = self._source.diagnostics.get_many(identifiers)
+        if len(records) != len(identifiers):
+            raise HistoricalAnalyticalImportError("direct historical diagnostic page is incomplete")
+        return tuple(records[identifier] for identifier in identifiers)
+
+    def iter_metric_pages(
+        self, *, limit: int, after: HistoricalAnalyticalCursor | None = None
+    ) -> Iterator[tuple[MetricResult, ...]]:
+        """Read one ordered source cursor and hydrate at most ``limit`` models at once."""
+        _validate_page_limit(limit)
+        query = "SELECT result_id FROM metric_results"
+        parameters: list[object] = []
+        if after is not None:
+            query += " WHERE available_at > ? OR (available_at = ? AND result_id > ?)"
+            parameters.extend((after.available_at, after.available_at, str(after.identifier)))
+        cursor = self._source.store.connection.cursor()
+        try:
+            rows = cursor.execute(query + " ORDER BY available_at, result_id", parameters)
+            while identifiers := tuple(UUID(str(row[0])) for row in rows.fetchmany(limit)):
+                records = self._source.metric_results.get_many(identifiers)
+                if len(records) != len(identifiers):
+                    raise HistoricalAnalyticalImportError(
+                        "direct historical metric page is incomplete"
+                    )
+                yield tuple(records[identifier] for identifier in identifiers)
+        finally:
+            cursor.close()
+
+    def iter_diagnostic_pages(
+        self, *, limit: int, after: HistoricalAnalyticalCursor | None = None
+    ) -> Iterator[tuple[DiagnosticResult, ...]]:
+        """Read one ordered source cursor and hydrate at most ``limit`` models at once."""
+        _validate_page_limit(limit)
+        query = "SELECT diagnostic_id FROM diagnostic_results"
+        parameters: list[object] = []
+        if after is not None:
+            query += " WHERE available_at > ? OR (available_at = ? AND diagnostic_id > ?)"
+            parameters.extend((after.available_at, after.available_at, str(after.identifier)))
+        cursor = self._source.store.connection.cursor()
+        try:
+            rows = cursor.execute(query + " ORDER BY available_at, diagnostic_id", parameters)
+            while identifiers := tuple(UUID(str(row[0])) for row in rows.fetchmany(limit)):
+                records = self._source.diagnostics.get_many(identifiers)
+                if len(records) != len(identifiers):
+                    raise HistoricalAnalyticalImportError(
+                        "direct historical diagnostic page is incomplete"
+                    )
+                yield tuple(records[identifier] for identifier in identifiers)
+        finally:
+            cursor.close()
+
+    def verify_rows(self) -> HistoricalAnalyticalRowsSummary:
+        metric_count, metric_digest, metric_cursor = self._inventory_metrics()
+        diagnostic_count, diagnostic_digest, diagnostic_cursor = self._inventory_diagnostics()
+        return HistoricalAnalyticalRowsSummary(
+            metric_count=metric_count,
+            diagnostic_count=diagnostic_count,
+            metric_digest=metric_digest,
+            diagnostic_digest=diagnostic_digest,
+            metric_cursor=metric_cursor,
+            diagnostic_cursor=diagnostic_cursor,
+        )
+
+    def verify_complete(self) -> None:
+        """The direct source has no archive-only graph representation to validate."""
+        self.verify_rows()
+
+    def _inventory_metrics(self) -> tuple[int, str, HistoricalAnalyticalCursor | None]:
+        count = 0
+        digest = _EMPTY_DIGEST
+        cursor: HistoricalAnalyticalCursor | None = None
+        while True:
+            page = self.list_metrics_page(limit=_MAX_PAGE, after=cursor)
+            if not page:
+                return count, digest, cursor
+            for record in page:
+                digest = _fold_digest(digest, record)
+                count += 1
+            last = page[-1]
+            cursor = HistoricalAnalyticalCursor(
+                available_at=last.available_at,
+                identifier=last.result_id,
+            )
+
+    def _inventory_diagnostics(self) -> tuple[int, str, HistoricalAnalyticalCursor | None]:
+        count = 0
+        digest = _EMPTY_DIGEST
+        cursor: HistoricalAnalyticalCursor | None = None
+        while True:
+            page = self.list_diagnostics_page(limit=_MAX_PAGE, after=cursor)
+            if not page:
+                return count, digest, cursor
+            for record in page:
+                digest = _fold_digest(digest, record)
+                count += 1
+            last = page[-1]
+            cursor = HistoricalAnalyticalCursor(
+                available_at=last.available_at,
+                identifier=last.diagnostic_id,
+            )
 
 
 class HistoricalAnalyticalImportCursor(ContractModel):
@@ -160,6 +301,7 @@ class HistoricalAnalyticalImporter:
         page_limit: int = _MAX_PAGE,
         clock: Callable[[], datetime] | None = None,
         failure_injector: Callable[[str], None] | None = None,
+        allow_source_transition: bool = False,
     ) -> None:
         source.require_open()
         if not source.read_only:
@@ -182,6 +324,7 @@ class HistoricalAnalyticalImporter:
         self._page_limit = page_limit
         self._clock = clock or (lambda: datetime.now(UTC))
         self._failure_injector = failure_injector
+        self._allow_source_transition = allow_source_transition
         self._workspace_id = self._read_workspace_id()
         self._staging_id = staging.staging_id
         if self._staging_id is None or not self._staging_id.strip():
@@ -217,13 +360,21 @@ class HistoricalAnalyticalImporter:
         state_path = self._staging.destination / _STATE_FILENAME
         if state_path.exists() or state_path.is_symlink():
             state = _read_state(state_path)
-            self._check_state_binding(
-                state,
-                source_fingerprint=source_fingerprint,
-                raw_digest=raw_digest,
-                observation_digest=observation_digest,
-            )
-            self._validate_confirmed_prefixes(state, archive)
+            try:
+                self._check_state_binding(
+                    state,
+                    source_fingerprint=source_fingerprint,
+                    raw_digest=raw_digest,
+                    observation_digest=observation_digest,
+                )
+            except HistoricalAnalyticalImportError:
+                if not self._allow_source_transition:
+                    raise
+                self._archive_historic_state(state_path)
+                state = self._initial_state(source_fingerprint, raw_digest, observation_digest)
+                self._write_state(state)
+            else:
+                self._validate_confirmed_prefixes(state, archive)
         else:
             state = self._initial_state(source_fingerprint, raw_digest, observation_digest)
             self._write_state(state)
@@ -453,6 +604,28 @@ class HistoricalAnalyticalImporter:
             page_limit=self._page_limit,
             updated_at=self._now(),
         )
+
+    @staticmethod
+    def _archive_historic_state(state_path: Path) -> None:
+        """Retain A checkpoint bytes before resetting the active B cursor."""
+        original = state_path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        archive = state_path.with_name(f"historical-analytical-import-state.A.{digest}.json")
+        if archive.exists():
+            if archive.is_symlink() or archive.read_bytes() != original:
+                raise HistoricalAnalyticalImportError(
+                    "historic analytical checkpoint cannot be preserved"
+                )
+            return
+        temporary = archive.with_name(f".{archive.name}.{uuid4().hex}.tmp")
+        try:
+            with temporary.open("xb") as handle:
+                handle.write(original)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, archive)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _check_state_binding(
         self,
@@ -835,6 +1008,7 @@ __all__ = [
     "HistoricalAnalyticalCorpusInventory",
     "HistoricalAnalyticalImportCursor",
     "HistoricalAnalyticalImportError",
+    "DirectHistoricalAnalyticalSource",
     "HistoricalAnalyticalImporter",
     "HistoricalAnalyticalImportState",
     "HistoricalAnalyticalImportSummary",

@@ -1,15 +1,20 @@
 """Append-only persistence for evaluated corporate valuation metrics."""
 
+import json
 from collections.abc import Collection
 from typing import Protocol
 from uuid import UUID
 
 from pydantic import ConfigDict, Field
 
+from investment_analyst.analytics.execution_reuse import ExecutionReuseService
 from investment_analyst.analytics.valuation.identity import valuation_result_parameters_v2
 from investment_analyst.analytics.valuation.models import (
     CorporateValuationSnapshot,
     ValuationStatus,
+)
+from investment_analyst.analytics.valuation.service import (
+    valuation_execution_reuse_key_from_snapshot,
 )
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
 from investment_analyst.core.models import (
@@ -19,6 +24,7 @@ from investment_analyst.core.models import (
     MetricResult,
 )
 from investment_analyst.core.models.base import ContractModel
+from investment_analyst.storage.local import LocalStorage
 
 
 class ValuationPersistenceSummary(ContractModel):
@@ -98,6 +104,7 @@ class CorporateValuationPersistencePipeline:
         }
         existing_results = self._storage.metric_results.get_existing(candidate_ids)
         created = reused = 0
+        stored_results: list[MetricResult] = []
         definitions = {item.metric_key: item for item in snapshot.definitions}
         to_save: list[MetricResult] = []
         for metric in snapshot.metrics:
@@ -164,12 +171,15 @@ class CorporateValuationPersistencePipeline:
                         "stored valuation result conflicts with deterministic identity"
                     )
                 reused += 1
+                stored_results.append(existing)
                 continue
             to_save.append(result)
             existing_results[result.result_id] = result
+            stored_results.append(result)
             created += 1
         for result in to_save:
             self._storage.metric_results.save_many([result])
+        self._remember_reusable_snapshot(snapshot, tuple(stored_results))
         return ValuationPersistenceSummary(
             definitions_created=definitions_created,
             definitions_reused=definitions_reused,
@@ -177,6 +187,27 @@ class CorporateValuationPersistencePipeline:
             metric_results_reused=reused,
             metrics_not_evaluable=snapshot.coverage.not_evaluable,
             metrics_not_applicable=snapshot.coverage.not_applicable,
+        )
+
+    def _remember_reusable_snapshot(
+        self,
+        snapshot: CorporateValuationSnapshot,
+        results: tuple[MetricResult, ...],
+    ) -> None:
+        """Record the whole persisted projection only in workspace-v2 storage."""
+        if not isinstance(self._storage, LocalStorage):
+            return
+        key = valuation_execution_reuse_key_from_snapshot(snapshot)
+        if key is None:
+            return
+        ExecutionReuseService(self._storage).remember_bundle(
+            key,
+            results,
+            stored_at=snapshot.computed_at,
+            available_at=snapshot.available_at or snapshot.known_at,
+            outcome_json=json.dumps(
+                snapshot.to_json_dict(), allow_nan=False, separators=(",", ":"), sort_keys=True
+            ),
         )
 
 

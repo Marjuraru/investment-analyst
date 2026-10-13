@@ -123,6 +123,28 @@ def test_observation_v2_rejects_same_id_different_content(tmp_path: Path) -> Non
     staging.close()
 
 
+def test_observation_v2_preserves_distinct_normalized_and_raw_sources(tmp_path: Path) -> None:
+    staging, _ = _staging(tmp_path)
+    with staging:
+        raw_record = _raw_record()
+        staging.save(raw_record)
+        observation = _observation(raw_record_id=raw_record.record_id).model_copy(
+            update={
+                "source": SourceReference(
+                    source_id="test:other-observations",
+                    record_key="obs-fixture",
+                    retrieved_at=_RECEIVED,
+                )
+            }
+        )
+
+        receipt = staging.save_observations([observation])
+        assert receipt.created_count == 1
+        staged = staging.get_observations([observation.observation_id])
+        assert staged[observation.observation_id] == observation
+    staging.close()
+
+
 def test_observation_v2_row_rejects_invalid_decimal_and_missing_raw(tmp_path: Path) -> None:
     staging, connection = _staging(tmp_path)
     with staging:

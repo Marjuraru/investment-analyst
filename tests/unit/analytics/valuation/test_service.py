@@ -1,6 +1,7 @@
 """Focused latest-annual corporate valuation tests."""
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -8,6 +9,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+import investment_analyst.analytics.valuation.service as valuation_service
 from investment_analyst.analytics.market.bar_models import MarketBar
 from investment_analyst.analytics.valuation import (
     AmbiguousValuationEvidenceError,
@@ -196,6 +198,48 @@ def _reference_rows(
         )
         for field_name, value in values.items()
     ]
+
+
+@dataclass(frozen=True)
+class _CachedMetricResult:
+    result_id: object
+
+
+def test_v2_reuse_skips_valuation_evaluation_for_an_equivalent_cut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(_reference_rows())
+    monkeypatch.setattr(service, "_price", lambda request: _price())
+    request = CorporateValuationRequest(
+        asset_id=_ASSET_ID,
+        known_at=_KNOWN_AT,
+        valuation_date=_KNOWN_AT.date(),
+    )
+    first = service.query(request, computed_at=_KNOWN_AT)
+
+    class _Reuse:
+        def lookup_bundle_outcome(self, key, *, known_at):
+            del key, known_at
+            return (
+                tuple(
+                    _CachedMetricResult(metric.result_id)
+                    for metric in first.metrics
+                    if metric.result_id is not None
+                ),
+                json.dumps(
+                    first.to_json_dict(), allow_nan=False, separators=(",", ":"), sort_keys=True
+                ),
+            )
+
+    service._semantic_identity_v2 = True
+    monkeypatch.setattr(valuation_service, "ExecutionReuseService", lambda storage: _Reuse())
+    monkeypatch.setattr(
+        service,
+        "_evaluate_metric",
+        lambda *args, **kwargs: pytest.fail("reuse must precede valuation evaluation"),
+    )
+
+    assert service.query(request, computed_at=_KNOWN_AT + timedelta(days=1)) == first
 
 
 def test_public_models_are_strict_versioned_and_reject_unsafe_numbers() -> None:

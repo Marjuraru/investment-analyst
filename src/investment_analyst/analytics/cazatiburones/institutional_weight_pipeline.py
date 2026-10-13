@@ -27,6 +27,7 @@ from investment_analyst.analytics.cazatiburones.institutional_weight_models impo
     InstitutionalWeightRunSummary,
     InstitutionalWeightSkip,
 )
+from investment_analyst.analytics.execution_reuse import ExecutionReuseService
 from investment_analyst.core.models.metric import MetricResult
 from investment_analyst.core.models.observation import NormalizedObservation
 from investment_analyst.evidence.sec_documents.models import normalize_cik
@@ -37,6 +38,10 @@ from investment_analyst.evidence.sec_institutional_semantics.artifact_reader imp
     InstitutionalSemanticsArtifactReader,
 )
 from investment_analyst.storage import StorageError
+from investment_analyst.storage.execution_reuse_v2 import (
+    ExecutionReuseKey,
+    canonical_digest,
+)
 
 
 class InstitutionalWeightPipeline:
@@ -67,6 +72,23 @@ class InstitutionalWeightPipeline:
                 tuple(item.observation_id for item in references)
             ).values()
         )
+        reuse_key = self._reuse_key(
+            asset_id=asset_id,
+            manager_cik=manager,
+            known_at=known_at,
+            artifacts=artifacts,
+            observations=observations,
+        )
+        reusable = ExecutionReuseService(self._storage).lookup_bundle_outcome(
+            reuse_key,
+            known_at=known_at,
+        )
+        if reusable is not None:
+            results, outcome_json = reusable
+            summary = InstitutionalWeightRunSummary.model_validate_json(outcome_json)
+            if summary.metrics_generated != len(results):
+                raise StorageError("reused institutional weight outcome does not match result set")
+            return summary.model_copy(update={"metrics_created": 0, "metrics_reused": len(results)})
         positions = _positions_by_artifact(observations)
         skipped: list[InstitutionalWeightSkip] = []
         candidates = []
@@ -148,6 +170,7 @@ class InstitutionalWeightPipeline:
                 )
         existing_by_id = self._storage.metric_results.get_existing(result_ids)
         created = reused = 0
+        stored_results: list[MetricResult] = []
         for candidate in candidates:
             observation = _observation_by_id(observations, candidate.input_observation_id)
             result_id = (
@@ -188,15 +211,17 @@ class InstitutionalWeightPipeline:
             existing = existing_by_id.get(result.result_id)
             if existing is None:
                 self._storage.metric_results.save_many([result])
+                stored_results.append(result)
                 created += 1
             else:
                 if existing.model_dump(exclude={"computed_at"}) != result.model_dump(
                     exclude={"computed_at"}
                 ):
                     raise StorageError("institutional weight identity conflicts")
+                stored_results.append(existing)
                 reused += 1
         reasons = Counter(item.reason for item in skipped)
-        return InstitutionalWeightRunSummary(
+        summary = InstitutionalWeightRunSummary(
             asset_id=asset_id,
             manager_cik=manager,
             known_at=known_at,
@@ -207,6 +232,50 @@ class InstitutionalWeightPipeline:
             metrics_reused=reused,
             skipped_total=len(skipped),
             skipped_by_reason=dict(reasons),
+        )
+        ExecutionReuseService(self._storage).remember_bundle(
+            reuse_key,
+            tuple(stored_results),
+            stored_at=computed_at,
+            outcome_json=json.dumps(
+                summary.model_dump(mode="json"),
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        )
+        return summary
+
+    @staticmethod
+    def _reuse_key(
+        *,
+        asset_id: str,
+        manager_cik: str,
+        known_at: datetime,
+        artifacts: list[object],
+        observations: tuple[NormalizedObservation, ...],
+    ) -> ExecutionReuseKey:
+        """Bind weights to their selected filings, observations and PIT cut."""
+        return ExecutionReuseKey(
+            family="institutional-weights",
+            asset_id=asset_id,
+            source_id=f"sec-13f:{manager_cik}",
+            frequency="filing-period",
+            algorithm_version=ALGORITHM_VERSION,
+            evidence_digest=canonical_digest(
+                {
+                    "artifacts": [artifact.model_dump(mode="json") for artifact in artifacts],
+                    "observations": [
+                        observation.model_dump(mode="json") for observation in observations
+                    ],
+                }
+            ),
+            parameters_digest=canonical_digest(
+                {
+                    "manager_cik": manager_cik,
+                    "known_at": known_at.astimezone(UTC).isoformat(),
+                }
+            ),
         )
 
 

@@ -398,7 +398,11 @@ def observability(
     return result
 
 
-def database(db_path: pathlib.Path | None = None) -> dict:
+def database(
+    db_path: pathlib.Path | None = None,
+    *,
+    as_of: dt.date | None = None,
+) -> dict:
     """Take one post-cycle logical document-size aggregate using a read-only engine."""
     import duckdb
 
@@ -424,7 +428,7 @@ def database(db_path: pathlib.Path | None = None) -> dict:
         tables = connection.execute(
             "select table_name, estimated_size from duckdb_tables() order by 2 desc"
         ).fetchall()
-        today = connection.execute("SELECT current_date").fetchone()[0]
+        database_today = connection.execute("SELECT current_date").fetchone()[0]
     finally:
         connection.close()
     by_key = sorted(
@@ -465,6 +469,7 @@ def database(db_path: pathlib.Path | None = None) -> dict:
         ),
         key=lambda row: (-row[3], row[0], row[1] or ""),
     )
+    today = as_of or database_today
     cutoff = today - dt.timedelta(days=3)
     recent = sorted(
         (

@@ -753,3 +753,19 @@ bloque requiere el smoke adjunto al draft PR y CI verde para el SHA exacto, adem
 independiente. `route_effect` es `ADVANCES`: DATA-CHASSIS permanece abierta y conserva un único
 `NEXT`. Los criterios de migración/cutover, backup Drive, medición operacional y cualquier limpieza
 siguen en los bloques 43–45; las oportunidades opcionales se proponen por separado en PLAN.
+
+## Migración y recovery aislados (`DATA-CHASSIS-43` / #341)
+
+Este candidato propone `route_effect: ADVANCES` sobre `DATA-CHASSIS`: completa
+la migración v1→v2 en un corte B aislado, su transporte directo y reanudable,
+backup packed en streaming y restore independiente, conservando v1 como formato
+activo. El cierre del backup, inventario, verificación y restore mantienen la
+memoria acotada y reutilizan volúmenes válidos mediante hashes, bindings y
+checkpoints durables. Los seis consumidores reutilizan resultados antes del
+engine dentro de scratch y la telemetría conserva terminales, reintentos
+auxiliares y bindings de raíz/DB/SHA. La evidencia real y el mapa de criterios
+están en `data_chassis_43_migration_runbook.md`; su consolidación exact-SHA, CI
+y AUDIT independiente siguen siendo gates del candidato. Esta etapa no activa
+v2, no retira B ni sustituye el restore Drive externo, la reconciliación final,
+la serie operacional de siete días o la limpieza condicionada de 44–45.
+route_transition:DATA-CHASSIS:ADVANCES

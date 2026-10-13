@@ -1,9 +1,11 @@
 """Append-only persistence for provider-independent derivatives metrics."""
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from investment_analyst.analytics.crypto.derivatives_engine import (
+    ALGORITHM_VERSION,
     DVOL_WINDOWS,
     FUNDING_WINDOWS,
     METRIC_DEFINITIONS,
@@ -12,10 +14,15 @@ from investment_analyst.analytics.crypto.derivatives_engine import (
 from investment_analyst.analytics.crypto.derivatives_models import (
     CryptoDerivativesMetricPersistenceSummary,
 )
+from investment_analyst.analytics.execution_reuse import ExecutionReuseService
 from investment_analyst.core.interfaces.repositories import BatchWriteReceipt
-from investment_analyst.core.models import MetricResult
+from investment_analyst.core.models import MetricResult, NormalizedObservation
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import StorageError
+from investment_analyst.storage.execution_reuse_v2 import (
+    ExecutionReuseKey,
+    canonical_digest,
+)
 
 
 class CryptoDerivativesMetricPipeline:
@@ -78,6 +85,35 @@ class CryptoDerivativesMetricPipeline:
                 available_to=known_at,
             ),
         )
+        for definition in METRIC_DEFINITIONS:
+            self._storage.metric_definitions.upsert(definition)
+
+        reuse_key = _reuse_key(
+            asset_id=asset_id,
+            funding_source_id=funding_source_id,
+            dvol_source_id=dvol_source_id,
+            summary_source_id=summary_source_id,
+            known_at=known_at,
+            as_of_from=as_of_from,
+            as_of_before=as_of_before,
+            observations=observations,
+        )
+        reusable = ExecutionReuseService(self._storage).lookup_bundle_outcome(
+            reuse_key,
+            known_at=known_at,
+        )
+        if reusable is not None:
+            results, outcome_json = reusable
+            missing_requirements = tuple(json.loads(outcome_json)["missing_requirements"])
+            return CryptoDerivativesMetricPersistenceSummary(
+                results=results,
+                results_created=0,
+                results_reused=len(results),
+                missing_requirements=missing_requirements,
+                traceability_verified=True,
+            )
+
+        computed_at = self._clock()
         computation = self._engine.compute(
             observations,
             asset_id=asset_id,
@@ -85,12 +121,10 @@ class CryptoDerivativesMetricPipeline:
             dvol_source_id=dvol_source_id,
             summary_source_id=summary_source_id,
             known_at=known_at,
-            computed_at=self._clock(),
+            computed_at=computed_at,
             as_of_from=as_of_from,
             as_of_before=as_of_before,
         )
-        for definition in METRIC_DEFINITIONS:
-            self._storage.metric_definitions.upsert(definition)
 
         candidate_ids = {candidate.result_id for candidate in computation.results}
         existing_results = self._storage.metric_results.get_existing(candidate_ids)
@@ -117,6 +151,16 @@ class CryptoDerivativesMetricPipeline:
             receipt = BatchWriteReceipt()
 
         self._verify_traceability(persisted, receipt)
+        ExecutionReuseService(self._storage).remember_bundle(
+            reuse_key,
+            tuple(persisted),
+            stored_at=computed_at,
+            outcome_json=json.dumps(
+                {"missing_requirements": computation.missing_requirements},
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        )
         return CryptoDerivativesMetricPersistenceSummary(
             results=tuple(persisted),
             results_created=created,
@@ -161,6 +205,51 @@ class CryptoDerivativesMetricPipeline:
                     or observation.available_at > result.available_at
                 ):
                     raise StorageError("Deribit metric input traceability failed")
+
+
+def _reuse_key(
+    *,
+    asset_id: str,
+    funding_source_id: str,
+    dvol_source_id: str,
+    summary_source_id: str,
+    known_at: datetime,
+    as_of_from: datetime | None,
+    as_of_before: datetime | None,
+    observations: tuple[NormalizedObservation, ...],
+) -> ExecutionReuseKey:
+    """Bind reuse to the selected input evidence and every compute coordinate."""
+    source_ids = (funding_source_id, dvol_source_id, summary_source_id)
+    evidence = tuple(
+        observation.model_dump(mode="json")
+        for observation in sorted(observations, key=lambda item: str(item.observation_id))
+    )
+    return ExecutionReuseKey(
+        family="crypto-derivatives",
+        asset_id=asset_id,
+        source_id="|".join(source_ids),
+        frequency="mixed:1h+1d+snapshot",
+        algorithm_version=ALGORITHM_VERSION,
+        evidence_digest=canonical_digest(
+            {
+                "known_at": known_at.astimezone(UTC).isoformat(),
+                "observations": evidence,
+            }
+        ),
+        parameters_digest=canonical_digest(
+            {
+                "as_of_from": (
+                    None if as_of_from is None else as_of_from.astimezone(UTC).isoformat()
+                ),
+                "as_of_before": (
+                    None if as_of_before is None else as_of_before.astimezone(UTC).isoformat()
+                ),
+                "sources": source_ids,
+                "funding_windows": FUNDING_WINDOWS,
+                "dvol_windows": DVOL_WINDOWS,
+            }
+        ),
+    )
 
 
 def _verify_equivalent(existing: MetricResult, candidate: MetricResult) -> None:

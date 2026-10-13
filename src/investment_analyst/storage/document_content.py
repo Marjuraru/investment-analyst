@@ -70,6 +70,45 @@ class DocumentContentStore:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def copy_verified_file(self, source: Path, checksum: str) -> DocumentContentReceipt:
+        """Stream a pre-existing content-addressed file without the API payload cap.
+
+        This narrow migration primitive still hashes every byte before publishing
+        it, so it cannot turn an arbitrary source path into trusted content.
+        """
+        if self._read_only:
+            raise DocumentContentError("document content cannot be saved through read-only storage")
+        if source.is_symlink() or not source.is_file() or source.name != checksum:
+            raise DocumentContentError("migration document source is unsafe")
+        target = self._path(checksum)
+        self._assert_safe_path(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._assert_safe_path(target)
+        if target.exists():
+            self._verify_path(target, checksum, size_bytes=source.stat().st_size)
+            return DocumentContentReceipt(checksum, source.stat().st_size, False)
+        temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        digest = hashlib.sha256()
+        size_bytes = 0
+        try:
+            with source.open("rb") as input_stream, temporary.open("xb") as output_stream:
+                for chunk in iter(lambda: input_stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    size_bytes += len(chunk)
+                    output_stream.write(chunk)
+                output_stream.flush()
+                os.fsync(output_stream.fileno())
+            if digest.hexdigest() != checksum:
+                raise DocumentContentError("migration document source checksum mismatch")
+            if target.exists():
+                self._verify_path(target, checksum, size_bytes=size_bytes)
+                return DocumentContentReceipt(checksum, size_bytes, False)
+            os.replace(temporary, target)
+            self._verify_path(target, checksum, size_bytes=size_bytes)
+            return DocumentContentReceipt(checksum, size_bytes, True)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def read(self, checksum: str) -> bytes:
         """Read explicitly requested content only after hash verification."""
         target = self._path(checksum)

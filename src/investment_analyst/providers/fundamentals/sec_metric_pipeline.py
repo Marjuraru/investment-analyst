@@ -5,12 +5,14 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID, uuid5
 
+from investment_analyst.analytics.execution_reuse import ExecutionReuseService
 from investment_analyst.core.models import DataQuality, MetricResult
 from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_metric_engine import (
     SecFundamentalMetricEngine,
 )
 from investment_analyst.providers.fundamentals.sec_metric_models import (
+    SEC_FUNDAMENTAL_METRIC_DEFINITIONS,
     SecFundamentalMetricCandidate,
     SecFundamentalMetricComputation,
     SecFundamentalMetricImportSummary,
@@ -24,6 +26,10 @@ from investment_analyst.providers.fundamentals.sec_raw_records import (
     aapl_sec_configuration,
 )
 from investment_analyst.storage import LocalStorage
+from investment_analyst.storage.execution_reuse_v2 import (
+    ExecutionReuseKey,
+    canonical_digest,
+)
 
 _RESULT_NAMESPACE = UUID("fe4bb5e6-0983-4ff5-a82e-c20f0789b6c4")
 _METRIC_WRITE_BATCH_SIZE = 256
@@ -108,6 +114,24 @@ class SecIssuerFundamentalMetricPipeline:
             limit=None,
         )
         source_result = self._point_in_time_service.query(internal_query)
+        reuse_key = self._reuse_key(request, source_result.model_dump(mode="json"))
+        reusable = ExecutionReuseService(self._storage).lookup_bundle_outcome(
+            reuse_key,
+            known_at=request.known_at,
+        )
+        if reusable is not None:
+            results, outcome_json = reusable
+            summary = SecFundamentalMetricImportSummary.model_validate_json(outcome_json)
+            if summary.metrics_generated != len(results):
+                raise SecFundamentalMetricTraceabilityError(
+                    "reused fundamental outcome does not match its result set"
+                )
+            counts_after = self._protected_counts()
+            if counts_after != counts_before:
+                raise SecFundamentalMetricTraceabilityError(
+                    "fundamental metric pipeline changed source data or diagnostics"
+                )
+            return summary.model_copy(update={"metrics_created": 0, "metrics_reused": len(results)})
         computed_at = _utc_datetime(self._clock(), "computed_at")
         computation = self._engine.compute(
             request,
@@ -149,7 +173,7 @@ class SecIssuerFundamentalMetricPipeline:
         target_views = [
             period for period in source_result.periods if period.period_end in target_set
         ]
-        return SecFundamentalMetricImportSummary(
+        summary = SecFundamentalMetricImportSummary(
             asset_id=request.asset_id,
             known_at=request.known_at,
             frequency=request.frequency,
@@ -169,6 +193,41 @@ class SecIssuerFundamentalMetricPipeline:
             observations_created=0,
             diagnostics_created=0,
             traceability_verified=True,
+        )
+        ExecutionReuseService(self._storage).remember_bundle(
+            reuse_key,
+            tuple(stored),
+            stored_at=computed_at,
+            outcome_json=json.dumps(
+                summary.model_dump(mode="json"),
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        )
+        return summary
+
+    def _reuse_key(
+        self,
+        request: SecFundamentalMetricRequest,
+        source_result: dict[str, object],
+    ) -> ExecutionReuseKey:
+        """Bind reuse to the SEC-selected PIT facts and complete request semantics."""
+        return ExecutionReuseKey(
+            family="sec-fundamental",
+            asset_id=request.asset_id,
+            source_id=self._configuration.companyfacts_source_id,
+            frequency=request.frequency.value,
+            algorithm_version=canonical_digest(
+                {
+                    "definitions": [
+                        definition.model_dump(mode="json")
+                        for definition in SEC_FUNDAMENTAL_METRIC_DEFINITIONS
+                    ]
+                }
+            ),
+            evidence_digest=canonical_digest({"source_result": source_result}),
+            parameters_digest=canonical_digest({"request": request.model_dump(mode="json")}),
         )
 
     def _to_metric_result(

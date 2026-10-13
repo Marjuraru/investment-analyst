@@ -18,6 +18,12 @@ from investment_analyst.application.cazatiburones_institutional_events import (
     CazatiburonesInstitutionalEventsApplication,
 )
 from investment_analyst.application.runtime import ApplicationRuntime, StorageLocationRequest
+from investment_analyst.core.models import (
+    DataFrequency,
+    NormalizedObservation,
+    RawRecord,
+    SourceReference,
+)
 from investment_analyst.core.models.enums import DataQuality
 from investment_analyst.core.models.metric import MetricResult
 from investment_analyst.storage import LocalStorage, StoragePaths
@@ -28,7 +34,12 @@ _CIK = "0001350694"
 _ASSET_ID = "equity:us:aapl"
 
 
-def _seed_metrics(storage: LocalStorage, available_at: datetime) -> list[MetricResult]:
+def _seed_metrics(
+    storage: LocalStorage,
+    available_at: datetime,
+    *,
+    persist: bool = True,
+) -> list[MetricResult]:
     metrics = [
         MetricResult(
             result_id=uuid4(),
@@ -94,8 +105,9 @@ def _seed_metrics(storage: LocalStorage, available_at: datetime) -> list[MetricR
             quality=DataQuality.VALID,
         ),
     ]
-    for metric in metrics:
-        storage.metric_results.save(metric)
+    if persist:
+        for metric in metrics:
+            storage.metric_results.save(metric)
     return metrics
 
 
@@ -220,3 +232,89 @@ def test_rematerialization_is_idempotent_and_divergent_identity_fails_closed(
         InstitutionalEventRepositoryError, match="snapshot identity conflicts with existing content"
     ):
         repo.save(divergent_snapshot)
+
+
+def test_v2_reuse_precedes_event_projection(tmp_path: Path, monkeypatch) -> None:
+    from investment_analyst.analytics.cazatiburones import institutional_event_service
+    from investment_analyst.analytics.cazatiburones.institutional_event_service import (
+        InstitutionalEventService,
+    )
+
+    workspace_service = WorkspaceService()
+    workspace_paths = workspace_service.initialize(
+        tmp_path / "workspace",
+        format_version=2,
+    ).paths
+    available_at = datetime(2024, 11, 14, 16, 0, 0, tzinfo=UTC)
+    known_at = datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC)
+    calls = 0
+    original_project = institutional_event_service.project_institutional_events
+
+    def counting_project(metrics):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        return original_project(metrics)
+
+    monkeypatch.setattr(
+        institutional_event_service,
+        "project_institutional_events",
+        counting_project,
+    )
+    with workspace_service.open_storage(
+        workspace_paths,
+        WorkspaceAccessMode.READ_WRITE,
+    ) as storage:
+        for metric in _seed_metrics(storage, available_at, persist=False):
+            for offset, observation_id in enumerate(metric.input_observation_ids):
+                raw_record_id = uuid4()
+                source = SourceReference(
+                    source_id="fixture:institutional-events",
+                    record_key=f"{metric.result_id}:{offset}",
+                    retrieved_at=available_at,
+                )
+                storage.raw_records.save(
+                    RawRecord(
+                        record_id=raw_record_id,
+                        asset_id=metric.asset_id,
+                        source=source,
+                        event_time=available_at,
+                        available_at=available_at,
+                        received_at=available_at,
+                        payload={"offset": offset},
+                        schema_version="institutional-event-reuse-fixture-v1",
+                    )
+                )
+                storage.observations.save(
+                    NormalizedObservation(
+                        observation_id=observation_id,
+                        raw_record_id=raw_record_id,
+                        asset_id=metric.asset_id,
+                        field_name="institutional.fixture",
+                        value=Decimal(offset + 1),
+                        unit="shares",
+                        frequency=DataFrequency.QUARTERLY,
+                        observed_at=available_at,
+                        available_at=available_at,
+                        normalized_at=available_at,
+                        source=source,
+                        quality=DataQuality.VALID,
+                        transformation_version="institutional-event-reuse-fixture-v1",
+                    )
+                )
+            storage.metric_results.save(metric)
+        service = InstitutionalEventService(storage, clock=lambda: known_at)
+        first = service.materialize(
+            asset_id=_ASSET_ID,
+            manager_cik=_CIK,
+            known_at=known_at,
+        )
+        repeated = service.materialize(
+            asset_id=_ASSET_ID,
+            manager_cik=_CIK,
+            known_at=known_at,
+        )
+
+    assert first.created is True
+    assert repeated.created is False
+    assert repeated.snapshot_id == first.snapshot_id
+    assert calls == 1

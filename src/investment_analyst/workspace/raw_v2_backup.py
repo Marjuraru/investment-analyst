@@ -1596,11 +1596,11 @@ class RawV2StagingBackupService:
                     except ObservationV2Error as error:
                         raise RawV2BackupError("restored observation row is corrupt") from error
                     raw_rows = connection.execute(
-                        "SELECT source_id FROM raw_v2_index WHERE record_id = ?",
+                        "SELECT record_id FROM raw_v2_index WHERE record_id = ?",
                         [str(row[1])],
                     ).fetchall()
-                    if not raw_rows or str(raw_rows[0][0]) != str(row[12]):
-                        raise RawV2BackupError("restored observation raw link is foreign")
+                    if not raw_rows:
+                        raise RawV2BackupError("restored observation raw link is missing")
                     digest = observation_extend_digest(digest, _observation_row_digest(tuple(row)))
                     counts_by_source[str(row[12])] = counts_by_source.get(str(row[12]), 0) + 1
                     counts_by_frequency[str(row[6])] = counts_by_frequency.get(str(row[6]), 0) + 1

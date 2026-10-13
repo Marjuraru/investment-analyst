@@ -71,11 +71,15 @@ from investment_analyst.workspace.models import (
     WorkspaceInspection,
 )
 from investment_analyst.workspace.service import WorkspaceError, WorkspaceService
+from investment_analyst.workspace.workspace_v2_migration_models import (
+    WorkspaceV1MigrationSourceSnapshot,
+)
 
 if TYPE_CHECKING:
     from investment_analyst.workspace.workspace_v2_backup import WorkspaceV2BackupManifest
 
 BACKUP_MANIFEST_NAME = "backup_manifest.json"
+_V1_MIGRATION_SOURCE_SNAPSHOT_PATH = "state/workspace-v1-migration-source-snapshot.json"
 _TRACEABILITY_BATCH_SIZE = 256
 
 _OBSERVATION_RAW_QUERY = (
@@ -309,16 +313,23 @@ class WorkspaceBackupService:
         destination_path = destination.expanduser()
         if backup_path.is_symlink() or destination_path.is_symlink():
             raise WorkspaceBackupError("workspace restore paths must not be symbolic links")
-        if _backup_manifest_schema(backup_path) == "workspace-v2-backup-manifest-v1":
+        v2_schema = _backup_manifest_schema(backup_path)
+        if v2_schema in {
+            "workspace-v2-backup-manifest-v1",
+            "workspace-v2-backup-manifest-v2",
+        }:
             from investment_analyst.workspace.workspace_v2_backup import (
                 WorkspaceV2BackupService,
             )
 
-            return WorkspaceV2BackupService(
+            v2_backup = WorkspaceV2BackupService(
                 self._workspace_service,
                 writer_lock=self._writer_lock,
                 clock=self._clock,
-            ).restore(backup, destination)
+            )
+            if v2_schema == "workspace-v2-backup-manifest-v2":
+                return v2_backup.restore_packed(backup, destination)
+            return v2_backup.restore(backup, destination)
         backup_root = backup_path.resolve()
         destination_root = destination_path.resolve(strict=False)
         if destination_root.exists() and any(destination_root.iterdir()):
@@ -327,7 +338,7 @@ class WorkspaceBackupService:
             raise WorkspaceBackupError("restore destination must be outside the backup")
         _reject_symlinks(backup_root)
         manifest = _load_manifest(backup_root / BACKUP_MANIFEST_NAME)
-        _verify_backup_directory(backup_root, manifest)
+        source_snapshot = _verify_backup_directory(backup_root, manifest)
         temporary = destination_root.with_name(f".{destination_root.name}.{uuid4().hex}.tmp")
         try:
             temporary.mkdir(parents=True)
@@ -349,6 +360,13 @@ class WorkspaceBackupService:
             if destination_root.exists():
                 destination_root.rmdir()
             os.replace(temporary, destination_root)
+            if source_snapshot is not None:
+                self._workspace_service.publish_v1_migration_source_snapshot(
+                    snapshot_paths=self._workspace_service.resolve(destination_root),
+                    descriptor=source_snapshot.model_copy(
+                        update={"snapshot_root": destination_root}
+                    ),
+                )
             return inspection.model_copy(update={"workspace_root": destination_root})
         except WorkspaceBackupError:
             raise
@@ -458,20 +476,78 @@ def _create_required_layout(root: Path) -> None:
         (root / relative).mkdir(parents=True, exist_ok=True)
 
 
-def _verify_backup_directory(root: Path, manifest: WorkspaceBackupManifest) -> None:
+def _verify_backup_directory(
+    root: Path, manifest: WorkspaceBackupManifest
+) -> WorkspaceV1MigrationSourceSnapshot | None:
     _reject_symlinks(root)
+    source_snapshot = _load_v1_migration_source_snapshot_extension(root, manifest)
     expected = {item.path: item for item in manifest.files}
+    allowed_paths = set(expected)
+    if source_snapshot is not None:
+        allowed_paths.add(_V1_MIGRATION_SOURCE_SNAPSHOT_PATH)
     actual = {
         path.relative_to(root).as_posix(): path
         for path in root.rglob("*")
         if path.is_file() and path.name != BACKUP_MANIFEST_NAME
     }
-    if set(actual) != set(expected):
+    if set(actual) != allowed_paths:
         raise WorkspaceBackupError("backup file inventory does not match manifest")
     for relative, item in expected.items():
         path = actual[relative]
         if path.stat().st_size != item.size_bytes or _sha256(path) != item.sha256:
             raise WorkspaceBackupError("backup file hash verification failed")
+    return source_snapshot
+
+
+def verify_v1_migration_source_snapshot(root: Path) -> WorkspaceV1MigrationSourceSnapshot:
+    """Verify a published v1 migration copy, including its permitted descriptor.
+
+    The descriptor is published after the immutable backup manifest.  It is the
+    sole non-inventoried file accepted by the v1 backup verifier and remains
+    valid only when every field binds the manifest's exact inventory.
+    """
+    root_path = root.expanduser()
+    if root_path.is_symlink() or not root_path.is_dir():
+        raise WorkspaceBackupError("migration source snapshot is unavailable or unsafe")
+    manifest = _load_manifest(root_path / BACKUP_MANIFEST_NAME)
+    descriptor = _verify_backup_directory(root_path.resolve(), manifest)
+    if descriptor is None:
+        raise WorkspaceBackupError("migration source snapshot descriptor is missing")
+    return descriptor
+
+
+def _load_v1_migration_source_snapshot_extension(
+    root: Path, manifest: WorkspaceBackupManifest
+) -> WorkspaceV1MigrationSourceSnapshot | None:
+    """Accept only the migration descriptor published after an exact v1 backup."""
+    descriptor_path = root / _V1_MIGRATION_SOURCE_SNAPSHOT_PATH
+    if not descriptor_path.exists():
+        return None
+    if descriptor_path.is_symlink() or not descriptor_path.is_file():
+        raise WorkspaceBackupError("migration source snapshot descriptor is unsafe")
+    try:
+        descriptor = WorkspaceV1MigrationSourceSnapshot.model_validate_json(
+            descriptor_path.read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, ValueError) as error:
+        raise WorkspaceBackupError("migration source snapshot descriptor is malformed") from error
+    inventory_digest = hashlib.sha256(
+        json.dumps(
+            [item.model_dump(mode="json") for item in manifest.files],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if (
+        descriptor.snapshot_root.resolve(strict=False) != root
+        or descriptor.snapshot_id != manifest.backup_id
+        or descriptor.source_workspace_id != manifest.source_workspace_id
+        or descriptor.physical_file_count != len(manifest.files)
+        or descriptor.physical_total_bytes != sum(item.size_bytes for item in manifest.files)
+        or descriptor.physical_inventory_sha256 != inventory_digest
+    ):
+        raise WorkspaceBackupError("migration source snapshot descriptor does not bind backup")
+    return descriptor
 
 
 def _load_manifest(path: Path) -> WorkspaceBackupManifest:

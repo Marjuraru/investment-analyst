@@ -22,6 +22,8 @@ from investment_analyst.storage import (
     StorageError,
     StoragePaths,
 )
+from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.service import WorkspaceService
 
 _FIXTURES = Path(__file__).parents[3] / "fixtures" / "deribit"
 _START = datetime(2026, 8, 1, tzinfo=UTC)
@@ -115,6 +117,59 @@ def test_equivalent_recomputation_reuses_original_computed_at(tmp_path: Path) ->
         assert repeated.results == first.results
         assert all(result.computed_at == _KNOWN for result in repeated.results)
         assert repeated.traceability_verified
+
+
+def test_v2_bundle_reuse_precedes_the_derivatives_engine(tmp_path: Path) -> None:
+    workspace_service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = workspace_service.initialize(tmp_path / "workspace", format_version=2)
+    configuration = _configuration()
+
+    class _CountingEngine(CryptoDerivativesMetricEngine):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def compute(self, *args, **kwargs):
+            self.calls += 1
+            return super().compute(*args, **kwargs)
+
+    with workspace_service.open_storage(
+        initialized.paths,
+        WorkspaceAccessMode.READ_WRITE,
+    ) as storage:
+        _setup_evidence(storage, configuration)
+        engine = _CountingEngine()
+        first = CryptoDerivativesMetricPipeline(
+            storage,
+            engine,
+            clock=lambda: _KNOWN,
+        ).run(
+            asset_id=configuration.asset_id,
+            funding_source_id=configuration.funding_source_id,
+            dvol_source_id=configuration.dvol_source_id,
+            summary_source_id=configuration.summary_source_id,
+            known_at=_KNOWN,
+            as_of_from=_START,
+            as_of_before=_END,
+        )
+        repeated = CryptoDerivativesMetricPipeline(
+            storage,
+            engine,
+            clock=lambda: _KNOWN + timedelta(days=1),
+        ).run(
+            asset_id=configuration.asset_id,
+            funding_source_id=configuration.funding_source_id,
+            dvol_source_id=configuration.dvol_source_id,
+            summary_source_id=configuration.summary_source_id,
+            known_at=_KNOWN,
+            as_of_from=_START,
+            as_of_before=_END,
+        )
+
+    assert first.results_created == len(first.results) > 0
+    assert repeated.results_created == 0
+    assert repeated.results_reused == len(first.results)
+    assert repeated.results == first.results
+    assert engine.calls == 1
 
 
 def test_pipeline_reads_and_writes_in_batches_without_get_after_save(
