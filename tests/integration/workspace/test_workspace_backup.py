@@ -50,9 +50,14 @@ from investment_analyst.workspace.backup import (
     BACKUP_MANIFEST_NAME,
     WorkspaceBackupError,
     WorkspaceBackupService,
+    verify_v1_migration_source_snapshot,
 )
 from investment_analyst.workspace.models import WorkspaceAccessMode
 from investment_analyst.workspace.service import WorkspaceError, WorkspaceService
+from investment_analyst.workspace.workspace_v2_migration import (
+    create_v1_migration_source_snapshot,
+    load_v1_migration_source_snapshot,
+)
 
 
 def _service(tmp_path: Path) -> tuple[WorkspaceService, WorkspaceBackupService, Path]:
@@ -301,6 +306,31 @@ def test_backup_is_repeatable_and_restore_preserves_identity_counts_and_hashes(
     assert restored.metric_result_count == first.counts.metric_results
     assert restored.diagnostic_result_count == first.counts.diagnostic_results
     assert (tmp_path / "restored/state/scheduler.json").is_file()
+
+
+def test_restore_accepts_and_republishes_a_bound_migration_source_snapshot(
+    tmp_path: Path,
+) -> None:
+    workspace_service, service, source = _service(tmp_path)
+    snapshot_root = tmp_path / "source-snapshot"
+    snapshot = create_v1_migration_source_snapshot(
+        service=workspace_service,
+        source_root=source,
+        snapshot_root=snapshot_root,
+        host_free_bytes=lambda: 10**12,
+    )
+    assert verify_v1_migration_source_snapshot(snapshot_root) == snapshot
+
+    restored_root = tmp_path / "restored-snapshot"
+    service.restore(snapshot_root, restored_root)
+
+    restored = load_v1_migration_source_snapshot(
+        service=workspace_service,
+        snapshot_root=restored_root,
+    )
+    assert restored.snapshot_id == snapshot.snapshot_id
+    assert restored.snapshot_root == restored_root
+    assert restored.physical_inventory_sha256 == snapshot.physical_inventory_sha256
 
 
 def test_restore_rejects_corrupt_or_missing_files_without_publishing_destination(

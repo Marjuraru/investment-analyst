@@ -1,5 +1,6 @@
 """Unit tests for the resumable raw v1 to v2 importer."""
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -206,3 +207,129 @@ def test_resume_and_completion_never_accumulate_full_inventory(tmp_path) -> None
             assert calls
             assert all(limit is not None and limit <= 2 for _, limit in calls)
             assert all(limit is not None and limit <= 256 for _, limit in calls)
+
+
+def test_resume_emits_prefix_and_checkpoint_progress(tmp_path: Path) -> None:
+    source_paths = StoragePaths.from_root(tmp_path / "source")
+    with LocalStorage(source_paths) as writer:
+        _seed(writer, 3)
+    with LocalStorage(source_paths, read_only=True) as source:
+        staging = _staging(tmp_path, "staging")
+        with staging:
+            events = []
+            importer = RawV2Importer(
+                source,
+                staging,
+                source_workspace_id="workspace-progress",
+                source_fingerprint="fingerprint-progress",
+                progress=events.append,
+            )
+            with pytest.raises(RawV2ImportError, match="interrupted"):
+                importer.run(page_limit=2, fail_after_page=0)
+            resumed = importer.run(page_limit=2)
+    assert resumed.complete is True
+    phases = [event.phase for event in events]
+    assert "prefix_validation_page_verified" in phases
+    assert "import_page_checkpointed" in phases
+    assert "completion_validation_completed" in phases
+    assert all(event.page_size <= 2 for event in events)
+
+
+def test_completed_import_revalidates_prefix_without_second_deep_pass(tmp_path: Path) -> None:
+    source_paths = StoragePaths.from_root(tmp_path / "source")
+    with LocalStorage(source_paths) as writer:
+        _seed(writer, 3)
+    with LocalStorage(source_paths, read_only=True) as source:
+        staging = _staging(tmp_path, "staging")
+        with staging:
+            events = []
+            importer = RawV2Importer(
+                source,
+                staging,
+                source_workspace_id="workspace-complete",
+                source_fingerprint="fingerprint-complete",
+                progress=events.append,
+            )
+            assert importer.run(page_limit=2).complete is True
+            events.clear()
+
+            rerun = importer.run(page_limit=2)
+
+    assert rerun.complete is True
+    phases = [event.phase for event in events]
+    assert phases.count("prefix_validation_page_verified") == 2
+    assert "completion_validation_page_verified" not in phases
+    assert phases[-1] == "completion_validation_completed"
+
+
+def test_snapshot_prefix_verification_resumes_from_a_durable_page_checkpoint(
+    tmp_path: Path,
+) -> None:
+    source_paths = StoragePaths.from_root(tmp_path / "source")
+    with LocalStorage(source_paths) as writer:
+        _seed(writer, 3)
+    with LocalStorage(source_paths, read_only=True) as source:
+        staging = _staging(tmp_path, "staging")
+        with staging:
+            initial = RawV2Importer(
+                source,
+                staging,
+                source_workspace_id="workspace-snapshot-prefix",
+                source_fingerprint="fingerprint-snapshot-prefix",
+            )
+            assert initial.run(page_limit=2).complete is True
+
+            def interrupt_after_first_verified_page(event) -> None:
+                if event.phase == "prefix_validation_page_verified" and event.confirmed_count == 2:
+                    raise RuntimeError("interrupt checkpointed verification")
+
+            interrupted = RawV2Importer(
+                source,
+                staging,
+                source_workspace_id="workspace-snapshot-prefix",
+                source_fingerprint="fingerprint-snapshot-prefix",
+                historic_source_fingerprint="historic-fingerprint",
+                progress=interrupt_after_first_verified_page,
+            )
+            with pytest.raises(RawV2ImportError, match="progress observer failed"):
+                interrupted.run(page_limit=2)
+
+            checkpoint = json.loads(
+                (staging.destination / "raw-v2-import-verification-work.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            assert checkpoint["confirmed_count"] == 2
+
+            events = []
+            resumed = RawV2Importer(
+                source,
+                staging,
+                source_workspace_id="workspace-snapshot-prefix",
+                source_fingerprint="fingerprint-snapshot-prefix",
+                historic_source_fingerprint="historic-fingerprint",
+                progress=events.append,
+            ).run(page_limit=2)
+
+    verified_counts = [
+        event.confirmed_count
+        for event in events
+        if event.phase == "prefix_validation_page_verified"
+    ]
+    assert verified_counts == [3]
+    assert resumed.counts_by_source == {"alpaca:bars": 3}
+    assert sum(resumed.counts_by_schema.values()) == 3
+
+    with LocalStorage(source_paths, read_only=True) as source:
+        staging = _staging(tmp_path, "staging")
+        with staging:
+            complete_resume = RawV2Importer(
+                source,
+                staging,
+                source_workspace_id="workspace-snapshot-prefix",
+                source_fingerprint="fingerprint-snapshot-prefix",
+                historic_source_fingerprint="historic-fingerprint",
+            ).run(page_limit=2)
+
+    assert complete_resume.complete is True
+    assert complete_resume.imported_count == 3

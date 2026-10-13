@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Context, Decimal, localcontext
 from typing import Protocol
 
+from investment_analyst.analytics.execution_reuse import ExecutionReuseService
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery, MarketBar
 from investment_analyst.analytics.market.history_service import (
     AmbiguousRevisionError,
@@ -34,7 +35,13 @@ from investment_analyst.application.analysis_capabilities import (
     AssetAnalysisFamily,
     FundamentalAnalysisMode,
 )
-from investment_analyst.core.models import DataFrequency, DataQuality, NormalizedObservation
+from investment_analyst.core.models import (
+    DataFrequency,
+    DataQuality,
+    MetricResult,
+    NormalizedObservation,
+)
+from investment_analyst.storage.execution_reuse_v2 import ExecutionReuseKey, canonical_digest
 from investment_analyst.storage.local import LocalStorage
 
 _ALGORITHM = "corporate-valuation-latest-annual-v1-decimal34"
@@ -280,6 +287,93 @@ _DEFINITIONS = tuple(
 )
 
 
+def valuation_execution_reuse_key(
+    *,
+    request: CorporateValuationRequest,
+    valuation_as_of: datetime,
+    annual_period_start: datetime | None,
+    annual_period_end: datetime,
+    filing_accepted_at: datetime,
+    filing_accession_number: str,
+    filing_form: str,
+    fiscal_year: str,
+    fiscal_period: str,
+    inputs: tuple[ValuationInput, ...],
+    market_source_id: str | None,
+    fundamental_source_id: str | None,
+    price_currency: str | None,
+    security_basis: ValuationSecurityBasis,
+) -> ExecutionReuseKey:
+    """Return the exact reusable key from selected valuation evidence."""
+    return ExecutionReuseKey(
+        family="corporate-valuation",
+        asset_id=request.asset_id,
+        source_id=(
+            f"{market_source_id or 'unconfigured'}|{fundamental_source_id or 'unconfigured'}"
+        ),
+        frequency="daily-plus-latest-annual",
+        algorithm_version=canonical_digest(
+            {"definitions": [item.model_dump(mode="json") for item in _DEFINITIONS]}
+        ),
+        evidence_digest=canonical_digest(
+            {
+                "valuation_as_of": valuation_as_of.isoformat(),
+                "inputs": [item.model_dump(mode="json") for item in inputs],
+                "annual_period_start": (
+                    annual_period_start.isoformat() if annual_period_start is not None else None
+                ),
+                "annual_period_end": annual_period_end.isoformat(),
+                "filing_accepted_at": filing_accepted_at.isoformat(),
+                "filing_accession_number": filing_accession_number,
+                "filing_form": filing_form,
+                "fiscal_year": fiscal_year,
+                "fiscal_period": fiscal_period,
+            }
+        ),
+        parameters_digest=canonical_digest(
+            {
+                "request": request.model_dump(mode="json"),
+                "price_currency": price_currency,
+                "security_basis": security_basis.model_dump(mode="json"),
+            }
+        ),
+    )
+
+
+def valuation_execution_reuse_key_from_snapshot(
+    snapshot: CorporateValuationSnapshot,
+) -> ExecutionReuseKey | None:
+    """Return a snapshot's key when it contains a complete evaluated projection."""
+    required = (
+        snapshot.valuation_as_of,
+        snapshot.annual_period_end,
+        snapshot.filing_accepted_at,
+        snapshot.filing_accession_number,
+        snapshot.filing_form,
+        snapshot.fiscal_year,
+        snapshot.fiscal_period,
+        snapshot.security_basis,
+    )
+    if any(value is None for value in required):
+        return None
+    return valuation_execution_reuse_key(
+        request=snapshot.request,
+        valuation_as_of=snapshot.valuation_as_of,
+        annual_period_start=snapshot.annual_period_start,
+        annual_period_end=snapshot.annual_period_end,
+        filing_accepted_at=snapshot.filing_accepted_at,
+        filing_accession_number=snapshot.filing_accession_number,
+        filing_form=snapshot.filing_form,
+        fiscal_year=snapshot.fiscal_year,
+        fiscal_period=snapshot.fiscal_period,
+        inputs=snapshot.inputs,
+        market_source_id=snapshot.price_source_id,
+        fundamental_source_id=snapshot.fundamental_source_id,
+        price_currency=snapshot.price_currency,
+        security_basis=snapshot.security_basis,
+    )
+
+
 class CorporateValuationService:
     """Compose stored daily prices and SEC facts without providers or writes."""
 
@@ -393,6 +487,30 @@ class CorporateValuationService:
 
         inputs = self._inputs(price, selection)
         by_role = {item.role: item for item in inputs}
+        reuse_key = self._reuse_key(
+            request=request,
+            price=price,
+            selection=selection,
+            security_basis=security_basis,
+            inputs=inputs,
+        )
+        reusable = (
+            ExecutionReuseService(self._storage).lookup_bundle_outcome(
+                reuse_key, known_at=request.known_at
+            )
+            if self._semantic_identity_v2
+            else None
+        )
+        if reusable is not None:
+            results, outcome_json = reusable
+            try:
+                snapshot = CorporateValuationSnapshot.model_validate_json(outcome_json)
+            except ValueError:
+                snapshot = None
+            if snapshot is not None and self._reusable_snapshot_matches(
+                snapshot, request=request, results=results
+            ):
+                return snapshot
         metrics = tuple(
             self._evaluate_metric(
                 definition,
@@ -440,6 +558,51 @@ class CorporateValuationService:
             coverage=coverage,
             limitations=tuple(limitations),
         )
+
+    def _reuse_key(
+        self,
+        *,
+        request: CorporateValuationRequest,
+        price: MarketBar,
+        selection: _AnnualSelection,
+        security_basis: ValuationSecurityBasis,
+        inputs: tuple[ValuationInput, ...],
+    ) -> ExecutionReuseKey:
+        """Bind a valuation calculation to its selected point-in-time evidence."""
+        return valuation_execution_reuse_key(
+            request=request,
+            valuation_as_of=price.timestamp,
+            annual_period_start=selection.period_start,
+            annual_period_end=selection.period_end,
+            filing_accepted_at=selection.accepted_at,
+            filing_accession_number=selection.metadata.accession_number,
+            filing_form=selection.metadata.form,
+            fiscal_year=selection.metadata.fiscal_year,
+            fiscal_period=selection.metadata.fiscal_period,
+            inputs=inputs,
+            market_source_id=self._market_source_id,
+            fundamental_source_id=self._fundamental_source_id,
+            price_currency=self._price_currency,
+            security_basis=security_basis,
+        )
+
+    @staticmethod
+    def _reusable_snapshot_matches(
+        snapshot: CorporateValuationSnapshot,
+        *,
+        request: CorporateValuationRequest,
+        results: tuple[MetricResult, ...],
+    ) -> bool:
+        """Reject a cached projection unless its complete persisted result set agrees."""
+        if snapshot.asset_id != request.asset_id or snapshot.request != request:
+            return False
+        expected_ids = tuple(
+            metric.result_id
+            for metric in snapshot.metrics
+            if metric.status is ValuationStatus.EVALUATED and metric.result_id is not None
+        )
+        result_ids = tuple(result.result_id for result in results)
+        return expected_ids == result_ids
 
     @staticmethod
     def _normalized_computed_at(value: datetime | None) -> datetime:

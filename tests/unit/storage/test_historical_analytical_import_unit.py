@@ -12,6 +12,7 @@ import pytest
 from investment_analyst.core.models import DiagnosticResult, MetricResult
 from investment_analyst.storage import LocalStorage, StoragePaths
 from investment_analyst.storage.historical_analytical_import import (
+    DirectHistoricalAnalyticalSource,
     HistoricalAnalyticalImporter,
     HistoricalAnalyticalImportError,
     HistoricalAnalyticalImportState,
@@ -108,6 +109,21 @@ def _importer(
         clock=lambda: datetime(2026, 10, 5, tzinfo=UTC),
         failure_injector=inject,
     )
+
+
+def test_direct_source_streams_bounded_ordered_metric_and_diagnostic_pages(tmp_path: Path) -> None:
+    with _prepared(tmp_path) as (source, _staging, metrics, diagnostics, _):
+        direct = DirectHistoricalAnalyticalSource(source)
+
+        metric_pages = tuple(direct.iter_metric_pages(limit=2))
+        diagnostic_pages = tuple(direct.iter_diagnostic_pages(limit=2))
+
+        assert [len(page) for page in metric_pages] == [2, 1]
+        assert [len(page) for page in diagnostic_pages] == [1]
+        assert tuple(item for page in metric_pages for item in page) == tuple(
+            sorted(metrics, key=lambda item: (item.available_at, str(item.result_id)))
+        )
+        assert tuple(item for page in diagnostic_pages for item in page) == diagnostics
 
 
 def test_import_preserves_rows_links_and_is_idempotent(tmp_path: Path) -> None:

@@ -50,6 +50,26 @@ class ObservationV2ImportError(StorageError):
     """Raised when an observation v2 import page or checkpoint cannot be trusted."""
 
 
+class ObservationV2ImportProgress(ContractModel):
+    """Safe bounded progress emitted by one observation import execution."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    phase: Literal[
+        "prefix_validation_started",
+        "prefix_validation_page_verified",
+        "prefix_validation_completed",
+        "import_page_started",
+        "import_page_checkpointed",
+        "completion_validation_started",
+        "completion_validation_page_verified",
+        "completion_validation_completed",
+    ]
+    confirmed_count: int = Field(ge=0)
+    page_count: int = Field(ge=0)
+    page_size: int = Field(ge=0, le=_MAX_OBSERVATION_IMPORT_PAGE)
+
+
 class ObservationV2ImportCursor(ContractModel):
     """Stable import cursor over the ``(available_at, observation_id)`` order."""
 
@@ -146,7 +166,10 @@ class ObservationV2Importer:
         source_workspace_id: str,
         source_fingerprint: str,
         raw_digest: str,
+        historic_source_fingerprint: str | None = None,
+        historic_raw_digest: str | None = None,
         clock: Callable[[], datetime] | None = None,
+        progress: Callable[[ObservationV2ImportProgress], None] | None = None,
     ) -> None:
         source.require_open()
         if not source.read_only:
@@ -158,7 +181,10 @@ class ObservationV2Importer:
         self._workspace_id = source_workspace_id
         self._fingerprint = source_fingerprint
         self._raw_digest = raw_digest
+        self._historic_fingerprint = historic_source_fingerprint
+        self._historic_raw_digest = historic_raw_digest
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._progress = progress
         self._destination_key = str(staging.destination.absolute())
         self._staging_id = staging.staging_id
         if not self._workspace_id.strip():
@@ -200,6 +226,12 @@ class ObservationV2Importer:
             )
             if not page:
                 break
+            self._emit(
+                "import_page_started",
+                confirmed_count=state.confirmed_count,
+                page_count=pages_confirmed + 1,
+                page_size=len(page),
+            )
             max_hydrated = max(max_hydrated, len(page))
             source_records = self._source.observations.get_many(page)
             ordered = [source_records[observation_id] for observation_id in page]
@@ -234,6 +266,12 @@ class ObservationV2Importer:
             imported = state.confirmed_count
             reused_total += receipt.reused_count
             pages_confirmed += 1
+            self._emit(
+                "import_page_checkpointed",
+                confirmed_count=state.confirmed_count,
+                page_count=pages_confirmed,
+                page_size=len(page),
+            )
             if fail_after_page is not None and pages_confirmed > fail_after_page:
                 raise ObservationV2ImportError("observation import interrupted before next page")
         return self._verify_completion(
@@ -336,18 +374,83 @@ class ObservationV2Importer:
             state = ObservationV2ImportState.model_validate_json(path.read_text(encoding="utf-8"))
         except ValueError as error:
             raise ObservationV2ImportError("observation import state is truncated") from error
-        self._check_state_binding(state)
+        transitioned = False
+        try:
+            self._check_state_binding(state)
+        except ObservationV2ImportError:
+            state = self._transition_confirm_and_rebind(state, page_limit)
+            transitioned = True
         if state.page_limit != page_limit:
             raise ObservationV2ImportError("observation import page limit does not match state")
-        self._validate_confirmed_prefix(state)
+        if not transitioned:
+            self._validate_confirmed_prefix(state)
         return state
 
+    def _transition_confirm_and_rebind(
+        self, state: ObservationV2ImportState, page_limit: int
+    ) -> ObservationV2ImportState:
+        """Preserve and rebind an A checkpoint after verifying its B prefix."""
+        if (
+            self._historic_fingerprint is None
+            or self._historic_raw_digest is None
+            or state.source_workspace_id != self._workspace_id
+            or state.source_fingerprint != self._historic_fingerprint
+            or state.raw_digest != self._historic_raw_digest
+            or state.page_limit != page_limit
+        ):
+            raise ObservationV2ImportError("observation import state belongs to another source")
+        if state.staging_id is not None and self._staging_id is not None:
+            if state.staging_id != self._staging_id:
+                raise ObservationV2ImportError(
+                    "observation import state belongs to another staging"
+                )
+        elif state.destination != self._destination_key:
+            raise ObservationV2ImportError("observation import state belongs to another staging")
+        self._validate_confirmed_prefix(state)
+        path = self._state_path()
+        original = path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        archive = path.with_name(f"observation-v2-import-state.A.{digest}.json")
+        if archive.exists():
+            if archive.is_symlink() or archive.read_bytes() != original:
+                raise ObservationV2ImportError(
+                    "historic observation checkpoint cannot be preserved"
+                )
+        else:
+            temporary = archive.with_name(f".{archive.name}.{uuid4().hex}.tmp")
+            try:
+                with temporary.open("xb") as handle:
+                    handle.write(original)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, archive)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return self._write_state(
+            cursor=state.cursor,
+            confirmed_count=state.confirmed_count,
+            accumulated_digest=state.accumulated_digest,
+            page_limit=state.page_limit,
+        )
+
     def _validate_confirmed_prefix(self, state: ObservationV2ImportState) -> None:
+        self._emit(
+            "prefix_validation_started",
+            confirmed_count=state.confirmed_count,
+            page_count=0,
+            page_size=0,
+        )
         if state.confirmed_count == 0:
             if state.cursor.available_at is not None or state.cursor.observation_id is not None:
                 raise ObservationV2ImportError("observation import cursor mismatches count")
             if state.accumulated_digest != observation_empty_digest():
                 raise ObservationV2ImportError("observation import digest mismatches count")
+            self._emit(
+                "prefix_validation_completed",
+                confirmed_count=0,
+                page_count=0,
+                page_size=0,
+            )
             return
         if state.cursor.available_at is None or state.cursor.observation_id is None:
             raise ObservationV2ImportError("observation import cursor mismatches count")
@@ -358,6 +461,7 @@ class ObservationV2Importer:
         staged_at: datetime | None = None
         staged_id: UUID | None = None
         last_source_id: UUID | None = None
+        page_count = 0
         while confirmed < state.confirmed_count:
             remaining = state.confirmed_count - confirmed
             source_page = self._source.observations.list_observation_import_page(
@@ -387,10 +491,45 @@ class ObservationV2Importer:
             source_at, source_id = last_source.available_at, last_source.observation_id
             staged_at, staged_id = source_at, source_id
             confirmed += len(source_page)
+            page_count += 1
+            self._emit(
+                "prefix_validation_page_verified",
+                confirmed_count=confirmed,
+                page_count=page_count,
+                page_size=len(source_page),
+            )
         if last_source_id != state.cursor.observation_id:
             raise ObservationV2ImportError("observation import cursor mismatches count")
         if digest != state.accumulated_digest:
             raise ObservationV2ImportError("observation import digest mismatches prefix")
+        self._emit(
+            "prefix_validation_completed",
+            confirmed_count=confirmed,
+            page_count=page_count,
+            page_size=0,
+        )
+
+    def _emit(
+        self,
+        phase: str,
+        *,
+        confirmed_count: int,
+        page_count: int,
+        page_size: int,
+    ) -> None:
+        if self._progress is None:
+            return
+        try:
+            self._progress(
+                ObservationV2ImportProgress(
+                    phase=phase,
+                    confirmed_count=confirmed_count,
+                    page_count=page_count,
+                    page_size=page_size,
+                )
+            )
+        except Exception as error:
+            raise ObservationV2ImportError("observation progress observer failed") from error
 
     def _write_state(
         self,
@@ -431,6 +570,12 @@ class ObservationV2Importer:
         max_page_requested: int,
         max_page_hydrated: int,
     ) -> ObservationV2ImportSummary:
+        self._emit(
+            "completion_validation_started",
+            confirmed_count=state.confirmed_count,
+            page_count=0,
+            page_size=0,
+        )
         digest = observation_empty_digest()
         counts_by_source: dict[str, int] = {}
         counts_by_frequency: dict[str, int] = {}
@@ -440,6 +585,7 @@ class ObservationV2Importer:
         source_id: UUID | None = None
         staged_at: datetime | None = None
         staged_id: UUID | None = None
+        page_count = 0
         while True:
             source_page = self._source.observations.list_observation_import_page(
                 limit=state.page_limit,
@@ -477,10 +623,23 @@ class ObservationV2Importer:
             source_at, source_id = last_source.available_at, last_source.observation_id
             staged_at, staged_id = source_at, source_id
             verified += len(source_page)
+            page_count += 1
+            self._emit(
+                "completion_validation_page_verified",
+                confirmed_count=verified,
+                page_count=page_count,
+                page_size=len(source_page),
+            )
         if digest != state.accumulated_digest:
             raise ObservationV2ImportError("observation digest mismatches verified corpus")
         if imported_count != verified:
             raise ObservationV2ImportError("observation count mismatches the source inventory")
+        self._emit(
+            "completion_validation_completed",
+            confirmed_count=verified,
+            page_count=page_count,
+            page_size=0,
+        )
         return ObservationV2ImportSummary(
             source_workspace_id=self._workspace_id,
             source_fingerprint=self._fingerprint,
@@ -536,6 +695,7 @@ __all__ = [
     "OBSERVATION_V2_IMPORT_SUMMARY_SCHEMA",
     "ObservationV2ImportCursor",
     "ObservationV2ImportError",
+    "ObservationV2ImportProgress",
     "ObservationV2ImportState",
     "ObservationV2ImportSummary",
     "ObservationV2Importer",

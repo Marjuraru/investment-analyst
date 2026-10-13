@@ -1,5 +1,6 @@
 """Resolution, initialization, inspection, and safe storage opening for workspaces."""
 
+import hashlib
 import json
 import os
 from collections.abc import Callable, Mapping
@@ -19,7 +20,12 @@ from investment_analyst.workspace.models import (
     WorkspaceInitialization,
     WorkspaceInspection,
     WorkspaceManifest,
+    WorkspaceMigrationIdentity,
     WorkspacePaths,
+)
+from investment_analyst.workspace.workspace_v2_migration_models import (
+    WorkspaceV1MigrationSourceSnapshot,
+    WorkspaceV2SourceTransitionState,
 )
 
 _WORKSPACE_ENVIRONMENT_VARIABLE = "INVESTMENT_ANALYST_WORKSPACE"
@@ -232,6 +238,202 @@ class WorkspaceService:
             warnings=tuple(warnings),
         )
 
+    def manifest(self, explicit_path: Path | None = None) -> WorkspaceManifest:
+        """Read one validated workspace manifest without opening its storage."""
+        return self._load_manifest(self.resolve(explicit_path))
+
+    def bind_v1_migration_identity(
+        self,
+        *,
+        source_paths: WorkspacePaths,
+        destination_paths: WorkspacePaths,
+        source_fingerprint: str,
+    ) -> WorkspaceMigrationIdentity:
+        """Bind the v1 logical identity to a v2 target through workspace APIs.
+
+        The v2 target retains its operational UUID; source UUID and creation
+        instant are persisted in database metadata and a recoverable state file.
+        A retry can repair only a missing state side after exact verification.
+        """
+        if not source_fingerprint.strip():
+            raise WorkspaceConfigurationError("migration source fingerprint must be explicit")
+        source_manifest = self._load_manifest(source_paths)
+        destination_manifest = self._load_manifest(destination_paths)
+        if source_manifest.format_version != 1 or destination_manifest.format_version != 2:
+            raise WorkspaceVersionError(
+                "migration identity requires a v1 source and v2 destination"
+            )
+        identity = WorkspaceMigrationIdentity(
+            source_workspace_id=source_manifest.workspace_id,
+            source_created_at=source_manifest.created_at,
+            source_fingerprint=source_fingerprint,
+            destination_workspace_id=destination_manifest.workspace_id,
+        )
+        state_path = destination_paths.state_root / "workspace-v2-migration-identity.json"
+        if state_path.is_symlink():
+            raise WorkspaceAccessError("migration identity state is unsafe")
+        expected = {
+            "source_workspace_id": str(identity.source_workspace_id),
+            "source_created_at": identity.source_created_at.isoformat(),
+            "source_fingerprint": identity.source_fingerprint,
+            "destination_workspace_id": str(identity.destination_workspace_id),
+        }
+        with self.open_storage(destination_paths, WorkspaceAccessMode.READ_WRITE) as storage:
+            connection = storage.store.connection
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS workspace_v2_migration_identity ("
+                "identity_key VARCHAR PRIMARY KEY, identity_value VARCHAR NOT NULL)"
+            )
+            rows = connection.execute(
+                "SELECT identity_key, identity_value FROM workspace_v2_migration_identity"
+            ).fetchall()
+            found = {str(key): str(value) for key, value in rows}
+            if found and found != expected:
+                raise WorkspaceAccessError("migration identity database binding does not match")
+            if not found:
+                connection.executemany(
+                    "INSERT INTO workspace_v2_migration_identity "
+                    "(identity_key, identity_value) VALUES (?, ?)",
+                    list(expected.items()),
+                )
+        if state_path.exists():
+            try:
+                persisted = WorkspaceMigrationIdentity.model_validate_json(
+                    state_path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError) as error:
+                raise WorkspaceAccessError("migration identity state is incompatible") from error
+            if persisted != identity:
+                raise WorkspaceAccessError("migration identity state binding does not match")
+        else:
+            self._write_json_atomically(state_path, identity.to_json_dict())
+        return identity
+
+    def publish_v1_migration_source_snapshot(
+        self,
+        *,
+        snapshot_paths: WorkspacePaths,
+        descriptor: WorkspaceV1MigrationSourceSnapshot,
+    ) -> WorkspaceV1MigrationSourceSnapshot:
+        """Persist the descriptor for an already verified immutable v1 copy."""
+        manifest = self._load_manifest(snapshot_paths)
+        if (
+            manifest.format_version != 1
+            or manifest.workspace_id != descriptor.source_workspace_id
+            or snapshot_paths.root != descriptor.snapshot_root
+        ):
+            raise WorkspaceConfigurationError("migration source snapshot does not match workspace")
+        self._write_json_atomically(
+            snapshot_paths.state_root / "workspace-v1-migration-source-snapshot.json",
+            descriptor.to_json_dict(),
+        )
+        return descriptor
+
+    def publish_v2_source_transition(
+        self,
+        *,
+        destination_paths: WorkspacePaths,
+        state: WorkspaceV2SourceTransitionState,
+    ) -> WorkspaceV2SourceTransitionState:
+        """Publish one immutable A-to-B provenance record through the workspace API."""
+        manifest = self._load_manifest(destination_paths)
+        if manifest.format_version != 2 or manifest.workspace_id != state.destination_workspace_id:
+            raise WorkspaceConfigurationError("migration transition does not match destination")
+        identity_path = destination_paths.state_root / "workspace-v2-migration-identity.json"
+        if identity_path.is_symlink() or not identity_path.is_file():
+            raise WorkspaceAccessError("migration identity is missing or unsafe")
+        try:
+            identity = WorkspaceMigrationIdentity.model_validate_json(
+                identity_path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as error:
+            raise WorkspaceAccessError("migration identity is incompatible") from error
+        if (
+            identity.source_workspace_id != state.source_workspace_id
+            or identity.source_created_at != state.source_created_at
+            or identity.source_fingerprint != state.historic_source_fingerprint
+        ):
+            raise WorkspaceAccessError("migration transition does not preserve historic identity")
+        self._write_json_atomically(
+            destination_paths.state_root / "workspace-v2-source-transition.json",
+            state.to_json_dict(),
+        )
+        return state
+
+    def v1_migration_identity(
+        self, destination_paths: WorkspacePaths
+    ) -> WorkspaceMigrationIdentity:
+        """Read the immutable historic v1 identity associated with a v2 target."""
+        path = destination_paths.state_root / "workspace-v2-migration-identity.json"
+        if path.is_symlink() or not path.is_file():
+            raise WorkspaceAccessError("migration identity is missing or unsafe")
+        try:
+            return WorkspaceMigrationIdentity.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise WorkspaceAccessError("migration identity is incompatible") from error
+
+    def v2_source_transition(
+        self, destination_paths: WorkspacePaths
+    ) -> WorkspaceV2SourceTransitionState | None:
+        """Read the optional immutable A-to-B transition record."""
+        path = destination_paths.state_root / "workspace-v2-source-transition.json"
+        if not path.exists():
+            return None
+        if path.is_symlink() or not path.is_file():
+            raise WorkspaceAccessError("migration transition is unsafe")
+        try:
+            return WorkspaceV2SourceTransitionState.model_validate_json(
+                path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as error:
+            raise WorkspaceAccessError("migration transition is incompatible") from error
+
+    def advance_v2_source_transition(
+        self,
+        *,
+        destination_paths: WorkspacePaths,
+        state: WorkspaceV2SourceTransitionState,
+    ) -> WorkspaceV2SourceTransitionState:
+        """Atomically advance transition state while retaining prior bytes as history."""
+        path = destination_paths.state_root / "workspace-v2-source-transition.json"
+        previous = self.v2_source_transition(destination_paths)
+        if previous is None:
+            raise WorkspaceAccessError("migration transition is missing")
+        immutable = (
+            "source_workspace_id",
+            "source_created_at",
+            "historic_source_fingerprint",
+            "historic_checkpoint_sha256",
+            "snapshot_id",
+            "snapshot_source_fingerprint",
+            "destination_workspace_id",
+        )
+        if any(getattr(previous, field) != getattr(state, field) for field in immutable):
+            raise WorkspaceAccessError("migration transition immutable provenance changed")
+        order = {"PREPARED": 0, "VERIFYING": 1, "APPLYING": 2, "COMPLETE": 3}
+        if order[state.phase.value] < order[previous.phase.value]:
+            raise WorkspaceAccessError("migration transition phase cannot move backwards")
+        original = path.read_bytes()
+        history = destination_paths.state_root / "workspace-v2-source-transition-history"
+        history.mkdir(parents=True, exist_ok=True)
+        archive = history / f"{hashlib.sha256(original).hexdigest()}.json"
+        if not archive.exists():
+            self._write_json_atomically(
+                archive,
+                json.loads(original.decode("utf-8")),
+            )
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+                json.dump(state.to_json_dict(), handle, separators=(",", ":"), sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return state
+
     def open_storage(
         self,
         paths: WorkspacePaths,
@@ -283,6 +485,24 @@ class WorkspaceService:
             return WorkspaceManifest.model_validate_json(text)
         except ValidationError as error:
             raise WorkspaceManifestError("workspace manifest is malformed") from error
+
+    def _write_json_atomically(self, target: Path, document: Mapping[str, object]) -> None:
+        """Write a new state document without following a pre-existing link."""
+        if target.exists() or target.is_symlink():
+            raise WorkspaceManifestError("workspace state document already exists")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        try:
+            with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+                json.dump(document, handle, separators=(",", ":"), sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            if target.exists():
+                raise WorkspaceManifestError("workspace state document was created concurrently")
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _write_manifest_atomically(
         self,

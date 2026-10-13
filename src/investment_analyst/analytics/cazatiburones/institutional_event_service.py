@@ -1,5 +1,6 @@
 """Service for materializing and querying persisted institutional 13F events."""
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID
@@ -24,9 +25,14 @@ from investment_analyst.analytics.cazatiburones.institutional_metric_definitions
 from investment_analyst.analytics.cazatiburones.institutional_metric_definitions import (
     INSTITUTIONAL_METRIC_DEFINITIONS,
 )
+from investment_analyst.analytics.execution_reuse import ExecutionReuseService
 from investment_analyst.core.models.metric import MetricResult
 from investment_analyst.evidence.sec_documents.models import normalize_cik
 from investment_analyst.storage import LocalStorage, StorageError
+from investment_analyst.storage.execution_reuse_v2 import (
+    ExecutionReuseKey,
+    canonical_digest,
+)
 
 _INSTITUTIONAL_METRIC_KEYS = tuple(
     definition.metric_key for definition in INSTITUTIONAL_METRIC_DEFINITIONS
@@ -59,11 +65,32 @@ class InstitutionalEventService:
             raise StorageError("institutional event materialization requires writable storage")
 
         normalized_mgr = normalize_cik(manager_cik)
-        recorded_at = self._clock()
-
         filtered_metrics = self._select_family_metrics(
             asset_id=asset_id, known_at=known_at, manager_cik=normalized_mgr
         )
+        reuse_key = self._reuse_key(
+            asset_id=asset_id,
+            manager_cik=normalized_mgr,
+            known_at=known_at,
+            metrics=filtered_metrics,
+        )
+        reusable = ExecutionReuseService(self._storage).lookup_bundle_outcome(
+            reuse_key,
+            known_at=known_at,
+        )
+        if reusable is not None:
+            _, outcome_json = reusable
+            summary = InstitutionalEventMaterializationSummary.model_validate_json(outcome_json)
+            persisted = self._repository.get(
+                asset_id=asset_id,
+                manager_cik=normalized_mgr,
+                known_at=known_at.isoformat(),
+                snapshot_id=summary.snapshot_id,
+            )
+            if persisted is not None:
+                return summary.model_copy(update={"created": False})
+
+        recorded_at = self._clock()
 
         evaluations, events, candidates = project_institutional_events(filtered_metrics)
 
@@ -94,7 +121,7 @@ class InstitutionalEventService:
 
         created = self._repository.save(snapshot)
 
-        return InstitutionalEventMaterializationSummary(
+        summary = InstitutionalEventMaterializationSummary(
             asset_id=asset_id,
             manager_cik=normalized_mgr,
             known_at=known_at,
@@ -102,6 +129,47 @@ class InstitutionalEventService:
             created=created,
             events=len(events),
             candidates=len(candidates),
+        )
+        ExecutionReuseService(self._storage).remember_bundle(
+            reuse_key,
+            (),
+            stored_at=recorded_at,
+            available_at=known_at,
+            outcome_json=json.dumps(
+                summary.model_dump(mode="json"),
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        )
+        return summary
+
+    @staticmethod
+    def _reuse_key(
+        *,
+        asset_id: str,
+        manager_cik: str,
+        known_at: datetime,
+        metrics: list[MetricResult],
+    ) -> ExecutionReuseKey:
+        """Bind event projection reuse to its selected institutional metrics."""
+        return ExecutionReuseKey(
+            family="institutional-events",
+            asset_id=asset_id,
+            source_id=f"sec-13f:{manager_cik}",
+            frequency="filing-period",
+            algorithm_version=POLICY_VERSION,
+            evidence_digest=canonical_digest(
+                {
+                    "metrics": [item.model_dump(mode="json") for item in metrics],
+                }
+            ),
+            parameters_digest=canonical_digest(
+                {
+                    "manager_cik": manager_cik,
+                    "known_at": known_at.astimezone(UTC).isoformat(),
+                }
+            ),
         )
 
     def _select_family_metrics(

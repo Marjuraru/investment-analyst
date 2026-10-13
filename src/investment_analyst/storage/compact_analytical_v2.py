@@ -41,10 +41,19 @@ from investment_analyst.storage.errors import (
     StorageSchemaError,
 )
 from investment_analyst.storage.serialization import canonical_json_bytes, sha256_hex
+from investment_analyst.workspace.workspace_v2_migration_models import (
+    WorkspaceV2MigrationVerificationProof,
+)
 
 _BATCH = 256
 _QUERY_CHUNK = 240
 _ORIGINS = ("HISTORICAL", "LIVE")
+
+
+def _historical_inventory_digest(inventory: tuple[int, str, int, str]) -> str:
+    return hashlib.sha256(
+        json.dumps(inventory, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    ).hexdigest()
 
 
 def _validate_metric_parameter_key(key: str) -> None:
@@ -1764,8 +1773,14 @@ class CompactAnalyticalStore:
         diagnostic_count: int,
         diagnostic_digest: str,
         sealed_at: datetime,
+        allow_source_transition: bool = False,
+        verification_proof: WorkspaceV2MigrationVerificationProof | None = None,
     ) -> HistoricalAnalyticalSeal:
-        """Seal only a complete archive whose ordered model digests match source v1."""
+        """Seal only a complete archive whose ordered model digests match source v1.
+
+        A fresh typed verification proof may replace the redundant destination
+        walk only when it binds this source inventory and destination coverage.
+        """
         if len(source_fingerprint) != 64 or any(
             character not in "0123456789abcdef" for character in source_fingerprint
         ):
@@ -1773,20 +1788,28 @@ class CompactAnalyticalStore:
         for value in (metric_digest, diagnostic_digest):
             if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
                 raise CompactAnalyticalError("historical inventory digest is not SHA-256")
-        actual_metric_count, actual_metric_digest = self._historical_metric_digest()
-        actual_diagnostic_count, actual_diagnostic_digest = self._historical_diagnostic_digest()
         expected = (
             metric_count,
             metric_digest,
             diagnostic_count,
             diagnostic_digest,
         )
-        actual = (
-            actual_metric_count,
-            actual_metric_digest,
-            actual_diagnostic_count,
-            actual_diagnostic_digest,
-        )
+        if verification_proof is None:
+            actual = self.historical_inventory_digests()
+        else:
+            inventory_digest = _historical_inventory_digest(expected)
+            if (
+                verification_proof.family != "analytical"
+                or verification_proof.source_fingerprint != source_fingerprint
+                or verification_proof.coverage_count != metric_count + diagnostic_count
+                or verification_proof.inventory_digest != inventory_digest
+                or verification_proof.source_digest != inventory_digest
+                or verification_proof.destination_digest != inventory_digest
+            ):
+                raise CompactAnalyticalError(
+                    "historical verification proof does not bind inventory"
+                )
+            actual = expected
         if actual != expected:
             raise CompactAnalyticalError("historical rows do not match the source inventory")
         existing = self.historical_seal()
@@ -1798,7 +1821,53 @@ class CompactAnalyticalStore:
                 or existing.diagnostic_count != diagnostic_count
                 or existing.diagnostic_digest != diagnostic_digest
             ):
-                raise CompactAnalyticalError("historical seal conflicts with the source inventory")
+                if not allow_source_transition:
+                    raise CompactAnalyticalError(
+                        "historical seal conflicts with the source inventory"
+                    )
+                if (
+                    existing.metric_count != metric_count
+                    or existing.metric_digest != metric_digest
+                    or existing.diagnostic_count != diagnostic_count
+                    or existing.diagnostic_digest != diagnostic_digest
+                ):
+                    raise CompactAnalyticalError("historical seal content conflicts with source")
+                with write_transaction(self._connection):
+                    self._connection.execute(
+                        "CREATE TABLE IF NOT EXISTS workspace_v2_historical_seal_history "
+                        "(source_fingerprint VARCHAR NOT NULL, metric_count BIGINT NOT NULL, "
+                        "metric_digest VARCHAR NOT NULL, diagnostic_count BIGINT NOT NULL, "
+                        "diagnostic_digest VARCHAR NOT NULL, sealed_at TIMESTAMPTZ NOT NULL)"
+                    )
+                    self._connection.execute(
+                        "INSERT INTO workspace_v2_historical_seal_history "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        [
+                            existing.source_fingerprint,
+                            existing.metric_count,
+                            existing.metric_digest,
+                            existing.diagnostic_count,
+                            existing.diagnostic_digest,
+                            existing.sealed_at,
+                        ],
+                    )
+                    self._connection.execute(f"DELETE FROM {_SEAL_TABLE}")
+                    self._connection.execute(
+                        f"INSERT INTO {_SEAL_TABLE} "
+                        "VALUES ('historical-analytical-v1', ?, ?, ?, ?, ?, ?)",
+                        [
+                            source_fingerprint,
+                            metric_count,
+                            metric_digest,
+                            diagnostic_count,
+                            diagnostic_digest,
+                            sealed_at.astimezone(UTC),
+                        ],
+                    )
+                result = self.historical_seal()
+                if result is None:
+                    raise CompactAnalyticalError("historical transition seal was not persisted")
+                return result
             return existing
         if sealed_at.tzinfo is None or sealed_at.utcoffset() is None:
             raise CompactAnalyticalError("historical seal timestamp must be timezone-aware")
@@ -1818,6 +1887,18 @@ class CompactAnalyticalStore:
         if result is None:
             raise CompactAnalyticalError("historical seal was not persisted")
         return result
+
+    def verify_historical_relationships(self) -> None:
+        """Verify global historical graph and raw bindings without rehydrating models."""
+        self.ensure(create=False)
+        raw_orphan = self._connection.execute(
+            "SELECT o.observation_id FROM normalized_observations_v2 o "
+            "LEFT JOIN raw_v2_index r ON r.record_id = o.raw_record_id "
+            "WHERE r.record_id IS NULL LIMIT 1"
+        ).fetchone()
+        if raw_orphan is not None:
+            raise CompactAnalyticalError("workspace v2 observation has no raw record")
+        self._require_acyclic_inventory()
 
     def verify_historical_seal(self) -> HistoricalAnalyticalSeal | None:
         seal = self.historical_seal()
@@ -1893,14 +1974,7 @@ class CompactAnalyticalStore:
 
     def verify_complete(self) -> dict[str, int | str]:
         """Walk each family by bounded pages and verify content, PIT links and seals."""
-        self.ensure(create=False)
-        raw_orphan = self._connection.execute(
-            "SELECT o.observation_id FROM normalized_observations_v2 o "
-            "LEFT JOIN raw_v2_index r ON r.record_id = o.raw_record_id "
-            "WHERE r.record_id IS NULL LIMIT 1"
-        ).fetchone()
-        if raw_orphan is not None:
-            raise CompactAnalyticalError("workspace v2 observation has no raw record")
+        self.verify_historical_relationships()
 
         metric_count = 0
         metric_cursor_at: datetime | None = None
@@ -1941,7 +2015,6 @@ class CompactAnalyticalStore:
             diagnostic_cursor_at = last.available_at
             diagnostic_cursor_id = last.diagnostic_id
 
-        self._require_acyclic_inventory()
         self.verify_historical_seal()
         return {
             "metric_count": metric_count,
@@ -1953,10 +2026,32 @@ class CompactAnalyticalStore:
         }
 
     def _require_acyclic_inventory(self) -> None:
-        row = self._connection.execute(
-            """
-            WITH RECURSIVE metric_edges(parent_id, child_id) AS (
-                SELECT m.result_id, members.member_id
+        """Reject cycles with one bounded asset/time projection at a time.
+
+        Every persisted edge already rejects a dependency whose ``available_at``
+        is in the future.  A cycle can therefore only occur inside one equal
+        timestamp bucket.  The asset invariant makes an edge cross no asset boundary.
+        Iterate the
+        finite ``(available_at, asset_id)`` partitions rather than materializing
+        the full inventory in a temporary table.
+        """
+        cursor = self._connection.execute(
+            f"SELECT CAST(available_at AS VARCHAR), asset_id FROM {_METRIC_TABLE} "
+            "GROUP BY available_at, asset_id ORDER BY available_at, asset_id"
+        )
+        while rows := cursor.fetchmany(_BATCH):
+            for available_at, asset_id in rows:
+                self._require_acyclic_partition(_instant(str(available_at)), str(asset_id))
+
+    def _require_acyclic_partition(self, available_at: datetime, asset_id: str) -> None:
+        """Reject a cycle inside one already-valid asset/time partition."""
+        edges = "_workspace_v2_cycle_edges"
+        nodes = "_workspace_v2_cycle_nodes"
+        try:
+            self._connection.execute(
+                f"""
+                CREATE OR REPLACE TEMP TABLE {edges} AS
+                SELECT DISTINCT m.result_id AS parent_id, members.member_id AS child_id
                 FROM workspace_metric_results_v2 m
                 JOIN workspace_analytical_sequences_v2 s
                   ON s.sequence_id = m.metric_sequence_id
@@ -1965,23 +2060,48 @@ class CompactAnalyticalStore:
                   ON links.sequence_id = s.sequence_id
                 JOIN workspace_analytical_segment_members_v2 members
                   ON members.segment_id = links.segment_id
-            ), walks(root_id, node_id, path, cycle) AS (
-                SELECT parent_id, child_id, [parent_id, child_id], parent_id = child_id
-                FROM metric_edges
-                UNION ALL
-                SELECT walks.root_id,
-                       metric_edges.child_id,
-                       list_append(walks.path, metric_edges.child_id),
-                       list_contains(walks.path, metric_edges.child_id)
-                FROM walks
-                JOIN metric_edges ON metric_edges.parent_id = walks.node_id
-                WHERE NOT walks.cycle
+                JOIN workspace_metric_results_v2 child
+                  ON child.result_id = members.member_id
+                WHERE m.available_at = ?
+                  AND child.available_at = m.available_at
+                  AND m.asset_id = ?
+                  AND child.asset_id = m.asset_id
+                """,
+                [available_at, asset_id],
             )
-            SELECT root_id FROM walks WHERE cycle LIMIT 1
-            """
-        ).fetchone()
-        if row is not None:
-            raise CompactAnalyticalError("workspace v2 metric dependency graph contains a cycle")
+            self._connection.execute(
+                f"""
+                CREATE OR REPLACE TEMP TABLE {nodes} AS
+                SELECT parent_id AS result_id FROM {edges}
+                UNION
+                SELECT child_id AS result_id FROM {edges}
+                """
+            )
+            while True:
+                before = int(
+                    self._connection.execute(f"SELECT count(*) FROM {nodes}").fetchone()[0]
+                )
+                if before == 0:
+                    return
+                self._connection.execute(
+                    f"""
+                    DELETE FROM {nodes} node
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM {edges} edge
+                        JOIN {nodes} parent ON parent.result_id = edge.parent_id
+                        WHERE edge.child_id = node.result_id
+                    )
+                    """
+                )
+                after = int(self._connection.execute(f"SELECT count(*) FROM {nodes}").fetchone()[0])
+                if after == before:
+                    raise CompactAnalyticalError(
+                        "workspace v2 metric dependency graph contains a cycle"
+                    )
+        finally:
+            self._connection.execute(f"DROP TABLE IF EXISTS {edges}")
+            self._connection.execute(f"DROP TABLE IF EXISTS {nodes}")
 
     def logical_table_bytes(self) -> dict[str, int]:
         """Measure stored logical bytes with UTF-8 text and fixed scalar widths."""

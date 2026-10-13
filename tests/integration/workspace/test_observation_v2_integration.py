@@ -150,7 +150,7 @@ def _importer(
     )
 
 
-def test_observation_v2_rejects_missing_or_foreign_raw(tmp_path: Path) -> None:
+def test_observation_v2_requires_raw_and_preserves_distinct_sources(tmp_path: Path) -> None:
     from investment_analyst.storage.observation_v2 import ObservationV2Error
 
     source_root = tmp_path / "source"
@@ -168,7 +168,7 @@ def test_observation_v2_rejects_missing_or_foreign_raw(tmp_path: Path) -> None:
             orphan = next(iter(observations.values())).model_copy(
                 update={"raw_record_id": UUID(int=999999)}
             )
-            with pytest.raises(ObservationV2Error, match="missing raw|foreign"):
+            with pytest.raises(ObservationV2Error, match="missing raw"):
                 staging.save_observations([orphan])
             complete_first = _importer(source, staging, workspace_id, fingerprint, raw_digest).run(
                 page_limit=2
@@ -204,8 +204,10 @@ def test_observation_v2_rejects_missing_or_foreign_raw(tmp_path: Path) -> None:
             foreign_observation = next(iter(observations.values())).model_copy(
                 update={"observation_id": _uuid4(), "raw_record_id": foreign_raw.record_id}
             )
-            with pytest.raises(ObservationV2Error, match="missing raw|foreign"):
-                staging.save_observations([foreign_observation])
+            receipt = staging.save_observations([foreign_observation])
+            assert receipt.created_count == 1
+            staged = staging.get_observations([foreign_observation.observation_id])
+            assert staged[foreign_observation.observation_id] == foreign_observation
 
 
 def test_observation_import_relocates_and_resumes_without_duplicate_ids(

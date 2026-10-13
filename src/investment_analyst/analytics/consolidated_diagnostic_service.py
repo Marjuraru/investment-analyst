@@ -323,10 +323,6 @@ class _SemanticTraceabilityResolver:
             return cached
         observation = self._observation(identifier)
         raw_record = self._raw_record(observation.raw_record_id)
-        if raw_record.source.source_id != observation.source.source_id:
-            raise ConsolidatedDiagnosticTraceabilityError(
-                f"observation {identifier} source does not match its raw record"
-            )
         document: dict[str, JsonValue] = {
             "raw_record": self._raw_identity(raw_record.record_id),
             "asset_id": observation.asset_id,

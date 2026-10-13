@@ -14,6 +14,7 @@ from investment_analyst.core.models import (
     DataQuality,
     MetricResult,
     NormalizedObservation,
+    RawRecord,
     SourceReference,
 )
 from investment_analyst.providers.asset_config import SecAssetConfiguration
@@ -41,6 +42,8 @@ from investment_analyst.providers.fundamentals.sec_raw_records import (
     aapl_sec_configuration,
 )
 from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.service import WorkspaceService
 
 _OBSERVATION_NAMESPACE = UUID("2d55a2cc-cae2-4a55-b2ba-c2422d142884")
 _TAGS = {item.field_name: item.tag for item in SEC_FACT_DEFINITIONS}
@@ -94,6 +97,25 @@ def _save_annual_period(
             "fundamental.revenue",
             "fundamental.net_income",
         }
+        source = SourceReference(
+            source_id=resolved.companyfacts_source_id,
+            record_key=record_key,
+            retrieved_at=datetime(2026, 12, 1, tzinfo=UTC),
+            raw_uri="https://data.sec.gov/test",
+            checksum_sha256="a" * 64,
+        )
+        storage.raw_records.save(
+            RawRecord(
+                record_id=raw_record_id,
+                asset_id=resolved.asset_id,
+                source=source,
+                event_time=period_end,
+                available_at=acceptance_at,
+                received_at=datetime(2026, 12, 1, tzinfo=UTC),
+                payload={"field_name": field_name, "value": text_value},
+                schema_version="sec-fundamental-metric-fixture-v1",
+            )
+        )
         storage.observations.save(
             NormalizedObservation(
                 observation_id=observation_id,
@@ -108,13 +130,7 @@ def _save_annual_period(
                 period_end=period_end,
                 available_at=acceptance_at,
                 normalized_at=datetime(2027, 1, 1, tzinfo=UTC),
-                source=SourceReference(
-                    source_id=resolved.companyfacts_source_id,
-                    record_key=record_key,
-                    retrieved_at=datetime(2026, 12, 1, tzinfo=UTC),
-                    raw_uri="https://data.sec.gov/test",
-                    checksum_sha256="a" * 64,
-                ),
+                source=source,
                 quality=DataQuality.VALID,
                 transformation_version=sec_transformation_version(resolved),
             )
@@ -205,6 +221,44 @@ def test_pipeline_persists_and_reuses_metrics_without_source_side_effects(tmp_pa
         )
         assert storage.diagnostics.list() == []
         assert first.to_json_dict()["traceability_verified"] is True
+
+
+def test_v2_reuse_precedes_fundamental_engine(tmp_path) -> None:
+    workspace_service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = workspace_service.initialize(tmp_path / "workspace", format_version=2)
+
+    class _CountingEngine(SecFundamentalMetricEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def compute(self, *args, **kwargs):
+            self.calls += 1
+            return super().compute(*args, **kwargs)
+
+    with workspace_service.open_storage(
+        initialized.paths,
+        WorkspaceAccessMode.READ_WRITE,
+    ) as storage:
+        _seed_history(storage)
+        engine = _CountingEngine()
+        pipeline = SecAaplFundamentalMetricPipeline(
+            storage,
+            SecAaplFundamentalPointInTimeService(storage),
+            engine,
+            clock=lambda: datetime(2027, 1, 2, tzinfo=UTC),
+        )
+        request = SecFundamentalMetricRequest(
+            known_at=datetime(2026, 12, 31, tzinfo=UTC),
+            frequency=DataFrequency.ANNUAL,
+        )
+        first = pipeline.run(request)
+        repeated = pipeline.run(request)
+
+    assert first.metrics_created == first.metrics_generated > 0
+    assert repeated.metrics_created == 0
+    assert repeated.metrics_reused == first.metrics_generated
+    assert engine.calls == 1
 
 
 def test_other_known_at_with_same_inputs_reuses_metric_identity(tmp_path) -> None:

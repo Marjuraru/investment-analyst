@@ -256,24 +256,27 @@ def require_raw_references(
     connection: DuckDBPyConnection,
     observations: Collection[NormalizedObservation],
 ) -> None:
-    """Verify raw record references by source in bounded ID pages."""
-    expected = {str(item.raw_record_id): item.source.source_id for item in observations}
+    """Verify raw record references in bounded ID pages.
+
+    A normalized observation can intentionally have its own source identity
+    while retaining a semantic raw artifact from another source family.  The
+    raw-record identifier is the immutable lineage link; both source
+    references remain stored independently on their respective models.
+    """
+    expected = {str(item.raw_record_id) for item in observations}
     ordered_ids = sorted(expected)
-    persisted: dict[str, str] = {}
+    persisted: set[str] = set()
     for start in range(0, len(ordered_ids), MAX_CHUNK_SIZE):
         id_chunk = ordered_ids[start : start + MAX_CHUNK_SIZE]
         placeholders = ", ".join("?" for _ in id_chunk)
         rows = connection.execute(
-            f"SELECT record_id, source_id FROM raw_v2_index WHERE record_id IN ({placeholders})",
+            f"SELECT record_id FROM raw_v2_index WHERE record_id IN ({placeholders})",
             id_chunk,
         ).fetchall()
-        persisted.update({str(row[0]): str(row[1]) for row in rows})
-    for record_id, source_id in expected.items():
-        stored_source_id = persisted.get(record_id)
-        if stored_source_id is None:
+        persisted.update(str(row[0]) for row in rows)
+    for record_id in expected:
+        if record_id not in persisted:
             raise ObservationV2Error(f"observation v2 references a missing raw record {record_id}")
-        if stored_source_id != source_id:
-            raise ObservationV2Error(f"observation v2 references a foreign raw record {record_id}")
 
 
 def require_observation_ids(

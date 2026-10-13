@@ -252,7 +252,11 @@ class _TrackedConnection:
         self._connection.close()
 
 
-def _full_measurement_once(database_path: Path) -> tuple[dict[str, object], int]:
+def _full_measurement_once(
+    database_path: Path,
+    *,
+    as_of: datetime | None = None,
+) -> tuple[dict[str, object], int]:
     scans: list[str] = []
     connect = duckdb.connect
 
@@ -260,7 +264,10 @@ def _full_measurement_once(database_path: Path) -> tuple[dict[str, object], int]
         return _TrackedConnection(connect(*args, **kwargs), scans)
 
     with patch.object(duckdb, "connect", tracked_connect):
-        result = cycle_probe.database(database_path)
+        result = cycle_probe.database(
+            database_path,
+            as_of=as_of.date() if as_of is not None else None,
+        )
     return result, len(scans)
 
 
@@ -476,7 +483,7 @@ def _cost_case(root: Path, row_count: int) -> dict[str, object]:
     ]
     execution_digest = observed["execution_digest"]
 
-    full_report, logical_scan_count = _full_measurement_once(database_path)
+    full_report, logical_scan_count = _full_measurement_once(database_path, as_of=_BASE_TIME)
     expected_logical_bytes = sum(len(document.encode("utf-8")) for document in documents)
     assert logical_scan_count == 1
     assert full_report["metric_rows"] == row_count
