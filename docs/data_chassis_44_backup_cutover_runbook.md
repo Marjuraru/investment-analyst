@@ -9,8 +9,9 @@ workspace permanente ni sustituir los guards vivos.
 - `target-v2` y `backup-v2` son artefactos del ensayo 43 que se conservan.
 - El backup packed contiene 676 volúmenes sellados, inventario JSONL y journal
   vinculados por sus manifests y recibos de 43.
-- B y `restore-v2` fueron retirados mediante lifecycle con sus checkpoints y
-  recibos; el complemento B permanece fuera del árbol retirado.
+- B fue retirado mediante lifecycle con sus checkpoints y recibos; su
+  complemento permanece fuera del árbol retirado. `restore-v2` se conserva
+  como candidato restaurado hasta que el cutover real complete sus guards.
 - El workspace `default` sigue siendo historia permanente y no entra en la
   limpieza de este bloque.
 
