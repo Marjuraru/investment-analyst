@@ -247,10 +247,21 @@ def verify_inventory(path: Path) -> WorkspaceV2BackupInventorySummary:
     )
 
 
+def inventory_summary(path: Path) -> WorkspaceV2BackupInventorySummary:
+    """Read the sealed inventory trailer without rescanning its entries."""
+    trailer = _sealed_trailer(path)
+    return WorkspaceV2BackupInventorySummary(
+        file_count=trailer.file_count,
+        total_bytes=trailer.total_bytes,
+        digest_sha256=trailer.digest_sha256,
+    )
+
+
 __all__ = [
     "WorkspaceV2BackupInventoryError",
     "WorkspaceV2BackupInventorySummary",
     "WorkspaceV2BackupInventoryTrailer",
+    "inventory_summary",
     "iter_inventory",
     "load_inventory",
     "verify_inventory",

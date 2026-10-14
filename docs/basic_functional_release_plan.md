@@ -769,3 +769,14 @@ y AUDIT independiente siguen siendo gates del candidato. Esta etapa no activa
 v2, no retira B ni sustituye el restore Drive externo, la reconciliación final,
 la serie operacional de siete días o la limpieza condicionada de 44–45.
 route_transition:DATA-CHASSIS:ADVANCES
+
+### DATA-CHASSIS-44 — backup externo y cutover preparado
+
+`DATA-CHASSIS-44` conserva la migración y el backup sellado de 43, publica los
+volúmenes ya existentes en Drive cifrado y demuestra restauración independiente
+sin repetir la migración. Añade preservación/retiro con recibos, streaming y
+cursores durables, un corte F finito para catch-up y binding explícito entre
+release y workspace. La activación productiva sigue siendo una operación
+posterior desde `main` integrado: exige guard vivo, capacidad física fresca,
+corte congelado y recibo de delta. No activa v2 ni retira el workspace default;
+esas decisiones operacionales permanecen en DATA-CHASSIS-45.

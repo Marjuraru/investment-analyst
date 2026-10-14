@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import BinaryIO, Literal, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from pydantic import ConfigDict, model_validator
@@ -48,6 +48,7 @@ from investment_analyst.workspace.service import WorkspaceService
 from investment_analyst.workspace.workspace_v2_backup_inventory import (
     WorkspaceV2BackupInventoryError,
     WorkspaceV2BackupInventorySummary,
+    inventory_summary,
     iter_inventory,
     verify_inventory,
     write_inventory,
@@ -73,6 +74,28 @@ class WorkspaceV2BackupError(WorkspaceBackupError):
 
 class _ByteDigest(Protocol):
     def update(self, data: bytes) -> None: ...
+
+
+class _DigestingReader:
+    """Read compressed bytes once while retaining their content seal."""
+
+    def __init__(self, stream: BinaryIO, digest: _ByteDigest) -> None:
+        self._stream = stream
+        self._digest = digest
+
+    def read(self, size: int = -1) -> bytes:
+        value = self._stream.read(size)
+        self._digest.update(value)
+        return value
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return False
+
+    def tell(self) -> int:
+        return self._stream.tell()
 
 
 class WorkspaceV2BackupManifest(ContractModel):
@@ -386,6 +409,9 @@ class WorkspaceV2BackupService:
         *,
         available_bytes: Callable[[], int] | None = None,
         reserve_bytes: int = _MINIMUM_RESERVE_BYTES,
+        prepare_stream_volume: Callable[[WorkspaceV2PackedVolume, Path], None] | None = None,
+        release_stream_volume: Callable[[WorkspaceV2PackedVolume, Path], None] | None = None,
+        reuse_checkpointed_stream_volumes: bool = False,
     ) -> WorkspaceInspection:
         """Restore from verified volumes, retaining an owned partial restore on failure."""
         destination_root = destination.expanduser().resolve(strict=False)
@@ -404,9 +430,9 @@ class WorkspaceV2BackupService:
             f".{destination_root.name}{_PACKED_RESTORE_CHECKPOINT_SUFFIX}"
         )
         # A resume may reuse confirmed target bytes, never unverified backup
-        # bytes.  ``inspect_packed`` streams the inventory and journal while
-        # binding every retained volume to the sealed manifest.
-        backup_root, manifest = self.inspect_packed(backup)
+        # bytes. Stream manifests bind their controls as restore consumes them,
+        # avoiding a separate full volume scan before the actual restore pass.
+        backup_root, manifest = self.inspect_packed_for_restore(backup)
         manifest_digest = _sha256(backup_root / _PACKED_MANIFEST_NAME)
         if not temporary.exists() and not checkpoint_path.exists():
             _validate_capacity_reader(capacity_reader, reserve_bytes)
@@ -424,16 +450,28 @@ class WorkspaceV2BackupService:
                 manifest_sha256=manifest_digest,
             )
             if isinstance(manifest, WorkspaceV2PackedStreamManifest):
-                _restore_packed_stream(
-                    backup_root,
-                    temporary,
-                    manifest,
-                    checkpoint_path=checkpoint_path,
-                    checkpoint=checkpoint,
-                    available_bytes=capacity_reader,
-                    reserve_bytes=reserve_bytes,
-                )
+                try:
+                    _restore_packed_stream(
+                        backup_root,
+                        temporary,
+                        manifest,
+                        checkpoint_path=checkpoint_path,
+                        checkpoint=checkpoint,
+                        available_bytes=capacity_reader,
+                        reserve_bytes=reserve_bytes,
+                        prepare_volume=prepare_stream_volume,
+                        release_volume=release_stream_volume,
+                        reuse_checkpointed_volumes=reuse_checkpointed_stream_volumes,
+                    )
+                except (EOFError, gzip.BadGzipFile) as error:
+                    raise WorkspaceV2BackupError(
+                        "packed backup volume verification failed"
+                    ) from error
             else:
+                if prepare_stream_volume is not None or release_stream_volume is not None:
+                    raise WorkspaceV2BackupError(
+                        "packed volume preparation requires a streamable backup"
+                    )
                 _restore_packed_volumes(
                     backup_root,
                     temporary,
@@ -453,6 +491,7 @@ class WorkspaceV2BackupService:
                 self._workspace_service,
                 temporary,
                 expected_counts=manifest.counts,
+                checkpoint_path=checkpoint_path,
             )
             if destination_root.exists():
                 destination_root.rmdir()
@@ -475,6 +514,22 @@ class WorkspaceV2BackupService:
             raise WorkspaceV2BackupError("packed backup path cannot be a symbolic link")
         manifest = _load_packed_manifest(backup_root / _PACKED_MANIFEST_NAME)
         _verify_packed_backup_files(backup_root, manifest)
+        return backup_root, manifest
+
+    def inspect_packed_for_restore(
+        self, backup: Path
+    ) -> tuple[Path, WorkspaceV2PackedBackupManifest | WorkspaceV2PackedStreamManifest]:
+        """Load restore controls without rehashing every v3 volume before use."""
+        backup_root = backup.expanduser().resolve()
+        if backup_root.is_symlink():
+            raise WorkspaceV2BackupError("packed backup path cannot be a symbolic link")
+        manifest = _load_packed_manifest(backup_root / _PACKED_MANIFEST_NAME)
+        _reject_symlinks(backup_root)
+        if isinstance(manifest, WorkspaceV2PackedStreamManifest):
+            if inventory_summary(backup_root / _PACKED_INVENTORY_NAME) != manifest.inventory:
+                raise WorkspaceV2BackupError("packed backup sidecar binding differs from manifest")
+        else:
+            _verify_packed_backup_files(backup_root, manifest)
         return backup_root, manifest
 
     def _require_v2_inspection(self, root: Path) -> WorkspaceInspection:
@@ -1022,6 +1077,18 @@ def _verify_packed_stream_sidecars(root: Path, manifest: WorkspaceV2PackedStream
         raise WorkspaceV2BackupError("packed backup sidecar binding differs from manifest")
 
 
+def _verify_packed_volume_bytes(root: Path, volume: WorkspaceV2PackedVolume) -> None:
+    """Revalidate a volume that a restore checkpoint has already consumed."""
+    path = root / volume.path
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or path.stat().st_size != volume.compressed_bytes
+        or _sha256(path) != volume.compressed_sha256
+    ):
+        raise WorkspaceV2BackupError("packed backup volume verification failed")
+
+
 def _open_packed_restore_checkpoint(
     path: Path,
     *,
@@ -1344,6 +1411,9 @@ def _restore_packed_stream(
     checkpoint: dict[str, object],
     available_bytes: Callable[[], int],
     reserve_bytes: int,
+    prepare_volume: Callable[[WorkspaceV2PackedVolume, Path], None] | None,
+    release_volume: Callable[[WorkspaceV2PackedVolume, Path], None] | None,
+    reuse_checkpointed_volumes: bool,
 ) -> None:
     """Restore a v3 packed backup with one journal volume and inventory entry in memory."""
     next_volume = int(checkpoint["next_volume_ordinal"])
@@ -1355,7 +1425,10 @@ def _restore_packed_stream(
     current_offset = 0
     final_checkpoint = checkpoint
     seen_volumes = 0
-    for volume_index, volume in enumerate(_iter_packed_volumes(backup_root / _PACKED_JOURNAL_NAME)):
+    journal_digest = hashlib.sha256()
+    for volume_index, volume in enumerate(
+        _iter_packed_journal(backup_root / _PACKED_JOURNAL_NAME, digest=journal_digest)
+    ):
         seen_volumes += 1
         if volume_index < next_volume:
             fragment_limit = len(volume.fragments)
@@ -1368,6 +1441,17 @@ def _restore_packed_stream(
         if fragment_limit < 0:
             raise WorkspaceV2BackupError("packed restore checkpoint fragment is invalid")
         if volume_index < next_volume:
+            volume_path = backup_root / volume.path
+            if not reuse_checkpointed_volumes:
+                prepared = False
+                if prepare_volume is not None:
+                    prepare_volume(volume, volume_path)
+                    prepared = True
+                try:
+                    _verify_packed_volume_bytes(backup_root, volume)
+                finally:
+                    if release_volume is not None and (prepare_volume is None or prepared):
+                        release_volume(volume, volume_path)
             stream_offset = 0
             for fragment in volume.fragments:
                 if fragment.stream_offset_bytes != stream_offset or current is None:
@@ -1392,117 +1476,129 @@ def _restore_packed_stream(
                 growth_bytes=volume.decompressed_bytes,
             )
         volume_path = backup_root / volume.path
-        if (
-            volume_path.is_symlink()
-            or not volume_path.is_file()
-            or volume_path.stat().st_size != volume.compressed_bytes
-            or _sha256(volume_path) != volume.compressed_sha256
-        ):
-            raise WorkspaceV2BackupError("packed backup volume verification failed")
-        stream_offset = 0
-        decompressed_digest = hashlib.sha256()
-        with gzip.open(volume_path, "rb") as stream:
-            for fragment_index, fragment in enumerate(volume.fragments):
-                length_bytes = stream.read(8)
-                if (
-                    len(length_bytes) != 8
-                    or struct.unpack(">Q", length_bytes)[0] != fragment.length_bytes
-                ):
-                    raise WorkspaceV2BackupError("packed backup fragment length is invalid")
-                payload = stream.read(fragment.length_bytes)
-                if (
-                    len(payload) != fragment.length_bytes
-                    or hashlib.sha256(payload).hexdigest() != fragment.sha256
-                ):
-                    raise WorkspaceV2BackupError("packed backup fragment hash is invalid")
-                decompressed_digest.update(length_bytes)
-                decompressed_digest.update(payload)
-                if fragment.stream_offset_bytes != stream_offset or current is None:
-                    raise WorkspaceV2BackupError("packed backup fragment mapping is invalid")
-                path, size, _ = current
-                if fragment.path != path or fragment.offset_bytes != current_offset:
-                    raise WorkspaceV2BackupError("packed backup fragment order is invalid")
-                if fragment.length_bytes > size - current_offset:
-                    raise WorkspaceV2BackupError("packed backup fragment exceeds inventory file")
-                target = destination / path
-                if fragment_index < fragment_limit:
-                    if (
-                        target.is_symlink()
-                        or not target.is_file()
-                        or target.stat().st_size < current_offset + fragment.length_bytes
-                    ):
-                        raise WorkspaceV2BackupError(
-                            "packed restore partial file differs from checkpoint"
-                        )
-                    with target.open("rb") as prior:
-                        prior.seek(current_offset)
-                        if prior.read(fragment.length_bytes) != payload:
+        prepared = False
+        if prepare_volume is not None:
+            prepare_volume(volume, volume_path)
+            prepared = True
+        try:
+            if (
+                volume_path.is_symlink()
+                or not volume_path.is_file()
+                or volume_path.stat().st_size != volume.compressed_bytes
+            ):
+                raise WorkspaceV2BackupError("packed backup volume verification failed")
+            stream_offset = 0
+            decompressed_digest = hashlib.sha256()
+            compressed_digest = hashlib.sha256()
+            with volume_path.open("rb") as compressed_stream:
+                reader = _DigestingReader(compressed_stream, compressed_digest)
+                with gzip.GzipFile(fileobj=reader, mode="rb") as stream:
+                    for fragment_index, fragment in enumerate(volume.fragments):
+                        length_bytes = stream.read(8)
+                        if (
+                            len(length_bytes) != 8
+                            or struct.unpack(">Q", length_bytes)[0] != fragment.length_bytes
+                        ):
+                            raise WorkspaceV2BackupError("packed backup fragment length is invalid")
+                        payload = stream.read(fragment.length_bytes)
+                        if (
+                            len(payload) != fragment.length_bytes
+                            or hashlib.sha256(payload).hexdigest() != fragment.sha256
+                        ):
+                            raise WorkspaceV2BackupError("packed backup fragment hash is invalid")
+                        decompressed_digest.update(length_bytes)
+                        decompressed_digest.update(payload)
+                        if fragment.stream_offset_bytes != stream_offset or current is None:
                             raise WorkspaceV2BackupError(
-                                "packed restore partial file differs from checkpoint"
+                                "packed backup fragment mapping is invalid"
                             )
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    if target.exists() and (target.is_symlink() or not target.is_file()):
-                        raise WorkspaceV2BackupError(
-                            "packed restore partial file differs from checkpoint"
-                        )
-                    if not target.exists() and current_offset:
-                        raise WorkspaceV2BackupError(
-                            "packed restore partial file differs from checkpoint"
-                        )
-                    existing_size = target.stat().st_size if target.exists() else 0
-                    if existing_size > current_offset:
-                        reusable = min(
-                            existing_size - current_offset,
-                            fragment.length_bytes,
-                        )
-                        with target.open("rb") as prior:
-                            prior.seek(current_offset)
-                            if prior.read(reusable) != payload[:reusable]:
+                        path, size, _ = current
+                        if fragment.path != path or fragment.offset_bytes != current_offset:
+                            raise WorkspaceV2BackupError("packed backup fragment order is invalid")
+                        if fragment.length_bytes > size - current_offset:
+                            raise WorkspaceV2BackupError(
+                                "packed backup fragment exceeds inventory file"
+                            )
+                        target = destination / path
+                        if fragment_index < fragment_limit:
+                            if (
+                                target.is_symlink()
+                                or not target.is_file()
+                                or target.stat().st_size < current_offset + fragment.length_bytes
+                            ):
                                 raise WorkspaceV2BackupError(
                                     "packed restore partial file differs from checkpoint"
                                 )
-                        if existing_size >= current_offset + fragment.length_bytes:
-                            reusable = fragment.length_bytes
+                            with target.open("rb") as prior:
+                                prior.seek(current_offset)
+                                if prior.read(fragment.length_bytes) != payload:
+                                    raise WorkspaceV2BackupError(
+                                        "packed restore partial file differs from checkpoint"
+                                    )
                         else:
-                            with target.open("r+b") as output:
-                                output.truncate(current_offset)
-                    else:
-                        reusable = 0
-                    if reusable != fragment.length_bytes:
-                        with target.open("ab") as output:
-                            output.write(payload)
-                            output.flush()
-                    should_checkpoint = fragment_index + 1 == len(volume.fragments)
-                    if should_checkpoint:
-                        os.sync()
-                    if should_checkpoint and fragment_index + 1 == len(volume.fragments):
-                        final_checkpoint = _write_packed_restore_checkpoint(
-                            checkpoint_path,
-                            final_checkpoint,
-                            next_volume_ordinal=volume_index + 1,
-                            next_fragment_ordinal=0,
-                        )
-                    elif should_checkpoint:
-                        final_checkpoint = _write_packed_restore_checkpoint(
-                            checkpoint_path,
-                            final_checkpoint,
-                            next_volume_ordinal=volume_index,
-                            next_fragment_ordinal=fragment_index + 1,
-                        )
-                stream_offset += 8 + fragment.length_bytes
-                current_offset += fragment.length_bytes
-                if current_offset == size:
-                    current = _stream_next_data_entry(entries, destination)
-                    current_offset = 0
-            if stream.read(1):
-                raise WorkspaceV2BackupError("packed backup volume has undeclared payload")
-        if (
-            stream_offset != volume.decompressed_bytes
-            or decompressed_digest.hexdigest() != volume.decompressed_sha256
-        ):
-            raise WorkspaceV2BackupError("packed backup volume payload differs from journal")
-    if seen_volumes != manifest.volume_count or next_volume > seen_volumes:
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            if target.exists() and (target.is_symlink() or not target.is_file()):
+                                raise WorkspaceV2BackupError(
+                                    "packed restore partial file differs from checkpoint"
+                                )
+                            if not target.exists() and current_offset:
+                                raise WorkspaceV2BackupError(
+                                    "packed restore partial file differs from checkpoint"
+                                )
+                            existing_size = target.stat().st_size if target.exists() else 0
+                            if existing_size > current_offset:
+                                reusable = min(
+                                    existing_size - current_offset,
+                                    fragment.length_bytes,
+                                )
+                                with target.open("rb") as prior:
+                                    prior.seek(current_offset)
+                                    if prior.read(reusable) != payload[:reusable]:
+                                        raise WorkspaceV2BackupError(
+                                            "packed restore partial file differs from checkpoint"
+                                        )
+                                if existing_size >= current_offset + fragment.length_bytes:
+                                    reusable = fragment.length_bytes
+                                else:
+                                    with target.open("r+b") as output:
+                                        output.truncate(current_offset)
+                            else:
+                                reusable = 0
+                            if reusable != fragment.length_bytes:
+                                with target.open("ab") as output:
+                                    output.write(payload)
+                                    output.flush()
+                            if fragment_index + 1 == len(volume.fragments):
+                                _fsync_regular_file(target)
+                        stream_offset += 8 + fragment.length_bytes
+                        current_offset += fragment.length_bytes
+                        if current_offset == size:
+                            current = _stream_next_data_entry(entries, destination)
+                            current_offset = 0
+                    if stream.read(1):
+                        raise WorkspaceV2BackupError("packed backup volume has undeclared payload")
+                compressed_offset = compressed_stream.tell()
+            if (
+                stream_offset != volume.decompressed_bytes
+                or decompressed_digest.hexdigest() != volume.decompressed_sha256
+                or compressed_offset != volume.compressed_bytes
+                or compressed_digest.hexdigest() != volume.compressed_sha256
+            ):
+                raise WorkspaceV2BackupError("packed backup volume payload differs from journal")
+            final_checkpoint = _write_packed_restore_checkpoint(
+                checkpoint_path,
+                final_checkpoint,
+                next_volume_ordinal=volume_index + 1,
+                next_fragment_ordinal=0,
+            )
+        finally:
+            if release_volume is not None and (prepare_volume is None or prepared):
+                release_volume(volume, volume_path)
+    if (
+        seen_volumes != manifest.volume_count
+        or next_volume > seen_volumes
+        or journal_digest.hexdigest() != manifest.journal_sha256
+    ):
         raise WorkspaceV2BackupError("packed restore checkpoint volume is invalid")
     if current is not None or current_offset:
         raise WorkspaceV2BackupError("packed backup fragments do not cover the inventory")
@@ -1521,6 +1617,12 @@ def _counts(inspection: WorkspaceInspection) -> WorkspaceBackupCounts:
         metric_results=inspection.metric_result_count,
         diagnostic_results=inspection.diagnostic_result_count,
     )
+
+
+def _fsync_regular_file(path: Path) -> None:
+    """Durably flush one restored file without synchronizing unrelated workspaces."""
+    with path.open("rb") as stream:
+        os.fsync(stream.fileno())
 
 
 def _backup_id(
@@ -1632,7 +1734,12 @@ def _verify_v2_workspace(
     root: Path,
     *,
     expected_counts: WorkspaceBackupCounts,
+    checkpoint_path: Path | None = None,
 ) -> None:
+    semantic = _open_semantic_verification_checkpoint(
+        checkpoint_path,
+        expected_counts=expected_counts,
+    )
     paths = service.resolve(root)
     storage = service.open_storage(paths, WorkspaceAccessMode.READ_ONLY)
     try:
@@ -1643,57 +1750,180 @@ def _verify_v2_workspace(
             or storage.diagnostics.count() != expected_counts.diagnostic_results
         ):
             raise WorkspaceV2BackupError("workspace v2 counts changed during backup verification")
-        cursor_at: datetime | None = None
-        cursor_id: UUID | None = None
-        verified = 0
+        cursor_at = _checkpoint_datetime(semantic["raw_received_at"])
+        cursor_id = _checkpoint_uuid(semantic["raw_record_id"])
+        verified = int(semantic["raw_verified"])
         sec_documents = SecDocumentRepository(storage.raw_records, storage.documents)
-        while True:
-            page = storage.raw_records.list_import_page(
-                limit=256,
-                after_received_at=cursor_at,
-                after_record_id=cursor_id,
+        if not semantic["raw_complete"]:
+            while True:
+                page = storage.raw_records.list_import_page(
+                    limit=256,
+                    after_received_at=cursor_at,
+                    after_record_id=cursor_id,
+                )
+                if not page:
+                    break
+                records = storage.raw_records.get_many(page)
+                if len(records) != len(page):
+                    raise WorkspaceV2BackupError("workspace v2 raw page did not resolve exactly")
+                verify_document_records(records.values(), sec_documents)
+                verified += len(records)
+                last = records[page[-1]]
+                cursor_at, cursor_id = last.received_at, last.record_id
+                semantic = {
+                    **semantic,
+                    "raw_verified": verified,
+                    "raw_received_at": cursor_at.isoformat(),
+                    "raw_record_id": str(cursor_id),
+                }
+                _write_semantic_verification_checkpoint(checkpoint_path, semantic)
+            if verified != expected_counts.raw_records:
+                raise WorkspaceV2BackupError("workspace v2 raw inventory is incomplete")
+            semantic = {**semantic, "raw_complete": True}
+            _write_semantic_verification_checkpoint(checkpoint_path, semantic)
+        observation_cursor_at = _checkpoint_datetime(semantic["observation_available_at"])
+        observation_cursor_id = _checkpoint_uuid(semantic["observation_id"])
+        verified = int(semantic["observations_verified"])
+        if not semantic["observations_complete"]:
+            while True:
+                page = storage.observations.list_observation_import_page(
+                    limit=256,
+                    after_available_at=observation_cursor_at,
+                    after_observation_id=observation_cursor_id,
+                )
+                if not page:
+                    break
+                observations = storage.observations.get_many(page)
+                if len(observations) != len(page):
+                    raise WorkspaceV2BackupError(
+                        "workspace v2 observation page did not resolve exactly"
+                    )
+                verified += len(observations)
+                last = observations[page[-1]]
+                observation_cursor_at, observation_cursor_id = (
+                    last.available_at,
+                    last.observation_id,
+                )
+                semantic = {
+                    **semantic,
+                    "observations_verified": verified,
+                    "observation_available_at": observation_cursor_at.isoformat(),
+                    "observation_id": str(observation_cursor_id),
+                }
+                _write_semantic_verification_checkpoint(checkpoint_path, semantic)
+            if verified != expected_counts.observations:
+                raise WorkspaceV2BackupError("workspace v2 observation inventory is incomplete")
+            semantic = {**semantic, "observations_complete": True}
+            _write_semantic_verification_checkpoint(checkpoint_path, semantic)
+        if not semantic["analytical_complete"]:
+            CompactAnalyticalStore(storage.store.connection).verify_complete()
+            semantic = {**semantic, "analytical_complete": True}
+            _write_semantic_verification_checkpoint(checkpoint_path, semantic)
+        if not semantic["incremental_complete"]:
+            try:
+                verify_workspace_incremental_v2(storage)
+            except WorkspaceIncrementalV2Error as error:
+                raise WorkspaceV2BackupError(
+                    "workspace v2 incremental artifacts failed verification"
+                ) from error
+            semantic = {**semantic, "incremental_complete": True}
+            _write_semantic_verification_checkpoint(checkpoint_path, semantic)
+        if not semantic["events_complete"]:
+            ActivityEventRepository(storage.paths.processed_dir, read_only=True).verify()
+            _write_semantic_verification_checkpoint(
+                checkpoint_path, {**semantic, "events_complete": True}
             )
-            if not page:
-                break
-            records = storage.raw_records.get_many(page)
-            if len(records) != len(page):
-                raise WorkspaceV2BackupError("workspace v2 raw page did not resolve exactly")
-            verify_document_records(records.values(), sec_documents)
-            verified += len(records)
-            last = records[page[-1]]
-            cursor_at, cursor_id = last.received_at, last.record_id
-        if verified != expected_counts.raw_records:
-            raise WorkspaceV2BackupError("workspace v2 raw inventory is incomplete")
-        observation_cursor_at: datetime | None = None
-        observation_cursor_id: UUID | None = None
-        verified = 0
-        while True:
-            page = storage.observations.list_observation_import_page(
-                limit=256,
-                after_available_at=observation_cursor_at,
-                after_observation_id=observation_cursor_id,
-            )
-            if not page:
-                break
-            observations = storage.observations.get_many(page)
-            verified += len(observations)
-            last = observations[page[-1]]
-            observation_cursor_at, observation_cursor_id = (
-                last.available_at,
-                last.observation_id,
-            )
-        if verified != expected_counts.observations:
-            raise WorkspaceV2BackupError("workspace v2 observation inventory is incomplete")
-        CompactAnalyticalStore(storage.store.connection).verify_complete()
-        try:
-            verify_workspace_incremental_v2(storage)
-        except WorkspaceIncrementalV2Error as error:
-            raise WorkspaceV2BackupError(
-                "workspace v2 incremental artifacts failed verification"
-            ) from error
-        ActivityEventRepository(storage.paths.processed_dir, read_only=True).verify()
     finally:
         storage.close()
+
+
+def _open_semantic_verification_checkpoint(
+    checkpoint_path: Path | None, *, expected_counts: WorkspaceBackupCounts
+) -> dict[str, object]:
+    state: dict[str, object] = {
+        "raw_verified": 0,
+        "raw_received_at": None,
+        "raw_record_id": None,
+        "raw_complete": False,
+        "observations_verified": 0,
+        "observation_available_at": None,
+        "observation_id": None,
+        "observations_complete": False,
+        "analytical_complete": False,
+        "incremental_complete": False,
+        "events_complete": False,
+    }
+    if checkpoint_path is None:
+        return state
+    try:
+        document = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as error:
+        raise WorkspaceV2BackupError("packed restore checkpoint is malformed") from error
+    stored = document.get("semantic_verification")
+    if stored is None:
+        return state
+    if not isinstance(stored, dict) or set(stored) != set(state):
+        raise WorkspaceV2BackupError("packed semantic verification checkpoint is malformed")
+    for key in ("raw_verified", "observations_verified"):
+        value = stored[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise WorkspaceV2BackupError("packed semantic verification checkpoint is malformed")
+    if (
+        stored["raw_verified"] > expected_counts.raw_records
+        or stored["observations_verified"] > expected_counts.observations
+        or any(not isinstance(stored[key], bool) for key in state if key.endswith("complete"))
+    ):
+        raise WorkspaceV2BackupError("packed semantic verification checkpoint is malformed")
+    for key in ("raw_received_at", "raw_record_id", "observation_available_at", "observation_id"):
+        if stored[key] is not None and not isinstance(stored[key], str):
+            raise WorkspaceV2BackupError("packed semantic verification checkpoint is malformed")
+    _checkpoint_datetime(stored["raw_received_at"])
+    _checkpoint_uuid(stored["raw_record_id"])
+    _checkpoint_datetime(stored["observation_available_at"])
+    _checkpoint_uuid(stored["observation_id"])
+    return stored
+
+
+def _write_semantic_verification_checkpoint(
+    checkpoint_path: Path | None, state: dict[str, object]
+) -> None:
+    if checkpoint_path is None:
+        return
+    try:
+        document = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as error:
+        raise WorkspaceV2BackupError("packed restore checkpoint is malformed") from error
+    document["semantic_verification"] = state
+    _atomic_json(checkpoint_path, document)
+
+
+def _checkpoint_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise WorkspaceV2BackupError("packed semantic verification checkpoint is malformed")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise WorkspaceV2BackupError(
+            "packed semantic verification checkpoint is malformed"
+        ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise WorkspaceV2BackupError("packed semantic verification checkpoint is malformed")
+    return parsed.astimezone(UTC)
+
+
+def _checkpoint_uuid(value: object) -> UUID | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise WorkspaceV2BackupError("packed semantic verification checkpoint is malformed")
+    try:
+        return UUID(value)
+    except ValueError as error:
+        raise WorkspaceV2BackupError(
+            "packed semantic verification checkpoint is malformed"
+        ) from error
 
 
 __all__ = [

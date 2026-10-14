@@ -7,6 +7,7 @@ import hashlib
 import math
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -22,7 +23,7 @@ from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Protocol, runtime_checkable
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import ConfigDict, field_validator
 
@@ -32,6 +33,7 @@ from investment_analyst.application.operational_state import (
     AaplOperationalStateError,
 )
 from investment_analyst.core.models.base import ContractModel, UTCDateTime
+from investment_analyst.workspace.service import WorkspaceError, WorkspaceService
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
@@ -133,6 +135,52 @@ class DeploymentState(ContractModel):
         return cleaned
 
 
+class DeploymentWorkspaceBinding(ContractModel):
+    """Typed companion binding between a deployed release and its workspace cut."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: str = "local-deployment-workspace-binding-v1"
+    release_sha: str
+    workspace_root: Path
+    workspace_id: UUID
+    workspace_format_version: int
+    workspace_created_at: UTCDateTime
+    bound_at: UTCDateTime
+
+    @field_validator("release_sha")
+    @classmethod
+    def validate_release_sha(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if not FULL_SHA.fullmatch(cleaned):
+            raise ValueError("binding release SHA must be 40 hexadecimal characters")
+        return cleaned
+
+    @field_validator("workspace_root")
+    @classmethod
+    def require_absolute_workspace_root(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("binding workspace root must be absolute")
+        return value
+
+    @field_validator("workspace_format_version")
+    @classmethod
+    def require_supported_workspace_format(cls, value: int) -> int:
+        if value not in {1, 2}:
+            raise ValueError("binding workspace format version is unsupported")
+        return value
+
+
+class DeploymentWorkspaceBindings(ContractModel):
+    """Companion state kept separately so historical deployment-state v1 remains readable."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: str = "local-deployment-workspace-bindings-v1"
+    current: DeploymentWorkspaceBinding | None = None
+    previous: DeploymentWorkspaceBinding | None = None
+
+
 class ReleaseStatusReport(ContractModel):
     """Comprehensive status report of the local release runtime and unit."""
 
@@ -153,6 +201,41 @@ class ReleaseStatusReport(ContractModel):
     overview_status: int | None = None
 
 
+def _same_workspace_binding(
+    existing: DeploymentWorkspaceBinding | None,
+    desired: DeploymentWorkspaceBinding,
+) -> bool:
+    """Compare stable workspace identity without an activation timestamp."""
+    return existing is not None and (
+        existing.release_sha,
+        existing.workspace_root,
+        existing.workspace_id,
+        existing.workspace_format_version,
+        existing.workspace_created_at,
+    ) == (
+        desired.release_sha,
+        desired.workspace_root,
+        desired.workspace_id,
+        desired.workspace_format_version,
+        desired.workspace_created_at,
+    )
+
+
+def _replace_workspace_argument(arguments: str, workspace_root: Path) -> str:
+    """Replace exactly one canonical workspace argument without inheriting an old root."""
+    try:
+        parsed = shlex.split(arguments, posix=True)
+    except ValueError as error:
+        raise ReleaseUnitError("ExecStart arguments cannot be parsed safely") from error
+    positions = [index for index, value in enumerate(parsed) if value == "--workspace"]
+    if len(positions) != 1 or positions[0] + 1 >= len(parsed):
+        raise ReleaseUnitError("ExecStart must contain exactly one --workspace argument")
+    parsed[positions[0] + 1] = str(workspace_root)
+    if any("\x00" in value or "\n" in value or "\r" in value for value in parsed):
+        raise ReleaseUnitError("ExecStart arguments contain an unsafe control character")
+    return " ".join(f'"{value.replace("\\", "\\\\").replace(chr(34), '\\"')}"' for value in parsed)
+
+
 @dataclass(frozen=True, slots=True)
 class LocalReleasePaths:
     """Resolved directory layout for the independent local release runtime."""
@@ -162,6 +245,7 @@ class LocalReleasePaths:
     releases: Path
     tools: Path
     state_file: Path
+    workspace_binding_file: Path
 
     @classmethod
     def from_root(cls, root: Path | str | None = None) -> LocalReleasePaths:
@@ -176,6 +260,7 @@ class LocalReleasePaths:
             releases=resolved_root / "releases",
             tools=resolved_root / "tools",
             state_file=resolved_root / "deployment_state.json",
+            workspace_binding_file=resolved_root / "deployment_workspace_binding.json",
         )
 
 
@@ -1329,6 +1414,7 @@ class LocalReleaseService:
         sha: str,
         unit_file: Path | None = None,
         env_file: Path | None = None,
+        workspace_root: Path | None = None,
     ) -> str:
         """Atomically retarget systemd user unit to an independent staged release."""
         cleaned_sha = sha.strip().lower()
@@ -1408,6 +1494,11 @@ class LocalReleaseService:
         if not match:
             raise ReleaseUnitError(f"ExecStart invocation unrecognized: {existing_exec_start}")
         trailing_args = match.group(1).strip()
+        if workspace_root is not None:
+            resolved_workspace = workspace_root.expanduser().resolve(strict=False)
+            if not resolved_workspace.is_absolute():
+                raise ReleaseUnitError("Workspace root for retarget must be absolute")
+            trailing_args = _replace_workspace_argument(trailing_args, resolved_workspace)
 
         new_lines = list(lines)
         new_lines[working_dir_idx] = f"WorkingDirectory={str(release_dir)}"
@@ -1534,6 +1625,55 @@ class LocalReleaseService:
         )
         temp_state.write_text(state.model_dump_json(indent=2), encoding="utf-8")
         temp_state.replace(self.paths.state_file)
+
+    def load_workspace_bindings(self) -> DeploymentWorkspaceBindings:
+        """Read the optional v2 companion without changing historical state v1."""
+        target = self.paths.workspace_binding_file
+        if not target.is_file():
+            return DeploymentWorkspaceBindings()
+        try:
+            return DeploymentWorkspaceBindings.model_validate_json(
+                target.read_text(encoding="utf-8")
+            )
+        except Exception as error:
+            raise ReleaseVerificationError(
+                f"Deployment workspace binding at {target} is corrupt: {error}"
+            ) from error
+
+    def _save_workspace_bindings(self, bindings: DeploymentWorkspaceBindings) -> None:
+        """Atomically persist the deployment/workspace companion state."""
+        self.init_runtime()
+        target = self.paths.workspace_binding_file
+        temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        try:
+            with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(bindings.model_dump_json(indent=2))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _workspace_binding(
+        self, sha: str, workspace_root: Path | None
+    ) -> DeploymentWorkspaceBinding | None:
+        if workspace_root is None:
+            return None
+        root = workspace_root.expanduser().resolve(strict=False)
+        try:
+            manifest = WorkspaceService().manifest(root)
+        except WorkspaceError as error:
+            raise ReleaseVerificationError(
+                f"Workspace cannot be bound to deployment: {root}"
+            ) from error
+        return DeploymentWorkspaceBinding(
+            release_sha=sha,
+            workspace_root=root,
+            workspace_id=manifest.workspace_id,
+            workspace_format_version=manifest.format_version,
+            workspace_created_at=manifest.created_at,
+            bound_at=datetime.now(UTC),
+        )
 
     def _validate_current_deployment(
         self,
@@ -1723,20 +1863,32 @@ class LocalReleaseService:
         current_state = self.load_deployment_state()
         previous_unit_text = self._validate_current_deployment(current_state, target_unit)
         managed_current = current_state.current is not None
+        desired_binding = self._workspace_binding(cleaned_sha, workspace_root)
+        current_bindings = self.load_workspace_bindings()
 
         # Idempotence check
         if current_state.current == cleaned_sha:
-            if skip_health_check or skip_systemd:
+            if desired_binding is not None and not _same_workspace_binding(
+                current_bindings.current, desired_binding
+            ):
+                pass
+            elif skip_health_check or skip_systemd:
                 return current_state
-            health_ok, _ = self.health_checker.check_health(
-                port=port,
-                endpoints=endpoints or ("/api/v1/overview", "/api/v1/candidate-notifications"),
-            )
-            if health_ok:
-                return current_state
+            else:
+                health_ok, _ = self.health_checker.check_health(
+                    port=port,
+                    endpoints=endpoints or ("/api/v1/overview", "/api/v1/candidate-notifications"),
+                )
+                if health_ok:
+                    return current_state
 
         # 2. Retarget unit
-        self.retarget_unit(cleaned_sha, unit_file=target_unit, env_file=target_env)
+        self.retarget_unit(
+            cleaned_sha,
+            unit_file=target_unit,
+            env_file=target_env,
+            workspace_root=workspace_root,
+        )
 
         # 3. Systemd restart and health check with readiness polling
         if not skip_systemd:
@@ -1803,6 +1955,13 @@ class LocalReleaseService:
             previous_release_path=current_state.current_release_path,
         )
         self._save_deployment_state(new_state)
+        if desired_binding is not None:
+            self._save_workspace_bindings(
+                DeploymentWorkspaceBindings(
+                    current=desired_binding,
+                    previous=current_bindings.current,
+                )
+            )
         return new_state
 
     def update(
@@ -1858,6 +2017,7 @@ class LocalReleaseService:
         self,
         unit_file: Path | None = None,
         env_file: Path | None = None,
+        allow_v1_workspace_rollback: bool = False,
         port: int = 8765,
         skip_systemd: bool = False,
         skip_health_check: bool = False,
@@ -1897,7 +2057,32 @@ class LocalReleaseService:
                 f"CRITICAL: previous release {prev_sha} is not a verified rollback target"
             )
 
-        self.retarget_unit(prev_sha, unit_file=target_unit, env_file=env_file)
+        bindings = self.load_workspace_bindings()
+        current_binding = bindings.current
+        previous_binding = bindings.previous
+        if current_binding is not None and current_binding.release_sha != current_state.current:
+            raise ReleaseRollbackError("deployment workspace binding differs from current release")
+        if previous_binding is not None and previous_binding.release_sha != prev_sha:
+            raise ReleaseRollbackError("deployment workspace binding differs from previous release")
+        if (
+            current_binding is not None
+            and current_binding.workspace_format_version == 2
+            and previous_binding is not None
+            and previous_binding.workspace_format_version == 1
+            and not allow_v1_workspace_rollback
+        ):
+            raise ReleaseRollbackError(
+                "rollback from workspace v2 to stale v1 requires explicit pre-write authorization"
+            )
+
+        self.retarget_unit(
+            prev_sha,
+            unit_file=target_unit,
+            env_file=env_file,
+            workspace_root=(
+                previous_binding.workspace_root if previous_binding is not None else None
+            ),
+        )
 
         if not skip_systemd:
             try:
@@ -1949,6 +2134,10 @@ class LocalReleaseService:
             previous_release_path=current_state.current_release_path,
         )
         self._save_deployment_state(new_state)
+        if previous_binding is not None:
+            self._save_workspace_bindings(
+                DeploymentWorkspaceBindings(current=previous_binding, previous=current_binding)
+            )
         return new_state
 
     def status(

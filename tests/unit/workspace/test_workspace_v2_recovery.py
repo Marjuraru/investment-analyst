@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+import investment_analyst.workspace.workspace_v2_backup as workspace_v2_backup_module
 from investment_analyst.workspace.backup import WorkspaceBackupCounts
 from investment_analyst.workspace.service import WorkspaceService
 from investment_analyst.workspace.workspace_v2_backup import (
@@ -137,6 +138,38 @@ def test_stream_manifest_restores_without_materializing_inventory(tmp_path: Path
     assert (tmp_path / "restore" / "state" / "payload.bin").read_bytes() == payload
 
 
+def test_stream_restore_does_not_prehash_pending_volumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    source = tmp_path / "source"
+    service.initialize(source, format_version=2)
+    (source / "state" / "payload.bin").write_bytes(b"one-pass" * 65_536)
+    backup = WorkspaceV2BackupService(service)
+    manifest = backup.create_packed(
+        source,
+        tmp_path / "backup",
+        volume_bytes=128_000,
+        fragment_bytes=32_000,
+        available_bytes=_host_free_bytes,
+    )
+    _seal_as_stream_manifest(tmp_path / "backup", manifest)
+    original_sha256 = workspace_v2_backup_module._sha256
+    hashed_paths: list[Path] = []
+
+    def record_sha256(path: Path) -> str:
+        hashed_paths.append(path)
+        return original_sha256(path)
+
+    monkeypatch.setattr(workspace_v2_backup_module, "_sha256", record_sha256)
+
+    backup.restore_packed(
+        tmp_path / "backup", tmp_path / "restore", available_bytes=_host_free_bytes
+    )
+
+    assert not any(path.parent.name == "volumes" for path in hashed_paths)
+
+
 def test_stream_restore_resumes_after_capacity_failure(tmp_path: Path) -> None:
     service = WorkspaceService(environ={}, home=tmp_path / "home")
     source = tmp_path / "source"
@@ -166,6 +199,33 @@ def test_stream_restore_resumes_after_capacity_failure(tmp_path: Path) -> None:
         tmp_path / "backup", tmp_path / "restore", available_bytes=_host_free_bytes
     )
     assert restored.workspace_id == service.inspect(source).workspace_id
+
+
+def test_stream_restore_does_not_globally_sync_unrelated_workspaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    source = tmp_path / "source"
+    service.initialize(source, format_version=2)
+    (source / "state" / "payload.bin").write_bytes(b"targeted-fsync" * 65_536)
+    backup = WorkspaceV2BackupService(service)
+    backup.create_packed(
+        source,
+        tmp_path / "backup",
+        volume_bytes=128_000,
+        fragment_bytes=32_000,
+        available_bytes=_host_free_bytes,
+    )
+    _seal_as_stream_manifest(tmp_path / "backup", backup.inspect_packed(tmp_path / "backup")[1])
+
+    def global_sync_must_not_run() -> None:
+        raise AssertionError("global sync must not run")
+
+    monkeypatch.setattr(workspace_v2_backup_module.os, "sync", global_sync_must_not_run)
+    restored = backup.restore_packed(
+        tmp_path / "backup", tmp_path / "restore", available_bytes=_host_free_bytes
+    )
+    assert restored.status == "ready"
 
 
 def test_stream_restore_resume_revalidates_confirmed_volume(tmp_path: Path) -> None:
@@ -385,9 +445,12 @@ def test_stream_packed_backup_rejects_a_corrupt_volume(tmp_path: Path) -> None:
         for line in (backup_root / "packed-backup-volumes.jsonl").read_text().splitlines()
     ]
     interrupted_path = backup_root / volumes[1]["path"]
-    interrupted_path.write_bytes(b"corrupt")
+    corrupted = bytearray(interrupted_path.read_bytes())
+    corrupted[-1] ^= 1
+    interrupted_path.write_bytes(corrupted)
 
     with pytest.raises(WorkspaceV2BackupError, match="verification failed"):
         backup.restore_packed(backup_root, tmp_path / "restore", available_bytes=_host_free_bytes)
 
-    assert not (tmp_path / ".restore.incomplete").exists()
+    assert (tmp_path / ".restore.incomplete").is_dir()
+    assert (tmp_path / ".restore.packed-restore-checkpoint.json").is_file()

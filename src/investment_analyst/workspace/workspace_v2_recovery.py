@@ -57,7 +57,7 @@ def backup_and_restore_workspace_v2(
     backup = WorkspaceV2BackupService(service)
     try:
         if backup_root.exists():
-            _, manifest = backup.inspect_packed(backup_root)
+            _, manifest = backup.inspect_packed_for_restore(backup_root)
             if (
                 manifest.source_workspace_id != source.workspace_id
                 or manifest.counts.raw_records != source.raw_record_count

@@ -36,6 +36,7 @@ from investment_analyst.application.local_service_unit import (
 )
 from investment_analyst.application.operational_state import AaplDailyRunLock
 from investment_analyst.core.models import DataFrequency
+from investment_analyst.workspace.service import WorkspaceService
 
 
 def test_full_sha_validation_and_rejection() -> None:
@@ -210,6 +211,113 @@ def test_unit_retargeting_exact_and_fail_closed(tmp_path: Path) -> None:
     bad_unit.write_text("[Unit]\nDescription=Bad\n", encoding="utf-8")
     with pytest.raises(ReleaseUnitError, match="missing"):
         service.retarget_unit(sha, unit_file=bad_unit)
+
+
+def test_activation_same_sha_retargets_and_binds_a_different_workspace(tmp_path: Path) -> None:
+    """The release SHA alone cannot make activation idempotent across workspace roots."""
+    sha = "1b0a1ab98d7ddbd0b202f40bb8c066a48c907cbb"
+    runtime_root = tmp_path / "runtime"
+    release_dir = runtime_root / "releases" / sha
+    (release_dir / ".venv" / "bin").mkdir(parents=True)
+    (release_dir / "scripts").mkdir()
+    (release_dir / ".venv" / "bin" / "python").touch()
+    (release_dir / "scripts" / "serve_investment_analyst.py").touch()
+    (release_dir / "manifest.json").write_text(
+        ReleaseManifest(
+            commit_sha=sha,
+            tree_sha="b6f8115ffdddb0915cae50736dbc821c5355d3ac",
+            uv_lock_sha256=hashlib.sha256(b"lock").hexdigest(),
+            python_version="Python 3.12.0",
+            staged_at=datetime.now(UTC),
+            release_path=str(release_dir),
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+    first = tmp_path / "workspace-v1"
+    second = tmp_path / "workspace-v2"
+    WorkspaceService().initialize(first, format_version=1)
+    WorkspaceService().initialize(second, format_version=2)
+    env_file = tmp_path / "config" / "service.env"
+    env_file.parent.mkdir()
+    env_file.write_text(
+        "ALPACA_API_KEY=k\nALPACA_API_SECRET=s\nSEC_USER_AGENT=u\n", encoding="utf-8"
+    )
+    env_file.chmod(0o600)
+    unit_file = tmp_path / "systemd" / "investment-analyst.service"
+    write_local_service_unit(
+        unit_file,
+        "[Service]\n"
+        f"WorkingDirectory={release_dir}\n"
+        f"EnvironmentFile={env_file}\n"
+        f'ExecStart="{release_dir / ".venv/bin/python"}" '
+        f'"{release_dir / "scripts/serve_investment_analyst.py"}" '
+        f'"--workspace" "{first}" "--port" "8765"\n',
+    )
+    service = LocalReleaseService(
+        paths=runtime_root,
+        systemd_unit_path=unit_file,
+        service_env_path=env_file,
+    )
+
+    service.activate(sha, workspace_root=first, skip_systemd=True, skip_health_check=True)
+    state = service.activate(sha, workspace_root=second, skip_systemd=True, skip_health_check=True)
+
+    assert state.current == sha
+    assert f'"--workspace" "{second}"' in unit_file.read_text(encoding="utf-8")
+    bindings = service.load_workspace_bindings()
+    assert bindings.current is not None
+    assert bindings.current.workspace_root == second.resolve()
+    assert bindings.current.workspace_format_version == 2
+
+
+def test_rollback_refuses_stale_v1_binding_after_v2_activation(tmp_path: Path) -> None:
+    """A generic rollback cannot silently discard a v2 writer's later progress."""
+    sha_v1 = "1111111111111111111111111111111111111111"
+    sha_v2 = "2222222222222222222222222222222222222222"
+    runtime_root = tmp_path / "runtime"
+    for sha in (sha_v1, sha_v2):
+        release = runtime_root / "releases" / sha
+        (release / ".venv" / "bin").mkdir(parents=True)
+        (release / "scripts").mkdir()
+        (release / ".venv" / "bin" / "python").touch()
+        (release / "scripts" / "serve_investment_analyst.py").touch()
+        (release / "manifest.json").write_text(
+            ReleaseManifest(
+                commit_sha=sha,
+                tree_sha="b6f8115ffdddb0915cae50736dbc821c5355d3ac",
+                uv_lock_sha256=hashlib.sha256(b"lock").hexdigest(),
+                python_version="Python 3.12.0",
+                staged_at=datetime.now(UTC),
+                release_path=str(release),
+            ).model_dump_json(),
+            encoding="utf-8",
+        )
+    v1 = tmp_path / "workspace-v1"
+    v2 = tmp_path / "workspace-v2"
+    WorkspaceService().initialize(v1, format_version=1)
+    WorkspaceService().initialize(v2, format_version=2)
+    env_file = tmp_path / "config" / "service.env"
+    env_file.parent.mkdir()
+    env_file.write_text("ALPACA_API_KEY=k\nALPACA_API_SECRET=s\nSEC_USER_AGENT=u\n")
+    env_file.chmod(0o600)
+    unit_file = tmp_path / "systemd" / "investment-analyst.service"
+    write_local_service_unit(
+        unit_file,
+        "[Service]\n"
+        f"WorkingDirectory={runtime_root / 'releases' / sha_v2}\n"
+        f"EnvironmentFile={env_file}\n"
+        f'ExecStart="{runtime_root / "releases" / sha_v2 / ".venv/bin/python"}" '
+        f'"{runtime_root / "releases" / sha_v2 / "scripts/serve_investment_analyst.py"}" '
+        f'"--workspace" "{v2}"\n',
+    )
+    service = LocalReleaseService(
+        paths=runtime_root, systemd_unit_path=unit_file, service_env_path=env_file
+    )
+    service.activate(sha_v1, workspace_root=v1, skip_systemd=True, skip_health_check=True)
+    service.activate(sha_v2, workspace_root=v2, skip_systemd=True, skip_health_check=True)
+
+    with pytest.raises(ReleaseRollbackError, match="stale v1"):
+        service.rollback(skip_systemd=True, skip_health_check=True)
 
 
 def test_safe_tar_extract_prevents_path_traversal(tmp_path: Path) -> None:

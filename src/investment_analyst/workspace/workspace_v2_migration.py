@@ -45,6 +45,7 @@ from investment_analyst.workspace.service import (
     WorkspaceAccessError,
     WorkspaceService,
 )
+from investment_analyst.workspace.workspace_v2_lifecycle_models import FrozenSourceCut
 from investment_analyst.workspace.workspace_v2_migration_models import (
     WorkspaceV1MigrationSourceSnapshot,
     WorkspaceV2MigrationPhase,
@@ -391,6 +392,7 @@ def migrate_workspace_v1_to_v2(
     progress: Callable[[WorkspaceV2MigrationProgress], None] | None = None,
     clock: Callable[[], datetime] | None = None,
     reconcile_source: bool = False,
+    frozen_source: FrozenSourceCut | None = None,
     analytical_failure_injector: Callable[[str], None] | None = None,
 ) -> WorkspaceV2MigrationSummary:
     """Migrate an unchanged v1 source into a disjoint, resumable v2 workspace."""
@@ -409,6 +411,8 @@ def migrate_workspace_v1_to_v2(
     source_paths = service.resolve(source_root)
     destination_paths = service.resolve(destination_root)
     _validate_destination(source_paths.root, destination_paths.root)
+    if reconcile_source and frozen_source is not None:
+        raise WorkspaceV2MigrationError("migration source cannot be both snapshot and frozen cut")
     snapshot = (
         load_v1_migration_source_snapshot(service=service, snapshot_root=source_paths.root)
         if reconcile_source
@@ -427,6 +431,18 @@ def migrate_workspace_v1_to_v2(
     fingerprint = source_fingerprint(service, source_paths.root)
     if snapshot is not None and snapshot.source_fingerprint != fingerprint:
         raise WorkspaceV2MigrationError("migration source snapshot fingerprint changed")
+    if frozen_source is not None:
+        source_manifest = service.manifest(source_paths.root)
+        if (
+            frozen_source.source_root != source_paths.root
+            or frozen_source.workspace_id != source_manifest.workspace_id
+            or frozen_source.workspace_format_version != source_manifest.format_version
+            or frozen_source.created_at != source_manifest.created_at
+            or frozen_source.source_fingerprint != fingerprint
+        ):
+            raise WorkspaceV2MigrationError(
+                "frozen source cut no longer binds the migration source"
+            )
     _emit(progress, "source_hash_completed")
     if destination_paths.root.exists() and not destination_paths.manifest_path.exists():
         raise WorkspaceV2MigrationError(
@@ -448,7 +464,7 @@ def migrate_workspace_v1_to_v2(
         )
     elif historic_identity.source_fingerprint == fingerprint:
         pass
-    elif snapshot is None:
+    elif snapshot is None and frozen_source is None:
         raise WorkspaceV2MigrationError("migration source differs from the historic identity")
     else:
         source_manifest = service.manifest(source_paths.root)
@@ -476,7 +492,12 @@ def migrate_workspace_v1_to_v2(
                     "historic raw checkpoint is incompatible"
                 ) from error
         transition = service.v2_source_transition(initialized.paths)
-        if transition is None:
+        if frozen_source is not None:
+            if transition is not None:
+                raise WorkspaceV2MigrationError(
+                    "frozen source cut conflicts with an existing snapshot transition"
+                )
+        elif transition is None:
             transition = WorkspaceV2SourceTransitionState(
                 phase=WorkspaceV2MigrationPhase.PREPARED,
                 source_workspace_id=historic_identity.source_workspace_id,
@@ -496,7 +517,7 @@ def migrate_workspace_v1_to_v2(
                 destination_paths=initialized.paths,
                 state=transition,
             )
-        else:
+        elif transition is not None:
             historic_checkpoint = checkpoint.with_name(
                 f"raw-v2-import-state.A.{transition.historic_checkpoint_sha256}.json"
             )
@@ -597,7 +618,7 @@ def migrate_workspace_v1_to_v2(
             source_workspace_id=str(source_inspection.workspace_id),
             source_fingerprint=fingerprint,
             page_limit=page_limit,
-            allow_source_transition=transition is not None,
+            allow_source_transition=transition is not None or frozen_source is not None,
             direct_transport=True,
             failure_injector=analytical_failure_injector,
         ).run()
