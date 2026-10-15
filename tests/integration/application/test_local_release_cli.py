@@ -16,6 +16,7 @@ from investment_analyst.application.local_service_unit import (
     render_local_service_unit,
     write_local_service_unit,
 )
+from investment_analyst.workspace.service import WorkspaceService
 
 
 def _create_mock_archive() -> bytes:
@@ -45,7 +46,7 @@ def test_cli_full_lifecycle_flow(tmp_path: Path, capsys: pytest.CaptureFixture[s
     env_file = config_dir / "service.env"
     unit_file = tmp_path / "systemd" / "investment-analyst.service"
     workspace = tmp_path / "workspace"
-    workspace.mkdir(parents=True, exist_ok=True)
+    WorkspaceService().initialize(workspace, format_version=2)
 
     # 1. Setup source env file
     source_env = tmp_path / "source.env"

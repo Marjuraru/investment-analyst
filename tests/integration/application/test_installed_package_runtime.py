@@ -35,6 +35,7 @@ def resource_exists(package_name, resource_name):
 required_resources = (
     ("investment_analyst.catalog", "default_assets.v1.json"),
     ("investment_analyst.storage.migrations", "001_initial.sql"),
+    ("investment_analyst.storage.migrations", "002_workspace_v2.sql"),
     ("investment_analyst.frontend", "static/index.html"),
     ("investment_analyst.frontend", "static/app.js"),
     ("investment_analyst.frontend", "static/styles.css"),
@@ -55,6 +56,22 @@ with runtime.open_storage(
     access_mode=WorkspaceAccessMode.READ_WRITE,
 ) as storage:
     assert storage.is_open
+
+workspace_v2 = workspace_root.with_name("workspace-v2")
+runtime.workspace_service.initialize(workspace_v2, format_version=2)
+with runtime.open_storage(
+    StorageLocationRequest(workspace=workspace_v2),
+    access_mode=WorkspaceAccessMode.READ_WRITE,
+) as storage:
+    assert storage.is_open
+
+from investment_analyst.workspace.workspace_v2_backup import WorkspaceV2BackupService
+backup = workspace_root.with_name("workspace-v2-backup")
+restored = workspace_root.with_name("workspace-v2-restored")
+backup_service = WorkspaceV2BackupService(runtime.workspace_service)
+backup_service.create(workspace_v2, backup)
+restored_inspection = backup_service.restore(backup, restored)
+assert restored_inspection.format_version == 2
 """
 
 

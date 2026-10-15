@@ -116,6 +116,9 @@ def _parser() -> argparse.ArgumentParser:
         "retarget-unit", help="Retarget existing systemd unit to a staged release"
     )
     retarget_parser.add_argument("--sha", required=True, help="Full 40-character commit SHA")
+    retarget_parser.add_argument(
+        "--workspace", type=Path, default=None, help="Workspace root to bind in the unit"
+    )
 
     # activate
     activate_parser = subparsers.add_parser(
@@ -253,7 +256,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         elif args.command == "retarget-unit":
-            service.retarget_unit(args.sha, unit_file=args.unit_file, env_file=args.env_file)
+            service.retarget_unit(
+                args.sha,
+                unit_file=args.unit_file,
+                env_file=args.env_file,
+                workspace_root=args.workspace,
+            )
             print(f"Retargeted unit {args.unit_file} to release {args.sha}")
             return 0
 
