@@ -415,7 +415,7 @@ def _next_inventory_entry(
         or size < 0
         or not isinstance(digest, str)
         or len(digest) != 64
-        or (previous_path is not None and path <= previous_path)
+        or (previous_path is not None and path == previous_path)
     ):
         raise WorkspaceV2PhysicalDeltaError("parent inventory ordering is invalid")
     return path, size, digest
@@ -496,9 +496,9 @@ def verify_physical_delta_index(path: Path) -> PhysicalDeltaIndexTrailer:
                     return trailer
                 entry = PhysicalDeltaIndexEntry.model_validate_json(raw_line)
                 if entry.path != previous_path:
-                    if previous_path is not None and entry.path <= previous_path:
+                    if previous_path is not None and entry.path == previous_path:
                         raise WorkspaceV2PhysicalDeltaError(
-                            "physical delta entries are not ordered"
+                            "physical delta path reappears after completion"
                         )
                     if previous_path is not None and previous_offset != previous_size:
                         raise WorkspaceV2PhysicalDeltaError(
