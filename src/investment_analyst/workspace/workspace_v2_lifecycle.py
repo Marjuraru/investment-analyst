@@ -34,6 +34,8 @@ from investment_analyst.workspace.workspace_v2_lifecycle_models import (
     LifecycleReceipt,
     LocalComplementManifest,
     ProvenCopyRetirementReceipt,
+    SealedDirectoryRetirementCheckpoint,
+    SealedDirectoryRetirementReceipt,
 )
 from investment_analyst.workspace.workspace_v2_recovery import WorkspaceV2RecoveryReceipt
 
@@ -584,6 +586,80 @@ class WorkspaceV2LifecycleService:
         _fsync_directory(target.parent)
         return receipt
 
+    def retire_sealed_directory(
+        self,
+        root: Path,
+        *,
+        complement: LocalComplementManifest,
+        remote_manifest_sha256: str,
+        operation_id: UUID,
+        checkpoint_path: Path,
+    ) -> SealedDirectoryRetirementReceipt:
+        """Retire a verified non-workspace complement without inventing workspace identity."""
+        source = root.expanduser().resolve(strict=False)
+        if not source.is_absolute() or source.is_symlink():
+            raise WorkspaceV2LifecycleError("sealed directory root is unavailable or unsafe")
+        if not _is_sha256(remote_manifest_sha256):
+            raise WorkspaceV2LifecycleError("remote manifest digest is invalid")
+        checkpoint = self._read_sealed_directory_checkpoint(checkpoint_path)
+        retiring = _retiring_root(source, operation_id)
+        if source.exists():
+            source = _safe_existing_root(source, label="sealed directory root")
+            verified = self.verify_complement(complement.source, source)
+            if verified != complement:
+                raise WorkspaceV2LifecycleError("sealed directory complement changed")
+            inventory_sha256 = _hash_file(source / _COMPLEMENT_MANIFEST_NAME)[1]
+            cursor = SealedDirectoryRetirementCheckpoint(
+                operation_id=operation_id,
+                phase="retiring",
+                source_root=source,
+                retiring_root=retiring,
+                inventory_sha256=inventory_sha256,
+                remote_manifest_sha256=remote_manifest_sha256,
+                files_confirmed=len(complement.files),
+                bytes_confirmed=complement.total_bytes,
+            )
+            self._write_sealed_directory_checkpoint(checkpoint_path, cursor)
+            if retiring.exists():
+                raise WorkspaceV2LifecycleError("sealed directory retirement path is ambiguous")
+            os.replace(source, retiring)
+            _fsync_directory(source.parent)
+        else:
+            if (
+                checkpoint is None
+                or checkpoint.operation_id != operation_id
+                or checkpoint.source_root != source
+                or checkpoint.retiring_root != retiring
+                or checkpoint.remote_manifest_sha256 != remote_manifest_sha256
+            ):
+                raise WorkspaceV2LifecycleError(
+                    "sealed directory retirement cannot be resumed safely"
+                )
+            cursor = checkpoint
+        if cursor.phase == "retiring":
+            if _safe_existing_root(retiring, label="retiring sealed directory") != retiring:
+                raise WorkspaceV2LifecycleError(
+                    "sealed directory retirement cannot be resumed safely"
+                )
+            try:
+                shutil.rmtree(retiring)
+            except OSError as error:
+                raise WorkspaceV2LifecycleError(
+                    "sealed directory retirement did not complete"
+                ) from error
+            cursor = cursor.model_copy(update={"phase": "retired"})
+            self._write_sealed_directory_checkpoint(checkpoint_path, cursor)
+        return SealedDirectoryRetirementReceipt(checkpoint=cursor, completed_at=self._now())
+
+    def write_sealed_directory_receipt(
+        self, path: Path, receipt: SealedDirectoryRetirementReceipt
+    ) -> SealedDirectoryRetirementReceipt:
+        """Persist a terminal sealed-directory receipt without overwriting history."""
+        target = _new_receipt_path(path, label="sealed directory receipt")
+        _write_new_json(target, receipt.model_dump(mode="json"))
+        _fsync_directory(target.parent)
+        return receipt
+
     def _read_checkpoint(self, path: Path) -> LifecycleCheckpoint | None:
         if not path.exists():
             return None
@@ -593,6 +669,28 @@ class WorkspaceV2LifecycleService:
             return LifecycleCheckpoint.model_validate_json(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
             raise WorkspaceV2LifecycleError("lifecycle checkpoint is malformed") from error
+
+    def _read_sealed_directory_checkpoint(
+        self, path: Path
+    ) -> SealedDirectoryRetirementCheckpoint | None:
+        if not path.exists():
+            return None
+        if path.is_symlink() or not path.is_file():
+            raise WorkspaceV2LifecycleError("sealed directory checkpoint is unsafe")
+        try:
+            return SealedDirectoryRetirementCheckpoint.model_validate_json(
+                path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as error:
+            raise WorkspaceV2LifecycleError("sealed directory checkpoint is malformed") from error
+
+    def _write_sealed_directory_checkpoint(
+        self, path: Path, checkpoint: SealedDirectoryRetirementCheckpoint
+    ) -> None:
+        target = path.expanduser().resolve(strict=False)
+        if not target.is_absolute() or target.is_symlink():
+            raise WorkspaceV2LifecycleError("sealed directory checkpoint path is unsafe")
+        _replace_json(target, checkpoint.model_dump(mode="json"))
 
     def _now(self) -> datetime:
         value = self._clock()
@@ -679,6 +777,16 @@ def _compare_source_to_inventory(source: Path, inventory_path: Path) -> tuple[in
 
 def _is_sha256(value: str) -> bool:
     return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _new_receipt_path(path: Path, *, label: str) -> Path:
+    target = path.expanduser().resolve(strict=False)
+    if not target.is_absolute() or target.is_symlink() or target.exists():
+        raise WorkspaceV2LifecycleError(f"{label} path is unavailable or unsafe")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.parent.is_symlink() or not target.parent.is_dir():
+        raise WorkspaceV2LifecycleError(f"{label} parent is unavailable or unsafe")
+    return target
 
 
 def _retiring_root(root: Path, operation_id: UUID) -> Path:

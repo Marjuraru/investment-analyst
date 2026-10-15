@@ -268,3 +268,22 @@ def test_proven_copy_retirement_rejects_an_extra_file(tmp_path: Path) -> None:
             checkpoint_path=tmp_path / "target-retirement-checkpoint.json",
         )
     assert source.is_dir()
+
+
+def test_sealed_directory_retirement_preserves_a_durable_checkpoint(tmp_path: Path) -> None:
+    service, source = _seed_source(tmp_path)
+    lifecycle = _lifecycle(service)
+    frozen = lifecycle.freeze_source(
+        source, operation_id=uuid4(), source_fingerprint="f" * 64, writer_closed=True
+    )
+    complement_root = tmp_path / "complement"
+    complement = lifecycle.publish_complement(frozen, complement_root)
+    receipt = lifecycle.retire_sealed_directory(
+        complement_root,
+        complement=complement,
+        remote_manifest_sha256="a" * 64,
+        operation_id=uuid4(),
+        checkpoint_path=tmp_path / "complement-checkpoint.json",
+    )
+    assert receipt.checkpoint.phase == "retired"
+    assert not complement_root.exists()

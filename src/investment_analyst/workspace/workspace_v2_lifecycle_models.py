@@ -307,3 +307,36 @@ class ProvenCopyRetirementReceipt(_LifecycleModel):
         if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
             raise ValueError("proven copy retirement digest is invalid")
         return value
+
+
+class SealedDirectoryRetirementCheckpoint(_LifecycleModel):
+    """Durable retirement cursor for a sealed non-workspace directory."""
+
+    schema_version: Literal["workspace-v2-sealed-directory-retirement-checkpoint-v1"] = (
+        "workspace-v2-sealed-directory-retirement-checkpoint-v1"
+    )
+    operation_id: UUID
+    phase: Literal["retiring", "retired"]
+    source_root: Path
+    retiring_root: Path
+    inventory_sha256: NonEmptyStr
+    remote_manifest_sha256: NonEmptyStr
+    files_confirmed: int = Field(ge=0)
+    bytes_confirmed: int = Field(ge=0)
+
+    @field_validator("inventory_sha256", "remote_manifest_sha256")
+    @classmethod
+    def require_digest(cls, value: str) -> str:
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ValueError("sealed directory retirement digest is invalid")
+        return value
+
+
+class SealedDirectoryRetirementReceipt(_LifecycleModel):
+    """Terminal evidence for a remotely verified non-workspace directory retirement."""
+
+    schema_version: Literal["workspace-v2-sealed-directory-retirement-receipt-v1"] = (
+        "workspace-v2-sealed-directory-retirement-receipt-v1"
+    )
+    checkpoint: SealedDirectoryRetirementCheckpoint
+    completed_at: UTCDateTime
