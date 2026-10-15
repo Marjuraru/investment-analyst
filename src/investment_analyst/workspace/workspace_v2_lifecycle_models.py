@@ -281,3 +281,29 @@ class LifecycleReceipt(_LifecycleModel):
     files_confirmed: int = Field(ge=0)
     bytes_confirmed: int = Field(ge=0)
     completed_at: UTCDateTime
+
+
+class ProvenCopyRetirementReceipt(_LifecycleModel):
+    """Terminal proof for retiring an inactive v2 copy covered by a sealed recovery."""
+
+    schema_version: Literal["workspace-v2-proven-copy-retirement-receipt-v1"] = (
+        "workspace-v2-proven-copy-retirement-receipt-v1"
+    )
+    operation_id: UUID
+    source_root: Path
+    retained_root: Path
+    backup_root: Path
+    backup_id: UUID
+    inventory_sha256: NonEmptyStr
+    remote_manifest_sha256: NonEmptyStr
+    workspace_id: UUID
+    files_confirmed: int = Field(ge=0)
+    bytes_confirmed: int = Field(ge=0)
+    completed_at: UTCDateTime
+
+    @field_validator("inventory_sha256", "remote_manifest_sha256")
+    @classmethod
+    def require_digest(cls, value: str) -> str:
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ValueError("proven copy retirement digest is invalid")
+        return value

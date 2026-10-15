@@ -13,7 +13,9 @@ from investment_analyst.workspace.workspace_v2_lifecycle import (
     WorkspaceV2LifecycleService,
 )
 from investment_analyst.workspace.workspace_v2_lifecycle_models import LifecycleContentRole
-from investment_analyst.workspace.workspace_v2_recovery import backup_and_restore_workspace_v2
+from investment_analyst.workspace.workspace_v2_recovery import (
+    backup_and_restore_workspace_v2,
+)
 
 
 def _seed_source(tmp_path: Path) -> tuple[WorkspaceService, Path]:
@@ -205,3 +207,64 @@ def test_recovery_slot_retirement_uses_existing_receipt_without_new_restore(tmp_
     )
     assert retired.phase.value == "retired"
     assert not receipt.restore_root.exists()
+
+
+def test_proven_copy_retirement_streams_the_sealed_inventory_once(tmp_path: Path) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    source = tmp_path / "target-v2"
+    service.initialize(source, format_version=2)
+    recovery = backup_and_restore_workspace_v2(
+        service=service,
+        source_root=source,
+        backup_root=tmp_path / "backup-v2",
+        restore_root=tmp_path / "restore-v2",
+        available_bytes=lambda: 10_000_000_000,
+    )
+    lifecycle = _lifecycle(service)
+    operation_id = uuid4()
+    checkpoint = tmp_path / "target-retirement-checkpoint.json"
+    receipt = lifecycle.retire_proven_copy(
+        source,
+        recovery=recovery,
+        remote_manifest_sha256="f" * 64,
+        operation_id=operation_id,
+        checkpoint_path=checkpoint,
+    )
+    receipt_path = tmp_path / "target-retirement-receipt.json"
+    lifecycle.write_proven_copy_receipt(receipt_path, receipt)
+
+    assert not source.exists()
+    assert receipt.files_confirmed > 0
+    assert receipt_path.is_file()
+    resumed = lifecycle.retire_proven_copy(
+        source,
+        recovery=recovery,
+        remote_manifest_sha256="f" * 64,
+        operation_id=operation_id,
+        checkpoint_path=checkpoint,
+    )
+    assert resumed.files_confirmed == receipt.files_confirmed
+
+
+def test_proven_copy_retirement_rejects_an_extra_file(tmp_path: Path) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    source = tmp_path / "target-v2"
+    service.initialize(source, format_version=2)
+    recovery = backup_and_restore_workspace_v2(
+        service=service,
+        source_root=source,
+        backup_root=tmp_path / "backup-v2",
+        restore_root=tmp_path / "restore-v2",
+        available_bytes=lambda: 10_000_000_000,
+    )
+    (source / "unexpected.bin").write_bytes(b"unique")
+
+    with pytest.raises(WorkspaceV2LifecycleError, match="coverage"):
+        _lifecycle(service).retire_proven_copy(
+            source,
+            recovery=recovery,
+            remote_manifest_sha256="f" * 64,
+            operation_id=uuid4(),
+            checkpoint_path=tmp_path / "target-retirement-checkpoint.json",
+        )
+    assert source.is_dir()

@@ -9,13 +9,20 @@ import shutil
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from itertools import zip_longest
 from pathlib import Path, PurePosixPath
 from uuid import UUID, uuid4
 
+from investment_analyst.workspace.models import WorkspaceInspection
 from investment_analyst.workspace.service import WorkspaceError, WorkspaceService
 from investment_analyst.workspace.workspace_v2_backup import (
     WorkspaceV2BackupError,
+    WorkspaceV2PackedStreamManifest,
     _load_packed_manifest,
+)
+from investment_analyst.workspace.workspace_v2_backup_inventory import (
+    WorkspaceV2BackupInventoryError,
+    iter_inventory,
 )
 from investment_analyst.workspace.workspace_v2_lifecycle_models import (
     FrozenSourceCut,
@@ -26,6 +33,7 @@ from investment_analyst.workspace.workspace_v2_lifecycle_models import (
     LifecyclePhase,
     LifecycleReceipt,
     LocalComplementManifest,
+    ProvenCopyRetirementReceipt,
 )
 from investment_analyst.workspace.workspace_v2_recovery import WorkspaceV2RecoveryReceipt
 
@@ -429,6 +437,153 @@ class WorkspaceV2LifecycleService:
             completed_at=self._now(),
         )
 
+    def retire_proven_copy(
+        self,
+        source_root: Path,
+        *,
+        recovery: WorkspaceV2RecoveryReceipt,
+        remote_manifest_sha256: str,
+        operation_id: UUID,
+        checkpoint_path: Path,
+    ) -> ProvenCopyRetirementReceipt:
+        """Retire one inactive copy after one streaming comparison to its sealed inventory."""
+        source = source_root.expanduser().resolve(strict=False)
+        if not source.is_absolute() or source.is_symlink():
+            raise WorkspaceV2LifecycleError("proven copy source is unavailable or unsafe")
+        checkpoint = self._read_checkpoint(checkpoint_path)
+        if source.exists():
+            source = _safe_existing_root(source, label="proven copy source")
+        retained = _safe_existing_root(recovery.restore_root, label="recovery restore")
+        backup = _safe_existing_root(recovery.backup_root, label="recovery backup")
+        if source in (retained, backup) or retained == backup:
+            raise WorkspaceV2LifecycleError("proven copy roots must be disjoint")
+        if not _is_sha256(remote_manifest_sha256):
+            raise WorkspaceV2LifecycleError("remote manifest digest is invalid")
+        try:
+            manifest = _load_packed_manifest(backup / "backup_manifest.json")
+        except WorkspaceV2BackupError as error:
+            raise WorkspaceV2LifecycleError("proven copy backup manifest is unavailable") from error
+        if not isinstance(manifest, WorkspaceV2PackedStreamManifest):
+            raise WorkspaceV2LifecycleError("proven copy requires a streaming backup manifest")
+        retained_inspection = _inspect_ready_v2(
+            self._workspace_service, retained, "recovery restore"
+        )
+        expected_counts = (
+            recovery.raw_record_count,
+            recovery.observation_count,
+            recovery.metric_result_count,
+            recovery.diagnostic_result_count,
+        )
+        retained_counts = _inspection_counts(retained_inspection)
+        if (
+            retained_inspection.workspace_id != manifest.source_workspace_id
+            or recovery.source_workspace_id != str(manifest.source_workspace_id)
+            or recovery.restored_workspace_id != str(retained_inspection.workspace_id)
+            or retained_counts != expected_counts
+        ):
+            raise WorkspaceV2LifecycleError("proven copy recovery bindings differ")
+        retiring_root = _retiring_root(source, operation_id)
+        if source.exists():
+            source_inspection = _inspect_ready_v2(
+                self._workspace_service, source, "proven copy source"
+            )
+            if (
+                source_inspection.workspace_id != manifest.source_workspace_id
+                or _inspection_counts(source_inspection) != expected_counts
+            ):
+                raise WorkspaceV2LifecycleError("proven copy recovery bindings differ")
+            confirmed_files, confirmed_bytes = _compare_source_to_inventory(
+                source, backup / "source-inventory.jsonl"
+            )
+            if (
+                confirmed_files != manifest.inventory.file_count
+                or confirmed_bytes != manifest.inventory.total_bytes
+            ):
+                raise WorkspaceV2LifecycleError(
+                    "proven copy inventory summary differs from manifest"
+                )
+            descriptor = self.freeze_source(
+                source,
+                operation_id=operation_id,
+                source_fingerprint=manifest.inventory.digest_sha256,
+                writer_closed=True,
+            )
+            if retiring_root.exists():
+                raise WorkspaceV2LifecycleError("proven copy retirement path is ambiguous")
+            with _v2_writer_closed(source):
+                retiring = LifecycleCheckpoint(
+                    operation_id=operation_id,
+                    phase=LifecyclePhase.RETIRING,
+                    source=descriptor,
+                    retirement_root=retiring_root,
+                    files_confirmed=confirmed_files,
+                    bytes_confirmed=confirmed_bytes,
+                )
+                self.write_checkpoint(checkpoint_path, retiring)
+                os.replace(source, retiring_root)
+                _fsync_directory(source.parent)
+                checkpoint = retiring
+        else:
+            if (
+                checkpoint is None
+                or checkpoint.operation_id != operation_id
+                or checkpoint.source.source_root != source
+                or checkpoint.source.source_fingerprint != manifest.inventory.digest_sha256
+                or checkpoint.retirement_root != retiring_root
+                or checkpoint.phase not in {LifecyclePhase.RETIRING, LifecyclePhase.RETIRED}
+            ):
+                raise WorkspaceV2LifecycleError("proven copy retirement cannot be resumed safely")
+            descriptor = checkpoint.source
+            confirmed_files = checkpoint.files_confirmed
+            confirmed_bytes = checkpoint.bytes_confirmed
+        if checkpoint is None or checkpoint.phase is not LifecyclePhase.RETIRED:
+            if _safe_existing_root(retiring_root, label="retiring proven copy") != retiring_root:
+                raise WorkspaceV2LifecycleError("proven copy retirement cannot be resumed safely")
+            try:
+                shutil.rmtree(retiring_root)
+            except OSError as error:
+                raise WorkspaceV2LifecycleError(
+                    "proven copy retirement did not complete"
+                ) from error
+            self.write_checkpoint(
+                checkpoint_path,
+                LifecycleCheckpoint(
+                    operation_id=operation_id,
+                    phase=LifecyclePhase.RETIRED,
+                    source=descriptor,
+                    retirement_root=retiring_root,
+                    files_confirmed=confirmed_files,
+                    bytes_confirmed=confirmed_bytes,
+                ),
+            )
+        return ProvenCopyRetirementReceipt(
+            operation_id=operation_id,
+            source_root=source,
+            retained_root=retained,
+            backup_root=backup,
+            backup_id=manifest.backup_id,
+            inventory_sha256=manifest.inventory.digest_sha256,
+            remote_manifest_sha256=remote_manifest_sha256,
+            workspace_id=manifest.source_workspace_id,
+            files_confirmed=confirmed_files,
+            bytes_confirmed=confirmed_bytes,
+            completed_at=self._now(),
+        )
+
+    def write_proven_copy_receipt(
+        self, path: Path, receipt: ProvenCopyRetirementReceipt
+    ) -> ProvenCopyRetirementReceipt:
+        """Persist the terminal receipt atomically outside the root being retired."""
+        target = path.expanduser().resolve(strict=False)
+        if not target.is_absolute() or target.is_symlink() or target.exists():
+            raise WorkspaceV2LifecycleError("proven copy receipt path is unavailable or unsafe")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.parent.is_symlink() or not target.parent.is_dir():
+            raise WorkspaceV2LifecycleError("proven copy receipt parent is unavailable or unsafe")
+        _write_new_json(target, receipt.model_dump(mode="json"))
+        _fsync_directory(target.parent)
+        return receipt
+
     def _read_checkpoint(self, path: Path) -> LifecycleCheckpoint | None:
         if not path.exists():
             return None
@@ -474,6 +629,56 @@ def _safe_new_root(path: Path, source: Path, *, label: str) -> Path:
 def _matching_source(source: FrozenSourceCut) -> Path:
     root = _safe_existing_root(source.source_root, label="source")
     return root
+
+
+def _inspection_counts(inspection: WorkspaceInspection) -> tuple[int, int, int, int]:
+    return (
+        inspection.raw_record_count,
+        inspection.observation_count,
+        inspection.metric_result_count,
+        inspection.diagnostic_result_count,
+    )
+
+
+def _inspect_ready_v2(
+    workspace_service: WorkspaceService, root: Path, label: str
+) -> WorkspaceInspection:
+    try:
+        inspection = workspace_service.inspect(root)
+    except WorkspaceError as error:
+        raise WorkspaceV2LifecycleError(f"{label} cannot be inspected") from error
+    if inspection.status != "ready" or inspection.format_version != 2:
+        raise WorkspaceV2LifecycleError(f"{label} is not a ready workspace v2")
+    return inspection
+
+
+def _compare_source_to_inventory(source: Path, inventory_path: Path) -> tuple[int, int]:
+    """Compare paths and lengths in one streaming pass; inventory hashes stay sealed evidence."""
+    sentinel = object()
+    file_count = 0
+    byte_count = 0
+    try:
+        inventory = iter_inventory(inventory_path)
+        files = _iter_regular_files(source)
+        for entry, path in zip_longest(inventory, files, fillvalue=sentinel):
+            if entry is sentinel or path is sentinel:
+                raise WorkspaceV2LifecycleError("proven copy inventory coverage differs")
+            if not isinstance(entry, dict) or not isinstance(path, Path):
+                raise WorkspaceV2LifecycleError("proven copy inventory coverage differs")
+            relative = path.relative_to(source).as_posix()
+            expected_path = entry.get("path")
+            expected_size = entry.get("size_bytes")
+            if relative != expected_path or path.stat().st_size != expected_size:
+                raise WorkspaceV2LifecycleError("proven copy inventory coverage differs")
+            file_count += 1
+            byte_count += path.stat().st_size
+    except WorkspaceV2BackupInventoryError as error:
+        raise WorkspaceV2LifecycleError("proven copy inventory is invalid") from error
+    return file_count, byte_count
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
 def _retiring_root(root: Path, operation_id: UUID) -> Path:
