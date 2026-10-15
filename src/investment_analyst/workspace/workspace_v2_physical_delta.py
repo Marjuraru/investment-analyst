@@ -227,6 +227,15 @@ class WorkspaceV2PhysicalDeltaIndexService:
         if temporary.exists() and (temporary.is_symlink() or not temporary.is_file()):
             raise WorkspaceV2PhysicalDeltaError("physical delta partial index is unsafe")
         prefix_count, prefix_digest = self._verify_partial_prefix(temporary, root, backup_manifest)
+        expected_checkpoint = _writing_checkpoint(
+            backup_manifest,
+            entry_count=prefix_count,
+            partial_index_sha256=prefix_digest.hexdigest(),
+        )
+        checkpoint = _read_checkpoint(checkpoint_path)
+        if checkpoint is not None and checkpoint != expected_checkpoint:
+            raise WorkspaceV2PhysicalDeltaError("physical delta checkpoint binding differs")
+        _replace_json(checkpoint_path, expected_checkpoint.model_dump(mode="json"))
         try:
             with temporary.open("a", encoding="utf-8", newline="\n") as stream:
                 trailer = self._write_records(
@@ -235,6 +244,7 @@ class WorkspaceV2PhysicalDeltaIndexService:
                     backup_manifest,
                     skip_count=prefix_count,
                     digest=prefix_digest,
+                    checkpoint_path=checkpoint_path,
                 )
                 stream.write(_compact_json(trailer.model_dump(mode="json")) + "\n")
                 stream.flush()
@@ -313,6 +323,7 @@ class WorkspaceV2PhysicalDeltaIndexService:
         *,
         skip_count: int,
         digest: hashlib._Hash,
+        checkpoint_path: Path,
     ) -> PhysicalDeltaIndexTrailer:
         file_count = 0
         entry_count = 0
@@ -329,6 +340,14 @@ class WorkspaceV2PhysicalDeltaIndexService:
                 if entry_count % self._checkpoint_interval == 0:
                     stream.flush()
                     os.fsync(stream.fileno())
+                    _replace_json(
+                        checkpoint_path,
+                        _writing_checkpoint(
+                            manifest,
+                            entry_count=entry_count,
+                            partial_index_sha256=digest.hexdigest(),
+                        ).model_dump(mode="json"),
+                    )
         if entry_count < skip_count:
             raise WorkspaceV2PhysicalDeltaError("physical delta partial index exceeds parent")
         return PhysicalDeltaIndexTrailer(
@@ -614,6 +633,23 @@ def _checkpoint_from_trailer(
     )
 
 
+def _writing_checkpoint(
+    manifest: WorkspaceV2PackedStreamManifest,
+    *,
+    entry_count: int,
+    partial_index_sha256: str,
+) -> PhysicalDeltaIndexCheckpoint:
+    return PhysicalDeltaIndexCheckpoint(
+        phase="writing",
+        parent_backup_id=manifest.backup_id,
+        source_workspace_id=manifest.source_workspace_id,
+        inventory_sha256=manifest.inventory.digest_sha256,
+        journal_sha256=manifest.journal_sha256,
+        entry_count=entry_count,
+        partial_index_sha256=partial_index_sha256,
+    )
+
+
 def _compact_json(document: object) -> str:
     return json.dumps(document, sort_keys=True, separators=(",", ":"))
 
@@ -641,6 +677,17 @@ def _replace_json(path: Path, document: object) -> None:
         _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _read_checkpoint(path: Path) -> PhysicalDeltaIndexCheckpoint | None:
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise WorkspaceV2PhysicalDeltaError("physical delta checkpoint is unavailable or unsafe")
+    try:
+        return PhysicalDeltaIndexCheckpoint.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise WorkspaceV2PhysicalDeltaError("physical delta checkpoint is malformed") from error
 
 
 def _fsync_directory(path: Path) -> None:
