@@ -576,6 +576,35 @@ def verify_physical_delta_index(path: Path) -> PhysicalDeltaIndexTrailer:
     raise WorkspaceV2PhysicalDeltaError("physical delta index is missing its trailer")
 
 
+def iter_physical_delta_index(path: Path) -> Iterator[PhysicalDeltaIndexEntry]:
+    """Yield index entries incrementally, validating the sealed trailer on exhaustion."""
+    target = path.expanduser().resolve(strict=False)
+    if not target.is_absolute() or target.is_symlink() or not target.is_file():
+        raise WorkspaceV2PhysicalDeltaError("physical delta index is unavailable or unsafe")
+    digest = hashlib.sha256()
+    try:
+        with target.open("rb") as stream:
+            for raw_line in stream:
+                if not raw_line.endswith(b"\n"):
+                    raise WorkspaceV2PhysicalDeltaError("physical delta index is incomplete")
+                document = json.loads(raw_line)
+                if isinstance(document, dict) and document.get("schema_version") == (
+                    "workspace-v2-physical-delta-trailer-v1"
+                ):
+                    trailer = PhysicalDeltaIndexTrailer.model_validate_json(raw_line)
+                    if stream.read(1) or trailer.index_sha256 != digest.hexdigest():
+                        raise WorkspaceV2PhysicalDeltaError(
+                            "physical delta trailer does not bind entries"
+                        )
+                    return
+                entry = PhysicalDeltaIndexEntry.model_validate_json(raw_line)
+                digest.update(raw_line)
+                yield entry
+    except (OSError, UnicodeError, ValueError) as error:
+        raise WorkspaceV2PhysicalDeltaError("physical delta index is malformed") from error
+    raise WorkspaceV2PhysicalDeltaError("physical delta index is missing its trailer")
+
+
 def _new_destination(path: Path) -> Path:
     target = path.expanduser().resolve(strict=False)
     if not target.is_absolute() or target.is_symlink():
@@ -705,5 +734,6 @@ __all__ = [
     "PhysicalDeltaIndexTrailer",
     "WorkspaceV2PhysicalDeltaError",
     "WorkspaceV2PhysicalDeltaIndexService",
+    "iter_physical_delta_index",
     "verify_physical_delta_index",
 ]

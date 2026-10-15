@@ -14,6 +14,7 @@ from investment_analyst.workspace.workspace_v2_physical_delta import (
     WorkspaceV2PhysicalDeltaError,
     WorkspaceV2PhysicalDeltaIndexService,
     _iter_entries,
+    iter_physical_delta_index,
     verify_physical_delta_index,
 )
 
@@ -54,6 +55,9 @@ def test_physical_delta_index_streams_complete_parent_coverage(tmp_path: Path) -
     assert trailer.file_count > 1
     assert trailer.entry_count >= trailer.file_count
     assert trailer.logical_bytes > 0
+    assert sum(1 for _ in iter_physical_delta_index(tmp_path / "index" / manifest.index_path)) == (
+        trailer.entry_count
+    )
     checkpoint = json.loads(
         (tmp_path / "index" / "physical-delta-checkpoint.json").read_text(encoding="utf-8")
     )
