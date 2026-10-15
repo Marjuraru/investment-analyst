@@ -54,6 +54,11 @@ def test_physical_delta_index_streams_complete_parent_coverage(tmp_path: Path) -
     assert trailer.file_count > 1
     assert trailer.entry_count >= trailer.file_count
     assert trailer.logical_bytes > 0
+    checkpoint = json.loads(
+        (tmp_path / "index" / "physical-delta-checkpoint.json").read_text(encoding="utf-8")
+    )
+    assert checkpoint["phase"] == "sealed"
+    assert checkpoint["entry_count"] == trailer.entry_count
     entries = (tmp_path / "index" / manifest.index_path).read_text(encoding="utf-8").splitlines()
     assert any('"path":"state/empty.bin"' in line for line in entries)
     assert any('"parent_object_key":"volumes/' in line for line in entries)

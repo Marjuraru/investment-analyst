@@ -13,6 +13,7 @@ import os
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -149,6 +150,28 @@ class PhysicalDeltaIndexManifest(ContractModel):
         return value
 
 
+class PhysicalDeltaIndexCheckpoint(ContractModel):
+    """Durable cursor for a resumable JSONL physical index derivation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: str = "workspace-v2-physical-delta-checkpoint-v1"
+    phase: Literal["writing", "sealed"]
+    parent_backup_id: UUID
+    source_workspace_id: UUID
+    inventory_sha256: NonEmptyStr
+    journal_sha256: NonEmptyStr
+    entry_count: int = Field(ge=0)
+    partial_index_sha256: NonEmptyStr
+
+    @field_validator("inventory_sha256", "journal_sha256", "partial_index_sha256")
+    @classmethod
+    def require_digest(cls, value: str) -> str:
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ValueError("physical delta checkpoint digest is invalid")
+        return value
+
+
 class WorkspaceV2PhysicalDeltaIndexService:
     """Derive and verify one resumable physical index without global collections."""
 
@@ -171,8 +194,13 @@ class WorkspaceV2PhysicalDeltaIndexService:
         destination_root = _new_destination(destination)
         index_path = destination_root / "physical-delta-index.jsonl"
         manifest_path = destination_root / "physical-delta-manifest.json"
+        checkpoint_path = destination_root / "physical-delta-checkpoint.json"
         if index_path.exists():
             trailer = verify_physical_delta_index(index_path)
+            _replace_json(
+                checkpoint_path,
+                _checkpoint_from_trailer(trailer, phase="sealed").model_dump(mode="json"),
+            )
             if manifest_path.exists():
                 try:
                     persisted = PhysicalDeltaIndexManifest.model_validate_json(
@@ -218,6 +246,10 @@ class WorkspaceV2PhysicalDeltaIndexService:
                 temporary.unlink(missing_ok=True)
         if verify_physical_delta_index(index_path) != trailer:
             raise WorkspaceV2PhysicalDeltaError("physical delta index changed after sealing")
+        _replace_json(
+            checkpoint_path,
+            _checkpoint_from_trailer(trailer, phase="sealed").model_dump(mode="json"),
+        )
         manifest = _manifest_from_trailer(
             trailer, index_path=index_path.name, created_at=self._now()
         )
@@ -568,6 +600,20 @@ def _manifest_from_trailer(
     )
 
 
+def _checkpoint_from_trailer(
+    trailer: PhysicalDeltaIndexTrailer, *, phase: Literal["writing", "sealed"]
+) -> PhysicalDeltaIndexCheckpoint:
+    return PhysicalDeltaIndexCheckpoint(
+        phase=phase,
+        parent_backup_id=trailer.parent_backup_id,
+        source_workspace_id=trailer.source_workspace_id,
+        inventory_sha256=trailer.inventory_sha256,
+        journal_sha256=trailer.journal_sha256,
+        entry_count=trailer.entry_count,
+        partial_index_sha256=trailer.index_sha256,
+    )
+
+
 def _compact_json(document: object) -> str:
     return json.dumps(document, sort_keys=True, separators=(",", ":"))
 
@@ -583,6 +629,20 @@ def _write_new_json(path: Path, document: object) -> None:
     _fsync_directory(path.parent)
 
 
+def _replace_json(path: Path, document: object) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+            stream.write(_compact_json(document))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
@@ -593,6 +653,7 @@ def _fsync_directory(path: Path) -> None:
 
 __all__ = [
     "PhysicalDeltaIndexEntry",
+    "PhysicalDeltaIndexCheckpoint",
     "PhysicalDeltaIndexManifest",
     "PhysicalDeltaIndexTrailer",
     "WorkspaceV2PhysicalDeltaError",
