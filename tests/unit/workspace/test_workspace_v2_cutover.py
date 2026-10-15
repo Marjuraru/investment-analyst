@@ -58,6 +58,10 @@ def test_frozen_cut_catches_up_changed_source_without_a_snapshot_copy(tmp_path: 
         checkpoint_path=tmp_path / "cutover.json",
         host_free_bytes=lambda: 30_000_000_000,
         reserve_bytes=5_000_000_000,
+        operational_inventory_path=tmp_path / "operational-inventory.jsonl",
+        operational_seal_path=tmp_path / "operational-seal.json",
+        operational_checkpoint_path=tmp_path / "operational-checkpoint.json",
+        operational_receipt_path=tmp_path / "operational-receipt.json",
         page_limit=1,
     )
 
@@ -65,6 +69,7 @@ def test_frozen_cut_catches_up_changed_source_without_a_snapshot_copy(tmp_path: 
     checkpoint = (tmp_path / "cutover.json").read_text(encoding="utf-8")
     assert WorkspaceV2CutoverPhase.CATCHUP_COMPLETE.value in checkpoint
     assert service.inspect(destination).raw_record_count == 2
+    assert (tmp_path / "operational-receipt.json").is_file()
 
 
 def test_cutover_rejects_active_writer_and_changed_frozen_source(tmp_path: Path) -> None:
@@ -84,4 +89,8 @@ def test_cutover_rejects_active_writer_and_changed_frozen_source(tmp_path: Path)
             checkpoint_path=tmp_path / "cutover.json",
             host_free_bytes=lambda: 30_000_000_000,
             reserve_bytes=5_000_000_000,
+            operational_inventory_path=tmp_path / "operational-inventory.jsonl",
+            operational_seal_path=tmp_path / "operational-seal.json",
+            operational_checkpoint_path=tmp_path / "operational-checkpoint.json",
+            operational_receipt_path=tmp_path / "operational-receipt.json",
         )

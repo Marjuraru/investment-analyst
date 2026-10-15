@@ -15,12 +15,21 @@ from pydantic import ConfigDict, Field
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 from investment_analyst.workspace.service import WorkspaceService
 from investment_analyst.workspace.workspace_v2_lifecycle import WorkspaceV2LifecycleService
-from investment_analyst.workspace.workspace_v2_lifecycle_models import FrozenSourceCut
+from investment_analyst.workspace.workspace_v2_lifecycle_models import (
+    FrozenSourceCut,
+    OperationalStateSeal,
+    OperationalStateTransferReceipt,
+)
 from investment_analyst.workspace.workspace_v2_migration import (
     WorkspaceV2MigrationError,
     WorkspaceV2MigrationSummary,
     migrate_workspace_v1_to_v2,
     source_fingerprint,
+)
+from investment_analyst.workspace.workspace_v2_operational_state import (
+    OperationalStateTransferError,
+    seal_operational_state,
+    transfer_operational_state,
 )
 
 
@@ -96,6 +105,10 @@ class WorkspaceV2CutoverService:
         checkpoint_path: Path,
         host_free_bytes: Callable[[], int],
         reserve_bytes: int,
+        operational_inventory_path: Path,
+        operational_seal_path: Path,
+        operational_checkpoint_path: Path,
+        operational_receipt_path: Path,
         page_limit: int = 256,
     ) -> WorkspaceV2MigrationSummary:
         """Apply a finite frozen cut, preserving importer checkpoints on interruption."""
@@ -148,6 +161,16 @@ class WorkspaceV2CutoverService:
             )
         except WorkspaceV2MigrationError as error:
             raise WorkspaceV2CutoverError("finite cutover catch-up did not complete") from error
+        self.complete_operational_state(
+            source,
+            destination,
+            inventory_path=operational_inventory_path,
+            seal_path=operational_seal_path,
+            checkpoint_path=operational_checkpoint_path,
+            receipt_path=operational_receipt_path,
+            host_free_bytes=host_free_bytes,
+            reserve_bytes=reserve_bytes,
+        )
         _replace_checkpoint(
             checkpoint,
             WorkspaceV2CutoverCheckpoint(
@@ -163,6 +186,52 @@ class WorkspaceV2CutoverService:
             ),
         )
         return summary
+
+    def complete_operational_state(
+        self,
+        source: FrozenSourceCut,
+        destination_root: Path,
+        *,
+        inventory_path: Path,
+        seal_path: Path,
+        checkpoint_path: Path,
+        receipt_path: Path,
+        host_free_bytes: Callable[[], int],
+        reserve_bytes: int,
+    ) -> OperationalStateTransferReceipt:
+        """Seal and transfer only the frozen operational state accompanying a v2 cut."""
+        destination = destination_root.expanduser().resolve(strict=False)
+        if not destination.is_absolute() or destination.is_symlink():
+            raise WorkspaceV2CutoverError("operational cutover destination is unsafe")
+        try:
+            seal = _load_operational_seal(seal_path)
+            if seal is None:
+                seal = seal_operational_state(
+                    source.source_root,
+                    destination,
+                    source=source,
+                    destination_workspace_id=self._workspace_service.manifest(
+                        destination
+                    ).workspace_id,
+                    inventory_path=inventory_path,
+                    clock=self._clock,
+                )
+                _replace_json(seal_path, seal.model_dump(mode="json"))
+            elif seal.source != source or seal.destination_root != destination:
+                raise WorkspaceV2CutoverError("operational seal binding differs")
+            return transfer_operational_state(
+                source.source_root,
+                destination,
+                seal=seal,
+                inventory_path=inventory_path,
+                checkpoint_path=checkpoint_path,
+                receipt_path=receipt_path,
+                available_bytes=host_free_bytes,
+                reserve_bytes=reserve_bytes,
+                clock=self._clock,
+            )
+        except (OperationalStateTransferError, RuntimeError) as error:
+            raise WorkspaceV2CutoverError("operational state catch-up did not complete") from error
 
     def _now(self) -> datetime:
         value = self._clock()
@@ -182,14 +251,27 @@ def _load_checkpoint(path: Path) -> WorkspaceV2CutoverCheckpoint | None:
         raise WorkspaceV2CutoverError("cutover checkpoint is malformed") from error
 
 
+def _load_operational_seal(path: Path) -> OperationalStateSeal | None:
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise WorkspaceV2CutoverError("operational seal is unsafe")
+    try:
+        return OperationalStateSeal.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise WorkspaceV2CutoverError("operational seal is malformed") from error
+
+
 def _replace_checkpoint(path: Path, checkpoint: WorkspaceV2CutoverCheckpoint) -> None:
+    _replace_json(path, checkpoint.model_dump(mode="json"))
+
+
+def _replace_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
         with temporary.open("x", encoding="utf-8", newline="\n") as stream:
-            json.dump(
-                checkpoint.model_dump(mode="json"), stream, sort_keys=True, separators=(",", ":")
-            )
+            json.dump(value, stream, sort_keys=True, separators=(",", ":"))
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())

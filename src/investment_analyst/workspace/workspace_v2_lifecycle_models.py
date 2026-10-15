@@ -40,6 +40,34 @@ class LifecyclePhase(StrEnum):
     RETIRED = "retired"
 
 
+class OperationalStateFamily(StrEnum):
+    """Closed operational families eligible for byte-exact cutover transfer."""
+
+    DAILY_RUN = "daily_run"
+    DAILY_SCHEDULE = "daily_schedule"
+    MULTI_ASSET_SCHEDULE = "multi_asset_schedule"
+    ANALYTICAL_SCREENING = "analytical_screening"
+    OPERATIONAL_ALERTS = "operational_alerts"
+    CANDIDATE_OUTBOX = "candidate_outbox"
+    CAZATIBURONES_OUTBOX = "cazatiburones_outbox"
+    INSTITUTIONAL_CYCLE = "institutional_cycle"
+    INSTITUTIONAL_HISTORY = "institutional_history"
+    MANUAL_OPERATIONS = "manual_operations"
+    STORAGE_TELEMETRY = "storage_telemetry"
+    ACTIVITY_EVENTS = "activity_events"
+    INSTITUTIONAL_EVENTS = "institutional_events"
+    ASSET_PREFERENCES = "asset_preferences"
+
+
+class OperationalStateArtifactRole(StrEnum):
+    """Physical artifact role; this never changes operational semantics."""
+
+    DOCUMENT = "document"
+    JOURNAL = "journal"
+    EVENT = "event"
+    TELEMETRY = "telemetry"
+
+
 class _LifecycleModel(ContractModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -96,6 +124,83 @@ class LifecycleFile(_LifecycleModel):
         if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
             raise ValueError("lifecycle file sha256 is invalid")
         return value
+
+
+class OperationalStateArtifact(_LifecycleModel):
+    """One bounded, sealed operational file; absence is represented by no artifact."""
+
+    family: OperationalStateFamily
+    role: OperationalStateArtifactRole
+    path: NonEmptyStr
+    size_bytes: int = Field(ge=0)
+    sha256: NonEmptyStr
+
+    @field_validator("path")
+    @classmethod
+    def require_relative_path(cls, value: str) -> str:
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts or value != path.as_posix():
+            raise ValueError("operational artifact path must be normalized and relative")
+        return value
+
+    @field_validator("sha256")
+    @classmethod
+    def require_digest(cls, value: str) -> str:
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ValueError("operational artifact sha256 is invalid")
+        return value
+
+
+class OperationalStateSeal(_LifecycleModel):
+    """Companion seal for state excluded from the financial source fingerprint."""
+
+    schema_version: Literal["workspace-v2-operational-state-seal-v1"] = (
+        "workspace-v2-operational-state-seal-v1"
+    )
+    policy: Literal["default-operational-state-transfer-v1"] = (
+        "default-operational-state-transfer-v1"
+    )
+    operation_id: UUID
+    source: FrozenSourceCut
+    destination_root: Path
+    destination_workspace_id: UUID
+    inventory_sha256: NonEmptyStr
+    sealed_at: UTCDateTime
+    present_families: tuple[OperationalStateFamily, ...]
+    absent_families: tuple[OperationalStateFamily, ...]
+
+    @model_validator(mode="after")
+    def require_partition(self) -> OperationalStateSeal:
+        present = set(self.present_families)
+        absent = set(self.absent_families)
+        if present & absent or present | absent != set(OperationalStateFamily):
+            raise ValueError("operational state families must form a complete partition")
+        return self
+
+
+class OperationalStateTransferReceipt(_LifecycleModel):
+    """Durable terminal evidence for an operational-state transfer epoch."""
+
+    schema_version: Literal["workspace-v2-operational-state-transfer-receipt-v1"] = (
+        "workspace-v2-operational-state-transfer-receipt-v1"
+    )
+    seal: OperationalStateSeal
+    source_inventory_sha256: NonEmptyStr
+    destination_inventory_sha256: NonEmptyStr
+    artifact_count: int = Field(ge=0)
+    transferred_bytes: int = Field(ge=0)
+    completed_families: tuple[OperationalStateFamily, ...]
+    completed_at: UTCDateTime
+
+    @model_validator(mode="after")
+    def require_terminal_inventory(self) -> OperationalStateTransferReceipt:
+        if self.source_inventory_sha256 != self.seal.inventory_sha256:
+            raise ValueError("operational receipt source inventory differs from seal")
+        if self.destination_inventory_sha256 != self.seal.inventory_sha256:
+            raise ValueError("operational receipt destination inventory differs from seal")
+        if tuple(sorted(self.completed_families)) != tuple(sorted(self.seal.present_families)):
+            raise ValueError("operational receipt families differ from seal")
+        return self
 
 
 class LifecycleInventory(_LifecycleModel):
