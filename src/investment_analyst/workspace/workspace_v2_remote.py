@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -269,6 +269,35 @@ class RemoteBackupRestoreReceipt(ContractModel):
     completed_at: UTCDateTime
 
 
+class RemoteBackupRetentionPreview(ContractModel):
+    """Fail-closed preview of objects safe to prune from this backup namespace.
+
+    The preview contains only keys referenced by the supplied manifests.  It
+    deliberately cannot select an unknown remote key, so it cannot become a
+    broad remote ``sync --delete`` operation.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: str = "workspace-v2-remote-retention-preview-v1"
+    recovery_backup_id: UUID
+    retained_backup_ids: tuple[UUID, ...]
+    retained_object_keys: tuple[NonEmptyStr, ...]
+    prune_object_keys: tuple[NonEmptyStr, ...]
+
+    @model_validator(mode="after")
+    def require_disjoint_sorted_sets(self) -> RemoteBackupRetentionPreview:
+        if not self.retained_backup_ids:
+            raise ValueError("retention preview requires retained backups")
+        retained = tuple(sorted(set(self.retained_object_keys)))
+        pruned = tuple(sorted(set(self.prune_object_keys)))
+        if retained != self.retained_object_keys or pruned != self.prune_object_keys:
+            raise ValueError("retention preview keys must be unique and sorted")
+        if set(retained) & set(pruned):
+            raise ValueError("retention preview overlaps retained and pruned objects")
+        return self
+
+
 class RemoteBackupManifestReconciliationReceipt(ContractModel):
     """Binds a legacy transfer receipt to the manifest actually readable in Drive."""
 
@@ -434,6 +463,87 @@ class WorkspaceV2RemoteService:
             return receipt
         finally:
             manifest_path.unlink(missing_ok=True)
+
+    def plan_retention_preview(
+        self,
+        manifests: Collection[RemoteBackupManifest],
+        *,
+        recovery_receipt: RemoteBackupRestoreReceipt,
+    ) -> RemoteBackupRetentionPreview:
+        """Select 7 daily, 4 weekly and 12 monthly logical versions.
+
+        Parent manifests are retained transitively.  The latest version must
+        have an independent recovery receipt before this method will describe
+        any deletion candidate.  It returns a preview only: no transport or
+        remote deletion capability is invoked here.
+        """
+        by_id = {manifest.backup_id: manifest for manifest in manifests}
+        if not by_id or len(by_id) != len(manifests):
+            raise WorkspaceV2RemoteError("retention manifests are missing or duplicate")
+        configurations = {manifest.configuration_fingerprint for manifest in by_id.values()}
+        workspaces = {manifest.source_workspace_id for manifest in by_id.values()}
+        if len(configurations) != 1 or len(workspaces) != 1:
+            raise WorkspaceV2RemoteError("retention manifests have incompatible bindings")
+        for manifest in by_id.values():
+            if manifest.parent_backup_id is not None and manifest.parent_backup_id not in by_id:
+                raise WorkspaceV2RemoteError("retention manifest parent is unavailable")
+
+        ordered = tuple(
+            sorted(
+                by_id.values(),
+                key=lambda item: (item.created_at, str(item.backup_id)),
+                reverse=True,
+            )
+        )
+        latest = ordered[0]
+        if recovery_receipt.backup_id != latest.backup_id:
+            raise WorkspaceV2RemoteError("retention requires recovery of the latest backup")
+
+        retained: set[UUID] = set()
+        daily: set[object] = set()
+        weekly: set[tuple[int, int]] = set()
+        monthly: set[tuple[int, int]] = set()
+        for manifest in ordered:
+            created = manifest.created_at
+            day = created.date()
+            iso_year, iso_week, _ = created.isocalendar()
+            month = (created.year, created.month)
+            if len(daily) < 7 and day not in daily:
+                daily.add(day)
+                retained.add(manifest.backup_id)
+            if len(weekly) < 4 and (iso_year, iso_week) not in weekly:
+                weekly.add((iso_year, iso_week))
+                retained.add(manifest.backup_id)
+            if len(monthly) < 12 and month not in monthly:
+                monthly.add(month)
+                retained.add(manifest.backup_id)
+        retained.add(latest.backup_id)
+
+        pending = list(retained)
+        while pending:
+            backup_id = pending.pop()
+            parent_id = by_id[backup_id].parent_backup_id
+            if parent_id is not None and parent_id not in retained:
+                retained.add(parent_id)
+                pending.append(parent_id)
+
+        all_objects: dict[str, RemoteBackupObject] = {}
+        for manifest in by_id.values():
+            for item in manifest.objects:
+                existing = all_objects.setdefault(item.object_key, item)
+                if existing != item:
+                    raise WorkspaceV2RemoteError("retention object binding conflicts")
+        retained_objects = {
+            item.object_key for backup_id in retained for item in by_id[backup_id].objects
+        }
+        all_keys = set(all_objects) | {f"manifests/{backup_id}.json" for backup_id in by_id}
+        retained_keys = retained_objects | {f"manifests/{backup_id}.json" for backup_id in retained}
+        return RemoteBackupRetentionPreview(
+            recovery_backup_id=recovery_receipt.backup_id,
+            retained_backup_ids=tuple(sorted(retained, key=str)),
+            retained_object_keys=tuple(sorted(retained_keys)),
+            prune_object_keys=tuple(sorted(all_keys - retained_keys)),
+        )
 
     def upload_complement(
         self,
@@ -1091,6 +1201,7 @@ __all__ = [
     "RemoteBackupManifestReconciliationReceipt",
     "RemoteBackupObject",
     "RemoteBackupPlan",
+    "RemoteBackupRetentionPreview",
     "RemoteBackupRestoreReceipt",
     "RemoteBackupSource",
     "RemoteBackupTransferReceipt",

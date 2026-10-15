@@ -2,7 +2,7 @@
 
 import hashlib
 import shutil
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -18,6 +18,8 @@ from investment_analyst.workspace.workspace_v2_lifecycle_models import (
     LocalComplementManifest,
 )
 from investment_analyst.workspace.workspace_v2_remote import (
+    RemoteBackupObject,
+    RemoteBackupRestoreReceipt,
     RemoteBackupTransferReceipt,
     WorkspaceV2RemoteError,
     WorkspaceV2RemoteService,
@@ -85,6 +87,78 @@ def test_changed_packed_backup_reuses_parent_objects_and_uploads_only_new_object
     assert delta.new_objects
     assert delta.reused_objects
     assert len(delta.manifest.objects) < 100
+
+
+def test_retention_preview_keeps_parent_closure_and_only_prunes_known_objects(
+    tmp_path: Path,
+) -> None:
+    """Retention has logical versions, preserves shared parents and never sees foreign keys."""
+    remote, backup_root = _remote(tmp_path)
+    base = remote.plan_base(backup_root, configuration_fingerprint="a" * 64).manifest
+    manifests = [base]
+    for offset in range(1, 25):
+        object_item = RemoteBackupObject(
+            object_key=f"volumes/{offset:064x}.gz",
+            sha256=f"{offset:064x}",
+            size_bytes=offset,
+        )
+        manifests.append(
+            base.model_copy(
+                update={
+                    "backup_id": uuid4(),
+                    "created_at": datetime(2026, 1, 1, tzinfo=UTC) + timedelta(days=offset),
+                    "parent_backup_id": base.backup_id,
+                    "objects": tuple(
+                        sorted((*base.objects, object_item), key=lambda item: item.object_key)
+                    ),
+                }
+            )
+        )
+    latest = max(manifests, key=lambda item: item.created_at)
+    receipt = RemoteBackupRestoreReceipt(
+        backup_id=latest.backup_id,
+        remote_manifest_sha256="a" * 64,
+        restored_workspace_id=uuid4(),
+        volume_count=1,
+        downloaded_volumes=1,
+        downloaded_bytes=1,
+        completed_at=datetime(2026, 2, 1, tzinfo=UTC),
+    )
+
+    preview = remote.plan_retention_preview(manifests, recovery_receipt=receipt)
+
+    assert base.backup_id in preview.retained_backup_ids
+    assert "manifests/foreign-user.json" not in preview.prune_object_keys
+    assert preview.prune_object_keys
+    assert not set(preview.prune_object_keys) & set(preview.retained_object_keys)
+
+
+def test_retention_preview_requires_latest_recovery_and_complete_parent_chain(
+    tmp_path: Path,
+) -> None:
+    remote, backup_root = _remote(tmp_path)
+    base = remote.plan_base(backup_root, configuration_fingerprint="a" * 64).manifest
+    changed = base.model_copy(
+        update={"backup_id": uuid4(), "created_at": datetime(2026, 11, 1, tzinfo=UTC)}
+    )
+    receipt = RemoteBackupRestoreReceipt(
+        backup_id=base.backup_id,
+        remote_manifest_sha256="a" * 64,
+        restored_workspace_id=uuid4(),
+        volume_count=1,
+        downloaded_volumes=1,
+        downloaded_bytes=1,
+        completed_at=datetime(2026, 2, 2, tzinfo=UTC),
+    )
+    with pytest.raises(WorkspaceV2RemoteError, match="latest backup"):
+        remote.plan_retention_preview((base, changed), recovery_receipt=receipt)
+
+    missing_parent = changed.model_copy(update={"parent_backup_id": uuid4()})
+    with pytest.raises(WorkspaceV2RemoteError, match="parent"):
+        remote.plan_retention_preview(
+            (missing_parent,),
+            recovery_receipt=receipt.model_copy(update={"backup_id": missing_parent.backup_id}),
+        )
 
 
 def test_base_plan_reuses_restore_controls_without_prehashing_volumes(

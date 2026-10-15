@@ -32,6 +32,7 @@ from investment_analyst.workspace.workspace_v2_lifecycle_models import (
 from investment_analyst.workspace.workspace_v2_remote import (
     RemoteBackupManifest,
     RemoteBackupManifestReconciliationReceipt,
+    RemoteBackupRestoreReceipt,
     RemoteBackupTransferReceipt,
     RemoteComplementTransferReceipt,
     WorkspaceV2RemoteError,
@@ -90,6 +91,13 @@ def _parser() -> argparse.ArgumentParser:
     remote.add_argument("--configuration-fingerprint", required=True)
     remote.add_argument("--parent-manifest", type=_existing_file)
     remote.add_argument("--output", type=_new_file, required=True)
+
+    retention = commands.add_parser(
+        "plan-retention", help="produce a fail-closed preview of logical backup retention"
+    )
+    retention.add_argument("--manifest", type=_existing_file, action="append", required=True)
+    retention.add_argument("--recovery-receipt", type=_existing_file, required=True)
+    retention.add_argument("--output", type=_new_file, required=True)
 
     upload = commands.add_parser(
         "upload-remote", help="upload a sealed remote delta and publish its manifest last"
@@ -236,6 +244,18 @@ def main(argv: list[str] | None = None) -> int:
                 parent=parent,
             )
             remote.publish_manifest(plan, args.output)
+            return 0
+        if args.command == "plan-retention":
+            manifests = tuple(
+                RemoteBackupManifest.model_validate_json(path.read_text(encoding="utf-8"))
+                for path in args.manifest
+            )
+            recovery = RemoteBackupRestoreReceipt.model_validate_json(
+                args.recovery_receipt.read_text(encoding="utf-8")
+            )
+            remote = WorkspaceV2RemoteService(WorkspaceV2BackupService(workspace_service))
+            preview = remote.plan_retention_preview(manifests, recovery_receipt=recovery)
+            _write_output(args.output, preview.model_dump(mode="json"))
             return 0
         if args.command == "upload-remote":
             parent = (
