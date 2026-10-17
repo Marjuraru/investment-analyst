@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -9,7 +10,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from time import monotonic
+from typing import Literal
 
 from pydantic import ConfigDict, Field, field_validator
 
@@ -77,11 +80,14 @@ class DriveTransport:
         run: Callable[[Sequence[str], int], _CommandResult] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         timer: Callable[[], float] = monotonic,
+        transfer_observer: Callable[[Literal["upload", "download"], str, int | None], None]
+        | None = None,
     ) -> None:
         self._config = config
         self._run = run or _run_command
         self._clock = clock
         self._timer = timer
+        self._transfer_observer = transfer_observer
 
     def probe(self) -> tuple[DriveAttempt, ...]:
         """Verify the configured binary and exactly one private namespace path."""
@@ -108,6 +114,29 @@ class DriveTransport:
         return self._execute(
             (str(self._config.rclone_path), "copyto", str(source), destination, "--checksum"),
             retry_transient=True,
+            transfer=("upload", remote_object),
+        )
+
+    def copy_immutable_object(self, source: Path, remote_object: str) -> tuple[DriveAttempt, ...]:
+        """Publish without replacing a remote object; callers verify a separate read.
+
+        Crypt may expose size alone. An equal size is not evidence of equality,
+        so this command deliberately provides no content-verification claim.
+        """
+        if source.is_symlink() or not source.is_file() or not _safe_object_name(remote_object):
+            raise DriveTransportError("immutable source or remote object is unsafe")
+        return self._execute(
+            (
+                str(self._config.rclone_path),
+                "copyto",
+                str(source),
+                self._remote_path(remote_object),
+                "--buffer-size=1M",
+                "--multi-thread-streams=0",
+                "--immutable",
+            ),
+            retry_transient=True,
+            transfer=("upload", remote_object),
         )
 
     def fetch_sealed_object(
@@ -140,8 +169,11 @@ class DriveTransport:
                     self._remote_path(remote_object),
                     str(temporary),
                     "--checksum",
+                    "--buffer-size=1M",
+                    "--multi-thread-streams=0",
                 ),
                 retry_transient=True,
+                transfer=("download", remote_object),
             )
             if temporary.is_symlink() or not temporary.is_file():
                 raise DriveTransportError("sealed download did not create a regular file")
@@ -152,6 +184,82 @@ class DriveTransport:
             return attempts
         finally:
             temporary.unlink(missing_ok=True)
+
+    def copy_immutable_batch(
+        self, source_root: Path, objects: tuple[str, ...]
+    ) -> tuple[DriveAttempt, ...]:
+        """Publish at most 32 physical delta blocks without per-object processes."""
+        self._require_delta_batch(objects)
+        if not source_root.is_absolute() or any(
+            p.is_symlink() for p in (source_root, *source_root.parents)
+        ):
+            raise DriveTransportError("immutable batch source is unsafe")
+        for key in objects:
+            path = source_root / key
+            if not path.is_file() or any(p.is_symlink() for p in (path, *path.parents)):
+                raise DriveTransportError("immutable batch object is unsafe")
+        return self._delta_batch_command(
+            str(source_root), self._remote_path(), objects, immutable=True, direction="upload"
+        )
+
+    def fetch_sealed_batch(
+        self, objects: tuple[str, ...], destination: Path
+    ) -> tuple[DriveAttempt, ...]:
+        """Fetch only the selected keys into a fresh independent read directory."""
+        self._require_delta_batch(objects)
+        if (
+            not destination.is_absolute()
+            or destination.exists()
+            or any(p.is_symlink() for p in (destination, *destination.parents))
+        ):
+            raise DriveTransportError("independent batch destination is unsafe")
+        destination.mkdir(parents=True)
+        return self._delta_batch_command(
+            self._remote_path(), str(destination), objects, immutable=False, direction="download"
+        )
+
+    @staticmethod
+    def _require_delta_batch(objects: tuple[str, ...]) -> None:
+        if (
+            not 1 <= len(objects) <= 32
+            or len(set(objects)) != len(objects)
+            or any(
+                not re.fullmatch(r"physical-delta/objects/[0-9a-f]{64}\.bin", key)
+                for key in objects
+            )
+        ):
+            raise DriveTransportError("physical delta batch keys are invalid")
+
+    def _delta_batch_command(
+        self,
+        source: str,
+        destination: str,
+        objects: tuple[str, ...],
+        *,
+        immutable: bool,
+        direction: Literal["upload", "download"],
+    ) -> tuple[DriveAttempt, ...]:
+        with TemporaryDirectory(prefix="ia-physical-delta-batch-") as scratch:
+            keys = Path(scratch) / "keys.txt"
+            keys.write_text("\n".join(objects) + "\n", encoding="ascii")
+            command = (
+                str(self._config.rclone_path),
+                "copy",
+                source,
+                destination,
+                "--files-from-raw",
+                str(keys),
+                "--no-traverse",
+                "--transfers=4",
+                "--checkers=4",
+                "--buffer-size=256K",
+                "--multi-thread-streams=0",
+            )
+            if immutable:
+                command += ("--immutable",)
+            return self._execute(
+                command, retry_transient=True, transfer=(direction, "physical-delta/objects/batch")
+            )
 
     def _remote_path(self, remote_object: str = "") -> str:
         """Build a path below the root bound into the encrypted rclone remote.
@@ -165,12 +273,20 @@ class DriveTransport:
         return f"{remote}:{suffix}"
 
     def _execute(
-        self, command: Sequence[str], *, retry_transient: bool
+        self,
+        command: Sequence[str],
+        *,
+        retry_transient: bool,
+        transfer: tuple[Literal["upload", "download"], str] | None = None,
     ) -> tuple[DriveAttempt, ...]:
         attempts: list[DriveAttempt] = []
+        if transfer is not None and self._transfer_observer is not None:
+            command = (*command, "--use-json-log", "--stats=1h", "--stats-log-level=NOTICE")
         for ordinal in range(1, self._config.max_attempts + 1):
             started = self._timer()
             result = self._run(command, self._config.timeout_seconds)
+            if transfer is not None and self._transfer_observer is not None:
+                self._transfer_observer(*transfer, _accounted_transfer_bytes(result.stderr))
             duration = max(0.0, self._timer() - started)
             diagnostic = _sanitize(result.stderr or result.stdout)
             if result.timed_out:
@@ -204,6 +320,22 @@ class DriveTransport:
         return value.astimezone(UTC)
 
 
+def _accounted_transfer_bytes(stderr: str) -> int | None:
+    """Take the cumulative final rclone counter, never sum periodic snapshots."""
+    maximum: int | None = None
+    for line in stderr.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or not isinstance(event.get("stats"), dict):
+            continue
+        value = event["stats"].get("bytes")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            maximum = value if maximum is None else max(maximum, value)
+    return maximum
+
+
 def _run_command(command: Sequence[str], timeout_seconds: int) -> _CommandResult:
     try:
         completed = subprocess.run(
@@ -217,8 +349,8 @@ def _run_command(command: Sequence[str], timeout_seconds: int) -> _CommandResult
     except subprocess.TimeoutExpired as error:
         return _CommandResult(
             returncode=None,
-            stdout=error.stdout or "",
-            stderr=error.stderr or "",
+            stdout=_timeout_text(error.stdout),
+            stderr=_timeout_text(error.stderr),
             timed_out=True,
         )
     return _CommandResult(
@@ -227,6 +359,10 @@ def _run_command(command: Sequence[str], timeout_seconds: int) -> _CommandResult
         stderr=completed.stderr,
         timed_out=False,
     )
+
+
+def _timeout_text(value: str | bytes | None) -> str:
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
 
 
 def _safe_object_name(value: str) -> bool:

@@ -10,6 +10,7 @@ from duckdb import DuckDBPyConnection
 from investment_analyst.storage.errors import StorageError, StorageSchemaError
 from investment_analyst.storage.paths import StoragePaths
 from investment_analyst.storage.raw_v2 import RawV2Staging
+from investment_analyst.storage.resource_policy import DuckDBResourcePolicy, connect_duckdb
 
 _FORMAT_ID = "workspace-analytical-store-v2"
 _SCHEMA_VERSION = "1"
@@ -28,11 +29,18 @@ class WorkspaceV2Error(StorageError):
 class WorkspaceV2Store:
     """Own one configured connection and the raw v2 writer lock for a workspace."""
 
-    def __init__(self, paths: StoragePaths, *, read_only: bool = False) -> None:
+    def __init__(
+        self,
+        paths: StoragePaths,
+        *,
+        read_only: bool = False,
+        resource_policy: DuckDBResourcePolicy | None = None,
+    ) -> None:
         if paths.format_version != 2 or paths.workspace_id is None:
             raise WorkspaceV2Error("workspace v2 storage requires a versioned workspace path")
         self.paths = paths
         self.read_only = read_only
+        self._resource_policy = resource_policy
         self._connection: DuckDBPyConnection | None = None
         self._raw_staging: RawV2Staging | None = None
 
@@ -61,12 +69,12 @@ class WorkspaceV2Store:
         else:
             self.paths.create_directories()
 
-        connection = duckdb.connect(str(self.paths.database_path), read_only=self.read_only)
+        connection = connect_duckdb(
+            self.paths.database_path, read_only=self.read_only, policy=self._resource_policy
+        )
         self._connection = connection
         staging: RawV2Staging | None = None
         try:
-            connection.execute(f"SET memory_limit = '{_MEMORY_LIMIT}'")
-            connection.execute(f"SET threads = {_THREADS}")
             existing_tables = self._table_names()
             is_new_store = not existing_tables
             if self.read_only:

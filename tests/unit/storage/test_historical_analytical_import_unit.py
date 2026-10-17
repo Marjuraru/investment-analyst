@@ -1,5 +1,7 @@
 """Unit coverage for resumable historical metric and diagnostic import."""
 
+import hashlib
+import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -20,6 +22,16 @@ from investment_analyst.storage.historical_analytical_import import (
 from investment_analyst.storage.observation_v2_import import ObservationV2Importer
 from investment_analyst.storage.raw_v2 import RawV2Staging
 from investment_analyst.storage.raw_v2_import import RawV2Importer, RawV2ImportError
+from investment_analyst.storage.resource_policy import (
+    DatabaseResourceAssignment,
+    DuckDBResourcePolicy,
+    MaintenanceExecution,
+    MaintenanceResourceBudget,
+    maintenance_execution,
+    maintenance_resource_budget,
+)
+from investment_analyst.storage.serialization import canonical_json_bytes, sha256_hex
+from investment_analyst.workspace.models import WorkspaceAccessMode
 from investment_analyst.workspace.service import WorkspaceService
 
 from .conftest import (
@@ -28,6 +40,102 @@ from .conftest import (
     make_observation,
     make_raw_record,
 )
+
+
+def test_recovered_reader_hydrates_only_selected_ids_and_splits_byte_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "source", format_version=1)
+    raw = make_raw_record()
+    observation = make_observation(raw_record_id=raw.record_id)
+    unrelated = make_metric_result(observation_id=observation.observation_id)
+    selected = tuple(
+        unrelated.model_copy(update={"result_id": uuid4(), "parameters": {"text": "雪" * 200000}})
+        for _ in range(2)
+    )
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as writer:
+        writer.raw_records.save(raw)
+        writer.observations.save(observation)
+        writer.metric_results.save_many((unrelated, *selected))
+    index = tmp_path / "new.jsonl"
+    data = b"".join(
+        (
+            json.dumps(
+                [
+                    "metrics",
+                    str(item.result_id),
+                    sha256_hex(canonical_json_bytes(item)),
+                    item.available_at.isoformat(),
+                ]
+            )
+            + "\n"
+        ).encode()
+        for item in selected
+    )
+    index.write_bytes(data)
+    budget = MaintenanceResourceBudget(
+        operation_id=uuid4(),
+        profile="verification",
+        assignments=(
+            DatabaseResourceAssignment(
+                database=initialized.paths.storage_root
+                / "data/processed/investment_analyst.duckdb",
+                policy=DuckDBResourcePolicy(
+                    memory_limit_bytes=256_000_000,
+                    threads=1,
+                    spill_limit_bytes=0,
+                    temp_directory=tmp_path / "temp",
+                ),
+            ),
+        ),
+    )
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(MaintenanceExecution(budget, lambda *_: None)),
+        service.open_storage(initialized.paths, WorkspaceAccessMode.READ_ONLY) as storage,
+    ):
+        reader = DirectHistoricalAnalyticalSource(storage)
+        original = storage.metric_results.get_many
+        requested = []
+
+        def selected_only(identifiers: tuple) -> dict:
+            assert len(identifiers) == 1
+            assert unrelated.result_id not in identifiers
+            requested.extend(identifiers)
+            return original(identifiers)
+
+        monkeypatch.setattr(storage.metric_results, "get_many", selected_only)
+        actual = []
+        for page in reader.iter_recovered_pages(
+            index_path=index,
+            index_sha256=hashlib.sha256(data).hexdigest(),
+            family="metrics",
+            limit=256,
+        ):
+            assert reader.is_current_transition_page(page, "metrics")
+            actual.extend(page)
+        assert actual == list(selected)
+        assert requested == [item.result_id for item in selected]
+        assert not reader.is_current_transition_page((), "metrics")
+        with pytest.raises(HistoricalAnalyticalImportError, match="checksum differs"):
+            list(
+                reader.iter_recovered_pages(
+                    index_path=index, index_sha256="0" * 64, family="metrics", limit=256
+                )
+            )
+        index.write_bytes(
+            data.replace(sha256_hex(canonical_json_bytes(selected[0])).encode(), b"0" * 64)
+        )
+        with pytest.raises(HistoricalAnalyticalImportError, match="model changed"):
+            list(
+                reader.iter_recovered_pages(
+                    index_path=index,
+                    index_sha256=sha256_hex(index.read_bytes()),
+                    family="metrics",
+                    limit=256,
+                )
+            )
 
 
 @contextmanager
@@ -229,3 +337,16 @@ def test_import_rejects_a_raw_checkpoint_that_only_looks_complete(tmp_path: Path
 
         with pytest.raises((RawV2ImportError, HistoricalAnalyticalImportError)):
             raw_state.run()
+
+
+def test_direct_transition_page_capability_expires_and_cannot_be_copied(tmp_path: Path) -> None:
+    with _prepared(tmp_path) as (source, _staging, _metrics, _diagnostics, _):
+        direct = DirectHistoricalAnalyticalSource(source)
+        pages = direct.iter_metric_pages(limit=1)
+        first = next(pages)
+        assert direct.is_current_transition_page(first, "metrics")
+        assert not direct.is_current_transition_page(first, "diagnostics")
+        assert not direct.is_current_transition_page(tuple(list(first)), "metrics")
+        next(pages)
+        assert not direct.is_current_transition_page(first, "metrics")
+        pages.close()

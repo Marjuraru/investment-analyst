@@ -8,13 +8,20 @@ contracts before a page checkpoint is advanced.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
+from uuid import UUID, uuid4
 
+from duckdb import DuckDBPyConnection
 from pydantic import ConfigDict, Field
 
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
@@ -34,19 +41,40 @@ from investment_analyst.storage.raw_v2_import import (
     RawV2ImportState,
     RawV2ImportSummary,
 )
+from investment_analyst.storage.resource_policy import (
+    MaintenanceExecution,
+    MaintenanceResourceReceipt,
+    connect_duckdb,
+    connection_policy,
+    execute_bounded,
+    require_maintenance_admission,
+)
+from investment_analyst.storage.serialization import (
+    canonical_json_bytes,
+    canonical_json_digest,
+    sha256_hex,
+)
 from investment_analyst.storage.workspace_v2 import WorkspaceV2Store
 from investment_analyst.storage.workspace_v2_inventory import (
     WorkspaceV2AnalyticalImporter,
     WorkspaceV2InventorySummary,
+    WorkspaceV2ProgressReconciler,
+    historical_transition_fingerprints,
+    reconciliation_file_reference,
 )
-from investment_analyst.workspace.backup import WorkspaceBackupService
-from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.backup import WorkspaceBackupService, _workspace_process_guard
+from investment_analyst.workspace.models import WorkspaceAccessMode, WorkspaceInspection
 from investment_analyst.workspace.service import (
     WorkspaceAccessError,
     WorkspaceService,
 )
 from investment_analyst.workspace.workspace_v2_lifecycle_models import FrozenSourceCut
 from investment_analyst.workspace.workspace_v2_migration_models import (
+    ProgressReconciliation,
+    ProgressReconciliationReceipt,
+    ProgressRelationshipProof,
+    ReconciliationFileReference,
+    SuccessorCoverageProof,
     WorkspaceV1MigrationSourceSnapshot,
     WorkspaceV2MigrationPhase,
     WorkspaceV2SourceTransitionState,
@@ -59,6 +87,1800 @@ _SOURCE_SNAPSHOT_FILENAME = "workspace-v1-migration-source-snapshot.json"
 
 class WorkspaceV2MigrationError(RuntimeError):
     """Raised when a migration cannot prove its source or destination boundary."""
+
+
+@dataclass(frozen=True)
+class _QuiescentSourceProof:
+    cut: FrozenSourceCut
+    inspection: WorkspaceInspection
+    metadata_sha256: str
+    writer_generation: UUID
+
+
+_QUIESCENT_SOURCE: ContextVar[_QuiescentSourceProof | None] = ContextVar(
+    "workspace_v2_quiescent_source", default=None
+)
+
+
+def _source_generation(root: Path) -> str:
+    """Detect replacements under held locks; never use this as a content hash."""
+    digest = hashlib.sha256()
+    candidates = [root / "manifest.json", root / "storage/data/processed/investment_analyst.duckdb"]
+    documents = root / "storage/data/documents/sha256"
+
+    def files() -> Iterator[Path]:
+        yield from candidates
+        if documents.exists():
+            for parent, directories, filenames in os.walk(documents, followlinks=False):
+                directories.sort()
+                filenames.sort()
+                for name in directories:
+                    if (Path(parent) / name).is_symlink():
+                        raise WorkspaceV2MigrationError("quiescent source documents are unsafe")
+                for name in filenames:
+                    yield Path(parent) / name
+
+    for path in files():
+        if path.is_symlink() or not path.is_file():
+            raise WorkspaceV2MigrationError("quiescent source generation is unsafe")
+        stat = path.stat()
+        digest.update(
+            json.dumps(
+                (
+                    path.relative_to(root).as_posix(),
+                    stat.st_dev,
+                    stat.st_ino,
+                    stat.st_size,
+                    stat.st_mtime_ns,
+                    stat.st_ctime_ns,
+                ),
+                separators=(",", ":"),
+            ).encode()
+        )
+    return digest.hexdigest()
+
+
+@contextmanager
+def quiescent_source_cut(
+    service: WorkspaceService,
+    source_root: Path,
+    *,
+    operation_id: UUID,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> Iterator[FrozenSourceCut]:
+    """Own the locks and reader for the whole cut; proof cannot survive this session."""
+    if _QUIESCENT_SOURCE.get() is not None:
+        raise WorkspaceV2MigrationError("quiescent source session is already active")
+    root = service.resolve(source_root).root
+    with _workspace_process_guard(root):
+        inspection = service.inspect(root)
+        identity = service.manifest(root)
+        if inspection.status != "ready" or identity.format_version != 1:
+            raise WorkspaceV2MigrationError("quiescent source must be a ready workspace v1")
+        before = _source_generation(root)
+        fingerprint = source_fingerprint(service, root)
+        if _source_generation(root) != before:
+            raise WorkspaceV2MigrationError("source changed while establishing quiescence")
+        cut = FrozenSourceCut(
+            operation_id=operation_id,
+            source_root=root,
+            workspace_id=identity.workspace_id,
+            workspace_format_version=identity.format_version,
+            created_at=identity.created_at,
+            source_fingerprint=fingerprint,
+            frozen_at=clock(),
+        )
+        # Hash the physical file while native readers are closed. Opening and
+        # closing another descriptor of a file protected by process POSIX locks
+        # can release those locks; keep the native reader for the session only
+        # after the physical fingerprint has been established.
+        with service.open_storage(service.resolve(root), WorkspaceAccessMode.READ_ONLY):
+            if _source_generation(root) != before:
+                raise WorkspaceV2MigrationError("source changed before quiescent reader opened")
+            proof = _QuiescentSourceProof(cut, inspection, before, uuid4())
+            token = _QUIESCENT_SOURCE.set(proof)
+            try:
+                yield cut
+                if _source_generation(root) != before:
+                    raise WorkspaceV2MigrationError("source changed during quiescent session")
+            finally:
+                _QUIESCENT_SOURCE.reset(token)
+
+
+def _live_quiescent_source(
+    root: Path, cut: FrozenSourceCut | None = None
+) -> _QuiescentSourceProof | None:
+    proof = _QUIESCENT_SOURCE.get()
+    if proof is None:
+        return None
+    if proof.cut.source_root != root or (cut is not None and proof.cut != cut):
+        raise WorkspaceV2MigrationError("quiescent source session binding differs")
+    if _source_generation(root) != proof.metadata_sha256:
+        raise WorkspaceV2MigrationError("source changed during quiescent session")
+    return proof
+
+
+class _SuccessorReservation(ContractModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    reconciliation_id: UUID
+    successor: FrozenSourceCut
+    source_session: UUID
+    baseline: ReconciliationFileReference
+    baseline_dataset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    module_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    resource_receipt: ReconciliationFileReference
+    verifier_compatibility: ReconciliationFileReference | None = None
+    recorded_at: UTCDateTime
+
+
+_BASELINE_CODE_PATHS = (
+    "storage/workspace_v2_inventory.py",
+    "storage/compact_analytical_v2.py",
+    "storage/historical_analytical_import.py",
+    "workspace/workspace_v2_migration_models.py",
+)
+
+
+def _baseline_verifier_ast(source: bytes, module: str, *, candidate: bool) -> str:
+    """Keep the full validated verifier and its module dependencies unchanged.
+
+    The W verifier does not call the analytical importer. The candidate may
+    change that importer or add the two explicit successor entry points, while
+    every existing compact-store method and module statement remains identical.
+    Archived source is parsed as evidence only; it is never imported/executed.
+    """
+    tree = ast.parse(source)
+    if module == "storage/workspace_v2_inventory.py":
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == "historical_transition_status":
+                # Lifecycle recognition does not participate in validating W.
+                # Preserve its definition/signature while allowing the explicit
+                # completed-successor exception for the covered predecessor.
+                node.body = [ast.Pass()]
+            if isinstance(node, ast.ClassDef) and node.name == "WorkspaceV2AnalyticalImporter":
+                retained: list[ast.stmt] = []
+                for member in node.body:
+                    if isinstance(member, ast.FunctionDef) and member.name in {
+                        "__init__",
+                        "_prepare_transition",
+                        "run",
+                    }:
+                        # Preserve signatures/decorators/defaults and class
+                        # creation. Only these uncalled importer bodies differ.
+                        member.body = [ast.Pass()]
+                    if isinstance(member, ast.FunctionDef) and member.name in {
+                        "_run_recovered_successor",
+                        "bind_recovered_successor",
+                    }:
+                        if (
+                            not candidate
+                            or member.args.defaults
+                            or any(value is not None for value in member.args.kw_defaults)
+                            or member.decorator_list
+                        ):
+                            raise WorkspaceV2MigrationError(
+                                "successor importer definition is unsafe"
+                            )
+                        continue
+                    retained.append(member)
+                node.body = retained
+    elif module == "storage/historical_analytical_import.py":
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == "DirectHistoricalAnalyticalSource":
+                retained = []
+                for member in node.body:
+                    if (
+                        isinstance(member, ast.FunctionDef)
+                        and member.name == "iter_recovered_pages"
+                    ):
+                        if (
+                            not candidate
+                            or member.args.defaults
+                            or any(value is not None for value in member.args.kw_defaults)
+                            or member.decorator_list
+                        ):
+                            raise WorkspaceV2MigrationError("successor source definition is unsafe")
+                        continue
+                    retained.append(member)
+                node.body = retained
+    elif module == "storage/compact_analytical_v2.py":
+        additions = {"recovered_historical_transition", "publish_recovered_transition_seal"}
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == "CompactAnalyticalStore":
+                retained: list[ast.stmt] = []
+                for member in node.body:
+                    if isinstance(member, ast.FunctionDef) and member.name in additions:
+                        if not candidate:
+                            raise WorkspaceV2MigrationError(
+                                "baseline contains successor entry point"
+                            )
+                        # A method addition must not execute arbitrary defaults
+                        # or decorators while its class/module is being loaded.
+                        if (
+                            member.args.defaults
+                            or any(value is not None for value in member.args.kw_defaults)
+                            or any(
+                                not isinstance(decorator, ast.Name)
+                                or decorator.id != "contextmanager"
+                                for decorator in member.decorator_list
+                            )
+                        ):
+                            raise WorkspaceV2MigrationError("successor method definition is unsafe")
+                    else:
+                        retained.append(member)
+                node.body = retained
+    return ast.dump(tree, include_attributes=False)
+
+
+class _BaselineVerifierCompatibility(ContractModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    schema_version: Literal["workspace-v2-baseline-verifier-compatibility-v1"] = (
+        "workspace-v2-baseline-verifier-compatibility-v1"
+    )
+    baseline: ReconciliationFileReference
+    dataset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    baseline_tree_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_tree_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    environment_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    baseline_code: tuple[ReconciliationFileReference, ...]
+    candidate_code: tuple[ReconciliationFileReference, ...]
+    policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verifier_module_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    equivalence_policy: Literal["unchanged-w-verifier-ast-v1"] = "unchanged-w-verifier-ast-v1"
+    verified_at: UTCDateTime
+
+
+def _verify_baseline_code_compatibility(
+    reconciler: WorkspaceV2ProgressReconciler,
+    progress: ProgressReconciliation,
+    baseline_code_root: Path | None,
+) -> ReconciliationFileReference | None:
+    tree, environment = historical_transition_fingerprints(
+        progress.page_limit, progress.verifier_policy
+    )
+    if environment != progress.current_environment_fingerprint:
+        raise WorkspaceV2MigrationError("successor verifier environment changed")
+    if tree == progress.current_tree_fingerprint:
+        return None
+    if baseline_code_root is None:
+        raise WorkspaceV2MigrationError(
+            "successor verifier binding requires archived baseline code"
+        )
+    assert progress.inventory is not None
+    current_root = Path(__file__).parent.parent
+    old_digest = hashlib.sha256()
+    new_digest = hashlib.sha256()
+    baseline_refs: list[ReconciliationFileReference] = []
+    candidate_refs: list[ReconciliationFileReference] = []
+    for relative in _BASELINE_CODE_PATHS:
+        baseline_path = baseline_code_root / "src/investment_analyst" / relative
+        candidate_path = current_root / relative
+        if any(item.is_symlink() for item in (baseline_path, *baseline_path.parents)):
+            raise WorkspaceV2MigrationError("baseline code archive is unsafe")
+        old, new = baseline_path.read_bytes(), candidate_path.read_bytes()
+        old_digest.update(hashlib.sha256(old).digest())
+        new_digest.update(hashlib.sha256(new).digest())
+        if _baseline_verifier_ast(old, relative, candidate=False) != _baseline_verifier_ast(
+            new, relative, candidate=True
+        ):
+            raise WorkspaceV2MigrationError("validated W verifier or dependencies changed")
+        baseline_refs.append(reconciliation_file_reference(baseline_path, "code"))
+        candidate_refs.append(reconciliation_file_reference(candidate_path, "code"))
+    if (old_digest.hexdigest(), new_digest.hexdigest()) != (
+        progress.current_tree_fingerprint,
+        tree,
+    ):
+        raise WorkspaceV2MigrationError("baseline code archive fingerprint differs")
+    # R3's module/policy fingerprints retain their original provenance. Check
+    # the policy against that proof instead of silently accepting a new policy.
+    relationships = ProgressRelationshipProof.model_validate_json(
+        progress.inventory.relationships.path.read_bytes()
+    )
+    policy_sha = sha256_hex((current_root / "storage/resource_policy.py").read_bytes())
+    if relationships.resource_policy_sha256 != policy_sha:
+        raise WorkspaceV2MigrationError("baseline resource policy changed")
+    if progress.reserved_successor_id is not None:
+        reservation_path = reconciler.state / (
+            f"progress-successor-reservation.{progress.reserved_successor_id}.json"
+        )
+        if reservation_path.is_symlink() or not reservation_path.is_file():
+            raise WorkspaceV2MigrationError("successor reservation session receipt is missing")
+        reservation = _SuccessorReservation.model_validate_json(reservation_path.read_bytes())
+        reconciler._verify(reservation.baseline)
+        baseline_reference = reservation.baseline
+    else:
+        baseline_reference = reconciler._publish(progress)
+    compatibility = _BaselineVerifierCompatibility(
+        baseline=baseline_reference,
+        dataset_sha256=progress.inventory.dataset_sha256,
+        baseline_tree_fingerprint=progress.current_tree_fingerprint,
+        candidate_tree_fingerprint=tree,
+        environment_fingerprint=environment,
+        baseline_code=tuple(baseline_refs),
+        candidate_code=tuple(candidate_refs),
+        policy_sha256=policy_sha,
+        verifier_module_sha256=sha256_hex(Path(__file__).read_bytes()),
+        verified_at=progress.inventory.verified_at,
+    )
+    document = canonical_json_bytes(compatibility) + b"\n"
+    path = reconciler.state / f"progress-verifier-compatibility.{sha256_hex(document)}.json"
+    reconciler._write_once(path, document)
+    return reconciliation_file_reference(path, "control")
+
+
+def reserve_recovered_successor(
+    *,
+    service: WorkspaceService,
+    destination_root: Path,
+    reconciliation_id: UUID,
+    frozen_source: FrozenSourceCut,
+    admission_path: Path,
+    baseline_code_root: Path | None = None,
+) -> ProgressReconciliationReceipt:
+    """Reserve exactly one live F1 without claiming W subset F1 or completing F0."""
+    from investment_analyst.workspace.workspace_v2_lifecycle import (
+        _closed_duckdb_file,
+        _v2_writer_closed,
+    )
+
+    admission = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+    require_maintenance_admission(admission)
+    source_database = (
+        service.resolve(frozen_source.source_root).storage_root
+        / "data/processed/investment_analyst.duckdb"
+    )
+    destination_database = destination_root / "storage/v2/index.duckdb"
+    if (
+        admission.budget.operation_id != frozen_source.operation_id
+        or admission.budget.profile != "verification"
+        or admission.budget.reader_worker is not None
+        or {item.database for item in admission.budget.assignments}
+        != {source_database, destination_database}
+    ):
+        raise WorkspaceV2MigrationError("successor reservation resource binding differs")
+    session = _live_quiescent_source(frozen_source.source_root, frozen_source)
+    if session is None:
+        raise WorkspaceV2MigrationError("successor reservation requires live source quiescence")
+    reconciler = WorkspaceV2ProgressReconciler(service, destination_root, reconciliation_id)
+    with reconciler._exclusive():
+        progress = ProgressReconciliation.model_validate_json(reconciler.path.read_bytes())
+        if progress.phase not in {"BASELINE_VERIFIED", "SUCCESSOR_BOUND"}:
+            raise WorkspaceV2MigrationError("successor reservation requires verified W")
+        reconciler._controls(progress)
+        assert progress.inventory is not None and progress.database_after is not None
+        reconciler._verify(progress.inventory.delta_membership)
+        reconciler._verify(progress.inventory.relationships)
+        compatibility = _verify_baseline_code_compatibility(
+            reconciler, progress, baseline_code_root
+        )
+        reservation_path = (
+            reconciler.state / f"progress-successor-reservation.{frozen_source.operation_id}.json"
+        )
+        module_sha = sha256_hex(Path(__file__).read_bytes())
+        if reservation_path.exists():
+            if reservation_path.is_symlink():
+                raise WorkspaceV2MigrationError("successor reservation artifact is unsafe")
+            receipt = _SuccessorReservation.model_validate_json(reservation_path.read_bytes())
+            if (
+                receipt.reconciliation_id != reconciliation_id
+                or receipt.successor != frozen_source
+                or receipt.source_session != session.writer_generation
+                or receipt.module_sha256 != module_sha
+                or receipt.baseline_dataset_sha256 != progress.inventory.dataset_sha256
+            ):
+                raise WorkspaceV2MigrationError("successor reservation session or code changed")
+            reconciler._verify(receipt.baseline)
+            reconciler._verify(receipt.resource_receipt)
+            if receipt.verifier_compatibility is not None:
+                reconciler._verify(receipt.verifier_compatibility)
+            elif compatibility is not None:
+                raise WorkspaceV2MigrationError("successor verifier compatibility receipt missing")
+        elif progress.reserved_successor is not None:
+            raise WorkspaceV2MigrationError("successor reservation session receipt is missing")
+        if progress.reserved_successor is not None:
+            if progress.reserved_successor != frozen_source:
+                raise WorkspaceV2MigrationError("reconciliation already reserved another successor")
+            return ProgressReconciliationReceipt(
+                reconciliation=progress,
+                certificate=reconciler._publish(progress),
+                stage="successor_bound"
+                if progress.phase == "SUCCESSOR_BOUND"
+                else "baseline_verified",
+                recorded_at=datetime.now(UTC),
+            )
+        reserved = ProgressReconciliation.model_validate(
+            {
+                **progress.model_dump(),
+                "reserved_successor_id": frozen_source.operation_id,
+                "reserved_successor": frozen_source,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        with _v2_writer_closed(destination_root), _closed_duckdb_file(destination_database):
+            reconciler._verify(progress.database_after)
+            wal = destination_database.with_suffix(".duckdb.wal")
+            if progress.wal_after is not None:
+                reconciler._verify(progress.wal_after)
+            elif wal.exists():
+                raise WorkspaceV2MigrationError("successor reservation found unexpected WAL")
+            if not reservation_path.exists():
+                receipt = _SuccessorReservation(
+                    reconciliation_id=reconciliation_id,
+                    successor=frozen_source,
+                    source_session=session.writer_generation,
+                    baseline=reconciler._publish(progress),
+                    baseline_dataset_sha256=progress.inventory.dataset_sha256,
+                    module_sha256=module_sha,
+                    resource_receipt=reconciliation_file_reference(admission_path, "resource"),
+                    verifier_compatibility=compatibility,
+                    recorded_at=datetime.now(UTC),
+                )
+                reconciler._write_once(reservation_path, canonical_json_bytes(receipt) + b"\n")
+            certificate = reconciler._publish(reserved)
+        return ProgressReconciliationReceipt(
+            reconciliation=reserved,
+            certificate=certificate,
+            stage="baseline_verified",
+            recorded_at=datetime.now(UTC),
+        )
+
+
+class _SuccessorCoverageWork(ContractModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    successor: FrozenSourceCut
+    baseline_dataset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    module_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    family: Literal["metrics", "diagnostics", "complete"] = "metrics"
+    available_at: UTCDateTime | None = None
+    identifier: UUID | None = None
+    metric_count: int = Field(default=0, ge=0)
+    diagnostic_count: int = Field(default=0, ge=0)
+    covered_metric_count: int = Field(default=0, ge=0)
+    covered_diagnostic_count: int = Field(default=0, ge=0)
+    metric_digest: str = Field(default_factory=lambda: hashlib.sha256(b"").hexdigest())
+    diagnostic_digest: str = Field(default_factory=lambda: hashlib.sha256(b"").hexdigest())
+    fast_count: int = Field(default=0, ge=0)
+    typed_count: int = Field(default=0, ge=0)
+    new_index_bytes: int = Field(default=0, ge=0)
+    new_index_sha256: str = Field(default_factory=lambda: hashlib.sha256(b"").hexdigest())
+
+
+class _SuccessorComparison(ContractModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    schema_version: Literal["workspace-v2-successor-comparison-v1"] = (
+        "workspace-v2-successor-comparison-v1"
+    )
+    baseline: ReconciliationFileReference
+    work: _SuccessorCoverageWork
+    new_index: ReconciliationFileReference
+    resource_receipt: ReconciliationFileReference
+    verifier_tree_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    environment_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verified_at: UTCDateTime
+
+
+def _utc_document_timestamp(column: str) -> str:
+    # Columns are fixed internal schema names, never caller-controlled SQL.
+    utc = f"{column} AT TIME ZONE 'UTC'"
+    fraction = f"(CAST(date_part('microseconds',{utc}) AS BIGINT)%1000000)"
+    return (
+        f"strftime({utc},'%Y-%m-%dT%H:%M:%S') || "
+        f"CASE WHEN {fraction}=0 THEN 'Z' ELSE '.'||"
+        f"lpad(CAST({fraction} AS VARCHAR),6,'0')||'Z' END"
+    )
+
+
+def _observation_canonical_sql(alias: str) -> str:
+    """Reconstruct the existing observation document from its typed v2 row."""
+    from investment_analyst.core.models import NormalizedObservation, SourceReference
+
+    fields = {
+        "asset_id": "asset_id",
+        "available_at": "available_at",
+        "field_name": "field_name",
+        "frequency": "frequency",
+        "normalized_at": "normalized_at",
+        "observation_id": "observation_id",
+        "observed_at": "observed_at",
+        "period_end": "period_end",
+        "period_start": "period_start",
+        "quality": "quality",
+        "raw_record_id": "raw_record_id",
+        "source": "source",
+        "transformation_version": "transformation_version",
+        "unit": "unit",
+        "value": "value_text",
+    }
+    source = {
+        "checksum_sha256": "source_checksum_sha256",
+        "raw_uri": "source_raw_uri",
+        "record_key": "source_record_key",
+        "retrieved_at": "source_retrieved_at",
+        "source_id": "source_id",
+    }
+    if set(NormalizedObservation.model_fields) != set(fields) or set(
+        SourceReference.model_fields
+    ) != set(source):
+        raise WorkspaceV2MigrationError("observation canonical contract changed")
+
+    def value(column: str, *, timestamp: bool) -> str:
+        return (
+            _utc_document_timestamp(f"CAST({alias}.{column} AS TIMESTAMPTZ)")
+            if timestamp
+            else f"{alias}.{column}"
+        )
+
+    source_sql = (
+        "json_object("
+        + ",".join(
+            f"'{name}',{value(column, timestamp=name == 'retrieved_at')}"
+            for name, column in sorted(source.items())
+        )
+        + ")"
+    )
+    timestamps = {"available_at", "normalized_at", "observed_at", "period_end", "period_start"}
+    return (
+        "json_object("
+        + ",".join(
+            f"'{name}',"
+            f"{source_sql if name == 'source' else value(column, timestamp=name in timestamps)}"
+            for name, column in sorted(fields.items())
+        )
+        + ")"
+    )
+
+
+class _RecoveredCoreAppendIntent(ContractModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    schema_version: Literal["workspace-v2-core-append-intent-v1"] = (
+        "workspace-v2-core-append-intent-v1"
+    )
+    successor: FrozenSourceCut
+    source_session: UUID
+    destination_root: Path
+    destination_workspace_id: UUID
+    core_baseline: ReconciliationFileReference
+    module_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    family: Literal["raw", "observations"]
+    facts: tuple[tuple[UUID, Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]], ...] = Field(
+        min_length=1, max_length=256
+    )
+
+
+class _RecoveredCoreComparison(ContractModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    schema_version: Literal["workspace-v2-recovered-core-comparison-v1"] = (
+        "workspace-v2-recovered-core-comparison-v1"
+    )
+    successor: FrozenSourceCut
+    source_session: UUID
+    core_baseline: ReconciliationFileReference
+    resource_receipt: ReconciliationFileReference
+    module_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    raw_count: int = Field(ge=0)
+    raw_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    observation_count: int = Field(ge=0)
+    observation_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    append_intents: tuple[ReconciliationFileReference, ...]
+
+
+def _publish_recovered_core_comparison(
+    destination: LocalStorage,
+    frozen_source: FrozenSourceCut,
+    reference: ReconciliationFileReference,
+    admission_path: Path,
+    raw: RawV2ImportSummary,
+    observations: ObservationV2ImportSummary,
+) -> None:
+    session = _QUIESCENT_SOURCE.get()
+    if session is None or session.cut != frozen_source:
+        raise WorkspaceV2MigrationError("core comparison source session differs")
+    state = destination.paths.root.parent.parent / "state"
+    references = []
+    module_sha = sha256_hex(Path(__file__).read_bytes())
+    for path in sorted(state.glob(f"progress-core-append.{frozen_source.operation_id}.*.json")):
+        control = reconciliation_file_reference(path, "control")
+        intent = _RecoveredCoreAppendIntent.model_validate_json(path.read_bytes())
+        if (
+            intent.successor != frozen_source
+            or intent.source_session != session.writer_generation
+            or intent.core_baseline != reference
+            or intent.module_sha256 != module_sha
+            or intent.destination_workspace_id != destination.paths.workspace_id
+            or intent.destination_root != state.parent
+        ):
+            raise WorkspaceV2MigrationError("core append intent binding differs")
+        references.append(control)
+    comparison = _RecoveredCoreComparison(
+        successor=frozen_source,
+        source_session=session.writer_generation,
+        core_baseline=reference,
+        resource_receipt=reconciliation_file_reference(admission_path, "resource"),
+        module_sha256=module_sha,
+        raw_count=raw.imported_count,
+        raw_digest=raw.corpus_digest,
+        observation_count=observations.imported_count,
+        observation_digest=observations.corpus_digest,
+        append_intents=tuple(references),
+    )
+    WorkspaceV2ProgressReconciler._write_once(
+        state / f"progress-core-comparison.{frozen_source.operation_id}.json",
+        canonical_json_bytes(comparison) + b"\n",
+    )
+
+
+def _require_recovered_core(
+    destination: LocalStorage,
+    frozen_source: FrozenSourceCut,
+    reference: ReconciliationFileReference,
+    admission_path: Path,
+) -> MaintenanceExecution:
+    """Bind native reuse to W and the exclusive same-session F1 reservation."""
+    if reference.role != "control" or reference.path.is_symlink():
+        raise WorkspaceV2MigrationError("recovered core proof reference differs")
+    WorkspaceV2ProgressReconciler._verify(reference)
+    core = _RecoveredCoreBaseline.model_validate_json(reference.path.read_bytes())
+    baseline = ProgressReconciliation.model_validate_json(core.reconciliation.path.read_bytes())
+    for control in (
+        core.reconciliation,
+        core.raw_state,
+        core.raw_terminal,
+        core.observation_state,
+        core.resource_receipt,
+    ):
+        WorkspaceV2ProgressReconciler._verify(control)
+    root = destination.paths.root.parent.parent
+    admission = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+    execution = require_maintenance_admission(admission)
+    if (
+        admission.budget.operation_id != frozen_source.operation_id
+        or admission.budget.profile != "verification"
+        or admission.budget.reader_worker is not None
+        or {item.database for item in admission.budget.assignments}
+        != {
+            frozen_source.source_root / "storage/data/processed/investment_analyst.duckdb",
+            destination.paths.database_path,
+        }
+    ):
+        raise WorkspaceV2MigrationError("recovered core admission binding differs")
+    reservation = _SuccessorReservation.model_validate_json(
+        (
+            root / "state" / f"progress-successor-reservation.{frozen_source.operation_id}.json"
+        ).read_bytes()
+    )
+    session = _live_quiescent_source(frozen_source.source_root, frozen_source)
+    progress = ProgressReconciliation.model_validate_json(
+        (root / "state" / f"progress-reconciliation.{baseline.operation_id}.json").read_bytes()
+    )
+    from investment_analyst.storage import raw_v2_import
+
+    if (
+        session is None
+        or reservation.source_session != session.writer_generation
+        or reservation.successor != frozen_source
+        or reservation.baseline != core.reconciliation
+        or core.verifier_module_sha256 != sha256_hex(Path(__file__).read_bytes())
+        or core.raw_verifier_sha256 != sha256_hex(Path(raw_v2_import.__file__).read_bytes())
+        or core.resource_policy_sha256
+        != sha256_hex((Path(__file__).parent.parent / "storage/resource_policy.py").read_bytes())
+        or baseline.phase != "BASELINE_VERIFIED"
+        or baseline.reserved_successor is not None
+        or baseline.source_workspace_id != frozen_source.workspace_id
+        or baseline.source_root != frozen_source.source_root
+        or baseline.destination_root != root
+        or baseline.destination_workspace_id != destination.paths.workspace_id
+        or core.database != baseline.database_after
+        or core.database.path != destination.paths.database_path
+        or baseline.inventory is None
+        or (core.raw_count, core.observation_count)
+        != (baseline.inventory.raw_count, baseline.inventory.observation_count)
+        or progress.phase != "SUCCESSOR_BOUND"
+        or progress.reserved_successor != frozen_source
+        or progress.inventory != baseline.inventory
+    ):
+        raise WorkspaceV2MigrationError("recovered core proof or source session changed")
+    return execution
+
+
+def _core_native_pages(
+    connection: DuckDBPyConnection,
+    execution: MaintenanceExecution,
+    limit: int,
+) -> Iterator[list[tuple[object, ...]]]:
+    while True:
+        with execution.step("sql", execution.budget.sql_timeout_seconds):
+            rows = connection.fetchmany(limit)
+            if not rows:
+                return
+            yield rows
+
+
+def _record_recovered_core_append(
+    destination: LocalStorage,
+    frozen_source: FrozenSourceCut,
+    reference: ReconciliationFileReference,
+    family: Literal["raw", "observations"],
+    facts: tuple[tuple[UUID, str], ...],
+) -> None:
+    session = _QUIESCENT_SOURCE.get()
+    if session is None or session.cut != frozen_source or destination.paths.workspace_id is None:
+        raise WorkspaceV2MigrationError("core append source session differs")
+    root = destination.paths.root.parent.parent
+    intent = _RecoveredCoreAppendIntent(
+        successor=frozen_source,
+        source_session=session.writer_generation,
+        destination_root=root,
+        destination_workspace_id=destination.paths.workspace_id,
+        core_baseline=reference,
+        module_sha256=sha256_hex(Path(__file__).read_bytes()),
+        family=family,
+        facts=facts,
+    )
+    document = canonical_json_bytes(intent) + b"\n"
+    path = (
+        root
+        / "state"
+        / (
+            f"progress-core-append.{frozen_source.operation_id}.{family}.{sha256_hex(document)}.json"
+        )
+    )
+    WorkspaceV2ProgressReconciler._write_once(path, document)
+
+
+def _append_recovered_raw(
+    *,
+    source: LocalStorage,
+    destination: LocalStorage,
+    frozen_source: FrozenSourceCut,
+    core_baseline: ReconciliationFileReference,
+    admission_path: Path,
+    page_limit: int,
+) -> RawV2ImportSummary:
+    """Internal recovered-W primitive; never reread confirmed immutable blobs.
+
+    The coordinator must validate the preserved core proof before calling this
+    primitive. This function publishes neither a checkpoint nor a cut seal.
+    """
+    from investment_analyst.core.models import RawRecord
+    from investment_analyst.storage.serialization import model_from_json
+
+    if isinstance(page_limit, bool) or not 1 <= page_limit <= 256:
+        raise WorkspaceV2MigrationError("recovered raw page limit differs")
+    if (
+        source.paths.root != frozen_source.source_root / "storage"
+        or source.paths.workspace_id != frozen_source.workspace_id
+        or not source.read_only
+        or _live_quiescent_source(frozen_source.source_root, frozen_source) is None
+        or not isinstance(destination.store, WorkspaceV2Store)
+    ):
+        raise WorkspaceV2MigrationError("recovered raw requires its live source and v2 destination")
+    execution = _require_recovered_core(destination, frozen_source, core_baseline, admission_path)
+    fields = (
+        "record_id",
+        "asset_id",
+        "source_id",
+        "event_time",
+        "available_at",
+        "received_at",
+        "schema_version",
+    )
+    timestamps = {"event_time", "available_at", "received_at"}
+
+    def envelope(alias: str, *, target: bool) -> str:
+        return (
+            "json_array("
+            + ",".join(
+                _utc_document_timestamp(f"CAST({alias}.{field} AS TIMESTAMPTZ)")
+                if field in timestamps and target
+                else _utc_document_timestamp(f"{alias}.{field}")
+                if field in timestamps
+                else f"{alias}.{field}"
+                for field in fields
+            )
+            + ")"
+        )
+
+    total = reused = max_hydrated = 0
+    digest = hashlib.sha256(b"").hexdigest()
+    by_source: dict[str, int] = {}
+    by_schema: dict[str, int] = {}
+    with connect_duckdb(source.paths.database_path, read_only=False) as stream:
+        execute_bounded(
+            stream,
+            "CREATE TEMP TABLE _recovered_raw "
+            "(identifier VARCHAR PRIMARY KEY,digest VARCHAR,metadata VARCHAR)",
+        )
+        target = destination.store.connection
+        execute_bounded(
+            target,
+            "SELECT record_id,checksum_sha256,CAST("
+            + envelope("r", target=True)
+            + " AS VARCHAR) FROM raw_v2_index r",
+        )
+        for rows in _core_native_pages(target, execution, page_limit):
+            execute_bounded(
+                stream,
+                "INSERT INTO _recovered_raw SELECT unnest(?),unnest(?),unnest(?)",
+                [
+                    [str(row[0]) for row in rows],
+                    [str(row[1]) for row in rows],
+                    [str(row[2]) for row in rows],
+                ],
+            )
+        paths = (
+            "["
+            + ",".join(
+                "'$.source.source_id'" if field == "source_id" else f"'$.{field}'"
+                for field in fields
+            )
+            + "]"
+        )
+        expected = (
+            "["
+            + ",".join(
+                _utc_document_timestamp(f"r.{field}") if field in timestamps else f"r.{field}"
+                for field in fields
+            )
+            + "]"
+        )
+        execute_bounded(
+            stream,
+            "SELECT r.record_id,r.checksum_sha256,sha256(r.document_json),"
+            "w.digest,CAST("
+            + envelope("r", target=False)
+            + " AS VARCHAR) IS NOT DISTINCT FROM w.metadata,"
+            + f"json_extract_string(r.document_json,{paths}) IS NOT DISTINCT FROM "
+            + expected
+            + ",octet_length(encode(r.document_json)),r.relative_path,"
+            "r.source_id,r.schema_version,CAST("
+            + envelope("r", target=False)
+            + " AS VARCHAR) FROM raw_record_index r LEFT JOIN _recovered_raw w "
+            "ON r.record_id=w.identifier ORDER BY r.received_at,r.record_id",
+        )
+        for rows in _core_native_pages(stream, execution, page_limit):
+            pending_groups: list[tuple[UUID, ...]] = []
+            pending_ids: list[UUID] = []
+            pending_size = 0
+            large_ids: set[UUID] = set()
+            for row in rows:
+                if (
+                    row[3] is not None
+                    and row[3] == row[1]
+                    and row[4] is True
+                    and (row[2] is None or (row[2] == row[1] and row[5] is True))
+                ):
+                    continue
+                path = source.paths.raw_dir / str(row[7])
+                if path.is_symlink() or not path.resolve().is_relative_to(source.paths.raw_dir):
+                    raise WorkspaceV2MigrationError("recovered raw source path is unsafe")
+                length = path.stat().st_size
+                if length > 1 << 20 or (row[6] is not None and int(row[6]) > 1 << 20):
+                    if pending_ids:
+                        pending_groups.append(tuple(pending_ids))
+                        pending_ids, pending_size = [], 0
+                    large_ids.add(UUID(str(row[0])))
+                    pending_groups.append((UUID(str(row[0])),))
+                    continue
+                if pending_ids and (pending_size + length > 1 << 20 or len(pending_ids) == 255):
+                    pending_groups.append(tuple(pending_ids))
+                    pending_ids, pending_size = [], 0
+                pending_ids.append(UUID(str(row[0])))
+                pending_size += length
+            if pending_ids:
+                pending_groups.append(tuple(pending_ids))
+            groups = iter(pending_groups)
+            models: dict[UUID, RawRecord] = {}
+            model: RawRecord | None = None
+            for row in rows:
+                known = row[3]
+                actual = str(row[1])
+                fast = (
+                    known is not None
+                    and known == actual
+                    and row[4] is True
+                    and (row[2] is None or (row[2] == actual and row[5] is True))
+                )
+                if not fast:
+                    identifier = UUID(str(row[0]))
+                    if identifier not in models:
+                        # Release the preceding batch before loading another;
+                        # leave one model slot for noncanonical inline fallback.
+                        model = None
+                        models = {}
+                        group = next(groups)
+                        models = (
+                            {group[0]: source.raw_records.get_verified_bounded(group[0])}
+                            if len(group) == 1 and group[0] in large_ids
+                            else source.raw_records.get_many(group)
+                        )
+                        max_hydrated = max(max_hydrated, len(models))
+                    model = models[identifier]
+                    actual = canonical_json_digest(model)
+                    expected_metadata = [
+                        str(model.record_id),
+                        model.asset_id,
+                        model.source.source_id,
+                        *(
+                            None if value is None else value.isoformat().replace("+00:00", "Z")
+                            for value in (model.event_time, model.available_at, model.received_at)
+                        ),
+                        model.schema_version,
+                    ]
+                    if json.loads(str(row[10])) != expected_metadata or actual != row[1]:
+                        raise WorkspaceV2MigrationError(
+                            "recovered raw metadata or checksum changed"
+                        )
+                    if row[2] is not None and row[2] != actual:
+                        inline = execute_bounded(
+                            source.store.connection,
+                            "SELECT document_json FROM raw_record_index WHERE record_id=?",
+                            [str(identifier)],
+                        ).fetchone()
+                        assert inline is not None
+                        inline_model = model_from_json(RawRecord, str(inline[0]))
+                        if canonical_json_digest(inline_model) != actual:
+                            raise WorkspaceV2MigrationError("recovered raw inline content changed")
+                        del inline_model
+                    if known is not None and known != actual:
+                        raise WorkspaceV2MigrationError("recovered raw content changed")
+                    if known is None:
+                        _record_recovered_core_append(
+                            destination,
+                            frozen_source,
+                            core_baseline,
+                            "raw",
+                            ((identifier, actual),),
+                        )
+                        staging = destination.store.raw_staging
+                        if identifier in large_ids:
+                            policy = connection_policy(destination.paths.database_path)
+                            if policy.temp_directory is None:
+                                raise WorkspaceV2MigrationError(
+                                    "raw spool requires admitted directory"
+                                )
+                            staging.save_bounded(model, spool_directory=policy.temp_directory)
+                        else:
+                            relative = staging._write_blob(actual, canonical_json_bytes(model))
+                            blob = staging._resolve_blob(relative.as_posix())
+                            with blob.open("rb") as stream_file:
+                                os.fsync(stream_file.fileno())
+                            parent = blob.parent
+                            while True:
+                                descriptor = os.open(parent, os.O_RDONLY)
+                                try:
+                                    os.fsync(descriptor)
+                                finally:
+                                    os.close(descriptor)
+                                if parent == destination.paths.raw_dir:
+                                    break
+                                parent = parent.parent
+                            destination.raw_records.save_many((model,))
+                    elif row[4] is not True:
+                        raise WorkspaceV2MigrationError(
+                            "recovered raw destination metadata changed"
+                        )
+                digest = hashlib.sha256(f"{digest}:{actual}".encode()).hexdigest()
+                total += 1
+                reused += known is not None
+                by_source[str(row[8])] = by_source.get(str(row[8]), 0) + 1
+                by_schema[str(row[9])] = by_schema.get(str(row[9]), 0) + 1
+        target_count = 0
+        target_digest = hashlib.sha256(b"").hexdigest()
+        execute_bounded(
+            target,
+            "SELECT checksum_sha256 FROM raw_v2_index "
+            "ORDER BY CAST(received_at AS TIMESTAMPTZ),record_id",
+        )
+        for rows in _core_native_pages(target, execution, page_limit):
+            for row in rows:
+                target_count += 1
+                target_digest = hashlib.sha256(f"{target_digest}:{row[0]}".encode()).hexdigest()
+        if (target_count, target_digest) != (total, digest):
+            raise WorkspaceV2MigrationError("recovered raw full inventory differs")
+    return RawV2ImportSummary(
+        source_workspace_id=str(frozen_source.workspace_id),
+        source_fingerprint=frozen_source.source_fingerprint,
+        destination=str(destination.store.raw_staging.destination.absolute()),
+        complete=True,
+        imported_count=total,
+        reused_count=reused,
+        corpus_digest=digest,
+        counts_by_source=by_source,
+        counts_by_schema=by_schema,
+        max_page_requested=page_limit,
+        max_page_hydrated=max_hydrated,
+    )
+
+
+def _append_recovered_observations(
+    *,
+    source: LocalStorage,
+    destination: LocalStorage,
+    frozen_source: FrozenSourceCut,
+    core_baseline: ReconciliationFileReference,
+    admission_path: Path,
+    raw_digest: str,
+    page_limit: int,
+) -> ObservationV2ImportSummary:
+    """Compare all identities natively; hydrate only new/noncanonical rows.
+
+    This internal primitive requires the caller's recovered-W proof and live
+    source session. It publishes no migration checkpoint or completion seal.
+    A replay checks already-written rows by their full canonical content.
+    """
+    if isinstance(page_limit, bool) or not 1 <= page_limit <= 256:
+        raise WorkspaceV2MigrationError("recovered observation page limit differs")
+    if (
+        source.paths.root != frozen_source.source_root / "storage"
+        or source.paths.workspace_id != frozen_source.workspace_id
+        or not source.read_only
+        or _live_quiescent_source(frozen_source.source_root, frozen_source) is None
+    ):
+        raise WorkspaceV2MigrationError("recovered observations require live source quiescence")
+    if not isinstance(destination.store, WorkspaceV2Store):
+        raise WorkspaceV2MigrationError("recovered observation destination is not v2")
+    execution = _require_recovered_core(destination, frozen_source, core_baseline, admission_path)
+    fields = (
+        "observation_id",
+        "raw_record_id",
+        "asset_id",
+        "field_name",
+        "frequency",
+        "observed_at",
+        "period_end",
+        "available_at",
+        "quality",
+    )
+    timestamps = {"observed_at", "period_end", "available_at"}
+    source_database = source.paths.database_path
+    digest = hashlib.sha256(b"").hexdigest()
+    total = reused = max_hydrated = 0
+    by_source: dict[str, int] = {}
+    by_frequency: dict[str, int] = {}
+    # Use registered connections, not unregistered DuckDB .cursor() clones.
+    with connect_duckdb(source_database, read_only=False) as stream:
+        execute_bounded(
+            stream,
+            "CREATE TEMP TABLE _recovered_observations "
+            "(identifier VARCHAR PRIMARY KEY,digest VARCHAR)",
+        )
+        target = destination.store.connection
+        execute_bounded(
+            target,
+            "SELECT observation_id,sha256(CAST("
+            + _observation_canonical_sql("o")
+            + " AS VARCHAR)) FROM normalized_observations_v2 o",
+        )
+        for known in _core_native_pages(target, execution, page_limit):
+            execute_bounded(
+                stream,
+                "INSERT INTO _recovered_observations SELECT unnest(?),unnest(?)",
+                [[str(row[0]) for row in known], [str(row[1]) for row in known]],
+            )
+        paths = "[" + ",".join(f"'$.{name}'" for name in fields) + "]"
+        envelope = (
+            "["
+            + ",".join(
+                _utc_document_timestamp(f"s.{name}") if name in timestamps else f"s.{name}"
+                for name in fields
+            )
+            + "]"
+        )
+        execute_bounded(
+            stream,
+            "SELECT "
+            + ",".join(
+                _utc_document_timestamp(f"s.{name}") if name in timestamps else f"s.{name}"
+                for name in fields
+            )
+            + ",sha256(s.document_json),w.digest,"
+            + f"json_extract_string(s.document_json,{paths}) IS NOT DISTINCT FROM "
+            + envelope
+            + ",octet_length(encode(s.document_json)),"
+            "json_extract_string(s.document_json,'$.source.source_id') "
+            "FROM normalized_observations s LEFT JOIN _recovered_observations w "
+            "ON s.observation_id=w.identifier ORDER BY s.available_at,s.observation_id",
+        )
+        for rows in _core_native_pages(stream, execution, page_limit):
+            # Only metadata crosses this cursor. Bound hydrated UTF-8 documents
+            # independently from the model count, including noncanonical rows.
+            pending = [row for row in rows if row[9] != row[10] or row[11] is not True]
+            canonical: dict[str, str] = {}
+            start = 0
+            while start < len(pending):
+                end, size = start, 0
+                while end < len(pending):
+                    length = pending[end][12]
+                    if length is None or int(length) > 1 << 20:
+                        raise WorkspaceV2MigrationError(
+                            "recovered observation exceeds buffer budget"
+                        )
+                    if size + int(length) > 1 << 20:
+                        break
+                    size += int(length)
+                    end += 1
+                batch = pending[start:end]
+                models = source.observations.get_many(tuple(UUID(str(row[0])) for row in batch))
+                max_hydrated = max(max_hydrated, len(models))
+                encoded_size = 0
+                for row in batch:
+                    model = models[UUID(str(row[0]))]
+                    for field, actual in zip(fields, row[:9], strict=True):
+                        expected = getattr(model, field)
+                        if field in timestamps:
+                            equal = (
+                                None if actual is None else datetime.fromisoformat(str(actual))
+                            ) == expected
+                        else:
+                            equal = str(actual) == str(getattr(expected, "value", expected))
+                        if not equal:
+                            raise WorkspaceV2MigrationError(
+                                "recovered observation metadata changed"
+                            )
+                    document = canonical_json_bytes(model)
+                    encoded_size += len(document)
+                    if encoded_size > 1 << 20:
+                        raise WorkspaceV2MigrationError(
+                            "canonical observations exceed buffer budget"
+                        )
+                    checksum = sha256_hex(document)
+                    if row[10] is not None and row[10] != checksum:
+                        raise WorkspaceV2MigrationError("recovered observation content changed")
+                    canonical[str(row[0])] = checksum
+                # Existing append-only writer validates lineage and all typed
+                # fields. Never pass the confirmed canonical W rows to it.
+                missing_ids = {UUID(str(row[0])) for row in batch if row[10] is None}
+                missing = tuple(
+                    model for identifier, model in models.items() if identifier in missing_ids
+                )
+                if missing:
+                    _record_recovered_core_append(
+                        destination,
+                        frozen_source,
+                        core_baseline,
+                        "observations",
+                        tuple(
+                            (model.observation_id, canonical[str(model.observation_id)])
+                            for model in missing
+                        ),
+                    )
+                    destination.observations.save_many(missing)
+                start = end
+            for row in rows:
+                checksum = canonical.get(str(row[0]), str(row[9]))
+                digest = hashlib.sha256(f"{digest}:{checksum}".encode()).hexdigest()
+                total += 1
+                reused += row[10] is not None
+                source_id = str(row[13])
+                by_source[source_id] = by_source.get(source_id, 0) + 1
+                frequency = str(row[4])
+                by_frequency[frequency] = by_frequency.get(frequency, 0) + 1
+        # A full ordered comparison catches missing W and foreign target rows,
+        # including IDs inserted earlier than the old cursor.
+        execute_bounded(
+            target,
+            "SELECT sha256(CAST("
+            + _observation_canonical_sql("o")
+            + " AS VARCHAR)) FROM normalized_observations_v2 o "
+            "ORDER BY CAST(available_at AS TIMESTAMPTZ),observation_id",
+        )
+        target_count = 0
+        target_digest = hashlib.sha256(b"").hexdigest()
+        for rows in _core_native_pages(target, execution, page_limit):
+            for row in rows:
+                target_count += 1
+                target_digest = hashlib.sha256(f"{target_digest}:{row[0]}".encode()).hexdigest()
+        if (target_count, target_digest) != (total, digest):
+            raise WorkspaceV2MigrationError("recovered observation full inventory differs")
+    return ObservationV2ImportSummary(
+        source_workspace_id=str(frozen_source.workspace_id),
+        source_fingerprint=frozen_source.source_fingerprint,
+        raw_digest=raw_digest,
+        destination=str(destination.store.raw_staging.destination.absolute()),
+        complete=True,
+        imported_count=total,
+        reused_count=reused,
+        corpus_digest=digest,
+        counts_by_source=by_source,
+        counts_by_frequency=by_frequency,
+        max_page_requested=page_limit,
+        max_page_hydrated=max_hydrated,
+    )
+
+
+class _RecoveredCoreBaseline(ContractModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    schema_version: Literal["workspace-v2-core-reuse-proof-v1"] = "workspace-v2-core-reuse-proof-v1"
+    reconciliation: ReconciliationFileReference
+    raw_state: ReconciliationFileReference
+    raw_terminal: ReconciliationFileReference
+    observation_state: ReconciliationFileReference
+    database: ReconciliationFileReference
+    resource_receipt: ReconciliationFileReference
+    raw_count: int = Field(ge=0)
+    raw_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    raw_metadata_binding: str = Field(pattern=r"^[0-9a-f]{64}$")
+    observation_count: int = Field(ge=0)
+    observation_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    raw_verifier_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verifier_module_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    resource_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    immutable_payload_scope: Literal["reuse-preserved-content-addressed-raw-terminal-proof"] = (
+        "reuse-preserved-content-addressed-raw-terminal-proof"
+    )
+    verified_at: UTCDateTime
+
+
+def verify_recovered_core_baseline(
+    *,
+    service: WorkspaceService,
+    destination_root: Path,
+    reconciliation_id: UUID,
+    admission_path: Path,
+) -> ReconciliationFileReference:
+    """Reconcile native raw metadata and observation bytes without rehydrating W.
+
+    The old raw terminal proof already verified its immutable blob bytes. This
+    pass proves the full native metadata/projection binding is still identical;
+    it does not claim to have read every immutable payload again.
+    """
+    from investment_analyst.storage import raw_v2_import
+    from investment_analyst.storage.observation_v2_import import ObservationV2ImportState
+    from investment_analyst.storage.raw_v2 import (
+        _INDEX_COLUMNS,
+        WORKSPACE_RAW_JSON_PROJECTIONS_TABLE,
+    )
+    from investment_analyst.workspace.workspace_v2_lifecycle import (
+        _closed_duckdb_file,
+        _v2_writer_closed,
+    )
+    from investment_analyst.workspace.workspace_v2_migration_models import (
+        HistoricalTransition,
+        WorkspaceV2MigrationWorkCheckpoint,
+    )
+
+    admission = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+    require_maintenance_admission(admission)
+    database = destination_root / "storage/v2/index.duckdb"
+    if (
+        admission.budget.operation_id != reconciliation_id
+        or admission.budget.profile != "verification"
+        or admission.budget.reader_worker is not None
+        or tuple(item.database for item in admission.budget.assignments) != (database,)
+    ):
+        raise WorkspaceV2MigrationError("core reuse admission binding differs")
+    reconciler = WorkspaceV2ProgressReconciler(service, destination_root, reconciliation_id)
+    with reconciler._exclusive():
+        progress = ProgressReconciliation.model_validate_json(reconciler.path.read_bytes())
+        if progress.phase != "BASELINE_VERIFIED" or progress.reserved_successor_id is not None:
+            raise WorkspaceV2MigrationError("core reuse requires unreserved verified W")
+        assert progress.database_after is not None and progress.inventory is not None
+        reconciler._controls(progress)
+        predecessor = progress.predecessor_operation_id
+        staging_root = destination_root / "storage/v2"
+        raw_path = staging_root / f"raw-v2-import-state.F.{predecessor}.json"
+        terminal_path = staging_root / f"raw-v2-terminal-verification.F.{predecessor}.json"
+        observation_path = staging_root / f"observation-v2-import-state.F.{predecessor}.json"
+        raw_reference = reconciliation_file_reference(raw_path, "control")
+        terminal_reference = reconciliation_file_reference(terminal_path, "control")
+        observation_reference = reconciliation_file_reference(observation_path, "control")
+        raw = RawV2ImportState.model_validate_json(raw_path.read_bytes())
+        terminal = WorkspaceV2MigrationWorkCheckpoint.model_validate_json(
+            terminal_path.read_bytes()
+        )
+        observation = ObservationV2ImportState.model_validate_json(observation_path.read_bytes())
+        raw_code_sha = sha256_hex(Path(raw_v2_import.__file__).read_bytes())
+        predecessor_control = HistoricalTransition.model_validate_json(
+            progress.predecessor.path.read_bytes()
+        )
+        predecessor_fingerprint = predecessor_control.source_fingerprint
+        if (
+            terminal.operation_id != predecessor
+            or terminal.snapshot_id != predecessor
+            or terminal.source_root != progress.source_root
+            or terminal.destination_root != destination_root
+            or terminal.destination_workspace_id != progress.destination_workspace_id
+            or terminal.verifier_policy != "paired-raw-terminal-F-v1"
+            or terminal.tree_fingerprint != raw_code_sha
+            or terminal.source_fingerprint != predecessor_fingerprint
+            or raw.source_fingerprint != predecessor_fingerprint
+            or observation.source_fingerprint != predecessor_fingerprint
+            or raw.source_workspace_id != str(progress.source_workspace_id)
+            or observation.source_workspace_id != raw.source_workspace_id
+            or terminal.confirmed_count != raw.confirmed_count
+            or terminal.accumulated_digest != raw.accumulated_digest
+            or observation.raw_digest != raw.accumulated_digest
+            or raw.confirmed_count != progress.inventory.raw_count
+            or observation.confirmed_count != progress.inventory.observation_count
+            or len(terminal.input_references) != 4
+            or terminal.input_references[:3] != ("raw", raw.source_workspace_id, raw.staging_id)
+        ):
+            raise WorkspaceV2MigrationError("preserved core verification binding differs")
+        with _v2_writer_closed(destination_root), _closed_duckdb_file(database):
+            reconciler._verify(progress.database_after)
+            if database.with_suffix(".duckdb.wal").exists():
+                raise WorkspaceV2MigrationError("core reuse found unexpected WAL")
+        metadata = hashlib.sha256()
+        raw_digest = hashlib.sha256(b"").hexdigest()
+        raw_count = observation_count = 0
+        observation_digest = hashlib.sha256(b"").hexdigest()
+        with service.open_storage(
+            service.resolve(destination_root), WorkspaceAccessMode.READ_ONLY
+        ) as target:
+            if not isinstance(target.store, WorkspaceV2Store):
+                raise WorkspaceV2MigrationError("core reuse destination is not v2")
+            if (
+                target.store.raw_staging._read_marker(
+                    staging_root / "raw-v2-staging.json"
+                ).staging_id
+                != raw.staging_id
+            ):
+                raise WorkspaceV2MigrationError("core reuse staging identity differs")
+            connection = target.store.connection
+            execute_bounded(
+                connection,
+                "SELECT "
+                + ",".join(_INDEX_COLUMNS)
+                + " FROM raw_v2_index ORDER BY received_at,record_id",
+            )
+            while rows := connection.fetchmany(progress.page_limit):
+                for row in rows:
+                    checksum = str(row[2])
+                    metadata.update(json.dumps(row, separators=(",", ":")).encode())
+                    metadata.update(bytes.fromhex(checksum))
+                    raw_digest = hashlib.sha256(f"{raw_digest}:{checksum}".encode()).hexdigest()
+                    raw_count += 1
+            exists = execute_bounded(
+                connection,
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema='main' AND table_name=?",
+                [WORKSPACE_RAW_JSON_PROJECTIONS_TABLE],
+            ).fetchone()
+            if exists is not None:
+                execute_bounded(
+                    connection,
+                    "SELECT record_id,field_name,field_value FROM "
+                    + WORKSPACE_RAW_JSON_PROJECTIONS_TABLE
+                    + " ORDER BY record_id,field_name",
+                )
+                while rows := connection.fetchmany(progress.page_limit):
+                    for row in rows:
+                        metadata.update(json.dumps(row, separators=(",", ":")).encode())
+            execute_bounded(
+                connection,
+                "SELECT sha256(CAST("
+                + _observation_canonical_sql("o")
+                + " AS VARCHAR)) FROM normalized_observations_v2 o "
+                "ORDER BY CAST(available_at AS TIMESTAMPTZ),observation_id",
+            )
+            while rows := connection.fetchmany(progress.page_limit):
+                for row in rows:
+                    observation_digest = hashlib.sha256(
+                        f"{observation_digest}:{row[0]}".encode()
+                    ).hexdigest()
+                    observation_count += 1
+        if (
+            (raw_count, raw_digest) != (raw.confirmed_count, raw.accumulated_digest)
+            or metadata.hexdigest() != terminal.input_references[3]
+            or (observation_count, observation_digest)
+            != (observation.confirmed_count, observation.accumulated_digest)
+        ):
+            raise WorkspaceV2MigrationError("recovered core metadata or canonical content changed")
+        baseline_document = canonical_json_bytes(progress) + b"\n"
+        baseline_path = reconciler.state / (
+            f"progress-reconciliation-generation.{reconciliation_id}."
+            f"{sha256_hex(baseline_document)}.json"
+        )
+        baseline_reference = reconciliation_file_reference(baseline_path, "control")
+        if baseline_reference.sha256 != sha256_hex(baseline_document):
+            raise WorkspaceV2MigrationError("core reuse baseline certificate changed")
+        artifact = _RecoveredCoreBaseline(
+            reconciliation=baseline_reference,
+            raw_state=raw_reference,
+            raw_terminal=terminal_reference,
+            observation_state=observation_reference,
+            database=progress.database_after,
+            resource_receipt=reconciliation_file_reference(admission_path, "resource"),
+            raw_count=raw_count,
+            raw_digest=raw_digest,
+            raw_metadata_binding=metadata.hexdigest(),
+            observation_count=observation_count,
+            observation_digest=observation_digest,
+            raw_verifier_sha256=raw_code_sha,
+            verifier_module_sha256=sha256_hex(Path(__file__).read_bytes()),
+            resource_policy_sha256=sha256_hex(
+                (Path(__file__).parent.parent / "storage/resource_policy.py").read_bytes()
+            ),
+            verified_at=datetime.now(UTC),
+        )
+        document = canonical_json_bytes(artifact) + b"\n"
+        path = (
+            reconciler.state
+            / f"progress-core-reuse.{reconciliation_id}.{sha256_hex(document)}.json"
+        )
+        reconciler._write_once(path, document)
+        return reconciliation_file_reference(path, "control")
+
+
+def verify_recovered_successor(
+    *,
+    service: WorkspaceService,
+    destination_root: Path,
+    reconciliation_id: UUID,
+    frozen_source: FrozenSourceCut,
+    admission_path: Path,
+    baseline_code_root: Path | None = None,
+) -> ProgressReconciliationReceipt:
+    """Prove W subset F1 by IDs and content, with one ordered source hash stream.
+
+    A known canonical hash reuses the validated W model. Every new or
+    noncanonical document uses the existing typed repository. This records
+    coverage only; it imports nothing, changes no seal and activates nothing.
+    """
+    from investment_analyst.storage.compact_analytical_v2 import _instant, _json_bytes
+    from investment_analyst.workspace.workspace_v2_lifecycle import (
+        _closed_duckdb_file,
+        _v2_writer_closed,
+    )
+
+    reservation = reserve_recovered_successor(
+        service=service,
+        destination_root=destination_root,
+        reconciliation_id=reconciliation_id,
+        frozen_source=frozen_source,
+        admission_path=admission_path,
+        baseline_code_root=baseline_code_root,
+    )
+    admission = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+    execution = require_maintenance_admission(admission)
+    reconciler = WorkspaceV2ProgressReconciler(service, destination_root, reconciliation_id)
+    module_sha = sha256_hex(Path(__file__).read_bytes())
+    with reconciler._exclusive():
+        progress = ProgressReconciliation.model_validate_json(reconciler.path.read_bytes())
+        assert progress.inventory is not None and progress.database_after is not None
+        inventory = progress.inventory
+        tree, environment = historical_transition_fingerprints(
+            progress.page_limit, progress.verifier_policy
+        )
+        if progress.phase == "SUCCESSOR_BOUND":
+            assert progress.coverage is not None
+            path = reconciler.state / (
+                f"progress-successor-comparison.{frozen_source.operation_id}."
+                f"{progress.coverage.comparison_sha256}.json"
+            )
+            if (
+                reconciliation_file_reference(path, "control").sha256
+                != progress.coverage.comparison_sha256
+            ):
+                raise WorkspaceV2MigrationError("successor comparison artifact differs")
+            comparison = _SuccessorComparison.model_validate_json(path.read_bytes())
+            if (
+                comparison.work.module_sha256 != module_sha
+                or comparison.work.successor != frozen_source
+                or comparison.work.baseline_dataset_sha256 != inventory.dataset_sha256
+                or comparison.work.family != "complete"
+                or comparison.verifier_tree_fingerprint != tree
+                or comparison.environment_fingerprint != environment
+                or (comparison.work.covered_metric_count, comparison.work.covered_diagnostic_count)
+                != (inventory.metric_count, inventory.diagnostic_count)
+                or comparison.new_index.role != "inventory"
+                or comparison.baseline.role != "control"
+                or comparison.resource_receipt.role != "resource"
+            ):
+                raise WorkspaceV2MigrationError("successor comparison code or cut changed")
+            reconciler._verify(comparison.baseline)
+            reconciler._verify(comparison.resource_receipt)
+            reconciler._verify(comparison.new_index)
+            original = ProgressReconciliation.model_validate_json(
+                comparison.baseline.path.read_bytes()
+            )
+            if original.phase != "BASELINE_VERIFIED" or original.inventory != inventory:
+                raise WorkspaceV2MigrationError("successor comparison baseline differs")
+            return reservation
+        if progress.phase != "BASELINE_VERIFIED" or progress.reserved_successor != frozen_source:
+            raise WorkspaceV2MigrationError(
+                "successor comparison requires its exclusive reservation"
+            )
+        expected = _SuccessorCoverageWork(
+            successor=frozen_source,
+            baseline_dataset_sha256=inventory.dataset_sha256,
+            module_sha256=module_sha,
+        )
+        work_path = reconciler.state / f"progress-successor-work.{frozen_source.operation_id}.json"
+        index_path = reconciler.state / f"progress-successor-new.{frozen_source.operation_id}.jsonl"
+        work = expected
+        if work_path.exists():
+            if work_path.is_symlink():
+                raise WorkspaceV2MigrationError("successor checkpoint is unsafe")
+            work = _SuccessorCoverageWork.model_validate_json(work_path.read_bytes())
+            if (work.successor, work.baseline_dataset_sha256, work.module_sha256) != (
+                expected.successor,
+                expected.baseline_dataset_sha256,
+                expected.module_sha256,
+            ):
+                raise WorkspaceV2MigrationError("successor checkpoint binding changed")
+        if index_path.is_symlink():
+            raise WorkspaceV2MigrationError("successor new-index path is unsafe")
+        source_paths = service.resolve(frozen_source.source_root)
+        source_database = source_paths.storage_root / "data/processed/investment_analyst.duckdb"
+        index_hash = hashlib.sha256()
+        with (
+            _v2_writer_closed(destination_root),
+            _closed_duckdb_file(progress.database_after.path),
+            index_path.open("a+b") as index,
+        ):
+            reconciler._verify(progress.database_after)
+            index.seek(0)
+            remaining = work.new_index_bytes
+            while remaining:
+                chunk = index.read(min(1 << 20, remaining))
+                if not chunk:
+                    raise WorkspaceV2MigrationError("successor index is truncated")
+                index_hash.update(chunk)
+                remaining -= len(chunk)
+            if index_hash.hexdigest() != work.new_index_sha256:
+                raise WorkspaceV2MigrationError("successor index checksum differs")
+            with service.open_storage(source_paths, WorkspaceAccessMode.READ_ONLY) as source:
+                with connect_duckdb(source_database, read_only=False) as stream:
+                    execute_bounded(stream, "SET index_scan_max_count=0")
+                    execute_bounded(stream, "SET index_scan_percentage=0")
+                    execute_bounded(source.store.connection, "SET index_scan_max_count=0")
+                    execute_bounded(source.store.connection, "SET index_scan_percentage=0")
+                    execute_bounded(
+                        stream,
+                        "CREATE TEMP TABLE _successor_w AS SELECT "
+                        "json_extract_string(json,'$[0]') AS family_name,"
+                        "CAST(json_extract_string(json,'$[1]') AS UUID) AS identifier,"
+                        "json_extract_string(json,'$[2]') AS digest "
+                        "FROM read_json_objects(?,format='newline_delimited',"
+                        "maximum_object_size=1024)",
+                        [
+                            [
+                                str(progress.parent_membership.path),
+                                str(inventory.delta_membership.path),
+                            ]
+                        ],
+                    )
+                    duplicates = execute_bounded(
+                        stream,
+                        "SELECT 1 FROM _successor_w GROUP BY family_name,identifier "
+                        "HAVING count(*)<>1 LIMIT 1",
+                    ).fetchone()
+                    counts = execute_bounded(
+                        stream,
+                        "SELECT count(*) FILTER(WHERE family_name='metrics'),"
+                        "count(*) FILTER(WHERE family_name='diagnostics') FROM _successor_w",
+                    ).fetchone()
+                    if duplicates is not None or counts != (
+                        inventory.metric_count,
+                        inventory.diagnostic_count,
+                    ):
+                        raise WorkspaceV2MigrationError("successor baseline index coverage differs")
+                    for family in ("metrics", "diagnostics"):
+                        if work.family == "complete" or (
+                            family == "metrics" and work.family == "diagnostics"
+                        ):
+                            continue
+                        metric = family == "metrics"
+                        table, key = (
+                            ("metric_results", "result_id")
+                            if metric
+                            else ("diagnostic_results", "diagnostic_id")
+                        )
+                        fields = [
+                            key,
+                            "asset_id",
+                            *(["metric_key"] if metric else ["mode", "verdict"]),
+                            "as_of",
+                            "available_at",
+                            "computed_at",
+                            "quality",
+                        ]
+                        json_paths = "[" + ",".join(f"'$.{field}'" for field in fields) + "]"
+                        envelope = (
+                            "["
+                            + ",".join(
+                                _utc_document_timestamp(f"s.{field}")
+                                if field in {"as_of", "available_at", "computed_at"}
+                                else f"s.{field}"
+                                for field in fields
+                            )
+                            + "]"
+                        )
+                        after, parameters = "", []
+                        if work.available_at is not None:
+                            after = (
+                                f" AND (s.available_at,s.{key})>"
+                                "(CAST(? AS TIMESTAMPTZ),CAST(? AS VARCHAR))"
+                            )
+                            parameters = [work.available_at.isoformat(), str(work.identifier)]
+                        execute_bounded(
+                            stream,
+                            f"SELECT s.{key},CAST(s.available_at AS VARCHAR),"
+                            f"sha256(s.document_json),w.digest,"
+                            f"json_extract_string(s.document_json,{json_paths})={envelope},"
+                            "octet_length(encode(s.document_json)) "
+                            f"FROM {table} s LEFT JOIN _successor_w w "
+                            f"ON w.family_name='{family}' AND w.identifier=CAST(s.{key} AS UUID) "
+                            f"WHERE TRUE{after} ORDER BY s.available_at,s.{key}",
+                            parameters,
+                        )
+                        while rows := stream.fetchmany(progress.page_limit):
+                            with execution.step("sql", admission.budget.sql_timeout_seconds):
+                                updates = work.model_dump()
+                                additions = bytearray()
+                                for row in rows:
+                                    identifier = UUID(str(row[0]))
+                                    known, actual = row[3], str(row[2])
+                                    if known is not None and actual == known and row[4] is True:
+                                        updates["fast_count"] += 1
+                                    else:
+                                        if int(row[5]) > 1 << 20:
+                                            raise WorkspaceV2MigrationError(
+                                                "successor model exceeds buffer budget"
+                                            )
+                                        model = (
+                                            source.metric_results.get_many((identifier,))[
+                                                identifier
+                                            ]
+                                            if metric
+                                            else source.diagnostics.get_many((identifier,))[
+                                                identifier
+                                            ]
+                                        )
+                                        if metric:
+                                            CompactAnalyticalStore._validate_metric_identity(model)
+                                        metadata = execute_bounded(
+                                            source.store.connection,
+                                            "SELECT "
+                                            + ",".join(
+                                                f"CAST({field} AS VARCHAR)"
+                                                if field in {"as_of", "available_at", "computed_at"}
+                                                else field
+                                                for field in fields
+                                            )
+                                            + f" FROM {table} WHERE {key}=?",
+                                            [str(identifier)],
+                                        ).fetchone()
+                                        assert metadata is not None
+                                        for field, value in zip(fields, metadata, strict=True):
+                                            expected_value = getattr(model, field)
+                                            if field in {"as_of", "available_at", "computed_at"}:
+                                                equal = _instant(value) == expected_value
+                                            else:
+                                                equal = str(value) == str(
+                                                    getattr(expected_value, "value", expected_value)
+                                                )
+                                            if not equal:
+                                                raise WorkspaceV2MigrationError(
+                                                    "successor row metadata differs from model"
+                                                )
+                                        actual = sha256_hex(canonical_json_bytes(model))
+                                        updates["typed_count"] += 1
+                                    if known is not None and actual != known:
+                                        raise WorkspaceV2MigrationError(
+                                            "successor changes recovered W content"
+                                        )
+                                    count_field = "metric_count" if metric else "diagnostic_count"
+                                    digest_field = (
+                                        "metric_digest" if metric else "diagnostic_digest"
+                                    )
+                                    updates[count_field] += 1
+                                    updates[digest_field] = hashlib.sha256(
+                                        f"{updates[digest_field]}:{actual}".encode()
+                                    ).hexdigest()
+                                    if known is not None:
+                                        covered = (
+                                            "covered_metric_count"
+                                            if metric
+                                            else "covered_diagnostic_count"
+                                        )
+                                        updates[covered] += 1
+                                    else:
+                                        additions.extend(
+                                            _json_bytes(
+                                                [
+                                                    family,
+                                                    str(identifier),
+                                                    actual,
+                                                    _instant(row[1])
+                                                    .isoformat()
+                                                    .replace("+00:00", "Z"),
+                                                ]
+                                            )
+                                            + b"\n"
+                                        )
+                                if len(additions) > 1 << 20:
+                                    raise WorkspaceV2MigrationError(
+                                        "successor index page exceeds buffer budget"
+                                    )
+                                index.seek(work.new_index_bytes)
+                                tail = index.read(len(additions))
+                                if not additions.startswith(tail):
+                                    raise WorkspaceV2MigrationError(
+                                        "successor index uncheckpointed tail differs"
+                                    )
+                                index.seek(0, os.SEEK_END)
+                                index.write(additions[len(tail) :])
+                                index.flush()
+                                os.fsync(index.fileno())
+                                index_hash.update(additions)
+                                updates.update(
+                                    available_at=_instant(rows[-1][1]),
+                                    identifier=UUID(str(rows[-1][0])),
+                                    new_index_bytes=work.new_index_bytes + len(additions),
+                                    new_index_sha256=index_hash.hexdigest(),
+                                )
+                                work = _SuccessorCoverageWork.model_validate(updates)
+                                reconciler._financial_checkpoint(work_path, work)
+                        work = _SuccessorCoverageWork.model_validate(
+                            {
+                                **work.model_dump(),
+                                "available_at": None,
+                                "identifier": None,
+                                "family": "diagnostics" if metric else "complete",
+                            }
+                        )
+                        reconciler._financial_checkpoint(work_path, work)
+                    execute_bounded(stream, "DROP TABLE _successor_w")
+                totals = execute_bounded(
+                    source.store.connection,
+                    "SELECT (SELECT count(*) FROM metric_results),"
+                    "(SELECT count(*) FROM diagnostic_results)",
+                ).fetchone()
+                if totals != (work.metric_count, work.diagnostic_count):
+                    raise WorkspaceV2MigrationError("successor source inventory count differs")
+            if index.seek(0, os.SEEK_END) != work.new_index_bytes:
+                raise WorkspaceV2MigrationError("successor index contains unverified extra bytes")
+            if (work.covered_metric_count, work.covered_diagnostic_count) != (
+                inventory.metric_count,
+                inventory.diagnostic_count,
+            ):
+                raise WorkspaceV2MigrationError("successor is missing recovered W IDs")
+            if sha256_hex(Path(__file__).read_bytes()) != module_sha:
+                raise WorkspaceV2MigrationError("successor verifier changed during execution")
+            if _live_quiescent_source(frozen_source.source_root, frozen_source) is None:
+                raise WorkspaceV2MigrationError("successor lost source quiescence")
+            comparison = _SuccessorComparison(
+                baseline=reservation.certificate,
+                work=work,
+                new_index=reconciliation_file_reference(index_path, "inventory"),
+                resource_receipt=reconciliation_file_reference(admission_path, "resource"),
+                verifier_tree_fingerprint=tree,
+                environment_fingerprint=environment,
+                verified_at=datetime.now(UTC),
+            )
+            document = canonical_json_bytes(comparison) + b"\n"
+            digest = sha256_hex(document)
+            reconciler._write_once(
+                reconciler.state
+                / f"progress-successor-comparison.{frozen_source.operation_id}.{digest}.json",
+                document,
+            )
+            coverage = SuccessorCoverageProof(
+                successor=frozen_source,
+                baseline_dataset_sha256=inventory.dataset_sha256,
+                covered_metric_count=work.covered_metric_count,
+                covered_diagnostic_count=work.covered_diagnostic_count,
+                comparison_sha256=digest,
+                verifier_tree_fingerprint=tree,
+                verified_at=comparison.verified_at,
+            )
+            bound = ProgressReconciliation.model_validate(
+                {
+                    **progress.model_dump(),
+                    "phase": "SUCCESSOR_BOUND",
+                    "coverage": coverage,
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+            certificate = reconciler._publish(bound)
+        return ProgressReconciliationReceipt(
+            reconciliation=bound,
+            certificate=certificate,
+            stage="successor_bound",
+            recorded_at=datetime.now(UTC),
+        )
 
 
 class WorkspaceV2MigrationProgress(ContractModel):
@@ -394,6 +2216,10 @@ def migrate_workspace_v1_to_v2(
     reconcile_source: bool = False,
     frozen_source: FrozenSourceCut | None = None,
     analytical_failure_injector: Callable[[str], None] | None = None,
+    reconciliation_id: UUID | None = None,
+    reconciliation_admission_path: Path | None = None,
+    baseline_code_root: Path | None = None,
+    core_baseline_path: Path | None = None,
 ) -> WorkspaceV2MigrationSummary:
     """Migrate an unchanged v1 source into a disjoint, resumable v2 workspace."""
     if (
@@ -406,6 +2232,24 @@ def migrate_workspace_v1_to_v2(
         raise WorkspaceV2MigrationError("migration reserve bytes must be a non-negative integer")
     if host_free_bytes is None:
         raise WorkspaceV2MigrationError("migration requires an explicit host capacity reader")
+    if (
+        (reconciliation_id is None) != (core_baseline_path is None)
+        or (reconciliation_id is None) != (reconciliation_admission_path is None)
+        or (reconciliation_id is None and baseline_code_root is not None)
+    ):
+        raise WorkspaceV2MigrationError("migration reconciliation bindings are incomplete")
+    if reconciliation_id is not None:
+        if frozen_source is None or reconcile_source:
+            raise WorkspaceV2MigrationError("migration reconciliation requires a live frozen cut")
+        assert reconciliation_admission_path is not None
+        verify_recovered_successor(
+            service=service,
+            destination_root=destination_root,
+            reconciliation_id=reconciliation_id,
+            frozen_source=frozen_source,
+            admission_path=reconciliation_admission_path,
+            baseline_code_root=baseline_code_root,
+        )
     _require_host_capacity(host_free_bytes, reserve_bytes=reserve_bytes)
     _emit(progress, "inspection_started")
     source_paths = service.resolve(source_root)
@@ -418,7 +2262,10 @@ def migrate_workspace_v1_to_v2(
         if reconcile_source
         else None
     )
-    source_inspection = service.inspect(source_paths.root)
+    quiescence = _live_quiescent_source(source_paths.root, frozen_source)
+    source_inspection = (
+        service.inspect(source_paths.root) if quiescence is None else quiescence.inspection
+    )
     if (
         source_inspection.format_version != 1
         or source_inspection.errors
@@ -428,7 +2275,11 @@ def migrate_workspace_v1_to_v2(
     _emit(progress, "inspection_completed")
     _require_host_capacity(host_free_bytes, reserve_bytes=reserve_bytes)
     _emit(progress, "source_hash_started")
-    fingerprint = source_fingerprint(service, source_paths.root)
+    fingerprint = (
+        source_fingerprint(service, source_paths.root)
+        if quiescence is None
+        else quiescence.cut.source_fingerprint
+    )
     if snapshot is not None and snapshot.source_fingerprint != fingerprint:
         raise WorkspaceV2MigrationError("migration source snapshot fingerprint changed")
     if frozen_source is not None:
@@ -493,10 +2344,18 @@ def migrate_workspace_v1_to_v2(
                 ) from error
         transition = service.v2_source_transition(initialized.paths)
         if frozen_source is not None:
-            if transition is not None:
+            if (
+                transition is not None
+                and transition.phase is not WorkspaceV2MigrationPhase.COMPLETE
+            ):
                 raise WorkspaceV2MigrationError(
-                    "frozen source cut conflicts with an existing snapshot transition"
+                    "frozen source cut conflicts with an incomplete snapshot transition"
                 )
+            # A/B provenance and cursors remain intact. F owns separate files;
+            # its complete bounded traversal uses save_many's identity anti-join.
+            transition = None
+            historic_fingerprint = None
+            historic_raw_digest = None
         elif transition is None:
             transition = WorkspaceV2SourceTransitionState(
                 phase=WorkspaceV2MigrationPhase.PREPARED,
@@ -547,6 +2406,16 @@ def migrate_workspace_v1_to_v2(
     ):
         if not isinstance(destination.store, WorkspaceV2Store):
             raise WorkspaceV2MigrationError("migration destination did not open workspace v2")
+        core_reference = (
+            None
+            if core_baseline_path is None
+            else reconciliation_file_reference(core_baseline_path, "control")
+        )
+        if core_reference is not None:
+            assert frozen_source is not None and reconciliation_admission_path is not None
+            _require_recovered_core(
+                destination, frozen_source, core_reference, reconciliation_admission_path
+            )
         for asset in source.assets.list_all():
             destination.assets.upsert(asset)
         for definition in source.sources.list_all():
@@ -559,22 +2428,37 @@ def migrate_workspace_v1_to_v2(
         _emit(progress, "documents_completed")
         _require_host_capacity(host_free_bytes, reserve_bytes=reserve_bytes)
         staging = destination.store.raw_staging
-        raw = RawV2Importer(
-            source,
-            staging,
-            source_workspace_id=str(source_inspection.workspace_id),
-            source_fingerprint=fingerprint,
-            historic_source_fingerprint=historic_fingerprint,
-            progress=(
-                lambda event: _emit(
-                    progress,
-                    _raw_phase(event).phase,
-                    confirmed_count=event.confirmed_count,
-                    page_count=event.page_count,
-                    page_size=event.page_size,
-                )
-            ),
-        ).run(page_limit=page_limit)
+        if core_reference is None:
+            raw = RawV2Importer(
+                source,
+                staging,
+                source_workspace_id=str(source_inspection.workspace_id),
+                source_fingerprint=fingerprint,
+                destination_connection=(
+                    None if frozen_source is None else destination.store.connection
+                ),
+                historic_source_fingerprint=historic_fingerprint,
+                epoch=None if frozen_source is None else frozen_source.operation_id,
+                progress=(
+                    lambda event: _emit(
+                        progress,
+                        _raw_phase(event).phase,
+                        confirmed_count=event.confirmed_count,
+                        page_count=event.page_count,
+                        page_size=event.page_size,
+                    )
+                ),
+            ).run(page_limit=page_limit)
+        else:
+            assert frozen_source is not None and reconciliation_admission_path is not None
+            raw = _append_recovered_raw(
+                source=source,
+                destination=destination,
+                frozen_source=frozen_source,
+                core_baseline=core_reference,
+                admission_path=reconciliation_admission_path,
+                page_limit=page_limit,
+            )
         if transition is not None and transition.phase is not WorkspaceV2MigrationPhase.COMPLETE:
             transition = service.advance_v2_source_transition(
                 destination_paths=initialized.paths,
@@ -588,28 +2472,49 @@ def migrate_workspace_v1_to_v2(
             )
         _require_host_capacity(host_free_bytes, reserve_bytes=reserve_bytes)
         _emit(progress, "observations_started")
-        observations = ObservationV2Importer(
-            source,
-            staging,
-            source_workspace_id=str(source_inspection.workspace_id),
-            source_fingerprint=fingerprint,
-            raw_digest=raw.corpus_digest,
-            historic_source_fingerprint=historic_fingerprint,
-            historic_raw_digest=historic_raw_digest,
-            progress=(
-                lambda event: _emit(
-                    progress,
-                    _observation_phase(event).phase,
-                    confirmed_count=event.confirmed_count,
-                    page_count=event.page_count,
-                    page_size=event.page_size,
-                )
-            ),
-        ).run(page_limit=page_limit)
+        if core_reference is None:
+            observations = ObservationV2Importer(
+                source,
+                staging,
+                source_workspace_id=str(source_inspection.workspace_id),
+                source_fingerprint=fingerprint,
+                raw_digest=raw.corpus_digest,
+                historic_source_fingerprint=historic_fingerprint,
+                historic_raw_digest=historic_raw_digest,
+                epoch=None if frozen_source is None else frozen_source.operation_id,
+                progress=(
+                    lambda event: _emit(
+                        progress,
+                        _observation_phase(event).phase,
+                        confirmed_count=event.confirmed_count,
+                        page_count=event.page_count,
+                        page_size=event.page_size,
+                    )
+                ),
+            ).run(page_limit=page_limit)
+        else:
+            assert frozen_source is not None and reconciliation_admission_path is not None
+            observations = _append_recovered_observations(
+                source=source,
+                destination=destination,
+                frozen_source=frozen_source,
+                core_baseline=core_reference,
+                admission_path=reconciliation_admission_path,
+                raw_digest=raw.corpus_digest,
+                page_limit=page_limit,
+            )
+            _publish_recovered_core_comparison(
+                destination,
+                frozen_source,
+                core_reference,
+                reconciliation_admission_path,
+                raw,
+                observations,
+            )
         _emit(progress, "observations_completed")
         _require_host_capacity(host_free_bytes, reserve_bytes=reserve_bytes)
         _emit(progress, "analytical_started")
-        analytical = WorkspaceV2AnalyticalImporter(
+        analytical_importer = WorkspaceV2AnalyticalImporter(
             DirectHistoricalAnalyticalSource(source),
             CompactAnalyticalStore(destination.store.connection),
             source_root=source_paths.root,
@@ -620,8 +2525,19 @@ def migrate_workspace_v1_to_v2(
             page_limit=page_limit,
             allow_source_transition=transition is not None or frozen_source is not None,
             direct_transport=True,
+            epoch=None if frozen_source is None else frozen_source.operation_id,
+            frozen_source=frozen_source,
+            source_snapshot=snapshot,
             failure_injector=analytical_failure_injector,
-        ).run()
+        )
+        if reconciliation_id is not None:
+            assert reconciliation_admission_path is not None
+            analytical_importer.bind_recovered_successor(
+                reconciliation_id=reconciliation_id,
+                admission_path=reconciliation_admission_path,
+                baseline_code_root=baseline_code_root,
+            )
+        analytical = analytical_importer.run()
         historical = analytical
         _emit(progress, "historical_completed")
         _emit(progress, "analytical_completed")

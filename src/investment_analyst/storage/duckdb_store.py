@@ -8,6 +8,7 @@ from duckdb import DuckDBPyConnection
 
 from investment_analyst.storage.errors import StorageError, StorageSchemaError
 from investment_analyst.storage.paths import StoragePaths
+from investment_analyst.storage.resource_policy import DuckDBResourcePolicy, connect_duckdb
 
 SCHEMA_VERSION = 1
 DEFAULT_MEMORY_LIMIT = "2GB"
@@ -17,9 +18,16 @@ DEFAULT_THREADS = 2
 class DuckDBStore:
     """Own one explicit persistent DuckDB connection."""
 
-    def __init__(self, paths: StoragePaths, *, read_only: bool = False) -> None:
+    def __init__(
+        self,
+        paths: StoragePaths,
+        *,
+        read_only: bool = False,
+        resource_policy: DuckDBResourcePolicy | None = None,
+    ) -> None:
         self.paths = paths
         self.read_only = read_only
+        self._resource_policy = resource_policy
         self._connection: DuckDBPyConnection | None = None
 
     @property
@@ -46,10 +54,10 @@ class DuckDBStore:
         # DuckDB requires every connection to one database in a process to use the same
         # physical configuration. Keep the existing writer configuration and enforce the
         # read-only capability through a transaction before any reader query or validation.
-        self._connection = duckdb.connect(str(self.paths.database_path), read_only=False)
+        self._connection = connect_duckdb(
+            self.paths.database_path, read_only=False, policy=self._resource_policy
+        )
         try:
-            self.connection.execute(f"SET memory_limit = '{DEFAULT_MEMORY_LIMIT}'")
-            self.connection.execute(f"SET threads = {DEFAULT_THREADS}")
             if self.read_only:
                 self.connection.execute("BEGIN TRANSACTION READ ONLY")
                 self._validate_schema()

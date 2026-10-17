@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections import defaultdict, deque
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from duckdb import DuckDBPyConnection
@@ -40,10 +43,17 @@ from investment_analyst.storage.errors import (
     StorageError,
     StorageSchemaError,
 )
+from investment_analyst.storage.resource_policy import execute_with_resource_budget
 from investment_analyst.storage.serialization import canonical_json_bytes, sha256_hex
 from investment_analyst.workspace.workspace_v2_migration_models import (
+    HistoricalTransition,
     WorkspaceV2MigrationVerificationProof,
 )
+
+if TYPE_CHECKING:
+    from investment_analyst.storage.historical_analytical_import import (
+        DirectHistoricalAnalyticalSource,
+    )
 
 _BATCH = 256
 _QUERY_CHUNK = 240
@@ -370,6 +380,17 @@ class CompactAnalyticalStore:
 
     def __init__(self, connection: DuckDBPyConnection) -> None:
         self._connection = connection
+        self._transition: HistoricalTransition | None = None
+        self._transition_reader: DirectHistoricalAnalyticalSource | None = None
+        self._transition_counts = {"metrics": 0, "diagnostics": 0}
+        self._transition_digests = {
+            "metrics": hashlib.sha256(b"").hexdigest(),
+            "diagnostics": hashlib.sha256(b"").hexdigest(),
+        }
+        self._transition_last: dict[str, tuple[datetime, str]] = {}
+        self._transition_checksum_page: object | None = None
+        self._transition_page_checksums: dict[UUID, str] = {}
+        self._verified_parent: tuple[Path, str, HistoricalAnalyticalSeal] | None = None
 
     def ensure(self, *, create: bool) -> None:
         ensure_compact_analytical_tables(self._connection, create=create)
@@ -809,10 +830,28 @@ class CompactAnalyticalStore:
             raise ValueError("workspace v2 cursor must be timezone-aware")
 
     def save_metrics(
+        self, results: Collection[MetricResult], *, origin: Literal["HISTORICAL", "LIVE"] = "LIVE"
+    ) -> BatchWriteReceipt:
+        return self._save_metrics(results, origin=origin)
+
+    def append_transition_metrics(
+        self, transition: HistoricalTransition, results: Collection[MetricResult]
+    ) -> BatchWriteReceipt:
+        existing = self._transition_existing_ids(transition, results, "metrics")
+        missing = [item for item in results if item.result_id not in existing]
+        receipt = self._save_metrics(missing, origin="HISTORICAL", transition=transition)
+        return BatchWriteReceipt(
+            created_ids=receipt.created_ids,
+            reused_ids=tuple(item.result_id for item in results if item.result_id in existing)
+            + receipt.reused_ids,
+        )
+
+    def _save_metrics(
         self,
         results: Collection[MetricResult],
         *,
         origin: Literal["HISTORICAL", "LIVE"] = "LIVE",
+        transition: HistoricalTransition | None = None,
     ) -> BatchWriteReceipt:
         typed = tuple(results)
         if origin not in _ORIGINS:
@@ -845,9 +884,29 @@ class CompactAnalyticalStore:
                 exclude={"computed_at"}
             ):
                 raise RecordConflictError(f"metric identifier {identifier} has conflicting content")
+        if transition is not None:
+            self._require_transition(transition)
+            for identifier, existing in existing_models.items():
+                if existing != unique[identifier]:
+                    raise RecordConflictError("historical transition changes canonical content")
+            origins = (
+                _id_query(
+                    self._connection,
+                    table=_METRIC_TABLE,
+                    key_column="result_id",
+                    columns="origin",
+                    identifiers=[str(identifier) for identifier in existing_ids],
+                )
+                if existing_ids
+                else []
+            )
+            if any(str(row[0]) != "HISTORICAL" for row in origins):
+                raise CompactAnalyticalError("historical transition collides with LIVE provenance")
         new_items = [item for identifier, item in unique.items() if identifier not in existing_ids]
         if origin == "HISTORICAL" and new_items and self.historical_seal() is not None:
-            raise CompactAnalyticalError("sealed historical analytical rows are immutable")
+            if transition is None:
+                raise CompactAnalyticalError("sealed historical analytical rows are immutable")
+            self._require_transition(transition)
         if origin == "LIVE" and new_items:
             self._require_metric_inputs_visible(new_items)
 
@@ -983,6 +1042,29 @@ class CompactAnalyticalStore:
         *,
         origin: Literal["HISTORICAL", "LIVE"] = "LIVE",
     ) -> BatchWriteReceipt:
+        return self._save_diagnostics(results, origin=origin)
+
+    def append_transition_diagnostics(
+        self, transition: HistoricalTransition, results: Collection[DiagnosticResult]
+    ) -> BatchWriteReceipt:
+        existing = self._transition_existing_ids(transition, results, "diagnostics")
+        missing = [item for item in results if item.diagnostic_id not in existing]
+        receipt = self._save_diagnostics(missing, origin="HISTORICAL", transition=transition)
+        return BatchWriteReceipt(
+            created_ids=receipt.created_ids,
+            reused_ids=tuple(
+                item.diagnostic_id for item in results if item.diagnostic_id in existing
+            )
+            + receipt.reused_ids,
+        )
+
+    def _save_diagnostics(
+        self,
+        results: Collection[DiagnosticResult],
+        *,
+        origin: Literal["HISTORICAL", "LIVE"] = "LIVE",
+        transition: HistoricalTransition | None = None,
+    ) -> BatchWriteReceipt:
         typed = tuple(results)
         if origin not in _ORIGINS:
             raise ValueError("workspace v2 diagnostic origin is invalid")
@@ -1015,9 +1097,29 @@ class CompactAnalyticalStore:
                 raise RecordConflictError(
                     f"diagnostic identifier {identifier} has conflicting content"
                 )
+        if transition is not None:
+            self._require_transition(transition)
+            for identifier, existing in existing_models.items():
+                if existing != unique[identifier]:
+                    raise RecordConflictError("historical transition changes canonical content")
+            origins = (
+                _id_query(
+                    self._connection,
+                    table=_DIAGNOSTIC_TABLE,
+                    key_column="diagnostic_id",
+                    columns="origin",
+                    identifiers=[str(identifier) for identifier in existing_ids],
+                )
+                if existing_ids
+                else []
+            )
+            if any(str(row[0]) != "HISTORICAL" for row in origins):
+                raise CompactAnalyticalError("historical transition collides with LIVE provenance")
         new_items = [item for identifier, item in unique.items() if identifier not in existing_ids]
         if origin == "HISTORICAL" and new_items and self.historical_seal() is not None:
-            raise CompactAnalyticalError("sealed historical analytical rows are immutable")
+            if transition is None:
+                raise CompactAnalyticalError("sealed historical analytical rows are immutable")
+            self._require_transition(transition)
         if origin == "LIVE" and new_items:
             self._require_diagnostic_metrics_visible(new_items, validate_domain=True)
 
@@ -1742,6 +1844,630 @@ class CompactAnalyticalStore:
         ).fetchone()
         return row is not None and int(row[0]) == 1
 
+    def write_parent_membership(self, path: Path, *, page_limit: int) -> str:
+        """Seal a bounded ID/hash inventory while the parent seal is still current."""
+        seal = self.historical_seal()
+        if seal is None:
+            raise CompactAnalyticalError("historical parent seal is missing")
+        if path.is_symlink():
+            raise CompactAnalyticalError("parent membership is unsafe")
+        temporary = path.with_name(path.name + ".partial")
+        if temporary.is_symlink():
+            raise CompactAnalyticalError("partial parent membership is unsafe")
+        digest = hashlib.sha256()
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            existing = stack.enter_context(path.open("rb")) if path.exists() else None
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600
+            )
+            handle = stack.enter_context(os.fdopen(descriptor, "wb"))
+            for family, table, key in (
+                ("metrics", _METRIC_TABLE, "result_id"),
+                ("diagnostics", _DIAGNOSTIC_TABLE, "diagnostic_id"),
+            ):
+                cursor = self._connection.cursor()
+                try:
+                    result = cursor.execute(
+                        f"SELECT {key}, checksum_sha256 FROM {table} "
+                        f"WHERE origin='HISTORICAL' ORDER BY {key}"
+                    )
+                    while rows := result.fetchmany(page_limit):
+                        for identifier, checksum in rows:
+                            line = (
+                                json.dumps(
+                                    [family, str(identifier), str(checksum)], separators=(",", ":")
+                                ).encode()
+                                + b"\n"
+                            )
+                            if existing is not None and existing.readline(1024) != line:
+                                raise CompactAnalyticalError("sealed parent membership differs")
+                            handle.write(line)
+                            digest.update(line)
+                finally:
+                    cursor.close()
+            if existing is not None and existing.read(1):
+                raise CompactAnalyticalError("sealed parent membership has extra rows")
+            # Bind the immutable persisted checksum inventory to the parent seal.
+            # Canonical model bytes are independently verified in the mandatory
+            # paired F traversal, which must cover every parent ID before sealing.
+            # This control pass never hydrates a second copy of the parent corpus.
+            inventory: list[int | str] = []
+            for table, key in ((_METRIC_TABLE, "result_id"), (_DIAGNOSTIC_TABLE, "diagnostic_id")):
+                cursor = self._connection.execute(
+                    f"SELECT checksum_sha256 FROM {table} WHERE origin='HISTORICAL' "
+                    f"ORDER BY available_at, {key}"
+                )
+                count, folded = 0, hashlib.sha256(b"").hexdigest()
+                while checksums := cursor.fetchmany(page_limit):
+                    for row in checksums:
+                        folded = hashlib.sha256(f"{folded}:{row[0]}".encode("ascii")).hexdigest()
+                        count += 1
+                inventory.extend((count, folded))
+            if tuple(inventory) != (
+                seal.metric_count,
+                seal.metric_digest,
+                seal.diagnostic_count,
+                seal.diagnostic_digest,
+            ):
+                raise CompactAnalyticalError("historical parent inventory differs")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.exists():
+            temporary.unlink()
+        else:
+            temporary.replace(path)
+        descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        self._verified_parent = (path, digest.hexdigest(), seal)
+        return digest.hexdigest()
+
+    def verify_parent_membership(self, transition: HistoricalTransition) -> str:
+        """Preservation is membership by ID and canonical bytes, never a time prefix."""
+        path = transition.parent_membership_path
+        if path.is_symlink() or not path.is_file():
+            raise CompactAnalyticalError("parent membership is unsafe or missing")
+        digest = hashlib.sha256()
+        counts = {"metrics": 0, "diagnostics": 0}
+        previous: tuple[int, str] | None = None
+        with path.open("rb") as handle:
+            while True:
+                page: list[tuple[str, UUID, str]] = []
+                for _ in range(transition.page_limit):
+                    line = handle.readline(1024)
+                    if not line:
+                        break
+                    if len(line) == 1024 or not line.endswith(b"\n"):
+                        raise CompactAnalyticalError("parent membership row is invalid")
+                    digest.update(line)
+                    try:
+                        family, identifier, checksum = json.loads(line)
+                        if family not in counts or not isinstance(checksum, str):
+                            raise ValueError
+                        order = (0 if family == "metrics" else 1, identifier)
+                        if previous is not None and order <= previous:
+                            raise ValueError
+                        previous = order
+                        page.append((family, UUID(identifier), checksum))
+                    except (ValueError, TypeError) as error:
+                        raise CompactAnalyticalError("parent membership row is invalid") from error
+                if not page:
+                    break
+                for family in counts:
+                    identifiers = [identifier for kind, identifier, _ in page if kind == family]
+                    table = _METRIC_TABLE if family == "metrics" else _DIAGNOSTIC_TABLE
+                    key = "result_id" if family == "metrics" else "diagnostic_id"
+                    rows = (
+                        _id_query(
+                            self._connection,
+                            table=table,
+                            key_column=key,
+                            columns=f"{key}, origin, checksum_sha256",
+                            identifiers=[str(identifier) for identifier in identifiers],
+                        )
+                        if identifiers
+                        else []
+                    )
+                    origins = {UUID(str(row[0])): (str(row[1]), str(row[2])) for row in rows}
+                    for kind, identifier, checksum in page:
+                        if kind != family:
+                            continue
+                        if origins.get(identifier) != ("HISTORICAL", checksum):
+                            raise CompactAnalyticalError(
+                                "historical parent member changed or missing"
+                            )
+                        counts[family] += 1
+        if (
+            digest.hexdigest() != transition.parent_membership_sha256
+            or counts["metrics"] != transition.parent_seal.metric_count
+            or counts["diagnostics"] != transition.parent_seal.diagnostic_count
+        ):
+            raise CompactAnalyticalError("historical parent membership seal differs")
+        return digest.hexdigest()
+
+    def _validate_transition_binding(self, transition: HistoricalTransition) -> None:
+        # Import locally: WorkspaceService constructs storage through this module.
+        from investment_analyst.storage.paths import StoragePaths
+        from investment_analyst.storage.workspace_v2_inventory import (
+            historical_transition_fingerprints,
+        )
+        from investment_analyst.workspace.service import WorkspaceService
+        from investment_analyst.workspace.workspace_v2_migration import (
+            _live_quiescent_source,
+            load_v1_migration_source_snapshot,
+            source_fingerprint,
+        )
+        from investment_analyst.workspace.workspace_v2_migration_models import (
+            HistoricalFrozenSource,
+        )
+
+        try:
+            HistoricalTransition.model_validate(transition.model_dump())
+        except ValueError as error:
+            raise CompactAnalyticalError("historical transition contract is invalid") from error
+        tree, environment = historical_transition_fingerprints(
+            transition.page_limit, "direct-historical-import-v1"
+        )
+        if (transition.tree_fingerprint, transition.environment_fingerprint) != (tree, environment):
+            raise CompactAnalyticalError("historical transition code/environment binding differs")
+        service = WorkspaceService()
+        if isinstance(transition.source, HistoricalFrozenSource):
+            live = _live_quiescent_source(transition.source_root, transition.source.cut)
+        else:
+            live = None
+            snapshot = load_v1_migration_source_snapshot(
+                service=service,
+                snapshot_root=transition.source_root,
+            )
+            if snapshot != transition.source.snapshot:
+                raise CompactAnalyticalError("historical transition snapshot binding differs")
+        fingerprint = (
+            live.cut.source_fingerprint
+            if live is not None
+            else source_fingerprint(service, transition.source_root)
+        )
+        if fingerprint != transition.source_fingerprint:
+            raise CompactAnalyticalError("historical transition source changed")
+        source = service.manifest(transition.source_root)
+        destination = service.manifest(transition.destination_root)
+        expected_db = StoragePaths.from_workspace_root(
+            transition.destination_root,
+            format_version=2,
+            workspace_id=destination.workspace_id,
+        ).database_path
+        databases = self._connection.execute("PRAGMA database_list").fetchall()
+        if (
+            source.workspace_id != transition.source_workspace_id
+            or source.created_at != transition.source_created_at
+            or destination.workspace_id != transition.destination_workspace_id
+            or destination.format_version != 2
+            or not any(row[2] and Path(str(row[2])).resolve() == expected_db for row in databases)
+            or sha256_hex(canonical_json_bytes(transition.parent_seal))
+            != transition.parent_seal_sha256
+        ):
+            raise CompactAnalyticalError(
+                "historical transition manifest/connection binding differs"
+            )
+
+    def _require_transition(self, transition: HistoricalTransition) -> None:
+        if self._transition is not transition or transition.phase != "APPLYING":
+            raise CompactAnalyticalError("historical append requires the active bound transition")
+
+    @contextmanager
+    def historical_transition(
+        self,
+        transition: HistoricalTransition,
+        *,
+        source: DirectHistoricalAnalyticalSource,
+    ) -> Iterator[None]:
+        """One writer-scoped capability; ordinary save methods remain immutable."""
+        from investment_analyst.workspace.backup import _workspace_process_guard
+
+        if self._transition is not None or transition.phase != "APPLYING":
+            raise CompactAnalyticalError("historical transition is not applicable")
+        self._validate_transition_binding(transition)
+        source.validate_transition_source(transition.source_root, transition.source_workspace_id)
+        with _workspace_process_guard(transition.destination_root):
+            if self._verified_parent != (
+                transition.parent_membership_path,
+                transition.parent_membership_sha256,
+                HistoricalAnalyticalSeal.model_validate(transition.parent_seal.model_dump()),
+            ):
+                self.verify_parent_membership(transition)
+            seal = self.historical_seal()
+            if seal is None or seal.model_dump() != transition.parent_seal.model_dump():
+                raise CompactAnalyticalError("historical transition parent seal differs")
+            self._transition = transition
+            self._transition_reader = source
+            self._transition_counts = {"metrics": 0, "diagnostics": 0}
+            self._transition_digests = {
+                "metrics": hashlib.sha256(b"").hexdigest(),
+                "diagnostics": hashlib.sha256(b"").hexdigest(),
+            }
+            self._transition_last = {}
+            try:
+                yield
+            finally:
+                self._transition = None
+                self._transition_reader = None
+                self._transition_checksum_page = None
+                self._transition_page_checksums = {}
+                self._verified_parent = None
+
+    @contextmanager
+    def recovered_historical_transition(
+        self,
+        transition: HistoricalTransition,
+        *,
+        source: DirectHistoricalAnalyticalSource,
+        reconciliation_id: UUID,
+        admission_path: Path,
+        baseline_code_root: Path | None,
+    ) -> Iterator[None]:
+        """Append only through exact recovered W coverage and live F1 authority."""
+        from investment_analyst.storage.resource_policy import execute_bounded
+        from investment_analyst.workspace.backup import _workspace_process_guard
+        from investment_analyst.workspace.service import WorkspaceService
+        from investment_analyst.workspace.workspace_v2_migration import (
+            _SuccessorComparison,
+            verify_recovered_successor,
+        )
+        from investment_analyst.workspace.workspace_v2_migration_models import (
+            HistoricalFrozenSource,
+        )
+
+        if (
+            self._transition is not None
+            or transition.phase != "APPLYING"
+            or not isinstance(transition.source, HistoricalFrozenSource)
+        ):
+            raise CompactAnalyticalError("recovered historical transition is not applicable")
+        receipt = verify_recovered_successor(
+            service=WorkspaceService(),
+            destination_root=transition.destination_root,
+            reconciliation_id=reconciliation_id,
+            frozen_source=transition.source.cut,
+            admission_path=admission_path,
+            baseline_code_root=baseline_code_root,
+        )
+        progress = receipt.reconciliation
+        assert progress.inventory is not None and progress.coverage is not None
+        if (
+            transition.parent_membership_path != progress.parent_membership.path
+            or transition.parent_membership_sha256 != progress.parent_membership.sha256
+            or transition.parent_seal != progress.parent_seal
+        ):
+            raise CompactAnalyticalError("recovered historical parent differs")
+        self._validate_transition_binding(transition)
+        source.validate_transition_source(transition.source_root, transition.source_workspace_id)
+        comparison_path = (
+            transition.destination_root
+            / "state"
+            / (
+                f"progress-successor-comparison.{transition.operation_id}."
+                f"{progress.coverage.comparison_sha256}.json"
+            )
+        )
+        comparison = _SuccessorComparison.model_validate_json(comparison_path.read_bytes())
+        with _workspace_process_guard(transition.destination_root):
+            seal = self.historical_seal()
+            if seal is None or seal.model_dump() != transition.parent_seal.model_dump():
+                raise CompactAnalyticalError("recovered historical seal differs")
+            execute_bounded(
+                self._connection,
+                "CREATE TEMP TABLE _recovered_transition_w AS SELECT "
+                "json_extract_string(json,'$[0]') AS family_name,"
+                "CAST(json_extract_string(json,'$[1]') AS UUID) AS identifier,"
+                "json_extract_string(json,'$[2]') AS digest "
+                "FROM read_json_objects(?,format='newline_delimited',maximum_object_size=1024)",
+                [
+                    [
+                        str(progress.parent_membership.path),
+                        str(progress.inventory.delta_membership.path),
+                    ]
+                ],
+            )
+            try:
+                duplicate = execute_bounded(
+                    self._connection,
+                    "SELECT 1 FROM _recovered_transition_w GROUP BY family_name,identifier "
+                    "HAVING count(*)<>1 LIMIT 1",
+                ).fetchone()
+                counts = execute_bounded(
+                    self._connection,
+                    "SELECT count(*) FILTER(WHERE family_name='metrics'),"
+                    "count(*) FILTER(WHERE family_name='diagnostics') FROM _recovered_transition_w",
+                ).fetchone()
+                if duplicate is not None or counts != (
+                    progress.inventory.metric_count,
+                    progress.inventory.diagnostic_count,
+                ):
+                    raise CompactAnalyticalError("recovered membership coverage differs")
+                for family, table, key in (
+                    ("metrics", _METRIC_TABLE, "result_id"),
+                    ("diagnostics", _DIAGNOSTIC_TABLE, "diagnostic_id"),
+                ):
+                    mismatch = execute_bounded(
+                        self._connection,
+                        f"SELECT 1 FROM _recovered_transition_w w LEFT JOIN {table} t "
+                        f"ON w.identifier=CAST(t.{key} AS UUID) WHERE w.family_name=? "
+                        f"AND (t.{key} IS NULL OR t.origin<>'HISTORICAL' "
+                        "OR t.checksum_sha256<>w.digest) LIMIT 1",
+                        [family],
+                    ).fetchone()
+                    if mismatch is not None:
+                        raise CompactAnalyticalError("recovered historical member changed")
+            finally:
+                execute_bounded(self._connection, "DROP TABLE _recovered_transition_w")
+            self._transition = transition
+            self._transition_reader = source
+            self._transition_counts = {"metrics": 0, "diagnostics": 0}
+            self._transition_digests = {
+                "metrics": hashlib.sha256(b"").hexdigest(),
+                "diagnostics": hashlib.sha256(b"").hexdigest(),
+            }
+            self._transition_last = {}
+            self._recovered_inventory = (
+                comparison.work.metric_count,
+                comparison.work.metric_digest,
+                comparison.work.diagnostic_count,
+                comparison.work.diagnostic_digest,
+            )
+            try:
+                yield
+            finally:
+                self._transition = None
+                self._transition_reader = None
+                self._transition_checksum_page = None
+                self._transition_page_checksums = {}
+                self._recovered_inventory = None
+
+    def publish_recovered_transition_seal(
+        self,
+        transition: HistoricalTransition,
+        *,
+        proof: WorkspaceV2MigrationVerificationProof,
+        sealed_at: datetime,
+    ) -> HistoricalAnalyticalSeal:
+        """Compare the full final ordered inventory, without hydrating W again."""
+        from investment_analyst.storage.resource_policy import connect_duckdb, execute_bounded
+
+        self._require_transition(transition)
+        expected = self._recovered_inventory
+        if expected is None:
+            raise CompactAnalyticalError("recovered final inventory authority is missing")
+        actual: list[int | str] = []
+        cursor = connect_duckdb(
+            str(transition.destination_root / "storage/v2/index.duckdb"), read_only=False
+        )
+        try:
+            for table, key in ((_METRIC_TABLE, "result_id"), (_DIAGNOSTIC_TABLE, "diagnostic_id")):
+                execute_bounded(
+                    cursor,
+                    f"SELECT checksum_sha256 FROM {table} WHERE origin='HISTORICAL' "
+                    f"ORDER BY available_at,{key}",
+                )
+                count, digest = 0, hashlib.sha256(b"").hexdigest()
+                while rows := cursor.fetchmany(transition.page_limit):
+                    for row in rows:
+                        digest = hashlib.sha256(f"{digest}:{row[0]}".encode()).hexdigest()
+                        count += 1
+                actual.extend((count, digest))
+        finally:
+            cursor.close()
+        if tuple(actual) != expected:
+            raise CompactAnalyticalError("recovered final inventory differs from F1")
+        self._transition_counts = {"metrics": expected[0], "diagnostics": expected[2]}
+        self._transition_digests = {"metrics": expected[1], "diagnostics": expected[3]}
+        # The existing publisher retains all proof/source/count/parent checks,
+        # runs one complete optimized relationship verification and archives B.
+        return self.publish_transition_seal(
+            transition, inventory=expected, proof=proof, sealed_at=sealed_at
+        )
+
+    def verify_transition_archive(self, transition: HistoricalTransition) -> None:
+        self._validate_transition_binding(transition)
+        parent = transition.parent_seal
+        try:
+            row = self._connection.execute(
+                "SELECT count(*) FROM workspace_v2_historical_seal_history WHERE "
+                "source_fingerprint=? AND metric_count=? AND metric_digest=? AND "
+                "diagnostic_count=? AND diagnostic_digest=? AND sealed_at=?",
+                [
+                    parent.source_fingerprint,
+                    parent.metric_count,
+                    parent.metric_digest,
+                    parent.diagnostic_count,
+                    parent.diagnostic_digest,
+                    parent.sealed_at,
+                ],
+            ).fetchone()
+        except Exception as error:
+            raise CompactAnalyticalError("historical parent archive is missing") from error
+        if row is None or int(row[0]) != 1:
+            raise CompactAnalyticalError("historical parent archive is missing or duplicated")
+
+    def _transition_existing_ids(
+        self,
+        transition: HistoricalTransition,
+        page: Collection[MetricResult] | Collection[DiagnosticResult],
+        family: Literal["metrics", "diagnostics"],
+    ) -> set[UUID]:
+        self._require_transition(transition)
+        if (
+            not 1 <= len(page) <= _BATCH
+            or self._transition_reader is None
+            or not self._transition_reader.is_current_transition_page(page, family)
+        ):
+            raise CompactAnalyticalError("historical append is not a bound source page")
+        checksums = {
+            (item.result_id if isinstance(item, MetricResult) else item.diagnostic_id): sha256_hex(
+                canonical_json_bytes(item)
+            )
+            for item in page
+        }
+        table = _METRIC_TABLE if family == "metrics" else _DIAGNOSTIC_TABLE
+        key = "result_id" if family == "metrics" else "diagnostic_id"
+        rows = _id_query(
+            self._connection,
+            table=table,
+            key_column=key,
+            columns=f"{key}, origin, checksum_sha256",
+            identifiers=[str(i) for i in checksums],
+        )
+        existing: set[UUID] = set()
+        for identifier, origin, checksum in rows:
+            identifier = UUID(str(identifier))
+            if str(origin) != "HISTORICAL":
+                raise CompactAnalyticalError("historical transition collides with LIVE provenance")
+            if str(checksum) != checksums[identifier]:
+                raise RecordConflictError("historical transition changes canonical content")
+            existing.add(identifier)
+        self._transition_checksum_page = page
+        self._transition_page_checksums = checksums
+        return existing
+
+    def transition_family_inventory(
+        self,
+        transition: HistoricalTransition,
+        family: Literal["metrics", "diagnostics"],
+    ) -> tuple[int, str]:
+        self._require_transition(transition)
+        return self._transition_counts[family], self._transition_digests[family]
+
+    def compare_transition_page(
+        self,
+        transition: HistoricalTransition,
+        page: Collection[MetricResult] | Collection[DiagnosticResult],
+        family: Literal["metrics", "diagnostics"],
+    ) -> dict[UUID, MetricResult] | dict[UUID, DiagnosticResult]:
+        self._require_transition(transition)
+        if (
+            self._transition_reader is None
+            or not self._transition_reader.is_current_transition_page(page, family)
+        ):
+            raise CompactAnalyticalError("historical verification is not a bound source page")
+        identifiers = [
+            item.result_id if isinstance(item, MetricResult) else item.diagnostic_id
+            for item in page
+        ]
+        actual = (
+            self.get_existing_metrics(identifiers)
+            if family == "metrics"
+            else self.get_existing_diagnostics(identifiers)
+        )
+        for identifier, item in zip(identifiers, page, strict=True):
+            order = (item.available_at, str(identifier))
+            previous = self._transition_last.get(family)
+            if previous is not None and order <= previous:
+                raise CompactAnalyticalError("historical verification page order differs")
+            if actual.get(identifier) != item:
+                raise CompactAnalyticalError("historical verification source/destination differs")
+            checksum = (
+                self._transition_page_checksums[identifier]
+                if self._transition_checksum_page is page
+                else sha256_hex(canonical_json_bytes(item))
+            )
+            prior = self._transition_digests[family]
+            self._transition_digests[family] = hashlib.sha256(
+                f"{prior}:{checksum}".encode("ascii")
+            ).hexdigest()
+            self._transition_counts[family] += 1
+            self._transition_last[family] = order
+        return actual
+
+    def publish_transition_seal(
+        self,
+        transition: HistoricalTransition,
+        *,
+        inventory: tuple[int, str, int, str],
+        proof: WorkspaceV2MigrationVerificationProof,
+        sealed_at: datetime,
+    ) -> HistoricalAnalyticalSeal:
+        """Archive only seal metadata and atomically publish the verified new pointer."""
+        self._require_transition(transition)
+        digest = _historical_inventory_digest(inventory)
+        compared = (
+            self._transition_counts["metrics"],
+            self._transition_digests["metrics"],
+            self._transition_counts["diagnostics"],
+            self._transition_digests["diagnostics"],
+        )
+        if (
+            self._transition_reader is None
+            or compared != inventory
+            or self._transition_reader.transition_source_counts() != (inventory[0], inventory[2])
+        ):
+            raise CompactAnalyticalError(
+                "historical transition lacks complete paired source coverage"
+            )
+        if (
+            proof.operation_id != transition.operation_id
+            or proof.source_workspace_id != transition.source_workspace_id
+            or proof.destination_workspace_id != transition.destination_workspace_id
+            or proof.source_root != transition.source_root
+            or proof.destination_root != transition.destination_root
+            or proof.source_fingerprint != transition.source_fingerprint
+            or proof.tree_fingerprint != transition.tree_fingerprint
+            or proof.environment_fingerprint != transition.environment_fingerprint
+            or proof.snapshot_id != transition.operation_id
+            or proof.family != "analytical"
+            or proof.coverage_count != inventory[0] + inventory[2]
+            or proof.inventory_digest != digest
+            or proof.source_digest != digest
+            or proof.destination_digest != digest
+            or self.count_metrics(origin="HISTORICAL") != inventory[0]
+            or self.count_diagnostics(origin="HISTORICAL") != inventory[2]
+        ):
+            raise CompactAnalyticalError("historical transition final proof differs")
+        self.verify_historical_relationships()
+        parent = self.historical_seal()
+        if parent is None or parent.model_dump() != transition.parent_seal.model_dump():
+            raise CompactAnalyticalError("historical transition parent seal differs")
+        result = HistoricalAnalyticalSeal(
+            source_fingerprint=transition.source_fingerprint,
+            metric_count=inventory[0],
+            metric_digest=inventory[1],
+            diagnostic_count=inventory[2],
+            diagnostic_digest=inventory[3],
+            sealed_at=sealed_at,
+        )
+        with write_transaction(self._connection):
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS workspace_v2_historical_seal_history "
+                "(source_fingerprint VARCHAR NOT NULL, metric_count BIGINT NOT NULL, "
+                "metric_digest VARCHAR NOT NULL, diagnostic_count BIGINT NOT NULL, "
+                "diagnostic_digest VARCHAR NOT NULL, sealed_at TIMESTAMPTZ NOT NULL)"
+            )
+            self._connection.execute(
+                "INSERT INTO workspace_v2_historical_seal_history VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    parent.source_fingerprint,
+                    parent.metric_count,
+                    parent.metric_digest,
+                    parent.diagnostic_count,
+                    parent.diagnostic_digest,
+                    parent.sealed_at,
+                ],
+            )
+            self._connection.execute(
+                f"UPDATE {_SEAL_TABLE} SET source_fingerprint=?, metric_count=?, metric_digest=?, "
+                "diagnostic_count=?, diagnostic_digest=?, sealed_at=?",
+                [
+                    result.source_fingerprint,
+                    result.metric_count,
+                    result.metric_digest,
+                    result.diagnostic_count,
+                    result.diagnostic_digest,
+                    result.sealed_at,
+                ],
+            )
+        return result
+
     def historical_seal(self) -> HistoricalAnalyticalSeal | None:
         rows = self._connection.execute(
             f"SELECT source_fingerprint, metric_count, metric_digest, diagnostic_count, "
@@ -1888,17 +2614,216 @@ class CompactAnalyticalStore:
             raise CompactAnalyticalError("historical seal was not persisted")
         return result
 
-    def verify_historical_relationships(self) -> None:
-        """Verify global historical graph and raw bindings without rehydrating models."""
+    def verify_historical_relationships(self, *, read_only_units: bool = False) -> None:
+        """Resolve shared references once before projecting each parent invariant.
+
+        This checks existence, full coverage, type, asset and PIT. Content hashes
+        remain the responsibility of the typed inventory verifier.
+        """
         self.ensure(create=False)
-        raw_orphan = self._connection.execute(
+        raw_orphan = self._relationship_sql(
             "SELECT o.observation_id FROM normalized_observations_v2 o "
             "LEFT JOIN raw_v2_index r ON r.record_id = o.raw_record_id "
             "WHERE r.record_id IS NULL LIMIT 1"
         ).fetchone()
         if raw_orphan is not None:
             raise CompactAnalyticalError("workspace v2 observation has no raw record")
-        self._require_acyclic_inventory()
+        metric_references = _METRIC_TABLE
+        if self._legacy_metric_table_exists():
+            metric_references = (
+                f"(SELECT result_id, asset_id, available_at FROM {_METRIC_TABLE} "
+                "UNION ALL SELECT result_id, asset_id, CAST(available_at AS TIMESTAMPTZ) "
+                f"FROM metric_results_v2 legacy WHERE NOT EXISTS (SELECT 1 FROM {_METRIC_TABLE} "
+                "compact WHERE compact.result_id=legacy.result_id))"
+            )
+        try:
+            self._build_relationship_metadata(metric_references)
+            for column, link_type in (
+                ("observation_sequence_id", "metric-input-observation-v1"),
+                ("metric_sequence_id", "metric-input-result-v1"),
+            ):
+                invalid = self._relationship_sql(
+                    f"SELECT p.result_id FROM {_METRIC_TABLE} p LEFT JOIN "
+                    f"_workspace_v2_reference_sequences q ON q.sequence_id=p.{column} "
+                    f"WHERE {self._invalid_reference_metadata('p', link_type)} LIMIT 1"
+                ).fetchone()
+                if invalid is not None:
+                    raise CompactAnalyticalError(
+                        "historical metric reference is missing, foreign or future"
+                    )
+            component_invariant = self._invalid_reference_metadata(
+                "p", "diagnostic-component-metric-result-v1"
+            )
+            invalid = self._relationship_sql(
+                f"SELECT c.diagnostic_id FROM {_COMPONENT_TABLE} c "
+                f"LEFT JOIN {_DIAGNOSTIC_TABLE} p ON p.diagnostic_id=c.diagnostic_id "
+                "LEFT JOIN _workspace_v2_reference_sequences q "
+                "ON q.sequence_id=c.metric_sequence_id "
+                f"WHERE p.diagnostic_id IS NULL OR {component_invariant} "
+                "LIMIT 1"
+            ).fetchone()
+            evidence = self._relationship_sql(
+                f"SELECT e.diagnostic_id FROM {_EVIDENCE_TABLE} e "
+                f"LEFT JOIN {_DIAGNOSTIC_TABLE} p ON p.diagnostic_id=e.diagnostic_id "
+                f"LEFT JOIN {metric_references} child ON child.result_id=e.metric_result_id "
+                "WHERE p.diagnostic_id IS NULL OR child.result_id IS NULL "
+                "OR child.asset_id<>p.asset_id OR child.available_at>p.available_at LIMIT 1"
+            ).fetchone()
+            if invalid is not None or evidence is not None:
+                raise CompactAnalyticalError(
+                    "historical diagnostic evidence is missing, foreign or future"
+                )
+            self._require_acyclic_inventory(read_only_units=read_only_units)
+        finally:
+            self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_reference_sequences")
+            self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_reference_segments")
+
+    def _relationship_sql(
+        self, sql: str, parameters: Sequence[object] | None = None
+    ) -> DuckDBPyConnection:
+        return execute_with_resource_budget(self._connection, sql, parameters)
+
+    def profile_historical_relationships(
+        self,
+        on_measurement: Callable[[str, int], None] | None = None,
+        on_plan: Callable[[str, str], None] | None = None,
+    ) -> dict[str, int]:
+        """Measure compact graph cardinality without materializing its edges."""
+        self.ensure(create=False)
+        try:
+            self._build_relationship_metadata(_METRIC_TABLE)
+            self._prepare_metric_dependency_metadata()
+            output: dict[str, int] = {}
+            queries = {
+                "sequence_rows": "SELECT count(*) FROM _workspace_v2_reference_sequences",
+                "segment_rows": "SELECT count(*) FROM _workspace_v2_reference_segments",
+                "metric_dependency_sequences": "SELECT count(*) FROM "
+                "_workspace_v2_metric_reference_sequences",
+                "metric_dependency_segments": "SELECT count(*) FROM "
+                "_workspace_v2_metric_reference_segments",
+                "metric_dependency_links": "SELECT count(*) FROM "
+                "_workspace_v2_metric_reference_links",
+                "metric_equal_edges": f"SELECT count(*) FROM {_METRIC_TABLE} m "
+                "JOIN _workspace_v2_metric_reference_sequences q "
+                "ON q.sequence_id=m.metric_sequence_id "
+                "WHERE m.available_at=q.latest_available",
+                "sequence_equal_edges": "SELECT count(*) FROM "
+                "_workspace_v2_metric_reference_links l "
+                "JOIN _workspace_v2_metric_reference_segments s ON s.segment_id=l.segment_id "
+                "WHERE l.latest_available=s.latest_available",
+                "segment_equal_edges": "WITH refs AS MATERIALIZED (SELECT members.member_id, "
+                "s.latest_available FROM _workspace_v2_metric_reference_segments s "
+                f"JOIN {_SEGMENT_MEMBER_TABLE} members ON members.segment_id=s.segment_id "
+                f") SELECT count(*) FROM refs JOIN {_METRIC_TABLE} child "
+                "ON child.result_id=refs.member_id AND child.available_at=refs.latest_available",
+                "largest_metric_time_bucket": "SELECT coalesce(max(n),0) FROM (SELECT count(*) n "
+                f"FROM {_METRIC_TABLE} m JOIN _workspace_v2_metric_reference_sequences q "
+                "ON q.sequence_id=m.metric_sequence_id "
+                "WHERE m.available_at=q.latest_available GROUP BY hash(m.available_at)%16) buckets",
+            }
+            for name, sql in queries.items():
+                if on_plan is not None:
+                    rows = self._relationship_sql("EXPLAIN " + sql).fetchall()
+                    on_plan(name, "\n".join(str(row[-1]) for row in rows))
+                row = self._relationship_sql(sql).fetchone()
+                assert row is not None
+                output[name] = int(row[0])
+                if on_measurement is not None:
+                    on_measurement(name, output[name])
+            return output
+        finally:
+            self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_reference_sequences")
+            self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_reference_segments")
+            self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_metric_reference_sequences")
+            self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_metric_reference_segments")
+            self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_metric_reference_links")
+
+    def _prepare_metric_dependency_metadata(self) -> None:
+        # Materialize the filtered projections before joins: TEMP statistics then
+        # describe actual dependency rows, rather than all observation sequences.
+        for family, key in (("sequences", "sequence_id"), ("segments", "segment_id")):
+            self._relationship_sql(
+                f"CREATE OR REPLACE TEMP TABLE _workspace_v2_metric_reference_{family} AS "
+                f"SELECT {key},latest_available FROM _workspace_v2_reference_{family} "
+                "WHERE link_type='metric-input-result-v1' AND member_count>0"
+            )
+        # Break the triangle (sequence identity, segment identity, availability)
+        # into two joins so timestamps cannot create a many-to-many intermediate.
+        self._relationship_sql(
+            "CREATE OR REPLACE TEMP TABLE _workspace_v2_metric_reference_links AS "
+            "SELECT q.sequence_id,l.segment_id,q.latest_available "
+            f"FROM _workspace_v2_metric_reference_sequences q JOIN {_SEQUENCE_SEGMENT_TABLE} l "
+            "ON l.sequence_id=q.sequence_id"
+        )
+
+    @staticmethod
+    def _invalid_reference_metadata(parent: str, link_type: str) -> str:
+        return (
+            f"(q.sequence_id IS NULL OR q.link_type<>'{link_type}' "
+            "OR q.invalid_segments<>0 OR q.actual_members<>q.member_count "
+            "OR q.covered_members<>q.member_count "
+            "OR (q.link_count>0 AND (q.first_link<>0 OR q.last_link<>q.link_count-1)) "
+            f"OR (q.member_count>0 AND (q.first_asset<>{parent}.asset_id "
+            f"OR q.last_asset<>{parent}.asset_id OR q.latest_available>{parent}.available_at)))"
+        )
+
+    def _build_relationship_metadata(self, metric_references: str) -> None:
+        # Each segment is joined to its children once, independent of the number
+        # of metrics/components sharing it. LEFT JOIN and explicit counts retain
+        # missing segments/members/children instead of silently dropping them.
+        projections: list[str] = []
+        for predicate, target, key in (
+            (
+                "s.link_type='metric-input-observation-v1'",
+                "normalized_observations_v2",
+                "observation_id",
+            ),
+            (
+                "s.link_type IN ('metric-input-result-v1','diagnostic-component-metric-result-v1')",
+                metric_references,
+                "result_id",
+            ),
+        ):
+            projections.append(
+                "SELECT s.segment_id,s.link_type,s.member_count, "
+                "count(m.member_position) actual_members, "
+                f"count(child.{key}) covered_members, "
+                "min(m.member_position) first_member,max(m.member_position) last_member, "
+                "min(child.asset_id) first_asset,max(child.asset_id) last_asset, "
+                "max(CAST(child.available_at AS TIMESTAMPTZ)) latest_available "
+                f"FROM {_SEGMENT_TABLE} s LEFT JOIN {_SEGMENT_MEMBER_TABLE} m "
+                f"ON m.segment_id=s.segment_id LEFT JOIN {target} child ON child.{key}=m.member_id "
+                f"WHERE {predicate} GROUP BY s.segment_id,s.link_type,s.member_count"
+            )
+        # Execute the two independent child-family aggregates sequentially.
+        # Their rows remain UNION ALL-equivalent, while their hash tables no
+        # longer have to coexist in the same admitted native query.
+        for index, projection in enumerate(projections):
+            self._relationship_sql(
+                (
+                    "CREATE OR REPLACE TEMP TABLE _workspace_v2_reference_segments AS "
+                    if index == 0
+                    else "INSERT INTO _workspace_v2_reference_segments "
+                )
+                + projection
+            )
+        self._relationship_sql(
+            "CREATE OR REPLACE TEMP TABLE _workspace_v2_reference_sequences AS "
+            "SELECT q.sequence_id,q.link_type,q.member_count, "
+            "count(l.segment_position) link_count,min(l.segment_position) first_link, "
+            "max(l.segment_position) last_link, "
+            "coalesce(sum(s.actual_members),0) actual_members, "
+            "coalesce(sum(s.covered_members),0) covered_members, "
+            "count(*) FILTER (WHERE l.segment_position IS NOT NULL AND "
+            "(s.segment_id IS NULL OR s.link_type<>q.link_type "
+            "OR s.actual_members<>s.member_count OR s.covered_members<>s.member_count "
+            "OR (s.member_count>0 AND (s.first_member<>0 OR s.last_member<>s.member_count-1)))) "
+            "invalid_segments, min(s.first_asset) first_asset,max(s.last_asset) last_asset, "
+            "max(s.latest_available) latest_available "
+            f"FROM {_SEQUENCE_TABLE} q LEFT JOIN {_SEQUENCE_SEGMENT_TABLE} l "
+            "ON l.sequence_id=q.sequence_id LEFT JOIN _workspace_v2_reference_segments s "
+            "ON s.segment_id=l.segment_id GROUP BY q.sequence_id,q.link_type,q.member_count"
+        )
 
     def verify_historical_seal(self) -> HistoricalAnalyticalSeal | None:
         seal = self.historical_seal()
@@ -2025,83 +2950,102 @@ class CompactAnalyticalStore:
             "historical_diagnostic_count": self.count_diagnostics(origin="HISTORICAL"),
         }
 
-    def _require_acyclic_inventory(self) -> None:
-        """Reject cycles with one bounded asset/time projection at a time.
+    def _require_acyclic_inventory(self, *, read_only_units: bool = False) -> None:
+        """Exact typed graph in sixteen disjoint equal-availability buckets.
 
-        Every persisted edge already rejects a dependency whose ``available_at``
-        is in the future.  A cycle can therefore only occur inside one equal
-        timestamp bucket.  The asset invariant makes an edge cross no asset boundary.
-        Iterate the
-        finite ``(available_at, asset_id)`` partitions rather than materializing
-        the full inventory in a temporary table.
+        Full PIT/asset validation precedes this check. Every real cycle has equal
+        availability along all edges, so all its typed nodes belong to the same
+        hash bucket. No potentially cyclic path crosses buckets. Each shared
+        sequence/segment path is retained; parent fanout is never expanded.
         """
-        cursor = self._connection.execute(
-            f"SELECT CAST(available_at AS VARCHAR), asset_id FROM {_METRIC_TABLE} "
-            "GROUP BY available_at, asset_id ORDER BY available_at, asset_id"
+        owns_metadata = not bool(
+            self._relationship_sql(
+                "SELECT count(*) FROM duckdb_tables() WHERE temporary "
+                "AND table_name='_workspace_v2_reference_sequences'"
+            ).fetchone()[0]
         )
-        while rows := cursor.fetchmany(_BATCH):
-            for available_at, asset_id in rows:
-                self._require_acyclic_partition(_instant(str(available_at)), str(asset_id))
-
-    def _require_acyclic_partition(self, available_at: datetime, asset_id: str) -> None:
-        """Reject a cycle inside one already-valid asset/time partition."""
-        edges = "_workspace_v2_cycle_edges"
-        nodes = "_workspace_v2_cycle_nodes"
+        if read_only_units:
+            mode = self._relationship_sql(
+                "SELECT readonly FROM duckdb_databases() WHERE database_name=current_database()"
+            ).fetchone()
+            if mode is None or mode[0] is not True:
+                raise CompactAnalyticalError(
+                    "bounded read-only units require a physical read-only database"
+                )
         try:
-            self._connection.execute(
-                f"""
-                CREATE OR REPLACE TEMP TABLE {edges} AS
-                SELECT DISTINCT m.result_id AS parent_id, members.member_id AS child_id
-                FROM workspace_metric_results_v2 m
-                JOIN workspace_analytical_sequences_v2 s
-                  ON s.sequence_id = m.metric_sequence_id
-                 AND s.link_type = 'metric-input-result-v1'
-                JOIN workspace_analytical_sequence_segments_v2 links
-                  ON links.sequence_id = s.sequence_id
-                JOIN workspace_analytical_segment_members_v2 members
-                  ON members.segment_id = links.segment_id
-                JOIN workspace_metric_results_v2 child
-                  ON child.result_id = members.member_id
-                WHERE m.available_at = ?
-                  AND child.available_at = m.available_at
-                  AND m.asset_id = ?
-                  AND child.asset_id = m.asset_id
-                """,
-                [available_at, asset_id],
+            if owns_metadata:
+                self._build_relationship_metadata(_METRIC_TABLE)
+            self._prepare_metric_dependency_metadata()
+            buckets = self._relationship_sql(
+                f"SELECT DISTINCT hash(m.available_at)%16 bucket FROM {_METRIC_TABLE} m "
+                "JOIN _workspace_v2_metric_reference_sequences q "
+                "ON q.sequence_id=m.metric_sequence_id "
+                "WHERE m.available_at=q.latest_available ORDER BY bucket"
+            ).fetchall()
+            for row in buckets:
+                self._require_acyclic_bucket(int(row[0]))
+                if read_only_units:
+                    # Only the inactive physical READ_ONLY target may cross these
+                    # boundaries. Its native file lock prevents any writer across
+                    # transactions; commits reclaim dropped/deleted TEMP versions.
+                    self._relationship_sql("COMMIT")
+                    self._relationship_sql("BEGIN TRANSACTION READ ONLY")
+        finally:
+            for family in ("sequences", "segments", "links"):
+                self._relationship_sql(
+                    f"DROP TABLE IF EXISTS _workspace_v2_metric_reference_{family}"
+                )
+            if owns_metadata:
+                self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_reference_sequences")
+                self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_reference_segments")
+
+    def _require_acyclic_bucket(self, bucket: int) -> None:
+        if not 0 <= bucket < 16:
+            raise ValueError("metric dependency bucket is invalid")
+        edges, nodes = "_workspace_v2_cycle_edges", "_workspace_v2_cycle_nodes"
+        try:
+            self._relationship_sql(
+                f"CREATE OR REPLACE TEMP TABLE {edges} AS "
+                "WITH refs AS MATERIALIZED (SELECT s.segment_id,members.member_id, "
+                "s.latest_available "
+                "FROM _workspace_v2_metric_reference_segments s "
+                f"JOIN {_SEGMENT_MEMBER_TABLE} members ON members.segment_id=s.segment_id "
+                "WHERE hash(s.latest_available)%16=?) "
+                "SELECT 'm:'||CAST(m.result_id AS VARCHAR) parent_id, "
+                "'q:'||m.metric_sequence_id child_id "
+                f"FROM {_METRIC_TABLE} m JOIN _workspace_v2_metric_reference_sequences q "
+                "ON q.sequence_id=m.metric_sequence_id "
+                "WHERE m.available_at=q.latest_available AND hash(m.available_at)%16=? "
+                "UNION ALL SELECT 'q:'||l.sequence_id,'s:'||l.segment_id "
+                "FROM _workspace_v2_metric_reference_links l "
+                "JOIN _workspace_v2_metric_reference_segments s ON s.segment_id=l.segment_id "
+                "WHERE l.latest_available=s.latest_available AND hash(l.latest_available)%16=? "
+                "UNION ALL SELECT 's:'||refs.segment_id,'m:'||CAST(child.result_id AS VARCHAR) "
+                f"FROM refs JOIN {_METRIC_TABLE} child ON child.result_id=refs.member_id "
+                "AND child.available_at=refs.latest_available",
+                [bucket, bucket, bucket],
             )
-            self._connection.execute(
-                f"""
-                CREATE OR REPLACE TEMP TABLE {nodes} AS
-                SELECT parent_id AS result_id FROM {edges}
-                UNION
-                SELECT child_id AS result_id FROM {edges}
-                """
+            self._relationship_sql(
+                f"CREATE OR REPLACE TEMP TABLE {nodes} AS "
+                f"SELECT parent_id result_id FROM {edges} UNION SELECT child_id FROM {edges}"
             )
             while True:
-                before = int(
-                    self._connection.execute(f"SELECT count(*) FROM {nodes}").fetchone()[0]
-                )
+                before = int(self._relationship_sql(f"SELECT count(*) FROM {nodes}").fetchone()[0])
                 if before == 0:
                     return
-                self._connection.execute(
-                    f"""
-                    DELETE FROM {nodes} node
-                    WHERE NOT EXISTS (
-                        SELECT 1
-                        FROM {edges} edge
-                        JOIN {nodes} parent ON parent.result_id = edge.parent_id
-                        WHERE edge.child_id = node.result_id
-                    )
-                    """
+                self._relationship_sql(
+                    f"DELETE FROM {nodes} node WHERE NOT EXISTS ("
+                    f"SELECT 1 FROM {edges} edge JOIN {nodes} parent "
+                    "ON parent.result_id=edge.parent_id WHERE edge.child_id=node.result_id)"
                 )
-                after = int(self._connection.execute(f"SELECT count(*) FROM {nodes}").fetchone()[0])
+                after = int(self._relationship_sql(f"SELECT count(*) FROM {nodes}").fetchone()[0])
                 if after == before:
                     raise CompactAnalyticalError(
                         "workspace v2 metric dependency graph contains a cycle"
                     )
         finally:
-            self._connection.execute(f"DROP TABLE IF EXISTS {edges}")
-            self._connection.execute(f"DROP TABLE IF EXISTS {nodes}")
+            for table in (edges, nodes):
+                self._relationship_sql(f"DROP TABLE IF EXISTS {table}")
 
     def logical_table_bytes(self) -> dict[str, int]:
         """Measure stored logical bytes with UTF-8 text and fixed scalar widths."""

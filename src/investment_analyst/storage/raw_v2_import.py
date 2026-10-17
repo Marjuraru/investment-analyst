@@ -15,6 +15,7 @@ ordered corpus digest.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from duckdb import DuckDBPyConnection
 from pydantic import ConfigDict, Field, field_validator
 
 from investment_analyst.core.models import RawRecord
@@ -32,7 +34,14 @@ from investment_analyst.storage.errors import (
     StorageError,
 )
 from investment_analyst.storage.local import LocalStorage
-from investment_analyst.storage.raw_v2 import RawV2Staging
+from investment_analyst.storage.raw_v2 import (
+    _INDEX_COLUMNS,
+    WORKSPACE_RAW_JSON_PROJECTIONS_TABLE,
+    RawV2Staging,
+    _parse_instant_text,
+    _project_13f_fields,
+    _project_raw_json_fields,
+)
 from investment_analyst.storage.serialization import canonical_json_bytes, sha256_hex
 from investment_analyst.workspace.workspace_v2_migration_models import (
     WorkspaceV2MigrationWorkCheckpoint,
@@ -46,6 +55,14 @@ RAW_V2_IMPORT_POLICY_VERSION = "raw-v2-import-v1"
 _MAX_IMPORT_PAGE = 256
 _IMPORT_STATE_FILENAME = "raw-v2-import-state.json"
 _VERIFICATION_CHECKPOINT_FILENAME = "raw-v2-import-verification-work.json"
+
+
+def _fsync_parent(path: Path) -> None:
+    descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 class RawV2ImportError(StorageError):
@@ -192,6 +209,8 @@ class RawV2Importer:
         source_workspace_id: str,
         source_fingerprint: str,
         historic_source_fingerprint: str | None = None,
+        epoch: UUID | None = None,
+        destination_connection: DuckDBPyConnection | None = None,
         clock: Callable[[], datetime] | None = None,
         progress: Callable[[RawV2ImportProgress], None] | None = None,
     ) -> None:
@@ -206,6 +225,20 @@ class RawV2Importer:
         self._workspace_id = source_workspace_id
         self._fingerprint = source_fingerprint
         self._historic_fingerprint = historic_source_fingerprint
+        self._epoch = epoch
+        self._destination_connection = destination_connection
+        if destination_connection is not None:
+            if epoch is None:
+                raise RawV2ImportError("bounded epoch reader requires an epoch")
+            current = destination_connection.execute("SELECT current_database()").fetchone()
+            databases = destination_connection.execute("PRAGMA database_list").fetchall()
+            if current is None or not any(
+                str(row[1]) == str(current[0])
+                and row[2]
+                and Path(str(row[2])).resolve().parent == staging_destination.resolve()
+                for row in databases
+            ):
+                raise RawV2ImportError("epoch reader connection belongs to another staging root")
         self._clock = clock or (lambda: datetime.now(UTC))
         self._progress = progress
         self._destination_key = str(staging_destination.absolute())
@@ -216,6 +249,105 @@ class RawV2Importer:
             raise RawV2ImportError("import source fingerprint must be explicit")
         if self._historic_fingerprint is not None and not self._historic_fingerprint.strip():
             raise RawV2ImportError("historic source fingerprint must be non-empty")
+
+    def _verify_epoch_page(
+        self,
+        records: Mapping[UUID, RawRecord],
+        *,
+        allow_writes: bool,
+    ) -> tuple[dict[UUID, str], int]:
+        """Compare selected canonical bytes and projections once, in bounded SQL batches.
+
+        Source models have already passed the v1 reader's hash/identity checks.
+        Equal canonical bytes prove the same typed model without decoding a
+        second copy; projections are compared using the staging's own extractors.
+        Only absent IDs reach the ordinary writer API.
+        """
+        connection = self._destination_connection
+        if connection is None or not 1 <= len(records) <= _MAX_IMPORT_PAGE:
+            raise RawV2ImportError("bounded raw verifier is not bound to an epoch page")
+        identifiers = [str(identifier) for identifier in records]
+        placeholders = ", ".join("?" for _ in identifiers)
+        columns = ", ".join(_INDEX_COLUMNS)
+
+        def selected_rows() -> dict[UUID, tuple[object, ...]]:
+            rows = connection.execute(
+                f"SELECT {columns} FROM raw_v2_index WHERE record_id IN ({placeholders})",
+                identifiers,
+            ).fetchall()
+            return {UUID(str(row[0])): row for row in rows}
+
+        indexed = selected_rows()
+        reused = len(indexed)
+        missing = [record for identifier, record in records.items() if identifier not in indexed]
+        if missing:
+            if not allow_writes:
+                raise RawV2ImportError("confirmed raw epoch page has missing destination records")
+            receipt = self._staging.save_many(missing)
+            if receipt.created_count + receipt.reused_count != len(missing):
+                raise RawV2ImportError("epoch raw write did not settle every missing ID")
+            reused += receipt.reused_count
+            indexed = selected_rows()
+        if set(indexed) != set(records):
+            raise RawV2ImportError("epoch raw destination ID coverage differs")
+        projection_table = (
+            connection.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema='main' AND table_name=?",
+                [WORKSPACE_RAW_JSON_PROJECTIONS_TABLE],
+            ).fetchone()
+            is not None
+        )
+        projections: dict[UUID, dict[str, str]] = {}
+        if projection_table:
+            rows = connection.execute(
+                "SELECT record_id, field_name, field_value "
+                f"FROM {WORKSPACE_RAW_JSON_PROJECTIONS_TABLE} "
+                f"WHERE record_id IN ({placeholders})",
+                identifiers,
+            ).fetchall()
+            for identifier, name, value in rows:
+                projections.setdefault(UUID(str(identifier)), {})[str(name)] = str(value)
+        checksums: dict[UUID, str] = {}
+        for identifier, record in records.items():
+            row = indexed[identifier]
+            (
+                _,
+                relative_path,
+                checksum,
+                asset_id,
+                source_id,
+                event_at,
+                available_at,
+                received_at,
+                schema,
+                manager,
+                report,
+            ) = row
+            if not isinstance(relative_path, str) or not isinstance(checksum, str):
+                raise RawV2ImportError("epoch raw destination metadata is malformed")
+            canonical = canonical_json_bytes(record)
+            if (
+                sha256_hex(canonical) != checksum
+                or self._staging._read_blob(relative_path, checksum) != canonical
+            ):
+                raise RecordConflictError("epoch raw canonical bytes differ from the source")
+            if (
+                record.asset_id != asset_id
+                or record.source.source_id != source_id
+                or record.schema_version != schema
+                or record.event_time != _parse_instant_text(event_at)
+                or record.available_at != _parse_instant_text(available_at)
+                or record.received_at != _parse_instant_text(received_at)
+                or _project_13f_fields(record) != (manager, report)
+                or projection_table
+                and projections.get(identifier, {}) != dict(_project_raw_json_fields(record))
+            ):
+                raise RawV2ImportError(
+                    "epoch raw destination projections differ from canonical source"
+                )
+            checksums[identifier] = checksum
+        return checksums, reused
 
     def run(
         self,
@@ -271,7 +403,14 @@ class RawV2Importer:
         counts, so resuming cannot add a second deep source walk.
         """
         original_confirmed = state.confirmed_count
-        verification_cursor, verified, digest = self._load_verification_checkpoint(state)
+        terminal = self._load_f_terminal_checkpoint(state) if allow_writes else None
+        verification_cursor, verified, digest = (
+            terminal
+            if terminal is not None
+            else self._load_verification_checkpoint(state)
+            if allow_writes
+            else (None, 0, empty_digest())
+        )
         if original_confirmed > 0:
             self._emit(
                 "prefix_validation_started",
@@ -283,6 +422,7 @@ class RawV2Importer:
             if (
                 verification_cursor is None
                 or state.cursor.record_id != verification_cursor.record_id
+                or state.cursor.received_at != verification_cursor.received_at
                 or digest != state.accumulated_digest
             ):
                 raise RawV2ImportError("verification checkpoint does not match import state")
@@ -301,17 +441,37 @@ class RawV2Importer:
         imported_pages = 0
         reused_total = 0
         last_record_id: UUID | None = source_id
+        epoch_inventory = None
+        if self._epoch is not None:
+            epoch_inventory = f"raw_epoch_inventory_{self._epoch.hex}"
+            self._source.store.connection.execute(
+                f"CREATE OR REPLACE TEMP TABLE {epoch_inventory} AS "
+                "SELECT record_id, row_number() OVER (ORDER BY received_at, record_id) AS ordinal "
+                "FROM raw_record_index"
+            )
         while True:
-            page = self._source.raw_records.list_import_page(
-                limit=state.page_limit,
-                after_received_at=source_at,
-                after_record_id=source_id,
-            )
-            staged_page = self._staging.list_inventory_page(
-                limit=state.page_limit,
-                after_received_at=source_at,
-                after_record_id=source_id,
-            )
+            if epoch_inventory is None:
+                page = self._source.raw_records.list_import_page(
+                    limit=state.page_limit,
+                    after_received_at=source_at,
+                    after_record_id=source_id,
+                )
+                staged_page = self._staging.list_inventory_page(
+                    limit=state.page_limit,
+                    after_received_at=source_at,
+                    after_record_id=source_id,
+                )
+            else:
+                rows = self._source.store.connection.execute(
+                    f"SELECT record_id FROM {epoch_inventory} WHERE ordinal > ? AND ordinal <= ? "
+                    "ORDER BY ordinal",
+                    [verified, verified + state.page_limit],
+                ).fetchall()
+                page = [UUID(row[0]) for row in rows]
+                # save_many performs the bounded identity anti-join. Each
+                # selected model is compared after reuse/write; final cardinality
+                # rejects destination-only IDs without a second payload walk.
+                staged_page = page
             if not page:
                 if staged_page:
                     raise RawV2ImportError("staged inventory has records absent from the source")
@@ -319,7 +479,25 @@ class RawV2Importer:
             max_hydrated = max(max_hydrated, len(page))
             records = self._source.raw_records.get_many(page)
             is_confirmed_prefix = verified < original_confirmed
-            if is_confirmed_prefix:
+            epoch_checksums: dict[UUID, str] | None = None
+            if self._destination_connection is not None:
+                if is_confirmed_prefix and verified + len(page) > original_confirmed:
+                    raise RawV2ImportError("import state does not end on a confirmed page")
+                if not is_confirmed_prefix:
+                    self._emit(
+                        "import_page_started",
+                        confirmed_count=state.confirmed_count,
+                        page_count=imported_pages + 1,
+                        page_size=len(page),
+                    )
+                epoch_checksums, reused = self._verify_epoch_page(
+                    records,
+                    allow_writes=allow_writes and not is_confirmed_prefix,
+                )
+                if not is_confirmed_prefix:
+                    reused_total += reused
+                reread = None
+            elif is_confirmed_prefix:
                 if verified + len(page) > original_confirmed:
                     raise RawV2ImportError("import state does not end on a confirmed page")
                 if [str(record_id) for record_id in staged_page] != [
@@ -332,9 +510,12 @@ class RawV2Importer:
             else:
                 if not allow_writes:
                     raise RawV2ImportError("complete raw import state does not cover the source")
-                if staged_page and [str(record_id) for record_id in staged_page] != [
-                    str(record_id) for record_id in page
-                ]:
+                if (
+                    self._epoch is None
+                    and staged_page
+                    and [str(record_id) for record_id in staged_page]
+                    != [str(record_id) for record_id in page]
+                ):
                     raise RawV2ImportError("staged inventory has unconfirmed records")
                 self._emit(
                     "import_page_started",
@@ -349,10 +530,14 @@ class RawV2Importer:
                 reused_total += receipt.reused_count
             for record_id in page:
                 source_record = records[record_id]
-                staged_record = reread[record_id]
-                if staged_record != source_record:
+                if reread is not None and reread[record_id] != source_record:
                     raise RawV2ImportError("staged record differs from its verified source")
-                digest = extend_digest(digest, sha256_hex(canonical_json_bytes(source_record)))
+                checksum = (
+                    epoch_checksums[record_id]
+                    if epoch_checksums is not None
+                    else sha256_hex(canonical_json_bytes(source_record))
+                )
+                digest = extend_digest(digest, checksum)
                 counts_by_source[source_record.source.source_id] = (
                     counts_by_source.get(source_record.source.source_id, 0) + 1
                 )
@@ -365,7 +550,7 @@ class RawV2Importer:
             verified += len(page)
             if is_confirmed_prefix:
                 prefix_pages += 1
-                if self._can_resume_verified_prefix():
+                if allow_writes and self._can_resume_verified_prefix():
                     state = self._write_state(
                         cursor=state.cursor,
                         confirmed_count=state.confirmed_count,
@@ -374,15 +559,16 @@ class RawV2Importer:
                         counts_by_schema=counts_by_schema,
                         page_limit=state.page_limit,
                     )
-                self._write_verification_checkpoint(
-                    state,
-                    cursor=RawV2ImportCursor(
-                        received_at=last.received_at,
-                        record_id=last.record_id,
-                    ),
-                    confirmed_count=verified,
-                    accumulated_digest=digest,
-                )
+                if allow_writes:
+                    self._write_verification_checkpoint(
+                        state,
+                        cursor=RawV2ImportCursor(
+                            received_at=last.received_at,
+                            record_id=last.record_id,
+                        ),
+                        confirmed_count=verified,
+                        accumulated_digest=digest,
+                    )
                 self._emit(
                     "prefix_validation_page_verified",
                     confirmed_count=verified,
@@ -392,6 +578,7 @@ class RawV2Importer:
                 if verified == original_confirmed:
                     if (
                         state.cursor.record_id != last_record_id
+                        or state.cursor.received_at != last.received_at
                         or digest != state.accumulated_digest
                     ):
                         raise RawV2ImportError(
@@ -421,6 +608,8 @@ class RawV2Importer:
             )
             if fail_after_page is not None and imported_pages > fail_after_page:
                 raise RawV2ImportError("import interrupted before the next page")
+        if self._epoch is not None and self._staging.count_records() != verified:
+            raise RawV2ImportError("staged inventory has records absent from the source epoch")
         if verified != state.confirmed_count or (
             verified > 0 and state.cursor.record_id != last_record_id
         ):
@@ -429,12 +618,16 @@ class RawV2Importer:
             raise RawV2ImportError("import digest does not match the verified corpus")
         if original_confirmed > 0 and verified < original_confirmed:
             raise RawV2ImportError("import state prefix does not match the source inventory")
+        if allow_writes and terminal is None:
+            self._write_f_terminal_checkpoint(state)
         self._emit(
             "completion_validation_completed",
             confirmed_count=verified,
             page_count=0,
             page_size=0,
         )
+        if epoch_inventory is not None:
+            self._source.store.connection.execute(f"DROP TABLE IF EXISTS {epoch_inventory}")
         return RawV2ImportSummary(
             source_workspace_id=self._workspace_id,
             source_fingerprint=self._fingerprint,
@@ -461,9 +654,15 @@ class RawV2Importer:
             raise RawV2ImportError("import destination must not use symbolic links")
 
     def _state_path(self) -> Path:
+        if self._epoch is not None:
+            return self._staging.destination / f"raw-v2-import-state.F.{self._epoch}.json"
         return self._staging.destination / _IMPORT_STATE_FILENAME
 
     def _verification_checkpoint_path(self) -> Path:
+        if self._epoch is not None:
+            return (
+                self._staging.destination / f"raw-v2-import-verification-work.F.{self._epoch}.json"
+            )
         return self._staging.destination / _VERIFICATION_CHECKPOINT_FILENAME
 
     def _archive_verification_checkpoint(self) -> None:
@@ -480,6 +679,7 @@ class RawV2Importer:
             if archive.is_symlink() or archive.read_bytes() != original:
                 raise RawV2ImportError("historic verification checkpoint cannot be preserved")
             path.unlink()
+            _fsync_parent(path)
             return
         temporary = archive.with_name(f".{archive.name}.{uuid4().hex}.tmp")
         try:
@@ -489,12 +689,132 @@ class RawV2Importer:
                 os.fsync(handle.fileno())
             os.replace(temporary, archive)
             path.unlink()
+            _fsync_parent(path)
         finally:
             temporary.unlink(missing_ok=True)
 
     def _can_resume_verified_prefix(self) -> bool:
         """Return whether the coordinator supplied the immutable B transition binding."""
         return self._historic_fingerprint is not None
+
+    def _f_terminal_checkpoint(
+        self, state: RawV2ImportState
+    ) -> WorkspaceV2MigrationWorkCheckpoint | None:
+        """Bind a completed F comparison to fresh quiescence and actual destination bytes.
+
+        Reopening still reads and hashes every raw blob and projection, but avoids
+        hydrating the same source models after a later family was interrupted.
+        Partial F prefixes never use this shortcut. Explicit verify_complete
+        always performs the independent typed comparison again.
+        """
+        if self._epoch is None or self._destination_connection is None or not state.confirmed_count:
+            return None
+        # Local imports avoid the coordinator/importer module dependency cycle.
+        from investment_analyst.workspace.service import WorkspaceService
+        from investment_analyst.workspace.workspace_v2_migration import _live_quiescent_source
+
+        source_root = self._source.paths.root.parent
+        proof = _live_quiescent_source(source_root)
+        if proof is None:
+            return None
+        if (
+            proof.cut.operation_id != self._epoch
+            or proof.cut.source_fingerprint != self._fingerprint
+            or str(proof.cut.workspace_id) != self._workspace_id
+        ):
+            raise RawV2ImportError("terminal raw verification belongs to another F")
+        destination_root = self._staging.destination.parents[1]
+        identity = WorkspaceService().manifest(destination_root)
+        binding = hashlib.sha256()
+        columns = ", ".join(_INDEX_COLUMNS)
+        reader = self._destination_connection.cursor()
+        try:
+            reader.execute(f"SELECT {columns} FROM raw_v2_index ORDER BY received_at, record_id")
+            count = 0
+            while rows := reader.fetchmany(_MAX_IMPORT_PAGE):
+                for row in rows:
+                    blob = self._staging._read_blob(str(row[1]), str(row[2]))
+                    binding.update(json.dumps(row, separators=(",", ":")).encode())
+                    binding.update(hashlib.sha256(blob).digest())
+                    count += 1
+            if count != state.confirmed_count:
+                raise RawV2ImportError("terminal raw coverage changed")
+            exists = reader.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema='main' AND table_name=?",
+                [WORKSPACE_RAW_JSON_PROJECTIONS_TABLE],
+            ).fetchone()
+            if exists:
+                reader.execute(
+                    "SELECT record_id, field_name, field_value "
+                    f"FROM {WORKSPACE_RAW_JSON_PROJECTIONS_TABLE} "
+                    "ORDER BY record_id, field_name"
+                )
+                while rows := reader.fetchmany(_MAX_IMPORT_PAGE):
+                    for row in rows:
+                        binding.update(json.dumps(row, separators=(",", ":")).encode())
+        finally:
+            reader.close()
+        return self._verification_checkpoint(
+            state,
+            cursor=state.cursor,
+            confirmed_count=state.confirmed_count,
+            accumulated_digest=state.accumulated_digest,
+        ).model_copy(
+            update={
+                "operation_id": self._epoch,
+                "snapshot_id": self._epoch,
+                "source_root": source_root,
+                "destination_root": destination_root,
+                "destination_workspace_id": identity.workspace_id,
+                "verifier_policy": "paired-raw-terminal-F-v1",
+                "input_references": (
+                    "raw",
+                    str(proof.cut.workspace_id),
+                    self._staging_id or "",
+                    binding.hexdigest(),
+                ),
+            }
+        )
+
+    def _f_terminal_path(self) -> Path:
+        return self._staging.destination / f"raw-v2-terminal-verification.F.{self._epoch}.json"
+
+    def _load_f_terminal_checkpoint(
+        self, state: RawV2ImportState
+    ) -> tuple[RawV2ImportCursor, int, str] | None:
+        path = self._f_terminal_path()
+        if self._epoch is None or not path.exists():
+            return None
+        if path.is_symlink() or not path.is_file():
+            raise RawV2ImportError("terminal raw verification is unsafe")
+        try:
+            stored = WorkspaceV2MigrationWorkCheckpoint.model_validate_json(path.read_bytes())
+        except (OSError, ValueError) as error:
+            raise RawV2ImportError("terminal raw verification is malformed") from error
+        expected = self._f_terminal_checkpoint(state)
+        if expected is None:
+            # A durable proof grants no authority outside a genuine live F session.
+            return None
+        if stored.model_dump(exclude={"updated_at"}) != expected.model_dump(exclude={"updated_at"}):
+            raise RawV2ImportError("terminal raw verification binding changed")
+        return state.cursor, state.confirmed_count, state.accumulated_digest
+
+    def _write_f_terminal_checkpoint(self, state: RawV2ImportState) -> None:
+        checkpoint = self._f_terminal_checkpoint(state)
+        if checkpoint is None:
+            return
+        path = self._f_terminal_path()
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            with temporary.open("x", encoding="utf-8") as handle:
+                handle.write(checkpoint.model_dump_json() + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            _fsync_parent(path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _verification_checkpoint(
         self,
@@ -565,6 +885,7 @@ class RawV2Importer:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, path)
+            _fsync_parent(path)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -855,6 +1176,7 @@ class RawV2Importer:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, path)
+            _fsync_parent(path)
         finally:
             temporary.unlink(missing_ok=True)
         return state

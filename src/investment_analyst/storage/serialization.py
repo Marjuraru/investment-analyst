@@ -3,7 +3,9 @@
 import hashlib
 import json
 import math
+from collections.abc import Iterator
 from decimal import Decimal
+from typing import BinaryIO
 
 from pydantic import BaseModel
 
@@ -55,3 +57,39 @@ def model_from_json[ModelT: BaseModel](model_type: type[ModelT], data: bytes | s
 def sha256_hex(data: bytes) -> str:
     """Calculate a lowercase SHA-256 digest for stored bytes."""
     return hashlib.sha256(data).hexdigest()
+
+
+def canonical_json_chunks(model: BaseModel) -> Iterator[bytes]:
+    """Same canonical document, bounded UTF-8 writes; one model's heap is not bounded.
+
+    Pydantic's JSON projection and the standard encoder preserve the ordinary
+    round-trip/number contract. A large encoder token may occupy model-sized
+    memory; it is never encoded or written as one unbounded bytes buffer.
+    """
+    _reject_non_finite(model.model_dump(mode="python"))
+    encoder = json.JSONEncoder(
+        allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    )
+    for token in encoder.iterencode(model.model_dump(mode="json", round_trip=True)):
+        for offset in range(0, len(token), 262_144):
+            yield token[offset : offset + 262_144].encode("utf-8")
+
+
+def canonical_json_to_stream(model: BaseModel, stream: BinaryIO) -> tuple[str, int]:
+    """Spool one canonical model and return its actual incremental SHA/length."""
+    digest = hashlib.sha256()
+    length = 0
+    for chunk in canonical_json_chunks(model):
+        if stream.write(chunk) != len(chunk):
+            raise OSError("canonical spool write was incomplete")
+        digest.update(chunk)
+        length += len(chunk)
+    return digest.hexdigest(), length
+
+
+def canonical_json_digest(model: BaseModel) -> str:
+    """Hash one canonical model without accumulating its serialized bytes."""
+    digest = hashlib.sha256()
+    for chunk in canonical_json_chunks(model):
+        digest.update(chunk)
+    return digest.hexdigest()

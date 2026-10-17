@@ -186,9 +186,21 @@ def test_remote_plan_rejects_unsealed_backup_and_invalid_configuration(tmp_path:
 class _RecordingTransport:
     def __init__(self) -> None:
         self.calls: list[tuple[Path, str]] = []
+        self.objects: dict[str, bytes] = {}
 
     def copy_sealed_object(self, source: Path, remote_object: str) -> tuple[object, ...]:
         self.calls.append((source, remote_object))
+        return ()
+
+    def copy_immutable_object(self, source: Path, remote_object: str) -> tuple[object, ...]:
+        data = source.read_bytes()
+        if remote_object in self.objects and self.objects[remote_object] != data:
+            raise DriveTransportError("immutable conflict")
+        self.objects[remote_object] = data
+        return self.copy_sealed_object(source, remote_object)
+
+    def fetch_sealed_object(self, remote_object: str, destination: Path) -> tuple[object, ...]:
+        destination.write_bytes(self.objects[remote_object])
         return ()
 
 
@@ -404,9 +416,33 @@ class _RemoteObjectTransport:
 
 def _remote_restore_fixture(
     tmp_path: Path,
+    *,
+    legacy_controls: bool = False,
 ) -> tuple[WorkspaceV2RemoteService, RemoteBackupTransferReceipt, Path, Path]:
     remote, backup_root = _remote(tmp_path)
     plan = remote.plan_base(backup_root, configuration_fingerprint="a" * 64)
+    if legacy_controls:
+        sources = tuple(
+            source.model_copy(
+                update={
+                    "object": source.object.model_copy(
+                        update={"object_key": f"controls/{source.relative_path}"}
+                    )
+                }
+            )
+            if source.object.object_key.startswith("controls-v2/")
+            else source
+            for source in plan.sources
+        )
+        objects = tuple(
+            sorted((source.object for source in sources), key=lambda item: item.object_key)
+        )
+        plan = plan.model_copy(
+            update={
+                "sources": sources,
+                "manifest": plan.manifest.model_copy(update={"objects": objects}),
+            }
+        )
     remote_root = tmp_path / "remote"
     for source in plan.sources:
         target = remote_root / source.object.object_key
@@ -429,6 +465,76 @@ def _remote_restore_fixture(
     )
     shutil.rmtree(backup_root)
     return remote, receipt, remote_root, tmp_path / "restore"
+
+
+def test_restore_retains_read_compatibility_with_legacy_controls(tmp_path: Path) -> None:
+    remote, receipt, remote_root, destination = _remote_restore_fixture(
+        tmp_path, legacy_controls=True
+    )
+    result = remote.restore_from_remote(
+        receipt,
+        configuration_fingerprint="a" * 64,
+        transport=_RemoteObjectTransport(remote_root),  # type: ignore[arg-type]
+        staging_root=tmp_path / "staging",
+        destination=destination,
+        available_bytes=lambda: 10_000_000_000,
+        reserve_bytes=1,
+        receipt_path=tmp_path / "restored.json",
+    )
+    assert result.restored_workspace_id
+
+
+def test_three_control_generations_preserve_parent_bytes(tmp_path: Path) -> None:
+    remote, backup_root = _remote(tmp_path)
+    transport = _RecordingTransport()
+    prior = None
+    original: dict[str, bytes] = {}
+    for generation in range(3):
+        if generation:
+            (tmp_path / "source/state/payload.bin").write_bytes(f"generation-{generation}".encode())
+            backup_root = tmp_path / f"backup-{generation}"
+            remote._backup_service.create_packed(
+                tmp_path / "source",
+                backup_root,
+                volume_bytes=64_000,
+                fragment_bytes=16_000,
+                available_bytes=lambda: 10_000_000_000,
+            )
+        plan = remote.plan_base(backup_root, configuration_fingerprint="a" * 64, parent=prior)
+        remote.upload_base(plan, backup_root, transport, tmp_path / f"uploaded-{generation}.json")  # type: ignore[arg-type]
+        assert all(not item.object_key.startswith("controls/") for item in plan.manifest.objects)
+        assert all(transport.objects[key] == value for key, value in original.items())
+        original.update(transport.objects)
+        prior = plan.manifest
+
+
+def test_size_only_success_cannot_publish_conflicting_remote_control(tmp_path: Path) -> None:
+    remote, backup_root = _remote(tmp_path)
+    plan = remote.plan_base(backup_root, configuration_fingerprint="a" * 64)
+
+    class CorruptingTransport(_RecordingTransport):
+        def fetch_sealed_object(self, remote_object: str, destination: Path) -> tuple[object, ...]:
+            data = self.objects[remote_object]
+            destination.write_bytes(b"x" * len(data))
+            return ()
+
+    with pytest.raises(WorkspaceV2RemoteError, match="conflicts with its seal"):
+        remote.upload_base(plan, backup_root, CorruptingTransport(), tmp_path / "uploaded.json")  # type: ignore[arg-type]
+    assert not (tmp_path / "uploaded.json").exists()
+
+
+def test_upload_rejects_same_size_local_volume_change_before_remote_write(tmp_path: Path) -> None:
+    remote, backup_root = _remote(tmp_path)
+    plan = remote.plan_base(backup_root, configuration_fingerprint="a" * 64)
+    volume_source = next(
+        item for item in plan.sources if item.object.object_key.startswith("volumes/")
+    )
+    payload = backup_root / volume_source.relative_path
+    payload.write_bytes(b"x" * payload.stat().st_size)
+    transport = _RecordingTransport()
+    with pytest.raises(WorkspaceV2RemoteError, match="binding is unavailable or unsafe"):
+        remote.upload_base(plan, backup_root, transport, tmp_path / "uploaded.json")  # type: ignore[arg-type]
+    assert not any(key.startswith("volumes/") for _, key in transport.calls)
 
 
 def test_remote_restore_streams_from_remote_without_local_volume_fallback(tmp_path: Path) -> None:

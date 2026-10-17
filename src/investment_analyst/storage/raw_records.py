@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Collection
 from datetime import UTC, datetime
@@ -256,6 +257,34 @@ class JsonRawRecordRepository:
         if row is None:
             raise RecordNotFoundError(f"raw record {record_id} was not found")
         record = self._verify_file(row[0], row[1])
+        if record.record_id != record_id:
+            raise StorageError("stored raw record identifier does not match its index")
+        return record
+
+    def get_verified_bounded(self, record_id: UUID) -> RawRecord:
+        """Read one migration record with <=1 MiB I/O and the existing exact parser.
+
+        The parser input and model remain record-sized heap, charged to the
+        admitted maintenance cgroup; this is not a constant-memory parser.
+        """
+        row = self._index_row(record_id)
+        if row is None:
+            raise RecordNotFoundError(f"raw record {record_id} was not found")
+        candidate = self._raw_root / row[0]
+        if any(path.is_symlink() for path in (candidate, *candidate.parents)):
+            raise StorageError("raw record path cannot use symbolic links")
+        target = _ensure_within(self._raw_root, candidate)
+        if not target.is_file():
+            raise StorageError("indexed raw record file is missing")
+        digest = hashlib.sha256()
+        document = bytearray()
+        with target.open("rb") as stream:
+            while chunk := stream.read(1 << 20):
+                digest.update(chunk)
+                document.extend(chunk)
+        if digest.hexdigest() != row[1]:
+            raise StorageError("checksum mismatch for raw record file")
+        record = RawRecord.model_validate_json(document)
         if record.record_id != record_id:
             raise StorageError("stored raw record identifier does not match its index")
         return record

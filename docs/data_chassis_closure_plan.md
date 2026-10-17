@@ -25,9 +25,9 @@ no activa v2 productivo y no acredita ahorro del host.
 | 40 | Backend v2 compatible, compacto y recuperable: workspace versionado, lectura histórica y escrituras tipadas, archivo histórico sellado, repositorios compatibles y backup v2. | Mismos modelos, IDs, JSON, Decimal y cortes PIT en scratch restaurado; consumidores existentes; perfiles de fidelidad, recuperación y escala. Sin cutover real. |
 | 41 | Corregir revisiones de metadata y adquisición SEC con disponibilidad point-in-time y entregar un colector acotado que conserve un resultado terminal por intento aunque falle la medición. | Cinco emisores: Submissions frescos, v3 sólo con bytes idénticos y v4 sólo con prueba byte-exact terminal; historia v1/v2/v3/v4 y restore verificados. Ciclo scratch de 102/102 intentos terminales con fallos inyectados, deadlines completos y comparación ABBA reproducible. No reescribe metadata ni resultados históricos. |
 | 42 | Adoptar checkpoints diarios recursivos e incrementalidad exacta en mercado, derivados, fundamentales, valoración, instituciones y eventos junto con lecturas filtradas/paginadas, identidad semántica separada de snapshot y acceso de features/explicación desacoplado. | Full/incremental Decimal y deltas 0/1/3 con revisión; cero resultados equivalentes añadidos, cero modelos ajenos hidratados, lecturas por IDs candidatos, lotes ≤256 y snapshots/lineage exactos. V1 se conserva hasta el bloque 43. No introduce ML, LLM ni paneles nuevos. |
-| 43 | Migración completa y cutover con inventario, restore, rollback, activación de v2 y sincronización de instrumentos con el release. | Inventario real completo; escenarios sin delta, barra nueva, revisión, interrupción/reanudación, arranque/lectura y restore/rollback; v2 activo y recuperable; inicia una serie UTC ordinaria separada del backfill. |
-| 44 | Backups cifrados e incrementales en Google Drive, reanudables, verificables y restaurables. Drive es destino de archivo, nunca almacenamiento DuckDB activo. | Restore desde Drive a destino vacío con hashes, conteos, PIT y lineage exactos. Dependencias, permisos y cifrado requieren PLAN explícito antes de BUILD. |
-| 45 | Aceptación final, correcciones residuales de gates y limpieza estrechamente autorizada de herramientas y copias. | Q1–Q7 y gates obligatorios satisfechos; recuperación retenida; inventario y autorización de limpieza; bytes lógicos, archivos, espacio Linux y espacio `C:` medidos por separado. |
+| 43 | Migración y recovery A→B aislados, transporte directo y backup packed reanudable. | Inventario y restore independientes conservados; default v1 continúa activo. No acredita cutover productivo. |
+| 44 | Backup cifrado en Drive, restore independiente y costuras tipadas de cutover/bindings. Drive es archivo, nunca DuckDB activo. | Padre de 676 volúmenes restaurado y controles reconciliados. No acredita activación v2 ni delta F físico. |
+| 45 | Limpieza temprana, transición histórica A→B→F, delta físico, cutover real y aceptación final. | Recuperación padre+delta F y release integrado 44 sobre v2; retiros estrechamente probados; Q1–Q7 y gates obligatorios satisfechos, incluidos siete días UTC completos posteriores a activación. |
 
 La adopción de #337 está acotada al formato v2 opt-in y conserva el formato 1 como default hasta
 resolver el inventario y el cutover en el bloque 43. La decisión humana `AUTO` aplica sólo a este
@@ -47,6 +47,9 @@ oportunidad opcional se registra en PLAN y no extiende la aceptación de #337.
 - Features y explicación desacopladas del almacenamiento físico y reproducibles desde evidencia PIT.
 - Q1–Q7 conservan su comparador y nivel de evidencia; los gates no numéricos también son obligatorios.
 
-El bloque 40 sólo demuestra comportamiento aislado con fixtures. El cutover, la migración del
-workspace permanente, el backup Drive, la observación operacional y cualquier liberación física de
-espacio pertenecen a bloques posteriores y requieren la autoridad que cada PLAN declare.
+El bloque 40 sólo demuestra comportamiento aislado con fixtures. La secuencia reconciliada de
+#341/#343/#345 lleva el cutover productivo y su aceptación a 45. La receta vigente está en
+[`data_chassis_45_acceptance_runbook.md`](data_chassis_45_acceptance_runbook.md); los recibos de
+43/44 conservan sus bindings originales y se reutilizan sin remigración ni restore base.
+Esta reconciliación no declara DATA-CHASSIS completado: requiere aceptación operacional y
+gates exact-SHA antes de la transición propuesta `COMPLETES`.

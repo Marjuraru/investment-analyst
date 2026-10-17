@@ -129,6 +129,36 @@ def test_verify_complete_is_read_only_and_detects_index_divergence(tmp_path: Pat
             assert state_path.read_bytes() == state_before
 
 
+def test_explicit_verification_does_not_trust_or_rewrite_a_completed_prefix(tmp_path: Path) -> None:
+    source_paths = StoragePaths.from_root(tmp_path / "source")
+    with LocalStorage(source_paths) as writer:
+        _seed(writer, 3)
+    with (
+        LocalStorage(source_paths, read_only=True) as source,
+        _staging(tmp_path, "staging") as staging,
+    ):
+        importer = RawV2Importer(
+            source,
+            staging,
+            source_workspace_id="source",
+            source_fingerprint="B",
+            historic_source_fingerprint="A",
+        )
+        importer.run(page_limit=2)
+        importer.run(page_limit=2)
+        paths = (
+            staging.destination / "raw-v2-import-state.json",
+            staging.destination / "raw-v2-import-verification-work.json",
+        )
+        before = {path: path.read_bytes() for path in paths}
+        assert importer.verify_complete().max_page_hydrated == 2
+        assert all(path.read_bytes() == payload for path, payload in before.items())
+        staging._connection.execute("DELETE FROM raw_v2_index")
+        with pytest.raises(RawV2ImportError, match="prefix does not match|staged inventory"):
+            importer.verify_complete()
+        assert all(path.read_bytes() == payload for path, payload in before.items())
+
+
 def test_legacy_v1_checkpoint_keeps_same_path_semantics(tmp_path) -> None:
     import json
 
@@ -333,3 +363,71 @@ def test_snapshot_prefix_verification_resumes_from_a_durable_page_checkpoint(
 
     assert complete_resume.complete is True
     assert complete_resume.imported_count == 3
+
+
+@pytest.mark.parametrize("corruption", [None, "blob", "metadata", "projection"])
+def test_bounded_epoch_reuses_only_exact_bytes_and_projections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corruption: str | None
+) -> None:
+    from investment_analyst.storage.raw_v2 import RawV2StagingError
+
+    source_paths = StoragePaths.from_root(tmp_path / "source")
+    with LocalStorage(source_paths) as source:
+        records = _seed(source, 3)
+    destination = (tmp_path / "staging").absolute()
+    destination.mkdir()
+    connection = duckdb.connect(str(destination / "raw-v2-index.duckdb"))
+    with (
+        LocalStorage(source_paths, read_only=True) as source,
+        RawV2Staging(destination, connection) as staging,
+    ):
+        baseline = RawV2Importer(
+            source, staging, source_workspace_id="source", source_fingerprint="frozen"
+        ).run(page_limit=2)
+        connection.execute(
+            "CREATE TABLE workspace_raw_json_projections_v2 "
+            "(record_id VARCHAR,field_name VARCHAR,field_value VARCHAR,"
+            "PRIMARY KEY(record_id,field_name))"
+        )
+
+        def repeated_work(*args, **kwargs):
+            raise AssertionError("settled epoch page must not repeat writer hydration")
+
+        monkeypatch.setattr(staging, "save_many", repeated_work)
+        monkeypatch.setattr(staging, "get_many", repeated_work)
+        if corruption == "blob":
+            row = connection.execute(
+                "SELECT relative_path FROM raw_v2_index WHERE record_id=?",
+                [str(records[0].record_id)],
+            ).fetchone()
+            path = staging._resolve_blob(row[0])
+            original = path.read_bytes()
+            path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+        elif corruption == "metadata":
+            connection.execute(
+                "UPDATE raw_v2_index SET source_id='foreign' WHERE record_id=?",
+                [str(records[0].record_id)],
+            )
+        elif corruption == "projection":
+            connection.execute(
+                "INSERT INTO workspace_raw_json_projections_v2 VALUES (?,'unknown','value')",
+                [str(records[0].record_id)],
+            )
+        importer = RawV2Importer(
+            source,
+            staging,
+            source_workspace_id="source",
+            source_fingerprint="frozen",
+            epoch=uuid4(),
+            destination_connection=connection,
+        )
+        if corruption is None:
+            result = importer.run(page_limit=2)
+            assert result.corpus_digest == baseline.corpus_digest
+            assert result.reused_count == result.imported_count == 3
+            assert importer.verify_complete().corpus_digest == result.corpus_digest
+        else:
+            with pytest.raises(
+                (RawV2StagingError, RawV2ImportError), match="checksum|projections|canonical"
+            ):
+                importer.run(page_limit=2)

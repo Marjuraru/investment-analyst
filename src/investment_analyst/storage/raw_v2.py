@@ -15,12 +15,15 @@ providers, credentials and installed runtimes stay out of reach.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 from collections.abc import Collection, Mapping, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid4
 
@@ -100,6 +103,7 @@ from investment_analyst.storage.observation_v2 import (
 )
 from investment_analyst.storage.serialization import (
     canonical_json_bytes,
+    canonical_json_to_stream,
     model_from_json,
     sha256_hex,
 )
@@ -450,6 +454,93 @@ class RawV2Staging:
             raise RawV2StagingError("raw v2 staging save did not settle exactly one record")
         return record
 
+    def save_bounded(self, record: RawRecord, *, spool_directory: Path) -> BatchWriteReceipt:
+        """Migration-only, one-model canonical spool; ordinary writers are unchanged."""
+        self._require_writable()
+        if not spool_directory.is_absolute() or any(
+            p.is_symlink() for p in (spool_directory, *spool_directory.parents)
+        ):
+            raise RawV2StagingError("raw spool directory must be absolute without symlinks")
+        spool_directory.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(mode="w+b", dir=spool_directory, prefix="raw-spool-") as spool:
+            checksum, length = canonical_json_to_stream(record, spool)
+            spool.flush()
+            os.fsync(spool.fileno())
+            existing = self._select_rows([record.record_id])
+            if existing and existing[0][2] != checksum:
+                raise RecordConflictError("raw v2 record already has different content")
+            relative = self._blob_relative_path(checksum)
+            if existing and existing[0][1] != relative.as_posix():
+                raise RawV2StagingError("raw v2 index path does not match canonical address")
+            target = self._resolve_blob(relative.as_posix())
+            if any(p.is_symlink() for p in (target, *target.parents)):
+                raise RawV2StagingError("raw v2 blob cannot use symbolic links")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+            try:
+                if existing and not target.is_file():
+                    raise RawV2StagingError("indexed raw v2 blob is missing")
+                if not target.exists():
+                    spool.seek(0)
+                    with temporary.open("xb") as output:
+                        while chunk := spool.read(1 << 20):
+                            output.write(chunk)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    with suppress(FileExistsError):
+                        os.link(temporary, target)
+                actual, actual_length = hashlib.sha256(), 0
+                with target.open("rb") as stream:
+                    while chunk := stream.read(1 << 20):
+                        actual.update(chunk)
+                        actual_length += len(chunk)
+                if actual.hexdigest() != checksum or actual_length != length:
+                    raise RawV2StagingError("raw v2 blob checksum or length differs")
+            finally:
+                temporary.unlink(missing_ok=True)
+            parent = target.parent
+            while True:
+                descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                if parent == self._raw_root:
+                    break
+                parent = parent.parent
+            if existing:
+                self._hydrate(record.record_id, existing[0], verified_record=record)
+                return BatchWriteReceipt(reused_ids=(record.record_id,))
+            manager, report = _project_13f_fields(record)
+            with write_transaction(self._connection):
+                insert_bounded(
+                    self._connection,
+                    BoundedInsertTable.RAW_V2_INDEX,
+                    [
+                        [
+                            str(record.record_id),
+                            relative.as_posix(),
+                            checksum,
+                            record.asset_id,
+                            record.source.source_id,
+                            _instant_text(record.event_time),
+                            _instant_text(record.available_at),
+                            _instant_text(record.received_at),
+                            record.schema_version,
+                            manager,
+                            report,
+                        ]
+                    ],
+                )
+                if self._workspace_projection_table_exists():
+                    for field, value in _project_raw_json_fields(record):
+                        self._connection.execute(
+                            f"INSERT INTO {WORKSPACE_RAW_JSON_PROJECTIONS_TABLE} "
+                            "(record_id,field_name,field_value) VALUES (?,?,?)",
+                            [str(record.record_id), field, value],
+                        )
+            return BatchWriteReceipt(created_ids=(record.record_id,))
+
     def save_many(self, records: Collection[RawRecord]) -> BatchWriteReceipt:
         """Persist batches idempotently; a failure confirms no partial batch."""
         self._require_writable()
@@ -476,6 +567,23 @@ class RawV2Staging:
         if not rows:
             raise RecordNotFoundError(f"raw v2 record {record_id} was not found")
         return self._hydrate(record_id, rows[0])
+
+    def get_verified_bounded(self, record_id: UUID) -> RawRecord:
+        """Verify one migration model using bounded reads and the exact existing parser."""
+        rows = self._select_rows([record_id])
+        if not rows:
+            raise RecordNotFoundError(f"raw v2 record {record_id} was not found")
+        relative, checksum = str(rows[0][1]), str(rows[0][2])
+        path = self._resolve_blob(relative)
+        document, digest = bytearray(), hashlib.sha256()
+        with path.open("rb") as stream:
+            while chunk := stream.read(1 << 20):
+                document.extend(chunk)
+                digest.update(chunk)
+        if digest.hexdigest() != checksum:
+            raise RawV2StagingError("checksum mismatch for raw v2 blob")
+        record = RawRecord.model_validate_json(document)
+        return self._hydrate(record_id, rows[0], verified_record=record)
 
     def get_many(self, record_ids: Collection[UUID]) -> dict[UUID, RawRecord]:
         """Hydrate verified records in deterministic order."""
@@ -763,7 +871,9 @@ class RawV2Staging:
             )
         return rows
 
-    def _hydrate(self, record_id: UUID, row: tuple[object, ...]) -> RawRecord:
+    def _hydrate(
+        self, record_id: UUID, row: tuple[object, ...], *, verified_record: RawRecord | None = None
+    ) -> RawRecord:
         (
             _indexed_id,
             relative_path,
@@ -779,8 +889,11 @@ class RawV2Staging:
         ) = row
         if not isinstance(relative_path, str) or not isinstance(checksum, str):
             raise RawV2StagingError("raw v2 index row is malformed")
-        data = self._read_blob(relative_path, checksum)
-        record = model_from_json(RawRecord, data)
+        record = (
+            model_from_json(RawRecord, self._read_blob(relative_path, checksum))
+            if verified_record is None
+            else verified_record
+        )
         if record.record_id != record_id:
             raise RawV2StagingError("stored raw v2 record identifier does not match its index")
         if (

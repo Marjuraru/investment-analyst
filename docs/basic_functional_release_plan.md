@@ -780,3 +780,15 @@ release y workspace. La activación productiva sigue siendo una operación
 posterior desde `main` integrado: exige guard vivo, capacidad física fresca,
 corte congelado y recibo de delta. No activa v2 ni retira el workspace default;
 esas decisiones operacionales permanecen en DATA-CHASSIS-45.
+
+## Cutover real y aceptación (`DATA-CHASSIS-45` / #345)
+
+El bloque activo propone `route_effect: COMPLETES` con limpieza temprana, transición histórica
+explícita A→B→F y delta físico recuperable, reutilizando el padre Drive de 44, sus controles
+verificados y el release integrado preparado. La receta operativa única es
+[`data_chassis_45_acceptance_runbook.md`](data_chassis_45_acceptance_runbook.md).
+La propuesta no equivale a cierre: Q1–Q7 conservan comparadores y denominador 7, y Q4 exige siete
+días UTC completos posteriores a la activación v2. Hasta demostrar aceptación, CI exact-SHA y los
+gates del protocolo, DATA-CHASSIS conserva su estado y FUNDAMENTALS-COVERAGE sigue `PLANNED`.
+Después de integración aceptada, el siguiente único `NEXT` propuesto es FUNDAMENTALS-COVERAGE,
+resuelto por PLAN fresco desde main, servicio y evidencia vivos.

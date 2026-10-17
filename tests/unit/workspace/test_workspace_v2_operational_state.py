@@ -11,12 +11,83 @@ import pytest
 from investment_analyst.workspace.workspace_v2_lifecycle_models import FrozenSourceCut
 from investment_analyst.workspace.workspace_v2_operational_state import (
     OperationalStateTransferError,
+    compare_operational_models,
     inventory_operational_state,
     seal_operational_state,
     transfer_operational_state,
 )
 
 _MOMENT = datetime(2026, 10, 15, tzinfo=UTC)
+
+
+def test_operational_models_reject_identical_bytes_with_an_invalid_schema(tmp_path: Path) -> None:
+    source, target = tmp_path / "source", tmp_path / "target"
+    for root in (source, target):
+        (root / "state").mkdir(parents=True)
+        (root / "state/aapl_daily_run_state.json").write_bytes(b"{}\n")
+    with pytest.raises(OperationalStateTransferError, match="model projection is invalid"):
+        compare_operational_models(source, target)
+    assert all(
+        (root / "state/aapl_daily_run_state.json").read_bytes() == b"{}\n"
+        for root in (source, target)
+    )
+
+
+def test_absent_operational_models_are_compared_without_creating_defaults(tmp_path: Path) -> None:
+    source, target = tmp_path / "source", tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    assert len(compare_operational_models(source, target)) == 15
+    assert list(source.iterdir()) == list(target.iterdir()) == []
+
+
+def test_unknown_destination_state_is_preserved_and_rejected(tmp_path: Path) -> None:
+    source, target = tmp_path / "source", tmp_path / "target"
+    source.mkdir()
+    (target / "state").mkdir(parents=True)
+    unique = target / "state/.unknown-durable"
+    unique.write_bytes(b"unique local state\n")
+    with pytest.raises(OperationalStateTransferError, match="unclassified durable"):
+        compare_operational_models(source, target)
+    assert unique.read_bytes() == b"unique local state\n"
+
+
+@pytest.mark.parametrize(
+    "mutation", ["source-change", "source-add", "source-remove", "target-change", "target-add"]
+)
+def test_terminal_receipt_revalidates_bytes_and_inventory_membership(
+    tmp_path: Path, mutation: str
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    _fixture(source)
+    inventory = tmp_path / "inventory.jsonl"
+    seal = _seal(source, target, inventory)
+    arguments = dict(
+        seal=seal,
+        inventory_path=inventory,
+        checkpoint_path=tmp_path / "checkpoint.json",
+        receipt_path=tmp_path / "receipt.json",
+        available_bytes=lambda: 10_000_000,
+        reserve_bytes=1,
+    )
+    transfer_operational_state(source, target, **arguments, clock=lambda: _MOMENT)
+    if mutation == "source-change":
+        (source / "state/aapl_daily_run_state.json").write_text('{"terminal":false}\n')
+    elif mutation == "source-add":
+        (source / "state/asset_preferences.json").write_text("{}\n")
+    elif mutation == "source-remove":
+        (source / "state/aapl_daily_run_state.json").unlink()
+    elif mutation == "target-change":
+        (target / "state/aapl_daily_run_state.json").write_text('{"terminal":false}\n')
+    else:
+        (target / "state/asset_preferences.json").write_text("{}\n")
+    with pytest.raises(OperationalStateTransferError):
+        transfer_operational_state(
+            source, target, **arguments, clock=lambda: datetime(2026, 10, 16, tzinfo=UTC)
+        )
 
 
 def _source(root: Path) -> FrozenSourceCut:
