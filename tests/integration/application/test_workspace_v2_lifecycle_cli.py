@@ -130,7 +130,31 @@ def test_cli_uploads_a_sealed_remote_plan_with_a_secret_free_fake_rclone(tmp_pat
         available_bytes=lambda: 10_000_000_000,
     )
     rclone = tmp_path / "rclone"
-    rclone.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    storage = tmp_path / "remote_storage"
+    storage.mkdir()
+    rclone_script = f"""#!/usr/bin/env python3
+import sys
+import shutil
+from pathlib import Path
+
+storage = Path({str(storage)!r})
+args = sys.argv[1:]
+if not args:
+    sys.exit(0)
+if args[0] == "copyto":
+    src, dst = args[1], args[2]
+    if ":" in src and not src.startswith("/"):
+        key = src.split(":", 1)[1]
+        target = storage / key
+        shutil.copy2(target, dst)
+    elif ":" in dst and not dst.startswith("/"):
+        key = dst.split(":", 1)[1]
+        target = storage / key
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, target)
+sys.exit(0)
+"""
+    rclone.write_text(rclone_script, encoding="utf-8")
     rclone.chmod(0o700)
     receipt = tmp_path / "remote-receipt.json"
 
