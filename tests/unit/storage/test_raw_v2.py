@@ -45,6 +45,42 @@ def _staging(tmp_path: Path, name: str = "staging") -> tuple[RawV2Staging, objec
     return RawV2Staging(destination, connection), connection
 
 
+def test_bounded_spool_large_raw_exact_idempotent_conflict_and_corruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from investment_analyst.storage import raw_v2 as module
+    from investment_analyst.storage.serialization import canonical_json_bytes, sha256_hex
+
+    staging, connection = _staging(tmp_path)
+    record = _record(payload={"large": "雪😀\\\n" * 300_000, "integer": 10**80})
+    expected = canonical_json_bytes(record)
+    with staging:
+        with monkeypatch.context() as patch:
+            patch.setattr(module, "canonical_json_bytes", lambda _: pytest.fail("full bytes"))
+            patch.setattr(Path, "read_bytes", lambda _: pytest.fail("unbounded blob read"))
+            assert (
+                staging.save_bounded(record, spool_directory=tmp_path / "spool").created_count == 1
+            )
+            assert (
+                staging.save_bounded(record, spool_directory=tmp_path / "spool").reused_count == 1
+            )
+            assert staging.get_verified_bounded(record.record_id) == record
+        assert staging.get(record.record_id) == record
+        path = staging._resolve_blob(staging._blob_relative_path(sha256_hex(expected)).as_posix())
+        assert path.read_bytes() == expected
+        assert list((tmp_path / "spool").iterdir()) == []
+        conflict = record.model_copy(update={"schema_version": "changed"})
+        with pytest.raises(RecordConflictError):
+            staging.save_bounded(conflict, spool_directory=tmp_path / "spool")
+        with path.open("ab") as output:
+            output.write(b" ")
+        with pytest.raises(RawV2StagingError, match="checksum"):
+            staging.save_bounded(record, spool_directory=tmp_path / "spool")
+        with pytest.raises(RawV2StagingError, match="checksum"):
+            staging.get_verified_bounded(record.record_id)
+        assert connection.execute("SELECT count(*) FROM raw_v2_index").fetchone() == (1,)
+
+
 def _read_only_staging(destination: Path) -> RawV2Staging:
     return RawV2Staging(
         destination, duckdb.connect(str(destination / "raw-v2-index.duckdb")), read_only=True

@@ -32,6 +32,27 @@ from investment_analyst.storage import (
 
 from .conftest import make_raw_record
 
+
+def test_bounded_verified_read_accepts_large_exact_record_without_read_bytes(
+    storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = make_raw_record().model_copy(
+        update={"payload": {"text": "雪😀\\\n" * 300_000, "integer": 10**80}}
+    )
+    storage.raw_records.save(record)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", lambda _: pytest.fail("unbounded raw read"))
+        assert storage.raw_records.get_verified_bounded(record.record_id) == record
+    row = storage.store.connection.execute(
+        "SELECT relative_path FROM raw_record_index WHERE record_id=?", [str(record.record_id)]
+    ).fetchone()
+    path = storage.paths.raw_dir / row[0]
+    with path.open("ab") as stream:
+        stream.write(b" ")
+    with pytest.raises(StorageError, match="checksum"):
+        storage.raw_records.get_verified_bounded(record.record_id)
+
+
 _THIRTEEN_F_COVER = b"""<edgarSubmission><submissionType>13F-HR</submissionType><filingManager>
 <name>Manager LLC</name></filingManager>
 <reportCalendarOrQuarter>2024-12-31</reportCalendarOrQuarter>

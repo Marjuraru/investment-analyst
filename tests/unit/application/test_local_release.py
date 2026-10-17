@@ -270,7 +270,10 @@ def test_activation_same_sha_retargets_and_binds_a_different_workspace(tmp_path:
     assert bindings.current.workspace_format_version == 2
 
 
-def test_rollback_refuses_stale_v1_binding_after_v2_activation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("previous_binding_present", [True, False])
+def test_rollback_refuses_stale_v1_binding_after_v2_activation(
+    tmp_path: Path, previous_binding_present: bool
+) -> None:
     """A generic rollback cannot silently discard a v2 writer's later progress."""
     sha_v1 = "1111111111111111111111111111111111111111"
     sha_v2 = "2222222222222222222222222222222222222222"
@@ -316,8 +319,44 @@ def test_rollback_refuses_stale_v1_binding_after_v2_activation(tmp_path: Path) -
     service.activate(sha_v1, workspace_root=v1, skip_systemd=True, skip_health_check=True)
     service.activate(sha_v2, workspace_root=v2, skip_systemd=True, skip_health_check=True)
 
+    if not previous_binding_present:
+        service._save_workspace_bindings(
+            service.load_workspace_bindings().model_copy(update={"previous": None})
+        )
+
     with pytest.raises(ReleaseRollbackError, match="stale v1"):
         service.rollback(skip_systemd=True, skip_health_check=True)
+
+
+@pytest.mark.parametrize("failure", ["restart", "health"])
+def test_failed_first_v2_activation_stops_without_reopening_v1(
+    tmp_path: Path, failure: str
+) -> None:
+    v2 = tmp_path / "v2"
+    WorkspaceService().initialize(v2, format_version=2)
+    runner = MagicMock()
+    if failure == "restart":
+        runner.restart.side_effect = RuntimeError("fixture restart failure")
+    health = MagicMock()
+    health.check_health_readiness.return_value = (False, 500)
+    service = LocalReleaseService(
+        paths=tmp_path / "runtime", systemctl=runner, health_checker=health
+    )
+    old = DeploymentState(current="1" * 40, updated_at=datetime.now(UTC))
+    with (
+        patch.object(service, "verify_pre_restart"),
+        patch.object(service, "load_deployment_state", return_value=old),
+        patch.object(service, "_validate_current_deployment", return_value="old v1 unit"),
+        patch.object(service, "retarget_unit"),
+        patch.object(service, "_recover_managed_current") as recover,
+        patch.object(service, "_save_deployment_state") as save,
+        pytest.raises(ReleaseRollbackError, match="current v2 data"),
+    ):
+        service.activate("2" * 40, workspace_root=v2)
+    runner.stop.assert_called_once_with("investment-analyst.service")
+    recover.assert_not_called()
+    save.assert_not_called()
+    assert v2.is_dir()
 
 
 def test_safe_tar_extract_prevents_path_traversal(tmp_path: Path) -> None:
@@ -1388,3 +1427,15 @@ def test_candidate_update_reuses_verified_activation_rollback_path(tmp_path: Pat
     assert activate.call_args.kwargs["sha"] == sha
     assert activate.call_args.kwargs["skip_systemd"] is True
     assert activate.call_args.kwargs["skip_health_check"] is True
+
+
+def test_workspace_binding_rejects_malformed_historical_companion(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    WorkspaceService().initialize(root, format_version=2)
+    companion = root / f"state/historical-transition.{uuid4()}.json"
+    companion.write_text('{"phase":"APPLYING"}')
+    service = LocalReleaseService(paths=tmp_path / "runtime")
+    with pytest.raises(ReleaseVerificationError, match="cannot be bound"):
+        service._workspace_binding("a" * 40, root)
+    assert service.load_deployment_state().current is None
+    assert service.load_workspace_bindings().current is None

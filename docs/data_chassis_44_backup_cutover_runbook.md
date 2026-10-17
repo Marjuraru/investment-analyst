@@ -1,5 +1,9 @@
 # DATA-CHASSIS-44: backup externo, cutover y capacidad física
 
+Documento histórico de 44. La receta vigente y las dependencias actuales de retiro están en
+[`data_chassis_45_acceptance_runbook.md`](data_chassis_45_acceptance_runbook.md). Los estados de
+entrada siguientes describen su ejecución original; no autorizan recrear copias ya retiradas.
+
 Este runbook opera sobre los artefactos ya acreditados de DATA-CHASSIS-43.
 No autoriza repetir la migración, recomprimir los 676 volúmenes, borrar el
 workspace permanente ni sustituir los guards vivos.

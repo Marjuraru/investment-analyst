@@ -340,3 +340,79 @@ class SealedDirectoryRetirementReceipt(_LifecycleModel):
     )
     checkpoint: SealedDirectoryRetirementCheckpoint
     completed_at: UTCDateTime
+
+
+class WorkspaceV2RetirementProof(_LifecycleModel):
+    """Physical recovery evidence for the exact inactive root being retired."""
+
+    schema_version: Literal["workspace-v2-retirement-proof-v1"] = "workspace-v2-retirement-proof-v1"
+    operation_id: UUID
+    role: Literal["physical_delta_recovery_slot"]
+    source_root: Path
+    source_workspace_id: UUID
+    retained_root: Path
+    recovery_epoch: UUID
+    recovery_manifest_sha256: NonEmptyStr
+    recovery_receipt_sha256: NonEmptyStr
+    inventory_sha256: NonEmptyStr
+    files_confirmed: int = Field(ge=0)
+    bytes_confirmed: int = Field(ge=0)
+    writer_closed: Literal[True] = True
+    verified_at: UTCDateTime
+
+    @model_validator(mode="after")
+    def require_closed_roots(self) -> WorkspaceV2RetirementProof:
+        if (
+            not self.source_root.is_absolute()
+            or not self.retained_root.is_absolute()
+            or self.source_root == self.retained_root
+            or self.source_root in self.retained_root.parents
+            or self.retained_root in self.source_root.parents
+        ):
+            raise ValueError("retirement roots must be absolute and disjoint")
+        for digest in (
+            self.recovery_manifest_sha256,
+            self.recovery_receipt_sha256,
+            self.inventory_sha256,
+        ):
+            if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+                raise ValueError("retirement evidence digest is invalid")
+        return self
+
+
+class BackupDirectoryRetirementProof(_LifecycleModel):
+    """Sealed physical directory identity; it is not a workspace or a fabricated UUID."""
+
+    schema_version: Literal["workspace-v2-retirement-proof-v1"] = "workspace-v2-retirement-proof-v1"
+    operation_id: UUID
+    role: Literal["packed_backup", "restore_staging"] = "packed_backup"
+    source_root: Path
+    retained_controls: Path
+    parent_index: Path
+    parent_index_sha256: NonEmptyStr
+    remote_manifest_sha256: NonEmptyStr
+    recovery_receipt_sha256: NonEmptyStr
+    inventory_sha256: NonEmptyStr
+    files_confirmed: int = Field(ge=1)
+    bytes_confirmed: int = Field(ge=0)
+    writer_closed: Literal[True] = True
+    verified_at: UTCDateTime
+
+    @model_validator(mode="after")
+    def require_directory_binding(self) -> BackupDirectoryRetirementProof:
+        for path in (self.source_root, self.retained_controls, self.parent_index):
+            if not path.is_absolute():
+                raise ValueError("backup retirement paths must be absolute")
+        if self.retained_controls.is_relative_to(
+            self.source_root
+        ) or self.parent_index.is_relative_to(self.source_root):
+            raise ValueError("backup retirement dependencies must survive outside the root")
+        for digest in (
+            self.parent_index_sha256,
+            self.remote_manifest_sha256,
+            self.recovery_receipt_sha256,
+            self.inventory_sha256,
+        ):
+            if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+                raise ValueError("backup retirement digest is invalid")
+        return self

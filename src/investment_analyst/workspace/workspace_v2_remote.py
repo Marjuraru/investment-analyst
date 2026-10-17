@@ -367,20 +367,21 @@ class WorkspaceV2RemoteService:
             raise WorkspaceV2RemoteError("sealed volume journal is malformed") from error
         if journal_digest.hexdigest() != manifest.journal_sha256:
             raise WorkspaceV2RemoteError("sealed volume journal binding differs from manifest")
-        object_map["controls/packed-backup-volumes.jsonl"] = RemoteBackupObject(
-            object_key="controls/packed-backup-volumes.jsonl",
+        journal_key = f"controls-v2/{journal_digest.hexdigest()}/packed-backup-volumes.jsonl"
+        object_map[journal_key] = RemoteBackupObject(
+            object_key=journal_key,
             sha256=journal_digest.hexdigest(),
             size_bytes=journal_size,
         )
-        source_map["controls/packed-backup-volumes.jsonl"] = RemoteBackupSource(
-            object=object_map["controls/packed-backup-volumes.jsonl"],
+        source_map[journal_key] = RemoteBackupSource(
+            object=object_map[journal_key],
             relative_path="packed-backup-volumes.jsonl",
         )
         ordered = tuple(sorted(object_map.values(), key=lambda item: item.object_key))
         remote = RemoteBackupManifest(
             backup_id=manifest.backup_id,
             source_workspace_id=manifest.source_workspace_id,
-            created_at=self._now(),
+            created_at=manifest.created_at,
             configuration_fingerprint=configuration_fingerprint,
             parent_backup_id=(
                 None
@@ -433,7 +434,11 @@ class WorkspaceV2RemoteService:
             source = sources[object_item.object_key]
             local_path = _checked_source_path(root, source, object_item)
             try:
-                attempts.extend(transport.copy_sealed_object(local_path, object_item.object_key))
+                attempts.extend(
+                    _publish_immutable_verified(
+                        transport, local_path, object_item.object_key, receipt_target.parent
+                    )
+                )
             except DriveTransportError as error:
                 raise WorkspaceV2RemoteError("remote object upload was not confirmed") from error
         manifest_path = receipt_target.with_name(f".{receipt_target.name}.{uuid4().hex}.manifest")
@@ -442,9 +447,11 @@ class WorkspaceV2RemoteService:
             manifest_digest = _sha256(manifest_path)
             try:
                 attempts.extend(
-                    transport.copy_sealed_object(
+                    _publish_immutable_verified(
+                        transport,
                         manifest_path,
                         f"manifests/{plan.manifest.backup_id}.json",
+                        receipt_target.parent,
                     )
                 )
             except DriveTransportError as error:
@@ -710,17 +717,15 @@ class WorkspaceV2RemoteService:
         ):
             raise WorkspaceV2RemoteError("remote manifest binding differs from transfer receipt")
         controls = {item.object_key: item for item in remote_manifest.objects}
-        for remote_key, local_name in (
-            ("controls/backup_manifest.json", "backup_manifest.json"),
-            ("controls/source-inventory.jsonl", "source-inventory.jsonl"),
-            ("controls/packed-backup-volumes.jsonl", "packed-backup-volumes.jsonl"),
+        for local_name in (
+            "backup_manifest.json",
+            "source-inventory.jsonl",
+            "packed-backup-volumes.jsonl",
         ):
-            item = controls.get(remote_key)
-            if item is None:
-                raise WorkspaceV2RemoteError("remote manifest is missing a restore control")
+            item = _restore_control(remote_manifest, local_name)
             _fetch_bound_object(
                 transport,
-                remote_key,
+                item.object_key,
                 staging / local_name,
                 expected_sha256=item.sha256,
                 expected_size=item.size_bytes,
@@ -916,15 +921,15 @@ class WorkspaceV2RemoteService:
             manifest = RemoteBackupManifest.model_validate_json(target.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError) as error:
             raise WorkspaceV2RemoteError("remote manifest is malformed") from error
-        required_controls = {
-            "controls/backup_manifest.json",
-            "controls/source-inventory.jsonl",
-            "controls/packed-backup-volumes.jsonl",
-        }
+        for name in (
+            "backup_manifest.json",
+            "source-inventory.jsonl",
+            "packed-backup-volumes.jsonl",
+        ):
+            _restore_control(manifest, name)
         if (
             manifest.backup_id != transfer.backup_id
             or manifest.configuration_fingerprint != configuration_fingerprint
-            or not required_controls.issubset({item.object_key for item in manifest.objects})
         ):
             raise WorkspaceV2RemoteError("observed remote manifest does not bind the transfer")
         result = RemoteBackupManifestReconciliationReceipt(
@@ -983,9 +988,44 @@ def _control_objects(root: Path) -> Iterable[RemoteBackupSource]:
                 digest.update(chunk)
                 size += len(chunk)
         object_item = RemoteBackupObject(
-            object_key=f"controls/{name}", sha256=digest.hexdigest(), size_bytes=size
+            object_key=f"controls-v2/{digest.hexdigest()}/{name}",
+            sha256=digest.hexdigest(),
+            size_bytes=size,
         )
         yield RemoteBackupSource(object=object_item, relative_path=name)
+
+
+def _restore_control(manifest: RemoteBackupManifest, name: str) -> RemoteBackupObject:
+    matches = tuple(
+        item
+        for item in manifest.objects
+        if item.object_key in {f"controls/{name}", f"controls-v2/{item.sha256}/{name}"}
+    )
+    if len(matches) != 1:
+        raise WorkspaceV2RemoteError(
+            "remote manifest is missing or ambiguously binds a restore control"
+        )
+    return matches[0]
+
+
+def _publish_immutable_verified(
+    transport: DriveTransport, source: Path, key: str, scratch: Path
+) -> tuple[DriveAttempt, ...]:
+    digest = _sha256(source)
+    size = source.stat().st_size
+    attempts = transport.copy_immutable_object(source, key)
+    downloaded = scratch / f".remote-verification-{uuid4().hex}"
+    try:
+        attempts += transport.fetch_sealed_object(key, downloaded)
+        if (
+            downloaded.is_symlink()
+            or not downloaded.is_file()
+            or (downloaded.stat().st_size != size or _sha256(downloaded) != digest)
+        ):
+            raise WorkspaceV2RemoteError("immutable remote object conflicts with its seal")
+        return attempts
+    finally:
+        downloaded.unlink(missing_ok=True)
 
 
 def _checked_source_path(
@@ -997,6 +1037,7 @@ def _checked_source_path(
         or path.is_symlink()
         or not path.is_file()
         or path.stat().st_size != object_item.size_bytes
+        or _sha256(path) != object_item.sha256
     ):
         raise WorkspaceV2RemoteError("local remote object binding is unavailable or unsafe")
     return path

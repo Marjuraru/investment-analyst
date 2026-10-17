@@ -33,6 +33,7 @@ from investment_analyst.application.operational_state import (
     AaplOperationalStateError,
 )
 from investment_analyst.core.models.base import ContractModel, UTCDateTime
+from investment_analyst.storage.errors import StorageError
 from investment_analyst.workspace.service import WorkspaceError, WorkspaceService
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -1662,7 +1663,16 @@ class LocalReleaseService:
         root = workspace_root.expanduser().resolve(strict=False)
         try:
             manifest = WorkspaceService().manifest(root)
-        except WorkspaceError as error:
+            if manifest.format_version == 2:
+                from investment_analyst.storage.workspace_v2_inventory import (
+                    historical_transition_status,
+                )
+
+                if historical_transition_status(root) != "COMPLETE":
+                    raise ReleaseVerificationError(
+                        "Incomplete historical transition cannot be activated"
+                    )
+        except (WorkspaceError, StorageError, ValueError) as error:
             raise ReleaseVerificationError(
                 f"Workspace cannot be bound to deployment: {root}"
             ) from error
@@ -1865,6 +1875,16 @@ class LocalReleaseService:
         managed_current = current_state.current is not None
         desired_binding = self._workspace_binding(cleaned_sha, workspace_root)
         current_bindings = self.load_workspace_bindings()
+        recovery_keeps_v2_data = (
+            desired_binding is None
+            or desired_binding.workspace_format_version != 2
+            or (
+                current_bindings.current is not None
+                and current_bindings.current.workspace_format_version == 2
+                and current_bindings.current.workspace_root == desired_binding.workspace_root
+                and current_bindings.current.workspace_id == desired_binding.workspace_id
+            )
+        )
 
         # Idempotence check
         if current_state.current == cleaned_sha:
@@ -1901,6 +1921,8 @@ class LocalReleaseService:
                 self.systemctl.restart(LOCAL_SERVICE_UNIT_NAME)
             except Exception as error:
                 failure_message = f"Systemd restart failed for {cleaned_sha}: {error}"
+                if not recovery_keeps_v2_data:
+                    self._stop_failed_v2_activation(error)
                 if managed_current:
                     self._recover_managed_current(
                         current_sha=current_state.current or "",
@@ -1929,6 +1951,8 @@ class LocalReleaseService:
                     failure_message = (
                         f"Health check failed for {cleaned_sha} with status {status_code}"
                     )
+                    if not recovery_keeps_v2_data:
+                        self._stop_failed_v2_activation(ReleaseVerificationError(failure_message))
                     if managed_current:
                         self._recover_managed_current(
                             current_sha=current_state.current or "",
@@ -1963,6 +1987,18 @@ class LocalReleaseService:
                 )
             )
         return new_state
+
+    def _stop_failed_v2_activation(self, failure: Exception) -> None:
+        """Never restart an older data root after a v2 writer may have started."""
+        try:
+            self.systemctl.stop(LOCAL_SERVICE_UNIT_NAME)
+        except Exception as stop_error:
+            raise ReleaseRollbackError(
+                "CRITICAL: failed v2 activation requires compatible recovery; stop failed"
+            ) from stop_error
+        raise ReleaseRollbackError(
+            "Failed v2 activation stopped; recover the current v2 data with compatible code"
+        ) from failure
 
     def update(
         self,
@@ -2067,12 +2103,17 @@ class LocalReleaseService:
         if (
             current_binding is not None
             and current_binding.workspace_format_version == 2
-            and previous_binding is not None
-            and previous_binding.workspace_format_version == 1
+            and (
+                previous_binding is None
+                or previous_binding.workspace_format_version != 2
+                or previous_binding.workspace_root != current_binding.workspace_root
+                or previous_binding.workspace_id != current_binding.workspace_id
+            )
             and not allow_v1_workspace_rollback
         ):
             raise ReleaseRollbackError(
-                "rollback from workspace v2 to stale v1 requires explicit pre-write authorization"
+                "rollback from workspace v2 to stale v1 or unbound data requires explicit "
+                "pre-write authorization"
             )
 
         self.retarget_unit(

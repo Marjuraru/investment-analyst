@@ -61,6 +61,11 @@ import duckdb
 from pydantic import ConfigDict, Field, model_validator
 
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
+from investment_analyst.storage.resource_policy import (
+    DuckDBResourcePolicy,
+    connect_duckdb,
+    reader_worker_policy,
+)
 
 _ARTIFACT_FILE_NAME = "storage_observability_v1.jsonl"
 _MAX_RETAINED_DAYS = 90
@@ -1090,7 +1095,9 @@ class _ReadOnlyMeasurement:
     select_count: int
 
 
-def _read_only_measurement_worker(database_path: str, channel: Connection) -> None:
+def _read_only_measurement_worker(
+    database_path: str, channel: Connection, policy: DuckDBResourcePolicy | None = None
+) -> None:
     """Serve bounded read requests, opening and closing a fresh read-only connection each time."""
     table_names: tuple[str, ...] | None = None
     count_query: str | None = None
@@ -1108,9 +1115,13 @@ def _read_only_measurement_worker(database_path: str, channel: Connection) -> No
         select_count = 0
         connection: duckdb.DuckDBPyConnection | None = None
         try:
-            connection = duckdb.connect(database_path, read_only=True)
-            connection.execute(f"SET memory_limit = '{_COLLECTOR_MEMORY_LIMIT}'")
-            connection.execute(f"SET threads = {_COLLECTOR_THREADS}")
+            connection = connect_duckdb(
+                database_path,
+                read_only=True,
+                policy=policy,
+                default_memory_bytes=256_000_000,
+                default_threads=1,
+            )
             connection_opened = True
             query_open_ns = time.perf_counter_ns() - opened_at
             select_started = time.perf_counter_ns()
@@ -1716,7 +1727,11 @@ class StorageObservabilityCollector:
         parent_channel, child_channel = context.Pipe(duplex=True)
         process = context.Process(
             target=_read_only_measurement_worker,
-            args=(str(self._database_path), child_channel),
+            args=(
+                str(self._database_path),
+                child_channel,
+                reader_worker_policy(self._database_path),
+            ),
             name="investment-analyst-storage-reader",
             daemon=False,
         )
@@ -1875,13 +1890,12 @@ class StorageObservabilityCollector:
     def _open_read_only_engine(self) -> duckdb.DuckDBPyConnection:
         """Open the engine read-only so no measurement can ever write."""
         try:
-            connection = duckdb.connect(str(self._database_path), read_only=True)
-            try:
-                connection.execute(f"SET memory_limit = '{_COLLECTOR_MEMORY_LIMIT}'")
-                connection.execute(f"SET threads = {_COLLECTOR_THREADS}")
-            except Exception:
-                connection.close()
-                raise
+            connection = connect_duckdb(
+                self._database_path,
+                read_only=True,
+                default_memory_bytes=256_000_000,
+                default_threads=1,
+            )
             return connection
         except duckdb.Error as error:
             raise StorageObservabilityError(

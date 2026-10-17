@@ -26,6 +26,7 @@ from investment_analyst.storage.repositories import (
     DuckDBObservationRepository,
     DuckDBSourceDefinitionRepository,
 )
+from investment_analyst.storage.resource_policy import DuckDBResourcePolicy
 from investment_analyst.storage.workspace_v2 import WorkspaceV2Store
 from investment_analyst.storage.workspace_v2_repositories import (
     WorkspaceV2DiagnosticResultRepository,
@@ -38,14 +39,22 @@ from investment_analyst.storage.workspace_v2_repositories import (
 class LocalStorage:
     """Context-managed facade for local raw files, DuckDB, and Parquet exports."""
 
-    def __init__(self, paths: StoragePaths, *, read_only: bool = False) -> None:
+    def __init__(
+        self,
+        paths: StoragePaths,
+        *,
+        read_only: bool = False,
+        resource_policy: DuckDBResourcePolicy | None = None,
+    ) -> None:
         self.paths = paths
         self.read_only = read_only
         self.store: DuckDBStore | WorkspaceV2Store
         if paths.format_version == 1:
-            self.store = DuckDBStore(paths, read_only=read_only)
+            self.store = DuckDBStore(paths, read_only=read_only, resource_policy=resource_policy)
         elif paths.format_version == 2:
-            self.store = WorkspaceV2Store(paths, read_only=read_only)
+            self.store = WorkspaceV2Store(
+                paths, read_only=read_only, resource_policy=resource_policy
+            )
         else:
             raise ValueError("workspace storage format is unsupported")
         self.assets: AssetRepository

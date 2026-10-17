@@ -5,15 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from itertools import zip_longest
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid4
 
-from investment_analyst.workspace.models import WorkspaceInspection
+from investment_analyst.workspace.models import WorkspaceAccessMode, WorkspaceInspection
 from investment_analyst.workspace.service import WorkspaceError, WorkspaceService
 from investment_analyst.workspace.workspace_v2_backup import (
     WorkspaceV2BackupError,
@@ -25,6 +27,7 @@ from investment_analyst.workspace.workspace_v2_backup_inventory import (
     iter_inventory,
 )
 from investment_analyst.workspace.workspace_v2_lifecycle_models import (
+    BackupDirectoryRetirementProof,
     FrozenSourceCut,
     LifecycleCheckpoint,
     LifecycleContentRole,
@@ -36,8 +39,12 @@ from investment_analyst.workspace.workspace_v2_lifecycle_models import (
     ProvenCopyRetirementReceipt,
     SealedDirectoryRetirementCheckpoint,
     SealedDirectoryRetirementReceipt,
+    WorkspaceV2RetirementProof,
 )
 from investment_analyst.workspace.workspace_v2_recovery import WorkspaceV2RecoveryReceipt
+
+if TYPE_CHECKING:
+    from investment_analyst.workspace.workspace_v2_physical_delta import PhysicalDeltaReceipt
 
 _COMPLEMENT_MANIFEST_NAME = "local-complement-manifest.json"
 _CHUNK_BYTES = 1024 * 1024
@@ -58,6 +65,98 @@ class WorkspaceV2LifecycleService:
     ) -> None:
         self._workspace_service = workspace_service
         self._clock = clock
+
+    def retire_orphaned_duckdb_spill(
+        self, root: Path, *, operation_id: UUID, receipt_path: Path
+    ) -> tuple[int, int, int]:
+        """Retire only disposable engine spill, preserving DB, WAL and all state.
+
+        Spill has no recoverable domain content. Record its metadata before any
+        unlink, under the existing writer locks and an exclusive database lock. Never
+        open the database here: opening may replay its WAL before capacity exists.
+        """
+        root = _safe_existing_root(root, label="spill workspace")
+        manifest = self._workspace_service.manifest(root)
+        if manifest.format_version != 2:
+            raise WorkspaceV2LifecycleError("spill retirement requires workspace v2")
+        parent = root / "storage" / "v2"
+        spill = parent / "index.duckdb.tmp"
+        if any(path.is_symlink() for path in (root / "storage", parent, spill)):
+            raise WorkspaceV2LifecycleError("spill directory is unsafe")
+        if not spill.is_dir() or not (parent / "index.duckdb").is_file():
+            raise WorkspaceV2LifecycleError("spill directory or database is missing")
+        if receipt_path.is_symlink() or not receipt_path.is_absolute():
+            raise WorkspaceV2LifecycleError("spill receipt is unsafe")
+        receipt = receipt_path.resolve()
+        if receipt.is_relative_to(root):
+            raise WorkspaceV2LifecycleError("spill evidence must survive outside workspace")
+        inventory = receipt.with_name(receipt.name + ".inventory.json")
+        if receipt.exists() or inventory.exists() or inventory.is_symlink():
+            raise WorkspaceV2LifecycleError("spill retirement evidence already exists")
+        with _v2_writer_closed(root), _closed_duckdb_file(parent / "index.duckdb"):
+            entries: list[tuple[Path, os.stat_result]] = []
+            for path in spill.iterdir():
+                if (
+                    len(entries) >= 4096
+                    or path.is_symlink()
+                    or not path.is_file()
+                    or re.fullmatch(
+                        r"duckdb_temp_storage_(?:DEFAULT|S[0-9]+K)-[0-9]+\.tmp", path.name
+                    )
+                    is None
+                ):
+                    raise WorkspaceV2LifecycleError("spill contains an unknown or unsafe entry")
+                entries.append((path, path.stat()))
+            logical = sum(stat.st_size for _, stat in entries)
+            allocated = sum(stat.st_blocks * 512 for _, stat in entries)
+            document = {
+                "operation_id": str(operation_id),
+                "workspace_id": str(manifest.workspace_id),
+                "workspace_root": str(root),
+                "spill_root": str(spill),
+                "classification": "regenerable_duckdb_spill",
+                "files": [
+                    {
+                        "name": path.name,
+                        "bytes": stat.st_size,
+                        "allocated_bytes": stat.st_blocks * 512,
+                        "inode": stat.st_ino,
+                        "mtime_ns": stat.st_mtime_ns,
+                    }
+                    for path, stat in entries
+                ],
+                "logical_bytes": logical,
+                "allocated_bytes": allocated,
+                "recorded_at": self._now().isoformat(),
+            }
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            _write_new_json(inventory, document)
+            _fsync_directory(inventory.parent)
+            for path, before in entries:
+                current = path.stat()
+                if (current.st_ino, current.st_size, current.st_mtime_ns) != (
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                ):
+                    raise WorkspaceV2LifecycleError("spill changed during retirement")
+                path.unlink()
+            spill.rmdir()
+            _fsync_directory(parent)
+            _write_new_json(
+                receipt,
+                {
+                    "operation_id": str(operation_id),
+                    "workspace_id": str(manifest.workspace_id),
+                    "inventory_sha256": hashlib.sha256(inventory.read_bytes()).hexdigest(),
+                    "files_retired": len(entries),
+                    "logical_bytes": logical,
+                    "allocated_bytes": allocated,
+                    "completed_at": self._now().isoformat(),
+                },
+            )
+            _fsync_directory(receipt.parent)
+        return len(entries), logical, allocated
 
     def freeze_source(
         self,
@@ -115,6 +214,106 @@ class WorkspaceV2LifecycleService:
             frozen_source=source,
             file_count=file_count,
             logical_bytes=logical_bytes,
+            roles=roles,
+            unknown_file_count=roles[LifecycleContentRole.UNKNOWN],
+        )
+
+    def inventory_current_v1(
+        self, source: FrozenSourceCut, complement_root: Path
+    ) -> LifecycleInventory:
+        """Classify metadata against indexed raw paths and the preserved complement.
+
+        This does not claim a new payload audit. The cutover caller must separately
+        prove complete F equivalence/recovery and an unchanged frozen source.
+        Unindexed raw files, exports, extra SQL tables and other files stay unknown.
+        """
+        root = _matching_source(source)
+        identity = self._workspace_service.manifest(root)
+        if (
+            source.workspace_format_version != 1
+            or identity.format_version != 1
+            or identity.workspace_id != source.workspace_id
+            or identity.created_at != source.created_at
+        ):
+            raise WorkspaceV2LifecycleError("source metadata inventory identity differs")
+        preserved = self.verify_complement(source, complement_root)
+        complement = {item.path: item for item in preserved.files}
+        roles = {role: 0 for role in LifecycleContentRole}
+        count = total = 0
+        with self._workspace_service.open_storage(
+            self._workspace_service.resolve(root), WorkspaceAccessMode.READ_ONLY
+        ) as storage:
+            tables = {
+                str(row[0])
+                for row in storage.store.connection.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema='main' AND table_type='BASE TABLE'"
+                ).fetchall()
+            }
+            if tables != {
+                "storage_metadata",
+                "assets",
+                "source_definitions",
+                "raw_record_index",
+                "normalized_observations",
+                "metric_definitions",
+                "metric_results",
+                "diagnostic_results",
+            }:
+                raise WorkspaceV2LifecycleError("source database contains unrepresented tables")
+            cursor = storage.store.connection.cursor()
+            try:
+                cursor.execute("SELECT relative_path FROM raw_record_index ORDER BY relative_path")
+
+                def indexed_paths() -> Iterable[str]:
+                    while rows := cursor.fetchmany(256):
+                        for row in rows:
+                            relative = str(row[0])
+                            path = Path(relative)
+                            if (
+                                path.is_absolute()
+                                or ".." in path.parts
+                                or path.as_posix() != relative
+                            ):
+                                raise WorkspaceV2LifecycleError("source raw index path is unsafe")
+                            yield relative
+
+                indexed = iter(indexed_paths())
+                expected = next(indexed, None)
+                for path in _iter_regular_files(root):
+                    relative = path.relative_to(root).as_posix()
+                    size = path.stat().st_size
+                    role = LifecycleContentRole.UNKNOWN
+                    if relative in complement:
+                        preserved_file = complement[relative]
+                        if _hash_file(path) != (preserved_file.size_bytes, preserved_file.sha256):
+                            raise WorkspaceV2LifecycleError(
+                                "source complement changed since preservation"
+                            )
+                        role = LifecycleContentRole.OPERATIONAL_HISTORIC
+                    elif path == storage.paths.database_path:
+                        role = LifecycleContentRole.MIGRATED_RECOVERABLE
+                    elif path.is_relative_to(storage.paths.raw_dir):
+                        raw_relative = path.relative_to(storage.paths.raw_dir).as_posix()
+                        if expected is not None and raw_relative == expected:
+                            role = LifecycleContentRole.MIGRATED_RECOVERABLE
+                            expected = next(indexed, None)
+                    elif path.is_relative_to(storage.paths.documents_dir / "sha256"):
+                        if _is_sha256(path.name):
+                            role = LifecycleContentRole.MIGRATED_RECOVERABLE
+                    elif relative in {"state/aapl_daily_run.lock", "state/aapl_local_service.lock"}:
+                        role = LifecycleContentRole.REGENERABLE
+                    roles[role] += 1
+                    count += 1
+                    total += size
+                if expected is not None:
+                    raise WorkspaceV2LifecycleError("source indexed raw file is absent")
+            finally:
+                cursor.close()
+        return LifecycleInventory(
+            frozen_source=source,
+            file_count=count,
+            logical_bytes=total,
             roles=roles,
             unknown_file_count=roles[LifecycleContentRole.UNKNOWN],
         )
@@ -292,8 +491,24 @@ class WorkspaceV2LifecycleService:
             raise WorkspaceV2LifecycleError("source contains unknown durable content")
         complement = self.verify_complement(source, complement_root)
         checkpoint = self._read_checkpoint(checkpoint_path)
+        complement_digest = _hash_file(Path(complement_root) / _COMPLEMENT_MANIFEST_NAME)[1]
+        if checkpoint is not None and (
+            checkpoint.source != source
+            or checkpoint.operation_id != source.operation_id
+            or (
+                checkpoint.complement_sha256 != complement_digest
+                and not (
+                    checkpoint.complement_sha256 is None
+                    and checkpoint.phase
+                    in {LifecyclePhase.INVENTORIED, LifecyclePhase.COMPLEMENT_PUBLISHED}
+                )
+            )
+        ):
+            raise WorkspaceV2LifecycleError("source retirement checkpoint bindings differ")
         if root.exists():
-            if retiring_root.exists():
+            if retiring_root.exists() or (
+                checkpoint is not None and checkpoint.phase == LifecyclePhase.RETIRED
+            ):
                 raise WorkspaceV2LifecycleError("lifecycle retirement path is ambiguous")
             # The preceding metadata pass and frozen descriptor are a caller-visible proof that
             # this exact root has no writer. Resolve again before detaching it.
@@ -303,7 +518,7 @@ class WorkspaceV2LifecycleService:
                 operation_id=source.operation_id,
                 phase=LifecyclePhase.RETIRING,
                 source=source,
-                complement_sha256=_hash_file(Path(complement_root) / _COMPLEMENT_MANIFEST_NAME)[1],
+                complement_sha256=complement_digest,
                 retirement_root=retiring_root,
                 files_confirmed=len(complement.files),
                 bytes_confirmed=complement.total_bytes,
@@ -313,15 +528,28 @@ class WorkspaceV2LifecycleService:
             _fsync_directory(root.parent)
         elif not (
             checkpoint is not None
-            and checkpoint.phase is LifecyclePhase.RETIRING
-            and checkpoint.retirement_root == retiring_root
-            and _safe_existing_root(retiring_root, label="retiring source") == retiring_root
+            and (
+                (
+                    checkpoint.phase is LifecyclePhase.RETIRING
+                    and checkpoint.retirement_root == retiring_root
+                )
+                or (
+                    checkpoint.phase is LifecyclePhase.RETIRED
+                    and checkpoint.files_confirmed == inventory.file_count
+                    and checkpoint.bytes_confirmed == inventory.logical_bytes
+                )
+            )
         ):
             raise WorkspaceV2LifecycleError("source retirement cannot be resumed safely")
-        try:
-            shutil.rmtree(retiring_root)
-        except OSError as error:
-            raise WorkspaceV2LifecycleError("source retirement did not complete") from error
+        if retiring_root.exists():
+            if checkpoint is not None and checkpoint.phase is LifecyclePhase.RETIRED:
+                raise WorkspaceV2LifecycleError("retired source unexpectedly exists")
+            _safe_existing_root(retiring_root, label="retiring source")
+            try:
+                shutil.rmtree(retiring_root)
+                _fsync_directory(root.parent)
+            except OSError as error:
+                raise WorkspaceV2LifecycleError("source retirement did not complete") from error
         terminal = LifecycleCheckpoint(
             operation_id=source.operation_id,
             phase=LifecyclePhase.RETIRED,
@@ -330,7 +558,8 @@ class WorkspaceV2LifecycleService:
             files_confirmed=inventory.file_count,
             bytes_confirmed=inventory.logical_bytes,
         )
-        self.write_checkpoint(checkpoint_path, terminal)
+        if checkpoint != terminal:
+            self.write_checkpoint(checkpoint_path, terminal)
         return LifecycleReceipt(
             operation_id=source.operation_id,
             phase=LifecyclePhase.RETIRED,
@@ -436,6 +665,213 @@ class WorkspaceV2LifecycleService:
             source_root=restore,
             files_confirmed=0,
             bytes_confirmed=0,
+            completed_at=self._now(),
+        )
+
+    def retire_delta_recovery_slot(
+        self,
+        receipt: PhysicalDeltaReceipt,
+        *,
+        delta_root: Path,
+        operation_id: UUID,
+        checkpoint_path: Path,
+        proof_path: Path,
+    ) -> LifecycleReceipt:
+        """Retire the exact independently recovered slot, preserving its small proof."""
+        from investment_analyst.storage.serialization import canonical_json_bytes
+        from investment_analyst.storage.workspace_v2_inventory import historical_transition_status
+        from investment_analyst.workspace.workspace_v2_physical_delta import (
+            PhysicalDeltaReceipt,
+            _iter_delta_files,
+            _read_delta_manifest,
+            _source_files,
+        )
+
+        receipt = PhysicalDeltaReceipt.model_validate(receipt.model_dump())
+        if (
+            receipt.kind != "restore"
+            or receipt.restored_root is None
+            or receipt.historical_state != "COMPLETE"
+        ):
+            raise WorkspaceV2LifecycleError("retirement requires a terminal root-bound restore")
+        root = receipt.restored_root
+        if root.is_symlink() or any(p.is_symlink() for p in root.parents):
+            raise WorkspaceV2LifecycleError("recovery retirement root is unsafe")
+        controls = _safe_existing_root(delta_root, label="physical delta controls")
+        manifest_path = controls / "delta-manifest.json"
+        manifest = _read_delta_manifest(manifest_path)
+        inventory = controls / "files.jsonl"
+        if (
+            manifest.historical_state != "COMPLETE"
+            or receipt.epoch != manifest.epoch
+            or receipt.manifest_sha256 != _hash_file(manifest_path)[1]
+            or receipt.files_sha256 != manifest.files_sha256
+            or _hash_file(inventory)[1] != manifest.files_sha256
+            or receipt.confirmed_files != manifest.file_count + manifest.deleted_count
+        ):
+            raise WorkspaceV2LifecycleError("recovery retirement manifest binding differs")
+        retained = _safe_existing_root(manifest.source_root, label="retained physical source")
+        if (
+            root in (retained, controls)
+            or root in retained.parents
+            or retained in root.parents
+            or root in controls.parents
+            or controls in root.parents
+        ):
+            raise WorkspaceV2LifecycleError("recovery retirement roots must be disjoint")
+        for output in (checkpoint_path, proof_path):
+            if (
+                not output.is_absolute()
+                or output.is_relative_to(root)
+                or output.is_relative_to(retained)
+                or any(path.is_symlink() for path in (output, *output.parents))
+            ):
+                raise WorkspaceV2LifecycleError("retirement controls must be outside workspaces")
+        if checkpoint_path == proof_path:
+            raise WorkspaceV2LifecycleError("retirement controls must be distinct")
+        receipt_digest = hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+        retiring = _retiring_root(root, operation_id)
+        checkpoint = self._read_checkpoint(checkpoint_path)
+        proof: WorkspaceV2RetirementProof | None = None
+        if proof_path.exists():
+            if proof_path.is_symlink():
+                raise WorkspaceV2LifecycleError("recovery retirement proof is unsafe")
+            proof = WorkspaceV2RetirementProof.model_validate_json(proof_path.read_bytes())
+            if (
+                proof.operation_id != operation_id
+                or proof.source_root != root
+                or proof.retained_root != retained
+                or proof.recovery_receipt_sha256 != receipt_digest
+                or proof.recovery_manifest_sha256 != receipt.manifest_sha256
+                or proof.inventory_sha256 != manifest.files_sha256
+                or proof.recovery_epoch != manifest.epoch
+                or proof.source_workspace_id != manifest.source_workspace_id
+            ):
+                raise WorkspaceV2LifecycleError("recovery retirement proof binding differs")
+        if root.exists():
+            if retiring.exists() or (
+                checkpoint is not None
+                and (
+                    proof is None
+                    or checkpoint.phase != LifecyclePhase.RETIRING
+                    or checkpoint.operation_id != operation_id
+                    or checkpoint.source.source_root != root
+                    or checkpoint.retirement_root != retiring
+                    or checkpoint.source.source_fingerprint != manifest.files_sha256
+                )
+            ):
+                raise WorkspaceV2LifecycleError("recovery retirement paths are ambiguous")
+            retained_inspection = _inspect_ready_v2(
+                self._workspace_service, retained, "retained source"
+            )
+            with _v2_writer_closed(root):
+                inspection = _inspect_ready_v2(self._workspace_service, root, "recovered slot")
+                if (
+                    inspection.workspace_id != manifest.source_workspace_id
+                    or retained_inspection.workspace_id != inspection.workspace_id
+                    or _inspection_counts(inspection) != _inspection_counts(retained_inspection)
+                    or historical_transition_status(root) != "COMPLETE"
+                ):
+                    raise WorkspaceV2LifecycleError("recovery retirement workspace binding differs")
+                actual = iter(_source_files(root))
+                count = total = 0
+                for item in _iter_delta_files(inventory):
+                    if item.deleted:
+                        continue
+                    if next(actual, None) != item.path:
+                        raise WorkspaceV2LifecycleError(
+                            "recovery retirement contains unique or absent files"
+                        )
+                    size, digest = _hash_file(root / item.path)
+                    if (size, digest) != (item.size_bytes, item.sha256):
+                        raise WorkspaceV2LifecycleError("recovery retirement content differs")
+                    count += 1
+                    total += size
+                if next(actual, None) is not None or (count, total) != (
+                    manifest.file_count,
+                    manifest.logical_bytes,
+                ):
+                    raise WorkspaceV2LifecycleError("recovery retirement coverage differs")
+                verified = WorkspaceV2RetirementProof(
+                    operation_id=operation_id,
+                    role="physical_delta_recovery_slot",
+                    source_root=root,
+                    source_workspace_id=inspection.workspace_id,
+                    retained_root=retained,
+                    recovery_epoch=manifest.epoch,
+                    recovery_manifest_sha256=receipt.manifest_sha256,
+                    recovery_receipt_sha256=receipt_digest,
+                    inventory_sha256=manifest.files_sha256,
+                    files_confirmed=count,
+                    bytes_confirmed=total,
+                    verified_at=self._now(),
+                )
+                if (
+                    proof is not None
+                    and proof.model_copy(update={"verified_at": verified.verified_at}) != verified
+                ):
+                    raise WorkspaceV2LifecycleError("recovery retirement proof changed")
+                if proof is None:
+                    _replace_json(proof_path, verified.model_dump(mode="json"))
+                    proof = verified
+                identity = self._workspace_service.manifest(root)
+                source = FrozenSourceCut(
+                    operation_id=operation_id,
+                    source_root=root,
+                    workspace_id=identity.workspace_id,
+                    workspace_format_version=2,
+                    created_at=identity.created_at,
+                    source_fingerprint=manifest.files_sha256,
+                    frozen_at=proof.verified_at,
+                )
+                checkpoint = LifecycleCheckpoint(
+                    operation_id=operation_id,
+                    phase=LifecyclePhase.RETIRING,
+                    source=source,
+                    retirement_root=retiring,
+                    files_confirmed=count,
+                    bytes_confirmed=total,
+                )
+                self.write_checkpoint(checkpoint_path, checkpoint)
+                try:
+                    os.replace(root, retiring)
+                    _fsync_directory(root.parent)
+                except OSError as error:
+                    raise WorkspaceV2LifecycleError(
+                        "recovery retirement rename did not complete"
+                    ) from error
+        elif (
+            checkpoint is None
+            or proof is None
+            or checkpoint.operation_id != operation_id
+            or checkpoint.source.source_root != root
+            or checkpoint.retirement_root != retiring
+            or checkpoint.source.source_fingerprint != manifest.files_sha256
+            or checkpoint.files_confirmed != proof.files_confirmed
+            or checkpoint.bytes_confirmed != proof.bytes_confirmed
+        ):
+            raise WorkspaceV2LifecycleError("recovery retirement cannot resume")
+        assert checkpoint is not None and proof is not None
+        if checkpoint.phase == LifecyclePhase.RETIRING:
+            if retiring.exists():
+                _safe_existing_root(retiring, label="retiring recovered slot")
+                try:
+                    shutil.rmtree(retiring)
+                except OSError as error:
+                    raise WorkspaceV2LifecycleError(
+                        "recovery retirement did not complete"
+                    ) from error
+                _fsync_directory(root.parent)
+            checkpoint = checkpoint.model_copy(update={"phase": LifecyclePhase.RETIRED})
+            self.write_checkpoint(checkpoint_path, checkpoint)
+        elif checkpoint.phase != LifecyclePhase.RETIRED or retiring.exists():
+            raise WorkspaceV2LifecycleError("recovery retirement terminal state differs")
+        return LifecycleReceipt(
+            operation_id=operation_id,
+            phase=LifecyclePhase.RETIRED,
+            source_root=root,
+            files_confirmed=proof.files_confirmed,
+            bytes_confirmed=proof.bytes_confirmed,
             completed_at=self._now(),
         )
 
@@ -586,6 +1022,297 @@ class WorkspaceV2LifecycleService:
         _fsync_directory(target.parent)
         return receipt
 
+    def retire_packed_backup(
+        self,
+        root: Path,
+        *,
+        retained_controls: Path,
+        parent_index: Path,
+        remote_manifest_path: Path,
+        recovery_receipt_path: Path,
+        operation_id: UUID,
+        inventory_path: Path,
+        proof_path: Path,
+        checkpoint_path: Path,
+        role: Literal["packed_backup", "restore_staging"] = "packed_backup",
+    ) -> SealedDirectoryRetirementReceipt:
+        """Retire packed bytes only after independently restored parent and index survive."""
+        from investment_analyst.workspace.workspace_v2_backup import _iter_packed_journal
+        from investment_analyst.workspace.workspace_v2_physical_delta import (
+            verify_physical_delta_index,
+        )
+        from investment_analyst.workspace.workspace_v2_remote import (
+            RemoteBackupManifest,
+            RemoteBackupRestoreReceipt,
+        )
+
+        if role not in {"packed_backup", "restore_staging"}:
+            raise WorkspaceV2LifecycleError("backup retirement role is invalid")
+        for path in (
+            root,
+            retained_controls,
+            parent_index,
+            remote_manifest_path,
+            recovery_receipt_path,
+            inventory_path,
+            proof_path,
+            checkpoint_path,
+        ):
+            if not path.is_absolute() or any(p.is_symlink() for p in (path, *path.parents)):
+                raise WorkspaceV2LifecycleError("packed retirement path is unsafe")
+        for path in (
+            retained_controls,
+            parent_index,
+            remote_manifest_path,
+            recovery_receipt_path,
+            inventory_path,
+            proof_path,
+            checkpoint_path,
+        ):
+            if path.is_relative_to(root) or root.is_relative_to(path):
+                raise WorkspaceV2LifecycleError("packed retirement dependencies overlap root")
+        index = verify_physical_delta_index(parent_index)
+        remote = RemoteBackupManifest.model_validate_json(remote_manifest_path.read_bytes())
+        recovery = RemoteBackupRestoreReceipt.model_validate_json(
+            recovery_receipt_path.read_bytes()
+        )
+        remote_digest = _hash_file(remote_manifest_path)[1]
+        recovery_digest = _hash_file(recovery_receipt_path)[1]
+        if (
+            remote.backup_id != index.parent_backup_id
+            or recovery.backup_id != remote.backup_id
+            or remote.source_workspace_id != index.source_workspace_id
+            or recovery.restored_workspace_id != index.source_workspace_id
+            or recovery.remote_manifest_sha256 != remote_digest
+            or recovery.volume_count != index.volume_count
+            or remote.inventory_sha256 != index.inventory_sha256
+            or remote.journal_sha256 != index.journal_sha256
+        ):
+            raise WorkspaceV2LifecycleError("packed retirement recovery parent differs")
+        retiring = _retiring_root(root, operation_id)
+        checkpoint = self._read_sealed_directory_checkpoint(checkpoint_path)
+        if checkpoint is not None and (
+            checkpoint.operation_id != operation_id
+            or checkpoint.source_root != root
+            or checkpoint.retiring_root != retiring
+            or checkpoint.remote_manifest_sha256 != remote_digest
+        ):
+            raise WorkspaceV2LifecycleError("packed retirement checkpoint differs")
+        if root.exists():
+            if retiring.exists():
+                raise WorkspaceV2LifecycleError("packed retirement path is ambiguous")
+            _require_no_directory_users(root)
+            packed = WorkspaceV2PackedStreamManifest.model_validate_json(
+                (root / "backup_manifest.json").read_bytes()
+            )
+            if (
+                packed.backup_id != remote.backup_id
+                or packed.inventory.digest_sha256 != index.inventory_sha256
+                or packed.journal_sha256 != index.journal_sha256
+                or packed.volume_count != index.volume_count
+            ):
+                raise WorkspaceV2LifecycleError("packed retirement manifest differs")
+            expected: dict[str, tuple[int, str]] = {}
+            objects = {item.object_key: item for item in remote.objects}
+            for name in (
+                "backup_manifest.json",
+                "source-inventory.jsonl",
+                "packed-backup-volumes.jsonl",
+            ):
+                size, digest = _hash_file(root / name)
+                if (role == "packed_backup" or name == "backup_manifest.json") and (
+                    _hash_file(retained_controls / name) != (size, digest)
+                ):
+                    raise WorkspaceV2LifecycleError(
+                        "packed retirement control preservation differs"
+                    )
+                matches = [
+                    item
+                    for item in remote.objects
+                    if item.object_key in {f"controls/{name}", f"controls-v2/{digest}/{name}"}
+                ]
+                if len(matches) != 1 or (matches[0].size_bytes, matches[0].sha256) != (
+                    size,
+                    digest,
+                ):
+                    raise WorkspaceV2LifecycleError("packed retirement remote control differs")
+                expected[name] = (size, digest)
+            volume_count = 0
+            for volume in _iter_packed_journal(root / "packed-backup-volumes.jsonl"):
+                item = objects.get(f"volumes/{volume.compressed_sha256}.gz")
+                if item is None or (item.size_bytes, item.sha256) != (
+                    volume.compressed_bytes,
+                    volume.compressed_sha256,
+                ):
+                    raise WorkspaceV2LifecycleError("packed retirement remote volume differs")
+                if role == "packed_backup" or (root / volume.path).exists():
+                    expected[volume.path] = (volume.compressed_bytes, volume.compressed_sha256)
+                volume_count += 1
+            if volume_count != index.volume_count:
+                raise WorkspaceV2LifecycleError("packed retirement volume count differs")
+            own = root / (
+                "packed-backup-checkpoint.json"
+                if role == "packed_backup"
+                else "remote-backup-manifest.json"
+            )
+            own_data = own.read_bytes()
+            own_state = json.loads(own_data)
+            if role == "packed_backup" and (
+                own_state.get("source_workspace_id") != str(index.source_workspace_id)
+                or own_state.get("inventory_digest") != index.inventory_sha256
+                or own_state.get("next_volume_ordinal") != index.volume_count
+                or own_state.get("next_file_index") != index.file_count
+                or own_state.get("next_offset_bytes") != 0
+            ):
+                raise WorkspaceV2LifecycleError("packed retirement checkpoint is incomplete")
+            if role == "restore_staging" and hashlib.sha256(own_data).hexdigest() != remote_digest:
+                raise WorkspaceV2LifecycleError(
+                    "restore staging control differs from independent parent"
+                )
+            preserved = (
+                proof_path.with_name(proof_path.stem + ".packed-backup-checkpoint.json")
+                if role == "packed_backup"
+                else retained_controls / own.name
+            )
+            if preserved.is_symlink():
+                raise WorkspaceV2LifecycleError("preserved backup control is unsafe")
+            if preserved.exists():
+                if preserved.read_bytes() != own_data:
+                    raise WorkspaceV2LifecycleError(
+                        "packed retirement preserved checkpoint differs"
+                    )
+            else:
+                _write_new_bytes(preserved, own_data)
+            expected[own.name] = (len(own_data), hashlib.sha256(own_data).hexdigest())
+            actual = sorted(path.relative_to(root).as_posix() for path in _iter_regular_files(root))
+            if actual != sorted(expected):
+                raise WorkspaceV2LifecycleError(
+                    "packed retirement contains unique or absent content"
+                )
+            digest = hashlib.sha256()
+            total = 0
+            partial = inventory_path.with_name(inventory_path.name + ".partial")
+            if partial.is_symlink() or (partial.exists() and not partial.is_file()):
+                raise WorkspaceV2LifecycleError("packed retirement partial inventory is unsafe")
+            with partial.open("w", encoding="utf-8", newline="\n") as stream:
+                for name in actual:
+                    size, checksum = _hash_file(root / name)
+                    if (size, checksum) != expected[name]:
+                        raise WorkspaceV2LifecycleError("packed retirement file content differs")
+                    encoded = (
+                        json.dumps(
+                            {"path": name, "size_bytes": size, "sha256": checksum},
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    ).encode()
+                    digest.update(encoded)
+                    stream.write(encoded.decode())
+                    total += size
+                stream.flush()
+                os.fsync(stream.fileno())
+            if inventory_path.exists() and _hash_file(inventory_path)[1] != digest.hexdigest():
+                raise WorkspaceV2LifecycleError("packed retirement inventory changed")
+            os.replace(partial, inventory_path)
+            _fsync_directory(inventory_path.parent)
+            proof = BackupDirectoryRetirementProof(
+                operation_id=operation_id,
+                role=role,
+                source_root=root,
+                retained_controls=retained_controls,
+                parent_index=parent_index,
+                parent_index_sha256=_hash_file(parent_index)[1],
+                remote_manifest_sha256=remote_digest,
+                recovery_receipt_sha256=recovery_digest,
+                inventory_sha256=digest.hexdigest(),
+                files_confirmed=len(actual),
+                bytes_confirmed=total,
+                verified_at=self._now(),
+            )
+            if proof_path.exists():
+                previous = BackupDirectoryRetirementProof.model_validate_json(
+                    proof_path.read_bytes()
+                )
+                if previous.model_copy(update={"verified_at": proof.verified_at}) != proof:
+                    raise WorkspaceV2LifecycleError("packed retirement proof changed")
+            else:
+                _write_new_json(proof_path, proof.model_dump(mode="json"))
+            checkpoint = SealedDirectoryRetirementCheckpoint(
+                operation_id=operation_id,
+                phase="retiring",
+                source_root=root,
+                retiring_root=retiring,
+                inventory_sha256=proof.inventory_sha256,
+                remote_manifest_sha256=remote_digest,
+                files_confirmed=proof.files_confirmed,
+                bytes_confirmed=total,
+            )
+            self._write_sealed_directory_checkpoint(checkpoint_path, checkpoint)
+            _require_no_directory_users(root)
+            os.replace(root, retiring)
+            _fsync_directory(root.parent)
+        if checkpoint is None or not proof_path.is_file() or not inventory_path.is_file():
+            raise WorkspaceV2LifecycleError("packed retirement cannot resume without proof")
+        proof = BackupDirectoryRetirementProof.model_validate_json(proof_path.read_bytes())
+        if (
+            proof.source_root != root
+            or proof.role != role
+            or proof.operation_id != operation_id
+            or proof.remote_manifest_sha256 != remote_digest
+            or proof.recovery_receipt_sha256 != recovery_digest
+            or proof.parent_index_sha256 != _hash_file(parent_index)[1]
+            or proof.inventory_sha256 != _hash_file(inventory_path)[1]
+            or checkpoint.inventory_sha256 != proof.inventory_sha256
+        ):
+            raise WorkspaceV2LifecycleError("packed retirement resume proof differs")
+        if checkpoint.phase == "retiring":
+            if retiring.exists():
+                _require_no_directory_users(retiring)
+                shutil.rmtree(retiring)
+                _fsync_directory(root.parent)
+            checkpoint = checkpoint.model_copy(update={"phase": "retired"})
+            self._write_sealed_directory_checkpoint(checkpoint_path, checkpoint)
+        elif retiring.exists():
+            raise WorkspaceV2LifecycleError("packed retirement terminal path differs")
+        return SealedDirectoryRetirementReceipt(checkpoint=checkpoint, completed_at=self._now())
+
+    def preserve_small_backup_controls(self, root: Path, destination: Path) -> tuple[Path, Path]:
+        """Keep small original controls byte-exact, leaving large JSONL in a single copy."""
+        source = _safe_existing_root(root, label="backup controls")
+        target = _safe_new_root(destination, source, label="preserved backup controls")
+        if any(path.is_symlink() for path in (*source.parents, *target.parents)):
+            raise WorkspaceV2LifecycleError("backup control ancestor is unsafe")
+        _require_no_directory_users(source)
+        target.mkdir(parents=True, exist_ok=True)
+        outputs: list[Path] = []
+        for name in ("backup_manifest.json", "remote-backup-manifest.json"):
+            original = source / name
+            output = target / name
+            if (
+                original.is_symlink()
+                or not original.is_file()
+                or original.stat().st_size > 1024 * 1024
+            ):
+                raise WorkspaceV2LifecycleError("small backup control is unsafe or exceeds bound")
+            expected = _hash_file(original)
+            if output.exists():
+                if output.is_symlink() or _hash_file(output) != expected:
+                    raise WorkspaceV2LifecycleError("preserved backup control differs")
+            else:
+                temporary = output.with_name(f".{name}.{uuid4().hex}.tmp")
+                try:
+                    if _copy_and_hash(original, temporary) != expected:
+                        raise WorkspaceV2LifecycleError(
+                            "backup control changed during preservation"
+                        )
+                    os.replace(temporary, output)
+                    _fsync_directory(target)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            outputs.append(output)
+        return outputs[0], outputs[1]
+
     def retire_sealed_directory(
         self,
         root: Path,
@@ -707,6 +1434,41 @@ def _safe_existing_root(path: Path, *, label: str) -> Path:
     if resolved != candidate.resolve(strict=True):
         raise WorkspaceV2LifecycleError(f"{label} root is unsafe")
     return resolved
+
+
+def _require_no_directory_users(root: Path) -> None:
+    """Reject another same-user process with this root open or in its command line."""
+    for process in Path("/proc").iterdir():
+        if not process.name.isdecimal() or int(process.name) == os.getpid():
+            continue
+        try:
+            if process.stat().st_uid != os.getuid():
+                continue
+            command = (process / "cmdline").read_bytes().split(b"\0")
+            if any(
+                arg == os.fsencode(root) or arg.startswith(os.fsencode(root) + b"/")
+                for arg in command
+            ):
+                raise WorkspaceV2LifecycleError("backup directory remains in use")
+            for descriptor in (process / "fd").iterdir():
+                try:
+                    target = Path(os.readlink(descriptor))
+                except (FileNotFoundError, PermissionError):
+                    continue
+                if target.is_absolute() and target.is_relative_to(root):
+                    raise WorkspaceV2LifecycleError("backup directory remains in use")
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+
+
+def _write_new_bytes(path: Path, payload: bytes) -> None:
+    if path.is_symlink():
+        raise WorkspaceV2LifecycleError("preserved backup control path is unsafe")
+    with path.open("xb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    _fsync_directory(path.parent)
 
 
 def _safe_new_root(path: Path, source: Path, *, label: str) -> Path:
@@ -903,6 +1665,26 @@ def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def _closed_duckdb_file(path: Path):
+    """Hold DuckDB's POSIX file-lock boundary without opening/replaying the DB.
+
+    An exclusive lock excludes both native readers and writers throughout spill
+    retirement. Unlike inspecting /proc, this also covers protected processes.
+    """
+    import fcntl
+
+    descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        try:
+            fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise WorkspaceV2LifecycleError("database remains in use") from error
+        yield
     finally:
         os.close(descriptor)
 
