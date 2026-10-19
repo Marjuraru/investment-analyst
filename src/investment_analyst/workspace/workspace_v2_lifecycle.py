@@ -60,6 +60,7 @@ if TYPE_CHECKING:
 
 _COMPLEMENT_MANIFEST_NAME = "local-complement-manifest.json"
 _CHUNK_BYTES = 1024 * 1024
+_PROC_ROOT = Path("/proc")
 
 
 class WorkspaceV2LifecycleError(WorkspaceError):
@@ -1829,9 +1830,18 @@ class WorkspaceV2LifecycleService:
                             _owned_payload_member(request, relative, expected)
                             stat = path.stat()
                             size, digest = _hash_file(path)
-                            if (
-                                request.role == OwnedPayloadRole.DELTA_STAGING_OBJECTS
-                                and (size, digest) != expected[relative]
+                            if request.role == OwnedPayloadRole.DELTA_STAGING_OBJECTS:
+                                key = relative
+                            elif (
+                                request.role == OwnedPayloadRole.INDEPENDENT_READ_CACHE
+                                and relative.startswith("physical-delta/objects/")
+                                and relative.endswith(".bin")
+                            ):
+                                key = relative.removeprefix("physical-delta/objects/")
+                            else:
+                                key = None
+                            if key is not None and (
+                                key not in expected or (size, digest) != expected[key]
                             ):
                                 raise WorkspaceV2LifecycleError("owned payload content differs")
                             stream.write(
@@ -2159,7 +2169,7 @@ def _safe_existing_root(path: Path, *, label: str) -> Path:
 
 
 def _owned_payload_scope(request: OwnedPayloadRetirementInput) -> None:
-    """Literal matrix roots only; final cache/scratch gates are not yet admitted."""
+    """Literal matrix roots; W2/cache/scratch are admitted only at their stage."""
     home = Path.home()
     ops = home / ".local/share/investment-analyst/ops/data-chassis-45"
     repository = home / "projects/investment-analyst"
@@ -2173,25 +2183,44 @@ def _owned_payload_scope(request: OwnedPayloadRetirementInput) -> None:
     if request.role == OwnedPayloadRole.REGENERABLE_LOCAL_CACHE:
         if request.source_root not in caches or request.evidence or request.consuming_generation:
             raise WorkspaceV2LifecycleError("regenerable cache root or identity differs")
-        for process in Path("/proc").iterdir():
-            if not process.name.isdecimal() or int(process.name) == os.getpid():
-                continue
-            try:
-                arguments = (process / "cmdline").read_bytes().split(b"\0")
-                if any(
-                    Path(os.fsdecode(arg)).name in {"pytest", "ruff", "pytest.py"}
-                    for arg in arguments
-                    if arg
-                ):
-                    raise WorkspaceV2LifecycleError("test or linter still uses regenerable caches")
-            except (FileNotFoundError, ProcessLookupError, PermissionError):
-                continue
+        _require_no_directory_users(request.source_root)
         return
     if request.role == OwnedPayloadRole.DELTA_STAGING_OBJECTS:
-        expected = ops / "physical-delta-W-20261017/physical-delta/objects"
-        if request.source_root != expected or request.releasing_stage != "E0":
-            raise WorkspaceV2LifecycleError("delta staging is protected by pending consumers")
-        _require_no_directory_users(expected.parent.parent)
+        w_old = ops / "physical-delta-W-20261017/physical-delta/objects"
+        w2 = ops / "physical-delta-W2-20261018/physical-delta/objects"
+        if request.source_root == w_old and request.releasing_stage == "E0":
+            _require_no_directory_users(w_old.parent.parent)
+            return
+        if request.source_root == w2 and request.releasing_stage == "E5":
+            _require_no_directory_users(w2.parent.parent)
+            return
+        raise WorkspaceV2LifecycleError("delta staging is protected by pending consumers")
+    if request.role == OwnedPayloadRole.INDEPENDENT_READ_CACHE:
+        expected = ops / "independent-reads-W-20261017"
+        if (
+            request.source_root != expected
+            or request.releasing_stage != "E5"
+            or request.consuming_generation is None
+        ):
+            raise WorkspaceV2LifecycleError("independent cache still has pending consumers")
+        _require_no_directory_users(expected)
+        return
+    if request.role == OwnedPayloadRole.TRANSFER_SCRATCH:
+        if request.releasing_stage not in {"E0", "E5"} or not request.evidence:
+            raise WorkspaceV2LifecycleError("transfer scratch requires its operation receipt")
+        if any(ref.path.is_relative_to(request.source_root) for ref in request.evidence):
+            raise WorkspaceV2LifecycleError("transfer scratch receipt must be outside its root")
+        if not (
+            request.source_root.is_relative_to(ops)
+            and (
+                request.source_root.name == "temporales"
+                or request.source_root.name.startswith(
+                    (".drive-batch-", ".remote-read-", ".restore-")
+                )
+            )
+        ):
+            raise WorkspaceV2LifecycleError("transfer scratch root is outside the matrix")
+        _require_no_directory_users(request.source_root)
         return
     raise WorkspaceV2LifecycleError("owned payload still requires its final consumer release")
 
@@ -2240,11 +2269,10 @@ def _verify_owned_payload_inventory(
         raise WorkspaceV2LifecycleError("owned payload contains new or missing content")
 
 
-def _owned_payload_proofs(
+def _owned_payload_delta_proofs(
     request: OwnedPayloadRetirementInput,
+    refs: dict[str, PreparatorySlotArtifact],
 ) -> dict[str, tuple[int, str]]:
-    if request.role == OwnedPayloadRole.REGENERABLE_LOCAL_CACHE:
-        return {}
     from investment_analyst.workspace.workspace_v2_acceptance import CompatibleRecoveryReadback
     from investment_analyst.workspace.workspace_v2_physical_delta import (
         PhysicalDeltaManifest,
@@ -2252,27 +2280,13 @@ def _owned_payload_proofs(
         _iter_delta_files,
     )
 
-    refs = {ref.kind: ref for ref in request.evidence}
-    required = {
-        "delta_manifest",
-        "files_inventory",
-        "remote_upload",
-        "restore_receipt",
-        "compatible_readback",
-    }
-    if set(refs) != required or len(refs) != len(request.evidence):
-        raise WorkspaceV2LifecycleError("owned payload recovery proofs are incomplete")
-    for ref in refs.values():
-        if ref.path.is_relative_to(request.source_root) or _hash_file(ref.path) != (
-            ref.size_bytes,
-            ref.sha256,
-        ):
-            raise WorkspaceV2LifecycleError("owned payload proof digest differs")
-    delta = request.source_root.parent.parent
+    delta = refs["delta_manifest"].path.parent
     if (
-        refs["delta_manifest"].path != delta / "delta-manifest.json"
-        or refs["files_inventory"].path != delta / "files.jsonl"
+        request.role == OwnedPayloadRole.DELTA_STAGING_OBJECTS
+        and delta != request.source_root.parent.parent
     ):
+        raise WorkspaceV2LifecycleError("owned payload proofs belong to another delta")
+    if refs["files_inventory"].path != delta / "files.jsonl":
         raise WorkspaceV2LifecycleError("owned payload proofs belong to another delta")
     manifest = PhysicalDeltaManifest.model_validate_json(refs["delta_manifest"].path.read_bytes())
     candidate = (
@@ -2341,12 +2355,69 @@ def _owned_payload_proofs(
     return expected
 
 
+def _owned_payload_proofs(
+    request: OwnedPayloadRetirementInput,
+) -> dict[str, tuple[int, str]]:
+    if request.role == OwnedPayloadRole.REGENERABLE_LOCAL_CACHE:
+        return {}
+    refs = {ref.kind: ref for ref in request.evidence}
+    if request.role == OwnedPayloadRole.TRANSFER_SCRATCH:
+        if not request.evidence:
+            raise WorkspaceV2LifecycleError("owned payload recovery proofs are incomplete")
+    elif request.role in {
+        OwnedPayloadRole.DELTA_STAGING_OBJECTS,
+        OwnedPayloadRole.INDEPENDENT_READ_CACHE,
+    }:
+        required = {
+            "delta_manifest",
+            "files_inventory",
+            "remote_upload",
+            "restore_receipt",
+            "compatible_readback",
+        }
+        if request.role == OwnedPayloadRole.INDEPENDENT_READ_CACHE:
+            required.add("independent_cache_binding")
+        if set(refs) != required or len(refs) != len(request.evidence):
+            raise WorkspaceV2LifecycleError("owned payload recovery proofs are incomplete")
+    else:
+        raise WorkspaceV2LifecycleError("owned payload role is not admitted")
+    for ref in request.evidence:
+        if ref.path.is_relative_to(request.source_root) or _hash_file(ref.path) != (
+            ref.size_bytes,
+            ref.sha256,
+        ):
+            raise WorkspaceV2LifecycleError("owned payload proof digest differs")
+    if request.role == OwnedPayloadRole.TRANSFER_SCRATCH:
+        return {}
+    return _owned_payload_delta_proofs(request, refs)
+
+
 def _owned_payload_member(
     request: OwnedPayloadRetirementInput, relative: str, expected: dict[str, tuple[int, str]]
 ) -> None:
     if request.role == OwnedPayloadRole.DELTA_STAGING_OBJECTS:
         if relative not in expected:
             raise WorkspaceV2LifecycleError("owned payload contains unique or unknown objects")
+        return
+    if request.role == OwnedPayloadRole.INDEPENDENT_READ_CACHE:
+        if relative == "cache-binding.json":
+            return
+        if re.fullmatch(r"physical-delta/manifests/[0-9a-f]{64}\.json(?:\.read\.json)?", relative):
+            return
+        if re.fullmatch(r"physical-delta/objects/[0-9a-f]{64}\.bin(?:\.read\.json)?", relative):
+            return
+        raise WorkspaceV2LifecycleError("independent read cache contains unknown content")
+    if request.role == OwnedPayloadRole.TRANSFER_SCRATCH:
+        if relative in {
+            "admission.json",
+            "source-bindings.json",
+            "heartbeat.json",
+            "stop-request.json",
+            "worker.log",
+        } or relative.startswith(("code/", "storage/", "state/")):
+            raise WorkspaceV2LifecycleError("transfer scratch contains protected content")
+        if relative.endswith((".duckdb", ".duckdb.wal", ".wal", ".parquet")):
+            raise WorkspaceV2LifecycleError("transfer scratch contains protected content")
         return
     if relative in {".gitignore", "CACHEDIR.TAG"}:
         return
@@ -2365,25 +2436,46 @@ def _owned_payload_member(
 
 
 def _require_no_directory_users(root: Path) -> None:
-    """Reject another same-user process with this root open or in its command line."""
-    for process in Path("/proc").iterdir():
+    """Reject another same-user process actually using this root.
+
+    A pytest/uv launcher from another root is not a consumer. The requested
+    root is matched through cwd, open descriptors and absolute or cwd-relative
+    command-line paths, never by process name alone.
+    """
+
+    def under_root(path: Path) -> bool:
+        try:
+            resolved = path.resolve(strict=False)
+        except (OSError, RuntimeError):
+            return False
+        return resolved == root or resolved.is_relative_to(root)
+
+    for process in _PROC_ROOT.iterdir():
         if not process.name.isdecimal() or int(process.name) == os.getpid():
             continue
         try:
             if process.stat().st_uid != os.getuid():
                 continue
-            command = (process / "cmdline").read_bytes().split(b"\0")
-            if any(
-                arg == os.fsencode(root) or arg.startswith(os.fsencode(root) + b"/")
-                for arg in command
-            ):
+            cwd = (process / "cwd").resolve(strict=False)
+            if under_root(cwd):
                 raise WorkspaceV2LifecycleError("backup directory remains in use")
+            command = (process / "cmdline").read_bytes().split(b"\0")
+            for arg in command:
+                if not arg:
+                    continue
+                candidate = Path(os.fsdecode(arg))
+                if not candidate.is_absolute():
+                    candidate = cwd / candidate
+                if under_root(candidate):
+                    raise WorkspaceV2LifecycleError("backup directory remains in use")
             for descriptor in (process / "fd").iterdir():
                 try:
                     target = Path(os.readlink(descriptor))
                 except (FileNotFoundError, PermissionError):
                     continue
-                if target.is_absolute() and target.is_relative_to(root):
+                if not target.is_absolute():
+                    target = cwd / target
+                if under_root(target):
                     raise WorkspaceV2LifecycleError("backup directory remains in use")
         except (FileNotFoundError, ProcessLookupError, PermissionError):
             continue

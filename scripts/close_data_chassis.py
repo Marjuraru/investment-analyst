@@ -22,7 +22,7 @@ import time
 import traceback
 import urllib.request
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4, uuid5
@@ -188,8 +188,12 @@ class _CutMonitor:
         self._execution: MaintenanceExecution | None = None
         self._run: Path | None = None
         self._bound_at = time.monotonic()
-        self._capacity: int | None = None
-        self._capacity_at = 0.0
+        self._capacity_success: int | None = None
+        self._capacity_success_at: float | None = None
+        self._capacity_low = False
+        self._capacity_error: str | None = None
+        self._capacity_attempt_at: float | None = None
+        self._host_updated = threading.Event()
         self.reason: str | None = None
         self.recovering = False
         self._stopped_at: float | None = None
@@ -198,9 +202,29 @@ class _CutMonitor:
         self._host = threading.Thread(target=self._host_probe, daemon=True)
         self._watcher = threading.Thread(target=self._watch, daemon=True)
 
-    def start(self) -> None:
-        self._host.start()
-        self._watcher.start()
+    def start_ready(self, timeout_seconds: float = 15.0) -> None:
+        """Start supervision only after a fresh valid host/R1 observation."""
+        if self._host.ident is None:
+            self._host.start()
+        deadline = time.monotonic() + max(0.1, timeout_seconds)
+        while True:
+            if self._stop.is_set():
+                raise MaintenancePhaseError("cut_monitor_stopped_before_ready")
+            try:
+                reason = self._ready_sample()
+            except Exception as error:
+                raise MaintenancePhaseError("cut_monitor_readiness_failed") from error
+            if reason is None:
+                if self._watcher.ident is None:
+                    self._watcher.start()
+                return
+            if reason != "host_capacity_unavailable_or_below_floor":
+                raise MaintenancePhaseError(reason)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise MaintenancePhaseError("host_capacity_unavailable_or_below_floor")
+            self._host_updated.wait(min(0.5, remaining))
+            self._host_updated.clear()
 
     def bind(self, execution: MaintenanceExecution, run: Path) -> None:
         with self._lock:
@@ -215,23 +239,121 @@ class _CutMonitor:
             raise MaintenancePhaseError(self.reason)
 
     def _host_probe(self) -> None:
+        required = max(budget.required_host_bytes for budget in self.budgets)
+        previous: tuple[str, str | None] | None = None
         while not self._stop.is_set():
+            state: tuple[str, int | None, str | None]
             try:
                 value = _capacity()
+            except MaintenancePhaseError as failure:
+                if failure.code == "host_capacity_below_floor":
+                    state = ("below_floor", None, failure.code)
+                    with self._lock:
+                        self._capacity_low = True
+                        self._capacity_success = None
+                        self._capacity_success_at = None
+                        self._capacity_error = failure.code
+                        self._capacity_attempt_at = time.monotonic()
+                else:
+                    state = ("transient", None, "host_capacity_probe_failed")
+                    with self._lock:
+                        self._capacity_error = "host_capacity_probe_failed"
+                        self._capacity_attempt_at = time.monotonic()
             except Exception:
-                value = None
-            with self._lock:
-                self._capacity, self._capacity_at = value, time.monotonic()
+                state = ("transient", None, "host_capacity_probe_failed")
+                with self._lock:
+                    self._capacity_error = "host_capacity_probe_failed"
+                    self._capacity_attempt_at = time.monotonic()
+            else:
+                if value < required:
+                    state = ("below_floor", value, "host_capacity_below_floor")
+                    with self._lock:
+                        self._capacity_low = True
+                        self._capacity_success = None
+                        self._capacity_success_at = None
+                        self._capacity_error = "host_capacity_below_floor"
+                        self._capacity_attempt_at = time.monotonic()
+                else:
+                    state = ("valid", value, None)
+                    with self._lock:
+                        self._capacity_success = value
+                        self._capacity_success_at = time.monotonic()
+                        self._capacity_error = (
+                            "host_capacity_below_floor" if self._capacity_low else None
+                        )
+                        self._capacity_attempt_at = self._capacity_success_at
+            key = (state[0], state[2])
+            if key != previous:
+                previous = key
+                with suppress(OSError):
+                    _replace_json(
+                        self.root / "cut-host-probe.json",
+                        {
+                            "state": state[0],
+                            "host_free_bytes": state[1],
+                            "diagnostic": state[2],
+                            "at": datetime.now(UTC).isoformat(),
+                        },
+                    )
+            self._host_updated.set()
             self._stop.wait(1)
+
+    def _resource_sample(
+        self, capacity: int, *, heartbeat_age_seconds: int
+    ) -> MaintenanceResourceSample:
+        samples = tuple(
+            sample_cgroup_resources(
+                budget,
+                self._cgroup,
+                host_free_bytes=capacity,
+                log_bytes=(self.root / "worker.log").stat().st_size
+                if (self.root / "worker.log").exists()
+                else 0,
+                heartbeat_age_seconds=heartbeat_age_seconds,
+            )
+            for budget in self.budgets
+        )
+        return samples[0].model_copy(
+            update={
+                "temp_allocated_bytes": sum(s.temp_allocated_bytes for s in samples),
+                "temp_logical_bytes": sum(s.temp_logical_bytes for s in samples),
+                "memory_current_bytes": max(s.memory_current_bytes for s in samples),
+                "available_memory_bytes": min(s.available_memory_bytes for s in samples),
+                "events": samples[-1].events,
+            }
+        )
+
+    def _ready_sample(self) -> str | None:
+        now = time.monotonic()
+        with self._lock:
+            low = self._capacity_low
+            success = self._capacity_success
+            success_at = self._capacity_success_at
+        if low:
+            return "host_capacity_below_floor"
+        if success is None or success_at is None or now - success_at > 15:
+            return "host_capacity_unavailable_or_below_floor"
+        sample = self._resource_sample(success, heartbeat_age_seconds=0)
+        for budget in self.budgets:
+            reason = resource_stop_reason(budget, sample, initial_events=None)
+            if reason is not None:
+                return reason
+        self._events = sample.events
+        _write_new_json(self.root / "cut-resource-origin.json", sample.model_dump(mode="json"))
+        _replace_json(self.root / "cut-last-sample.json", sample.model_dump(mode="json"))
+        return None
 
     def _observe(self) -> str | None:
         now = time.monotonic()
         with self._lock:
             execution, run, bound = self._execution, self._run, self._bound_at
-            capacity = self._capacity if now - self._capacity_at <= 15 else None
-        # Before the first host result no operation is allowed to stop v1.
-        if capacity is None and self._capacity_at == 0 and now - bound <= 5:
-            return None
+            low = self._capacity_low
+            success = self._capacity_success
+            success_at = self._capacity_success_at
+        if low:
+            return "host_capacity_below_floor"
+        if success is None or success_at is None or now - success_at > 15:
+            return "host_capacity_unavailable_or_below_floor"
         age = 0
         if execution is not None and run is not None:
             path = run / "heartbeat.json"
@@ -244,27 +366,7 @@ class _CutMonitor:
                 age = int(now - heartbeat["heartbeat_monotonic"])
             elif now - bound > 5:
                 return "cut_heartbeat_missing"
-        samples = tuple(
-            sample_cgroup_resources(
-                b,
-                self._cgroup,
-                host_free_bytes=capacity,
-                log_bytes=(self.root / "worker.log").stat().st_size
-                if (self.root / "worker.log").exists()
-                else 0,
-                heartbeat_age_seconds=age,
-            )
-            for b in self.budgets
-        )
-        sample = samples[0].model_copy(
-            update={
-                "temp_allocated_bytes": sum(s.temp_allocated_bytes for s in samples),
-                "temp_logical_bytes": sum(s.temp_logical_bytes for s in samples),
-                "memory_current_bytes": max(s.memory_current_bytes for s in samples),
-                "available_memory_bytes": min(s.available_memory_bytes for s in samples),
-                "events": samples[-1].events,
-            }
-        )
+        sample = self._resource_sample(success, heartbeat_age_seconds=age)
         if self._events is None:
             self._events = sample.events
             _write_new_json(self.root / "cut-resource-origin.json", sample.model_dump(mode="json"))
@@ -316,8 +418,11 @@ class _CutMonitor:
 
     def close(self) -> None:
         self._stop.set()
-        self._watcher.join(timeout=2)
-        self._host.join(timeout=2)
+        self._host_updated.set()
+        if self._watcher.ident is not None:
+            self._watcher.join(timeout=2)
+        if self._host.ident is not None:
+            self._host.join(timeout=2)
 
 
 def _absolute(value: str) -> Path:
@@ -424,6 +529,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 MAINTENANCE_UNIT = "investment-analyst-dc45-cut-f.service"
+CUT_MONITOR_READINESS_SECONDS = 15.0
 
 
 def _memory_composition(cgroup: Path) -> dict[str, int] | None:
@@ -2163,6 +2269,7 @@ def _run_global_cut(args: argparse.Namespace) -> dict[str, object]:
     preflight = argparse.Namespace(**vars(args))
     preflight.resource_run_root = run / "preflight"
     preflight.resource_run_root.mkdir()
+    monitor.start_ready(CUT_MONITOR_READINESS_SECONDS)
     # All admission and fresh authority checks happen with v1 still active.
     with _worker_resources(preflight):
         go_path = _required(args.cut_go, "cut_go")
@@ -2239,6 +2346,7 @@ def _run_global_cut(args: argparse.Namespace) -> dict[str, object]:
         _write_new_json(
             capacity_path, {"host_free_bytes": capacity, "at": datetime.now(UTC).isoformat()}
         )
+        monitor.require_continue()
         go = go.model_copy(
             update={
                 "guard": reconciliation_file_reference(guard_path, "control"),
@@ -2292,8 +2400,8 @@ def _run_global_cut(args: argparse.Namespace) -> dict[str, object]:
             updated_at=datetime.now(UTC),
         )
         WorkspaceV2CutWindowService(window_path).prepare(window, go)
-    monitor.start()
     try:
+        monitor.require_continue()
         _cut_advance(args, "STOPPING", "normal_service_stop")
         release.systemctl.stop("investment-analyst.service")
         with ExitStack() as source_lease:

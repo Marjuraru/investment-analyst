@@ -358,6 +358,8 @@ class PreparatorySlotArtifact(_LifecycleModel):
         "compatible_readback",
         "retained_certificate",
         "link_witness",
+        "independent_cache_binding",
+        "operation_receipt",
     ]
     path: Path
     size_bytes: int = Field(ge=0)

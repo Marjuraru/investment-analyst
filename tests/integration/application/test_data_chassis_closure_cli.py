@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -587,6 +588,184 @@ def _resource_sample(budget: MaintenanceResourceBudget) -> MaintenanceResourceSa
         events=(0, 0, 0),
         heartbeat_age_seconds=0,
     )
+
+
+def _cut_monitor_arguments(
+    tmp_path: Path,
+) -> tuple[SimpleNamespace, MaintenanceResourceBudget, MaintenanceResourceBudget]:
+    operation = uuid4()
+    controls = tmp_path / "controls"
+    controls.mkdir()
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    recovery = tmp_path / "recovery"
+    temporary = controls / "resource-temporaries" / str(operation)
+    base = MaintenanceResourceBudget(
+        operation_id=operation,
+        profile="verification",
+        assignments=(
+            DatabaseResourceAssignment(
+                database=source / "storage/data/processed/investment_analyst.duckdb",
+                policy=DuckDBResourcePolicy(
+                    memory_limit_bytes=1_000_000_000,
+                    threads=1,
+                    spill_limit_bytes=0,
+                    temp_directory=temporary / "source",
+                ),
+            ),
+            DatabaseResourceAssignment(
+                database=destination / "storage/v2/index.duckdb",
+                policy=DuckDBResourcePolicy(
+                    memory_limit_bytes=1_000_000_000,
+                    threads=1,
+                    spill_limit_bytes=0,
+                    temp_directory=temporary / "destination",
+                ),
+            ),
+        ),
+    )
+    reader = MaintenanceResourceBudget(
+        operation_id=operation,
+        profile="compatible_44",
+        assignments=(
+            DatabaseResourceAssignment(
+                database=recovery / "storage/v2/index.duckdb",
+                policy=DuckDBResourcePolicy(
+                    memory_limit_bytes=2_000_000_000,
+                    threads=2,
+                    spill_limit_bytes=0,
+                    temp_directory=temporary / "reader",
+                ),
+            ),
+        ),
+    )
+    base_path = controls / "cut-budget.json"
+    base_path.write_text(base.model_dump_json())
+    reader_path = controls / "readback-budget.json"
+    reader_path.write_text(reader.model_dump_json())
+    run = controls / "run"
+    run.mkdir()
+    args = SimpleNamespace(
+        source=source,
+        destination=destination,
+        recovery_root=recovery,
+        controls_root=controls,
+        resource_budget=base_path,
+        cut_readback_budget=reader_path,
+        resource_run_root=run,
+        operation_id=operation,
+        cut_window=controls / "cut-window.json",
+    )
+    return args, base, reader
+
+
+def _cut_monitor(
+    module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    args: SimpleNamespace,
+    base: MaintenanceResourceBudget,
+) -> object:
+    monkeypatch.setattr(
+        module,
+        "_process_identity",
+        lambda pid: (os.getpid(), uuid4(), Path("/sys/fs/cgroup/fixture")),
+    )
+    monkeypatch.setattr(
+        module, "sample_cgroup_resources", lambda *unused, **kwargs: _resource_sample(base)
+    )
+    return module._CutMonitor(args)
+
+
+def test_cut_monitor_readiness_accepts_first_transient_then_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource_cli_module: ModuleType
+) -> None:
+    module = resource_cli_module
+    args, base, _ = _cut_monitor_arguments(tmp_path)
+    calls = {"count": 0}
+
+    def capacity() -> int:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("fixture transient host probe")
+        return 30_000_000_000
+
+    monkeypatch.setattr(module, "_capacity", capacity)
+    monitor = _cut_monitor(module, monkeypatch, args, base)
+    try:
+        monitor.start_ready(5.0)
+        assert monitor.reason is None
+        origin = json.loads((args.resource_run_root / "cut-resource-origin.json").read_text())
+        assert origin["host_free_bytes"] == 30_000_000_000
+        assert calls["count"] >= 2
+    finally:
+        monitor.close()
+
+
+@pytest.mark.parametrize("fault", ["no_value", "low", "low_exception"])
+def test_cut_monitor_readiness_rejects_unavailable_or_low_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resource_cli_module: ModuleType,
+    fault: str,
+) -> None:
+    module = resource_cli_module
+    args, base, _ = _cut_monitor_arguments(tmp_path)
+    if fault == "no_value":
+
+        def capacity() -> int:
+            raise RuntimeError("fixture transient host probe")
+
+        expected = "host_capacity_unavailable_or_below_floor"
+        timeout = 0.6
+    elif fault == "low":
+
+        def capacity() -> int:
+            return 24_000_000_000
+
+        expected = "host_capacity_below_floor"
+        timeout = 5.0
+    else:
+
+        def capacity() -> int:
+            raise module.MaintenancePhaseError("host_capacity_below_floor")
+
+        expected = "host_capacity_below_floor"
+        timeout = 5.0
+
+    monkeypatch.setattr(module, "_capacity", capacity)
+    monitor = _cut_monitor(module, monkeypatch, args, base)
+    try:
+        with pytest.raises(module.MaintenancePhaseError, match=expected):
+            monitor.start_ready(timeout)
+        assert not (args.resource_run_root / "cut-resource-origin.json").exists()
+    finally:
+        monitor.close()
+
+
+def test_cut_monitor_transient_failure_preserves_last_success_and_stale_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource_cli_module: ModuleType
+) -> None:
+    module = resource_cli_module
+    args, base, _ = _cut_monitor_arguments(tmp_path)
+    monkeypatch.setattr(module, "_capacity", lambda: 30_000_000_000)
+    monitor = _cut_monitor(module, monkeypatch, args, base)
+    try:
+        monitor.start_ready(5.0)
+        success_at = monitor._capacity_success_at
+        assert success_at is not None
+
+        def failing() -> int:
+            raise RuntimeError("fixture transient host probe")
+
+        monkeypatch.setattr(module, "_capacity", failing)
+        time.sleep(1.2)
+        assert monitor._capacity_success_at == success_at
+        assert monitor._observe() is None
+        with monitor._lock:
+            monitor._capacity_success_at = success_at - 16
+        assert monitor._observe() == "host_capacity_unavailable_or_below_floor"
+    finally:
+        monitor.close()
 
 
 def test_unresponsive_worker_stop_targets_only_its_transient_unit(
@@ -1586,7 +1765,15 @@ def test_5400_cut_rejects_foreign_attempt_before_creating_a_window(
         destination=tmp_path / "destination",
         operation_id=uuid4(),
     )
-    monkeypatch.setattr(module, "_CutMonitor", lambda unused: SimpleNamespace())
+    monkeypatch.setattr(
+        module,
+        "_CutMonitor",
+        lambda unused: SimpleNamespace(
+            start_ready=lambda *args, **kwargs: None,
+            require_continue=lambda: None,
+            close=lambda: None,
+        ),
+    )
     monkeypatch.setattr(module, "WorkspaceService", lambda: SimpleNamespace())
     monkeypatch.setattr(module, "LocalReleaseService", lambda: SimpleNamespace())
 

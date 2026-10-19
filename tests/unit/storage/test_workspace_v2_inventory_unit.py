@@ -2944,8 +2944,56 @@ def test_coordinator_invalidates_orphan_without_changing_legacy_reservation_or_h
     assert not ledger.head_path.exists()
 
 
-def _certified_successor_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def _reapply_certified_fixture_patches(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_analyst.application.local_release import (
+        DeploymentWorkspaceBindings,
+        LocalReleaseService,
+    )
+
+    monkeypatch.setattr(
+        LocalReleaseService,
+        "load_workspace_bindings",
+        lambda self: DeploymentWorkspaceBindings(),
+    )
+    native_step = MaintenanceExecution.step
+
+    def require_supervisor_phase(self, phase: str, seconds: int) -> object:
+        assert phase in {"ready", "open", "sql"}
+        return native_step(self, phase, seconds)
+
+    monkeypatch.setattr(MaintenanceExecution, "step", require_supervisor_phase)
+
+
+def _reset_certified_successor_fixture(
+    template_root: Path,
+    pristine: Path,
+    template_result: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    shutil.rmtree(template_root)
+    shutil.copytree(pristine, template_root)
+    _reapply_certified_fixture_patches(monkeypatch)
+    return template_result
+
+
+@pytest.fixture(scope="module")
+def certified_successor_template(tmp_path_factory):
+    root = tmp_path_factory.mktemp("dc45-certified-successor-template")
+    pristine = tmp_path_factory.mktemp("dc45-certified-successor-pristine")
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        result = _certified_successor_fixture(root, monkeypatch)
+    shutil.copytree(root, pristine, dirs_exist_ok=True)
+    return root, pristine, result
+
+
+def _certified_successor_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    template: tuple[Path, Path, tuple] | None = None,
+):
     """Real small W→completed prior attempt→C1/C2 baseline; no proof producers mocked."""
+    if template is not None:
+        return _reset_certified_successor_fixture(*template, monkeypatch)
     from investment_analyst.application.local_release import (
         DeploymentWorkspaceBindings,
         LocalReleaseService,
@@ -3259,7 +3307,10 @@ with (
 
 @pytest.mark.parametrize("fault", [None, "epoch", "root"])
 def test_coverage_only_measures_retained_generation_without_restore(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str | None,
+    certified_successor_template: tuple[Path, tuple],
 ):
     import importlib.util
 
@@ -3267,7 +3318,9 @@ def test_coverage_only_measures_retained_generation_without_restore(
         WorkspaceV2PhysicalDeltaService,
     )
 
-    seed, ledger, admission, _, index, parent = _certified_successor_fixture(tmp_path, monkeypatch)
+    seed, ledger, admission, _, index, parent = _certified_successor_fixture(
+        tmp_path, monkeypatch, certified_successor_template
+    )
     generation = ledger.resolve()[1].generation_id
     scripts = Path(__file__).resolve().parents[3] / "scripts"
     monkeypatch.syspath_prepend(str(scripts))
@@ -3444,13 +3497,19 @@ def test_successor_typed_fallback_batches_models_by_bytes_and_preserves_hashes(
     ],
 )
 def test_comparison_measurement_is_read_only_unreserved_and_bound_to_current_inputs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, additions: int, fault: str | None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    additions: int,
+    fault: str | None,
+    certified_successor_template: tuple[Path, tuple],
 ) -> None:
     import os
 
     from investment_analyst.workspace import workspace_v2_migration as migration
 
-    seed, ledger, admission, *_ = _certified_successor_fixture(tmp_path, monkeypatch)
+    seed, ledger, admission, *_ = _certified_successor_fixture(
+        tmp_path, monkeypatch, certified_successor_template
+    )
     baseline = ledger.resolve()[1]
     for ordinal in range(additions):
         raw = make_raw_record(source_id=f"fixture:measurement:{ordinal}")
@@ -3565,10 +3624,14 @@ def test_comparison_measurement_is_read_only_unreserved_and_bound_to_current_inp
 
 @pytest.mark.parametrize("additions,noncanonical", [(0, False), (1, False), (3, False), (0, True)])
 def test_certified_generation_reaches_real_incremental_financial_seal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, additions: int, noncanonical: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    additions: int,
+    noncanonical: bool,
+    certified_successor_template: tuple[Path, tuple],
 ) -> None:
     seed, ledger, admission, parent_root, index, parent_manifest = _certified_successor_fixture(
-        tmp_path, monkeypatch
+        tmp_path, monkeypatch, certified_successor_template
     )
     from investment_analyst.workspace.workspace_v2_migration_models import ProgressReconciliationV2
 
@@ -3835,7 +3898,11 @@ def test_certified_generation_reaches_real_incremental_financial_seal(
     ],
 )
 def test_global_controller_runs_certified_delta_recovery_and_activation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, additions: int, fault: str | None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    additions: int,
+    fault: str | None,
+    certified_successor_template: tuple[Path, tuple],
 ):
     """Real data/ledger/clock/44 reader/release API; simulate only OS/Drive boundaries."""
     import importlib.util
@@ -3869,7 +3936,7 @@ def test_global_controller_runs_certified_delta_recovery_and_activation(
     real_bindings = LocalReleaseService.load_workspace_bindings
     old_state = production.load_deployment_state()
     seed, ledger, admission, _, index, parent_manifest = _certified_successor_fixture(
-        tmp_path, monkeypatch
+        tmp_path, monkeypatch, certified_successor_template
     )
     from investment_analyst.workspace.workspace_v2_physical_delta import (
         WorkspaceV2PhysicalDeltaService,

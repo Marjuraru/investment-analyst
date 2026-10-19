@@ -1417,6 +1417,222 @@ def test_owned_payload_regenerable_matrix_roots(tmp_path, monkeypatch, writer, n
     assert lifecycle.retire_owned_payload(request) == result
 
 
+@pytest.mark.parametrize("consumer", ["other_root", "cwd", "fd", "arg"])
+def test_regenerable_cache_consumer_is_root_scoped(tmp_path, monkeypatch, consumer: str) -> None:
+    from investment_analyst.workspace.workspace_v2_lifecycle_models import (
+        OwnedPayloadRetirementInput,
+        OwnedPayloadRole,
+    )
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    root = tmp_path / "projects/investment-analyst/.worktrees/data-chassis-45/.pytest_cache"
+    root.mkdir(parents=True)
+    (root / "CACHEDIR.TAG").write_text("regenerable")
+    controls = tmp_path / ".local/share/investment-analyst/ops/data-chassis-45/cleanup-E0"
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr(lifecycle_module, "_PROC_ROOT", proc)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    process = proc / "4242"
+    process.mkdir()
+    (process / "cmdline").write_bytes(b"uv\0run\0python\0-m\0pytest\0")
+    (process / "cwd").symlink_to(root if consumer == "cwd" else elsewhere, target_is_directory=True)
+    (process / "fd").mkdir()
+    if consumer == "fd":
+        (process / "fd" / "3").symlink_to(root / "CACHEDIR.TAG")
+    if consumer == "arg":
+        (process / "cmdline").write_bytes(b"python\0" + str(root).encode() + b"\0")
+    request = OwnedPayloadRetirementInput(
+        operation_id=uuid4(),
+        role=OwnedPayloadRole.REGENERABLE_LOCAL_CACHE,
+        source_root=root,
+        retained_controls_root=controls,
+        consuming_generation=None,
+        releasing_stage="E0",
+        no_users=True,
+        no_unique_data=True,
+    )
+    if consumer == "other_root":
+        lifecycle_module._owned_payload_scope(request)
+    else:
+        with pytest.raises(WorkspaceV2LifecycleError, match="remains in use"):
+            lifecycle_module._owned_payload_scope(request)
+
+
+def _owned_payload_artifact(path: Path, kind: str):
+    from investment_analyst.workspace.workspace_v2_lifecycle_models import (
+        PreparatorySlotArtifact,
+    )
+
+    data = path.read_bytes()
+    return PreparatorySlotArtifact(
+        kind=kind,
+        path=path,
+        size_bytes=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+    )
+
+
+def test_owned_payload_scope_admits_final_w2_and_cache_stages(tmp_path, monkeypatch):
+    from investment_analyst.workspace.workspace_v2_lifecycle_models import OwnedPayloadRole
+
+    _, request = _owned_payload_fixture(tmp_path, monkeypatch)
+    ops = tmp_path / ".local/share/investment-analyst/ops/data-chassis-45"
+    controls = ops / "cleanup-E5"
+    w2 = ops / "physical-delta-W2-20261018/physical-delta/objects"
+    w2.mkdir(parents=True)
+    w2_request = request.model_copy(
+        update={
+            "source_root": w2,
+            "retained_controls_root": controls,
+            "releasing_stage": "E5",
+        }
+    )
+    lifecycle_module._owned_payload_scope(w2_request)
+    with pytest.raises(WorkspaceV2LifecycleError):
+        lifecycle_module._owned_payload_scope(
+            w2_request.model_copy(update={"releasing_stage": "E0"})
+        )
+    cache = ops / "independent-reads-W-20261017"
+    cache.mkdir(parents=True)
+    cache_request = request.model_copy(
+        update={
+            "role": OwnedPayloadRole.INDEPENDENT_READ_CACHE,
+            "source_root": cache,
+            "retained_controls_root": controls,
+            "releasing_stage": "E5",
+        }
+    )
+    lifecycle_module._owned_payload_scope(cache_request)
+    with pytest.raises(WorkspaceV2LifecycleError):
+        lifecycle_module._owned_payload_scope(
+            cache_request.model_copy(update={"releasing_stage": "E0"})
+        )
+    with pytest.raises(WorkspaceV2LifecycleError):
+        lifecycle_module._owned_payload_scope(
+            cache_request.model_copy(update={"consuming_generation": None})
+        )
+
+
+def test_owned_payload_retires_independent_cache_with_preserved_binding(tmp_path, monkeypatch):
+    from investment_analyst.workspace.workspace_v2_lifecycle_models import OwnedPayloadRole
+
+    lifecycle, request = _owned_payload_fixture(tmp_path, monkeypatch)
+    ops = tmp_path / ".local/share/investment-analyst/ops/data-chassis-45"
+    controls = ops / "cleanup-E5"
+    controls.mkdir(parents=True)
+    manifest_ref = next(ref for ref in request.evidence if ref.kind == "delta_manifest")
+    payload_path = next(request.source_root.iterdir())
+    digest = payload_path.name.removesuffix(".bin")
+    cache = ops / "independent-reads-W-20261017"
+    (cache / "physical-delta/objects").mkdir(parents=True)
+    (cache / "physical-delta/manifests").mkdir(parents=True)
+    (cache / "physical-delta/objects" / f"{digest}.bin").write_bytes(payload_path.read_bytes())
+    (cache / "physical-delta/objects" / f"{digest}.bin.read.json").write_text("{}")
+    (cache / "physical-delta/manifests" / f"{manifest_ref.sha256}.json").write_bytes(
+        manifest_ref.path.read_bytes()
+    )
+    (cache / "physical-delta/manifests" / f"{manifest_ref.sha256}.json.read.json").write_text("{}")
+    (cache / "cache-binding.json").write_text("{}")
+    binding_path = controls / "independent-cache-binding.json"
+    binding_path.write_text("{}")
+    independent = request.model_copy(
+        update={
+            "role": OwnedPayloadRole.INDEPENDENT_READ_CACHE,
+            "source_root": cache,
+            "retained_controls_root": controls,
+            "releasing_stage": "E5",
+            "evidence": (
+                *request.evidence,
+                _owned_payload_artifact(binding_path, "independent_cache_binding"),
+            ),
+        }
+    )
+    receipt = lifecycle.retire_owned_payload(independent)
+    assert receipt.checkpoint.phase == "retired"
+    assert not cache.exists()
+    assert binding_path.read_text() == "{}"
+
+
+def test_owned_payload_retires_transfer_scratch_and_rejects_protected_content(
+    tmp_path, monkeypatch
+):
+    from investment_analyst.workspace.workspace_v2_lifecycle_models import (
+        OwnedPayloadRetirementInput,
+        OwnedPayloadRole,
+    )
+
+    lifecycle, _ = _owned_payload_fixture(tmp_path, monkeypatch)
+    ops = tmp_path / ".local/share/investment-analyst/ops/data-chassis-45"
+    controls = ops / "cleanup-E5"
+    scratch = ops / "resource-run-fixture/temporales"
+    scratch.mkdir(parents=True)
+    (scratch / "part.tmp").write_bytes(b"scratch")
+    receipt_path = ops / "scratch-receipt.json"
+    receipt_path.write_text("{}")
+    request = OwnedPayloadRetirementInput(
+        operation_id=uuid4(),
+        role=OwnedPayloadRole.TRANSFER_SCRATCH,
+        source_root=scratch,
+        retained_controls_root=controls,
+        consuming_generation=None,
+        releasing_stage="E0",
+        evidence=(_owned_payload_artifact(receipt_path, "operation_receipt"),),
+        no_users=True,
+        no_unique_data=True,
+    )
+    result = lifecycle.retire_owned_payload(request)
+    assert result.checkpoint.phase == "retired"
+    assert not scratch.exists()
+    assert receipt_path.read_text() == "{}"
+    protected = ops / "resource-run-protected/temporales"
+    protected.mkdir(parents=True)
+    (protected / "index.duckdb").write_bytes(b"database")
+    protected_receipt = ops / "scratch-receipt-protected.json"
+    protected_receipt.write_text("{}")
+    protected_request = request.model_copy(
+        update={
+            "operation_id": uuid4(),
+            "source_root": protected,
+            "evidence": (_owned_payload_artifact(protected_receipt, "operation_receipt"),),
+        }
+    )
+    with pytest.raises(WorkspaceV2LifecycleError, match="protected content"):
+        lifecycle.retire_owned_payload(protected_request)
+    assert protected.exists()
+
+
+def test_owned_payload_independent_cache_rejects_unknown_content(tmp_path, monkeypatch):
+    from investment_analyst.workspace.workspace_v2_lifecycle_models import OwnedPayloadRole
+
+    lifecycle, request = _owned_payload_fixture(tmp_path, monkeypatch)
+    ops = tmp_path / ".local/share/investment-analyst/ops/data-chassis-45"
+    controls = ops / "cleanup-E5"
+    controls.mkdir(parents=True)
+    cache = ops / "independent-reads-W-20261017"
+    (cache / "physical-delta/objects").mkdir(parents=True)
+    (cache / "physical-delta/objects" / "unknown.bin").write_bytes(b"unique")
+    (cache / "cache-binding.json").write_text("{}")
+    binding_path = controls / "independent-cache-binding.json"
+    binding_path.write_text("{}")
+    independent = request.model_copy(
+        update={
+            "role": OwnedPayloadRole.INDEPENDENT_READ_CACHE,
+            "source_root": cache,
+            "retained_controls_root": controls,
+            "releasing_stage": "E5",
+            "evidence": (
+                *request.evidence,
+                _owned_payload_artifact(binding_path, "independent_cache_binding"),
+            ),
+        }
+    )
+    with pytest.raises(WorkspaceV2LifecycleError):
+        lifecycle.retire_owned_payload(independent)
+    assert cache.exists()
+
+
 def test_owned_payload_resume_detects_unknown_writes(tmp_path, monkeypatch):
     lifecycle, request = _owned_payload_fixture(tmp_path, monkeypatch)
     original = lifecycle_module.shutil.rmtree
