@@ -3554,6 +3554,9 @@ class WorkspaceV2GenerationLedger:
                             "successor_owner",
                             "successor_admission",
                             "coverage",
+                            "code",
+                            "tree_fingerprint",
+                            "environment_fingerprint",
                         }
                         old_values, new_values = previous.model_dump(), generation.model_dump()
                         if any(old_values[k] != new_values[k] for k in old_values.keys() - allowed):

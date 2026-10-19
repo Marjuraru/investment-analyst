@@ -2573,14 +2573,28 @@ def verify_recovered_successor(
             )
             if ledger is not None:
                 assert isinstance(progress, ProgressReconciliationV2)
+                verifier_root = Path(__file__).resolve().parents[1]
+                current_code = tuple(
+                    reconciliation_file_reference(verifier_root / relative, "code")
+                    for relative in (
+                        "storage/workspace_v2_inventory.py",
+                        "storage/compact_analytical_v2.py",
+                        "storage/historical_analytical_import.py",
+                        "workspace/workspace_v2_migration_models.py",
+                    )
+                )
                 bound_v2 = progress.model_copy(
                     update={
                         "phase": "SUCCESSOR_BOUND",
                         "coverage": coverage,
+                        "code": current_code,
+                        "tree_fingerprint": tree,
+                        "environment_fingerprint": environment,
                         "previous_certificate": baseline_reference,
                         "recorded_at": datetime.now(UTC),
                     }
                 )
+                bound_v2 = ProgressReconciliationV2.model_validate(bound_v2.model_dump())
                 ledger.publish(bound_v2, expected_head_sha256=expected_head, admission=admission)
                 return bound_v2
             bound = ProgressReconciliation.model_validate(

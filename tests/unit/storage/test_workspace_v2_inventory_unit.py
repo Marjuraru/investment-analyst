@@ -2990,6 +2990,7 @@ def _certified_successor_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     template: tuple[Path, Path, tuple] | None = None,
+    verifier_tree: tuple[str, str] | None = None,
 ):
     """Real small W→completed prior attempt→C1/C2 baseline; no proof producers mocked."""
     if template is not None:
@@ -3196,6 +3197,8 @@ with (
     ):
         invalidation = ledger.invalidate(event, admission=admission)
         tree, environment = historical_transition_fingerprints(256, "shared-reference-verifier-v1")
+        if verifier_tree is not None:
+            tree, environment = verifier_tree
         generation = ProgressReconciliationV2(
             generation_id=generation_id,
             ordinal=1,
@@ -3875,6 +3878,95 @@ def test_certified_generation_reaches_real_incremental_financial_seal(
             readback = module._complete_recovery(args, recovered_receipt, manifest)
         assert readback["readback"]["raw_count"] == 1 + additions
         assert readback["coverage"]["physical_files"] == manifest.file_count
+
+
+def test_successor_bound_advances_verifier_tree_without_rewriting_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certified_successor_template: tuple[Path, Path, tuple],
+) -> None:
+    from types import SimpleNamespace
+
+    from investment_analyst.storage.workspace_v2_inventory import (
+        reconciliation_file_reference,
+    )
+    from investment_analyst.workspace.workspace_v2_migration_models import (
+        CutOwner,
+        ProgressReconciliationV2,
+    )
+
+    seed, ledger, admission, _, _, _ = _certified_successor_fixture(
+        tmp_path, monkeypatch, certified_successor_template
+    )
+    head, baseline = ledger.resolve()
+    assert baseline.inventory is not None
+    cut = FrozenSourceCut(
+        operation_id=uuid4(),
+        source_root=baseline.source_root,
+        workspace_id=baseline.source_workspace_id,
+        created_at=baseline.source_created_at,
+        frozen_at=datetime.now(UTC),
+        source_fingerprint="a" * 64,
+        workspace_format_version=1,
+        writer_closed=True,
+    )
+    template_root, _, _ = certified_successor_template
+    admission_ref = reconciliation_file_reference(
+        template_root / "generation-admission.json", "resource"
+    )
+    owner = CutOwner(
+        source_session=uuid4(),
+        pid=admission.pid,
+        start_ticks=admission.process_start_ticks,
+        boot_id=admission.boot_id,
+        cgroup=admission.cgroup_path,
+    )
+    new_tree, new_environment = "c" * 64, "d" * 64
+    coverage = SuccessorCoverageProof(
+        successor=cut,
+        baseline_dataset_sha256=baseline.inventory.dataset_sha256,
+        covered_metric_count=baseline.inventory.metric_count,
+        covered_diagnostic_count=baseline.inventory.diagnostic_count,
+        comparison_sha256="e" * 64,
+        verifier_tree_fingerprint=new_tree,
+        verified_at=datetime.now(UTC),
+    )
+    bound = baseline.model_copy(
+        update={
+            "phase": "SUCCESSOR_BOUND",
+            "coverage": coverage,
+            "reserved_successor": cut,
+            "successor_owner": owner,
+            "successor_admission": admission_ref,
+            "tree_fingerprint": new_tree,
+            "environment_fingerprint": new_environment,
+            "previous_certificate": head.certificate,
+            "recorded_at": datetime.now(UTC),
+        }
+    )
+    bound = ProgressReconciliationV2.model_validate(bound.model_dump())
+    monkeypatch.setattr(
+        migration_module,
+        "_live_quiescent_source",
+        lambda *args, **kwargs: SimpleNamespace(writer_generation=owner.source_session),
+    )
+    with (
+        maintenance_resource_budget(admission.budget),
+        maintenance_execution(MaintenanceExecution(admission.budget, lambda *_: None)),
+    ):
+        ledger.publish(
+            bound,
+            expected_head_sha256=ledger._head_digest(),
+            admission=admission,
+        )
+    head, resolved = ledger.resolve()
+    assert (resolved.tree_fingerprint, resolved.environment_fingerprint) == (
+        new_tree,
+        new_environment,
+    )
+    assert resolved.coverage is not None
+    assert resolved.coverage.verifier_tree_fingerprint == new_tree
+    ProgressReconciliationV2.model_validate_json(head.certificate.path.read_bytes())
 
 
 @pytest.mark.parametrize(
