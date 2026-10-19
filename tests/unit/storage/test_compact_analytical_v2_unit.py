@@ -36,6 +36,149 @@ from investment_analyst.workspace.service import WorkspaceService
 _BASE = datetime(2026, 8, 1, tzinfo=UTC)
 
 
+def test_cut_byte_collector_counts_shared_persisted_lineage_once(tmp_path: Path) -> None:
+    from investment_analyst.application.storage_observability import measure_cut_analytical_payloads
+
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "workspace", format_version=2)
+    raw, observation = _observation(1)
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        storage.raw_records.save(raw)
+        storage.observations.save(observation)
+        first = _metric(
+            [observation],
+            key="crypto.derivatives.funding.mean_1h",
+            identity="first-cut-byte",
+            v8=False,
+        )
+        storage.metric_results.save(first)
+        before = {
+            m.table_name: m
+            for m in measure_cut_analytical_payloads(storage.store.connection, format_version=2)
+        }
+        second = _metric(
+            [observation],
+            key="crypto.derivatives.funding.sum_1h",
+            identity="second-cut-byte",
+            v8=False,
+        )
+        storage.metric_results.save(second)
+        after = {
+            m.table_name: m
+            for m in measure_cut_analytical_payloads(storage.store.connection, format_version=2)
+        }
+        # Only one typed metric row is new: content, sequences and segments are
+        # shared. IDs here are stored VARCHARs, not reconstructed UUID objects.
+        row_bytes = storage.store.connection.execute(
+            "SELECT octet_length(encode(result_id)) + 8*4 + 4 + "
+            "octet_length(encode(origin)) + octet_length(encode(asset_id)) + "
+            "octet_length(encode(metric_key)) + octet_length(encode(value_text)) + "
+            "octet_length(encode(unit)) + octet_length(encode(parameters_content_id)) + "
+            "octet_length(encode(observation_sequence_id)) + "
+            "octet_length(encode(metric_sequence_id)) + octet_length(encode(algorithm_version)) + "
+            "octet_length(encode(quality)) + octet_length(encode(checksum_sha256)) "
+            "FROM workspace_metric_results_v2 WHERE result_id=?",
+            [second.result_id],
+        ).fetchone()[0]
+        assert after["funding"].row_count == after["metrics"].row_count == 2
+        assert after["funding"].document_bytes == after["metrics"].document_bytes
+        assert after["funding"].document_bytes - before["funding"].document_bytes == row_bytes
+        assert after["diagnostics"].row_count == after["diagnostics"].document_bytes == 0
+
+
+def test_cut_byte_collector_measures_utf8_and_rejects_unknown_scalar(tmp_path: Path) -> None:
+    import duckdb
+
+    from investment_analyst.application.storage_observability import (
+        StorageObservabilityError,
+        measure_cut_analytical_payloads,
+    )
+
+    with duckdb.connect() as source:
+        source.execute("CREATE TABLE metric_results(metric_key VARCHAR, document_json VARCHAR)")
+        source.execute("CREATE TABLE diagnostic_results(document_json VARCHAR)")
+        source.execute(
+            "INSERT INTO metric_results VALUES (?,?)", ["crypto.derivatives.funding.mean_1h", "ñ€"]
+        )
+        result = {
+            m.table_name: m for m in measure_cut_analytical_payloads(source, format_version=1)
+        }
+        assert result["metrics"].document_bytes == result["funding"].document_bytes == 5
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "workspace", format_version=2)
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        storage.store.connection.execute(
+            "ALTER TABLE workspace_metric_results_v2 ADD COLUMN unknown DOUBLE"
+        )
+        with pytest.raises(StorageObservabilityError, match="scalar type"):
+            measure_cut_analytical_payloads(storage.store.connection, format_version=2)
+
+
+def test_cut_funding_bytes_include_transitive_shared_metric_dependencies(tmp_path: Path) -> None:
+    from investment_analyst.application.storage_observability import measure_cut_analytical_payloads
+
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "workspace", format_version=2)
+    raw, observation = _observation(1)
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        storage.raw_records.save(raw)
+        storage.observations.save(observation)
+        parent = _metric([observation], key="fixture.base", identity="base-cut-byte", v8=False)
+        child = _metric(
+            [observation],
+            key="crypto.derivatives.funding.sum_1h",
+            identity="funding-cut-byte",
+            v8=False,
+        ).model_copy(update={"input_metric_result_ids": [parent.result_id]})
+        storage.metric_results.save(parent)
+        storage.metric_results.save(child)
+        measured = {
+            m.table_name: m
+            for m in measure_cut_analytical_payloads(storage.store.connection, format_version=2)
+        }
+        assert measured["funding"].row_count == 1
+        assert measured["metrics"].row_count == 2
+        assert measured["funding"].document_bytes == measured["metrics"].document_bytes
+        storage.metric_results.save(
+            _metric([observation], key="fixture.unrelated", identity="unrelated-cut-byte", v8=False)
+        )
+        after = {
+            m.table_name: m
+            for m in measure_cut_analytical_payloads(storage.store.connection, format_version=2)
+        }
+        assert after["funding"] == measured["funding"]
+        assert after["metrics"].document_bytes > measured["metrics"].document_bytes
+
+
+@pytest.mark.parametrize("boundary", ["metadata", "cycle"])
+def test_graph_failure_is_not_masked_by_cleanup_in_aborted_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "workspace", format_version=2)
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        compact = CompactAnalyticalStore(storage.store.connection)
+        execute = compact._relationship_sql
+
+        def failure(*args, **kwargs):
+            raise RuntimeError("original graph failure")
+
+        def checked_sql(sql, *args, **kwargs):
+            if sql.startswith("DROP TABLE"):
+                pytest.fail("cleanup must not mask an aborted transaction's original failure")
+            if boundary == "cycle":
+                failure()
+            return execute(sql, *args, **kwargs)
+
+        monkeypatch.setattr(compact, "_relationship_sql", checked_sql)
+        monkeypatch.setattr(compact, "_build_relationship_metadata", failure)
+        with pytest.raises(RuntimeError, match="original graph failure"):
+            if boundary == "metadata":
+                compact.verify_historical_relationships()
+            else:
+                compact._require_acyclic_bucket(0)
+
+
 @pytest.mark.parametrize("parents,members", [(32, 32), (128, 256), (512, 512)])
 def test_shared_reference_metadata_scales_with_segments_not_parent_fanout(
     tmp_path: Path,

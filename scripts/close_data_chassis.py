@@ -12,22 +12,26 @@ import json
 import os
 import platform
 import resource
+import shlex
+import signal
 import stat
 import subprocess
 import sys
 import threading
 import time
 import traceback
+import urllib.request
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import duckdb
 from migrate_workspace_v2 import _host_free_bytes
 
 from investment_analyst.application.local_release import LocalReleaseService, ReleaseManifest
+from investment_analyst.application.storage_observability import measure_cut_analytical_payloads
 from investment_analyst.storage.resource_policy import (
     MaintenanceExecution,
     MaintenanceResourceBudget,
@@ -42,6 +46,10 @@ from investment_analyst.storage.resource_policy import (
 from investment_analyst.storage.workspace_v2_inventory import (
     WorkspaceV2GenerationLedger,
     WorkspaceV2ProgressReconciler,
+    historical_transition_fingerprints,
+    reconciliation_file_reference,
+    verify_generation_contents,
+    verify_generation_raw_files,
 )
 from investment_analyst.workspace.drive_transport import DriveTransport, DriveTransportConfig
 from investment_analyst.workspace.models import WorkspaceAccessMode
@@ -67,17 +75,35 @@ from investment_analyst.workspace.workspace_v2_lifecycle_models import (
     LifecycleCheckpoint,
     LifecycleInventory,
     LifecyclePhase,
+    OwnedPayloadRetirementInput,
+    PreparatorySlotRetirementReceipt,
 )
 from investment_analyst.workspace.workspace_v2_migration import (
     WorkspaceV2MigrationError,
+    _live_quiescent_source,
+    _QuiescentSourceIntent,
     _RecoveredCoreBaseline,
+    _SuccessorReservation,
+    close_quiescent_native_reader,
+    measure_recovered_comparison,
     quiescent_source_cut,
     source_fingerprint,
     verify_recovered_core_baseline,
 )
 from investment_analyst.workspace.workspace_v2_migration_models import (
+    CUT_WINDOW_EXCEPTION_SECONDS,
+    CutInvalidation,
+    CutOwner,
+    CutWindow,
+    CutWindowGo,
+    CutWindowReceipt,
+    GenerationContentProof,
+    HistoricalTransition,
+    HistoricalTransitionReceipt,
     ProgressReconciliation,
     ProgressReconciliationV2,
+    ReconciliationFileReference,
+    ReconciliationGenerationReference,
 )
 from investment_analyst.workspace.workspace_v2_operational_state import compare_operational_models
 from investment_analyst.workspace.workspace_v2_physical_delta import (
@@ -99,6 +125,25 @@ PHASES = (
     "report",
     "retire-final",
 )
+GENERATION_CODE_PATHS = (
+    "scripts/close_data_chassis.py",
+    "src/investment_analyst/application/local_release.py",
+    "src/investment_analyst/application/storage_observability.py",
+    "src/investment_analyst/storage/workspace_v2_inventory.py",
+    "src/investment_analyst/storage/compact_analytical_v2.py",
+    "src/investment_analyst/storage/historical_analytical_import.py",
+    "src/investment_analyst/workspace/workspace_v2_migration_models.py",
+    "src/investment_analyst/storage/resource_policy.py",
+    "src/investment_analyst/storage/serialization.py",
+    "src/investment_analyst/storage/raw_v2.py",
+    "src/investment_analyst/storage/raw_records.py",
+    "src/investment_analyst/workspace/workspace_v2_migration.py",
+    "src/investment_analyst/workspace/workspace_v2_physical_delta.py",
+    "src/investment_analyst/workspace/workspace_v2_lifecycle.py",
+    "src/investment_analyst/workspace/workspace_v2_lifecycle_models.py",
+    "src/investment_analyst/workspace/workspace_v2_cutover.py",
+    "src/investment_analyst/workspace/workspace_v2_operational_state.py",
+)
 
 
 class MaintenancePhaseError(ValueError):
@@ -107,6 +152,172 @@ class MaintenancePhaseError(ValueError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+class _CutMonitor:
+    """Unit-owned R1/deadline supervision, independent of the client and SQL."""
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.args = args
+        self.root = _required(args.resource_run_root, "resource_run_root")
+        read_args = argparse.Namespace(**vars(args))
+        read_args.resource_budget = _required(args.cut_readback_budget, "cut_readback_budget")
+        self.budgets = (_load_resource_budget(args), _load_resource_budget(read_args))
+        base, reader = self.budgets
+        if (
+            base.profile != "verification"
+            or {a.database for a in base.assignments}
+            != {
+                args.source / "storage/data/processed/investment_analyst.duckdb",
+                args.destination / "storage/v2/index.duckdb",
+            }
+            or len(base.assignments) != 2
+            or base.reader_worker is not None
+            or reader.profile != "compatible_44"
+            or len(reader.assignments) != 1
+            or reader.assignments[0].database
+            != _required(args.recovery_root, "recovery_root") / "storage/v2/index.duckdb"
+            or reader.assignments[0].policy.memory_limit_bytes != 2_000_000_000
+        ):
+            raise MaintenancePhaseError("cut_requires_verification_and_single_reader_profiles")
+        directories = [a.policy.temp_directory for b in self.budgets for a in b.assignments]
+        if len(directories) != len(set(directories)):
+            raise MaintenancePhaseError("cut_profiles_share_temporary_directories")
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._execution: MaintenanceExecution | None = None
+        self._run: Path | None = None
+        self._bound_at = time.monotonic()
+        self._capacity: int | None = None
+        self._capacity_at = 0.0
+        self.reason: str | None = None
+        self.recovering = False
+        self._stopped_at: float | None = None
+        self._events: tuple[int, int, int] | None = None
+        self._cgroup = _process_identity(os.getpid())[2]
+        self._host = threading.Thread(target=self._host_probe, daemon=True)
+        self._watcher = threading.Thread(target=self._watch, daemon=True)
+
+    def start(self) -> None:
+        self._host.start()
+        self._watcher.start()
+
+    def bind(self, execution: MaintenanceExecution, run: Path) -> None:
+        with self._lock:
+            self._execution, self._run, self._bound_at = execution, run, time.monotonic()
+
+    def unbind(self) -> None:
+        with self._lock:
+            self._execution, self._run = None, None
+
+    def require_continue(self) -> None:
+        if self.reason is not None:
+            raise MaintenancePhaseError(self.reason)
+
+    def _host_probe(self) -> None:
+        while not self._stop.is_set():
+            try:
+                value = _capacity()
+            except Exception:
+                value = None
+            with self._lock:
+                self._capacity, self._capacity_at = value, time.monotonic()
+            self._stop.wait(1)
+
+    def _observe(self) -> str | None:
+        now = time.monotonic()
+        with self._lock:
+            execution, run, bound = self._execution, self._run, self._bound_at
+            capacity = self._capacity if now - self._capacity_at <= 15 else None
+        # Before the first host result no operation is allowed to stop v1.
+        if capacity is None and self._capacity_at == 0 and now - bound <= 5:
+            return None
+        age = 0
+        if execution is not None and run is not None:
+            path = run / "heartbeat.json"
+            if path.exists():
+                heartbeat = json.loads(path.read_bytes())
+                if heartbeat.get("pid") != os.getpid() or heartbeat.get("operation_id") != str(
+                    self.args.operation_id
+                ):
+                    return "cut_heartbeat_owner_differs"
+                age = int(now - heartbeat["heartbeat_monotonic"])
+            elif now - bound > 5:
+                return "cut_heartbeat_missing"
+        samples = tuple(
+            sample_cgroup_resources(
+                b,
+                self._cgroup,
+                host_free_bytes=capacity,
+                log_bytes=(self.root / "worker.log").stat().st_size
+                if (self.root / "worker.log").exists()
+                else 0,
+                heartbeat_age_seconds=age,
+            )
+            for b in self.budgets
+        )
+        sample = samples[0].model_copy(
+            update={
+                "temp_allocated_bytes": sum(s.temp_allocated_bytes for s in samples),
+                "temp_logical_bytes": sum(s.temp_logical_bytes for s in samples),
+                "memory_current_bytes": max(s.memory_current_bytes for s in samples),
+                "available_memory_bytes": min(s.available_memory_bytes for s in samples),
+                "events": samples[-1].events,
+            }
+        )
+        if self._events is None:
+            self._events = sample.events
+            _write_new_json(self.root / "cut-resource-origin.json", sample.model_dump(mode="json"))
+        _replace_json(self.root / "cut-last-sample.json", sample.model_dump(mode="json"))
+        for budget in self.budgets:
+            reason = resource_stop_reason(budget, sample, initial_events=self._events)
+            if reason is not None:
+                return reason
+        window_path = _required(self.args.cut_window, "cut_window")
+        if window_path.exists():
+            window_service = WorkspaceV2CutWindowService(window_path)
+            window = window_service.load()
+            if window.phase not in {"HEALTHY_V1", "HEALTHY_V2", "ABORTED", "RETURNING_V1"}:
+                boot = _process_identity(os.getpid())[1]
+                if (
+                    window_service.remaining_work_ns(boot_id=boot, monotonic_ns=time.monotonic_ns())
+                    <= 0
+                ):
+                    return "cut_global_recovery_reserve_reached"
+        return None
+
+    def _watch(self) -> None:
+        while not self._stop.is_set():
+            try:
+                reason = self._observe()
+                if reason is not None and not self.recovering:
+                    self.reason = self.reason or reason
+                    with self._lock:
+                        execution = self._execution
+                    if execution is not None:
+                        execution.cancel(self.reason)
+                    if self._stopped_at is None:
+                        self._stopped_at = time.monotonic()
+                        _replace_json(
+                            self.root / "cut-stop-request.json",
+                            {
+                                "reason": self.reason,
+                                "at": datetime.now(UTC).isoformat(),
+                            },
+                        )
+                    if time.monotonic() - self._stopped_at >= 5:
+                        # systemd runs the mandatory source-aware ExecStopPost.
+                        os.kill(os.getpid(), signal.SIGTERM)
+            except Exception:
+                # A dead observer cannot leave a stopped source unattended.
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+            self._stop.wait(1)
+
+    def close(self) -> None:
+        self._stop.set()
+        self._watcher.join(timeout=2)
+        self._host.join(timeout=2)
 
 
 def _absolute(value: str) -> Path:
@@ -131,13 +342,22 @@ def _parser() -> argparse.ArgumentParser:
             *PHASES,
             "resource-check",
             "recover-progress",
+            "reconcile-generation",
+            "invalidate-reservation",
+            "verify-generation",
+            "verify-generation-raw",
+            "certify-generation",
+            "retire-preparatory",
+            "retire-owned-payload",
             "verify-relationships",
             "verify-financial-baseline",
             "verify-core-baseline",
             "prepare-parent-reuse",
+            "prepare-links",
             "prepare-delta",
             "recovery-readback",
             "profile-relationships",
+            "cut",
         ),
     )
     parser.add_argument("--source", type=_absolute, required=True)
@@ -150,24 +370,40 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--parent-manifest", type=_absolute)
     parser.add_argument("--parent-manifest-sha256")
     parser.add_argument("--delta-root", type=_absolute)
-    parser.add_argument("--delta-action", choices=("plan", "upload", "restore"), default="plan")
+    parser.add_argument("--prepared-delta", type=_absolute)
+    parser.add_argument(
+        "--delta-action",
+        choices=("plan", "upload", "restore", "measure-plan", "measure-comparison"),
+        default="plan",
+    )
+    parser.add_argument("--coverage-only", action="store_true")
     parser.add_argument("--recovery-root", type=_absolute)
     parser.add_argument("--reuse-parent-immutables", action="store_true")
     parser.add_argument("--immutable-parent-proof", type=_absolute)
+    parser.add_argument("--immutable-link-journal", type=_absolute)
+    parser.add_argument("--immutable-link-witness", type=_absolute)
+    parser.add_argument("--link-witness-receipt", type=_absolute)
+    parser.add_argument("--journal-byte-budget", type=int, default=1_000_000_000)
     parser.add_argument("--transport-config", type=_absolute)
     parser.add_argument("--independent-read-root", type=_absolute)
     parser.add_argument("--recovery-receipt", type=_absolute)
     parser.add_argument("--cut-window", type=_absolute)
+    parser.add_argument("--cut-go", type=_absolute)
+    parser.add_argument("--cut-readback-budget", type=_absolute)
+    parser.add_argument("--cut-recover", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--acceptance-input", type=_absolute)
     parser.add_argument("--lifecycle-inventory", type=_absolute)
     parser.add_argument("--complement-root", type=_absolute)
     parser.add_argument(
         "--preclean-kind",
-        choices=("recovery_slot", "packed_backup", "restore_staging"),
+        choices=("recovery_slot", "packed_backup", "restore_staging", "unused_release"),
         default="recovery_slot",
     )
     parser.add_argument("--retire-root", type=_absolute)
+    parser.add_argument("--owned-payload-input", type=_absolute)
     parser.add_argument("--retained-controls", type=_absolute)
+    parser.add_argument("--retire-release-sha", type=_sha)
+    parser.add_argument("--retained-release-path", type=_absolute, action="append")
     parser.add_argument("--remote-restore-receipt", type=_absolute)
     parser.add_argument("--output", type=_absolute)
     parser.add_argument("--resource-budget", type=_absolute)
@@ -176,8 +412,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--predecessor-code", type=_absolute)
     parser.add_argument("--relationships-proof", type=_absolute)
     parser.add_argument("--reconciliation-id", type=UUID)
+    parser.add_argument("--reservation-path", type=_absolute)
     parser.add_argument("--baseline-code-root", type=_absolute)
     parser.add_argument("--core-baseline-path", type=_absolute)
+    parser.add_argument("--generation-content-proof", type=_absolute)
+    parser.add_argument("--preparatory-retirement-input", type=_absolute)
     parser.add_argument("--profile-financial-reader", action="store_true")
     parser.add_argument("--supervised-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--resource-run-root", type=_absolute, help=argparse.SUPPRESS)
@@ -364,7 +603,13 @@ def _load_resource_budget(args: argparse.Namespace) -> MaintenanceResourceBudget
 
 def _unit_properties() -> dict[str, str]:
     completed = subprocess.run(
-        ["systemctl", "--user", "show", MAINTENANCE_UNIT, "--property=ActiveState,MainPID,Result"],
+        [
+            "systemctl",
+            "--user",
+            "show",
+            MAINTENANCE_UNIT,
+            "--property=ActiveState,MainPID,ControlPID,Result,ActiveEnterTimestampMonotonic",
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -425,7 +670,15 @@ def _worker_resources(args: argparse.Namespace) -> Iterator[None]:
         raise MaintenancePhaseError("resource_run_boundary_mismatch")
     pid = os.getpid()
     properties = _unit_properties()
-    if properties.get("ActiveState") != "active" or properties.get("MainPID") != str(pid):
+    is_stop_hook = (
+        getattr(args, "cut_recover", False)
+        and args.phase == "cut"
+        and properties.get("ActiveState") in {"deactivating", "failed"}
+        and properties.get("ControlPID") == str(pid)
+    )
+    if not is_stop_hook and (
+        properties.get("ActiveState") != "active" or properties.get("MainPID") != str(pid)
+    ):
         raise MaintenancePhaseError("worker_is_not_owned_maintenance_unit")
     _, _, cgroup = _process_identity(pid)
     # This admission precedes any service/backend construction or WAL replay.
@@ -437,9 +690,37 @@ def _worker_resources(args: argparse.Namespace) -> Iterator[None]:
     _write_new_json(run / "admission.json", receipt.model_dump(mode="json"))
     if reason is not None:
         raise MaintenancePhaseError(reason)
+    monitor = getattr(args, "cut_monitor", None)
+    if monitor is not None:
+        with monitor._lock:
+            active_execution = monitor._execution
+        if active_execution is not None:
+            # Freeze and catch-up share the real source instance. Replacing its
+            # execution registry would try to ATTACH that database twice.
+            from investment_analyst.storage.resource_policy import require_maintenance_admission
+
+            require_maintenance_admission(receipt)
+            yield
+            return
     execution: MaintenanceExecution
     cache = _PhysicalCacheReclaimer(
-        receipt, enabled=args.phase in {"prepare-delta", "delta", "catchup"}
+        receipt,
+        enabled=args.phase
+        in {
+            "preclean",
+            "cut",
+            "prepare-delta",
+            "delta",
+            "catchup",
+            "reconcile-generation",
+            "verify-generation",
+            "verify-generation-raw",
+            "certify-generation",
+            "retire-preparatory",
+            "prepare-links",
+            "retire-owned-payload",
+            "recovery-readback",
+        },
     )
 
     def observe(phase: str, step_started: float, deadline: int) -> None:
@@ -466,11 +747,15 @@ def _worker_resources(args: argparse.Namespace) -> Iterator[None]:
         )
 
     execution = MaintenanceExecution(budget, observe)
+    if monitor is not None:
+        monitor.bind(execution, run)
     cache.start()
     try:
         with maintenance_resource_budget(budget), maintenance_execution(execution):
             yield
     finally:
+        if monitor is not None:
+            monitor.unbind()
         cache.close()
         _replace_json(
             run / "native-settings.json",
@@ -508,16 +793,78 @@ def _stop_owned_worker(run: Path, reason: str, grace: int) -> None:
     )
 
 
+def _cut_unit_options(args: argparse.Namespace, worker_args: list[str], run: Path) -> list[str]:
+    """A unit-owned recovery hook must outlive both the client and the worker."""
+    go = CutWindowGo.model_validate_json(_required(args.cut_go, "cut_go").read_bytes())
+    reserve = next(b.upper_seconds for b in go.bounds if b.step == "cancel_close_restart")
+    recovery = list(worker_args)
+    if "--output" in recovery:
+        index = recovery.index("--output")
+        recovery[index + 1] = str(run / "cut-recovery-phase.json")
+    recovery.append("--cut-recover")
+    hook = shlex.join([sys.executable, str(Path(__file__).resolve()), *recovery])
+    # systemd performs specifier/environment expansion even without a shell.
+    hook = hook.replace("%", "%%").replace("$", "$$")
+    return [
+        f"--property=RuntimeMaxSec={go.window_limit_seconds - reserve}",
+        f"--property=TimeoutStopSec={reserve}",
+        "--property=ExecStopPost=" + hook,
+    ]
+
+
+def _wait_cut_unit(output: Path, run: Path) -> dict[str, object]:
+    # Client loss must not stop this unit. Resource/deadline observation belongs
+    # to its MainPID, and systemd owns recovery after that PID disappears.
+    while True:
+        properties = _unit_properties()
+        if (
+            properties.get("MainPID", "0") == "0"
+            and properties.get("ControlPID", "0") == "0"
+            and properties.get("ActiveState") not in {"active", "activating", "deactivating"}
+        ):
+            if output.is_file():
+                return json.loads(output.read_bytes())
+            if (run / "cut-recovery-phase.json").is_file():
+                raise MaintenancePhaseError("cut_interrupted_recovery_recorded")
+            raise MaintenancePhaseError("cut_exited_without_recovery_receipt")
+        time.sleep(1)
+
+
 def _supervise(args: argparse.Namespace, argv: list[str]) -> dict[str, object]:
     budget = _load_resource_budget(args)
     properties = _unit_properties()
-    if properties.get("MainPID", "0") != "0" or properties.get("ActiveState") == "active":
+    if (
+        properties.get("MainPID", "0") != "0"
+        or properties.get("ControlPID", "0") != "0"
+        or properties.get("ActiveState") in {"active", "activating", "deactivating"}
+    ):
         raise MaintenancePhaseError("maintenance_unit_already_in_use")
     initial_capacity = _capacity()
     if initial_capacity < budget.required_host_bytes:
         raise MaintenancePhaseError("next_unit_host_reserve_unavailable")
     run = args.controls_root / ("resource-run-" + uuid4().hex)
     run.mkdir()
+    # Preserve the bytes actually admitted for this worker. Later edits must
+    # never relabel a completed receipt or force reconstruction of old code.
+    repository = Path(__file__).resolve().parents[1]
+    bindings = {}
+    for relative in GENERATION_CODE_PATHS:
+        document = (repository / relative).read_bytes()
+        archived = run / "code" / relative
+        archived.parent.mkdir(parents=True, exist_ok=True)
+        WorkspaceV2ProgressReconciler._write_once(archived, document)
+        bindings[relative] = {
+            "sha256": hashlib.sha256(document).hexdigest(),
+            "size_bytes": len(document),
+        }
+    _write_new_json(
+        run / "source-bindings.json",
+        {
+            "code_sha": args.code_sha,
+            "files": bindings,
+            "recorded_at": datetime.now(UTC).isoformat(),
+        },
+    )
     output = args.output or run / "phase-result.json"
     if output.exists():
         raise MaintenancePhaseError("phase_output_already_exists")
@@ -550,7 +897,12 @@ def _supervise(args: argparse.Namespace, argv: list[str]) -> dict[str, object]:
     command.extend([sys.executable, str(script), *worker_args])
     if args.phase in {"catchup", "activate"}:
         command.insert(3, "--property=RuntimeMaxSec=1800")
+    if args.phase == "cut":
+        command = [part for part in command if not part.startswith("--property=TimeoutStopSec=")]
+        command[3:3] = _cut_unit_options(args, worker_args, run)
     subprocess.run(command, check=True, capture_output=True, timeout=10)
+    if args.phase == "cut":
+        return _wait_cut_unit(output, run)
     stop_sampling = threading.Event()
     host_lock = threading.Lock()
     host_value: int | None = initial_capacity
@@ -887,6 +1239,7 @@ def _readback(
         budget.profile != "compatible_44"
         or len(budget.assignments) != 1
         or budget.assignments[0].database != receipt.restored_root / "storage/v2/index.duckdb"
+        or budget.assignments[0].policy.memory_limit_bytes != 2_000_000_000
     ):
         raise MaintenancePhaseError("readback_requires_single_compatible_44_allocation")
     policy = budget.assignments[0].policy
@@ -966,6 +1319,7 @@ def _complete_recovery(
         budget.profile != "compatible_44"
         or len(budget.assignments) != 1
         or budget.assignments[0].database != root / "storage/v2/index.duckdb"
+        or budget.assignments[0].policy.memory_limit_bytes != 2_000_000_000
     ):
         raise MaintenancePhaseError("recovery_requires_single_compatible_44_allocation")
     policy = budget.assignments[0].policy
@@ -1057,6 +1411,418 @@ def _status(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def _prepare_generation(args: argparse.Namespace, service: WorkspaceService) -> dict[str, object]:
+    """Publish C1 through the typed ledger, preserving the exact legacy objects.
+
+    The small operational intents make retries byte-exact. They are never a
+    substitute for the ledger's locks, live owner/binding checks or CAS.
+    """
+    from investment_analyst.workspace.workspace_v2_backup import _v2_writer_guard
+
+    ledger = WorkspaceV2GenerationLedger(service, args.destination)
+    admission = MaintenanceResourceReceipt.model_validate_json(
+        (_required(args.resource_run_root, "resource_run_root") / "admission.json").read_bytes()
+    )
+    ledger._admit(admission)
+    if admission.budget.operation_id != args.operation_id:
+        raise MaintenancePhaseError("generation_admission_identity_differs")
+    release = LocalReleaseService()
+    bindings = release.load_workspace_bindings()
+    properties = release.systemctl.show_properties(
+        "investment-analyst.service", ("ActiveState", "MainPID", "ExecStart")
+    )
+    if (
+        any(
+            b is not None and b.workspace_format_version == 2
+            for b in (bindings.current, bindings.previous)
+        )
+        or properties.get("ActiveState") != "active"
+        or properties.get("MainPID") in {None, "0"}
+        or str(args.source) not in properties.get("ExecStart", "")
+        or str(args.destination) in properties.get("ExecStart", "")
+    ):
+        raise MaintenancePhaseError("generation_requires_active_v1_and_no_v2_activation")
+    resolved = ledger.resolve()
+    if resolved is not None:
+        head, generation = resolved
+        if generation.generation_id != args.operation_id:
+            raise MaintenancePhaseError("generation_already_owned_by_another_attempt")
+        return {
+            "generation": generation.model_dump(mode="json"),
+            "certificate": head.certificate.model_dump(mode="json"),
+            "reused": True,
+        }
+    reconciliation_id = args.reconciliation_id
+    if reconciliation_id is None or not args.predecessor_proof:
+        raise MaintenancePhaseError("generation_requires_legacy_identity_and_invalidity_evidence")
+    legacy_path = ledger.state / f"progress-reconciliation.{reconciliation_id}.json"
+    legacy = ProgressReconciliation.model_validate_json(legacy_path.read_bytes())
+    if (
+        legacy.phase != "SUCCESSOR_BOUND"
+        or legacy.reserved_successor is None
+        or legacy.source_root != args.source
+        or legacy.destination_root != args.destination
+    ):
+        raise MaintenancePhaseError("generation_requires_exact_preserved_legacy_successor")
+    WorkspaceV2ProgressReconciler._verify(legacy.parent_membership)
+    source = service.manifest(args.source)
+    if (source.workspace_id, source.created_at) != (
+        legacy.source_workspace_id,
+        legacy.source_created_at,
+    ):
+        raise MaintenancePhaseError("generation_source_identity_differs")
+    transition_path = _required(args.predecessor_transition, "predecessor_transition")
+    transition = HistoricalTransition.model_validate_json(transition_path.read_bytes())
+    attempt = legacy.reserved_successor.operation_id
+    receipt_path = ledger.state / f"historical-transition-receipt.{attempt}.json"
+    receipt = HistoricalTransitionReceipt.model_validate_json(receipt_path.read_bytes())
+    if (
+        transition.operation_id != attempt
+        or receipt.transition.operation_id != attempt
+        or transition.destination_workspace_id != ledger.identity.workspace_id
+        or receipt.transition.destination_workspace_id != ledger.identity.workspace_id
+        or transition.phase != "COMPLETE"
+    ):
+        raise MaintenancePhaseError("generation_predecessor_seal_binding_differs")
+    reservation_path = ledger.state / f"progress-successor-reservation.{attempt}.json"
+    reservation = _SuccessorReservation.model_validate_json(reservation_path.read_bytes())
+    WorkspaceV2ProgressReconciler._verify(reservation.resource_receipt)
+    old_admission = MaintenanceResourceReceipt.model_validate_json(
+        reservation.resource_receipt.path.read_bytes()
+    )
+    owner = CutOwner(
+        source_session=reservation.source_session,
+        pid=old_admission.pid,
+        start_ticks=old_admission.process_start_ticks,
+        boot_id=old_admission.boot_id,
+        cgroup=old_admission.cgroup_path,
+    )
+    core = _RecoveredCoreBaseline.model_validate_json(
+        _required(args.core_baseline_path, "core_baseline_path").read_bytes()
+    )
+    WorkspaceV2ProgressReconciler._verify(core.reconciliation)
+    original_w = ProgressReconciliation.model_validate_json(core.reconciliation.path.read_bytes())
+    if original_w.phase != "BASELINE_VERIFIED" or original_w.operation_id != reconciliation_id:
+        raise MaintenancePhaseError("generation_original_w_certificate_differs")
+    legacy_document = legacy_path.read_bytes()
+    legacy_digest = hashlib.sha256(legacy_document).hexdigest()
+    archived = (
+        ledger.state
+        / f"progress-reconciliation-generation.{reconciliation_id}.{legacy_digest}.json"
+    )
+    WorkspaceV2ProgressReconciler._write_once(archived, legacy_document)
+    previous = ReconciliationGenerationReference(
+        schema_type="workspace-v2-progress-reconciliation-v1",
+        artifact=reconciliation_file_reference(archived, "control"),
+    )
+    proofs = tuple(reconciliation_file_reference(p, "control") for p in args.predecessor_proof)
+    evidence_path = args.controls_root / "generation-invalidation-evidence.json"
+    with _v2_writer_guard(args.destination):
+        database = args.destination / "storage/v2/index.duckdb"
+        if database.with_suffix(".duckdb.wal").exists():
+            raise MaintenancePhaseError("generation_requires_closed_image_no_new_wal")
+        image = reconciliation_file_reference(database, "database")
+        if not evidence_path.exists():
+            _write_new_json(
+                evidence_path,
+                {
+                    "operation_id": str(args.operation_id),
+                    "observed_at": datetime.now(UTC).isoformat(),
+                    "destination": str(args.destination),
+                    "workspace_id": str(ledger.identity.workspace_id),
+                    "database": image.model_dump(mode="json"),
+                    "wal_present": False,
+                    "active_v1_pid": int(properties["MainPID"]),
+                    "active_source": str(args.source),
+                    "v2_binding_present": False,
+                    "historical_owner": owner.model_dump(mode="json"),
+                    "invalidity_evidence": [p.model_dump(mode="json") for p in proofs],
+                },
+            )
+    evidence = reconciliation_file_reference(evidence_path, "control")
+    prior_event = None
+    for reason in ("EVIDENCE_INVALID", "SOURCE_REOPENED"):
+        intent = args.controls_root / f"invalidation-{reason.lower()}.intent.json"
+        if intent.exists():
+            event = CutInvalidation.model_validate_json(intent.read_bytes())
+        else:
+            event = CutInvalidation(
+                event_id=uuid5(args.operation_id, reason),
+                generation_id=args.operation_id,
+                attempt_id=attempt,
+                previous_event=prior_event,
+                certificate=previous,
+                reservation=reconciliation_file_reference(reservation_path, "control"),
+                owner=owner,
+                source_root=args.source,
+                source_workspace_id=source.workspace_id,
+                destination_root=args.destination,
+                destination_workspace_id=ledger.identity.workspace_id,
+                database=image,
+                wal=None,
+                write_generation=evidence,
+                historical_seal=reconciliation_file_reference(transition_path, "control"),
+                historical_receipt=reconciliation_file_reference(receipt_path, "control"),
+                reason=reason,
+                owner_absence=evidence,
+                exclusivity=evidence,
+                no_activation=evidence,
+                code_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                policy_sha256=admission.resource_policy_sha256,
+                recorded_at=datetime.now(UTC),
+            )
+            WorkspaceV2ProgressReconciler._write_once(
+                intent, event.model_dump_json().encode() + b"\n"
+            )
+        if event.generation_id != args.operation_id or event.previous_event != prior_event:
+            raise MaintenancePhaseError("generation_invalidation_intent_differs")
+        prior_event = ledger.invalidate(event, admission=admission)
+    prepared_path = args.controls_root / "prepared-generation.intent.json"
+    if prepared_path.exists():
+        generation = ProgressReconciliationV2.model_validate_json(prepared_path.read_bytes())
+    else:
+        code = []
+        repository = Path(__file__).resolve().parents[1]
+        for relative in GENERATION_CODE_PATHS:
+            target = args.controls_root / "generation-code" / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            WorkspaceV2ProgressReconciler._write_once(target, (repository / relative).read_bytes())
+            code.append(reconciliation_file_reference(target, "code"))
+        tree, environment = historical_transition_fingerprints(256, "shared-reference-verifier-v1")
+        now = datetime.now(UTC)
+        generation = ProgressReconciliationV2(
+            generation_id=args.operation_id,
+            ordinal=1,
+            previous_generation=previous,
+            invalidation=prior_event,
+            source_root=args.source,
+            source_workspace_id=source.workspace_id,
+            source_created_at=source.created_at,
+            destination_root=args.destination,
+            destination_workspace_id=ledger.identity.workspace_id,
+            predecessor=legacy.predecessor,
+            previous_attempt=reconciliation_file_reference(transition_path, "control"),
+            previous_reservation=reconciliation_file_reference(reservation_path, "control"),
+            previous_receipts=(reconciliation_file_reference(receipt_path, "control"), *proofs),
+            parent_membership=legacy.parent_membership,
+            parent_seal=legacy.parent_seal,
+            verified_w=core.reconciliation,
+            database=image,
+            wal=None,
+            code=tuple(code),
+            tree_fingerprint=tree,
+            environment_fingerprint=environment,
+            resource_receipt=reconciliation_file_reference(
+                args.resource_run_root / "admission.json", "resource"
+            ),
+            prepared_at=now,
+            recorded_at=now,
+        )
+        WorkspaceV2ProgressReconciler._write_once(
+            prepared_path, generation.model_dump_json().encode() + b"\n"
+        )
+    if generation.generation_id != args.operation_id or generation.invalidation != prior_event:
+        raise MaintenancePhaseError("generation_preparation_intent_differs")
+    reference = ledger.publish(generation, expected_head_sha256=None, admission=admission)
+    return {
+        "generation": generation.model_dump(mode="json"),
+        "certificate": reference.model_dump(mode="json"),
+        "reused": False,
+    }
+
+
+def _invalidate_legacy_reservation(
+    args: argparse.Namespace, service: WorkspaceService
+) -> dict[str, object]:
+    """Close a historical pre-head reservation using C1; never clear its file."""
+    from investment_analyst.workspace.workspace_v2_backup import _v2_writer_guard
+
+    ledger = WorkspaceV2GenerationLedger(service, args.destination)
+    resolved = ledger.resolve()
+    if (
+        resolved is None
+        or resolved[1].generation_id != args.reconciliation_id
+        or resolved[1].phase != "BASELINE_VERIFIED"
+        or resolved[1].reserved_successor is not None
+    ):
+        raise MaintenancePhaseError("orphan_invalidation_requires_unreserved_certified_generation")
+    path = _required(args.reservation_path, "reservation_path")
+    reservation = _SuccessorReservation.model_validate_json(path.read_bytes())
+    baseline = ProgressReconciliation.model_validate_json(ledger._read(reservation.baseline))
+    cut = reservation.successor
+    if (
+        path != ledger.state / f"progress-successor-reservation.{cut.operation_id}.json"
+        or reservation.reconciliation_id != args.operation_id
+        or baseline.operation_id != args.operation_id
+        or reservation.baseline != resolved[1].verified_w
+        or baseline.phase != "BASELINE_VERIFIED"
+        or baseline.reserved_successor is not None
+        or cut.source_root != args.source
+        or (service.manifest(args.source).workspace_id, service.manifest(args.source).created_at)
+        != (cut.workspace_id, cut.created_at)
+    ):
+        raise MaintenancePhaseError("orphan_invalidation_reservation_binding_differs")
+    old = MaintenanceResourceReceipt.model_validate_json(ledger._read(reservation.resource_receipt))
+    owner = CutOwner(
+        source_session=reservation.source_session,
+        pid=old.pid,
+        start_ticks=old.process_start_ticks,
+        boot_id=old.boot_id,
+        cgroup=old.cgroup_path,
+    )
+    boot = UUID(Path("/proc/sys/kernel/random/boot_id").read_text().strip())
+    absent = old.boot_id != boot
+    if not absent:
+        try:
+            absent = _process_identity(old.pid)[0] != old.process_start_ticks
+        except (FileNotFoundError, ProcessLookupError):
+            absent = True
+    if not absent:
+        raise MaintenancePhaseError("orphan_invalidation_owner_still_alive")
+    release = LocalReleaseService()
+    bindings = release.load_workspace_bindings()
+    properties = release.systemctl.show_properties(
+        "investment-analyst.service", ("ActiveState", "MainPID", "ExecStart")
+    )
+    if (
+        any(
+            b is not None and b.workspace_format_version == 2
+            for b in (bindings.current, bindings.previous)
+        )
+        or properties.get("ActiveState") != "active"
+        or properties.get("MainPID") in {None, "0"}
+        or str(args.source) not in properties.get("ExecStart", "")
+        or str(args.destination) in properties.get("ExecStart", "")
+    ):
+        raise MaintenancePhaseError("orphan_invalidation_requires_active_v1_no_activation")
+    admission = MaintenanceResourceReceipt.model_validate_json(
+        (_required(args.resource_run_root, "resource_run_root") / "admission.json").read_bytes()
+    )
+    ledger._admit(admission)
+    if admission.budget.operation_id != args.operation_id:
+        raise MaintenancePhaseError("orphan_invalidation_admission_differs")
+    evidence_path = args.controls_root / f"orphan-invalidation.{cut.operation_id}.evidence.json"
+    intent_path = args.controls_root / f"orphan-invalidation.{cut.operation_id}.intent.json"
+    if intent_path.exists():
+        event = CutInvalidation.model_validate_json(intent_path.read_bytes())
+        if (
+            event.attempt_id != cut.operation_id
+            or event.certificate.artifact != reservation.baseline
+            or event.owner != owner
+            or event.expected_head_sha256 != ledger._head_digest()
+        ):
+            raise MaintenancePhaseError("orphan_invalidation_intent_differs")
+    else:
+        with _v2_writer_guard(args.destination):
+            database = args.destination / "storage/v2/index.duckdb"
+            if database.with_suffix(".duckdb.wal").exists():
+                raise MaintenancePhaseError("orphan_invalidation_requires_closed_image")
+            image = reconciliation_file_reference(database, "database")
+            if not evidence_path.exists():
+                _write_new_json(
+                    evidence_path,
+                    {
+                        "observed_at": datetime.now(UTC).isoformat(),
+                        "owner": owner.model_dump(mode="json"),
+                        "owner_absent": absent,
+                        "observed_boot_id": str(boot),
+                        "active_v1_pid": int(properties["MainPID"]),
+                        "database": image.model_dump(mode="json"),
+                        "wal_present": False,
+                        "v2_binding_present": False,
+                        "head": resolved[0].model_dump(mode="json"),
+                    },
+                )
+            observed = json.loads(evidence_path.read_bytes())
+            if (
+                observed.get("database") != image.model_dump(mode="json")
+                or observed.get("owner") != owner.model_dump(mode="json")
+                or observed.get("head") != resolved[0].model_dump(mode="json")
+            ):
+                raise MaintenancePhaseError("orphan_invalidation_evidence_changed")
+        evidence = reconciliation_file_reference(evidence_path, "control")
+        event = CutInvalidation(
+            event_id=uuid5(cut.operation_id, "SESSION_ENDED"),
+            generation_id=args.operation_id,
+            attempt_id=cut.operation_id,
+            expected_head_sha256=ledger._head_digest(),
+            certificate=ReconciliationGenerationReference(
+                schema_type="workspace-v2-progress-reconciliation-v1", artifact=reservation.baseline
+            ),
+            reservation=reconciliation_file_reference(path, "control"),
+            owner=owner,
+            source_root=args.source,
+            source_workspace_id=cut.workspace_id,
+            destination_root=args.destination,
+            destination_workspace_id=ledger.identity.workspace_id,
+            database=image,
+            wal=None,
+            write_generation=evidence,
+            historical_seal=None,
+            historical_receipt=None,
+            reason="SESSION_ENDED",
+            owner_absence=evidence,
+            exclusivity=evidence,
+            no_activation=evidence,
+            code_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            policy_sha256=admission.resource_policy_sha256,
+            recorded_at=datetime.now(UTC),
+        )
+        WorkspaceV2ProgressReconciler._write_once(
+            intent_path, event.model_dump_json().encode() + b"\n"
+        )
+    reference = ledger.invalidate(event, admission=admission)
+    return {"invalidation": reference.model_dump(mode="json"), "attempt_id": str(cut.operation_id)}
+
+
+def _verify_generation(args: argparse.Namespace, service: WorkspaceService) -> dict[str, object]:
+    ledger = WorkspaceV2GenerationLedger(service, args.destination)
+    resolved = ledger.resolve()
+    if resolved is None or resolved[1].generation_id != args.operation_id:
+        raise MaintenancePhaseError("corrective_verification_requires_prepared_generation")
+    generation = resolved[1]
+    core = _RecoveredCoreBaseline.model_validate_json(
+        _required(args.core_baseline_path, "core_baseline_path").read_bytes()
+    )
+    if generation.verified_w != core.reconciliation:
+        raise MaintenancePhaseError("corrective_verification_original_w_binding_differs")
+    proof_path = getattr(args, "generation_content_proof", None) or (
+        args.controls_root / "corrective-content-proof.json"
+    )
+    if proof_path.exists():
+        proof = GenerationContentProof.model_validate_json(proof_path.read_bytes())
+        WorkspaceV2ProgressReconciler._verify(proof.database)
+        if (
+            proof.generation_id != args.operation_id
+            or proof.baseline_certificate != core.reconciliation
+            or proof.verifier_sha256
+            != hashlib.sha256(inspect.getsource(verify_generation_contents).encode()).hexdigest()
+        ):
+            raise MaintenancePhaseError("corrective_content_proof_binding_differs")
+    else:
+        proof = verify_generation_contents(
+            service,
+            generation_id=args.operation_id,
+            destination=args.destination,
+            baseline_root=_required(args.recovery_root, "recovery_root"),
+            baseline_certificate=core.reconciliation,
+            baseline_database_sha256=core.database.sha256,
+            admission_path=_required(args.resource_run_root, "resource_run_root")
+            / "admission.json",
+            relationships_path=args.relationships_proof,
+        )
+        WorkspaceV2ProgressReconciler._write_once(
+            proof_path, proof.model_dump_json().encode() + b"\n"
+        )
+    # Content proof alone does not certify raw files or controlled links. The
+    # baseline remains PREPARED until those independent gates are integrated.
+    return {
+        "content_proof": proof.model_dump(mode="json"),
+        "proof_path": str(proof_path),
+        "baseline_published": False,
+    }
+
+
 def _admit_cut_command(args: argparse.Namespace, service: WorkspaceService) -> None:
     """Fail before data access for legacy commands outside the C1/global window.
 
@@ -1130,43 +1896,909 @@ def _admit_cut_command(args: argparse.Namespace, service: WorkspaceService) -> N
         raise MaintenancePhaseError("cut_window_requires_complete_successor")
 
 
+def _catchup_live(
+    args: argparse.Namespace, service: WorkspaceService, current: FrozenSourceCut
+) -> dict[str, object]:
+    core_path = args.core_baseline_path
+    if core_path is None and args.reconciliation_id is not None:
+        resolved = WorkspaceV2GenerationLedger(service, args.destination).resolve()
+        if resolved is not None and resolved[1].core_proof is not None:
+            core_path = resolved[1].core_proof.path
+    summary = WorkspaceV2CutoverService(service).catch_up(
+        current,
+        args.destination,
+        checkpoint_path=args.controls_root / "cutover-checkpoint.json",
+        host_free_bytes=_capacity,
+        reserve_bytes=25_000_000_000,
+        operational_inventory_path=args.controls_root / "operational-inventory.jsonl",
+        operational_seal_path=args.controls_root / "operational-seal.json",
+        operational_checkpoint_path=args.controls_root / "operational-checkpoint.json",
+        operational_receipt_path=args.controls_root / "operational-receipt.json",
+        page_limit=256,
+        reconciliation_id=args.reconciliation_id,
+        reconciliation_admission_path=(
+            None
+            if args.reconciliation_id is None
+            else _required(args.resource_run_root, "resource_run_root") / "admission.json"
+        ),
+        baseline_code_root=args.baseline_code_root,
+        core_baseline_path=core_path,
+    )
+    if getattr(args, "cut_monitor", None) is not None:
+        _capture_cut_bytes(args, service, current)
+    return summary.model_dump(mode="json")
+
+
+def _cut_workspace_bytes(root: Path) -> dict[str, int]:
+    """Stat the active root once, without hashing/hydrating its historical data."""
+    logical = allocated = files = 0
+    seen: set[tuple[int, int]] = set()
+    for parent, directories, names in os.walk(root, followlinks=False):
+        for name in directories:
+            if (Path(parent) / name).is_symlink():
+                raise MaintenancePhaseError("cut_byte_capture_unsafe_directory")
+        for name in names:
+            metadata = (Path(parent) / name).lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                raise MaintenancePhaseError("cut_byte_capture_unsafe_file")
+            identity = (metadata.st_dev, metadata.st_ino)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            files += 1
+            logical += metadata.st_size
+            allocated += metadata.st_blocks * 512
+    return {"files": files, "logical_bytes": logical, "linux_allocated_bytes": allocated}
+
+
+def _capture_cut_bytes(
+    args: argparse.Namespace, service: WorkspaceService, cut: FrozenSourceCut
+) -> None:
+    """Preserve paired measurements before releasing this actual F source reader."""
+    session = _live_quiescent_source(args.source, cut)
+    if session is None:
+        raise MaintenancePhaseError("cut_byte_capture_requires_live_source")
+    started = time.monotonic()
+    measured: list[dict[str, object]] = []
+    for root, version in ((args.source, 1), (args.destination, 2)):
+        args.cut_monitor.require_continue()
+        with service.open_storage(service.resolve(root), WorkspaceAccessMode.READ_ONLY) as storage:
+            payloads = measure_cut_analytical_payloads(
+                storage.store.connection, format_version=version
+            )
+        measured.append(
+            {
+                "workspace_root": str(root),
+                "workspace_id": str(service.manifest(root).workspace_id),
+                "format_version": version,
+                "workspace_bytes": _cut_workspace_bytes(root),
+                "analytical_payloads": [item.to_json_dict() for item in payloads],
+            }
+        )
+    before, after = measured
+    if [item["row_count"] for item in before["analytical_payloads"]] != [
+        item["row_count"] for item in after["analytical_payloads"]
+    ]:
+        raise MaintenancePhaseError("cut_byte_capture_counts_differ")
+    # A stat-only size capture is not an independent content proof. Retain the
+    # same complete catchup proof and live session, rather than invent a scope
+    # from equal counts or reuse W2 as the final F denominator.
+    _live_quiescent_source(args.source, cut)
+    args.cut_monitor.require_continue()
+    _write_new_json(
+        args.controls_root / "paired-cut-byte-capture.json",
+        {
+            "operation_id": str(args.operation_id),
+            "source_cut": cut.model_dump(mode="json"),
+            "source_session": str(session.writer_generation),
+            "cutover_checkpoint": reconciliation_file_reference(
+                args.controls_root / "cutover-checkpoint.json", "control"
+            ).model_dump(mode="json"),
+            "collector_code": reconciliation_file_reference(
+                Path(inspect.getfile(measure_cut_analytical_payloads)), "code"
+            ).model_dump(mode="json"),
+            "pairs": measured,
+            "collector_elapsed_seconds": time.monotonic() - started,
+            "measured_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def _cut_advance(
+    args: argparse.Namespace, phase: str, step: str, **references: ReconciliationFileReference
+) -> None:
+    from typing import cast
+
+    from investment_analyst.workspace.workspace_v2_migration_models import CutWindowPhase
+
+    path = _required(args.cut_window, "cut_window")
+    WorkspaceV2CutWindowService(path).advance(
+        cast(CutWindowPhase, phase),
+        expected=reconciliation_file_reference(path, "control"),
+        boot_id=_process_identity(os.getpid())[1],
+        monotonic_ns=time.monotonic_ns(),
+        at=datetime.now(UTC),
+        step=step,
+        **references,
+    )
+
+
+def _cut_service_identity(args: argparse.Namespace, *, v2: bool) -> dict[str, object]:
+    """Observe the actual process and HTTP identity, not just deployment intent."""
+    release = LocalReleaseService()
+    root = args.destination if v2 else args.source
+    identity = WorkspaceService().manifest(root)
+    properties = release.systemctl.show_properties(
+        "investment-analyst.service", ("ActiveState", "MainPID", "ExecStart", "WorkingDirectory")
+    )
+    pid = int(properties.get("MainPID", "0"))
+    if properties.get("ActiveState") != "active" or not pid:
+        raise MaintenancePhaseError("cut_service_not_active")
+    start, boot, cgroup = _process_identity(pid)
+    command = (Path("/proc") / str(pid) / "cmdline").read_bytes().split(b"\0")
+    arguments = [value.decode() for value in command if value]
+    if "--workspace" not in arguments or arguments[arguments.index("--workspace") + 1] != str(root):
+        raise MaintenancePhaseError("cut_live_workspace_root_differs")
+    if v2:
+        bindings = release.load_workspace_bindings()
+        binding = bindings.current
+        if (
+            binding is None
+            or binding.workspace_root != root
+            or binding.workspace_id != identity.workspace_id
+            or binding.workspace_format_version != 2
+            or binding.release_sha != INTEGRATED_RELEASE
+            or identity.format_version != 2
+            or properties.get("WorkingDirectory")
+            != str(release.paths.releases / INTEGRATED_RELEASE)
+        ):
+            raise MaintenancePhaseError("cut_live_v2_binding_differs")
+    statuses: dict[str, int] = {}
+    for endpoint in ("/api/v1/overview", "/api/v1/candidate-notifications"):
+        with urllib.request.urlopen("http://127.0.0.1:8765" + endpoint, timeout=5) as response:
+            statuses[endpoint] = response.status
+            if response.status != 200:
+                raise MaintenancePhaseError("cut_http_health_failed")
+            if endpoint.endswith("overview"):
+                overview = json.load(response)
+                if overview.get("workspace_id") != str(identity.workspace_id):
+                    raise MaintenancePhaseError("cut_http_workspace_identity_differs")
+    if _process_identity(pid) != (start, boot, cgroup):
+        raise MaintenancePhaseError("cut_service_restarted_during_health")
+    return {
+        "workspace_root": str(root),
+        "workspace_id": str(identity.workspace_id),
+        "format_version": identity.format_version,
+        "pid": pid,
+        "start_ticks": start,
+        "boot_id": str(boot),
+        "cgroup": str(cgroup),
+        "unit": properties,
+        "http": statuses,
+        "observed_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _cut_terminal(args: argparse.Namespace, *, v2: bool) -> dict[str, object]:
+    observed = _cut_service_identity(args, v2=v2)
+    health_document = json.dumps(observed, sort_keys=True).encode() + b"\n"
+    path = args.controls_root / (
+        ("cut-v2-health." if v2 else "cut-v1-health.")
+        + hashlib.sha256(health_document).hexdigest()
+        + ".json"
+    )
+    WorkspaceV2ProgressReconciler._write_once(path, health_document)
+    evidence = reconciliation_file_reference(path, "control")
+    binding_path = args.controls_root / "cut-v2-binding.json"
+    if v2:
+        WorkspaceV2ProgressReconciler._write_once(
+            binding_path, LocalReleaseService().paths.workspace_binding_file.read_bytes()
+        )
+    phase = "HEALTHY_V2" if v2 else "HEALTHY_V1"
+    window_path = _required(args.cut_window, "cut_window")
+    window = WorkspaceV2CutWindowService(window_path).load()
+    if (
+        window.boot_id != _process_identity(os.getpid())[1]
+        or time.monotonic_ns() > window.deadline_monotonic_ns
+    ):
+        phase = "ABORTED"
+    if window.phase != phase:
+        _cut_advance(
+            args,
+            phase,
+            "verified_http_and_runtime",
+            **({"binding": reconciliation_file_reference(binding_path, "control")} if v2 else {}),
+        )
+    receipt = CutWindowReceipt(
+        window=reconciliation_file_reference(window_path, "control"),
+        phase=phase,
+        completed_monotonic_ns=time.monotonic_ns(),
+        completed_at=datetime.now(UTC),
+        identity=evidence,
+        health=evidence,
+    )
+    terminal = args.controls_root / "cut-window-receipt.json"
+    WorkspaceV2ProgressReconciler._write_once(terminal, receipt.model_dump_json().encode() + b"\n")
+    return {"window_receipt": receipt.model_dump(mode="json"), "health": observed}
+
+
+def _cut_step(
+    args: argparse.Namespace, phase: str, *, action: str = "plan", readback: bool = False
+) -> dict[str, object]:
+    monitor = args.cut_monitor
+    monitor.require_continue()
+    child = argparse.Namespace(**vars(args))
+    child.phase, child.delta_action = phase, action
+    child.resource_run_root = _required(args.resource_run_root, "resource_run_root") / (
+        phase + "-" + action
+    )
+    child.resource_run_root.mkdir()
+    if readback:
+        child.resource_budget = args.cut_readback_budget
+    started = time.monotonic()
+    with _worker_resources(child):
+        result = _execute(child)
+    monitor.require_continue()
+    _write_new_json(
+        child.resource_run_root / "phase-result.json",
+        {
+            "phase": phase,
+            "action": action,
+            "elapsed_seconds": time.monotonic() - started,
+            "result": result,
+        },
+    )
+    return result
+
+
+def _run_global_cut(args: argparse.Namespace) -> dict[str, object]:
+    """One MainPID owns stop, the fresh source session and every phase's clock."""
+    args.cut_monitor = monitor = _CutMonitor(args)
+    service = WorkspaceService()
+    release = LocalReleaseService()
+    window_path = _required(args.cut_window, "cut_window")
+    if window_path.exists():
+        raise MaintenancePhaseError("cut_window_cannot_be_restarted")
+    run = _required(args.resource_run_root, "resource_run_root")
+    preflight = argparse.Namespace(**vars(args))
+    preflight.resource_run_root = run / "preflight"
+    preflight.resource_run_root.mkdir()
+    # All admission and fresh authority checks happen with v1 still active.
+    with _worker_resources(preflight):
+        go_path = _required(args.cut_go, "cut_go")
+        go = CutWindowGo.model_validate_json(go_path.read_bytes())
+        if (
+            go.window_limit_seconds == CUT_WINDOW_EXCEPTION_SECONDS
+            and go.attempt_id != args.operation_id
+        ):
+            raise MaintenancePhaseError("cut_window_authorization_attempt_differs")
+        resolved = WorkspaceV2GenerationLedger(service, args.destination).resolve()
+        if resolved is None:
+            raise MaintenancePhaseError("cut_requires_certified_baseline")
+        head, baseline = resolved
+        if (
+            baseline.phase != "BASELINE_VERIFIED"
+            or baseline.reserved_successor is not None
+            or head.certificate != go.baseline
+            or baseline.generation_id != args.reconciliation_id
+            or baseline.source_workspace_id != go.source_workspace_id
+            or baseline.destination_workspace_id != go.destination_workspace_id
+        ):
+            raise MaintenancePhaseError("cut_go_baseline_differs")
+        prepared_root = _required(args.prepared_delta, "prepared_delta")
+        prepared_path = prepared_root / "delta-manifest.json"
+        prepared = PhysicalDeltaManifest.model_validate_json(prepared_path.read_bytes())
+        prepared_reference = reconciliation_file_reference(prepared_path, "control")
+        if (
+            prepared.epoch != baseline.generation_id
+            or prepared.source_root != args.destination
+            or prepared.source_workspace_id != baseline.destination_workspace_id
+            or prepared_reference not in go.prerequisites
+        ):
+            raise MaintenancePhaseError("cut_prepared_delta_baseline_differs")
+        database = next(
+            (
+                item
+                for item in _iter_delta_files(prepared_root / "files.jsonl")
+                if item.path == "storage/v2/index.duckdb"
+            ),
+            None,
+        )
+        if database is None or (database.sha256, database.size_bytes) != (
+            baseline.database.sha256,
+            baseline.database.size_bytes,
+        ):
+            raise MaintenancePhaseError("cut_prepared_database_differs")
+        _cut_service_identity(args, v2=False)
+        guard = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).with_name("check_workflow_guards.py")),
+                "--live",
+                "--phase",
+                "build",
+                "--repo",
+                "Marjuraru/investment-analyst",
+                "--issue",
+                "345",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+        authority = json.loads(guard.stdout)
+        if authority.get("authoritative") is not True or authority.get("decision") != "CONTINUE":
+            raise MaintenancePhaseError("cut_live_guard_did_not_continue")
+        guard_path = run / "cut-live-guard.json"
+        _write_new_json(guard_path, authority)
+        capacity_path = run / "cut-live-capacity.json"
+        capacity = _capacity()
+        if capacity < _load_resource_budget(args).required_host_bytes:
+            raise MaintenancePhaseError("cut_host_reserve_unavailable")
+        _write_new_json(
+            capacity_path, {"host_free_bytes": capacity, "at": datetime.now(UTC).isoformat()}
+        )
+        go = go.model_copy(
+            update={
+                "guard": reconciliation_file_reference(guard_path, "control"),
+                "capacity": reconciliation_file_reference(capacity_path, "control"),
+                "admitted_at": datetime.now(UTC),
+            }
+        )
+        admitted = run / "cut-admitted-go.json"
+        _write_new_json(admitted, go.model_dump(mode="json"))
+        intent = _QuiescentSourceIntent(args.source, args.operation_id)
+        start, boot, cgroup = _process_identity(os.getpid())
+        now = time.monotonic_ns()
+        unit_started = int(_unit_properties().get("ActiveEnterTimestampMonotonic", "0")) * 1000
+        if unit_started <= 0 or unit_started > now:
+            raise MaintenancePhaseError("cut_unit_runtime_origin_unavailable")
+        prefix_seconds = (now - unit_started + 999_999_999) // 1_000_000_000
+        if not go.admits_prefix(prefix_seconds):
+            raise MaintenancePhaseError("cut_unit_prefix_exceeds_measured_go")
+        window = CutWindow(
+            window_id=uuid4(),
+            attempt_id=args.operation_id,
+            source_root=args.source,
+            source_workspace_id=go.source_workspace_id,
+            destination_root=args.destination,
+            destination_workspace_id=go.destination_workspace_id,
+            release_sha=INTEGRATED_RELEASE,
+            owner=CutOwner(
+                source_session=intent.writer_generation,
+                pid=os.getpid(),
+                start_ticks=start,
+                boot_id=boot,
+                cgroup=cgroup,
+            ),
+            boot_id=boot,
+            started_monotonic_ns=now,
+            deadline_monotonic_ns=now + go.window_limit_seconds * 1_000_000_000,
+            stop_started_at=datetime.now(UTC),
+            recovery_reserve_seconds=next(
+                b.upper_seconds for b in go.bounds if b.step == "cancel_close_restart"
+            ),
+            window_limit_seconds=go.window_limit_seconds,
+            window_authorization=go.window_authorization,
+            go=reconciliation_file_reference(admitted, "control"),
+            baseline=head.certificate,
+            code=reconciliation_file_reference(run / "code/scripts/close_data_chassis.py", "code"),
+            environment_sha256=baseline.environment_fingerprint,
+            resource_receipt=reconciliation_file_reference(
+                preflight.resource_run_root / "admission.json", "resource"
+            ),
+            step="ready_to_stop",
+            updated_at=datetime.now(UTC),
+        )
+        WorkspaceV2CutWindowService(window_path).prepare(window, go)
+    monitor.start()
+    try:
+        _cut_advance(args, "STOPPING", "normal_service_stop")
+        release.systemctl.stop("investment-analyst.service")
+        with ExitStack() as source_lease:
+            with _worker_resources_for_freeze(args):
+                cut = source_lease.enter_context(
+                    quiescent_source_cut(
+                        service, args.source, operation_id=args.operation_id, _session_intent=intent
+                    )
+                )
+                _write_new_json(
+                    args.controls_root / "frozen-source-cut.json", cut.model_dump(mode="json")
+                )
+                args.live_source_cut = cut
+                _cut_advance(args, "QUIESCENT", "fresh_source_session")
+                _cut_advance(args, "APPLYING", "catchup")
+                _cut_step(args, "catchup")
+                # End the source instance before switching executions/profiles;
+                # the original source lease and writer exclusion remain held.
+                close_quiescent_native_reader(args.source, cut)
+            _cut_step(args, "delta", action="plan")
+            _cut_step(args, "delta", action="upload")
+            _cut_step(args, "delta", action="restore", readback=True)
+            recovery = reconciliation_file_reference(
+                _required(args.delta_root, "delta_root") / "restore-receipt.json", "control"
+            )
+            args.recovery_receipt = recovery.path
+            _cut_advance(
+                args,
+                "RECOVERY_VERIFIED",
+                "same_epoch_external_recovery",
+                recovery_receipt=recovery,
+            )
+            intention_path = args.controls_root / "activation-intent.json"
+            _write_new_json(
+                intention_path,
+                {
+                    "operation_id": str(args.operation_id),
+                    "release_sha": INTEGRATED_RELEASE,
+                    "workspace_root": str(args.destination),
+                    "recovery": recovery.model_dump(mode="json"),
+                    "previous_state": release.load_deployment_state().model_dump(mode="json"),
+                    "previous_bindings": release.load_workspace_bindings().model_dump(mode="json"),
+                },
+            )
+            _cut_advance(
+                args,
+                "ACTIVATING",
+                "durable_activation_intention",
+                activation_intent=reconciliation_file_reference(intention_path, "control"),
+            )
+            _cut_step(args, "activate")
+            return _cut_terminal(args, v2=True)
+    finally:
+        monitor.close()
+
+
+@contextmanager
+def _worker_resources_for_freeze(args: argparse.Namespace) -> Iterator[None]:
+    # Admission stays live while entering the quiescent native reader; child
+    # phases install their own measurements without replacing the source lease.
+    freeze = argparse.Namespace(**vars(args))
+    freeze.resource_run_root = _required(args.resource_run_root, "resource_run_root") / "freeze"
+    freeze.resource_run_root.mkdir()
+    with _worker_resources(freeze):
+        yield
+
+
+def _invalidate_cut_owner(args: argparse.Namespace, window: CutWindow) -> dict[str, object]:
+    """C1 keeps the reservation, the current DB and any valid WAL after owner loss."""
+    from investment_analyst.workspace.workspace_v2_backup import _v2_writer_guard
+
+    service = WorkspaceService()
+    ledger = WorkspaceV2GenerationLedger(service, args.destination)
+    if ledger.attempt_invalidated(window.attempt_id):
+        return {"invalidation": "already_recorded"}
+    path = args.destination / "state" / f"progress-successor-reservation.{window.attempt_id}.json"
+    if not path.exists():
+        return {"invalidation": "no_reservation_created"}
+    reservation = _SuccessorReservation.model_validate_json(path.read_bytes())
+    if reservation.source_session != window.owner.source_session:
+        raise MaintenancePhaseError("cut_recovery_reservation_owner_differs")
+    resolved = ledger.resolve()
+    if resolved is None:
+        raise MaintenancePhaseError("cut_recovery_head_missing")
+    head, generation = resolved
+    admission = MaintenanceResourceReceipt.model_validate_json(
+        (_required(args.resource_run_root, "resource_run_root") / "admission.json").read_bytes()
+    )
+    with _v2_writer_guard(args.destination):
+        database = reconciliation_file_reference(
+            args.destination / "storage/v2/index.duckdb", "database"
+        )
+        wal_path = args.destination / "storage/v2/index.duckdb.wal"
+        wal = reconciliation_file_reference(wal_path, "wal") if wal_path.exists() else None
+        evidence_path = args.resource_run_root / "owner-loss-evidence.json"
+        _write_new_json(
+            evidence_path,
+            {
+                "window": reconciliation_file_reference(
+                    _required(args.cut_window, "cut_window"), "control"
+                ).model_dump(mode="json"),
+                "database": database.model_dump(mode="json"),
+                "wal": None if wal is None else wal.model_dump(mode="json"),
+                "health": _cut_service_identity(args, v2=False),
+                "owner": window.owner.model_dump(mode="json"),
+                "head": head.model_dump(mode="json"),
+            },
+        )
+    evidence = reconciliation_file_reference(evidence_path, "control")
+    event = CutInvalidation(
+        event_id=uuid4(),
+        generation_id=generation.generation_id,
+        attempt_id=window.attempt_id,
+        expected_head_sha256=ledger._head_digest(),
+        certificate=ReconciliationGenerationReference(
+            schema_type="workspace-v2-progress-reconciliation-v2", artifact=head.certificate
+        ),
+        reservation=reconciliation_file_reference(path, "control"),
+        owner=window.owner,
+        source_root=args.source,
+        source_workspace_id=window.source_workspace_id,
+        destination_root=args.destination,
+        destination_workspace_id=window.destination_workspace_id,
+        database=database,
+        wal=wal,
+        write_generation=evidence,
+        historical_seal=None,
+        historical_receipt=None,
+        reason="SESSION_ENDED",
+        owner_absence=evidence,
+        exclusivity=evidence,
+        no_activation=evidence,
+        code_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        policy_sha256=admission.resource_policy_sha256,
+        recorded_at=datetime.now(UTC),
+    )
+    reference = ledger.invalidate(event, admission=admission)
+    return {"invalidation": reference.model_dump(mode="json")}
+
+
+def _recover_v2_activation(args: argparse.Namespace, window: CutWindow) -> dict[str, object]:
+    from investment_analyst.application.local_release import (
+        DeploymentState,
+        DeploymentWorkspaceBindings,
+    )
+    from investment_analyst.storage.workspace_v2_inventory import _reconciliation_lock
+
+    if window.activation_intent is None or window.recovery_receipt is None:
+        raise MaintenancePhaseError("cut_v2_recovery_intention_missing")
+    for reference in (window.activation_intent, window.recovery_receipt, window.code):
+        WorkspaceV2ProgressReconciler._verify(reference)
+    intention = json.loads(window.activation_intent.path.read_bytes())
+    if (
+        intention.get("operation_id") != str(args.operation_id)
+        or intention.get("workspace_root") != str(args.destination)
+        or intention.get("release_sha") != INTEGRATED_RELEASE
+        or intention.get("recovery") != window.recovery_receipt.model_dump(mode="json")
+    ):
+        raise MaintenancePhaseError("cut_v2_recovery_intention_differs")
+    # No maintenance DB is opened here: compatible runtime recovery owns its
+    # own writer. Never replay preactivation rollback once this phase exists.
+    with _reconciliation_lock(args.controls_root):
+        LocalReleaseService().recover_interrupted_v2_activation(
+            INTEGRATED_RELEASE,
+            workspace_root=args.destination,
+            previous_state=DeploymentState.model_validate(intention["previous_state"]),
+            previous_bindings=DeploymentWorkspaceBindings.model_validate_json(
+                json.dumps(intention["previous_bindings"])
+            ),
+            deadline_seconds=(
+                min(
+                    window.recovery_reserve_seconds,
+                    max(0, (window.deadline_monotonic_ns - time.monotonic_ns()) / 1e9),
+                )
+                if window.boot_id == _process_identity(os.getpid())[1]
+                else window.recovery_reserve_seconds
+            ),
+        )
+    return _cut_terminal(args, v2=True)
+
+
+def _recover_global_cut(args: argparse.Namespace) -> dict[str, object]:
+    """ExecStopPost runs after the MainPID and all its native handles are gone."""
+    properties = _unit_properties()
+    if (
+        not args.supervised_worker
+        or properties.get("ControlPID") != str(os.getpid())
+        or properties.get("ActiveState") not in {"deactivating", "failed"}
+        or properties.get("MainPID", "0") != "0"
+    ):
+        raise MaintenancePhaseError("cut_recovery_is_not_owned_stop_hook")
+    window_path = _required(args.cut_window, "cut_window")
+    if not window_path.exists():
+        return {"recovery": "preflight_ended_before_stop"}
+    window = WorkspaceV2CutWindowService(window_path).load()
+    if (
+        window.attempt_id != args.operation_id
+        or window.source_root != args.source
+        or window.destination_root != args.destination
+    ):
+        raise MaintenancePhaseError("cut_recovery_window_binding_differs")
+    if window.owner.boot_id == _process_identity(os.getpid())[1]:
+        try:
+            alive = _process_identity(window.owner.pid)[0] == window.owner.start_ticks
+        except (FileNotFoundError, ProcessLookupError):
+            alive = False
+        if alive:
+            raise MaintenancePhaseError("cut_recovery_owner_still_alive")
+    terminal = args.controls_root / "cut-window-receipt.json"
+    if window.phase in {"HEALTHY_V1", "HEALTHY_V2"} and terminal.exists():
+        result = {"recovery": "terminal_reused", "receipt": str(terminal)}
+        if window.phase == "HEALTHY_V2":
+            _cut_service_identity(args, v2=True)
+            return result
+    if window.phase in {"ACTIVATING", "HEALTHY_V2"}:
+        # An activation may already have accepted writes. A missing final flag
+        # is never permission to restore an older root or restart v1.
+        return _recover_v2_activation(args, window)
+    release = LocalReleaseService()
+    bindings = release.load_workspace_bindings()
+    unit = release.systemctl.show_properties("investment-analyst.service", ("ExecStart",))
+    if (
+        any(
+            b is not None and b.workspace_format_version == 2
+            for b in (bindings.current, bindings.previous)
+        )
+        or str(args.destination) in unit.get("ExecStart", "")
+        or str(args.source) not in unit.get("ExecStart", "")
+    ):
+        raise MaintenancePhaseError("cut_return_v1_actual_binding_is_ambiguous")
+    changed_boot = window.boot_id != _process_identity(os.getpid())[1]
+    if not changed_boot and window.phase not in {"RETURNING_V1", "HEALTHY_V1", "ABORTED"}:
+        if window.phase == "PREPARED":
+            _cut_advance(args, "ABORTED", "stop_was_not_requested")
+            return {
+                "recovery": "aborted_before_stop",
+                "health": _cut_service_identity(args, v2=False),
+            }
+        _cut_advance(args, "RETURNING_V1", "owner_lost_return_source")
+    if not release.systemctl.is_active("investment-analyst.service"):
+        release.systemctl.restart("investment-analyst.service")
+    healthy, _ = release.health_checker.check_health_readiness(
+        port=8765,
+        endpoints=("/api/v1/overview", "/api/v1/candidate-notifications"),
+        deadline_seconds=max(
+            1,
+            min(
+                window.recovery_reserve_seconds,
+                (window.deadline_monotonic_ns - time.monotonic_ns()) / 1e9,
+            ),
+        ),
+    )
+    if not healthy:
+        raise MaintenancePhaseError("cut_return_v1_health_failed")
+    # Restore availability before resource admission. Low disk/memory must not
+    # prevent returning the old service when no activation was attempted.
+    result = _cut_terminal(args, v2=False) if not terminal.exists() else {"receipt": str(terminal)}
+    recovery = argparse.Namespace(**vars(args))
+    recovery.resource_run_root = _required(args.resource_run_root, "resource_run_root") / (
+        "recovery-" + uuid4().hex
+    )
+    recovery.resource_run_root.mkdir()
+    with _worker_resources(recovery):
+        result.update(_invalidate_cut_owner(recovery, window))
+    return result
+
+
 def _execute(args: argparse.Namespace) -> dict[str, object]:
     if args.phase == "resource-check":
         # Let the parent observe a live bounded worker; no database is opened.
         time.sleep(2)
         return {"resource_admission": "verified", "database_opened": False}
     service = WorkspaceService()
+    if args.phase == "retire-owned-payload":
+        request = OwnedPayloadRetirementInput.model_validate_json(
+            _required(args.owned_payload_input, "owned_payload_input").read_bytes()
+        )
+        if (
+            request.operation_id != args.operation_id
+            or request.retained_controls_root != args.controls_root
+        ):
+            raise MaintenancePhaseError("owned_payload_operation_binding_differs")
+        receipt = WorkspaceV2LifecycleService(service).retire_owned_payload(request)
+        return {"owned_payload_retirement": receipt.model_dump(mode="json")}
+    if args.phase == "reconcile-generation":
+        return _prepare_generation(args, service)
+    if args.phase == "invalidate-reservation":
+        return _invalidate_legacy_reservation(args, service)
+    if args.phase == "verify-generation":
+        return _verify_generation(args, service)
+    if args.phase == "retire-preparatory":
+        proposal = PreparatorySlotRetirementReceipt.model_validate_json(
+            _required(
+                args.preparatory_retirement_input, "preparatory_retirement_input"
+            ).read_bytes()
+        )
+        if (
+            proposal.operation_id != args.operation_id
+            or proposal.retained_root != args.destination
+            or proposal.source_root == args.source
+            or proposal.retained_generation_id != args.reconciliation_id
+        ):
+            raise MaintenancePhaseError("preparatory_retirement_command_binding_differs")
+        return (
+            WorkspaceV2LifecycleService(service)
+            .retire_preparatory_slot(
+                proposal,
+                admission_path=_required(args.resource_run_root, "resource_run_root")
+                / "admission.json",
+                checkpoint_path=args.controls_root / "preparatory-retirement-checkpoint.json",
+                proof_path=args.controls_root / "preparatory-retirement-proof.json",
+                unlink_root=_required(args.immutable_link_journal, "immutable_link_journal"),
+                journal_byte_budget=args.journal_byte_budget,
+            )
+            .model_dump(mode="json")
+        )
+    if args.phase == "certify-generation":
+        ledger = WorkspaceV2GenerationLedger(service, args.destination)
+        resolved = ledger.resolve()
+        if resolved is None or resolved[1].generation_id != args.operation_id:
+            raise MaintenancePhaseError("baseline_generation_owner_differs")
+        code = []
+        if resolved[1].phase == "PREPARED":
+            repository = Path(__file__).resolve().parents[1]
+            for relative in GENERATION_CODE_PATHS:
+                document = (repository / relative).read_bytes()
+                digest = hashlib.sha256(document).hexdigest()
+                path = args.controls_root / "certified-code" / digest / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                WorkspaceV2ProgressReconciler._write_once(path, document)
+                code.append(reconciliation_file_reference(path, "code"))
+        else:
+            code.extend(resolved[1].code)
+        certificate = ledger.certify_baseline(
+            content_path=args.generation_content_proof
+            or (args.controls_root / "corrective-content-proof.json"),
+            raw_coverage_path=args.controls_root / "generation-raw-coverage.json",
+            relationships_path=_required(args.relationships_proof, "relationships_proof"),
+            admission_path=_required(args.resource_run_root, "resource_run_root")
+            / "admission.json",
+            code=tuple(code),
+        )
+        return {
+            "certificate": certificate.model_dump(mode="json"),
+            "generation": ledger.resolve()[1].model_dump(mode="json"),
+        }
+    if args.phase == "verify-generation-raw":
+        document = json.loads(
+            _required(args.link_witness_receipt, "link_witness_receipt").read_bytes()
+        )
+        if (
+            document.get("schema_version") != "data-chassis-maintenance-phase-receipt-v1"
+            or document.get("action") != "prepare-links"
+            or document.get("operation_id") != str(args.operation_id)
+            or document.get("destination_root") != str(args.destination)
+        ):
+            raise MaintenancePhaseError("generation_link_witness_receipt_binding_differs")
+        witness = ReconciliationFileReference.model_validate_json(
+            json.dumps(document["result"]["immutable_link_journal"])
+        )
+        proof = verify_generation_raw_files(
+            service,
+            destination=args.destination,
+            content_path=args.generation_content_proof
+            or (args.controls_root / "corrective-content-proof.json"),
+            link_witness=witness,
+            admission_path=_required(args.resource_run_root, "resource_run_root")
+            / "admission.json",
+        )
+        path = args.controls_root / "generation-raw-coverage.json"
+        WorkspaceV2ProgressReconciler._write_once(path, proof.model_dump_json().encode() + b"\n")
+        return {"raw_coverage": proof.model_dump(mode="json"), "proof_path": str(path)}
+    if args.phase == "prepare-links":
+        proof, count = WorkspaceV2PhysicalDeltaService(service).prepare_existing_link_witness(
+            _required(args.delta_root, "delta_root"),
+            _required(args.recovery_root, "recovery_root"),
+            _required(args.immutable_link_journal, "immutable_link_journal"),
+            operation_id=args.operation_id,
+            parent_manifest=_required(args.parent_manifest, "parent_manifest"),
+            parent_index=_required(args.parent_index, "parent_index"),
+            parent_proof=_required(args.immutable_parent_proof, "immutable_parent_proof"),
+            admission_path=_required(args.resource_run_root, "resource_run_root")
+            / "admission.json",
+            byte_budget=args.journal_byte_budget,
+        )
+        return {"immutable_link_journal": proof.model_dump(mode="json"), "confirmed_links": count}
     if args.phase in {"catchup", "delta", "activate"}:
         _admit_cut_command(args, service)
     if args.phase == "recovery-readback":
         _, manifest = _delta(args)
+        if args.coverage_only:
+            # Measure the changed coverage insertion on the retained W2 photo,
+            # without recreating its retired slot, re-reading Drive or calling
+            # the installed reader again. This is explicitly NOT a new restore.
+            resolved = WorkspaceV2GenerationLedger(service, args.destination).resolve()
+            if (
+                resolved is None
+                or resolved[1].generation_id != manifest.epoch
+                or resolved[1].phase != "BASELINE_VERIFIED"
+                or resolved[1].reserved_successor is not None
+                or manifest.historical_state != "APPLYING"
+                or args.recovery_root != args.destination
+                or resolved[1].destination_workspace_id != manifest.source_workspace_id
+            ):
+                raise MaintenancePhaseError("coverage_measurement_requires_retained_w2")
+            budget = _load_resource_budget(args)
+            if (
+                len(budget.assignments) != 1
+                or budget.assignments[0].database != args.destination / "storage/v2/index.duckdb"
+            ):
+                raise MaintenancePhaseError("coverage_measurement_requires_single_candidate")
+            service = WorkspaceService(
+                resource_policies={budget.assignments[0].database: budget.assignments[0].policy}
+            )
+            coverage_started = time.monotonic()
+            with service.open_storage(
+                service.resolve(args.destination), WorkspaceAccessMode.READ_ONLY
+            ) as storage:
+                coverage = _verify_full_recovery_coverage(
+                    args.destination,
+                    args.delta_root / "files.jsonl",
+                    manifest,
+                    storage.store.connection,
+                )
+                coverage_seconds = time.monotonic() - coverage_started
+                payload_started = time.monotonic()
+                payloads = measure_cut_analytical_payloads(
+                    storage.store.connection, format_version=2
+                )
+                payload_seconds = time.monotonic() - payload_started
+            return {
+                "coverage_only": True,
+                "new_restore": False,
+                "generation_certificate": resolved[0].certificate.model_dump(mode="json"),
+                "coverage": coverage,
+                "coverage_elapsed_seconds": coverage_seconds,
+                "payload_capture_elapsed_seconds": payload_seconds,
+                "analytical_payloads": [item.to_json_dict() for item in payloads],
+                "verifier_sha256": hashlib.sha256(
+                    inspect.getsource(_verify_full_recovery_coverage).encode()
+                ).hexdigest(),
+            }
         receipt = PhysicalDeltaReceipt.model_validate_json(
             _required(args.recovery_receipt, "recovery_receipt").read_bytes()
         )
         return _complete_recovery(args, receipt, manifest)
     if args.phase == "prepare-delta":
-        # Prepare only the preserved W photo while v1 stays active. This epoch
-        # cannot be presented as the operational F1 or used for activation.
-        proof_path = _required(args.core_baseline_path, "core_baseline_path")
-        core = _RecoveredCoreBaseline.model_validate_json(proof_path.read_bytes())
-        WorkspaceV2ProgressReconciler._verify(core.reconciliation)
-        baseline = ProgressReconciliation.model_validate_json(core.reconciliation.path.read_bytes())
-        owner = WorkspaceV2ProgressReconciler(service, args.destination, args.operation_id)
-        current = ProgressReconciliation.model_validate_json(owner.path.read_bytes())
-        owner._controls(current)
-        if (
-            current != baseline
-            or current.phase != "BASELINE_VERIFIED"
-            or current.reserved_successor is not None
-            or current.source_root != args.source
-            or current.destination_root != args.destination
-            or current.database_after != core.database
-            or core.verifier_module_sha256
-            != hashlib.sha256(
-                Path(inspect.getfile(verify_recovered_core_baseline)).read_bytes()
-            ).hexdigest()
-        ):
-            raise MaintenancePhaseError("prepared_delta_requires_preserved_verified_w")
+        preparation_binding = {}
+        # W remains immutable. A C1 generation prepares a distinct W2 epoch;
+        # the legacy path below continues to read only its preserved W photo.
+        generation_id = getattr(args, "reconciliation_id", None)
+        if generation_id is not None:
+            ledger = WorkspaceV2GenerationLedger(service, args.destination)
+            resolved = ledger.resolve()
+            if resolved is None:
+                raise MaintenancePhaseError("prepared_delta_generation_head_missing")
+            baseline_ref, baseline = resolved[0].certificate, resolved[1]
+            if (
+                baseline.generation_id != generation_id
+                or args.operation_id != generation_id
+                or baseline.phase != "BASELINE_VERIFIED"
+                or baseline.reserved_successor is not None
+                or baseline.source_root != args.source
+                or baseline.destination_root != args.destination
+                or baseline.core_proof is None
+            ):
+                raise MaintenancePhaseError("prepared_delta_requires_certified_unreserved_w2")
+            content = GenerationContentProof.model_validate_json(ledger._read(baseline.core_proof))
+            if (
+                content.database != baseline.database
+                or content.generation_id != generation_id
+                or content.verifier_sha256
+                != hashlib.sha256(
+                    inspect.getsource(verify_generation_contents).encode()
+                ).hexdigest()
+            ):
+                raise MaintenancePhaseError("prepared_delta_corrective_verifier_differs")
+            for reference in (baseline.database, *baseline.corrective_proofs):
+                WorkspaceV2ProgressReconciler._verify(reference)
+            baseline_database = baseline.database
+            preparation_binding = {"generation_certificate": baseline_ref.model_dump(mode="json")}
+        else:
+            proof_path = _required(args.core_baseline_path, "core_baseline_path")
+            core = _RecoveredCoreBaseline.model_validate_json(proof_path.read_bytes())
+            WorkspaceV2ProgressReconciler._verify(core.reconciliation)
+            baseline = ProgressReconciliation.model_validate_json(
+                core.reconciliation.path.read_bytes()
+            )
+            owner = WorkspaceV2ProgressReconciler(service, args.destination, args.operation_id)
+            current = ProgressReconciliation.model_validate_json(owner.path.read_bytes())
+            owner._controls(current)
+            if (
+                current != baseline
+                or current.phase != "BASELINE_VERIFIED"
+                or current.reserved_successor is not None
+                or current.source_root != args.source
+                or current.destination_root != args.destination
+                or current.database_after != core.database
+                or core.verifier_module_sha256
+                != hashlib.sha256(
+                    Path(inspect.getfile(verify_recovered_core_baseline)).read_bytes()
+                ).hexdigest()
+            ):
+                raise MaintenancePhaseError("prepared_delta_requires_preserved_verified_w")
+            baseline_database = core.database
         root = _required(args.delta_root, "delta_root")
         physical = WorkspaceV2PhysicalDeltaService(service)
         if args.delta_action != "plan":
@@ -1178,6 +2810,33 @@ def _execute(args: argparse.Namespace) -> dict[str, object]:
             ):
                 raise MaintenancePhaseError("prepared_delta_manifest_binding_differs")
             _capacity()
+            if args.delta_action == "measure-comparison":
+                if generation_id is None:
+                    raise MaintenancePhaseError("comparison_measurement_requires_certified_w2")
+                return {
+                    "preparation_only": True,
+                    **measure_recovered_comparison(
+                        service,
+                        args.source,
+                        args.destination,
+                        generation_id,
+                        _required(args.resource_run_root, "resource_run_root") / "admission.json",
+                    ),
+                }
+            if args.delta_action == "measure-plan":
+                return {
+                    "preparation_only": True,
+                    **preparation_binding,
+                    "measurement": physical.measure_prepared_plan(
+                        args.destination,
+                        _required(args.parent_index, "parent_index"),
+                        root,
+                        link_witness=reconciliation_file_reference(
+                            _required(args.immutable_link_witness, "immutable_link_witness"),
+                            "control",
+                        ),
+                    ),
+                }
             if args.delta_action == "upload":
                 transfer = physical.upload(
                     root,
@@ -1187,7 +2846,26 @@ def _execute(args: argparse.Namespace) -> dict[str, object]:
                     batch_transfer=getattr(args, "independent_read_root", None) is not None,
                     **_independent_read_options(args),
                 )
-                return {"preparation_only": True, "transfer": transfer.model_dump(mode="json")}
+                return {
+                    "preparation_only": True,
+                    **preparation_binding,
+                    "transfer": transfer.model_dump(mode="json"),
+                }
+            controlled_options: dict[str, object] = {}
+            if generation_id is not None:
+                if not args.reuse_parent_immutables:
+                    raise MaintenancePhaseError("generation_restore_requires_controlled_links")
+                if args.journal_byte_budget > _load_resource_budget(args).cache_and_control_bytes:
+                    raise MaintenancePhaseError("generation_restore_journal_exceeds_admission")
+                controlled_options = {
+                    "immutable_link_journal": _required(
+                        args.immutable_link_journal, "immutable_link_journal"
+                    ),
+                    "immutable_link_witness": reconciliation_file_reference(
+                        _required(args.immutable_link_witness, "immutable_link_witness"), "control"
+                    ),
+                    "journal_byte_budget": args.journal_byte_budget,
+                }
             restored = physical.restore(
                 root,
                 parent_index=_required(args.parent_index, "parent_index"),
@@ -1198,9 +2876,14 @@ def _execute(args: argparse.Namespace) -> dict[str, object]:
                 checkpoint_path=root / "restore-checkpoint.json",
                 receipt_path=root / "restore-receipt.json",
                 reuse_parent_immutables=args.reuse_parent_immutables,
+                **controlled_options,
                 **_independent_read_options(args),
             )
-            return {"preparation_only": True, "restore": restored.model_dump(mode="json")}
+            return {
+                "preparation_only": True,
+                **preparation_binding,
+                "restore": restored.model_dump(mode="json"),
+            }
         result = physical.plan(
             args.destination,
             _required(args.parent_index, "parent_index"),
@@ -1209,6 +2892,11 @@ def _execute(args: argparse.Namespace) -> dict[str, object]:
             epoch=args.operation_id,
             allow_incomplete_historical=True,
             immutable_parent_proof=_required(args.immutable_parent_proof, "immutable_parent_proof"),
+            immutable_link_witness=(
+                reconciliation_file_reference(args.immutable_link_witness, "control")
+                if getattr(args, "immutable_link_witness", None) is not None
+                else None
+            ),
         )
         database = next(
             (
@@ -1222,10 +2910,14 @@ def _execute(args: argparse.Namespace) -> dict[str, object]:
             result.historical_state != "APPLYING"
             or database is None
             or (database.size_bytes, database.sha256)
-            != (core.database.size_bytes, core.database.sha256)
+            != (baseline_database.size_bytes, baseline_database.sha256)
         ):
             raise MaintenancePhaseError("prepared_delta_w_database_binding_differs")
-        return {"preparation_only": True, "manifest": result.model_dump(mode="json")}
+        return {
+            "preparation_only": True,
+            **preparation_binding,
+            "manifest": result.model_dump(mode="json"),
+        }
     if args.phase == "prepare-parent-reuse":
         return {
             "immutable_parent_proof": WorkspaceV2PhysicalDeltaService(service)
@@ -1272,6 +2964,59 @@ def _execute(args: argparse.Namespace) -> dict[str, object]:
                     )
                 )
     if args.phase in {"verify-relationships", "profile-relationships"}:
+        if (
+            args.phase == "verify-relationships"
+            and (args.destination / "state/reconciliation-head.json").exists()
+        ):
+            path = args.controls_root / "generation-relationships.json"
+            ledger = WorkspaceV2GenerationLedger(service, args.destination)
+            admission_path = (
+                _required(args.resource_run_root, "resource_run_root") / "admission.json"
+            )
+            if path.exists():
+                proof = ledger.reuse_relationships(path, admission_path=admission_path)
+            else:
+                proof = ledger.verify_relationships(admission_path=admission_path)
+                WorkspaceV2ProgressReconciler._write_once(
+                    path, proof.model_dump_json().encode() + b"\n"
+                )
+            return {"relationships": proof.model_dump(mode="json"), "proof_path": str(path)}
+        if (
+            args.phase == "profile-relationships"
+            and (args.destination / "state/reconciliation-head.json").exists()
+        ):
+            from investment_analyst.storage.resource_policy import execute_bounded
+
+            resolved = WorkspaceV2GenerationLedger(service, args.destination).resolve()
+            if resolved is None or resolved[1].generation_id != args.operation_id:
+                raise MaintenancePhaseError("relationship_profile_generation_differs")
+            with service.open_storage(
+                service.resolve(args.destination), WorkspaceAccessMode.READ_ONLY
+            ) as storage:
+                connection = storage.store.connection
+                counts = execute_bounded(
+                    connection,
+                    "SELECT count(*) FILTER (WHERE r.record_id IS NULL),"
+                    "count(*) FILTER (WHERE r.asset_id<>o.asset_id),"
+                    "count(*) FILTER (WHERE r.source_id<>o.source_id) "
+                    "FROM normalized_observations_v2 o LEFT JOIN raw_v2_index r "
+                    "ON r.record_id=o.raw_record_id",
+                ).fetchone()
+                pairs = execute_bounded(
+                    connection,
+                    "SELECT r.source_id,o.source_id,count(*) FROM normalized_observations_v2 o "
+                    "JOIN raw_v2_index r ON r.record_id=o.raw_record_id "
+                    "WHERE r.source_id<>o.source_id GROUP BY r.source_id,o.source_id "
+                    "ORDER BY r.source_id,o.source_id LIMIT 16",
+                ).fetchall()
+            return {
+                "profile_only": True,
+                "generation_id": str(args.operation_id),
+                "missing_raw": counts[0],
+                "different_asset": counts[1],
+                "different_source": counts[2],
+                "source_pairs": pairs,
+            }
         return (
             WorkspaceV2ProgressReconciler(service, args.destination, args.operation_id)
             .verify_relationships(
@@ -1325,6 +3070,13 @@ def _execute(args: argparse.Namespace) -> dict[str, object]:
             if frozen_path.exists()
             else None
         )
+        held_cut = getattr(args, "live_source_cut", None)
+        if held_cut is not None:
+            from investment_analyst.workspace.workspace_v2_migration import _live_quiescent_source
+
+            if _live_quiescent_source(args.source, held_cut) is None:
+                raise MaintenancePhaseError("catchup_requires_live_source_session")
+            return _catchup_live(args, service, held_cut)
         with quiescent_source_cut(
             service,
             args.source,
@@ -1335,27 +3087,8 @@ def _execute(args: argparse.Namespace) -> dict[str, object]:
                 raise MaintenancePhaseError("frozen_source_changed")
             if frozen is None:
                 _write_new_json(frozen_path, current.model_dump(mode="json"))
-            summary = cutover.catch_up(
-                current,
-                args.destination,
-                checkpoint_path=args.controls_root / "cutover-checkpoint.json",
-                host_free_bytes=_capacity,
-                reserve_bytes=25_000_000_000,
-                operational_inventory_path=args.controls_root / "operational-inventory.jsonl",
-                operational_seal_path=args.controls_root / "operational-seal.json",
-                operational_checkpoint_path=args.controls_root / "operational-checkpoint.json",
-                operational_receipt_path=args.controls_root / "operational-receipt.json",
-                page_limit=256,
-                reconciliation_id=args.reconciliation_id,
-                reconciliation_admission_path=(
-                    None
-                    if args.reconciliation_id is None
-                    else _required(args.resource_run_root, "resource_run_root") / "admission.json"
-                ),
-                baseline_code_root=args.baseline_code_root,
-                core_baseline_path=args.core_baseline_path,
-            )
-        return summary.model_dump(mode="json")
+            return _catchup_live(args, service, current)
+
     if args.phase == "delta":
         cut = _cut(args)
         if cut.phase != WorkspaceV2CutoverPhase.CATCHUP_COMPLETE:
@@ -1380,6 +3113,12 @@ def _execute(args: argparse.Namespace) -> dict[str, object]:
                 parent_manifest_sha256=args.parent_manifest_sha256,
                 epoch=args.operation_id,
                 immutable_parent_proof=args.immutable_parent_proof,
+                immutable_link_witness=(
+                    reconciliation_file_reference(args.immutable_link_witness, "control")
+                    if args.immutable_link_witness is not None
+                    else None
+                ),
+                prepared_delta=args.prepared_delta,
             )
             return {**result.model_dump(mode="json"), "operational_models": projection}
         _, final_manifest = _delta(args)
@@ -1404,12 +3143,32 @@ def _execute(args: argparse.Namespace) -> dict[str, object]:
             checkpoint_path=root / "restore-checkpoint.json",
             receipt_path=root / "restore-receipt.json",
             reuse_parent_immutables=args.reuse_parent_immutables,
+            immutable_link_journal=args.immutable_link_journal,
+            immutable_link_witness=(
+                reconciliation_file_reference(args.immutable_link_witness, "control")
+                if args.immutable_link_witness is not None
+                else None
+            ),
+            journal_byte_budget=args.journal_byte_budget,
             **_independent_read_options(args),
         )
         result = _complete_recovery(args, restored, final_manifest)
         projection = compare_operational_models(args.source, restored.restored_root)
         return {**result, "operational_models": projection}
     if args.phase == "preclean":
+        if args.preclean_kind == "unused_release":
+            if args.retire_release_sha is None:
+                raise MaintenancePhaseError("missing_retire_release_sha")
+            return (
+                LocalReleaseService()
+                .retire_unused_release(
+                    args.retire_release_sha,
+                    operation_id=args.operation_id,
+                    retained_controls=_required(args.retained_controls, "retained_controls"),
+                    retained_release_paths=tuple(args.retained_release_path or ()),
+                )
+                .model_dump(mode="json")
+            )
         if args.preclean_kind in {"packed_backup", "restore_staging"}:
             lifecycle = WorkspaceV2LifecycleService(service)
             root = _required(args.retire_root, "retire_root")
@@ -1582,6 +3341,7 @@ def _execute(args: argparse.Namespace) -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    tool_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     started = datetime.now(UTC)
     timer = time.monotonic()
     try:
@@ -1605,9 +3365,18 @@ def main(argv: list[str] | None = None) -> int:
             result = _supervise(args, list(sys.argv[1:] if argv is None else argv))
             print(json.dumps(result, sort_keys=True))
             return 0
-        with _worker_resources(args):
-            result = _execute(args)
+        if args.phase == "cut":
+            result = _recover_global_cut(args) if args.cut_recover else _run_global_cut(args)
+        else:
+            if args.cut_recover:
+                raise MaintenancePhaseError("cut_recovery_requires_cut_phase")
+            with _worker_resources(args):
+                result = _execute(args)
         io_after = _process_io()
+        try:
+            cgroup_peak = int((_process_identity(os.getpid())[2] / "memory.peak").read_text())
+        except (OSError, ValueError):
+            cgroup_peak = None
         receipt = {
             "schema_version": "data-chassis-maintenance-phase-receipt-v1",
             "operation_id": str(args.operation_id),
@@ -1620,8 +3389,9 @@ def main(argv: list[str] | None = None) -> int:
             "completed_at": datetime.now(UTC).isoformat(),
             "elapsed_seconds": time.monotonic() - timer,
             "rss_hwm_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
+            "maintenance_cgroup_peak_bytes": cgroup_peak,
             **_io_measurement(io_before, io_after, args, result),
-            "tool_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "tool_sha256": tool_sha256,
             "result": result,
         }
         if args.output is not None:

@@ -39,6 +39,110 @@ from investment_analyst.workspace.workspace_v2_migration_models import (
 _MOMENT = datetime(2026, 10, 7, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("raw", [False, True])
+@pytest.mark.parametrize("row_count", [0, 1, 257])
+def test_core_comparison_projection_is_bounded_exact_and_temporary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: bool, row_count: int
+) -> None:
+    from uuid import uuid4
+
+    from investment_analyst.storage.resource_policy import (
+        DatabaseResourceAssignment,
+        DuckDBResourcePolicy,
+        MaintenanceExecution,
+        MaintenanceResourceBudget,
+        connect_duckdb,
+        maintenance_execution,
+        maintenance_resource_budget,
+    )
+
+    source, target = tmp_path / "source-db/index.duckdb", tmp_path / "target-db/index.duckdb"
+    source.parent.mkdir()
+    target.parent.mkdir()
+    budget = MaintenanceResourceBudget(
+        operation_id=uuid4(),
+        profile="verification",
+        assignments=tuple(
+            DatabaseResourceAssignment(
+                database=path,
+                policy=DuckDBResourcePolicy(
+                    memory_limit_bytes=1_000_000_000,
+                    threads=1,
+                    spill_limit_bytes=500_000_000,
+                    temp_directory=tmp_path / label,
+                ),
+            )
+            for path, label in [(source, "source-temp"), (target, "target-temp")]
+        ),
+    )
+    pages = []
+    original = migration_module._core_native_pages
+
+    def bounded_pages(*args):
+        for rows in original(*args):
+            pages.append(len(rows))
+            yield rows
+
+    monkeypatch.setattr(migration_module, "_core_native_pages", bounded_pages)
+    execution = MaintenanceExecution(budget, lambda *_: None)
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(execution),
+        connect_duckdb(source, read_only=False) as left,
+        connect_duckdb(target, read_only=False) as right,
+    ):
+        columns = "identifier VARCHAR,digest VARCHAR" + (",metadata VARCHAR" if raw else "")
+        table = "_recovered_raw" if raw else "_recovered_observations"
+        left.execute(f"CREATE TEMP TABLE {table}({columns})")
+        right.execute(f"CREATE TEMP TABLE input({columns})")
+        # The large metadata field proves there is no accidental 1 MiB or
+        # CSV-default line limit. No RawRecord/domain payload is hydrated.
+        metadata = '雪\t\n"\\' + ("x" * (3 * 1024 * 1024) if row_count == 1 else "short")
+        expected = [
+            tuple([str(uuid5(NAMESPACE_URL, str(i))), "a" * 64] + ([metadata] if raw else []))
+            for i in range(row_count)
+        ]
+        if expected:
+            right.executemany(
+                "INSERT INTO input VALUES (" + ",".join("?" for _ in expected[0]) + ")",
+                expected,
+            )
+        right.execute("SELECT * FROM input ORDER BY identifier")
+        migration_module._load_recovered_core_projection(
+            right, left, source, execution, 256, raw=raw
+        )
+        assert left.execute(f"SELECT * FROM {table} ORDER BY identifier").fetchall() == sorted(
+            expected
+        )
+        assert all(size <= 256 for size in pages)
+        assert not list((tmp_path / "source-temp").glob("recovered-core-index-*"))
+        if row_count == 1:
+            right.execute("SELECT * FROM input ORDER BY identifier")
+            with pytest.raises(WorkspaceV2MigrationError, match="duplicate identities"):
+                migration_module._load_recovered_core_projection(
+                    right, left, source, execution, 256, raw=raw
+                )
+            assert not list((tmp_path / "source-temp").glob("recovered-core-index-*"))
+        if raw and row_count == 257:
+            execute = migration_module.execute_bounded
+
+            def interrupted(connection, sql, *args):
+                if "read_csv(" in sql:
+                    raise RuntimeError("fixture core projection SQL interrupted")
+                return execute(connection, sql, *args)
+
+            monkeypatch.setattr(migration_module, "execute_bounded", interrupted)
+            right.execute("SELECT * FROM input ORDER BY identifier")
+            with pytest.raises(RuntimeError, match="projection SQL interrupted"):
+                migration_module._load_recovered_core_projection(
+                    right, left, source, execution, 256, raw=raw
+                )
+            assert left.execute(f"SELECT * FROM {table} ORDER BY identifier").fetchall() == sorted(
+                expected
+            )
+            assert not list((tmp_path / "source-temp").glob("recovered-core-index-*"))
+
+
 @pytest.mark.parametrize("value", ["1.00", "3E-12", "-0.00", "123456789012345678.123456789"])
 @pytest.mark.parametrize("microseconds", [0, 1000, 123456])
 def test_observation_native_canonical_document_preserves_exact_model(
@@ -381,3 +485,57 @@ def test_snapshot_transition_preserves_a_checkpoint_and_imports_b_suffix(tmp_pat
     assert transition.phase.value == "COMPLETE"
     assert transition.confirmed_equivalent_count == 2
     assert list((destination / "storage" / "v2").glob("raw-v2-import-state.A.*.json"))
+
+
+def test_cut_session_intent_is_one_use_and_native_handoff_keeps_writer_exclusion(tmp_path: Path):
+    import subprocess
+    import sys
+    from uuid import uuid4
+
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    root = tmp_path / "source"
+    service.initialize(root, format_version=1)
+    operation = uuid4()
+    intent = migration_module._QuiescentSourceIntent(root, operation)
+    with migration_module.quiescent_source_cut(
+        service, root, operation_id=operation, _session_intent=intent
+    ) as cut:
+        proof = migration_module._live_quiescent_source(root, cut)
+        assert proof.writer_generation == intent.writer_generation
+        migration_module.close_quiescent_native_reader(root, cut)
+        migration_module.close_quiescent_native_reader(root, cut)
+        assert (
+            migration_module._live_quiescent_source(root, cut).writer_generation
+            == intent.writer_generation
+        )
+        code = (
+            "import duckdb,sys; duckdb.connect(sys.argv[1],"
+            "config={'memory_limit':'64000000B','threads':'1',"
+            "'max_temp_directory_size':'0B'}).close()"
+        )
+        arguments = [
+            sys.executable,
+            "-c",
+            code,
+            str(root / "storage/data/processed/investment_analyst.duckdb"),
+        ]
+        blocked = subprocess.run(arguments, capture_output=True, text=True, timeout=10)
+        assert blocked.returncode != 0 and "lock" in blocked.stderr.lower()
+    opened = subprocess.run(arguments, capture_output=True, text=True, timeout=10)
+    assert opened.returncode == 0, opened.stderr
+    with (
+        pytest.raises(WorkspaceV2MigrationError, match="consumed"),
+        migration_module.quiescent_source_cut(
+            service, root, operation_id=operation, _session_intent=intent
+        ),
+    ):
+        pass
+    with migration_module.quiescent_source_cut(service, root, operation_id=operation) as fresh:
+        assert (
+            migration_module._live_quiescent_source(root, fresh).writer_generation
+            != intent.writer_generation
+        )
+    with pytest.raises(TypeError):
+        migration_module._QuiescentSourceIntent(
+            root, operation, writer_generation=intent.writer_generation
+        )

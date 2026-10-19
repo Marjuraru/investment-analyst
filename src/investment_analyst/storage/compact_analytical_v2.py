@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from collections import defaultdict, deque
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -2118,6 +2119,7 @@ class CompactAnalyticalStore:
         )
         from investment_analyst.workspace.workspace_v2_migration_models import (
             HistoricalFrozenSource,
+            ProgressReconciliationV2,
         )
 
         if (
@@ -2134,12 +2136,30 @@ class CompactAnalyticalStore:
             admission_path=admission_path,
             baseline_code_root=baseline_code_root,
         )
-        progress = receipt.reconciliation
+        progress = (
+            receipt if isinstance(receipt, ProgressReconciliationV2) else receipt.reconciliation
+        )
         assert progress.inventory is not None and progress.coverage is not None
+        parent_matches = (
+            (
+                transition.parent_seal.metric_count,
+                transition.parent_seal.metric_digest,
+                transition.parent_seal.diagnostic_count,
+                transition.parent_seal.diagnostic_digest,
+            )
+            == (
+                progress.inventory.metric_count,
+                progress.inventory.metric_digest,
+                progress.inventory.diagnostic_count,
+                progress.inventory.diagnostic_digest,
+            )
+            if isinstance(progress, ProgressReconciliationV2)
+            else transition.parent_seal == progress.parent_seal
+        )
         if (
             transition.parent_membership_path != progress.parent_membership.path
             or transition.parent_membership_sha256 != progress.parent_membership.sha256
-            or transition.parent_seal != progress.parent_seal
+            or not parent_matches
         ):
             raise CompactAnalyticalError("recovered historical parent differs")
         self._validate_transition_binding(transition)
@@ -2675,8 +2695,11 @@ class CompactAnalyticalStore:
                 )
             self._require_acyclic_inventory(read_only_units=read_only_units)
         finally:
-            self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_reference_sequences")
-            self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_reference_segments")
+            # An aborted native transaction cannot execute cleanup SQL. Keep
+            # the original failure; closing/rolling back owns TEMP cleanup then.
+            if sys.exc_info()[0] is None:
+                self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_reference_sequences")
+                self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_reference_segments")
 
     def _relationship_sql(
         self, sql: str, parameters: Sequence[object] | None = None
@@ -2991,13 +3014,14 @@ class CompactAnalyticalStore:
                     self._relationship_sql("COMMIT")
                     self._relationship_sql("BEGIN TRANSACTION READ ONLY")
         finally:
-            for family in ("sequences", "segments", "links"):
-                self._relationship_sql(
-                    f"DROP TABLE IF EXISTS _workspace_v2_metric_reference_{family}"
-                )
-            if owns_metadata:
-                self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_reference_sequences")
-                self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_reference_segments")
+            if sys.exc_info()[0] is None:
+                for family in ("sequences", "segments", "links"):
+                    self._relationship_sql(
+                        f"DROP TABLE IF EXISTS _workspace_v2_metric_reference_{family}"
+                    )
+                if owns_metadata:
+                    self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_reference_sequences")
+                    self._relationship_sql("DROP TABLE IF EXISTS _workspace_v2_reference_segments")
 
     def _require_acyclic_bucket(self, bucket: int) -> None:
         if not 0 <= bucket < 16:
@@ -3044,8 +3068,9 @@ class CompactAnalyticalStore:
                         "workspace v2 metric dependency graph contains a cycle"
                     )
         finally:
-            for table in (edges, nodes):
-                self._relationship_sql(f"DROP TABLE IF EXISTS {table}")
+            if sys.exc_info()[0] is None:
+                for table in (edges, nodes):
+                    self._relationship_sql(f"DROP TABLE IF EXISTS {table}")
 
     def logical_table_bytes(self) -> dict[str, int]:
         """Measure stored logical bytes with UTF-8 text and fixed scalar widths."""

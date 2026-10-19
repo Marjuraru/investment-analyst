@@ -560,6 +560,7 @@ def _resource_arguments(tmp_path: Path) -> tuple[SimpleNamespace, MaintenanceRes
     run.mkdir()
     return SimpleNamespace(
         resource_budget=path,
+        code_sha="a" * 40,
         operation_id=operation,
         controls_root=controls,
         source=tmp_path / "source",
@@ -1021,3 +1022,581 @@ def test_fresh_capacity_reader_uses_existing_helper_and_rejects_untrusted_output
         ) as raised:
             module._fresh_host_capacity()
         assert "fixture-secret" not in str(raised.value)
+
+
+@pytest.mark.parametrize("changed", [None, "operation", "generation", "destination", "v1"])
+def test_preparatory_retirement_dispatch_binds_exact_roots_and_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resource_cli_module: ModuleType,
+    changed: str | None,
+) -> None:
+    module = resource_cli_module
+    args, _ = _resource_arguments(tmp_path)
+    args.phase = "retire-preparatory"
+    args.reconciliation_id = uuid4()
+    args.immutable_link_journal = args.controls_root / "unlinks"
+    args.journal_byte_budget = 1_000_000
+    args.preparatory_retirement_input = tmp_path / "proposal.json"
+    args.preparatory_retirement_input.write_bytes(b"typed proposal checked below")
+    proposal = SimpleNamespace(
+        operation_id=uuid4() if changed == "operation" else args.operation_id,
+        retained_generation_id=uuid4() if changed == "generation" else args.reconciliation_id,
+        retained_root=tmp_path / "different" if changed == "destination" else args.destination,
+        source_root=args.source if changed == "v1" else tmp_path / "old-W-slot",
+    )
+    monkeypatch.setattr(
+        module,
+        "PreparatorySlotRetirementReceipt",
+        SimpleNamespace(model_validate_json=lambda document: proposal),
+    )
+    monkeypatch.setattr(module, "WorkspaceService", object)
+    called = []
+
+    def retire(actual, **options):
+        assert actual is proposal
+        assert options["admission_path"] == args.resource_run_root / "admission.json"
+        assert options["checkpoint_path"].parent == args.controls_root
+        assert options["proof_path"].parent == args.controls_root
+        assert options["unlink_root"] == args.immutable_link_journal
+        called.append(actual)
+        return SimpleNamespace(model_dump=lambda **unused: {"phase": "retired"})
+
+    monkeypatch.setattr(
+        module,
+        "WorkspaceV2LifecycleService",
+        lambda service: SimpleNamespace(retire_preparatory_slot=retire),
+    )
+    if changed:
+        with pytest.raises(module.MaintenancePhaseError, match="command_binding_differs"):
+            module._execute(args)
+        assert called == []
+    else:
+        assert module._execute(args) == {"phase": "retired"}
+        assert called == [proposal]
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "prepared",
+        "reserved",
+        "generation",
+        "verifier",
+        "database",
+        "restore",
+        "restore_without_links",
+        "restore_over_budget",
+        "measure-plan",
+        "measure-comparison",
+    ],
+)
+def test_prepare_delta_uses_certified_generation_without_reopening_legacy_w(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resource_cli_module: ModuleType,
+    fault: str | None,
+) -> None:
+    import inspect
+
+    from investment_analyst.workspace.workspace_v2_migration_models import (
+        ReconciliationFileReference,
+    )
+    from investment_analyst.workspace.workspace_v2_physical_delta import (
+        PhysicalDeltaFile,
+        PhysicalDeltaManifest,
+    )
+
+    module = resource_cli_module
+    args, _ = _resource_arguments(tmp_path)
+    args.phase, args.delta_action = "prepare-delta", "plan"
+    args.reconciliation_id = args.operation_id
+    args.delta_root = tmp_path / "new-W2-delta"
+    args.parent_index = tmp_path / "parent-index"
+    args.parent_manifest_sha256 = "a" * 64
+    args.immutable_parent_proof = tmp_path / "historical-parent-proof.json"
+    args.immutable_link_witness = tmp_path / "UNLINK-trailer.json"
+    args.immutable_link_witness.write_bytes(b"durable controlled unlink witness")
+    restoring = fault is not None and fault.startswith("restore")
+    if fault in {"measure-plan", "measure-comparison"}:
+        args.delta_action = fault
+        monkeypatch.setattr(module, "_capacity", lambda: 50_000_000_000)
+    if restoring:
+        args.delta_action = "restore"
+        args.recovery_root = tmp_path / "single-recovery-slot"
+        args.reuse_parent_immutables = fault != "restore_without_links"
+        args.immutable_link_journal = args.controls_root / "new-links"
+        args.journal_byte_budget = 1_000_000
+        monkeypatch.setattr(module, "_capacity", lambda: 50_000_000_000)
+        monkeypatch.setattr(module, "_transport", lambda _: object())
+        monkeypatch.setattr(module, "_independent_read_options", lambda _: {})
+        monkeypatch.setattr(
+            module,
+            "_load_resource_budget",
+            lambda _: SimpleNamespace(
+                cache_and_control_bytes=1 if fault == "restore_over_budget" else 1_000_000
+            ),
+        )
+    digest = hashlib.sha256(b"").hexdigest()
+    database = ReconciliationFileReference(
+        path=args.destination / "storage/v2/index.duckdb",
+        role="database",
+        size_bytes=1 if fault == "database" else 0,
+        sha256=digest,
+    )
+    certificate = ReconciliationFileReference(
+        path=args.controls_root / "certified.json",
+        role="control",
+        size_bytes=1,
+        sha256="c" * 64,
+    )
+    baseline = SimpleNamespace(
+        generation_id=uuid4() if fault == "generation" else args.operation_id,
+        phase="PREPARED" if fault == "prepared" else "BASELINE_VERIFIED",
+        reserved_successor=object() if fault == "reserved" else None,
+        source_root=args.source,
+        destination_root=args.destination,
+        destination_workspace_id=uuid4(),
+        core_proof=certificate,
+        database=database,
+        corrective_proofs=(certificate,),
+    )
+    verified = []
+    content = SimpleNamespace(
+        database=database,
+        generation_id=args.operation_id,
+        verifier_sha256="0" * 64
+        if fault == "verifier"
+        else hashlib.sha256(
+            inspect.getsource(module.verify_generation_contents).encode()
+        ).hexdigest(),
+    )
+    monkeypatch.setattr(module, "WorkspaceService", object)
+    monkeypatch.setattr(
+        module,
+        "WorkspaceV2GenerationLedger",
+        lambda *unused: SimpleNamespace(
+            resolve=lambda: (SimpleNamespace(certificate=certificate), baseline),
+            _read=lambda ref: b"content proof validated by its separate tests",
+        ),
+    )
+    monkeypatch.setattr(
+        module, "GenerationContentProof", SimpleNamespace(model_validate_json=lambda _: content)
+    )
+    monkeypatch.setattr(
+        module, "WorkspaceV2ProgressReconciler", SimpleNamespace(_verify=verified.append)
+    )
+    manifest = PhysicalDeltaManifest(
+        historical_state="APPLYING",
+        epoch=args.operation_id,
+        source_root=args.destination,
+        source_workspace_id=baseline.destination_workspace_id,
+        parent_backup_id=uuid4(),
+        parent_manifest_sha256="a" * 64,
+        parent_index_sha256="b" * 64,
+        files_sha256=digest,
+        file_count=1,
+        deleted_count=0,
+        logical_bytes=0,
+        new_bytes=0,
+        reused_bytes=0,
+    )
+    calls = []
+
+    def measure_comparison(service, source, destination, generation, admission):
+        assert source == args.source and destination == args.destination
+        assert generation == args.reconciliation_id
+        assert admission == args.resource_run_root / "admission.json"
+        calls.append({"action": "measure-comparison"})
+        return {
+            "calibration_only": True,
+            "generation_certificate": certificate.model_dump(mode="json"),
+        }
+
+    monkeypatch.setattr(module, "measure_recovered_comparison", measure_comparison)
+
+    def plan(source, index, output, **options):
+        assert (source, index, output) == (args.destination, args.parent_index, args.delta_root)
+        assert options["allow_incomplete_historical"] is True
+        assert options["epoch"] == args.operation_id
+        assert options["immutable_link_witness"].path == args.immutable_link_witness
+        calls.append(options)
+        return manifest
+
+    def restore(root, **options):
+        assert root == args.delta_root
+        assert options["immutable_link_journal"] == args.immutable_link_journal
+        assert options["immutable_link_witness"].path == args.immutable_link_witness
+        assert options["journal_byte_budget"] == args.journal_byte_budget
+        assert options["destination"] == args.recovery_root
+        calls.append(options)
+        return SimpleNamespace(model_dump=lambda **_: {"kind": "restore"})
+
+    def measure(source, index, prepared, **options):
+        assert (source, index, prepared) == (args.destination, args.parent_index, args.delta_root)
+        assert options["link_witness"].path == args.immutable_link_witness
+        calls.append(options)
+        return {"calibration_only": True, "plan_published": False}
+
+    monkeypatch.setattr(module, "_delta", lambda _: (args.delta_root, manifest))
+
+    monkeypatch.setattr(
+        module,
+        "WorkspaceV2PhysicalDeltaService",
+        lambda service: SimpleNamespace(plan=plan, restore=restore, measure_prepared_plan=measure),
+    )
+    monkeypatch.setattr(
+        module,
+        "_iter_delta_files",
+        lambda path: iter(
+            (
+                PhysicalDeltaFile(
+                    path="storage/v2/index.duckdb",
+                    size_bytes=0,
+                    blocks=(),
+                    sha256=digest,
+                ),
+            )
+        ),
+    )
+    if fault and fault not in {"restore", "measure-plan", "measure-comparison"}:
+        with pytest.raises(module.MaintenancePhaseError):
+            module._execute(args)
+        assert bool(calls) == (fault == "database")
+    else:
+        result = module._execute(args)
+        assert result["preparation_only"] is True
+        assert result["generation_certificate"] == certificate.model_dump(mode="json")
+        assert database in verified and calls
+
+
+@pytest.mark.parametrize("mismatch", [None, "operation", "controls"])
+def test_owned_payload_dispatch_retires_only_bound_regenerable_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resource_cli_module: ModuleType,
+    mismatch: str | None,
+) -> None:
+    from investment_analyst.workspace.workspace_v2_lifecycle_models import (
+        OwnedPayloadRetirementInput,
+        OwnedPayloadRole,
+    )
+
+    module = resource_cli_module
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    args, _ = _resource_arguments(tmp_path)
+    args.phase = "retire-owned-payload"
+    args.controls_root = tmp_path / ".local/share/investment-analyst/ops/data-chassis-45/cleanup-E0"
+    root = tmp_path / "projects/investment-analyst/.worktrees/data-chassis-45/.pytest_cache"
+    root.mkdir(parents=True)
+    (root / "CACHEDIR.TAG").write_text("regenerable")
+    request = OwnedPayloadRetirementInput(
+        operation_id=uuid4() if mismatch == "operation" else args.operation_id,
+        role=OwnedPayloadRole.REGENERABLE_LOCAL_CACHE,
+        source_root=root,
+        retained_controls_root=args.controls_root / "different"
+        if mismatch == "controls"
+        else args.controls_root,
+        consuming_generation=None,
+        releasing_stage="E0",
+        no_users=True,
+        no_unique_data=True,
+    )
+    args.owned_payload_input = tmp_path / "owned-payload-input.json"
+    args.owned_payload_input.write_text(request.model_dump_json())
+    if mismatch:
+        with pytest.raises(
+            module.MaintenancePhaseError, match="owned_payload_operation_binding_differs"
+        ):
+            module._execute(args)
+        assert root.exists()
+    else:
+        result = module._execute(args)
+        assert result["owned_payload_retirement"]["checkpoint"]["phase"] == "retired"
+        assert not root.exists()
+        assert module._execute(args) == result
+
+
+def test_unused_release_preclean_dispatch_keeps_release_service_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource_cli_module: ModuleType
+) -> None:
+    module = resource_cli_module
+    args, _ = _resource_arguments(tmp_path)
+    args.phase = "preclean"
+    args.preclean_kind = "unused_release"
+    args.retire_release_sha = "a" * 40
+    args.retained_controls = args.controls_root
+    args.retained_release_path = [tmp_path / "releases" / ("b" * 40)]
+    calls = []
+
+    def retire(sha, **kwargs):
+        calls.append((sha, kwargs))
+        return SimpleNamespace(model_dump=lambda **unused: {"phase": "retired"})
+
+    monkeypatch.setattr(
+        module, "LocalReleaseService", lambda: SimpleNamespace(retire_unused_release=retire)
+    )
+    assert module._execute(args) == {"phase": "retired"}
+    assert calls == [
+        (
+            args.retire_release_sha,
+            {
+                "operation_id": args.operation_id,
+                "retained_controls": args.controls_root,
+                "retained_release_paths": tuple(args.retained_release_path),
+            },
+        )
+    ]
+    args.retire_release_sha = None
+    with pytest.raises(module.MaintenancePhaseError, match="missing_retire_release_sha"):
+        module._execute(args)
+
+
+def test_recovery_rejects_incompatible_reader_budget_before_opening_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource_cli_module: ModuleType
+) -> None:
+    from investment_analyst.workspace.workspace_v2_physical_delta import PhysicalDeltaManifest
+
+    module = resource_cli_module
+    args, budget = _resource_arguments(tmp_path)
+    args.recovery_root = tmp_path / "restored"
+    args.delta_root = tmp_path / "delta"
+    args.delta_root.mkdir()
+    manifest = PhysicalDeltaManifest(
+        epoch=args.operation_id,
+        source_root=args.destination,
+        source_workspace_id=uuid4(),
+        parent_backup_id=uuid4(),
+        parent_manifest_sha256="a" * 64,
+        parent_index_sha256="b" * 64,
+        files_sha256="c" * 64,
+        file_count=0,
+        deleted_count=0,
+        logical_bytes=0,
+        new_bytes=0,
+        reused_bytes=0,
+    )
+    data = manifest.model_dump_json().encode()
+    (args.delta_root / "delta-manifest.json").write_bytes(data)
+    receipt = PhysicalDeltaReceipt(
+        kind="restore",
+        restored_root=args.recovery_root,
+        epoch=args.operation_id,
+        manifest_sha256=hashlib.sha256(data).hexdigest(),
+        files_sha256=manifest.files_sha256,
+        confirmed_files=0,
+        completed_at=datetime.now(UTC),
+    )
+    allocation = budget.assignments[0].model_copy(
+        update={
+            "database": args.recovery_root / "storage/v2/index.duckdb",
+            "policy": budget.assignments[0].policy.model_copy(update={"threads": 2}),
+        }
+    )
+    invalid = MaintenanceResourceBudget.model_validate(
+        {**budget.model_dump(), "profile": "compatible_44", "assignments": (allocation,)}
+    )
+    args.resource_budget.write_text(invalid.model_dump_json())
+
+    def forbidden(*unused, **kwargs):
+        raise AssertionError("incompatible reader budget opened a database")
+
+    monkeypatch.setattr(module, "WorkspaceService", forbidden)
+    with pytest.raises(
+        module.MaintenancePhaseError, match="recovery_requires_single_compatible_44_allocation"
+    ):
+        module._complete_recovery(args, receipt, manifest)
+
+
+@pytest.mark.parametrize(
+    ("window_limit_seconds", "window_authorization", "expected_runtime"),
+    (
+        (1800, None, "1700"),
+        (5400, "human-dc45-cut-5400-20261019", "5300"),
+    ),
+)
+def test_client_loss_leaves_cut_unit_and_its_recovery_hook_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resource_cli_module: ModuleType,
+    window_limit_seconds: int,
+    window_authorization: str | None,
+    expected_runtime: str,
+):
+    from investment_analyst.storage.workspace_v2_inventory import reconciliation_file_reference
+    from investment_analyst.workspace.workspace_v2_migration_models import (
+        CutWindowBound,
+        CutWindowGo,
+    )
+
+    module = resource_cli_module
+    args, budget = _resource_arguments(tmp_path)
+    args.phase = "cut"
+    proof = tmp_path / "measured.json"
+    proof.write_text("{}")
+    ref = reconciliation_file_reference(proof, "control")
+    go = CutWindowGo(
+        bounds=tuple(
+            CutWindowBound(
+                step=step,
+                upper_seconds=100,
+                measurement=ref,
+                measured_at=datetime.now(UTC),
+                universe="fixture",
+                workload="small fixture",
+                changes_since_measurement="none",
+            )
+            for step in (
+                "freeze",
+                "comparison_delta",
+                "operational",
+                "physical_plan",
+                "upload",
+                "restore_open",
+                "activation_health",
+                "cancel_close_restart",
+            )
+        ),
+        margin_seconds=100,
+        baseline=ref,
+        prerequisites=(ref,),
+        guard=ref,
+        capacity=ref,
+        source_workspace_id=uuid4(),
+        destination_workspace_id=uuid4(),
+        admitted_at=datetime.now(UTC),
+        window_limit_seconds=window_limit_seconds,
+        window_authorization=window_authorization,
+        attempt_id=args.operation_id if window_limit_seconds == 5400 else None,
+    )
+    args.cut_go = tmp_path / "go.json"
+    args.cut_go.write_text(go.model_dump_json())
+    commands = []
+    monkeypatch.setattr(
+        module,
+        "_unit_properties",
+        lambda: {"MainPID": "0", "ControlPID": "0", "ActiveState": "inactive"},
+    )
+    monkeypatch.setattr(module, "_capacity", lambda: 30_000_000_000)
+    monkeypatch.setattr(module.subprocess, "run", lambda command, **kw: commands.append(command))
+    monkeypatch.setattr(
+        module,
+        "_stop_owned_worker",
+        lambda *_: pytest.fail("lost client stopped the cut controller"),
+    )
+
+    def lost_client(*args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(module, "_wait_cut_unit", lost_client)
+    with pytest.raises(KeyboardInterrupt):
+        module._supervise(args, ["cut"])
+    assert len(commands) == 1
+    command = commands[0]
+    assert f"--property=RuntimeMaxSec={expected_runtime}" in command
+    assert [arg for arg in command if arg.startswith("--property=TimeoutStopSec=")] == [
+        "--property=TimeoutStopSec=100"
+    ]
+    hook = next(arg for arg in command if arg.startswith("--property=ExecStopPost="))
+    assert "--cut-recover" in hook and "--supervised-worker" in hook
+    assert "cut-recovery-phase.json" in hook
+    assert "--property=Restart=no" in command
+
+
+def test_cut_client_waits_until_stop_post_finishes_before_reading_terminal_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource_cli_module: ModuleType
+):
+    module = resource_cli_module
+    output = tmp_path / "result.json"
+    output.write_text('{"terminal":"recovered"}')
+    states = iter(
+        [
+            {"MainPID": "0", "ControlPID": "123", "ActiveState": "deactivating"},
+            {"MainPID": "0", "ControlPID": "0", "ActiveState": "inactive"},
+        ]
+    )
+    sleeps = []
+    monkeypatch.setattr(module, "_unit_properties", lambda: next(states))
+    monkeypatch.setattr(module.time, "sleep", sleeps.append)
+    assert module._wait_cut_unit(output, tmp_path) == {"terminal": "recovered"}
+    assert sleeps == [1]
+
+
+def test_5400_cut_rejects_foreign_attempt_before_creating_a_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource_cli_module: ModuleType
+):
+    from contextlib import contextmanager
+
+    from investment_analyst.storage.workspace_v2_inventory import reconciliation_file_reference
+    from investment_analyst.workspace.workspace_v2_migration_models import (
+        CutWindowBound,
+        CutWindowGo,
+    )
+
+    module = resource_cli_module
+    controls = tmp_path / "controls"
+    run = controls / "run"
+    run.mkdir(parents=True)
+    proof = controls / "proof.json"
+    proof.write_text("{}")
+    reference = reconciliation_file_reference(proof, "control")
+    go = CutWindowGo(
+        bounds=tuple(
+            CutWindowBound(
+                step=step,
+                upper_seconds=100,
+                measurement=reference,
+                measured_at=datetime.now(UTC),
+                universe="fixture",
+                workload="fixture",
+                changes_since_measurement="none",
+            )
+            for step in (
+                "freeze",
+                "comparison_delta",
+                "operational",
+                "physical_plan",
+                "upload",
+                "restore_open",
+                "activation_health",
+                "cancel_close_restart",
+            )
+        ),
+        margin_seconds=100,
+        baseline=reference,
+        prerequisites=(reference,),
+        guard=reference,
+        capacity=reference,
+        source_workspace_id=uuid4(),
+        destination_workspace_id=uuid4(),
+        admitted_at=datetime.now(UTC),
+        window_limit_seconds=5400,
+        window_authorization="human-dc45-cut-5400-20261019",
+        attempt_id=uuid4(),
+    )
+    go_path = controls / "go.json"
+    go_path.write_text(go.model_dump_json())
+    args = SimpleNamespace(
+        cut_window=controls / "window.json",
+        cut_go=go_path,
+        controls_root=controls,
+        resource_run_root=run,
+        source=tmp_path / "source",
+        destination=tmp_path / "destination",
+        operation_id=uuid4(),
+    )
+    monkeypatch.setattr(module, "_CutMonitor", lambda unused: SimpleNamespace())
+    monkeypatch.setattr(module, "WorkspaceService", lambda: SimpleNamespace())
+    monkeypatch.setattr(module, "LocalReleaseService", lambda: SimpleNamespace())
+
+    @contextmanager
+    def resources(unused):
+        yield
+
+    monkeypatch.setattr(module, "_worker_resources", resources)
+    with pytest.raises(
+        module.MaintenancePhaseError, match="cut_window_authorization_attempt_differs"
+    ):
+        module._run_global_cut(args)
+    assert not (controls / "window.json").exists()

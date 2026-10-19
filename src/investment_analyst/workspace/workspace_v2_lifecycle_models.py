@@ -342,6 +342,137 @@ class SealedDirectoryRetirementReceipt(_LifecycleModel):
     completed_at: UTCDateTime
 
 
+class PreparatorySlotArtifact(_LifecycleModel):
+    """One exact prerequisite of the narrowly authorized APPLYING W retirement."""
+
+    kind: Literal[
+        "delta_manifest",
+        "files_inventory",
+        "remote_upload",
+        "remote_parent_restore",
+        "remote_parent_manifest",
+        "remote_parent_index",
+        "remote_locator",
+        "restore_receipt",
+        "complete_coverage",
+        "compatible_readback",
+        "retained_certificate",
+        "link_witness",
+    ]
+    path: Path
+    size_bytes: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("path")
+    @classmethod
+    def absolute_path(cls, value: Path) -> Path:
+        if not value.is_absolute() or ".." in value.parts:
+            raise ValueError("preparatory evidence path must be absolute")
+        return value
+
+
+class OwnedPayloadRole(StrEnum):
+    """Closed payload roles authorized by the DATA-CHASSIS-45 cleanup matrix."""
+
+    DELTA_STAGING_OBJECTS = "DELTA_STAGING_OBJECTS"
+    INDEPENDENT_READ_CACHE = "INDEPENDENT_READ_CACHE"
+    TRANSFER_SCRATCH = "TRANSFER_SCRATCH"
+    REGENERABLE_LOCAL_CACHE = "REGENERABLE_LOCAL_CACHE"
+
+
+class OwnedPayloadRetirementInput(_LifecycleModel):
+    """Exact retirement identity; assertions never substitute for verified receipts."""
+
+    operation_id: UUID
+    role: OwnedPayloadRole
+    source_root: Path
+    retained_controls_root: Path
+    consuming_generation: UUID | None
+    releasing_stage: Literal["E0", "E5"]
+    evidence: tuple[PreparatorySlotArtifact, ...] = ()
+    no_users: Literal[True]
+    no_unique_data: Literal[True]
+
+    @model_validator(mode="after")
+    def require_disjoint_roots(self) -> OwnedPayloadRetirementInput:
+        roots = (self.source_root, self.retained_controls_root)
+        if any(not p.is_absolute() or ".." in p.parts for p in roots) or (
+            roots[0].is_relative_to(roots[1]) or roots[1].is_relative_to(roots[0])
+        ):
+            raise ValueError("owned payload roots must be absolute and disjoint")
+        return self
+
+
+class OwnedPayloadRetirementReceipt(_LifecycleModel):
+    """Durable inventory and sealed-directory cursor for one exact owned payload."""
+
+    schema_version: Literal["workspace-v2-owned-payload-retirement-v1"] = (
+        "workspace-v2-owned-payload-retirement-v1"
+    )
+    request: OwnedPayloadRetirementInput
+    inventory: PreparatorySlotArtifact
+    checkpoint: SealedDirectoryRetirementCheckpoint
+    allocated_bytes: int = Field(ge=0)
+    started_at: UTCDateTime
+    completed_at: UTCDateTime | None = None
+
+    @model_validator(mode="after")
+    def require_terminal_time(self) -> OwnedPayloadRetirementReceipt:
+        if (self.checkpoint.phase == "retired") != (self.completed_at is not None):
+            raise ValueError("owned payload terminal phase and timestamp differ")
+        return self
+
+
+class PreparatorySlotRetirementReceipt(_LifecycleModel):
+    """Retiring W is independent from, and never authorizes, cut activation."""
+
+    schema_version: Literal["workspace-v2-preparatory-slot-retirement-receipt-v1"] = (
+        "workspace-v2-preparatory-slot-retirement-receipt-v1"
+    )
+    operation_id: UUID
+    phase: Literal["retiring", "retired"]
+    source_root: Path
+    retained_root: Path
+    workspace_id: UUID
+    retained_generation_id: UUID
+    recovery_epoch: UUID
+    historical_state: Literal["APPLYING"] = "APPLYING"
+    evidence: tuple[PreparatorySlotArtifact, ...] = Field(min_length=12, max_length=12)
+    configuration_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    files_confirmed: int = Field(ge=0)
+    bytes_confirmed: int = Field(ge=0)
+    no_unique_content: Literal[True] = True
+    writer_closed: Literal[True] = True
+    unlink_witness: PreparatorySlotArtifact | None = None
+    verified_at: UTCDateTime
+    completed_at: UTCDateTime | None = None
+
+    @model_validator(mode="after")
+    def exact_preparatory_retirement(self) -> PreparatorySlotRetirementReceipt:
+        if (
+            not self.source_root.is_absolute()
+            or not self.retained_root.is_absolute()
+            or self.source_root == self.retained_root
+            or self.source_root.is_relative_to(self.retained_root)
+            or self.retained_root.is_relative_to(self.source_root)
+            or len({item.kind for item in self.evidence}) != 12
+            or any(item.path.is_relative_to(self.source_root) for item in self.evidence)
+        ):
+            raise ValueError("preparatory retirement roots or evidence differ")
+        if self.phase == "retired" and (self.unlink_witness is None or self.completed_at is None):
+            raise ValueError("retired preparatory slot requires completed unlink evidence")
+        if self.phase == "retiring" and (
+            self.unlink_witness is not None or self.completed_at is not None
+        ):
+            raise ValueError("preparatory proposal cannot claim terminal evidence")
+        if self.unlink_witness is not None and (
+            self.unlink_witness.kind != "link_witness"
+            or self.unlink_witness.path.is_relative_to(self.source_root)
+        ):
+            raise ValueError("unlink evidence must survive preparatory retirement")
+        return self
+
+
 class WorkspaceV2RetirementProof(_LifecycleModel):
     """Physical recovery evidence for the exact inactive root being retired."""
 

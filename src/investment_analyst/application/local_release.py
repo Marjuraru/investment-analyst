@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
+import json
 import math
 import os
 import re
@@ -35,6 +37,10 @@ from investment_analyst.application.operational_state import (
 from investment_analyst.core.models.base import ContractModel, UTCDateTime
 from investment_analyst.storage.errors import StorageError
 from investment_analyst.workspace.service import WorkspaceError, WorkspaceService
+from investment_analyst.workspace.workspace_v2_lifecycle_models import (
+    SealedDirectoryRetirementCheckpoint,
+    SealedDirectoryRetirementReceipt,
+)
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
@@ -769,6 +775,265 @@ class LocalReleaseService:
                 )
             except (subprocess.SubprocessError, OSError) as error:
                 raise ReleaseAcquisitionError("Installed package runtime probe failed") from error
+
+    def retire_unused_release(
+        self,
+        sha: str,
+        *,
+        operation_id: UUID,
+        retained_controls: Path,
+        retained_release_paths: tuple[Path, ...] = (),
+    ) -> SealedDirectoryRetirementReceipt:
+        """C5: retire one unreferenced installed release, preserving its manifest.
+
+        Compare code to the existing mirror without fetching or making a copy.
+        Unknown local files and any live deployment/reader reference fail closed.
+        Only generated venv/build/bytecode/egg metadata is disposable alongside
+        that exact code. This never changes the unit, state, environment or mirror.
+        """
+        from investment_analyst.workspace.workspace_v2_lifecycle import (
+            _fsync_directory,
+            _hash_file,
+            _replace_json,
+            _require_no_directory_users,
+            _retiring_root,
+            _verify_owned_payload_inventory,
+        )
+
+        if FULL_SHA.fullmatch(sha) is None:
+            raise ReleaseVerificationError("retirement requires an exact release SHA")
+        root = self.paths.releases / sha
+        retiring = _retiring_root(root, operation_id)
+        for path in (root, retained_controls, retiring):
+            if not path.is_absolute() or any(p.is_symlink() for p in (path, *path.parents)):
+                raise ReleaseVerificationError("release retirement path is unsafe")
+        if retained_controls.is_relative_to(self.paths.root) or self.paths.root.is_relative_to(
+            retained_controls
+        ):
+            raise ReleaseVerificationError("release retirement evidence must be outside runtime")
+        retained_controls.mkdir(parents=True, exist_ok=True)
+        receipt_path = retained_controls / f"release-{sha}-{operation_id}.json"
+        inventory_path = receipt_path.with_suffix(".inventory.jsonl")
+        checkpoint_path = receipt_path.with_suffix(".checkpoint.json")
+        preserved_manifest = receipt_path.with_suffix(".manifest.json")
+        for path in (
+            receipt_path,
+            inventory_path,
+            checkpoint_path,
+            preserved_manifest,
+            retained_controls / "release-retirement.lock",
+        ):
+            if path.is_symlink():
+                raise ReleaseVerificationError("release retirement control is unsafe")
+
+        def require_unused() -> None:
+            state = self.load_deployment_state()
+            bindings = self.load_workspace_bindings()
+            protected = {state.current, state.previous, "dbbdfd021b0fee20be31b2d2a845874b0e861067"}
+            protected.update(
+                b.release_sha for b in (bindings.current, bindings.previous) if b is not None
+            )
+            retained_deployments = (
+                state.current_release_path,
+                state.previous_release_path,
+            )
+            if any(p is not None and Path(p).is_relative_to(root) for p in retained_deployments):
+                raise ReleaseVerificationError("release remains referenced by deployment path")
+            properties = self.systemctl.show_properties(
+                LOCAL_SERVICE_UNIT_NAME, ("ExecStart", "WorkingDirectory")
+            )
+            unit = self.systemd_unit_path.read_text() if self.systemd_unit_path.exists() else ""
+            if (
+                sha in protected
+                or any(p == root or p.is_relative_to(root) for p in retained_release_paths)
+                or str(root) in unit
+                or any(str(root) in v for v in properties.values())
+            ):
+                raise ReleaseVerificationError(
+                    "release remains referenced by deployment or recovery"
+                )
+            # A symlink into this release is a consumer, even if deployment state
+            # has not yet been updated by a different owner.
+            for path in self.paths.root.iterdir():
+                if path.is_symlink() and (
+                    path.resolve() == root or path.resolve().is_relative_to(root)
+                ):
+                    raise ReleaseVerificationError("release remains referenced by symlink")
+            _require_no_directory_users(root)
+            _require_no_directory_users(retiring)
+
+        with (retained_controls / "release-retirement.lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            require_unused()
+            if checkpoint_path.exists():
+                cursor = SealedDirectoryRetirementCheckpoint.model_validate_json(
+                    checkpoint_path.read_bytes()
+                )
+                manifest = ReleaseManifest.model_validate_json(preserved_manifest.read_bytes())
+                if (
+                    cursor.operation_id != operation_id
+                    or cursor.source_root != root
+                    or cursor.retiring_root != retiring
+                    or manifest.commit_sha != sha
+                    or _hash_file(preserved_manifest)[1] != cursor.remote_manifest_sha256
+                    or _hash_file(inventory_path)[1] != cursor.inventory_sha256
+                ):
+                    raise ReleaseVerificationError("release retirement cursor differs")
+                if receipt_path.exists():
+                    receipt = SealedDirectoryRetirementReceipt.model_validate_json(
+                        receipt_path.read_bytes()
+                    )
+                    if receipt.checkpoint != cursor or cursor.phase != "retired":
+                        raise ReleaseVerificationError("release terminal receipt differs")
+                    if root.exists() or retiring.exists():
+                        raise ReleaseVerificationError("retired release reappeared")
+                    return receipt
+            else:
+                if not root.is_dir() or retiring.exists():
+                    raise ReleaseVerificationError("release retirement source is unavailable")
+                manifest_path = root / "manifest.json"
+                manifest = ReleaseManifest.model_validate_json(manifest_path.read_bytes())
+                tree = (
+                    subprocess.check_output(
+                        ["git", "--git-dir", str(self.paths.mirror), "rev-parse", sha + "^{tree}"],
+                        timeout=15,
+                    )
+                    .decode()
+                    .strip()
+                )
+                if (
+                    manifest.commit_sha != sha
+                    or Path(manifest.release_path) != root
+                    or manifest.tree_sha != tree
+                    or _hash_file(root / "uv.lock")[1] != manifest.uv_lock_sha256
+                ):
+                    raise ReleaseVerificationError("release retirement manifest differs")
+                listing = subprocess.check_output(
+                    ["git", "--git-dir", str(self.paths.mirror), "ls-tree", "-rz", sha], timeout=15
+                )
+                expected: dict[str, str] = {}
+                for entry in listing.split(b"\0"):
+                    if entry:
+                        header, name = entry.split(b"\t", 1)
+                        mode, kind, digest = header.split()
+                        if kind != b"blob" or mode not in {b"100644", b"100755"}:
+                            raise ReleaseVerificationError(
+                                "release retirement tree contains unsupported content"
+                            )
+                        expected[os.fsdecode(name)] = digest.decode()
+                count = logical = 0
+                temporary = inventory_path.with_suffix(".pending")
+                if temporary.is_symlink():
+                    raise ReleaseVerificationError("release retirement inventory is unsafe")
+                with temporary.open("w", encoding="utf-8") as stream:
+                    for parent, dirs, files in os.walk(root, followlinks=False):
+                        for name in sorted(dirs + files):
+                            path = Path(parent) / name
+                            relative = path.relative_to(root).as_posix()
+                            if path.is_symlink():
+                                if not relative.startswith(".venv/"):
+                                    raise ReleaseVerificationError(
+                                        "release contains an unknown symlink"
+                                    )
+                                continue
+                            if path.is_dir():
+                                continue
+                            generated = relative.startswith(
+                                (".venv/", "src/investment_analyst.egg-info/")
+                            ) or ("/__pycache__/" in relative and path.suffix == ".pyc")
+                            source = relative.removeprefix("build/lib/")
+                            build_source = (
+                                "src/" + source if relative.startswith("build/lib/") else None
+                            )
+                            if (
+                                relative not in expected
+                                and relative != "manifest.json"
+                                and not generated
+                                and build_source not in expected
+                            ):
+                                raise ReleaseVerificationError(
+                                    "release contains unique or unknown files"
+                                )
+                            stat_result = path.stat()
+                            blob = hashlib.sha1(
+                                f"blob {stat_result.st_size}\0".encode(), usedforsecurity=False
+                            )
+                            digest = hashlib.sha256()
+                            with path.open("rb") as reader:
+                                while chunk := reader.read(1024 * 1024):
+                                    blob.update(chunk)
+                                    digest.update(chunk)
+                            required = expected.get(relative, expected.get(build_source or ""))
+                            if required is not None and blob.hexdigest() != required:
+                                raise ReleaseVerificationError(
+                                    "release code changed from its immutable tree"
+                                )
+                            stream.write(
+                                json.dumps(
+                                    {
+                                        "path": relative,
+                                        "size_bytes": stat_result.st_size,
+                                        "sha256": digest.hexdigest(),
+                                        "device": stat_result.st_dev,
+                                        "inode": stat_result.st_ino,
+                                        "mtime_ns": stat_result.st_mtime_ns,
+                                        "ctime_ns": stat_result.st_ctime_ns,
+                                        "links": stat_result.st_nlink,
+                                        "allocated_bytes": stat_result.st_blocks * 512,
+                                    },
+                                    sort_keys=True,
+                                )
+                                + "\n"
+                            )
+                            count += 1
+                            logical += stat_result.st_size
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, inventory_path)
+                cursor = SealedDirectoryRetirementCheckpoint(
+                    operation_id=operation_id,
+                    phase="retiring",
+                    source_root=root,
+                    retiring_root=retiring,
+                    inventory_sha256=_hash_file(inventory_path)[1],
+                    remote_manifest_sha256=_hash_file(manifest_path)[1],
+                    files_confirmed=count,
+                    bytes_confirmed=logical,
+                )
+                manifest_bytes = manifest_path.read_bytes()
+                if (
+                    preserved_manifest.exists()
+                    and preserved_manifest.read_bytes() != manifest_bytes
+                ):
+                    raise ReleaseVerificationError("preserved release manifest differs")
+                if not preserved_manifest.exists():
+                    with preserved_manifest.open("xb") as stream:
+                        stream.write(manifest_bytes)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                _replace_json(checkpoint_path, cursor.model_dump(mode="json"))
+            require_unused()
+            if root.exists():
+                if retiring.exists():
+                    raise ReleaseVerificationError("release retirement detach is ambiguous")
+                _verify_owned_payload_inventory(
+                    root, inventory_path, allow_missing=False, regenerable_venv_links=True
+                )
+                os.replace(root, retiring)
+                _fsync_directory(root.parent)
+            if retiring.exists():
+                _verify_owned_payload_inventory(
+                    retiring, inventory_path, allow_missing=True, regenerable_venv_links=True
+                )
+                shutil.rmtree(retiring)
+                _fsync_directory(root.parent)
+            cursor = cursor.model_copy(update={"phase": "retired"})
+            _replace_json(checkpoint_path, cursor.model_dump(mode="json"))
+            receipt = SealedDirectoryRetirementReceipt(
+                checkpoint=cursor, completed_at=datetime.now(UTC)
+            )
+            _replace_json(receipt_path, receipt.model_dump(mode="json"))
+            return receipt
 
     def init_runtime(self) -> None:
         """Create runtime directories with strict 0700 permissions."""
@@ -1999,6 +2264,81 @@ class LocalReleaseService:
         raise ReleaseRollbackError(
             "Failed v2 activation stopped; recover the current v2 data with compatible code"
         ) from failure
+
+    def recover_interrupted_v2_activation(
+        self,
+        sha: str,
+        *,
+        workspace_root: Path,
+        previous_state: DeploymentState,
+        previous_bindings: DeploymentWorkspaceBindings,
+        deadline_seconds: float,
+    ) -> DeploymentState:
+        """Finish a durable first-v2 intention exclusively toward the same v2 root.
+
+        The cut controller owns the deployment lock and verifies live HTTP/PID
+        identity afterwards. Never call the old-root rollback path here: the
+        new process may have committed writes before the state pointer changed.
+        """
+        desired = self._workspace_binding(sha, workspace_root)
+        if desired is None or desired.workspace_format_version != 2 or deadline_seconds <= 0:
+            raise ReleaseVerificationError("Interrupted activation requires its v2 workspace")
+        current = self.load_deployment_state()
+        bindings = self.load_workspace_bindings()
+        committed = current.current == sha and _same_workspace_binding(bindings.current, desired)
+        partial_state = (
+            current.current == sha
+            and current.previous == previous_state.current
+            and bindings == previous_bindings
+        )
+        if (
+            not committed
+            and not partial_state
+            and (current != previous_state or bindings != previous_bindings)
+        ):
+            raise ReleaseVerificationError("Interrupted activation deployment ancestry differs")
+        properties = self.systemctl.show_properties(
+            LOCAL_SERVICE_UNIT_NAME, ("ActiveState", "ExecStart", "WorkingDirectory")
+        )
+        target = self.paths.releases / sha
+        matches = (
+            properties.get("WorkingDirectory") == str(target)
+            and str(target / "scripts/serve_investment_analyst.py")
+            in properties.get("ExecStart", "")
+            and str(workspace_root) in properties.get("ExecStart", "")
+        )
+        if properties.get("ActiveState") == "active" and not matches:
+            raise ReleaseVerificationError("Interrupted activation has another live runtime")
+        if not matches:
+            self.verify_pre_restart(sha, self.systemd_unit_path, workspace_root=workspace_root)
+            self.retarget_unit(sha, workspace_root=workspace_root)
+            self.systemctl.daemon_reload()
+        if properties.get("ActiveState") != "active":
+            self.systemctl.restart(LOCAL_SERVICE_UNIT_NAME)
+        healthy, _ = self.health_checker.check_health_readiness(
+            port=8765,
+            endpoints=("/api/v1/overview", "/api/v1/candidate-notifications"),
+            deadline_seconds=deadline_seconds,
+        )
+        if not healthy:
+            raise ReleaseVerificationError("Interrupted v2 activation health failed")
+        if committed:
+            return current
+        new_state = DeploymentState(
+            current=sha,
+            previous=previous_state.current,
+            updated_at=datetime.now(UTC),
+            current_release_path=str(target),
+            previous_release_path=previous_state.current_release_path,
+        )
+        self._save_deployment_state(new_state)
+        self._save_workspace_bindings(
+            DeploymentWorkspaceBindings(
+                current=desired,
+                previous=previous_bindings.current,
+            )
+        )
+        return new_state
 
     def update(
         self,

@@ -245,6 +245,8 @@ def _control_name(name: str, prefixes: tuple[str, ...]) -> bool:
         if pieces[-1] != "json":
             continue
         if len(pieces) == 2:
+            if prefix == "reconciliation-head" and re.fullmatch(r"[0-9a-f]{64}", pieces[0]):
+                return True
             try:
                 return str(UUID(pieces[0])) == pieces[0]
             except ValueError:
@@ -256,18 +258,55 @@ def _control_name(name: str, prefixes: tuple[str, ...]) -> bool:
                 continue
         if len(pieces) == 3 and pieces[0] in {"A", "source"}:
             return re.fullmatch(r"[0-9a-f]{64}", pieces[1]) is not None
+        if len(pieces) == 3 and re.fullmatch(r"[0-9a-f]{64}", pieces[1]):
+            try:
+                return str(UUID(pieces[0])) == pieces[0]
+            except ValueError:
+                continue
+        if (
+            prefix == "progress-core-append"
+            and len(pieces) == 4
+            and pieces[1] in {"raw", "observations"}
+            and re.fullmatch(r"[0-9a-f]{64}", pieces[2])
+        ):
+            try:
+                return str(UUID(pieces[0])) == pieces[0]
+            except ValueError:
+                continue
     return False
 
 
 def _require_operational_layout(root: Path) -> None:
     """Keep typed migration provenance; reject all unclassified destination state."""
-    from investment_analyst.storage.workspace_v2_inventory import WorkspaceV2InventoryState
+    from investment_analyst.storage.workspace_v2_inventory import (
+        GenerationRawCoverageProof,
+        WorkspaceV2InventoryState,
+        _OrderedFinancialDigest,
+        _ProgressFinancialWork,
+    )
     from investment_analyst.workspace.models import WorkspaceMigrationIdentity
     from investment_analyst.workspace.service import WorkspaceError, WorkspaceService
     from investment_analyst.workspace.workspace_v2_cutover import WorkspaceV2CutoverCheckpoint
+    from investment_analyst.workspace.workspace_v2_migration import (
+        _RecoveredCoreAppendIntent,
+        _RecoveredCoreBaseline,
+        _RecoveredCoreComparison,
+        _SuccessorComparison,
+        _SuccessorCoverageWork,
+        _SuccessorReservation,
+    )
     from investment_analyst.workspace.workspace_v2_migration_models import (
+        CutInvalidation,
+        GenerationContentProof,
         HistoricalTransition,
         HistoricalTransitionReceipt,
+        ProgressReconciliation,
+        ProgressReconciliationReceipt,
+        ProgressReconciliationV2,
+        ProgressRecoveryAttempt,
+        ProgressRelationshipProof,
+        ReconciliationFileReference,
+        ReconciliationHead,
         WorkspaceV2MigrationWorkCheckpoint,
         WorkspaceV2SourceTransitionState,
     )
@@ -285,7 +324,7 @@ def _require_operational_layout(root: Path) -> None:
         raise OperationalStateTransferError("operational state root is unsafe")
     known = {Path(relative).name for _, relative, _ in _DOCUMENTS}
     journals = {Path(relative).name for _, relative in _JOURNALS}
-    known.update({"aapl_local_service.lock", "aapl_daily_run.lock"})
+    known.update({"aapl_local_service.lock", "aapl_daily_run.lock", "progress-reconciliation.lock"})
     controls: tuple[tuple[type[ContractModel], tuple[str, ...]], ...] = (
         (WorkspaceMigrationIdentity, ("workspace-v2-migration-identity",)),
         (WorkspaceV2SourceTransitionState, ("workspace-v2-source-transition",)),
@@ -305,6 +344,22 @@ def _require_operational_layout(root: Path) -> None:
         (HistoricalTransitionReceipt, ("historical-transition-receipt",)),
         (WorkspaceV2CutoverCheckpoint, ("workspace-v2-cutover",)),
         (OperationalStateTransferReceipt, ("workspace-v2-operational-transfer",)),
+        (ProgressReconciliation, ("progress-reconciliation", "progress-reconciliation-generation")),
+        (ProgressReconciliationV2, ("progress-generation",)),
+        (ProgressReconciliationReceipt, ("progress-reconciliation-receipt",)),
+        (ProgressRelationshipProof, ("progress-relationships",)),
+        (_ProgressFinancialWork, ("progress-financial-work", "progress-financial-proof")),
+        (_OrderedFinancialDigest, ("progress-ordered-digest",)),
+        (_RecoveredCoreBaseline, ("progress-core-reuse",)),
+        (_RecoveredCoreAppendIntent, ("progress-core-append",)),
+        (_RecoveredCoreComparison, ("progress-core-comparison",)),
+        (_SuccessorReservation, ("progress-successor-reservation",)),
+        (_SuccessorCoverageWork, ("progress-successor-work",)),
+        (_SuccessorComparison, ("progress-successor-comparison",)),
+        (CutInvalidation, ("cut-invalidation",)),
+        (ReconciliationHead, ("reconciliation-head",)),
+        (GenerationContentProof, ("generation-content-proof",)),
+        (GenerationRawCoverageProof, ("generation-raw-coverage",)),
     )
     try:
         origin = (
@@ -315,6 +370,35 @@ def _require_operational_layout(root: Path) -> None:
     except WorkspaceError as error:
         raise OperationalStateTransferError("migration control identity is invalid") from error
 
+    referenced: dict[Path, ReconciliationFileReference] = {}
+    origin_state = state
+    head_path = state / "reconciliation-head.json"
+    if head_path.exists():
+        if head_path.is_symlink() or head_path.stat().st_size > _CHUNK_BYTES:
+            raise OperationalStateTransferError("generation head is unsafe")
+        try:
+            head = ReconciliationHead.model_validate_json(head_path.read_bytes())
+        except ValueError as error:
+            raise OperationalStateTransferError("generation head is invalid") from error
+        if head.workspace_id != identity.workspace_id:
+            raise OperationalStateTransferError("generation head workspace identity differs")
+        origin_state = head.root / "state"
+
+    def collect(value: object) -> None:
+        if isinstance(value, ReconciliationFileReference):
+            if value.path.parent in {state, origin_state} and value.role != "database":
+                local = state / value.path.name
+                previous = referenced.get(local)
+                if previous is not None and previous != value:
+                    raise OperationalStateTransferError("migration inventory references conflict")
+                referenced[local] = value
+        elif isinstance(value, ContractModel):
+            for name in type(value).model_fields:
+                collect(getattr(value, name))
+        elif isinstance(value, tuple):
+            for item in value:
+                collect(item)
+
     def parse(path: Path, model: type[ContractModel]) -> ContractModel:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > _CHUNK_BYTES:
             raise OperationalStateTransferError("migration control is unsafe")
@@ -322,6 +406,24 @@ def _require_operational_layout(root: Path) -> None:
             value = model.model_validate_json(path.read_bytes())
         except (OSError, ValueError) as error:
             raise OperationalStateTransferError("migration control is invalid") from error
+        collect(value)
+        if isinstance(value, ReconciliationHead) and value.workspace_id != identity.workspace_id:
+            raise OperationalStateTransferError("generation head workspace identity differs")
+        if (
+            isinstance(
+                value,
+                (
+                    ProgressReconciliationV2,
+                    ReconciliationHead,
+                    CutInvalidation,
+                    _RecoveredCoreAppendIntent,
+                    _SuccessorComparison,
+                ),
+            )
+            and (re.fullmatch(r"[0-9a-f]{64}", path.stem.rsplit(".", 1)[-1]))
+            and (hashlib.sha256(path.read_bytes()).hexdigest() != path.stem.rsplit(".", 1)[-1])
+        ):
+            raise OperationalStateTransferError("addressed migration control digest differs")
         owner = getattr(value, "destination_workspace_id", None)
         if isinstance(value, HistoricalTransitionReceipt):
             owner = value.transition.destination_workspace_id
@@ -358,12 +460,48 @@ def _require_operational_layout(root: Path) -> None:
             raise OperationalStateTransferError("migration control source identity differs")
         return value
 
+    # Collect only explicitly typed controls. Payloads are admitted by those
+    # exact references, never by a broad progress-* name or an ignored directory.
+    classified: set[Path] = set()
+    for entry in state.iterdir():
+        for model, prefixes in controls:
+            if _control_name(entry.name, prefixes):
+                parse(entry, model)
+                classified.add(entry)
+                break
+        else:
+            match = re.fullmatch(r"generation-baseline\.([0-9a-f-]{36})\.intent\.json", entry.name)
+            if match is not None:
+                value = parse(entry, ProgressReconciliationV2)
+                if value.generation_id != _control_operation(match[1]):
+                    raise OperationalStateTransferError("generation intent identity differs")
+                classified.add(entry)
+            attempt = re.fullmatch(
+                r"progress-recovery-attempt\.([0-9a-f-]{36})\.([0-9a-f-]{36})\.json", entry.name
+            )
+            if attempt is not None:
+                value = parse(entry, ProgressRecoveryAttempt)
+                if value.operation_id != _control_operation(attempt[1]):
+                    raise OperationalStateTransferError("recovery attempt identity differs")
+                _control_operation(attempt[2])
+                classified.add(entry)
     for entry in state.iterdir():
         if entry.is_symlink():
             raise OperationalStateTransferError("operational state contains a symlink")
         if entry.name in known and entry.is_file():
             continue
         if entry.name in journals and entry.is_dir():
+            continue
+        if entry in referenced:
+            reference = referenced[entry]
+            if not entry.is_file() or entry.stat().st_size != reference.size_bytes:
+                raise OperationalStateTransferError("referenced migration inventory differs")
+            with entry.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if digest != reference.sha256:
+                raise OperationalStateTransferError("referenced migration inventory differs")
+            continue
+        if entry in classified:
             continue
         if entry.name == "workspace-v2-source-transition-history" and entry.is_dir():
             for archived in entry.iterdir():

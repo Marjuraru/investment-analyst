@@ -7,14 +7,18 @@ inventory nor the packed journal is materialized as a Python collection.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import inspect
 import json
 import os
+import stat
+import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
-from itertools import groupby
+from itertools import groupby, tee
 from pathlib import Path
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import BinaryIO, Literal, TextIO
 from uuid import UUID, uuid4
 
@@ -251,6 +255,9 @@ class PhysicalDeltaReceipt(ContractModel):
     confirmed_files: int = Field(ge=0)
     parent_linked_files: int = Field(default=0, ge=0)
     parent_linked_bytes: int = Field(default=0, ge=0)
+    immutable_link_journals: tuple[ReconciliationFileReference, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     completed_at: UTCDateTime
 
     @model_validator(mode="after")
@@ -281,6 +288,140 @@ class WorkspaceV2PhysicalDeltaService:
 
     def __init__(self, workspace_service: WorkspaceService) -> None:
         self._workspace_service = workspace_service
+
+    def prepare_existing_link_witness(
+        self,
+        delta_root: Path,
+        slot: Path,
+        journal_root: Path,
+        *,
+        operation_id: UUID,
+        parent_manifest: Path,
+        parent_index: Path,
+        parent_proof: Path,
+        admission_path: Path,
+        byte_budget: int,
+    ) -> tuple[ReconciliationFileReference, int]:
+        """Hash prior controlled links once, without inventing historical preimages.
+
+        Nonlinked files are not described as links. Complete file/raw coverage
+        remains a separate required proof. No database is opened or linked here.
+        """
+        from investment_analyst.storage.resource_policy import (
+            MaintenanceResourceReceipt,
+            require_maintenance_admission,
+        )
+        from investment_analyst.storage.workspace_v2_inventory import (
+            WorkspaceV2ProgressReconciler,
+            _reconciliation_lock,
+            reconciliation_file_reference,
+        )
+
+        admission = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+        execution = require_maintenance_admission(admission)
+        root = _safe_root(delta_root)
+        manifest = _read_delta_manifest(root / "delta-manifest.json")
+        retained = _safe_root(manifest.source_root)
+        slot = _safe_root(slot)
+        if (
+            admission.budget.operation_id != operation_id
+            or byte_budget <= 0
+            or byte_budget
+            > admission.budget.cache_and_control_bytes + admission.budget.next_unit_growth_bytes
+            or not {
+                retained / "storage/v2/index.duckdb",
+                slot / "storage/v2/index.duckdb",
+            }.issubset({a.database for a in admission.budget.assignments})
+            or slot == retained
+            or slot.is_relative_to(retained)
+            or retained.is_relative_to(slot)
+        ):
+            raise WorkspaceV2PhysicalDeltaError(
+                "existing link witness resource/root binding differs"
+            )
+        identity = self._workspace_service.manifest(retained)
+        slot_identity = self._workspace_service.manifest(slot)
+        parent = PhysicalImmutableParentProof.model_validate_json(parent_proof.read_bytes())
+        WorkspaceV2ProgressReconciler._verify(parent.restore_receipt)
+        if (
+            identity.workspace_id != manifest.source_workspace_id
+            or slot_identity.workspace_id != identity.workspace_id
+            or parent.source_root != retained
+            or parent.source_workspace_id != identity.workspace_id
+            or parent.parent_backup_id != manifest.parent_backup_id
+            or parent.parent_manifest_sha256 != _sha256(parent_manifest)
+            or parent.parent_manifest_sha256 != manifest.parent_manifest_sha256
+            or parent.parent_index_sha256 != _sha256(parent_index)
+            or parent.parent_index_sha256 != manifest.parent_index_sha256
+            or _sha256(root / "files.jsonl") != manifest.files_sha256
+        ):
+            raise WorkspaceV2PhysicalDeltaError(
+                "existing link witness parent/image binding differs"
+            )
+        with (
+            _reconciliation_lock(retained / "state"),
+            _v2_writer_guard(retained),
+            _v2_writer_guard(slot),
+        ):
+            databases = tuple(_safe_file(p, "storage/v2/index.duckdb") for p in (retained, slot))
+            if not all(p.is_file() for p in databases) or os.path.samestat(
+                databases[0].stat(), databases[1].stat()
+            ):
+                raise WorkspaceV2PhysicalDeltaError(
+                    "mutable databases cannot share a witnessed inode"
+                )
+            if any((p / "storage/v2/index.duckdb.wal").exists() for p in (retained, slot)):
+                raise WorkspaceV2PhysicalDeltaError("existing link witness requires closed images")
+            header_path = journal_root / "header.json"
+            bindings = dict(
+                operation_id=operation_id,
+                action="LINK",
+                retained_root=retained,
+                retained_workspace_id=identity.workspace_id,
+                slot=slot,
+                inventory=reconciliation_file_reference(root / "files.jsonl", "inventory"),
+                parent_manifest=reconciliation_file_reference(parent_manifest, "control"),
+                parent_index=reconciliation_file_reference(parent_index, "inventory"),
+                parent_proof=reconciliation_file_reference(parent_proof, "control"),
+                verifier_sha256=_immutable_link_verifier_sha256(),
+                byte_budget=byte_budget,
+            )
+            if header_path.exists():
+                header = ImmutableLinkHeader.model_validate_json(header_path.read_bytes())
+                if any(getattr(header, key) != value for key, value in bindings.items()):
+                    raise WorkspaceV2PhysicalDeltaError(
+                        "existing link witness resume binding differs"
+                    )
+            else:
+                header = ImmutableLinkHeader(**bindings, created_at=datetime.now(UTC))
+            journal = ImmutableLinkJournal(journal_root, header).open()
+            pending: list[tuple[int, PhysicalDeltaFile]] = []
+            for ordinal, item in enumerate(_iter_delta_files(root / "files.jsonl")):
+                if ordinal <= journal.confirmed_inventory_ordinal or item.deleted:
+                    continue
+                if not (
+                    item.path.startswith("storage/v2/raw/raw/sha256/")
+                    or item.path.startswith("data/documents/sha256/")
+                ):
+                    continue
+                left, right = _safe_file(retained, item.path), _safe_file(slot, item.path)
+                before, restored = (
+                    ImmutableLinkIdentity.observe(left),
+                    ImmutableLinkIdentity.observe(right),
+                )
+                if (before.device, before.inode) != (restored.device, restored.inode):
+                    continue
+                pending.append((ordinal, item))
+                if len(pending) == 256:
+                    journal.apply_page(tuple(pending), adopt_existing=True)
+                    execution.record_measurement("controlled_links_confirmed", journal._ordinal)
+                    pending.clear()
+            if pending:
+                journal.apply_page(tuple(pending), adopt_existing=True)
+            terminal = journal_root / (
+                f"page-{journal._page - 1:08d}.trailer.json" if journal._page else "header.json"
+            )
+            return reconciliation_file_reference(terminal, "control"), journal._ordinal
 
     def prepare_immutable_parent_reuse(
         self,
@@ -332,6 +473,104 @@ class WorkspaceV2PhysicalDeltaService:
         _write_new_json(destination, proof.model_dump(mode="json"))
         return proof
 
+    def measure_prepared_plan(
+        self,
+        source_root: Path,
+        parent_index: Path,
+        prepared_delta: Path,
+        *,
+        link_witness: ReconciliationFileReference,
+    ) -> dict[str, int | float | bool]:
+        """Measure E4 without publishing/replacing a plan, epoch or upload object."""
+        from investment_analyst.storage.resource_policy import connection_policy
+
+        source, prepared = _safe_root(source_root), _safe_root(prepared_delta)
+        manifest = _read_delta_manifest(prepared / "delta-manifest.json")
+        if manifest.source_root != source:
+            raise WorkspaceV2PhysicalDeltaError("plan measurement source or witness differs")
+        identity = self._workspace_service.manifest(source)
+        header = ImmutableLinkHeader.model_validate_json(
+            _safe_file(link_witness.path.parent, "header.json").read_bytes()
+        )
+        if (
+            manifest.source_root != source
+            or identity.format_version != 2
+            or identity.workspace_id != manifest.source_workspace_id
+            or header.retained_root != source
+            or header.retained_workspace_id != manifest.source_workspace_id
+            or header.parent_index.path != parent_index
+            or header.parent_index.sha256 != manifest.parent_index_sha256
+        ):
+            raise WorkspaceV2PhysicalDeltaError("plan measurement source or witness differs")
+        policy = connection_policy(source / "storage/v2/index.duckdb")
+        if policy.temp_directory is None:
+            raise WorkspaceV2PhysicalDeltaError("plan measurement requires admitted temporaries")
+        policy.temp_directory.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        parent = verify_physical_delta_index(parent_index)
+        if (
+            parent.parent_backup_id != manifest.parent_backup_id
+            or parent.source_workspace_id != manifest.source_workspace_id
+        ):
+            raise WorkspaceV2PhysicalDeltaError("plan measurement parent differs")
+        index_seconds = time.monotonic() - started
+        started = time.monotonic()
+        files = logical = serialized = new_blocks = new_bytes = 0
+        probes: list[PhysicalDeltaBlock] = []
+        with _v2_writer_guard(source):
+            for item in _plan_prepared_delta_files(
+                source,
+                prepared,
+                manifest,
+                prepared,
+                8 * 1024 * 1024,
+                link_witness,
+                materialize=False,
+            ):
+                files += not item.deleted
+                logical += item.size_bytes
+                serialized += len((_compact_json(item.model_dump(mode="json")) + "\n").encode())
+                delta_blocks = tuple(b for b in item.blocks if b.origin == "delta")
+                new_blocks += len(delta_blocks)
+                new_bytes += sum(b.length_bytes for b in delta_blocks)
+            read_seconds = time.monotonic() - started
+            # At most three existing immutable units, never a workspace/DB copy.
+            for item in _iter_delta_files(prepared / "files.jsonl"):
+                if item.path == "storage/v2/index.duckdb":
+                    probes = sorted(
+                        (b for b in item.blocks if b.origin == "delta"),
+                        key=lambda b: b.length_bytes,
+                        reverse=True,
+                    )[:3]
+                    break
+            slowest = 0.0
+            for block in probes:
+                origin = _safe_file(prepared, str(block.object_key))
+                with TemporaryDirectory(
+                    dir=policy.temp_directory, prefix="delta-unit-probe-"
+                ) as folder:
+                    unit_started = time.monotonic()
+                    copied = _plan_delta_file(
+                        origin.parent, origin.name, (), Path(folder), 8 * 1024 * 1024
+                    )
+                    elapsed = time.monotonic() - unit_started
+                    if (copied.sha256, copied.size_bytes) != (block.sha256, block.length_bytes):
+                        raise WorkspaceV2PhysicalDeltaError("plan measurement unit digest differs")
+                    slowest = max(slowest, elapsed)
+        return {
+            "calibration_only": True,
+            "plan_published": False,
+            "parent_index_seconds": index_seconds,
+            "read_and_encode_seconds": read_seconds,
+            "file_count": files,
+            "logical_bytes": logical,
+            "serialized_bytes": serialized,
+            "new_blocks": new_blocks,
+            "new_bytes": new_bytes,
+            "write_probe_units": len(probes),
+            "slowest_write_unit_seconds": slowest,
+        }
+
     def plan(
         self,
         source_root: Path,
@@ -343,6 +582,8 @@ class WorkspaceV2PhysicalDeltaService:
         block_bytes: int = 8 * 1024 * 1024,
         allow_incomplete_historical: bool = False,
         immutable_parent_proof: Path | None = None,
+        immutable_link_witness: ReconciliationFileReference | None = None,
+        prepared_delta: Path | None = None,
     ) -> PhysicalDeltaManifest:
         """Resume by verifying the exact recorded prefix, never by trusting mtime."""
         if not 1 <= block_bytes <= 8 * 1024 * 1024:
@@ -364,7 +605,10 @@ class WorkspaceV2PhysicalDeltaService:
                 parent_manifest_sha256,
                 self._workspace_service,
                 parent,
+                immutable_link_witness,
             )
+        elif immutable_link_witness is not None:
+            raise WorkspaceV2PhysicalDeltaError("link witness requires its historical parent")
         from investment_analyst.storage.workspace_v2_inventory import historical_transition_status
 
         historical_state = historical_transition_status(source)
@@ -389,8 +633,30 @@ class WorkspaceV2PhysicalDeltaService:
         )
         binding_path = output / "plan-binding.json"
         binding_document = {"manifest": binding.model_dump(mode="json"), "block_bytes": block_bytes}
+        prepared_manifest = None
+        if prepared_delta is not None:
+            prepared_delta = _safe_root(prepared_delta)
+            if prepared_delta == output or prepared_delta.is_relative_to(source):
+                raise WorkspaceV2PhysicalDeltaError("prepared delta roots differ")
+            prepared_manifest = _read_delta_manifest(prepared_delta / "delta-manifest.json")
+            if (
+                prepared_manifest.epoch == epoch
+                or prepared_manifest.source_root != source
+                or prepared_manifest.source_workspace_id != identity.workspace_id
+                or prepared_manifest.parent_backup_id != parent.parent_backup_id
+                or prepared_manifest.parent_manifest_sha256 != parent_manifest_sha256
+                or prepared_manifest.parent_index_sha256 != binding.parent_index_sha256
+            ):
+                raise WorkspaceV2PhysicalDeltaError("prepared delta parent or identity differs")
+            binding_document["prepared_delta_manifest_sha256"] = _sha256(
+                prepared_delta / "delta-manifest.json"
+            )
         if immutable_parent_proof is not None:
             binding_document["immutable_parent_proof_sha256"] = _sha256(immutable_parent_proof)
+        if immutable_link_witness is not None:
+            binding_document["immutable_link_witness"] = immutable_link_witness.model_dump(
+                mode="json"
+            )
         if binding_path.exists():
             if (
                 binding_path.is_symlink()
@@ -409,7 +675,21 @@ class WorkspaceV2PhysicalDeltaService:
         digest = hashlib.sha256()
         count = deleted = logical = changed = reused = records = 0
         with _v2_writer_guard(source), partial.open("a", encoding="utf-8", newline="\n") as stream:
-            for item in _plan_delta_files(source, parent_index, output, block_bytes, reuse):
+            planned_files = (
+                _plan_delta_files(
+                    source, parent_index, output, block_bytes, reuse, immutable_link_witness
+                )
+                if prepared_manifest is None or prepared_delta is None
+                else _plan_prepared_delta_files(
+                    source,
+                    prepared_delta,
+                    prepared_manifest,
+                    output,
+                    block_bytes,
+                    immutable_link_witness,
+                )
+            )
+            for item in planned_files:
                 encoded = (_compact_json(item.model_dump(mode="json")) + "\n").encode()
                 digest.update(encoded)
                 records += 1
@@ -572,6 +852,9 @@ class WorkspaceV2PhysicalDeltaService:
         reuse_parent_immutables: bool = False,
         independent_cache_root: Path | None = None,
         configuration_sha256: str | None = None,
+        immutable_link_journal: Path | None = None,
+        immutable_link_witness: ReconciliationFileReference | None = None,
+        journal_byte_budget: int = 1_000_000_000,
     ) -> PhysicalDeltaReceipt:
         """Materialize parent slices plus independently downloaded new blocks.
 
@@ -625,6 +908,14 @@ class WorkspaceV2PhysicalDeltaService:
         ):
             raise WorkspaceV2PhysicalDeltaError("physical delta recovery roots must be disjoint")
         binding = {"manifest_sha256": _sha256(manifest_path), "destination": str(target)}
+        if (immutable_link_journal is None) != (immutable_link_witness is None):
+            raise WorkspaceV2PhysicalDeltaError("controlled recovery requires journal and witness")
+        if immutable_link_journal is not None:
+            if not reuse_parent_immutables:
+                raise WorkspaceV2PhysicalDeltaError("controlled recovery requires immutable reuse")
+            binding["immutable_link_journal"] = str(immutable_link_journal)
+            assert immutable_link_witness is not None
+            binding["immutable_link_witness"] = immutable_link_witness.model_dump(mode="json")
         if reuse_parent_immutables:
             binding["reuse_parent_immutables"] = True
         if checkpoint_path.exists():
@@ -642,6 +933,24 @@ class WorkspaceV2PhysicalDeltaService:
         current = next(parents, None)
         count = linked_files = linked_bytes = 0
         with _v2_writer_guard(parent_root):
+            link_proofs: tuple[ReconciliationFileReference, ...] = ()
+            witnesses: Iterator[tuple[PhysicalDeltaFile, ImmutableLinkIdentity]] = iter(())
+            if immutable_link_journal is not None:
+                assert immutable_link_witness is not None
+                link_proofs = (
+                    _restore_controlled_parent_links(
+                        root,
+                        manifest,
+                        parent_root,
+                        parent_index,
+                        target,
+                        immutable_link_journal,
+                        immutable_link_witness,
+                        journal_byte_budget,
+                    ),
+                )
+                witnesses = _iter_retained_link_witness(link_proofs[0])
+            witnessed = next(witnesses, None)
             for item in _iter_delta_files(root / "files.jsonl"):
                 count += 1
                 while current is not None and _path_order(current[0]) < _path_order(item.path):
@@ -656,6 +965,23 @@ class WorkspaceV2PhysicalDeltaService:
                 if current is not None and current[0] == item.path:
                     current = next(parents, None)
                 destination_file = _safe_file(target, item.path)
+                if witnessed is not None and _path_order(witnessed[0].path) < _path_order(
+                    item.path
+                ):
+                    raise WorkspaceV2PhysicalDeltaError("controlled recovery member is missing")
+                if witnessed is not None and witnessed[0].path == item.path:
+                    sealed, identity = witnessed
+                    if (
+                        item.deleted
+                        or item.sha256 != sealed.sha256
+                        or item.size_bytes != sealed.size_bytes
+                        or ImmutableLinkIdentity.observe(destination_file) != identity
+                    ):
+                        raise WorkspaceV2PhysicalDeltaError("controlled recovery member differs")
+                    linked_files += 1
+                    linked_bytes += item.size_bytes
+                    witnessed = next(witnesses, None)
+                    continue
                 if item.deleted:
                     if destination_file.exists():
                         raise WorkspaceV2PhysicalDeltaError(
@@ -673,7 +999,11 @@ class WorkspaceV2PhysicalDeltaService:
                         linked_bytes += item.size_bytes
                     continue
                 destination_file.parent.mkdir(parents=True, exist_ok=True)
-                if reuse_parent_immutables and _parent_immutable_file(item):
+                if (
+                    reuse_parent_immutables
+                    and immutable_link_journal is None
+                    and _parent_immutable_file(item)
+                ):
                     parent_file = _safe_file(parent_root, item.path)
                     _verify_file(parent_file, item.size_bytes, item.sha256)
                     os.link(parent_file, destination_file, follow_symlinks=False)
@@ -728,6 +1058,8 @@ class WorkspaceV2PhysicalDeltaService:
                     _fsync_directory(destination_file.parent)
                 finally:
                     temporary.unlink(missing_ok=True)
+            if witnessed is not None:
+                raise WorkspaceV2PhysicalDeltaError("controlled recovery exceeds sealed image")
         identity = self._workspace_service.manifest(target)
         if identity.workspace_id != manifest.source_workspace_id or identity.format_version != 2:
             raise WorkspaceV2PhysicalDeltaError(
@@ -743,6 +1075,7 @@ class WorkspaceV2PhysicalDeltaService:
             confirmed_files=count,
             parent_linked_files=linked_files,
             parent_linked_bytes=linked_bytes,
+            immutable_link_journals=link_proofs,
             completed_at=datetime.now(UTC),
         )
         if receipt_path.exists():
@@ -756,6 +1089,103 @@ class WorkspaceV2PhysicalDeltaService:
         return receipt
 
 
+def _restore_controlled_parent_links(
+    delta_root: Path,
+    manifest: PhysicalDeltaManifest,
+    retained: Path,
+    parent_index: Path,
+    slot: Path,
+    journal_root: Path,
+    previous: ReconciliationFileReference,
+    byte_budget: int,
+) -> ReconciliationFileReference:
+    """Reuse the retired slot for a new epoch, preserving the old inode chain.
+
+    Only members of the previous sealed inventory are linked. Other files
+    follow ordinary parent-range/independent-Drive materialization. The old
+    inventory and journal are never rewritten to describe the newer image.
+    """
+    from investment_analyst.storage.workspace_v2_inventory import (
+        WorkspaceV2ProgressReconciler,
+        reconciliation_file_reference,
+    )
+
+    WorkspaceV2ProgressReconciler._verify(previous)
+    prior = ImmutableLinkHeader.model_validate_json(
+        _safe_file(previous.path.parent, "header.json").read_bytes()
+    )
+    if (
+        prior.action != "UNLINK"
+        or prior.retained_root != retained
+        or prior.slot != slot
+        or prior.retained_workspace_id != manifest.source_workspace_id
+        or prior.parent_manifest.sha256 != manifest.parent_manifest_sha256
+        or prior.parent_index != reconciliation_file_reference(parent_index, "inventory")
+        or prior.verifier_sha256 != _immutable_link_verifier_sha256()
+    ):
+        raise WorkspaceV2PhysicalDeltaError("controlled recovery predecessor binding differs")
+    header = prior.model_copy(
+        update={
+            "action": "LINK",
+            "operation_id": manifest.epoch,
+            "previous_journal": previous,
+            "byte_budget": byte_budget,
+            "created_at": datetime.now(UTC),
+        }
+    )
+    header_path = journal_root / "header.json"
+    if header_path.exists():
+        persisted = ImmutableLinkHeader.model_validate_json(
+            _safe_file(journal_root, "header.json").read_bytes()
+        )
+        if persisted.model_copy(update={"created_at": header.created_at}) != header:
+            raise WorkspaceV2PhysicalDeltaError("controlled recovery journal binding differs")
+        header = persisted
+    # model_copy does not validate updates; validate before any inode mutation.
+    header = ImmutableLinkHeader.model_validate_json(header.model_dump_json())
+    journal = ImmutableLinkJournal(journal_root, header).open()
+    confirmed = journal.confirmed_inventory_ordinal
+    # The lookahead is at most one bounded page ahead of apply_page. Parse the
+    # authenticated predecessor once, retaining the same validation/cursor.
+    assert journal._prior is not None
+    previous_entries, journal._prior = tee(journal._prior)
+    previous_entry = next(previous_entries, None)
+    current_files = iter(_iter_delta_files(delta_root / "files.jsonl"))
+    current = next(current_files, None)
+    page: list[tuple[int, PhysicalDeltaFile]] = []
+    for ordinal, item in enumerate(_iter_delta_files(header.inventory.path)):
+        if previous_entry is None:
+            break
+        if ordinal != previous_entry.inventory_ordinal:
+            continue
+        while current is not None and _path_order(current.path) < _path_order(item.path):
+            current = next(current_files, None)
+        if (
+            current is None
+            or current.path != item.path
+            or current.size_bytes != item.size_bytes
+            or current.sha256 != item.sha256
+            or not _parent_immutable_file(current)
+        ):
+            raise WorkspaceV2PhysicalDeltaError("controlled recovery predecessor member differs")
+        if ordinal > confirmed:
+            page.append((ordinal, item))
+            if len(page) == 256:
+                _apply_controlled_link_page(journal, tuple(page))
+                page.clear()
+        previous_entry = next(previous_entries, None)
+    if previous_entry is not None:
+        raise WorkspaceV2PhysicalDeltaError("controlled recovery predecessor is incomplete")
+    if page:
+        _apply_controlled_link_page(journal, tuple(page))
+    terminal = (
+        journal_root / f"page-{journal._page - 1:08d}.trailer.json"
+        if journal._page
+        else journal_root / "header.json"
+    )
+    return reconciliation_file_reference(terminal, "control")
+
+
 def _load_immutable_parent_proof(
     path: Path,
     source: Path,
@@ -763,6 +1193,7 @@ def _load_immutable_parent_proof(
     parent_manifest_sha256: str,
     service: WorkspaceService,
     parent: PhysicalDeltaIndexTrailer,
+    link_witness: ReconciliationFileReference | None = None,
 ) -> PhysicalImmutableParentProof:
     from investment_analyst.workspace.workspace_v2_remote import RemoteBackupRestoreReceipt
 
@@ -772,6 +1203,25 @@ def _load_immutable_parent_proof(
     control = proof.restore_receipt
     _verify_file(control.path, control.size_bytes, control.sha256)
     receipt = RemoteBackupRestoreReceipt.model_validate_json(control.path.read_bytes())
+    if link_witness is not None:
+        from investment_analyst.storage.workspace_v2_inventory import (
+            WorkspaceV2ProgressReconciler,
+            reconciliation_file_reference,
+        )
+
+        WorkspaceV2ProgressReconciler._verify(link_witness)
+        header = ImmutableLinkHeader.model_validate_json(
+            _safe_file(link_witness.path.parent, "header.json").read_bytes()
+        )
+        if (
+            header.retained_root != source
+            or header.retained_workspace_id != proof.source_workspace_id
+            or header.parent_proof != reconciliation_file_reference(path, "control")
+            or header.parent_index != reconciliation_file_reference(parent_index, "inventory")
+            or header.parent_manifest.sha256 != parent_manifest_sha256
+            or header.verifier_sha256 != _immutable_link_verifier_sha256()
+        ):
+            raise WorkspaceV2PhysicalDeltaError("immutable parent link witness binding differs")
     if (
         proof.source_root != source
         or proof.source_workspace_id != service.manifest(source).workspace_id
@@ -784,7 +1234,7 @@ def _load_immutable_parent_proof(
         or proof.source_workspace_id != receipt.restored_workspace_id
         or proof.parent_manifest_sha256 != receipt.remote_manifest_sha256
         or proof.restored_at != receipt.completed_at
-        or proof.verifier_sha256 != _sha256(Path(__file__))
+        or (link_witness is None and proof.verifier_sha256 != _sha256(Path(__file__)))
     ):
         raise WorkspaceV2PhysicalDeltaError("immutable parent proof binding differs")
     return proof
@@ -795,6 +1245,7 @@ def _cached_immutable_parent_file(
     relative: str,
     prior: tuple[PhysicalDeltaIndexEntry, ...],
     proof: PhysicalImmutableParentProof | None,
+    witnessed: tuple[PhysicalDeltaFile, ImmutableLinkIdentity] | None = None,
 ) -> PhysicalDeltaFile | None:
     if (
         proof is None
@@ -804,12 +1255,21 @@ def _cached_immutable_parent_file(
         or not prior[0].file_size_bytes
     ):
         return None
-    stat = _safe_file(root, relative).stat()
+    if witnessed is not None:
+        # This last observation supplies both the proof check and size/ctime;
+        # a separate earlier stat adds no protection against a later mutation.
+        identity = ImmutableLinkIdentity.observe(_safe_file(root, relative))
+        if identity != witnessed[1]:
+            raise WorkspaceV2PhysicalDeltaError("immutable witness changed before consumption")
+        size, ctime_ns = identity.size, identity.ctime_ns
+    else:
+        metadata = _safe_file(root, relative).stat()
+        size, ctime_ns = metadata.st_size, metadata.st_ctime_ns
     delta = proof.restored_at - datetime(1970, 1, 1, tzinfo=UTC)
     restored_ns = (delta.days * 86400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1000
-    if stat.st_size != prior[0].file_size_bytes or stat.st_ctime_ns > restored_ns:
+    if size != prior[0].file_size_bytes or (ctime_ns > restored_ns and witnessed is None):
         return None
-    return PhysicalDeltaFile(
+    cached = PhysicalDeltaFile(
         path=relative,
         size_bytes=prior[0].file_size_bytes,
         sha256=prior[0].file_sha256,
@@ -823,6 +1283,9 @@ def _cached_immutable_parent_file(
             for entry in prior
         ),
     )
+    if witnessed is not None and witnessed[0] != cached:
+        raise WorkspaceV2PhysicalDeltaError("immutable witness differs from parent blocks")
+    return cached
 
 
 def _parent_immutable_file(item: PhysicalDeltaFile) -> bool:
@@ -927,8 +1390,12 @@ def _read_delta_manifest(path: Path) -> PhysicalDeltaManifest:
         raise WorkspaceV2PhysicalDeltaError("physical delta manifest is malformed") from error
 
 
-def _iter_delta_files(path: Path) -> Iterator[PhysicalDeltaFile]:
+def _iter_delta_files(
+    path: Path, *, manifest: PhysicalDeltaManifest | None = None
+) -> Iterator[PhysicalDeltaFile]:
     previous: tuple[tuple[str, ...], str] | None = None
+    digest = hashlib.sha256()
+    files = deleted = logical = changed = reused = 0
     try:
         if path.is_symlink():
             raise WorkspaceV2PhysicalDeltaError("physical delta inventory is unsafe")
@@ -941,9 +1408,28 @@ def _iter_delta_files(path: Path) -> Iterator[PhysicalDeltaFile]:
                 if previous is not None and key <= previous:
                     raise WorkspaceV2PhysicalDeltaError("physical delta file ordering differs")
                 previous = key
+                if manifest is not None:
+                    digest.update(line)
+                    files += not item.deleted
+                    deleted += item.deleted
+                    logical += item.size_bytes
+                    changed += sum(b.length_bytes for b in item.blocks if b.origin == "delta")
+                    reused += sum(b.length_bytes for b in item.blocks if b.origin == "parent")
                 yield item
     except (ValueError, OSError) as error:
         raise WorkspaceV2PhysicalDeltaError("physical delta file inventory is malformed") from error
+    if manifest is not None and (
+        (files, deleted, logical, changed, reused)
+        != (
+            manifest.file_count,
+            manifest.deleted_count,
+            manifest.logical_bytes,
+            manifest.new_bytes,
+            manifest.reused_bytes,
+        )
+        or digest.hexdigest() != manifest.files_sha256
+    ):
+        raise WorkspaceV2PhysicalDeltaError("physical delta inventory accounting or seal differs")
 
 
 def _validate_delta_inventory(path: Path, manifest: PhysicalDeltaManifest) -> None:
@@ -970,6 +1456,12 @@ def _path_order(path: str) -> tuple[tuple[str, ...], str]:
 
 
 def _source_files(root: Path) -> Iterator[str]:
+    for relative, _ in _source_file_metadata(root):
+        yield relative
+
+
+def _source_file_metadata(root: Path) -> Iterator[tuple[str, os.stat_result]]:
+    """Share each safe leaf observation with complete coverage, without a cache."""
     for parent, directories, filenames in os.walk(root, followlinks=False):
         directories.sort()
         filenames.sort()
@@ -978,9 +1470,10 @@ def _source_files(root: Path) -> Iterator[str]:
             _safe_file(root, (directory / name).relative_to(root).as_posix())
         for name in filenames:
             relative = (directory / name).relative_to(root).as_posix()
-            if not _safe_file(root, relative).is_file():
+            metadata = _safe_file(root, relative).lstat()
+            if not stat.S_ISREG(metadata.st_mode):
                 raise WorkspaceV2PhysicalDeltaError("physical delta source is not a regular file")
-            yield relative
+            yield relative, metadata
 
 
 def _plan_delta_files(
@@ -989,10 +1482,16 @@ def _plan_delta_files(
     output: Path,
     block_bytes: int,
     immutable_parent: PhysicalImmutableParentProof | None = None,
+    link_witness: ReconciliationFileReference | None = None,
 ) -> Iterator[PhysicalDeltaFile]:
     parents = iter(groupby(iter_physical_delta_index(parent_index), key=lambda item: item.path))
     current = next(parents, None)
+    witnesses = iter(()) if link_witness is None else _iter_retained_link_witness(link_witness)
+    witness = next(witnesses, None)
     for relative in _source_files(source):
+        if witness is not None and _path_order(witness[0].path) < _path_order(relative):
+            raise WorkspaceV2PhysicalDeltaError("witnessed immutable member disappeared")
+        witnessed = witness if witness is not None and witness[0].path == relative else None
         while current is not None and _path_order(current[0]) < _path_order(relative):
             yield PhysicalDeltaFile(
                 path=current[0],
@@ -1006,7 +1505,7 @@ def _plan_delta_files(
                 pass
             current = next(parents, None)
         prior = () if current is None or current[0] != relative else tuple(current[1])
-        cached = _cached_immutable_parent_file(source, relative, prior, immutable_parent)
+        cached = _cached_immutable_parent_file(source, relative, prior, immutable_parent, witnessed)
         planned = (
             cached
             if cached is not None
@@ -1020,8 +1519,12 @@ def _plan_delta_files(
         ):
             raise WorkspaceV2PhysicalDeltaError("immutable source content-address binding differs")
         yield planned
+        if witnessed is not None:
+            witness = next(witnesses, None)
         if current is not None and current[0] == relative:
             current = next(parents, None)
+    if witness is not None:
+        raise WorkspaceV2PhysicalDeltaError("witnessed immutable suffix disappeared")
     while current is not None:
         yield PhysicalDeltaFile(
             path=current[0],
@@ -1035,12 +1538,90 @@ def _plan_delta_files(
         current = next(parents, None)
 
 
+def _plan_prepared_delta_files(
+    source: Path,
+    prepared_root: Path,
+    manifest: PhysicalDeltaManifest,
+    output: Path,
+    block_bytes: int,
+    link_witness: ReconciliationFileReference | None,
+    *,
+    materialize: bool = True,
+) -> Iterator[PhysicalDeltaFile]:
+    """Reuse sealed W2 block provenance, never its mutable DB or a stale inode."""
+    previous = iter(_iter_delta_files(prepared_root / "files.jsonl", manifest=manifest))
+    current = next(previous, None)
+    witnesses = iter(()) if link_witness is None else _iter_retained_link_witness(link_witness)
+    witness = next(witnesses, None)
+    for relative in _source_files(source):
+        if witness is not None and _path_order(witness[0].path) < _path_order(relative):
+            raise WorkspaceV2PhysicalDeltaError("witnessed immutable member disappeared")
+        while current is not None and _path_order(current.path) < _path_order(relative):
+            yield PhysicalDeltaFile(
+                path=current.path,
+                deleted=True,
+                size_bytes=0,
+                sha256=hashlib.sha256(b"").hexdigest(),
+                blocks=(),
+            )
+            current = next(previous, None)
+        known = current if current is not None and current.path == relative else None
+        witnessed = witness if witness is not None and witness[0].path == relative else None
+        if witnessed is not None:
+            if known != witnessed[0] or not _parent_immutable_file(known):
+                raise WorkspaceV2PhysicalDeltaError("prepared immutable member binding differs")
+            if ImmutableLinkIdentity.observe(_safe_file(source, relative)) != witnessed[1]:
+                raise WorkspaceV2PhysicalDeltaError("immutable witness changed before consumption")
+            planned = known
+            witness = next(witnesses, None)
+        else:
+            # Only base-44 parent fragments can retain origin=parent. W2 delta
+            # fragments are hashed afresh and keep their content-addressed remote
+            # object keys; DB block equality is never inferred from the old plan.
+            # Delta ranges also delimit the next parent range. Dropping them
+            # would merge across parent boundaries and manufacture new objects.
+            # They supply lengths only: _plan_delta_file never reuses them as
+            # parent references, even when their freshly computed hash matches.
+            prior = () if known is None else known.blocks
+            planned = (
+                _plan_delta_file(source, relative, prior, output, block_bytes)
+                if materialize
+                else _plan_delta_file(
+                    source, relative, prior, output, block_bytes, materialize=False
+                )
+            )
+            if (
+                relative.startswith(("storage/v2/raw/raw/sha256/", "data/documents/sha256/"))
+                and _valid_digest(Path(relative).name)
+                and Path(relative).name != planned.sha256
+            ):
+                raise WorkspaceV2PhysicalDeltaError(
+                    "immutable source content-address binding differs"
+                )
+        yield planned
+        if known is not None:
+            current = next(previous, None)
+    if witness is not None:
+        raise WorkspaceV2PhysicalDeltaError("witnessed immutable suffix disappeared")
+    while current is not None:
+        yield PhysicalDeltaFile(
+            path=current.path,
+            deleted=True,
+            size_bytes=0,
+            sha256=hashlib.sha256(b"").hexdigest(),
+            blocks=(),
+        )
+        current = next(previous, None)
+
+
 def _plan_delta_file(
     root: Path,
     relative: str,
-    prior: tuple[PhysicalDeltaIndexEntry, ...],
+    prior: tuple[PhysicalDeltaIndexEntry, ...] | tuple[PhysicalDeltaBlock, ...],
     output: Path,
     block_bytes: int,
+    *,
+    materialize: bool = True,
 ) -> PhysicalDeltaFile:
     path = _safe_file(root, relative)
     before = path.stat()
@@ -1072,11 +1653,17 @@ def _plan_delta_file(
             sha = digest.hexdigest()
             reusable = (
                 previous is not None
+                and (isinstance(previous, PhysicalDeltaIndexEntry) or previous.origin == "parent")
                 and previous.length_bytes == length
-                and previous.fragment_sha256 == sha
+                and (
+                    previous.fragment_sha256
+                    if isinstance(previous, PhysicalDeltaIndexEntry)
+                    else previous.sha256
+                )
+                == sha
             )
             key = None if reusable else f"physical-delta/objects/{sha}.bin"
-            if key is not None:
+            if key is not None and materialize:
                 target = _safe_file(output, key)
                 if target.exists():
                     _verify_file(target, length, sha)
@@ -2106,7 +2693,7 @@ def _verify_full_recovery_coverage(
     """
     from duckdb import DuckDBPyConnection
 
-    from investment_analyst.storage.resource_policy import execute_bounded
+    from investment_analyst.storage.resource_policy import connection_policy, execute_bounded
 
     if not isinstance(connection, DuckDBPyConnection):
         raise WorkspaceV2PhysicalDeltaError("raw coverage requires its admitted native connection")
@@ -2115,33 +2702,54 @@ def _verify_full_recovery_coverage(
         _safe_file(root, "storage/v2/index.duckdb").resolve()
     }:
         raise WorkspaceV2PhysicalDeltaError("raw coverage native database binding differs")
-    _validate_delta_inventory(inventory, manifest)
-    actual = iter(_source_files(_safe_root(root)))
+    actual = iter(_source_file_metadata(_safe_root(root)))
     files = total = raw_files = 0
-    pending: list[tuple[str, str]] = []
     table = "_physical_raw_coverage_" + uuid4().hex
+    policy = connection_policy(_safe_file(root, "storage/v2/index.duckdb"))
+    if policy.temp_directory is None:
+        raise WorkspaceV2PhysicalDeltaError(
+            "raw coverage requires its admitted temporary directory"
+        )
     execute_bounded(connection, f"CREATE TEMP TABLE {table}(path VARCHAR,checksum VARCHAR)")
     try:
-        for item in _iter_delta_files(inventory):
-            if item.deleted:
-                continue
-            if (
-                next(actual, None) != item.path
-                or _safe_file(root, item.path).stat().st_size != item.size_bytes
-            ):
-                raise WorkspaceV2PhysicalDeltaError("recovery physical path coverage differs")
-            files += 1
-            total += item.size_bytes
-            if item.path.startswith("storage/v2/raw/raw/sha256/"):
-                if Path(item.path).name != item.sha256:
-                    raise WorkspaceV2PhysicalDeltaError("recovery raw file address differs")
-                pending.append((item.path.removeprefix("storage/v2/raw/"), item.sha256))
-                raw_files += 1
-                if len(pending) == 256:
-                    connection.executemany(f"INSERT INTO {table} VALUES (?,?)", pending)
-                    pending.clear()
-        if pending:
-            connection.executemany(f"INSERT INTO {table} VALUES (?,?)", pending)
+        # One bounded projection in the admitted spill directory replaces
+        # thousands of native statement preparations. It contains only paths
+        # and checksums, never payloads or reconstructed financial models.
+        with NamedTemporaryFile(
+            mode="w",
+            newline="",
+            encoding="utf-8",
+            dir=policy.temp_directory,
+            prefix="physical-raw-coverage-",
+            suffix=".tsv",
+        ) as projection:
+            writer = csv.writer(projection, delimiter="\t", quoting=csv.QUOTE_ALL)
+            for item in _iter_delta_files(inventory, manifest=manifest):
+                if item.deleted:
+                    continue
+                observed = next(actual, None)
+                if (
+                    observed is None
+                    or observed[0] != item.path
+                    or observed[1].st_size != item.size_bytes
+                ):
+                    raise WorkspaceV2PhysicalDeltaError("recovery physical path coverage differs")
+                files += 1
+                total += item.size_bytes
+                if item.path.startswith("storage/v2/raw/raw/sha256/"):
+                    if Path(item.path).name != item.sha256:
+                        raise WorkspaceV2PhysicalDeltaError("recovery raw file address differs")
+                    writer.writerow((item.path.removeprefix("storage/v2/raw/"), item.sha256))
+                    raw_files += 1
+            projection.flush()
+            if raw_files:
+                execute_bounded(
+                    connection,
+                    f"INSERT INTO {table} SELECT path,checksum FROM read_csv(?, "
+                    "columns={'path':'VARCHAR','checksum':'VARCHAR'}, delim='\t', "
+                    "header=false, quote='\"', escape='\"')",
+                    [projection.name],
+                )
         if next(actual, None) is not None or (files, total) != (
             manifest.file_count,
             manifest.logical_bytes,
@@ -2275,6 +2883,8 @@ class ImmutableLinkTrailer(ContractModel):
     confirmed_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     previous_trailer_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     confirmed_bytes: int = Field(ge=0)
+    confirmed_offset_bytes: int = Field(ge=0)
+    header_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     generation: UUID
 
 
@@ -2293,6 +2903,7 @@ class ImmutableLinkJournal:
         self._budget_used = 0
         self._previous: str | None = None
         self._page = 0
+        self._confirmed_offset = 0
         self._prior: Iterator[ImmutableLinkEntry] | None = None
 
     def open(self) -> ImmutableLinkJournal:
@@ -2310,15 +2921,23 @@ class ImmutableLinkJournal:
         self.root.mkdir(parents=True, exist_ok=True)
         document = self.header.model_dump_json().encode() + b"\n"
         self._seal(self.root / "header.json", document)
-        self._budget_used = sum(p.stat().st_size for p in self.root.iterdir() if p.is_file())
+        self._budget_used = 0
+        for path in self.root.iterdir():
+            if path.is_symlink() or not path.is_file():
+                raise WorkspaceV2PhysicalDeltaError(
+                    "immutable link journal contains unsafe entries"
+                )
+            self._budget_used += path.stat().st_size
         if self._budget_used > self.header.byte_budget:
             raise WorkspaceV2PhysicalDeltaError("immutable link journal budget exceeded")
         while (self.root / f"page-{self._page:08d}.trailer.json").exists():
             trailer, entries = self._read_page(self.root, self._page, self._previous)
             if trailer.generation != self.header.operation_id:
                 raise WorkspaceV2PhysicalDeltaError("immutable link journal generation differs")
+            if trailer.confirmed_offset_bytes != self._confirmed_offset:
+                raise WorkspaceV2PhysicalDeltaError("immutable link journal byte offset differs")
             for entry in entries:
-                if entry.ordinal != self._ordinal:
+                if entry.ordinal != self._ordinal or entry.action != self.header.action:
                     raise WorkspaceV2PhysicalDeltaError("immutable link journal ordinal differs")
                 for current in self._inventory:
                     self._current_item = current
@@ -2328,7 +2947,31 @@ class ImmutableLinkJournal:
                     raise WorkspaceV2PhysicalDeltaError(
                         "immutable link journal inventory is missing"
                     )
+                item = self._current_item[1]
+                if (
+                    item.deleted
+                    or not (
+                        item.path.startswith("storage/v2/raw/raw/sha256/")
+                        or item.path.startswith("data/documents/sha256/")
+                    )
+                    or Path(item.path).name != item.sha256
+                    or entry.after is None
+                    or entry.after.size != item.size_bytes
+                ):
+                    raise WorkspaceV2PhysicalDeltaError("immutable link prefix member differs")
+                retained = _safe_file(self.header.retained_root, item.path)
+                slot = _safe_file(self.header.slot, item.path)
+                if ImmutableLinkIdentity.observe(retained) != entry.after:
+                    raise WorkspaceV2PhysicalDeltaError("immutable link confirmed prefix changed")
+                if self.header.action == "LINK":
+                    if ImmutableLinkIdentity.observe(slot) != entry.after:
+                        raise WorkspaceV2PhysicalDeltaError(
+                            "immutable slot confirmed prefix changed"
+                        )
+                elif slot.exists() or slot.is_symlink():
+                    raise WorkspaceV2PhysicalDeltaError("immutable unlink confirmed prefix changed")
                 self._ordinal += 1
+            self._confirmed_offset += trailer.confirmed_bytes
             self._previous = _sha256(self.root / f"page-{self._page:08d}.trailer.json")
             self._page += 1
         if self.header.previous_journal is not None:
@@ -2359,12 +3002,13 @@ class ImmutableLinkJournal:
             or _sha256(intent_path) != trailer.intent_sha256
             or _sha256(confirmed_path) != trailer.confirmed_sha256
             or confirmed_path.stat().st_size != trailer.confirmed_bytes
+            or _sha256(_safe_file(root, "header.json")) != trailer.header_sha256
         ):
             raise WorkspaceV2PhysicalDeltaError("immutable link page seal differs")
         with confirmed_path.open("rb") as stream:
             entries: list[ImmutableLinkEntry] = []
-            for line in stream:
-                if len(entries) == 256 or len(line) > 1 << 20:
+            while line := stream.readline(1 << 20):
+                if len(entries) == 256 or not line.endswith(b"\n"):
                     raise WorkspaceV2PhysicalDeltaError("immutable link page exceeds bounds")
                 entries.append(ImmutableLinkEntry.model_validate_json(line))
         if len(entries) != trailer.entries or any(e.after is None for e in entries):
@@ -2375,7 +3019,9 @@ class ImmutableLinkJournal:
         self, reference: ReconciliationFileReference
     ) -> Iterator[ImmutableLinkEntry]:
         root = reference.path.parent
-        header = ImmutableLinkHeader.model_validate_json((root / "header.json").read_bytes())
+        header = ImmutableLinkHeader.model_validate_json(
+            _safe_file(root, "header.json").read_bytes()
+        )
         if (
             header.retained_root != self.header.retained_root
             or header.slot != self.header.slot
@@ -2387,9 +3033,21 @@ class ImmutableLinkJournal:
             raise WorkspaceV2PhysicalDeltaError("prior immutable link journal binding differs")
         previous = None
         page = 0
+        offset = 0
+        ordinal = 0
         while True:
-            _, entries = self._read_page(root, page, previous)
+            trailer, entries = self._read_page(root, page, previous)
+            if (
+                trailer.generation != header.operation_id
+                or trailer.confirmed_offset_bytes != offset
+            ):
+                raise WorkspaceV2PhysicalDeltaError("prior immutable link journal sequence differs")
+            for entry in entries:
+                if entry.ordinal != ordinal or entry.action != header.action:
+                    raise WorkspaceV2PhysicalDeltaError("prior immutable link entries differ")
+                ordinal += 1
             yield from entries
+            offset += trailer.confirmed_bytes
             path = root / f"page-{page:08d}.trailer.json"
             previous = _sha256(path)
             if path == reference.path:
@@ -2452,9 +3110,10 @@ class ImmutableLinkJournal:
         intent_path = self.root / f"page-{self._page:08d}.intents.jsonl"
         pending: list[ImmutableLinkEntry] = []
         if intent_path.exists():
+            _safe_file(self.root, intent_path.name)
             with intent_path.open("rb") as stream:
-                for line in stream:
-                    if len(pending) == 256 or len(line) > 1 << 20:
+                while line := stream.readline(1 << 20):
+                    if len(pending) == 256 or not line.endswith(b"\n"):
                         raise WorkspaceV2PhysicalDeltaError(
                             "pending immutable link page exceeds bounds"
                         )
@@ -2580,6 +3239,8 @@ class ImmutableLinkJournal:
             confirmed_sha256=_sha256(path),
             previous_trailer_sha256=self._previous,
             confirmed_bytes=len(document),
+            confirmed_offset_bytes=self._confirmed_offset,
+            header_sha256=_sha256(self.root / "header.json"),
             generation=self.header.operation_id,
         )
         trailer_path = self.root / f"page-{self._page:08d}.trailer.json"
@@ -2587,7 +3248,181 @@ class ImmutableLinkJournal:
         self._previous = _sha256(trailer_path)
         self._ordinal += len(confirmed)
         self._page += 1
+        self._confirmed_offset += len(document)
         return trailer
+
+
+def _apply_controlled_link_page(
+    journal: ImmutableLinkJournal, members: tuple[tuple[int, PhysicalDeltaFile], ...]
+) -> ImmutableLinkTrailer:
+    """Same C4 page/reader contract, one directory durability barrier per page.
+
+    Fresh witnessed pages seal every intent before any mutation and sync all
+    affected directories before confirmations/trailer. Interrupted pages use
+    the unchanged reader/recovery implementation, including affected-payload
+    hashing. No existing journal or verifier identity is rewritten. The new
+    producer bytes are bound by the worker's source-bindings snapshot.
+    """
+    if (
+        journal._prior is None
+        or (journal.root / f"page-{journal._page:08d}.intents.jsonl").exists()
+    ):
+        return journal.apply_page(members)
+    if not 1 <= len(members) <= 256:
+        raise WorkspaceV2PhysicalDeltaError("link journal requires one bounded ordered page")
+    if any(
+        (journal.root / f"page-{journal._page:08d}.{suffix}").exists()
+        for suffix in ("confirmed.jsonl", "trailer.json")
+    ):
+        raise WorkspaceV2PhysicalDeltaError("link page confirmation has no durable intent")
+    prepared: list[tuple[Path, Path, PhysicalDeltaFile, ImmutableLinkEntry]] = []
+    for offset, (ordinal, item) in enumerate(members):
+        retained, slot = journal._member(ordinal, item)
+        before = ImmutableLinkIdentity.observe(retained)
+        witness = next(journal._prior, None)
+        if (
+            witness is None
+            or witness.inventory_ordinal != ordinal
+            or before != witness.after
+            or before.size != item.size_bytes
+        ):
+            raise WorkspaceV2PhysicalDeltaError("immutable link witness metadata changed")
+        prepared.append(
+            (
+                retained,
+                slot,
+                item,
+                ImmutableLinkEntry(
+                    ordinal=journal._ordinal + offset,
+                    inventory_ordinal=ordinal,
+                    action=journal.header.action,
+                    phase="INTENT",
+                    before=before,
+                    recorded_at=datetime.now(UTC),
+                ),
+            )
+        )
+    intent_path = journal.root / f"page-{journal._page:08d}.intents.jsonl"
+    journal._seal(intent_path, b"".join(e.model_dump_json().encode() + b"\n" for *_, e in prepared))
+    directories: set[Path] = set()
+    confirmed: list[ImmutableLinkEntry] = []
+    for retained, slot, _item, entry in prepared:
+        before = entry.before
+        assert before is not None
+        if ImmutableLinkIdentity.observe(retained) != before:
+            raise WorkspaceV2PhysicalDeltaError("immutable link preimage changed")
+        if journal.header.action == "LINK":
+            # Include parents of newly created directories in the barrier too.
+            parent = slot.parent
+            while not parent.exists():
+                directories.add(parent.parent)
+                parent = parent.parent
+            slot.parent.mkdir(parents=True, exist_ok=True)
+            os.link(retained, slot, follow_symlinks=False)
+        else:
+            if ImmutableLinkIdentity.observe(slot) != before:
+                raise WorkspaceV2PhysicalDeltaError("slot does not share the witnessed inode")
+            slot.unlink()
+        directories.add(slot.parent)
+        after = ImmutableLinkIdentity.observe(retained)
+        expected_links = before.nlink + (1 if journal.header.action == "LINK" else -1)
+        if not journal._same_content(before, after) or after.nlink != expected_links:
+            raise WorkspaceV2PhysicalDeltaError("immutable link transition differs")
+        if journal.header.action == "LINK" and ImmutableLinkIdentity.observe(slot) != after:
+            raise WorkspaceV2PhysicalDeltaError("immutable slot transition differs")
+        confirmed.append(
+            ImmutableLinkEntry(
+                ordinal=entry.ordinal,
+                inventory_ordinal=entry.inventory_ordinal,
+                action=entry.action,
+                phase="CONFIRMED",
+                before=before,
+                after=after,
+                recorded_at=datetime.now(UTC),
+            )
+        )
+    # The bounded page never publishes a cursor for an unsynced mutation.
+    for directory in sorted(directories, key=lambda p: (-len(p.parts), str(p))):
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    for (retained, slot, _, _), entry in zip(prepared, confirmed, strict=True):
+        if ImmutableLinkIdentity.observe(retained) != entry.after:
+            raise WorkspaceV2PhysicalDeltaError("immutable member changed during directory barrier")
+        if journal.header.action == "LINK":
+            if ImmutableLinkIdentity.observe(slot) != entry.after:
+                raise WorkspaceV2PhysicalDeltaError(
+                    "immutable slot changed during directory barrier"
+                )
+        elif slot.exists() or slot.is_symlink():
+            raise WorkspaceV2PhysicalDeltaError("immutable unlink changed during directory barrier")
+    document = b"".join(e.model_dump_json().encode() + b"\n" for e in confirmed)
+    path = journal.root / f"page-{journal._page:08d}.confirmed.jsonl"
+    journal._seal(path, document)
+    trailer = ImmutableLinkTrailer(
+        page=journal._page,
+        entries=len(confirmed),
+        intent_sha256=_sha256(intent_path),
+        confirmed_sha256=_sha256(path),
+        previous_trailer_sha256=journal._previous,
+        confirmed_bytes=len(document),
+        confirmed_offset_bytes=journal._confirmed_offset,
+        header_sha256=_sha256(journal.root / "header.json"),
+        generation=journal.header.operation_id,
+    )
+    trailer_path = journal.root / f"page-{journal._page:08d}.trailer.json"
+    journal._seal(trailer_path, trailer.model_dump_json().encode() + b"\n")
+    journal._previous = _sha256(trailer_path)
+    journal._ordinal += len(confirmed)
+    journal._page += 1
+    journal._confirmed_offset += len(document)
+    return trailer
+
+
+def _iter_retained_link_witness(
+    reference: ReconciliationFileReference,
+) -> Iterator[tuple[PhysicalDeltaFile, ImmutableLinkIdentity]]:
+    """Stream sealed inode witnesses; reject any unknown change before reuse."""
+    from investment_analyst.storage.workspace_v2_inventory import WorkspaceV2ProgressReconciler
+
+    WorkspaceV2ProgressReconciler._verify(reference)
+    root = _safe_root(reference.path.parent)
+    header = ImmutableLinkHeader.model_validate_json(_safe_file(root, "header.json").read_bytes())
+    if header.verifier_sha256 != _immutable_link_verifier_sha256():
+        raise WorkspaceV2PhysicalDeltaError("immutable witness verifier changed")
+    for control in (
+        header.inventory,
+        header.parent_manifest,
+        header.parent_index,
+        header.parent_proof,
+    ):
+        WorkspaceV2ProgressReconciler._verify(control)
+    if reference.path == root / "header.json":
+        if any(root.glob("page-*.trailer.json")):
+            raise WorkspaceV2PhysicalDeltaError("empty immutable witness has sealed pages")
+        return
+    journal = ImmutableLinkJournal(root, header)
+    inventory = iter(enumerate(_iter_delta_files(header.inventory.path)))
+    for entry in journal._prior_witnesses(reference):
+        current = next(inventory, None)
+        while current is not None and current[0] < entry.inventory_ordinal:
+            current = next(inventory, None)
+        if current is None or current[0] != entry.inventory_ordinal:
+            raise WorkspaceV2PhysicalDeltaError("immutable witness inventory member differs")
+        item = current[1]
+        if (
+            item.deleted
+            or not item.path.startswith(("storage/v2/raw/raw/sha256/", "data/documents/sha256/"))
+            or Path(item.path).name != item.sha256
+            or entry.after is None
+            or entry.after.size != item.size_bytes
+            or ImmutableLinkIdentity.observe(_safe_file(header.retained_root, item.path))
+            != entry.after
+        ):
+            raise WorkspaceV2PhysicalDeltaError("immutable witness retained identity changed")
+        yield item, entry.after
 
 
 def _immutable_link_verifier_sha256() -> str:
@@ -2599,6 +3434,7 @@ def _immutable_link_verifier_sha256() -> str:
         ImmutableLinkEntry,
         ImmutableLinkTrailer,
         ImmutableLinkJournal,
+        _iter_retained_link_witness,
         _verify_file,
         _safe_file,
         _immutable_link_verifier_sha256,

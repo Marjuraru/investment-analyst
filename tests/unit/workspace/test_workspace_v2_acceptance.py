@@ -20,6 +20,8 @@ from investment_analyst.workspace.workspace_v2_acceptance import (
     FinalAcceptanceInput,
     IdempotenceComparison,
     MemoryScenario,
+    OrdinaryBatchBoundary,
+    OrdinaryBatchGrowth,
     PhysicalByteCategories,
     build_final_acceptance,
 )
@@ -243,3 +245,199 @@ def test_changed_artifact_fails_closed_and_gates_cannot_be_reduced(tmp_path: Pat
     value.receipts[0].path.write_bytes(b"changed")
     with pytest.raises(FinalAcceptanceError, match="evidence_digest_mismatch"):
         build_final_acceptance(value)
+
+
+def _finite_input(tmp_path: Path) -> FinalAcceptanceInput:
+    value = _input(tmp_path).model_copy(update={"data_scope": "permanent"})
+    assert value.activated_at is not None
+    batches = []
+    for index, scenario in enumerate(("ordinary", "same_inputs")):
+        started = value.activated_at + timedelta(minutes=1 + 2 * index)
+        attempts = (uuid4(), uuid4())  # A retry also contributes its positive growth.
+        boundaries = tuple(
+            OrdinaryBatchBoundary(
+                attempt_id=attempts[step // 2],
+                job_pair=value.required_job_pairs[0],
+                edge="before" if step % 2 == 0 else "after",
+                observed_at=started + timedelta(seconds=step),
+                database_bytes=1000 + step * 100,
+                wal_bytes=step * 10,
+            )
+            for step in range(4)
+        )
+        batches.append(
+            OrdinaryBatchGrowth(
+                scenario=scenario,
+                started_at=started,
+                completed_at=boundaries[-1].observed_at,
+                runtime_sha=value.runtime_sha,
+                workspace_id=value.workspace_id,
+                scope=value.scope,
+                job_pairs=value.required_job_pairs,
+                attempt_ids=attempts,
+                boundaries=boundaries,
+                complete=True,
+                exclusive_writer=True,
+                evidence=value.receipts,
+            )
+        )
+    return value.model_copy(
+        update={"q4_policy": "ordinary-batch-growth-v1", "ordinary_batches": tuple(batches)}
+    )
+
+
+def test_finite_q4_uses_both_shared_batches_without_waiting_for_days(tmp_path: Path) -> None:
+    value = _finite_input(tmp_path)
+    reported = value.ordinary_batches[-1].completed_at + timedelta(seconds=1)
+    value = value.model_copy(update={"reported_at": reported, "ordinary_days": ()})
+    report = build_final_acceptance(value, clock=lambda: reported)
+    assert report.schema_version == "workspace-v2-final-acceptance-v2"
+    assert report.q4_policy == "ordinary-batch-growth-v1"
+    assert report.q4_unit == "B/batch"
+    assert report.accepted and report.met == 7
+    assert [batch.positive_growth_bytes for batch in value.ordinary_batches] == [330, 330]
+    assert "does not establish B/day" in report.objectives[3].reason
+    assert len(report.objectives) == 7
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "absent",
+        "partial",
+        "concurrent",
+        "future_report",
+        "future_batch",
+        "fixture",
+        "no_activation",
+        "before_activation",
+        "runtime",
+        "workspace",
+        "scope",
+        "inputs",
+        "versions",
+        "matrix",
+        "attempt",
+        "overlap",
+        "duplicate_attempt",
+        "missing_boundary",
+        "wrong_edge",
+        "wrong_boundary_pair",
+        "gap_order",
+        "new_equivalents",
+    ],
+)
+def test_finite_q4_rejects_incomplete_or_incompatible_batches(tmp_path: Path, fault: str) -> None:
+    value = _finite_input(tmp_path)
+    first, second = value.ordinary_batches
+    changed = {}
+    batch_changed = {}
+    clock = value.reported_at
+    if fault == "absent":
+        changed["ordinary_batches"] = ()
+    elif fault in {"partial", "concurrent"}:
+        batch_changed["complete" if fault == "partial" else "exclusive_writer"] = False
+    elif fault == "future_report":
+        clock = first.started_at
+    elif fault == "future_batch":
+        batch_changed["completed_at"] = clock + timedelta(seconds=1)
+    elif fault == "fixture":
+        changed["data_scope"] = "fixture"
+    elif fault == "no_activation":
+        changed["activated_at"] = None
+    elif fault == "before_activation":
+        changed["activated_at"] = first.completed_at
+    elif fault == "runtime":
+        batch_changed["runtime_sha"] = "0" * 40
+    elif fault == "workspace":
+        batch_changed["workspace_id"] = uuid4()
+    elif fault in {"scope", "inputs", "versions"}:
+        field = {
+            "scope": "inventory_sha256",
+            "inputs": "inputs_sha256",
+            "versions": "algorithm_versions_sha256",
+        }[fault]
+        batch_changed["scope"] = first.scope.model_copy(update={field: "0" * 64})
+    elif fault == "matrix":
+        batch_changed["job_pairs"] = ()
+    elif fault == "attempt":
+        batch_changed["attempt_ids"] = (uuid4(), *first.attempt_ids[1:])
+    elif fault == "overlap":
+        batch_changed["completed_at"] = second.started_at + timedelta(seconds=1)
+    elif fault == "duplicate_attempt":
+        batch_changed["attempt_ids"] = (first.attempt_ids[0], first.attempt_ids[0])
+    elif fault == "missing_boundary":
+        batch_changed["boundaries"] = first.boundaries[:-1]
+    elif fault in {"wrong_edge", "wrong_boundary_pair", "gap_order"}:
+        field, replacement = {
+            "wrong_edge": ("edge", "after"),
+            "wrong_boundary_pair": ("job_pair", ("fundamentals", "equity:us:other")),
+            "gap_order": ("observed_at", first.completed_at),
+        }[fault]
+        boundary = first.boundaries[0].model_copy(update={field: replacement})
+        batch_changed["boundaries"] = (boundary, *first.boundaries[1:])
+    elif fault == "new_equivalents":
+        changed["idempotence"] = (value.idempotence[0].model_copy(update={"after_count": 4}),)
+    if batch_changed:
+        changed["ordinary_batches"] = (first.model_copy(update=batch_changed), second)
+    value = value.model_copy(update=changed)
+    result = build_final_acceptance(value, clock=lambda: clock)
+    assert result.objectives[3].status == ("NOT_MET" if fault == "new_equivalents" else "UNKNOWN")
+    assert not result.accepted
+
+
+@pytest.mark.parametrize("location", ["attempt", "gap", "second_scenario"])
+def test_finite_q4_never_offsets_positive_growth_with_decreases(
+    tmp_path: Path, location: str
+) -> None:
+    value = _finite_input(tmp_path)
+    index = 1 if location == "second_scenario" else 0
+    batch = value.ordinary_batches[index]
+    sizes = [0, 30_000_001, 0, 0] if location != "gap" else [0, 0, 30_000_001, 0]
+    boundaries = tuple(
+        boundary.model_copy(update={"database_bytes": size, "wal_bytes": 0})
+        for boundary, size in zip(batch.boundaries, sizes, strict=True)
+    )
+    modified = batch.model_copy(update={"boundaries": boundaries})
+    batches = list(value.ordinary_batches)
+    batches[index] = modified
+    value = value.model_copy(update={"ordinary_batches": tuple(batches)})
+    assert modified.positive_growth_bytes == 30_000_001
+    assert (
+        build_final_acceptance(value, clock=lambda: value.reported_at).objectives[3].status
+        == "NOT_MET"
+    )
+
+
+def test_finite_q4_does_not_net_wal_decrease_against_database_growth(tmp_path: Path) -> None:
+    value = _finite_input(tmp_path)
+    batch = value.ordinary_batches[0]
+    boundaries = tuple(
+        boundary.model_copy(update={"database_bytes": db, "wal_bytes": wal})
+        for boundary, db, wal in zip(
+            batch.boundaries, (0, 30_000_001, 0, 0), (30_000_001, 0, 0, 0), strict=True
+        )
+    )
+    modified = batch.model_copy(update={"boundaries": boundaries})
+    assert modified.positive_growth_bytes == 30_000_001
+    value = value.model_copy(update={"ordinary_batches": (modified, value.ordinary_batches[1])})
+    assert (
+        build_final_acceptance(value, clock=lambda: value.reported_at).objectives[3].status
+        == "NOT_MET"
+    )
+
+
+def test_legacy_acceptance_report_still_reads_and_evaluates_v1(tmp_path: Path) -> None:
+    from investment_analyst.workspace.workspace_v2_acceptance import FinalAcceptanceReport
+
+    value = _input(tmp_path).model_copy(update={"data_scope": "permanent"})
+    report = build_final_acceptance(value, clock=lambda: value.reported_at)
+    document = report.model_dump(mode="json")
+    document.pop("q4_policy")
+    document.pop("q4_unit")
+    document["measurements"].pop("q4_policy")
+    document["measurements"].pop("ordinary_batches")
+    legacy = FinalAcceptanceReport.model_validate_json(__import__("json").dumps(document))
+    assert legacy.schema_version == "workspace-v2-final-acceptance-v1"
+    assert legacy.q4_policy == "seven-closed-utc-days-v1"
+    assert legacy.q4_unit == "B/day" and legacy.accepted

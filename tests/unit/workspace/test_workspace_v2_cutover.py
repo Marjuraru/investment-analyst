@@ -3,7 +3,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 
@@ -33,11 +33,21 @@ from investment_analyst.workspace.workspace_v2_migration import (
     migrate_workspace_v1_to_v2,
     quiescent_source_cut,
 )
+from investment_analyst.workspace.workspace_v2_migration_models import (
+    CUT_WINDOW_5400_AUTHORIZATION,
+)
 
 _MOMENT = datetime(2026, 10, 14, tzinfo=UTC)
 
 
-def _window_fixture(tmp_path: Path):
+def _window_fixture(
+    tmp_path: Path,
+    *,
+    window_limit_seconds: int = 1800,
+    window_authorization: str | None = None,
+    go_attempt_id: UUID | None = None,
+    attempt_id: UUID | None = None,
+):
     from investment_analyst.storage.workspace_v2_inventory import reconciliation_file_reference
     from investment_analyst.workspace.workspace_v2_cutover import WorkspaceV2CutWindowService
     from investment_analyst.workspace.workspace_v2_migration_models import (
@@ -51,6 +61,7 @@ def _window_fixture(tmp_path: Path):
     proof.write_bytes(b"{}")
     reference = reconciliation_file_reference(proof, "control")
     source_id, destination_id, boot = uuid4(), uuid4(), uuid4()
+    attempt = attempt_id or uuid4()
     bounds = tuple(
         CutWindowBound(
             step=step,
@@ -82,12 +93,15 @@ def _window_fixture(tmp_path: Path):
         source_workspace_id=source_id,
         destination_workspace_id=destination_id,
         admitted_at=_MOMENT,
+        window_limit_seconds=window_limit_seconds,
+        window_authorization=window_authorization,
+        attempt_id=go_attempt_id,
     )
     go_path = tmp_path / "go.json"
     go_path.write_text(go.model_dump_json())
     window = CutWindow(
         window_id=uuid4(),
-        attempt_id=uuid4(),
+        attempt_id=attempt,
         source_root=tmp_path / "source",
         source_workspace_id=source_id,
         destination_root=tmp_path / "destination",
@@ -102,9 +116,11 @@ def _window_fixture(tmp_path: Path):
         ),
         boot_id=boot,
         started_monotonic_ns=100,
-        deadline_monotonic_ns=1800_000_000_100,
+        deadline_monotonic_ns=100 + window_limit_seconds * 1_000_000_000,
         stop_started_at=_MOMENT,
         recovery_reserve_seconds=100,
+        window_limit_seconds=window_limit_seconds,
+        window_authorization=window_authorization,
         go=reconciliation_file_reference(go_path, "control"),
         baseline=reference,
         code=reference,
@@ -117,11 +133,197 @@ def _window_fixture(tmp_path: Path):
     return owner, window, go
 
 
-@pytest.mark.parametrize("operation", ["catchup", "plan", "upload", "restore", "activate"])
-def test_global_window_commands_share_clock_and_preserve_recovery_reserve(
-    tmp_path: Path, operation: str
+@pytest.mark.parametrize(
+    ("window_limit_seconds", "window_authorization"),
+    ((1800, None), (5400, CUT_WINDOW_5400_AUTHORIZATION)),
+)
+def test_go_prefix_uses_the_typed_global_limit(
+    tmp_path: Path,
+    window_limit_seconds: int,
+    window_authorization: str | None,
 ) -> None:
+    attempt = uuid4() if window_limit_seconds == 5400 else None
+    _, window, go = _window_fixture(
+        tmp_path,
+        window_limit_seconds=window_limit_seconds,
+        window_authorization=window_authorization,
+        go_attempt_id=attempt,
+        attempt_id=attempt,
+    )
+    assert window.deadline_monotonic_ns - window.started_monotonic_ns == (
+        window_limit_seconds * 1_000_000_000
+    )
+    assert go.window_limit_seconds == window_limit_seconds
+    reserved = sum(bound.upper_seconds for bound in go.bounds) + go.margin_seconds
+    assert go.admits_prefix(window_limit_seconds - reserved)
+    assert not go.admits_prefix(window_limit_seconds - reserved + 1)
+    with pytest.raises(ValueError, match="negative"):
+        go.admits_prefix(-1)
+
+
+def test_authorized_5400_window_keeps_one_clock_and_phase_bounds(tmp_path: Path) -> None:
+    attempt = uuid4()
+    owner, window, go = _window_fixture(
+        tmp_path,
+        window_limit_seconds=5400,
+        window_authorization=CUT_WINDOW_5400_AUTHORIZATION,
+        go_attempt_id=attempt,
+        attempt_id=attempt,
+    )
+    reference = owner.prepare(window, go)
+    assert reference == owner.prepare(window, go)
+    assert owner.remaining_work_ns(boot_id=window.boot_id, monotonic_ns=100) == (5300_000_000_000)
+    active_values = window.model_dump()
+    active_values.update(phase="QUIESCENT")
+    owner.path.write_text(type(window).model_validate(active_values).model_dump_json())
+    deadline = window.deadline_monotonic_ns
+    with pytest.raises(WorkspaceV2CutoverError, match="recovery reserve"):
+        owner.admit_operation(
+            operation="catchup",
+            boot_id=window.boot_id,
+            monotonic_ns=deadline - 200_000_000_000 + 1,
+        )
+    admitted = owner.admit_operation(
+        operation="catchup",
+        boot_id=window.boot_id,
+        monotonic_ns=deadline - 300_000_000_000,
+    )
+    assert admitted.deadline_monotonic_ns == deadline
+
+
+def test_5400_window_requires_authorization_attempt_and_exact_deadline(
+    tmp_path: Path,
+) -> None:
+    from investment_analyst.workspace.workspace_v2_migration_models import (
+        CutWindow,
+        CutWindowGo,
+    )
+
+    attempt = uuid4()
+    owner, window, go = _window_fixture(
+        tmp_path,
+        window_limit_seconds=5400,
+        window_authorization=CUT_WINDOW_5400_AUTHORIZATION,
+        go_attempt_id=attempt,
+        attempt_id=attempt,
+    )
+    values = go.model_dump()
+    for update in (
+        {"window_authorization": None},
+        {"attempt_id": None},
+        {"window_limit_seconds": 5401},
+        {"window_authorization": "foreign-authorization"},
+    ):
+        with pytest.raises(ValueError):
+            CutWindowGo.model_validate({**values, **update})
+    large = {
+        **values,
+        "bounds": tuple({**bound, "upper_seconds": 700} for bound in values["bounds"]),
+    }
+    with pytest.raises(ValueError, match="exceeds 5400"):
+        CutWindowGo.model_validate(large)
+    with pytest.raises(ValueError, match="legacy 1800-second GO"):
+        CutWindowGo.model_validate({**values, "window_limit_seconds": 1800})
+    window_values = window.model_dump()
+    with pytest.raises(ValueError, match="5400-second deadline"):
+        CutWindow.model_validate(
+            {
+                **window_values,
+                "deadline_monotonic_ns": window.started_monotonic_ns + 1800_000_000_000,
+            }
+        )
+    with pytest.raises(ValueError, match="requires its explicit authorization"):
+        CutWindow.model_validate({**window_values, "window_authorization": None})
+    mismatch_root = tmp_path / "mismatch"
+    mismatch_root.mkdir()
+    mismatch_owner, mismatch_window, mismatch_go = _window_fixture(
+        mismatch_root,
+        window_limit_seconds=5400,
+        window_authorization=CUT_WINDOW_5400_AUTHORIZATION,
+        go_attempt_id=attempt,
+        attempt_id=uuid4(),
+    )
+    with pytest.raises(WorkspaceV2CutoverError, match="GO binding differs"):
+        mismatch_owner.prepare(mismatch_window, mismatch_go)
+    edit_root = tmp_path / "edit"
+    edit_root.mkdir()
+    edit_owner, edit_window, edit_go = _window_fixture(
+        edit_root,
+        window_limit_seconds=5400,
+        window_authorization=CUT_WINDOW_5400_AUTHORIZATION,
+        go_attempt_id=attempt,
+        attempt_id=attempt,
+    )
+    edit_owner.prepare(edit_window, edit_go)
+    edited = edit_window.model_copy(
+        update={
+            "started_monotonic_ns": edit_window.started_monotonic_ns + 1,
+            "deadline_monotonic_ns": edit_window.deadline_monotonic_ns + 1,
+        }
+    )
+    with pytest.raises(WorkspaceV2CutoverError, match="another immutable start"):
+        edit_owner.prepare(edited, edit_go)
+    with pytest.raises(WorkspaceV2CutoverError, match="GO binding differs"):
+        edit_owner.prepare(
+            edit_window.model_copy(update={"destination_workspace_id": uuid4()}),
+            edit_go,
+        )
+
+
+@pytest.mark.parametrize("phase", ["STOPPING", "QUIESCENT", "APPLYING", "ACTIVATING"])
+def test_changed_boot_can_only_record_abort_without_renewing_window(tmp_path: Path, phase: str):
     owner, window, go = _window_fixture(tmp_path)
+    reference = owner.prepare(window, go)
+    original = window.model_dump()
+    values = window.model_dump()
+    values.update(phase=phase)
+    if phase == "ACTIVATING":
+        values.update(activation_intent=window.baseline, recovery_receipt=window.baseline)
+    owner.path.write_text(type(window).model_validate(values).model_dump_json())
+    from investment_analyst.storage.workspace_v2_inventory import reconciliation_file_reference
+
+    reference = reconciliation_file_reference(owner.path, "control")
+    new_boot = uuid4()
+    with pytest.raises(WorkspaceV2CutoverError, match="clock changed|transition is forbidden"):
+        owner.advance(
+            "HEALTHY_V2" if phase == "ACTIVATING" else "RETURNING_V1",
+            expected=reference,
+            boot_id=new_boot,
+            monotonic_ns=1,
+            at=_MOMENT,
+            step="forbidden_new_clock",
+            binding=window.baseline,
+        )
+    owner.advance(
+        "ABORTED",
+        expected=reference,
+        boot_id=new_boot,
+        monotonic_ns=1,
+        at=_MOMENT,
+        step="boot_changed_quiescence_invalid",
+    )
+    aborted = owner.load()
+    assert aborted.phase == "ABORTED"
+    for field in ("started_monotonic_ns", "deadline_monotonic_ns", "boot_id", "owner", "go"):
+        assert aborted.model_dump()[field] == original[field]
+
+
+@pytest.mark.parametrize("operation", ["catchup", "plan", "upload", "restore", "activate"])
+@pytest.mark.parametrize(
+    ("window_limit_seconds", "window_authorization"),
+    ((1800, None), (5400, CUT_WINDOW_5400_AUTHORIZATION)),
+)
+def test_global_window_commands_share_clock_and_preserve_recovery_reserve(
+    tmp_path: Path, operation: str, window_limit_seconds: int, window_authorization: str | None
+) -> None:
+    attempt = uuid4() if window_limit_seconds == 5400 else None
+    owner, window, go = _window_fixture(
+        tmp_path,
+        window_limit_seconds=window_limit_seconds,
+        window_authorization=window_authorization,
+        go_attempt_id=attempt,
+        attempt_id=attempt,
+    )
     phase = (
         "QUIESCENT"
         if operation == "catchup"
@@ -250,8 +452,21 @@ def test_global_window_rejects_unknown_budget_clock_and_restart(
     assert owner.path.read_bytes() == before
 
 
-def test_global_window_never_returns_old_v1_from_activating(tmp_path: Path) -> None:
-    owner, window, go = _window_fixture(tmp_path)
+@pytest.mark.parametrize(
+    ("window_limit_seconds", "window_authorization"),
+    ((1800, None), (5400, CUT_WINDOW_5400_AUTHORIZATION)),
+)
+def test_global_window_never_returns_old_v1_from_activating(
+    tmp_path: Path, window_limit_seconds: int, window_authorization: str | None
+) -> None:
+    attempt = uuid4() if window_limit_seconds == 5400 else None
+    owner, window, go = _window_fixture(
+        tmp_path,
+        window_limit_seconds=window_limit_seconds,
+        window_authorization=window_authorization,
+        go_attempt_id=attempt,
+        attempt_id=attempt,
+    )
     reference = owner.prepare(window, go)
     for phase in ("STOPPING", "QUIESCENT", "APPLYING", "RECOVERY_VERIFIED", "ACTIVATING"):
         reference = owner.advance(

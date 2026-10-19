@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
 import shutil
-from collections.abc import Callable, Iterable
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
-from itertools import zip_longest
+from itertools import tee, zip_longest
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid4
@@ -36,6 +37,11 @@ from investment_analyst.workspace.workspace_v2_lifecycle_models import (
     LifecyclePhase,
     LifecycleReceipt,
     LocalComplementManifest,
+    OwnedPayloadRetirementInput,
+    OwnedPayloadRetirementReceipt,
+    OwnedPayloadRole,
+    PreparatorySlotArtifact,
+    PreparatorySlotRetirementReceipt,
     ProvenCopyRetirementReceipt,
     SealedDirectoryRetirementCheckpoint,
     SealedDirectoryRetirementReceipt,
@@ -44,7 +50,13 @@ from investment_analyst.workspace.workspace_v2_lifecycle_models import (
 from investment_analyst.workspace.workspace_v2_recovery import WorkspaceV2RecoveryReceipt
 
 if TYPE_CHECKING:
-    from investment_analyst.workspace.workspace_v2_physical_delta import PhysicalDeltaReceipt
+    from investment_analyst.workspace.workspace_v2_migration_models import (
+        ReconciliationFileReference,
+    )
+    from investment_analyst.workspace.workspace_v2_physical_delta import (
+        ImmutableLinkJournal,
+        PhysicalDeltaReceipt,
+    )
 
 _COMPLEMENT_MANIFEST_NAME = "local-complement-manifest.json"
 _CHUNK_BYTES = 1024 * 1024
@@ -667,6 +679,432 @@ class WorkspaceV2LifecycleService:
             bytes_confirmed=0,
             completed_at=self._now(),
         )
+
+    def retire_preparatory_slot(
+        self,
+        proposal: PreparatorySlotRetirementReceipt,
+        *,
+        admission_path: Path,
+        checkpoint_path: Path,
+        proof_path: Path,
+        unlink_root: Path,
+        journal_byte_budget: int,
+    ) -> PreparatorySlotRetirementReceipt:
+        """Retire remotely covered APPLYING W/W2, retaining its certified superset."""
+        from investment_analyst.application.local_release import LocalReleaseService
+        from investment_analyst.storage.resource_policy import (
+            MaintenanceResourceReceipt,
+            require_maintenance_admission,
+        )
+        from investment_analyst.storage.serialization import canonical_json_bytes
+        from investment_analyst.storage.workspace_v2_inventory import (
+            GenerationContentProof,
+            WorkspaceV2GenerationLedger,
+            WorkspaceV2ProgressReconciler,
+            _reconciliation_lock,
+            reconciliation_file_reference,
+        )
+        from investment_analyst.workspace.drive_transport import DriveTransportConfig
+        from investment_analyst.workspace.workspace_v2_acceptance import CompatibleRecoveryReadback
+        from investment_analyst.workspace.workspace_v2_migration_models import (
+            ProgressReconciliation,
+        )
+        from investment_analyst.workspace.workspace_v2_physical_delta import (
+            ImmutableLinkHeader,
+            ImmutableLinkJournal,
+            PhysicalDeltaReceipt,
+            _apply_controlled_link_page,
+            _immutable_link_verifier_sha256,
+            _iter_delta_files,
+            _read_delta_manifest,
+        )
+        from investment_analyst.workspace.workspace_v2_remote import RemoteBackupRestoreReceipt
+
+        admission = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+        execution = require_maintenance_admission(admission)
+        root, retained = (
+            proposal.source_root,
+            _safe_existing_root(proposal.retained_root, label="retained W2"),
+        )
+        for output in (checkpoint_path, proof_path, unlink_root):
+            if (
+                not output.is_absolute()
+                or output.is_relative_to(root)
+                or output.is_relative_to(retained)
+                or any(p.is_symlink() for p in (output, *output.parents))
+            ):
+                raise WorkspaceV2LifecycleError("preparatory controls must survive retirement")
+        if (
+            admission.budget.operation_id != proposal.operation_id
+            or retained / "storage/v2/index.duckdb"
+            not in {a.database for a in admission.budget.assignments}
+            or journal_byte_budget
+            > admission.budget.next_unit_growth_bytes + admission.budget.cache_and_control_bytes
+        ):
+            raise WorkspaceV2LifecycleError("preparatory retirement resource binding differs")
+        controls = {item.kind: item for item in proposal.evidence}
+        if proposal.phase != "retiring" or proposal.unlink_witness is not None:
+            raise WorkspaceV2LifecycleError("preparatory retirement requires a fresh proposal")
+        for item in proposal.evidence:
+            if (
+                any(p.is_symlink() for p in (item.path, *item.path.parents))
+                or not item.path.is_file()
+                or _hash_file(item.path) != (item.size_bytes, item.sha256)
+            ):
+                raise WorkspaceV2LifecycleError("preparatory retirement evidence changed")
+        prepared_path = proof_path.with_name(proof_path.name + ".prepared.json")
+        checkpoint = self._read_checkpoint(checkpoint_path)
+        retiring = _retiring_root(root, proposal.operation_id)
+        if proof_path.exists():
+            terminal = PreparatorySlotRetirementReceipt.model_validate_json(proof_path.read_bytes())
+            prepared = PreparatorySlotRetirementReceipt.model_validate_json(
+                prepared_path.read_bytes()
+            )
+            if (
+                checkpoint is None
+                or checkpoint.phase != LifecyclePhase.RETIRED
+                or terminal.phase != "retired"
+                or root.exists()
+                or retiring.exists()
+                or proposal.model_copy(update={"verified_at": prepared.verified_at}) != prepared
+                or terminal.model_copy(
+                    update={"phase": "retiring", "unlink_witness": None, "completed_at": None}
+                )
+                != prepared
+                or terminal.unlink_witness is None
+                or _hash_file(terminal.unlink_witness.path)
+                != (terminal.unlink_witness.size_bytes, terminal.unlink_witness.sha256)
+            ):
+                raise WorkspaceV2LifecycleError("preparatory terminal retirement differs")
+            return terminal
+        manifest = _read_delta_manifest(controls["delta_manifest"].path)
+        restore = PhysicalDeltaReceipt.model_validate_json(
+            controls["restore_receipt"].path.read_bytes()
+        )
+        upload = PhysicalDeltaReceipt.model_validate_json(
+            controls["remote_upload"].path.read_bytes()
+        )
+        parent = RemoteBackupRestoreReceipt.model_validate_json(
+            controls["remote_parent_restore"].path.read_bytes()
+        )
+        readback = CompatibleRecoveryReadback.model_validate_json(
+            controls["compatible_readback"].path.read_bytes()
+        )
+        coverage = json.loads(controls["complete_coverage"].path.read_bytes())
+        config = DriveTransportConfig.model_validate_json(
+            controls["remote_locator"].path.read_bytes()
+        )
+        ledger = WorkspaceV2GenerationLedger(self._workspace_service, retained)
+        resolved = ledger.resolve()
+        if resolved is None:
+            raise WorkspaceV2LifecycleError("preparatory retirement requires certified W2")
+        head, generation = resolved
+        if generation.core_proof is None or generation.inventory is None:
+            raise WorkspaceV2LifecycleError("preparatory retirement requires corrective W2 proofs")
+        content = GenerationContentProof.model_validate_json(ledger._read(generation.core_proof))
+        w = ProgressReconciliation.model_validate_json(ledger._read(generation.verified_w))
+        same_generation = manifest.epoch == generation.generation_id
+        photo = generation.inventory if same_generation else w.inventory
+        photo_epoch = generation.generation_id if same_generation else w.operation_id
+        if photo is None:
+            raise WorkspaceV2LifecycleError("preparatory photo inventory is missing")
+        if same_generation:
+            image = next(
+                (
+                    item
+                    for item in _iter_delta_files(controls["files_inventory"].path)
+                    if item.path == "storage/v2/index.duckdb"
+                ),
+                None,
+            )
+            if (
+                image is None
+                or image.sha256 != generation.database.sha256
+                or image.size_bytes != generation.database.size_bytes
+            ):
+                raise WorkspaceV2LifecycleError("preparatory W2 database binding differs")
+        if (
+            generation.phase != "BASELINE_VERIFIED"
+            or generation.reserved_successor is not None
+            or head.certificate.sha256 != controls["retained_certificate"].sha256
+            or head.certificate.path != controls["retained_certificate"].path
+            or generation.generation_id != proposal.retained_generation_id
+            or generation.database != content.database
+            or content.baseline_certificate != generation.verified_w
+            or w.phase != "BASELINE_VERIFIED"
+            or w.inventory is None
+            or manifest.historical_state != "APPLYING"
+            or restore.historical_state != "APPLYING"
+            or restore.kind != "restore"
+            or upload.kind != "upload"
+            or upload.historical_state != "APPLYING"
+            or restore.epoch != manifest.epoch
+            or upload.epoch != manifest.epoch
+            or proposal.recovery_epoch != manifest.epoch
+            or photo_epoch != manifest.epoch
+            or restore.restored_root != root
+            or manifest.source_root != retained
+            or manifest.source_workspace_id != proposal.workspace_id
+            or generation.destination_workspace_id != proposal.workspace_id
+            or restore.manifest_sha256 != controls["delta_manifest"].sha256
+            or upload.manifest_sha256 != restore.manifest_sha256
+            or upload.files_sha256 != manifest.files_sha256
+            or restore.files_sha256 != manifest.files_sha256
+            or controls["files_inventory"].sha256 != manifest.files_sha256
+            or controls["remote_parent_manifest"].sha256 != manifest.parent_manifest_sha256
+            or controls["remote_parent_index"].sha256 != manifest.parent_index_sha256
+            or parent.backup_id != manifest.parent_backup_id
+            or parent.remote_manifest_sha256 != manifest.parent_manifest_sha256
+            or parent.restored_workspace_id != proposal.workspace_id
+            or upload.confirmed_files != manifest.file_count + manifest.deleted_count
+            or restore.confirmed_files != upload.confirmed_files
+            or readback.operation_id != manifest.epoch
+            or readback.restored_root != root
+            or readback.workspace_id != proposal.workspace_id
+            or readback.manifest_sha256 != restore.manifest_sha256
+            or readback.recovery_receipt_sha256
+            != hashlib.sha256(restore.model_dump_json().encode()).hexdigest()
+            or readback.reader_sha != "dbbdfd021b0fee20be31b2d2a845874b0e861067"
+            or (
+                readback.raw_count,
+                readback.observation_count,
+                readback.metric_count,
+                readback.diagnostic_count,
+            )
+            != (
+                photo.raw_count,
+                photo.observation_count,
+                photo.metric_count,
+                photo.diagnostic_count,
+            )
+            or coverage.get("action") != "recovery-readback"
+            or coverage.get("operation_id") != str(photo_epoch)
+            or coverage.get("result", {}).get("readback") != readback.model_dump(mode="json")
+            or coverage.get("result", {}).get("coverage", {}).get("physical_files")
+            != manifest.file_count
+            or coverage.get("result", {}).get("coverage", {}).get("physical_bytes")
+            != manifest.logical_bytes
+            or coverage.get("result", {}).get("coverage", {}).get("raw_indexed")
+            != readback.raw_count
+            or hashlib.sha256(config.model_dump_json().encode()).hexdigest()
+            != proposal.configuration_sha256
+            or (proposal.files_confirmed, proposal.bytes_confirmed)
+            != (manifest.file_count, manifest.logical_bytes)
+        ):
+            raise WorkspaceV2LifecycleError("preparatory retirement proof bindings differ")
+        expected_reader = (
+            LocalReleaseService().paths.releases
+            / readback.reader_sha
+            / "src/investment_analyst/storage/compact_analytical_v2.py"
+        ).resolve()
+        if readback.reader_module_path != expected_reader or not expected_reader.is_file():
+            raise WorkspaceV2LifecycleError("preparatory retirement requires integrated reader 44")
+        for binding in (
+            LocalReleaseService().load_workspace_bindings().current,
+            LocalReleaseService().load_workspace_bindings().previous,
+        ):
+            if binding is not None and binding.workspace_root in (root, retained):
+                raise WorkspaceV2LifecycleError(
+                    "preparatory workspace has an active runtime binding"
+                )
+        link_ref = reconciliation_file_reference(controls["link_witness"].path, "control")
+        link_header = ImmutableLinkHeader.model_validate_json(
+            (link_ref.path.parent / "header.json").read_bytes()
+        )
+        if (
+            link_header.retained_root != retained
+            or link_header.slot != root
+            or (
+                link_header.inventory.sha256 != manifest.files_sha256
+                and not (same_generation and link_ref in restore.immutable_link_journals)
+            )
+            or (same_generation and link_header.operation_id != manifest.epoch)
+            or link_header.retained_workspace_id != proposal.workspace_id
+        ):
+            raise WorkspaceV2LifecycleError("preparatory retirement link witness differs")
+        if root.exists():
+            root = _safe_existing_root(root, label="preparatory slot")
+            if (root / "storage/v2/index.duckdb").samefile(retained / "storage/v2/index.duckdb"):
+                raise WorkspaceV2LifecycleError("mutable database must never be linked")
+            _require_no_directory_users(root)
+            with (
+                _reconciliation_lock(retained / "state"),
+                _v2_writer_closed(root),
+                _v2_writer_closed(retained),
+                _closed_duckdb_file(root / "storage/v2/index.duckdb"),
+                _closed_duckdb_file(retained / "storage/v2/index.duckdb"),
+            ):
+                if any((p / "storage/v2/index.duckdb.wal").exists() for p in (root, retained)):
+                    raise WorkspaceV2LifecycleError("preparatory retirement requires closed images")
+                if ledger.resolve()[0].certificate != head.certificate:
+                    raise WorkspaceV2LifecycleError("retained W2 changed during retirement")
+                WorkspaceV2ProgressReconciler._verify(generation.database)
+                intent_path = proof_path.with_name(proof_path.name + ".intent.json")
+                if not intent_path.exists():
+                    proposal = proposal.model_copy(update={"verified_at": self._now()})
+                    WorkspaceV2ProgressReconciler._write_once(
+                        intent_path, canonical_json_bytes(proposal) + b"\n"
+                    )
+                else:
+                    old = PreparatorySlotRetirementReceipt.model_validate_json(
+                        intent_path.read_bytes()
+                    )
+                    if proposal.model_copy(update={"verified_at": old.verified_at}) != old:
+                        raise WorkspaceV2LifecycleError("preparatory retirement proposal changed")
+                    proposal = old
+                unheader = link_header.model_copy(
+                    update={
+                        "operation_id": proposal.operation_id,
+                        "action": "UNLINK",
+                        "previous_journal": link_ref if restore.parent_linked_files else None,
+                        "byte_budget": journal_byte_budget,
+                        "created_at": proposal.verified_at,
+                        "verifier_sha256": _immutable_link_verifier_sha256(),
+                    }
+                )
+                journal = ImmutableLinkJournal(unlink_root, unheader).open()
+                if prepared_path.exists():
+                    if (
+                        PreparatorySlotRetirementReceipt.model_validate_json(
+                            prepared_path.read_bytes()
+                        )
+                        != proposal
+                    ):
+                        raise WorkspaceV2LifecycleError("prepared retirement changed before resume")
+                    _resume_preparatory_unlink_tail(journal)
+                count, total = _verify_preparatory_slot_remaining(
+                    root, controls["files_inventory"].path, link_ref, journal
+                )
+                if (count, total) != (manifest.file_count, manifest.logical_bytes):
+                    raise WorkspaceV2LifecycleError("preparatory slot remaining coverage differs")
+                WorkspaceV2ProgressReconciler._write_once(
+                    prepared_path, canonical_json_bytes(proposal) + b"\n"
+                )
+                if restore.parent_linked_files:
+                    assert journal._prior is not None
+                    prior, journal._prior = tee(journal._prior)
+                else:
+                    prior = iter(())
+                entry = next(prior, None)
+                pending = []
+                for ordinal, item in enumerate(_iter_delta_files(link_header.inventory.path)):
+                    if entry is None:
+                        break
+                    if ordinal != entry.inventory_ordinal:
+                        continue
+                    if ordinal > journal.confirmed_inventory_ordinal:
+                        pending.append((ordinal, item))
+                        if len(pending) == 256:
+                            _apply_controlled_link_page(journal, tuple(pending))
+                            pending.clear()
+                            execution.record_measurement(
+                                "preparatory_unlinked_files", journal._ordinal
+                            )
+                    entry = next(prior, None)
+                if pending:
+                    _apply_controlled_link_page(journal, tuple(pending))
+                if entry is not None or journal._ordinal != restore.parent_linked_files:
+                    raise WorkspaceV2LifecycleError("preparatory unlink coverage differs")
+                unlink_ref = reconciliation_file_reference(
+                    unlink_root
+                    / (
+                        f"page-{journal._page - 1:08d}.trailer.json"
+                        if journal._page
+                        else "header.json"
+                    ),
+                    "control",
+                )
+                unlink_artifact = PreparatorySlotArtifact(
+                    kind="link_witness",
+                    path=unlink_ref.path,
+                    sha256=unlink_ref.sha256,
+                    size_bytes=unlink_ref.size_bytes,
+                )
+                WorkspaceV2ProgressReconciler._write_once(
+                    proof_path.with_name(proof_path.name + ".unlink.json"),
+                    canonical_json_bytes(unlink_artifact) + b"\n",
+                )
+                descriptor = FrozenSourceCut(
+                    operation_id=proposal.operation_id,
+                    source_root=root,
+                    workspace_id=proposal.workspace_id,
+                    workspace_format_version=2,
+                    created_at=self._workspace_service.manifest(root).created_at,
+                    source_fingerprint=manifest.files_sha256,
+                    frozen_at=proposal.verified_at,
+                )
+                checkpoint = LifecycleCheckpoint(
+                    operation_id=proposal.operation_id,
+                    phase=LifecyclePhase.RETIRING,
+                    source=descriptor,
+                    retirement_root=retiring,
+                    files_confirmed=proposal.files_confirmed,
+                    bytes_confirmed=proposal.bytes_confirmed,
+                )
+                self.write_checkpoint(checkpoint_path, checkpoint)
+                if retiring.exists():
+                    raise WorkspaceV2LifecycleError("preparatory retiring root already exists")
+                os.replace(root, retiring)
+                _fsync_directory(root.parent)
+        if checkpoint is None or checkpoint.phase not in {
+            LifecyclePhase.RETIRING,
+            LifecyclePhase.RETIRED,
+        }:
+            raise WorkspaceV2LifecycleError("preparatory retirement has no valid checkpoint")
+        if (
+            checkpoint.operation_id != proposal.operation_id
+            or checkpoint.source.source_root != root
+            or checkpoint.retirement_root != retiring
+        ):
+            raise WorkspaceV2LifecycleError("preparatory retirement checkpoint differs")
+        if retiring.exists():
+            _safe_existing_root(retiring, label="retiring preparatory slot")
+            _require_no_directory_users(retiring)
+            old = PreparatorySlotRetirementReceipt.model_validate_json(prepared_path.read_bytes())
+            unheader = link_header.model_copy(
+                update={
+                    "operation_id": old.operation_id,
+                    "action": "UNLINK",
+                    "previous_journal": link_ref if restore.parent_linked_files else None,
+                    "byte_budget": journal_byte_budget,
+                    "created_at": old.verified_at,
+                    "verifier_sha256": _immutable_link_verifier_sha256(),
+                }
+            )
+            with _reconciliation_lock(retained / "state"), ExitStack() as locks:
+                if (retiring / "storage/v2/raw-v2-staging.lock").exists():
+                    locks.enter_context(_v2_writer_closed(retiring))
+                if (retiring / "storage/v2/index.duckdb").exists():
+                    locks.enter_context(_closed_duckdb_file(retiring / "storage/v2/index.duckdb"))
+                journal = ImmutableLinkJournal(unlink_root, unheader).open()
+                if _verify_preparatory_slot_remaining(
+                    retiring,
+                    controls["files_inventory"].path,
+                    link_ref,
+                    journal,
+                    allow_removed=True,
+                ) != (manifest.file_count, manifest.logical_bytes):
+                    raise WorkspaceV2LifecycleError("detached preparatory contents changed")
+                shutil.rmtree(retiring)
+                _fsync_directory(root.parent)
+        proposal = PreparatorySlotRetirementReceipt.model_validate_json(prepared_path.read_bytes())
+        unlink_artifact = PreparatorySlotArtifact.model_validate_json(
+            proof_path.with_name(proof_path.name + ".unlink.json").read_bytes()
+        )
+        terminal = proposal.model_copy(
+            update={
+                "phase": "retired",
+                "unlink_witness": unlink_artifact,
+                "completed_at": self._now(),
+            }
+        )
+        self.write_checkpoint(
+            checkpoint_path, checkpoint.model_copy(update={"phase": LifecyclePhase.RETIRED})
+        )
+        WorkspaceV2ProgressReconciler._write_once(
+            proof_path, canonical_json_bytes(terminal) + b"\n"
+        )
+        return terminal
 
     def retire_delta_recovery_slot(
         self,
@@ -1313,6 +1751,166 @@ class WorkspaceV2LifecycleService:
             outputs.append(output)
         return outputs[0], outputs[1]
 
+    def retire_owned_payload(
+        self, request: OwnedPayloadRetirementInput
+    ) -> OwnedPayloadRetirementReceipt:
+        """Retire only exact matrix payloads, with proofs retained outside the root.
+
+        A sealed-directory cursor owns detach/removal. The owned receipt binds that
+        cursor to the original request and a streaming inventory, including across
+        a crash after detach or halfway through removal.
+        """
+        from investment_analyst.workspace.workspace_v2_lifecycle_models import (
+            PreparatorySlotArtifact,
+        )
+
+        root, controls = request.source_root, request.retained_controls_root
+        _owned_payload_scope(request)
+        for path in (root, controls, *[ref.path for ref in request.evidence]):
+            if any(p.is_symlink() for p in (path, *path.parents)):
+                raise WorkspaceV2LifecycleError("owned payload path is unsafe")
+        controls.mkdir(parents=True, exist_ok=True)
+        stem = str(request.operation_id)
+        receipt_path = controls / f"{stem}.json"
+        inventory_path = controls / f"{stem}.inventory.jsonl"
+        checkpoint_path = controls / f"{stem}.checkpoint.json"
+        for path in (
+            receipt_path,
+            inventory_path,
+            checkpoint_path,
+            controls / "owned-payload-retirement.lock",
+        ):
+            if path.is_symlink():
+                raise WorkspaceV2LifecycleError("owned payload control is unsafe")
+        with (controls / "owned-payload-retirement.lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            existing = None
+            if receipt_path.exists():
+                existing = OwnedPayloadRetirementReceipt.model_validate_json(
+                    receipt_path.read_bytes()
+                )
+                if existing.request != request or _hash_file(existing.inventory.path) != (
+                    existing.inventory.size_bytes,
+                    existing.inventory.sha256,
+                ):
+                    raise WorkspaceV2LifecycleError("owned payload retirement binding differs")
+            checkpoint = self._read_sealed_directory_checkpoint(checkpoint_path)
+            retiring = _retiring_root(root, request.operation_id)
+            if existing is not None and existing.completed_at is not None:
+                if root.exists() or retiring.exists() or checkpoint != existing.checkpoint:
+                    raise WorkspaceV2LifecycleError("owned payload terminal state differs")
+                return existing
+            _require_no_directory_users(root)
+            _require_no_directory_users(retiring)
+            if existing is None:
+                if not root.is_dir() or retiring.exists() or checkpoint is not None:
+                    raise WorkspaceV2LifecycleError("owned payload source is unavailable")
+                expected = _owned_payload_proofs(request)
+                started = self._now()
+                count = logical = allocated = 0
+                # An incomplete inventory is not a deletion cursor. Recreate only
+                # this operation's inventory while the original root is untouched.
+                temporary = inventory_path.with_suffix(".pending")
+                if temporary.is_symlink():
+                    raise WorkspaceV2LifecycleError("owned payload inventory is ambiguous")
+                with temporary.open("w", encoding="utf-8") as stream:
+                    for parent, dirs, files in os.walk(root, followlinks=False):
+                        for name in sorted(dirs + files):
+                            path = Path(parent) / name
+                            if path.is_symlink():
+                                raise WorkspaceV2LifecycleError("owned payload contains a symlink")
+                            if path.is_dir():
+                                continue
+                            if not path.is_file():
+                                raise WorkspaceV2LifecycleError(
+                                    "owned payload contains unknown data"
+                                )
+                            relative = path.relative_to(root).as_posix()
+                            _owned_payload_member(request, relative, expected)
+                            stat = path.stat()
+                            size, digest = _hash_file(path)
+                            if (
+                                request.role == OwnedPayloadRole.DELTA_STAGING_OBJECTS
+                                and (size, digest) != expected[relative]
+                            ):
+                                raise WorkspaceV2LifecycleError("owned payload content differs")
+                            stream.write(
+                                json.dumps(
+                                    {
+                                        "path": relative,
+                                        "size_bytes": size,
+                                        "allocated_bytes": stat.st_blocks * 512,
+                                        "sha256": digest,
+                                        "device": stat.st_dev,
+                                        "inode": stat.st_ino,
+                                        "mtime_ns": stat.st_mtime_ns,
+                                        "ctime_ns": stat.st_ctime_ns,
+                                        "links": stat.st_nlink,
+                                    },
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                )
+                                + "\n"
+                            )
+                            count += 1
+                            logical += size
+                            allocated += stat.st_blocks * 512
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                if inventory_path.exists() and _hash_file(inventory_path) != _hash_file(temporary):
+                    raise WorkspaceV2LifecycleError("owned payload uncommitted inventory differs")
+                os.replace(temporary, inventory_path)
+                size, digest = _hash_file(inventory_path)
+                checkpoint = SealedDirectoryRetirementCheckpoint(
+                    operation_id=request.operation_id,
+                    phase="retiring",
+                    source_root=root,
+                    retiring_root=retiring,
+                    inventory_sha256=digest,
+                    remote_manifest_sha256=hashlib.sha256(
+                        request.model_dump_json().encode()
+                    ).hexdigest(),
+                    files_confirmed=count,
+                    bytes_confirmed=logical,
+                )
+                existing = OwnedPayloadRetirementReceipt(
+                    request=request,
+                    inventory=PreparatorySlotArtifact(
+                        kind="files_inventory", path=inventory_path, size_bytes=size, sha256=digest
+                    ),
+                    checkpoint=checkpoint,
+                    allocated_bytes=allocated,
+                    started_at=started,
+                )
+                _replace_json(receipt_path, existing.model_dump(mode="json"))
+            if checkpoint is None:
+                checkpoint = existing.checkpoint
+                self._write_sealed_directory_checkpoint(checkpoint_path, checkpoint)
+            if checkpoint.model_copy(update={"phase": "retiring"}) != existing.checkpoint:
+                raise WorkspaceV2LifecycleError("owned payload cursor differs")
+            if root.exists():
+                if retiring.exists():
+                    raise WorkspaceV2LifecycleError("owned payload detach is ambiguous")
+                _require_no_directory_users(root)
+                _verify_owned_payload_inventory(root, inventory_path, allow_missing=False)
+                os.replace(root, retiring)
+                _fsync_directory(root.parent)
+            if retiring.exists():
+                _require_no_directory_users(retiring)
+                _verify_owned_payload_inventory(retiring, inventory_path, allow_missing=True)
+                shutil.rmtree(retiring)
+                _fsync_directory(root.parent)
+            checkpoint = checkpoint.model_copy(update={"phase": "retired"})
+            self._write_sealed_directory_checkpoint(checkpoint_path, checkpoint)
+            terminal = existing.model_copy(
+                update={
+                    "checkpoint": checkpoint,
+                    "completed_at": self._now(),
+                }
+            )
+            _replace_json(receipt_path, terminal.model_dump(mode="json"))
+            return terminal
+
     def retire_sealed_directory(
         self,
         root: Path,
@@ -1426,6 +2024,130 @@ class WorkspaceV2LifecycleService:
         return value.astimezone(UTC)
 
 
+def _resume_preparatory_unlink_tail(journal: ImmutableLinkJournal) -> None:
+    """Finish only the durable bounded intent, retaining all unknown extra data."""
+    from investment_analyst.workspace.workspace_v2_physical_delta import (
+        ImmutableLinkEntry,
+        _iter_delta_files,
+        _safe_file,
+    )
+
+    path = _safe_file(journal.root, f"page-{journal._page:08d}.intents.jsonl")
+    if not path.exists():
+        return
+    entries = []
+    with path.open("rb") as stream:
+        while line := stream.readline(1 << 20):
+            if len(entries) == 256 or not line.endswith(b"\n"):
+                raise WorkspaceV2LifecycleError("preparatory unlink intent exceeds bounds")
+            entries.append(ImmutableLinkEntry.model_validate_json(line))
+    wanted = {entry.inventory_ordinal for entry in entries}
+    members = []
+    for ordinal, item in enumerate(_iter_delta_files(journal.header.inventory.path)):
+        if ordinal in wanted:
+            members.append((ordinal, item))
+        if len(members) == len(entries):
+            break
+    if not entries or len(members) != len(entries):
+        raise WorkspaceV2LifecycleError("preparatory unlink intent membership differs")
+    journal.apply_page(tuple(members))
+
+
+def _verify_preparatory_slot_remaining(
+    root: Path,
+    inventory: Path,
+    link_reference: ReconciliationFileReference,
+    journal: ImmutableLinkJournal,
+    *,
+    allow_removed: bool = False,
+) -> tuple[int, int]:
+    """Recheck every surviving file even after a partial controlled UNLINK."""
+    from investment_analyst.workspace.workspace_v2_physical_delta import (
+        ImmutableLinkEntry,
+        ImmutableLinkHeader,
+        ImmutableLinkIdentity,
+        ImmutableLinkJournal,
+        PhysicalDeltaFile,
+        _iter_delta_files,
+        _path_order,
+        _source_files,
+    )
+
+    old_header = ImmutableLinkHeader.model_validate_json(
+        (link_reference.path.parent / "header.json").read_bytes()
+    )
+    prior = (
+        ImmutableLinkJournal(link_reference.path.parent, old_header)._prior_witnesses(
+            link_reference
+        )
+        if link_reference.path.name != "header.json"
+        else iter(())
+    )
+
+    def linked_members() -> Iterator[tuple[ImmutableLinkEntry, PhysicalDeltaFile]]:
+        entry = next(prior, None)
+        for ordinal, item in enumerate(_iter_delta_files(old_header.inventory.path)):
+            if entry is None:
+                return
+            if ordinal == entry.inventory_ordinal:
+                yield entry, item
+                entry = next(prior, None)
+        if entry is not None:
+            raise WorkspaceV2LifecycleError("preparatory witness inventory is incomplete")
+
+    linked_inventory = linked_members()
+    witnessed = next(linked_inventory, None)
+    actual = iter(_source_files(root))
+    current = next(actual, None)
+    count = total = 0
+    for item in _iter_delta_files(inventory):
+        if item.deleted:
+            continue
+        if witnessed is not None and _path_order(witnessed[1].path) < _path_order(item.path):
+            raise WorkspaceV2LifecycleError("preparatory witness member is missing from photo")
+        linked = witnessed is not None and witnessed[1].path == item.path
+        entry = witnessed[0] if linked else None
+        if linked and (item.size_bytes, item.sha256) != (
+            witnessed[1].size_bytes,
+            witnessed[1].sha256,
+        ):
+            raise WorkspaceV2LifecycleError("preparatory witness member content differs")
+        path = root / item.path
+        if entry is not None and entry.inventory_ordinal <= journal.confirmed_inventory_ordinal:
+            if path.exists() or path.is_symlink():
+                raise WorkspaceV2LifecycleError("confirmed unlink member reappeared")
+        else:
+            if current != item.path:
+                if allow_removed and (
+                    current is None or _path_order(current) > _path_order(item.path)
+                ):
+                    count += 1
+                    total += item.size_bytes
+                    if linked:
+                        witnessed = next(linked_inventory, None)
+                    continue
+                raise WorkspaceV2LifecycleError("preparatory slot contains unique or missing files")
+            if linked:
+                assert entry is not None
+                if (
+                    entry.after is None
+                    or ImmutableLinkIdentity.observe(path) != entry.after
+                    or ImmutableLinkIdentity.observe(old_header.retained_root / item.path)
+                    != entry.after
+                ):
+                    raise WorkspaceV2LifecycleError("preparatory immutable slot changed")
+            elif _hash_file(path) != (item.size_bytes, item.sha256):
+                raise WorkspaceV2LifecycleError("preparatory slot content changed")
+            current = next(actual, None)
+        if linked:
+            witnessed = next(linked_inventory, None)
+        count += 1
+        total += item.size_bytes
+    if current is not None or witnessed is not None:
+        raise WorkspaceV2LifecycleError("preparatory slot contains unique or missing suffix")
+    return count, total
+
+
 def _safe_existing_root(path: Path, *, label: str) -> Path:
     candidate = path.expanduser()
     if candidate.is_symlink() or not candidate.is_dir():
@@ -1434,6 +2156,212 @@ def _safe_existing_root(path: Path, *, label: str) -> Path:
     if resolved != candidate.resolve(strict=True):
         raise WorkspaceV2LifecycleError(f"{label} root is unsafe")
     return resolved
+
+
+def _owned_payload_scope(request: OwnedPayloadRetirementInput) -> None:
+    """Literal matrix roots only; final cache/scratch gates are not yet admitted."""
+    home = Path.home()
+    ops = home / ".local/share/investment-analyst/ops/data-chassis-45"
+    repository = home / "projects/investment-analyst"
+    caches = {
+        parent / name
+        for parent in (repository, repository / ".worktrees/data-chassis-45")
+        for name in (".pytest_cache", ".ruff_cache")
+    }
+    if not request.retained_controls_root.is_relative_to(ops):
+        raise WorkspaceV2LifecycleError("owned payload controls are outside the matrix")
+    if request.role == OwnedPayloadRole.REGENERABLE_LOCAL_CACHE:
+        if request.source_root not in caches or request.evidence or request.consuming_generation:
+            raise WorkspaceV2LifecycleError("regenerable cache root or identity differs")
+        for process in Path("/proc").iterdir():
+            if not process.name.isdecimal() or int(process.name) == os.getpid():
+                continue
+            try:
+                arguments = (process / "cmdline").read_bytes().split(b"\0")
+                if any(
+                    Path(os.fsdecode(arg)).name in {"pytest", "ruff", "pytest.py"}
+                    for arg in arguments
+                    if arg
+                ):
+                    raise WorkspaceV2LifecycleError("test or linter still uses regenerable caches")
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+        return
+    if request.role == OwnedPayloadRole.DELTA_STAGING_OBJECTS:
+        expected = ops / "physical-delta-W-20261017/physical-delta/objects"
+        if request.source_root != expected or request.releasing_stage != "E0":
+            raise WorkspaceV2LifecycleError("delta staging is protected by pending consumers")
+        _require_no_directory_users(expected.parent.parent)
+        return
+    raise WorkspaceV2LifecycleError("owned payload still requires its final consumer release")
+
+
+def _verify_owned_payload_inventory(
+    root: Path, inventory: Path, *, allow_missing: bool, regenerable_venv_links: bool = False
+) -> None:
+    """Detect additions and edits after inventory; partial own removals may resume."""
+    found = 0
+    with inventory.open(encoding="utf-8") as stream:
+        for line in stream:
+            row = json.loads(line)
+            path = root / row["path"]
+            if not path.exists() and allow_missing:
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise WorkspaceV2LifecycleError("owned payload inventory member is unavailable")
+            stat = path.stat()
+            if (
+                stat.st_dev,
+                stat.st_ino,
+                stat.st_size,
+                stat.st_mtime_ns,
+                stat.st_ctime_ns,
+                stat.st_nlink,
+            ) != (
+                row["device"],
+                row["inode"],
+                row["size_bytes"],
+                row["mtime_ns"],
+                row["ctime_ns"],
+                row["links"],
+            ):
+                raise WorkspaceV2LifecycleError("owned payload changed after inventory")
+            found += 1
+    actual = 0
+    for parent, dirs, files in os.walk(root, followlinks=False):
+        for name in dirs + files:
+            path = Path(parent) / name
+            if path.is_symlink() and not (
+                regenerable_venv_links and path.relative_to(root).parts[0] == ".venv"
+            ):
+                raise WorkspaceV2LifecycleError("owned payload contains a new symlink")
+        actual += sum(not (Path(parent) / name).is_symlink() for name in files)
+    if actual != found:
+        raise WorkspaceV2LifecycleError("owned payload contains new or missing content")
+
+
+def _owned_payload_proofs(
+    request: OwnedPayloadRetirementInput,
+) -> dict[str, tuple[int, str]]:
+    if request.role == OwnedPayloadRole.REGENERABLE_LOCAL_CACHE:
+        return {}
+    from investment_analyst.workspace.workspace_v2_acceptance import CompatibleRecoveryReadback
+    from investment_analyst.workspace.workspace_v2_physical_delta import (
+        PhysicalDeltaManifest,
+        PhysicalDeltaReceipt,
+        _iter_delta_files,
+    )
+
+    refs = {ref.kind: ref for ref in request.evidence}
+    required = {
+        "delta_manifest",
+        "files_inventory",
+        "remote_upload",
+        "restore_receipt",
+        "compatible_readback",
+    }
+    if set(refs) != required or len(refs) != len(request.evidence):
+        raise WorkspaceV2LifecycleError("owned payload recovery proofs are incomplete")
+    for ref in refs.values():
+        if ref.path.is_relative_to(request.source_root) or _hash_file(ref.path) != (
+            ref.size_bytes,
+            ref.sha256,
+        ):
+            raise WorkspaceV2LifecycleError("owned payload proof digest differs")
+    delta = request.source_root.parent.parent
+    if (
+        refs["delta_manifest"].path != delta / "delta-manifest.json"
+        or refs["files_inventory"].path != delta / "files.jsonl"
+    ):
+        raise WorkspaceV2LifecycleError("owned payload proofs belong to another delta")
+    manifest = PhysicalDeltaManifest.model_validate_json(refs["delta_manifest"].path.read_bytes())
+    candidate = (
+        Path.home()
+        / ".local/share/investment-analyst/workspaces/data-chassis-43-rehearsal/restore-v2"
+    )
+    if manifest.source_root != candidate:
+        raise WorkspaceV2LifecycleError("owned payload belongs to another workspace")
+    if (
+        manifest.epoch != request.consuming_generation
+        or manifest.files_sha256 != refs["files_inventory"].sha256
+    ):
+        raise WorkspaceV2LifecycleError("owned payload generation or inventory differs")
+    receipts = []
+    for name, kind in (("remote_upload", "upload"), ("restore_receipt", "restore")):
+        receipt = PhysicalDeltaReceipt.model_validate_json(refs[name].path.read_bytes())
+        if (
+            receipt.kind,
+            receipt.epoch,
+            receipt.manifest_sha256,
+            receipt.files_sha256,
+            receipt.confirmed_files,
+            receipt.historical_state,
+        ) != (
+            kind,
+            manifest.epoch,
+            refs["delta_manifest"].sha256,
+            manifest.files_sha256,
+            manifest.file_count,
+            manifest.historical_state,
+        ):
+            raise WorkspaceV2LifecycleError("owned payload terminal recovery differs")
+        receipts.append(receipt)
+    readback = CompatibleRecoveryReadback.model_validate_json(
+        refs["compatible_readback"].path.read_bytes()
+    )
+    if readback.reader_sha != "dbbdfd021b0fee20be31b2d2a845874b0e861067":
+        raise WorkspaceV2LifecycleError("owned payload lacks the compatible release readback")
+    if (
+        readback.operation_id,
+        readback.workspace_id,
+        readback.restored_root,
+        readback.manifest_sha256,
+        readback.recovery_receipt_sha256,
+    ) != (
+        manifest.epoch,
+        manifest.source_workspace_id,
+        receipts[1].restored_root,
+        refs["delta_manifest"].sha256,
+        hashlib.sha256(receipts[1].model_dump_json().encode()).hexdigest(),
+    ):
+        raise WorkspaceV2LifecycleError("owned payload readback belongs to another recovery")
+    expected: dict[str, tuple[int, str]] = {}
+    count = 0
+    for item in _iter_delta_files(refs["files_inventory"].path):
+        count += 1
+        for block in item.blocks:
+            if block.origin == "delta":
+                name = f"{block.sha256}.bin"
+                value = (block.length_bytes, block.sha256)
+                if name in expected and expected[name] != value:
+                    raise WorkspaceV2LifecycleError("owned payload object identity conflicts")
+                expected[name] = value
+    if count != manifest.file_count:
+        raise WorkspaceV2LifecycleError("owned payload file coverage differs")
+    return expected
+
+
+def _owned_payload_member(
+    request: OwnedPayloadRetirementInput, relative: str, expected: dict[str, tuple[int, str]]
+) -> None:
+    if request.role == OwnedPayloadRole.DELTA_STAGING_OBJECTS:
+        if relative not in expected:
+            raise WorkspaceV2LifecycleError("owned payload contains unique or unknown objects")
+        return
+    if relative in {".gitignore", "CACHEDIR.TAG"}:
+        return
+    if request.source_root.name == ".pytest_cache" and relative in {
+        "README.md",
+        "v/cache/nodeids",
+        "v/cache/lastfailed",
+        "v/cache/stepwise",
+    }:
+        return
+    if request.source_root.name == ".ruff_cache" and re.fullmatch(
+        r"[0-9]+\.[0-9]+\.[0-9]+/[0-9]+", relative
+    ):
+        return
+    raise WorkspaceV2LifecycleError("regenerable cache contains unknown content")
 
 
 def _require_no_directory_users(root: Path) -> None:
@@ -1701,19 +2629,20 @@ def _v2_writer_closed(root: Path):
     )
     descriptors: list[int] = []
     try:
-        for index, path in enumerate(paths):
-            if path.is_symlink() or (index == 0 and not path.is_file()):
-                raise WorkspaceV2LifecycleError("recovery writer lock is missing or unsafe")
-            if not path.exists():
-                continue
-            descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
-            descriptors.append(descriptor)
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            for index, path in enumerate(paths):
+                if path.is_symlink() or (index == 0 and not path.is_file()):
+                    raise WorkspaceV2LifecycleError("recovery writer lock is missing or unsafe")
+                if not path.exists():
+                    continue
+                descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+                descriptors.append(descriptor)
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise WorkspaceV2LifecycleError("recovery writer remains active") from error
+        except OSError as error:
+            raise WorkspaceV2LifecycleError("recovery writer lock cannot be acquired") from error
         yield
-    except BlockingIOError as error:
-        raise WorkspaceV2LifecycleError("recovery writer remains active") from error
-    except OSError as error:
-        raise WorkspaceV2LifecycleError("recovery writer lock cannot be acquired") from error
     finally:
         for descriptor in reversed(descriptors):
             try:

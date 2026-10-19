@@ -31,6 +31,7 @@ from investment_analyst.workspace.workspace_v2_migration import (
     source_fingerprint,
 )
 from investment_analyst.workspace.workspace_v2_migration_models import (
+    CUT_WINDOW_EXCEPTION_SECONDS,
     CutWindow,
     CutWindowGo,
     CutWindowPhase,
@@ -82,6 +83,12 @@ class WorkspaceV2CutWindowService:
             or window.source_workspace_id != go.source_workspace_id
             or window.destination_workspace_id != go.destination_workspace_id
             or window.baseline != go.baseline
+            or window.window_limit_seconds != go.window_limit_seconds
+            or window.window_authorization != go.window_authorization
+            or (
+                go.window_limit_seconds == CUT_WINDOW_EXCEPTION_SECONDS
+                and window.attempt_id != go.attempt_id
+            )
             or window.recovery_reserve_seconds
             != next(b.upper_seconds for b in go.bounds if b.step == "cancel_close_restart")
         ):
@@ -154,6 +161,12 @@ class WorkspaceV2CutWindowService:
             go.baseline != current.baseline
             or go.source_workspace_id != current.source_workspace_id
             or go.destination_workspace_id != current.destination_workspace_id
+            or go.window_limit_seconds != current.window_limit_seconds
+            or go.window_authorization != current.window_authorization
+            or (
+                current.window_limit_seconds == CUT_WINDOW_EXCEPTION_SECONDS
+                and go.attempt_id != current.attempt_id
+            )
             or current.recovery_reserve_seconds
             != next(b.upper_seconds for b in go.bounds if b.step == "cancel_close_restart")
         ):
@@ -200,9 +213,18 @@ class WorkspaceV2CutWindowService:
             if reconciliation_file_reference(self.path, "control") != expected:
                 raise WorkspaceV2CutoverError("cut window compare-and-swap failed")
             current = self.load()
-            if phase not in self._NEXT[current.phase]:
+            changed_boot_abort = (
+                phase == "ABORTED"
+                and boot_id != current.boot_id
+                and current.phase not in {"HEALTHY_V1", "HEALTHY_V2", "ABORTED"}
+            )
+            if phase not in self._NEXT[current.phase] and not changed_boot_abort:
                 raise WorkspaceV2CutoverError("cut window phase transition is forbidden")
-            remaining = self.remaining_work_ns(boot_id=boot_id, monotonic_ns=monotonic_ns)
+            remaining = (
+                0
+                if changed_boot_abort
+                else self.remaining_work_ns(boot_id=boot_id, monotonic_ns=monotonic_ns)
+            )
             if (
                 phase not in {"RETURNING_V1", "HEALTHY_V1", "ABORTED", "HEALTHY_V2"}
                 and remaining <= 0

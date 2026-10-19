@@ -522,6 +522,20 @@ class ProgressReconciliation(ContractModel):
         return self
 
 
+class ProgressRecoveryAttempt(ContractModel):
+    """Typed reading of the existing durable progress-recovery attempt document."""
+
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    schema_version: Literal["workspace-v2-progress-recovery-attempt-v1"] = (
+        "workspace-v2-progress-recovery-attempt-v1"
+    )
+    operation_id: UUID
+    admission: ReconciliationFileReference
+    database: ReconciliationFileReference
+    wal: ReconciliationFileReference | None
+    recorded_at: UTCDateTime
+
+
 class ProgressReconciliationReceipt(ContractModel):
     """A stage receipt, with no claim that F0 became a completed source cut."""
 
@@ -850,6 +864,12 @@ class GenerationContentProof(ContractModel):
     verified_at: UTCDateTime
 
 
+CutWindowLimit = Literal[1800, 5400]
+CutWindowAuthorization = Literal["human-dc45-cut-5400-20261019"]
+CUT_WINDOW_EXCEPTION_SECONDS = 5400
+CUT_WINDOW_5400_AUTHORIZATION = "human-dc45-cut-5400-20261019"
+
+
 CutWindowPhase = Literal[
     "PREPARED",
     "STOPPING",
@@ -897,14 +917,33 @@ class CutWindowGo(ContractModel):
     source_workspace_id: UUID
     destination_workspace_id: UUID
     admitted_at: UTCDateTime
+    window_limit_seconds: CutWindowLimit = 1800
+    window_authorization: CutWindowAuthorization | None = None
+    attempt_id: UUID | None = None
 
     @model_validator(mode="after")
     def complete_conservative_window(self) -> CutWindowGo:
         if len({bound.step for bound in self.bounds}) != 8:
             raise ValueError("GO requires every measured phase exactly once")
-        if sum(bound.upper_seconds for bound in self.bounds) + self.margin_seconds > 1800:
-            raise ValueError("measured global window exceeds 1800 seconds")
+        limit = self.window_limit_seconds
+        if limit == CUT_WINDOW_EXCEPTION_SECONDS:
+            if self.window_authorization != CUT_WINDOW_5400_AUTHORIZATION:
+                raise ValueError("5400-second GO requires its explicit authorization")
+            if self.attempt_id is None:
+                raise ValueError("5400-second GO requires its explicit F3 attempt")
+        elif self.window_authorization is not None or self.attempt_id is not None:
+            raise ValueError("legacy 1800-second GO cannot carry the 5400-second exception")
+        if sum(bound.upper_seconds for bound in self.bounds) + self.margin_seconds > limit:
+            raise ValueError(f"measured global window exceeds {limit} seconds")
         return self
+
+    def admits_prefix(self, prefix_seconds: int) -> bool:
+        if prefix_seconds < 0:
+            raise ValueError("cut window prefix cannot be negative")
+        return (
+            sum(bound.upper_seconds for bound in self.bounds) + self.margin_seconds + prefix_seconds
+            <= self.window_limit_seconds
+        )
 
 
 class CutWindow(ContractModel):
@@ -926,6 +965,8 @@ class CutWindow(ContractModel):
     deadline_monotonic_ns: int = Field(gt=0)
     stop_started_at: UTCDateTime
     recovery_reserve_seconds: int = Field(gt=0, lt=1800)
+    window_limit_seconds: CutWindowLimit = 1800
+    window_authorization: CutWindowAuthorization | None = None
     go: ReconciliationFileReference
     baseline: ReconciliationFileReference
     code: ReconciliationFileReference
@@ -942,8 +983,19 @@ class CutWindow(ContractModel):
 
     @model_validator(mode="after")
     def immutable_clock_and_boundary(self) -> CutWindow:
-        if self.deadline_monotonic_ns - self.started_monotonic_ns != 1800 * 1_000_000_000:
-            raise ValueError("cut window must have exactly one global 1800-second deadline")
+        if self.window_limit_seconds == CUT_WINDOW_EXCEPTION_SECONDS:
+            if self.window_authorization != CUT_WINDOW_5400_AUTHORIZATION:
+                raise ValueError("5400-second cut window requires its explicit authorization")
+        elif self.window_authorization is not None:
+            raise ValueError("legacy 1800-second cut window cannot carry the 5400-second exception")
+        if (
+            self.deadline_monotonic_ns - self.started_monotonic_ns
+            != self.window_limit_seconds * 1_000_000_000
+        ):
+            raise ValueError(
+                "cut window must have exactly one global "
+                f"{self.window_limit_seconds}-second deadline"
+            )
         if not self.source_root.is_absolute() or not self.destination_root.is_absolute():
             raise ValueError("cut window roots must be absolute")
         if self.source_root == self.destination_root:

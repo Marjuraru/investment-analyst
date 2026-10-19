@@ -270,6 +270,83 @@ def test_activation_same_sha_retargets_and_binds_a_different_workspace(tmp_path:
     assert bindings.current.workspace_format_version == 2
 
 
+@pytest.mark.parametrize(
+    "point", ["before_state", "after_state", "after_binding", "health_failure", "foreign"]
+)
+def test_interrupted_v2_activation_finishes_forward_without_old_root_restart(
+    tmp_path: Path, point: str
+):
+    from investment_analyst.application.local_release import (
+        DeploymentWorkspaceBinding,
+        DeploymentWorkspaceBindings,
+    )
+
+    root = tmp_path / "v2"
+    workspace = WorkspaceService().initialize(root, format_version=2).manifest
+    sha = "2" * 40
+    target = tmp_path / "runtime/releases" / sha
+    desired = DeploymentWorkspaceBinding(
+        release_sha=sha,
+        workspace_root=root,
+        workspace_id=workspace.workspace_id,
+        workspace_format_version=2,
+        workspace_created_at=workspace.created_at,
+        bound_at=datetime.now(UTC),
+    )
+    runner = SimulatedSystemctlRunner(
+        properties={
+            "ActiveState": "active",
+            "WorkingDirectory": str(target),
+            "ExecStart": f"{target}/scripts/serve_investment_analyst.py --workspace {root}",
+        }
+    )
+    health = SimulatedHealthChecker(succeed=point != "health_failure")
+    service = LocalReleaseService(
+        paths=tmp_path / "runtime", systemctl=runner, health_checker=health
+    )
+    old = DeploymentState(current="1" * 40, updated_at=datetime.now(UTC))
+    old_bindings = DeploymentWorkspaceBindings()
+    service._save_deployment_state(old)
+    if point in {"after_state", "after_binding"}:
+        service._save_deployment_state(
+            DeploymentState(
+                current=sha,
+                previous=old.current,
+                updated_at=datetime.now(UTC),
+                current_release_path=str(target),
+            )
+        )
+    if point == "after_binding":
+        service._save_workspace_bindings(DeploymentWorkspaceBindings(current=desired))
+    if point == "foreign":
+        service._save_deployment_state(old.model_copy(update={"current": "3" * 40}))
+    with (
+        patch.object(service, "_workspace_binding", return_value=desired),
+        patch.object(service, "_recover_managed_current") as rollback,
+    ):
+        if point in {"health_failure", "foreign"}:
+            with pytest.raises(ReleaseVerificationError):
+                service.recover_interrupted_v2_activation(
+                    sha,
+                    workspace_root=root,
+                    previous_state=old,
+                    previous_bindings=old_bindings,
+                    deadline_seconds=10,
+                )
+        else:
+            result = service.recover_interrupted_v2_activation(
+                sha,
+                workspace_root=root,
+                previous_state=old,
+                previous_bindings=old_bindings,
+                deadline_seconds=10,
+            )
+            assert result.current == sha and result.previous == old.current
+            assert service.load_workspace_bindings().current.workspace_id == workspace.workspace_id
+        rollback.assert_not_called()
+    assert runner.restarts == [] and runner.stops == []
+
+
 @pytest.mark.parametrize("previous_binding_present", [True, False])
 def test_rollback_refuses_stale_v1_binding_after_v2_activation(
     tmp_path: Path, previous_binding_present: bool
@@ -1439,3 +1516,187 @@ def test_workspace_binding_rejects_malformed_historical_companion(tmp_path: Path
         service._workspace_binding("a" * 40, root)
     assert service.load_deployment_state().current is None
     assert service.load_workspace_bindings().current is None
+
+
+def _unused_release_fixture(tmp_path: Path):
+    import subprocess
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "src").mkdir()
+    (source / "src/tool.py").write_text("print('versioned')\n")
+    (source / "uv.lock").write_text("version=1\n")
+
+    def git(*args):
+        return (
+            subprocess.check_output(["git", "-C", str(source), *args], stderr=subprocess.DEVNULL)
+            .decode()
+            .strip()
+        )
+
+    git("init")
+    git("add", ".")
+    git(
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "-m",
+        "fixture",
+    )
+    sha, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+    service = LocalReleaseService(
+        paths=tmp_path / "runtime",
+        systemctl=SimulatedSystemctlRunner(),
+        systemd_unit_path=tmp_path / "unit",
+    )
+    service.paths.releases.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--bare", str(source), str(service.paths.mirror)],
+        check=True,
+        capture_output=True,
+    )
+    root = service.paths.releases / sha
+    (root / "src").mkdir(parents=True)
+    (root / "src/tool.py").write_bytes((source / "src/tool.py").read_bytes())
+    (root / "uv.lock").write_bytes((source / "uv.lock").read_bytes())
+    (root / ".venv/bin").mkdir(parents=True)
+    (root / ".venv/bin/python").symlink_to("/usr/bin/python3")
+    manifest = ReleaseManifest(
+        commit_sha=sha,
+        tree_sha=tree,
+        uv_lock_sha256=hashlib.sha256((root / "uv.lock").read_bytes()).hexdigest(),
+        python_version="Python 3.12.3",
+        staged_at=datetime.now(UTC),
+        release_path=str(root),
+    )
+    (root / "manifest.json").write_text(manifest.model_dump_json())
+    return service, sha, dict(operation_id=uuid4(), retained_controls=tmp_path / "controls")
+
+
+def test_unused_release_retirement_replays_preserving_runtime(tmp_path: Path):
+    service, sha, options = _unused_release_fixture(tmp_path)
+    receipt = service.retire_unused_release(sha, **options)
+    assert receipt.checkpoint.phase == "retired"
+    assert receipt.checkpoint.files_confirmed == 3
+    preserved = (
+        options["retained_controls"] / f"release-{sha}-{options['operation_id']}.manifest.json"
+    )
+    assert ReleaseManifest.model_validate_json(preserved.read_bytes()).commit_sha == sha
+    assert not (service.paths.releases / sha).exists()
+    assert service.paths.mirror.is_dir()
+    assert service.retire_unused_release(sha, **options) == receipt
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["current", "previous", "unit", "reference", "symlink", "unknown", "changed", "compatible"],
+)
+def test_unused_release_retirement_rejects_consumers_or_unique_data(tmp_path: Path, fault: str):
+    service, sha, options = _unused_release_fixture(tmp_path)
+    root = service.paths.releases / sha
+    if fault in {"current", "previous"}:
+        state = DeploymentState(updated_at=datetime.now(UTC), **{fault: sha})
+        service.paths.state_file.write_text(state.model_dump_json())
+    elif fault == "unit":
+        service.systemd_unit_path.write_text(f"WorkingDirectory={root}\n")
+    elif fault == "reference":
+        options["retained_release_paths"] = (root / "src/tool.py",)
+    elif fault == "symlink":
+        (service.paths.root / "current").symlink_to(root)
+    elif fault == "unknown":
+        (root / "unique.json").write_text("preserve")
+    elif fault == "changed":
+        (root / "src/tool.py").write_text("changed user code")
+    else:
+        compatible = "dbbdfd021b0fee20be31b2d2a845874b0e861067"
+        root.rename(service.paths.releases / compatible)
+        sha = compatible
+    with pytest.raises(ReleaseVerificationError):
+        service.retire_unused_release(sha, **options)
+    assert (service.paths.releases / sha).exists()
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+def test_unused_release_retirement_resumes_only_exact_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unknown: bool
+):
+    import shutil
+
+    from investment_analyst.workspace.workspace_v2_lifecycle import WorkspaceV2LifecycleError
+
+    service, sha, options = _unused_release_fixture(tmp_path)
+    original = shutil.rmtree
+    fired = False
+
+    def interrupt(root):
+        nonlocal fired
+        if not fired:
+            fired = True
+            (root / "src/tool.py").unlink()
+            if unknown:
+                (root / "unique-new.json").write_text("must survive")
+            raise OSError("process lost during removal")
+        original(root)
+
+    monkeypatch.setattr(shutil, "rmtree", interrupt)
+    with pytest.raises(OSError):
+        service.retire_unused_release(sha, **options)
+    if unknown:
+        with pytest.raises(WorkspaceV2LifecycleError, match="new or missing"):
+            service.retire_unused_release(sha, **options)
+    else:
+        assert service.retire_unused_release(sha, **options).checkpoint.phase == "retired"
+
+
+@pytest.mark.parametrize("position", ["current", "previous"])
+def test_unused_release_retirement_protects_workspace_bindings(tmp_path: Path, position: str):
+    from investment_analyst.application.local_release import (
+        DeploymentWorkspaceBinding,
+        DeploymentWorkspaceBindings,
+    )
+
+    service, sha, options = _unused_release_fixture(tmp_path)
+    binding = DeploymentWorkspaceBinding(
+        release_sha=sha,
+        workspace_root=tmp_path / "workspace",
+        workspace_id=uuid4(),
+        workspace_format_version=2,
+        workspace_created_at=datetime.now(UTC),
+        bound_at=datetime.now(UTC),
+    )
+    service.paths.workspace_binding_file.write_text(
+        DeploymentWorkspaceBindings(**{position: binding}).model_dump_json()
+    )
+    with pytest.raises(ReleaseVerificationError, match="referenced"):
+        service.retire_unused_release(sha, **options)
+    assert (service.paths.releases / sha).exists()
+
+
+def test_unused_release_retirement_protects_live_reader(tmp_path: Path):
+    import subprocess
+    import sys
+
+    from investment_analyst.workspace.workspace_v2_lifecycle import WorkspaceV2LifecycleError
+
+    service, sha, options = _unused_release_fixture(tmp_path)
+    root = service.paths.releases / sha
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys,time; f=open(sys.argv[1]); print('ready',flush=True); time.sleep(20)",
+            str(root / "src/tool.py"),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout.readline().strip() == "ready"
+        with pytest.raises(WorkspaceV2LifecycleError, match="in use"):
+            service.retire_unused_release(sha, **options)
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+    assert root.exists()

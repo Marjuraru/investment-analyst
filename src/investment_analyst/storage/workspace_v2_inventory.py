@@ -1329,7 +1329,17 @@ def historical_transition_status(root: Path) -> Literal["COMPLETE", "APPLYING"]:
     """Read companions without treating an incomplete physical photo as complete F."""
     from investment_analyst.workspace.service import WorkspaceService
 
-    manifest = WorkspaceService().manifest(root)
+    service = WorkspaceService()
+    manifest = service.manifest(root)
+    ledger = WorkspaceV2GenerationLedger(service, root)
+    resolved = ledger.resolve()
+    generation = None if resolved is None else resolved[1]
+    if generation is not None and (
+        generation.phase != "SUCCESSOR_BOUND"
+        or generation.reserved_successor is None
+        or ledger.attempt_invalidated(generation.reserved_successor.operation_id)
+    ):
+        return "APPLYING"
     result: Literal["COMPLETE", "APPLYING"] = "COMPLETE"
     incomplete: list[tuple[Path, HistoricalTransition]] = []
     complete: dict[UUID, HistoricalTransitionReceipt] = {}
@@ -1359,6 +1369,101 @@ def historical_transition_status(root: Path) -> Literal["COMPLETE", "APPLYING"]:
         ):
             raise WorkspaceV2InventoryError("historical terminal receipt binding differs")
         complete[transition.operation_id] = receipt
+    if generation is not None:
+        from investment_analyst.workspace.workspace_v2_migration import _SuccessorComparison
+
+        assert generation.reserved_successor is not None
+        cut = generation.reserved_successor
+        terminal = complete.get(cut.operation_id)
+        if terminal is None:
+            return "APPLYING"
+        inventory, coverage = generation.inventory, generation.coverage
+        assert inventory is not None and coverage is not None
+        # Every prior transition must be an exact referenced ancestor. A new
+        # head is not permission to ignore unrelated APPLYING controls/forks.
+        ancestors: dict[Path, ReconciliationFileReference] = {}
+        current = generation
+        while True:
+            for reference in (current.predecessor, current.previous_attempt):
+                WorkspaceV2ProgressReconciler._verify(reference)
+                ancestors[reference.path] = reference
+            previous = current.previous_generation
+            if previous.schema_type == "workspace-v2-progress-reconciliation-v1":
+                legacy = ProgressReconciliation.model_validate_json(ledger._read(previous.artifact))
+                ancestors[legacy.predecessor.path] = legacy.predecessor
+                break
+            current = ProgressReconciliationV2.model_validate_json(ledger._read(previous.artifact))
+        controls = [
+            *incomplete,
+            *(
+                (root / "state" / f"historical-transition.{identifier}.json", receipt.transition)
+                for identifier, receipt in complete.items()
+                if identifier != cut.operation_id
+            ),
+        ]
+        for path, transition in controls:
+            reference = ancestors.get(path)
+            if (
+                reference is None
+                or reconciliation_file_reference(path, "control") != reference
+                or transition.destination_workspace_id != manifest.workspace_id
+            ):
+                raise WorkspaceV2InventoryError(
+                    "generation contains an uncovered historical control"
+                )
+        successor = terminal.transition
+        comparison_path = (
+            root
+            / "state"
+            / (
+                f"progress-successor-comparison.{cut.operation_id}.{coverage.comparison_sha256}.json"
+            )
+        )
+        if (
+            reconciliation_file_reference(comparison_path, "control").sha256
+            != coverage.comparison_sha256
+        ):
+            raise WorkspaceV2InventoryError("generational successor comparison changed")
+        comparison = _SuccessorComparison.model_validate_json(comparison_path.read_bytes())
+        parent, seal = successor.parent_seal, terminal.final_seal
+        if (
+            not isinstance(successor.source, HistoricalFrozenSource)
+            or successor.source.cut != cut
+            or successor.parent_membership_path != generation.parent_membership.path
+            or successor.parent_membership_sha256 != generation.parent_membership.sha256
+            or (
+                parent.metric_count,
+                parent.metric_digest,
+                parent.diagnostic_count,
+                parent.diagnostic_digest,
+            )
+            != (
+                inventory.metric_count,
+                inventory.metric_digest,
+                inventory.diagnostic_count,
+                inventory.diagnostic_digest,
+            )
+            or comparison.work.successor != cut
+            or comparison.work.family != "complete"
+            or comparison.work.baseline_dataset_sha256 != inventory.dataset_sha256
+            or comparison.verifier_tree_fingerprint != coverage.verifier_tree_fingerprint
+            or (comparison.work.covered_metric_count, comparison.work.covered_diagnostic_count)
+            != (inventory.metric_count, inventory.diagnostic_count)
+            or (
+                seal.metric_count,
+                seal.metric_digest,
+                seal.diagnostic_count,
+                seal.diagnostic_digest,
+            )
+            != (
+                comparison.work.metric_count,
+                comparison.work.metric_digest,
+                comparison.work.diagnostic_count,
+                comparison.work.diagnostic_digest,
+            )
+        ):
+            raise WorkspaceV2InventoryError("generational historical successor binding differs")
+        return "COMPLETE"
     if incomplete:
         from investment_analyst.workspace.workspace_v2_migration import _SuccessorComparison
 
@@ -1496,7 +1601,7 @@ class WorkspaceV2AnalyticalImporter:
         self._frozen_source = frozen_source
         self._source_snapshot = source_snapshot
         self._historical_transition: HistoricalTransition | None = None
-        self._recovered_progress: ProgressReconciliation | None = None
+        self._recovered_progress: ProgressReconciliation | ProgressReconciliationV2 | None = None
         self._recovered_admission: Path | None = None
         self._recovered_code_root: Path | None = None
         if epoch is not None and not isinstance(source, DirectHistoricalAnalyticalSource):
@@ -1682,12 +1787,6 @@ class WorkspaceV2AnalyticalImporter:
             self._source, DirectHistoricalAnalyticalSource
         ):
             raise WorkspaceV2InventoryError("recovered successor requires a direct frozen source")
-        reconciler = WorkspaceV2ProgressReconciler(
-            WorkspaceService(), self._destination_root, reconciliation_id
-        )
-        progress = ProgressReconciliation.model_validate_json(reconciler.path.read_bytes())
-        if progress.phase != "SUCCESSOR_BOUND":
-            raise WorkspaceV2InventoryError("recovered successor requires complete coverage")
         receipt = verify_recovered_successor(
             service=WorkspaceService(),
             destination_root=self._destination_root,
@@ -1697,9 +1796,15 @@ class WorkspaceV2AnalyticalImporter:
             baseline_code_root=baseline_code_root,
         )
         self._source.validate_transition_source(self._source_root, UUID(self._source_workspace_id))
-        if receipt.reconciliation.reserved_successor != self._frozen_source:
+        progress = (
+            receipt if isinstance(receipt, ProgressReconciliationV2) else receipt.reconciliation
+        )
+        if (
+            progress.phase != "SUCCESSOR_BOUND"
+            or progress.reserved_successor != self._frozen_source
+        ):
             raise WorkspaceV2InventoryError("recovered successor cut differs")
-        self._recovered_progress = receipt.reconciliation
+        self._recovered_progress = progress
         self._recovered_admission = admission_path
         self._recovered_code_root = baseline_code_root
 
@@ -1739,9 +1844,12 @@ class WorkspaceV2AnalyticalImporter:
                     recovered is not None
                     and recovered.phase == "SUCCESSOR_BOUND"
                     and recovered.reserved_successor == self._frozen_source
-                    and existing.operation_id == recovered.predecessor_operation_id
                     and other == recovered.predecessor.path
                     and reconciliation_file_reference(other, "control") == recovered.predecessor
+                    and (
+                        isinstance(recovered, ProgressReconciliationV2)
+                        or existing.operation_id == recovered.predecessor_operation_id
+                    )
                 ):
                     continue
                 raise WorkspaceV2InventoryError("another historical transition is incomplete")
@@ -1768,8 +1876,23 @@ class WorkspaceV2AnalyticalImporter:
             return None
         else:
             recovered = self._recovered_progress
-            if recovered is not None and parent.model_dump() != recovered.parent_seal.model_dump():
-                raise WorkspaceV2InventoryError("recovered successor parent seal changed")
+            if recovered is not None:
+                if isinstance(recovered, ProgressReconciliationV2):
+                    inventory = recovered.inventory
+                    if inventory is None or (
+                        parent.metric_count,
+                        parent.metric_digest,
+                        parent.diagnostic_count,
+                        parent.diagnostic_digest,
+                    ) != (
+                        inventory.metric_count,
+                        inventory.metric_digest,
+                        inventory.diagnostic_count,
+                        inventory.diagnostic_digest,
+                    ):
+                        raise WorkspaceV2InventoryError("recovered generation parent seal changed")
+                elif parent.model_dump() != recovered.parent_seal.model_dump():
+                    raise WorkspaceV2InventoryError("recovered successor parent seal changed")
             membership = (
                 recovered.parent_membership.path
                 if recovered is not None
@@ -1847,7 +1970,11 @@ class WorkspaceV2AnalyticalImporter:
                 with self._target.recovered_historical_transition(
                     transition,
                     source=self._source,
-                    reconciliation_id=self._recovered_progress.operation_id,
+                    reconciliation_id=(
+                        self._recovered_progress.generation_id
+                        if isinstance(self._recovered_progress, ProgressReconciliationV2)
+                        else self._recovered_progress.operation_id
+                    ),
                     admission_path=self._recovered_admission,
                     baseline_code_root=self._recovered_code_root,
                 ):
@@ -2727,6 +2854,7 @@ class WorkspaceV2GenerationLedger:
         document = self.head_path.read_bytes()
         seen: set[str] = set()
         current: tuple[ReconciliationHead, ProgressReconciliationV2] | None = None
+        child: ProgressReconciliationV2 | None = None
         while True:
             if digest in seen:
                 raise WorkspaceV2InventoryError("reconciliation head chain contains a cycle")
@@ -2738,6 +2866,20 @@ class WorkspaceV2GenerationLedger:
             if archived.is_symlink() or archived.read_bytes() != document:
                 raise WorkspaceV2InventoryError("reconciliation head history differs")
             generation = ProgressReconciliationV2.model_validate_json(self._read(head.certificate))
+            if child is not None:
+                expected = (
+                    child.previous_certificate
+                    if child.generation_id == generation.generation_id
+                    else child.previous_generation.artifact
+                )
+                if expected != head.certificate or child.ordinal != (
+                    generation.ordinal
+                    if child.generation_id == generation.generation_id
+                    else generation.ordinal + 1
+                ):
+                    raise WorkspaceV2InventoryError(
+                        "reconciliation head/certificate ancestry differs"
+                    )
             if (
                 generation.generation_id != head.generation_id
                 or generation.ordinal != head.ordinal
@@ -2770,12 +2912,373 @@ class WorkspaceV2GenerationLedger:
                     raise WorkspaceV2InventoryError("reconciliation initial ordinal differs")
                 break
             digest = head.previous_head_sha256
+            child = generation
             path = self.state / f"reconciliation-head.{digest}.json"
             reference = reconciliation_file_reference(path, "control")
             if reference.sha256 != digest:
                 raise WorkspaceV2InventoryError("reconciliation previous head digest differs")
             document = path.read_bytes()
         return current
+
+    def verify_relationships(self, *, admission_path: Path) -> ProgressRelationshipProof:
+        """Verify W2's affected graph independently, and seal it once for C2 reuse."""
+        from investment_analyst.storage.resource_policy import execute_bounded
+        from investment_analyst.workspace.models import WorkspaceAccessMode
+        from investment_analyst.workspace.workspace_v2_backup import _v2_writer_guard
+
+        admission = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+        self._admit(admission)
+        resolved = self.resolve()
+        if (
+            resolved is None
+            or admission.budget.operation_id != resolved[1].generation_id
+            or admission.budget.profile != "verification"
+            or admission.budget.reader_worker is not None
+        ):
+            raise WorkspaceV2InventoryError("generation relationship ownership differs")
+        head, generation = resolved
+        database = self.root / "storage/v2/index.duckdb"
+        with _reconciliation_lock(self.state), _v2_writer_guard(self.root):
+            if database.with_suffix(".duckdb.wal").exists():
+                raise WorkspaceV2InventoryError("generation relationship image has new WAL")
+            image = reconciliation_file_reference(database, "database")
+            with self.service.open_storage(
+                self.service.resolve(self.root), WorkspaceAccessMode.READ_ONLY
+            ) as storage:
+                connection = storage.store.connection
+                CompactAnalyticalStore(connection).verify_historical_relationships(
+                    read_only_units=True
+                )
+                counts = execute_bounded(
+                    connection,
+                    "SELECT (SELECT count(*) FROM raw_v2_index),"
+                    "(SELECT count(*) FROM normalized_observations_v2),"
+                    "(SELECT count(*) FROM workspace_metric_results_v2 WHERE origin='HISTORICAL'),"
+                    "(SELECT count(*) FROM workspace_diagnostic_results_v2 "
+                    "WHERE origin='HISTORICAL')",
+                ).fetchone()
+            if image != reconciliation_file_reference(database, "database"):
+                raise WorkspaceV2InventoryError("generation relationship image changed")
+        tree, environment = historical_transition_fingerprints(256, generation.verifier_policy)
+        return ProgressRelationshipProof(
+            operation_id=generation.generation_id,
+            destination_root=self.root,
+            destination_workspace_id=self.identity.workspace_id,
+            reconciliation=head.certificate,
+            database=image,
+            wal=None,
+            parent_membership=generation.parent_membership,
+            tree_fingerprint=tree,
+            environment_fingerprint=environment,
+            verifier_module_sha256=sha256_hex(
+                Path(__file__).with_name("compact_analytical_v2.py").read_bytes()
+            ),
+            resource_policy_sha256=admission.resource_policy_sha256,
+            resource_receipt=reconciliation_file_reference(admission_path, "resource"),
+            raw_count=int(counts[0]),
+            observation_count=int(counts[1]),
+            metric_count=int(counts[2]),
+            diagnostic_count=int(counts[3]),
+            verified_at=datetime.now(UTC),
+        )
+
+    def reuse_relationships(self, path: Path, *, admission_path: Path) -> ProgressRelationshipProof:
+        """Reuse the sealed graph only for its unchanged image, owner and policy."""
+        from investment_analyst.workspace.workspace_v2_backup import _v2_writer_guard
+
+        admission = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+        self._admit(admission)
+        resolved = self.resolve()
+        proof = ProgressRelationshipProof.model_validate_json(path.read_bytes())
+        if resolved is None:
+            raise WorkspaceV2InventoryError("generation relationship head is missing")
+        head, generation = resolved
+        _, environment = historical_transition_fingerprints(256, generation.verifier_policy)
+        if (
+            proof.operation_id != generation.generation_id
+            or admission.budget.operation_id != generation.generation_id
+            or proof.destination_root != self.root
+            or proof.destination_workspace_id != self.identity.workspace_id
+            or proof.reconciliation != head.certificate
+            or proof.parent_membership != generation.parent_membership
+            or proof.environment_fingerprint != environment
+            or proof.wal is not None
+            or proof.database.path != self.root / "storage/v2/index.duckdb"
+            or proof.verifier_module_sha256
+            != sha256_hex(Path(__file__).with_name("compact_analytical_v2.py").read_bytes())
+            or proof.resource_policy_sha256 != admission.resource_policy_sha256
+        ):
+            raise WorkspaceV2InventoryError("generation relationship reuse binding differs")
+        with _reconciliation_lock(self.state), _v2_writer_guard(self.root):
+            if (self.root / "storage/v2/index.duckdb.wal").exists():
+                raise WorkspaceV2InventoryError("generation relationship image has new WAL")
+            for reference in (
+                proof.database,
+                proof.reconciliation,
+                proof.parent_membership,
+                proof.resource_receipt,
+            ):
+                WorkspaceV2ProgressReconciler._verify(reference)
+        return proof
+
+    def certify_baseline(
+        self,
+        *,
+        content_path: Path,
+        raw_coverage_path: Path,
+        relationships_path: Path,
+        admission_path: Path,
+        code: tuple[ReconciliationFileReference, ...],
+    ) -> ReconciliationFileReference:
+        """Publish W2 only after corrected content, graph and complete raw coverage."""
+        from investment_analyst.storage.resource_policy import execute_bounded
+        from investment_analyst.workspace.models import WorkspaceAccessMode
+        from investment_analyst.workspace.workspace_v2_backup import _v2_writer_guard
+
+        admission = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+        self._admit(admission)
+        resolved = self.resolve()
+        if resolved is None or resolved[1].generation_id != admission.budget.operation_id:
+            raise WorkspaceV2InventoryError("baseline generation owner differs")
+        head, prepared = resolved
+        if prepared.phase != "PREPARED":
+            if (
+                prepared.core_proof != reconciliation_file_reference(content_path, "control")
+                or reconciliation_file_reference(raw_coverage_path, "control")
+                not in prepared.corrective_proofs
+                or reconciliation_file_reference(relationships_path, "control")
+                not in prepared.corrective_proofs
+                or code != prepared.code
+            ):
+                raise WorkspaceV2InventoryError("certified baseline retry bindings differ")
+            for reference in (prepared.database, *prepared.corrective_proofs, *prepared.code):
+                WorkspaceV2ProgressReconciler._verify(reference)
+            return head.certificate
+        content_ref = reconciliation_file_reference(content_path, "control")
+        raw_ref = reconciliation_file_reference(raw_coverage_path, "control")
+        relationship_ref = reconciliation_file_reference(relationships_path, "control")
+        content = GenerationContentProof.model_validate_json(self._read(content_ref))
+        raw = GenerationRawCoverageProof.model_validate_json(self._read(raw_ref))
+        relationships = self.reuse_relationships(relationships_path, admission_path=admission_path)
+        if (
+            content.generation_id != prepared.generation_id
+            or content.baseline_certificate != prepared.verified_w
+            or content.workspace_id != self.identity.workspace_id
+            or content.database != prepared.database
+            or raw.database != content.database
+            or raw.content_proof != content_ref
+            or raw.generation_id != prepared.generation_id
+            or raw.destination_root != self.root
+            or raw.workspace_id != self.identity.workspace_id
+            or raw.raw_count != content.raw_count
+            or raw.witnessed_files + raw.hashed_files != raw.raw_count
+            or (
+                relationships.raw_count,
+                relationships.observation_count,
+                relationships.metric_count,
+                relationships.diagnostic_count,
+            )
+            != (
+                content.raw_count,
+                content.observation_count,
+                content.metric_count,
+                content.diagnostic_count,
+            )
+            or content.verifier_sha256
+            != sha256_hex(inspect.getsource(verify_generation_contents).encode())
+            or raw.verifier_sha256
+            != sha256_hex(inspect.getsource(verify_generation_raw_files).encode())
+            or content.policy_sha256 != admission.resource_policy_sha256
+            or raw.policy_sha256 != admission.resource_policy_sha256
+            or not code
+            or any(ref.role != "code" for ref in code)
+        ):
+            raise WorkspaceV2InventoryError("corrective baseline proof binding differs")
+        for reference in (
+            content.resource_receipt,
+            raw.resource_receipt,
+            raw.link_witness,
+            prepared.parent_membership,
+            *code,
+        ):
+            self._read(reference)
+        expected_head = self._head_digest()
+        delta_path = self.state / f"generation-delta-membership.{prepared.generation_id}.jsonl"
+        with _v2_writer_guard(self.root):
+            with _reconciliation_lock(self.state):
+                if self._head_digest() != expected_head:
+                    raise WorkspaceV2InventoryError("baseline head changed before verification")
+                WorkspaceV2ProgressReconciler._verify(content.database)
+                with (
+                    self.service.open_storage(
+                        self.service.resolve(self.root), WorkspaceAccessMode.READ_ONLY
+                    ) as storage,
+                    delta_path.open("a+b") as delta,
+                ):
+                    connection = storage.store.connection
+                    execute_bounded(
+                        connection,
+                        "CREATE TEMP TABLE _generation_b AS SELECT "
+                        "json_extract_string(json,'$[0]') AS family,"
+                        "try_cast(json_extract_string(json,'$[1]') AS UUID) identifier,"
+                        "json_extract_string(json,'$[2]') digest "
+                        "FROM read_json_objects(?,format='newline_delimited',"
+                        "maximum_object_size=1024)",
+                        [str(prepared.parent_membership.path)],
+                    )
+                    invalid = execute_bounded(
+                        connection,
+                        "SELECT 1 FROM _generation_b WHERE family NOT IN ('metrics','diagnostics') "
+                        "OR family IS NULL OR identifier IS NULL OR digest IS NULL "
+                        "OR NOT regexp_full_match(digest,'[0-9a-f]{64}') LIMIT 1",
+                    ).fetchone()
+                    duplicate = execute_bounded(
+                        connection,
+                        "SELECT 1 FROM _generation_b GROUP BY family,identifier "
+                        "HAVING count(*)<>1 LIMIT 1",
+                    ).fetchone()
+                    parent_counts = execute_bounded(
+                        connection,
+                        "SELECT count(*) FILTER(WHERE family='metrics'),"
+                        "count(*) FILTER(WHERE family='diagnostics') FROM _generation_b",
+                    ).fetchone()
+                    if (
+                        invalid is not None
+                        or duplicate is not None
+                        or parent_counts
+                        != (
+                            prepared.parent_seal.metric_count,
+                            prepared.parent_seal.diagnostic_count,
+                        )
+                    ):
+                        raise WorkspaceV2InventoryError("baseline original B membership differs")
+                    delta.seek(0)
+                    for family, table, key, expected in (
+                        (
+                            "metrics",
+                            "workspace_metric_results_v2",
+                            "result_id",
+                            content.metric_count,
+                        ),
+                        (
+                            "diagnostics",
+                            "workspace_diagnostic_results_v2",
+                            "diagnostic_id",
+                            content.diagnostic_count,
+                        ),
+                    ):
+                        missing = execute_bounded(
+                            connection,
+                            f"SELECT 1 FROM _generation_b b LEFT JOIN {table} t "
+                            f"ON t.{key}=b.identifier WHERE b.family=? AND "
+                            f"(t.{key} IS NULL OR t.origin<>'HISTORICAL' OR "
+                            "t.checksum_sha256<>b.digest) LIMIT 1",
+                            [family],
+                        ).fetchone()
+                        if missing is not None:
+                            raise WorkspaceV2InventoryError("baseline lost or changed original B")
+                        execute_bounded(
+                            connection,
+                            f"SELECT t.{key},t.checksum_sha256 FROM {table} t "
+                            "WHERE t.origin='HISTORICAL' AND NOT EXISTS "
+                            f"(SELECT 1 FROM _generation_b b WHERE b.identifier=t.{key} "
+                            f"AND b.family=?) ORDER BY t.{key}",
+                            [family],
+                        )
+                        count = 0
+                        while rows := connection.fetchmany(256):
+                            document = b"".join(
+                                _json_bytes([family, str(row[0]), str(row[1])]) + b"\n"
+                                for row in rows
+                            )
+                            previous = delta.read(len(document))
+                            if not document.startswith(previous):
+                                raise WorkspaceV2InventoryError(
+                                    "baseline delta membership prefix differs"
+                                )
+                            if len(previous) != len(document):
+                                delta.write(document[len(previous) :])
+                                delta.flush()
+                                os.fsync(delta.fileno())
+                            count += len(rows)
+                        base = parent_counts[0 if family == "metrics" else 1]
+                        if base + count != expected:
+                            raise WorkspaceV2InventoryError(
+                                "baseline B plus delta coverage differs"
+                            )
+                    if delta.read(1):
+                        raise WorkspaceV2InventoryError("baseline delta membership has extra bytes")
+                    execute_bounded(connection, "DROP TABLE _generation_b")
+                WorkspaceV2ProgressReconciler._verify(content.database)
+                delta_ref = reconciliation_file_reference(delta_path, "inventory")
+                dataset = sha256_hex(
+                    _json_bytes(
+                        [
+                            content.raw_count,
+                            content.raw_digest,
+                            content.observation_count,
+                            content.observation_digest,
+                            content.metric_count,
+                            content.metric_digest,
+                            content.diagnostic_count,
+                            content.diagnostic_digest,
+                            prepared.parent_membership.sha256,
+                            delta_ref.sha256,
+                        ]
+                    )
+                )
+                inventory = RecoveredProgressInventory(
+                    raw_count=content.raw_count,
+                    observation_count=content.observation_count,
+                    metric_count=content.metric_count,
+                    diagnostic_count=content.diagnostic_count,
+                    metric_digest=content.metric_digest,
+                    diagnostic_digest=content.diagnostic_digest,
+                    dataset_sha256=dataset,
+                    delta_membership=delta_ref,
+                    relationships=relationship_ref,
+                    verified_at=raw.verified_at,
+                )
+                tree, environment = historical_transition_fingerprints(
+                    256, prepared.verifier_policy
+                )
+                baseline = ProgressReconciliationV2.model_validate(
+                    {
+                        **prepared.model_dump(),
+                        "phase": "BASELINE_VERIFIED",
+                        "previous_certificate": head.certificate,
+                        "inventory": inventory,
+                        "core_proof": content_ref,
+                        "corrective_proofs": (
+                            content_ref,
+                            raw_ref,
+                            relationship_ref,
+                            raw.link_witness,
+                        ),
+                        "code": code,
+                        "tree_fingerprint": tree,
+                        "environment_fingerprint": environment,
+                        "resource_receipt": reconciliation_file_reference(
+                            admission_path, "resource"
+                        ),
+                        "recorded_at": raw.verified_at,
+                    }
+                )
+                intent = self.state / f"generation-baseline.{prepared.generation_id}.intent.json"
+                if intent.exists():
+                    prior = ProgressReconciliationV2.model_validate_json(intent.read_bytes())
+                    if (
+                        baseline.model_copy(update={"resource_receipt": prior.resource_receipt})
+                        != prior
+                    ):
+                        raise WorkspaceV2InventoryError("baseline publication intent changed")
+                    self._read(prior.resource_receipt)
+                    baseline = prior
+                else:
+                    WorkspaceV2ProgressReconciler._write_once(
+                        intent, canonical_json_bytes(baseline) + b"\n"
+                    )
+            return self.publish(baseline, expected_head_sha256=expected_head, admission=admission)
 
     def attempt_invalidated(self, attempt_id: UUID) -> bool:
         """An event revokes activation even if a crash prevented publishing a head."""
@@ -2821,10 +3324,15 @@ class WorkspaceV2GenerationLedger:
                 or event.destination_workspace_id != self.identity.workspace_id
             ):
                 raise WorkspaceV2InventoryError("invalidation destination differs")
+            if event.wal is None and (self.root / "storage/v2/index.duckdb.wal").exists():
+                raise WorkspaceV2InventoryError("invalidation found an unrecorded WAL")
             if event.owner.pid is not None and self._owner_alive(event):
                 raise WorkspaceV2InventoryError("invalidation owner is still alive")
-            binding = LocalReleaseService().load_workspace_bindings().current
-            if binding is not None and binding.workspace_format_version == 2:
+            bindings = LocalReleaseService().load_workspace_bindings()
+            if any(
+                binding is not None and binding.workspace_format_version == 2
+                for binding in (bindings.current, getattr(bindings, "previous", None))
+            ):
                 raise WorkspaceV2InventoryError(
                     "preactivation invalidation cannot follow v2 binding"
                 )
@@ -2854,9 +3362,49 @@ class WorkspaceV2GenerationLedger:
                 reservation = _SuccessorReservation.model_validate_json(
                     self._read(event.reservation)
                 )
+                pending = certificate.reserved_successor is None
+                if pending:
+                    # The immutable reservation can precede publication of the
+                    # reserved certificate/head. Anchor it to the actual legacy
+                    # baseline, without publishing a dead session or releasing
+                    # its reservation by hand.
+                    legacy = list(self.state.glob("progress-reconciliation.*.json"))
+                    if len(legacy) != 1 or legacy[0].is_symlink():
+                        raise WorkspaceV2InventoryError("pending legacy reservation is ambiguous")
+                    current = ProgressReconciliation.model_validate_json(legacy[0].read_bytes())
+                    resolved = self.resolve()
+                    verified_ancestor = (
+                        resolved is not None
+                        and resolved[1].verified_w == event.certificate.artifact
+                    )
+                    transient = {
+                        "phase",
+                        "updated_at",
+                        "reserved_successor_id",
+                        "reserved_successor",
+                        "coverage",
+                    }
+                    if (
+                        certificate.phase != "BASELINE_VERIFIED"
+                        or certificate.inventory is None
+                        or reservation.baseline != event.certificate.artifact
+                        or reservation.baseline_dataset_sha256
+                        != certificate.inventory.dataset_sha256
+                        or (
+                            not verified_ancestor
+                            and certificate.model_dump(exclude=transient)
+                            != current.model_dump(exclude=transient)
+                        )
+                    ):
+                        raise WorkspaceV2InventoryError("pending legacy baseline differs")
                 if (
                     certificate.operation_id != reservation.reconciliation_id
-                    or certificate.reserved_successor != reservation.successor
+                    or (not pending and certificate.reserved_successor != reservation.successor)
+                    or certificate.source_root != reservation.successor.source_root
+                    or certificate.source_workspace_id != reservation.successor.workspace_id
+                    or certificate.source_created_at != reservation.successor.created_at
+                    or certificate.destination_root != self.root
+                    or certificate.destination_workspace_id != self.identity.workspace_id
                     or reservation.successor.operation_id != event.attempt_id
                     or reservation.source_session != event.owner.source_session
                     or reservation.successor.source_root != event.source_root
@@ -2864,13 +3412,68 @@ class WorkspaceV2GenerationLedger:
                 ):
                     raise WorkspaceV2InventoryError("invalidation reservation identity differs")
             else:
+                from investment_analyst.workspace.workspace_v2_migration import (
+                    _SuccessorReservation,
+                )
+
                 certificate_v2 = ProgressReconciliationV2.model_validate_json(
                     self._read(event.certificate.artifact)
                 )
+                reservation_v2 = _SuccessorReservation.model_validate_json(
+                    self._read(event.reservation)
+                )
+                old_admission = MaintenanceResourceReceipt.model_validate_json(
+                    self._read(reservation_v2.resource_receipt)
+                )
+                pending_v2 = certificate_v2.reserved_successor is None
+                resolved = self.resolve()
+                if resolved is None or resolved[0].certificate != event.certificate.artifact:
+                    raise WorkspaceV2InventoryError("generational invalidation head differs")
+                if pending_v2 and (
+                    certificate_v2.phase != "BASELINE_VERIFIED"
+                    or reservation_v2.baseline != event.certificate.artifact
+                    or certificate_v2.inventory is None
+                    or reservation_v2.baseline_dataset_sha256
+                    != certificate_v2.inventory.dataset_sha256
+                ):
+                    raise WorkspaceV2InventoryError("pending generational baseline differs")
                 if (
-                    certificate_v2.reserved_successor is None
-                    or certificate_v2.reserved_successor.operation_id != event.attempt_id
-                    or certificate_v2.successor_owner != event.owner
+                    certificate_v2.generation_id != reservation_v2.reconciliation_id
+                    or certificate_v2.inventory is None
+                    or reservation_v2.baseline_dataset_sha256
+                    != certificate_v2.inventory.dataset_sha256
+                    or event.reservation.path
+                    != self.state / f"progress-successor-reservation.{event.attempt_id}.json"
+                    or certificate_v2.destination_root != self.root
+                    or certificate_v2.destination_workspace_id != self.identity.workspace_id
+                    or certificate_v2.source_root != reservation_v2.successor.source_root
+                    or certificate_v2.source_workspace_id != reservation_v2.successor.workspace_id
+                    or certificate_v2.source_created_at != reservation_v2.successor.created_at
+                    or reservation_v2.successor.operation_id != event.attempt_id
+                    or reservation_v2.successor.source_root != event.source_root
+                    or reservation_v2.successor.workspace_id != event.source_workspace_id
+                    or reservation_v2.source_session != event.owner.source_session
+                    or old_admission.budget.operation_id != event.attempt_id
+                    or (
+                        old_admission.pid,
+                        old_admission.process_start_ticks,
+                        old_admission.boot_id,
+                        old_admission.cgroup_path,
+                    )
+                    != (
+                        event.owner.pid,
+                        event.owner.start_ticks,
+                        event.owner.boot_id,
+                        event.owner.cgroup,
+                    )
+                    or (
+                        not pending_v2
+                        and (
+                            certificate_v2.reserved_successor != reservation_v2.successor
+                            or certificate_v2.successor_owner != event.owner
+                            or certificate_v2.successor_admission != reservation_v2.resource_receipt
+                        )
+                    )
                 ):
                     raise WorkspaceV2InventoryError("invalidation generational reservation differs")
             if event.previous_event is not None:
@@ -2962,6 +3565,24 @@ class WorkspaceV2GenerationLedger:
                             or generation.successor_admission != previous.successor_admission
                         ):
                             raise WorkspaceV2InventoryError("reserved source session cannot change")
+                    else:
+                        mutable = {
+                            "phase",
+                            "previous_certificate",
+                            "recorded_at",
+                            "inventory",
+                            "core_proof",
+                            "corrective_proofs",
+                            "code",
+                            "tree_fingerprint",
+                            "environment_fingerprint",
+                            "resource_receipt",
+                        }
+                        old_values, new_values = previous.model_dump(), generation.model_dump()
+                        if any(old_values[k] != new_values[k] for k in old_values.keys() - mutable):
+                            raise WorkspaceV2InventoryError(
+                                "prepared generation identity cannot change"
+                            )
                 elif (
                     generation.ordinal != previous.ordinal + 1
                     or generation.previous_generation.artifact != head.certificate
@@ -3059,6 +3680,152 @@ class WorkspaceV2GenerationLedger:
             return reference
 
 
+class GenerationRawCoverageProof(ContractModel):
+    """C2 corrective evidence for every raw path of the closed current image."""
+
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    generation_id: UUID
+    destination_root: Path
+    workspace_id: UUID
+    database: ReconciliationFileReference
+    content_proof: ReconciliationFileReference
+    link_witness: ReconciliationFileReference
+    resource_receipt: ReconciliationFileReference
+    raw_count: int = Field(ge=0)
+    raw_bytes: int = Field(ge=0)
+    witnessed_files: int = Field(ge=0)
+    hashed_files: int = Field(ge=0)
+    file_metadata_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verifier_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verified_at: UTCDateTime
+
+
+def verify_generation_raw_files(
+    service: WorkspaceService,
+    *,
+    destination: Path,
+    content_path: Path,
+    link_witness: ReconciliationFileReference,
+    admission_path: Path,
+) -> GenerationRawCoverageProof:
+    """Cover index/path membership completely, reusing only exact inode witnesses."""
+    verifier_sha256 = sha256_hex(inspect.getsource(verify_generation_raw_files).encode())
+    from investment_analyst.storage.resource_policy import execute_bounded
+    from investment_analyst.workspace.models import WorkspaceAccessMode
+    from investment_analyst.workspace.workspace_v2_backup import _v2_writer_guard
+    from investment_analyst.workspace.workspace_v2_physical_delta import (
+        ImmutableLinkHeader,
+        ImmutableLinkIdentity,
+        _iter_retained_link_witness,
+        _safe_file,
+        _source_files,
+        _verify_file,
+    )
+
+    admission = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+    execution = require_maintenance_admission(admission)
+    content_ref = reconciliation_file_reference(content_path, "control")
+    content = GenerationContentProof.model_validate_json(content_path.read_bytes())
+    identity = service.manifest(destination)
+    WorkspaceV2ProgressReconciler._verify(link_witness)
+    header = ImmutableLinkHeader.model_validate_json(
+        _safe_file(link_witness.path.parent, "header.json").read_bytes()
+    )
+    if (
+        content.generation_id != admission.budget.operation_id
+        or content.workspace_id != identity.workspace_id
+        or content.database.path != destination / "storage/v2/index.duckdb"
+        or content.policy_sha256 != admission.resource_policy_sha256
+        or content.verifier_sha256
+        != sha256_hex(inspect.getsource(verify_generation_contents).encode())
+        or header.operation_id != content.generation_id
+        or header.retained_root != destination
+        or header.retained_workspace_id != identity.workspace_id
+    ):
+        raise WorkspaceV2InventoryError("generation raw coverage content binding differs")
+    count = total = witnessed = hashed = 0
+    metadata = hashlib.sha256()
+    staging = destination / "storage/v2/raw"
+    with _reconciliation_lock(destination / "state"), _v2_writer_guard(destination):
+        if (destination / "storage/v2/index.duckdb.wal").exists():
+            raise WorkspaceV2InventoryError("generation raw coverage image has WAL")
+        WorkspaceV2ProgressReconciler._verify(content.database)
+        witnesses = (
+            (item, stamp)
+            for item, stamp in _iter_retained_link_witness(link_witness)
+            if item.path.startswith("storage/v2/raw/raw/sha256/")
+        )
+        witness = next(witnesses, None)
+        actual = iter(_source_files(staging))
+        with service.open_storage(
+            service.resolve(destination), WorkspaceAccessMode.READ_ONLY
+        ) as storage:
+            connection = storage.store.connection
+            execute_bounded(
+                connection,
+                "SELECT relative_path,checksum_sha256 FROM raw_v2_index ORDER BY relative_path",
+            )
+            while rows := connection.fetchmany(256):
+                for row in rows:
+                    relative, checksum = str(row[0]), str(row[1])
+                    full = "storage/v2/raw/" + relative
+                    canonical = f"raw/sha256/{checksum[:2]}/{checksum[2:4]}/{checksum}"
+                    if relative != canonical or next(actual, None) != relative:
+                        raise WorkspaceV2InventoryError(
+                            "generation raw files/index membership differs"
+                        )
+                    path = _safe_file(staging, relative)
+                    before = ImmutableLinkIdentity.observe(path)
+                    if witness is not None and witness[0].path < full:
+                        raise WorkspaceV2InventoryError("generation witnessed raw is unindexed")
+                    if witness is not None and witness[0].path == full:
+                        item, stamp = witness
+                        if (
+                            before != stamp
+                            or item.sha256 != checksum
+                            or item.size_bytes != before.size
+                        ):
+                            raise WorkspaceV2InventoryError(
+                                "generation raw witness identity differs"
+                            )
+                        witnessed += 1
+                        witness = next(witnesses, None)
+                    else:
+                        _verify_file(path, before.size, checksum)
+                        if ImmutableLinkIdentity.observe(path) != before:
+                            raise WorkspaceV2InventoryError(
+                                "generation raw changed during verification"
+                            )
+                        hashed += 1
+                    metadata.update(
+                        _json_bytes([relative, checksum, before.model_dump(mode="json")])
+                    )
+                    count += 1
+                    total += before.size
+                execution.record_measurement("generation_raw_files", count)
+        if next(actual, None) is not None or witness is not None or count != content.raw_count:
+            raise WorkspaceV2InventoryError("generation raw coverage has missing or extra members")
+        WorkspaceV2ProgressReconciler._verify(content.database)
+    return GenerationRawCoverageProof(
+        generation_id=content.generation_id,
+        destination_root=destination,
+        workspace_id=identity.workspace_id,
+        database=content.database,
+        content_proof=content_ref,
+        link_witness=link_witness,
+        resource_receipt=reconciliation_file_reference(admission_path, "resource"),
+        raw_count=count,
+        raw_bytes=total,
+        witnessed_files=witnessed,
+        hashed_files=hashed,
+        file_metadata_sha256=metadata.hexdigest(),
+        verifier_sha256=verifier_sha256,
+        policy_sha256=admission.resource_policy_sha256,
+        verified_at=datetime.now(UTC),
+    )
+
+
 def verify_generation_contents(
     service: WorkspaceService,
     *,
@@ -3068,6 +3835,7 @@ def verify_generation_contents(
     baseline_certificate: ReconciliationFileReference,
     baseline_database_sha256: str,
     admission_path: Path,
+    relationships_path: Path | None = None,
 ) -> GenerationContentProof:
     """C2: compare persisted W rows/fragments once and type-check every addition.
 
@@ -3076,6 +3844,7 @@ def verify_generation_contents(
     old cursor. It does not join metrics through shared segment memberships.
     This proves destination content, never source equivalence for historical F2.
     """
+    verifier_sha256 = sha256_hex(inspect.getsource(verify_generation_contents).encode())
     from investment_analyst.storage.compact_analytical_v2 import _COMPACT_TABLES
     from investment_analyst.storage.resource_policy import connect_duckdb, execute_bounded
     from investment_analyst.storage.serialization import canonical_json_digest
@@ -3141,21 +3910,49 @@ def verify_generation_contents(
                     if name != "workspace_v2_historical_seal"
                 ),
             )
+            identity_columns = {
+                "raw_v2_index": "record_id",
+                "workspace_raw_json_projections_v2": "record_id",
+                "normalized_observations_v2": "observation_id",
+                "workspace_analytical_content_v2": "content_id",
+                "workspace_analytical_sequences_v2": "sequence_id",
+                "workspace_analytical_segments_v2": "segment_id",
+                "workspace_analytical_sequence_segments_v2": "sequence_id",
+                "workspace_analytical_segment_members_v2": "segment_id",
+                "workspace_analytical_components_v2": "diagnostic_id",
+                "workspace_analytical_evidence_v2": "diagnostic_id",
+                "workspace_metric_results_v2": "result_id",
+                "workspace_diagnostic_results_v2": "diagnostic_id",
+            }
             for table in tables:
-                missing = execute_bounded(
+                counts = execute_bounded(
                     connection,
-                    f"SELECT count(*) FROM (SELECT * FROM _verified_w.main.{table} "
-                    f"EXCEPT ALL SELECT * FROM main.{table}) AS missing",
+                    f"SELECT (SELECT count(*) FROM _verified_w.main.{table}),"
+                    f"(SELECT count(*) FROM main.{table})",
                 ).fetchone()
-                if missing != (0,):
-                    raise WorkspaceV2InventoryError(
-                        "verified W row or fragment changed or disappeared"
+                assert counts is not None
+                # Bound native EXCEPT ALL state as well as Python batches.
+                # SQL hash partitions identities only; canonical content hashes
+                # and the financial identity algorithms are unchanged. Every
+                # possible key belongs to exactly one bucket in this engine.
+                buckets = 16 if max(int(c) for c in counts) > 65_536 else 1
+                for bucket in range(buckets):
+                    predicate = (
+                        ""
+                        if buckets == 1
+                        else f" WHERE hash({identity_columns[table]}) % {buckets} = {bucket}"
                     )
-                count = execute_bounded(
-                    connection, f"SELECT count(*) FROM _verified_w.main.{table}"
-                ).fetchone()
-                assert count is not None
-                preserved.append((table, int(count[0])))
+                    missing = execute_bounded(
+                        connection,
+                        f"SELECT count(*) FROM (SELECT * FROM _verified_w.main.{table}{predicate} "
+                        f"EXCEPT ALL SELECT * FROM main.{table}{predicate}) AS missing",
+                    ).fetchone()
+                    if missing != (0,):
+                        raise WorkspaceV2InventoryError(
+                            "verified W row or fragment changed or disappeared"
+                        )
+                    execution.record_measurement("corrective_native_bucket", 1)
+                preserved.append((table, int(counts[0])))
             # A new row attached to an old sequence, segment or diagnostic can
             # change W's meaning without changing any of its existing rows.
             # Preserve those complete memberships, including absence of extras.
@@ -3182,15 +3979,27 @@ def verify_generation_contents(
                     "workspace_diagnostic_results_v2",
                 ),
             ):
-                extra = execute_bounded(
-                    connection,
-                    f"SELECT count(*) FROM (SELECT c.* FROM main.{table} c "
-                    f"WHERE EXISTS (SELECT 1 FROM _verified_w.main.{owners} w "
-                    f"WHERE w.{key}=c.{key}) EXCEPT ALL SELECT * "
-                    f"FROM _verified_w.main.{table}) AS extra",
-                ).fetchone()
-                if extra != (0,):
-                    raise WorkspaceV2InventoryError("verified W membership acquired extra rows")
+                buckets = 16 if dict(preserved)[table] > 65_536 else 1
+                for bucket in range(buckets):
+                    current_bucket = (
+                        "" if buckets == 1 else f" AND hash(c.{key}) % {buckets}={bucket}"
+                    )
+                    owner_bucket = (
+                        "" if buckets == 1 else f" AND hash(w.{key}) % {buckets}={bucket}"
+                    )
+                    original_bucket = (
+                        "" if buckets == 1 else f" WHERE hash({key}) % {buckets}={bucket}"
+                    )
+                    extra = execute_bounded(
+                        connection,
+                        f"SELECT count(*) FROM (SELECT c.* FROM main.{table} c "
+                        f"WHERE EXISTS (SELECT 1 FROM _verified_w.main.{owners} w "
+                        f"WHERE w.{key}=c.{key}{owner_bucket}){current_bucket} "
+                        f"EXCEPT ALL SELECT * FROM _verified_w.main.{table}"
+                        f"{original_bucket}) AS extra",
+                    ).fetchone()
+                    if extra != (0,):
+                        raise WorkspaceV2InventoryError("verified W membership acquired extra rows")
             baseline_financial = execute_bounded(
                 connection,
                 "SELECT (SELECT count(*) FROM _verified_w.main.workspace_metric_results_v2 "
@@ -3348,14 +4157,32 @@ def verify_generation_contents(
                 connection,
                 "SELECT count(*) FROM normalized_observations_v2 o "
                 "LEFT JOIN raw_v2_index r ON r.record_id=o.raw_record_id "
-                "WHERE r.record_id IS NULL OR r.asset_id<>o.asset_id "
-                "OR r.source_id<>o.source_id",
+                "WHERE r.record_id IS NULL OR r.asset_id<>o.asset_id",
             ).fetchone()
             if lineage != (0,):
                 raise WorkspaceV2InventoryError("corrective raw observation lineage differs")
             # The new graph is not yet covered by W's proof. Verify this
             # affected invariant once, under R1, with the bounded verifier.
-            compact.verify_historical_relationships(read_only_units=True)
+            if relationships_path is None:
+                compact.verify_historical_relationships(read_only_units=True)
+            else:
+                reference = reconciliation_file_reference(relationships_path, "control")
+                relationships = ProgressRelationshipProof.model_validate_json(
+                    reference.path.read_bytes()
+                )
+                if (
+                    relationships.operation_id != generation_id
+                    or relationships.destination_root != destination
+                    or relationships.destination_workspace_id != identity.workspace_id
+                    or relationships.database != database_reference
+                    or relationships.wal is not None
+                    or relationships.verifier_module_sha256
+                    != sha256_hex(Path(__file__).with_name("compact_analytical_v2.py").read_bytes())
+                    or relationships.resource_policy_sha256 != admission.resource_policy_sha256
+                ):
+                    raise WorkspaceV2InventoryError("corrective relationship proof binding differs")
+                WorkspaceV2ProgressReconciler._verify(relationships.reconciliation)
+                WorkspaceV2ProgressReconciler._verify(relationships.resource_receipt)
 
             def folded(sql: str) -> tuple[int, str]:
                 execute_bounded(connection, sql)
@@ -3406,7 +4233,7 @@ def verify_generation_contents(
             baseline_database=baseline_reference,
             database=database_reference,
             resource_receipt=reconciliation_file_reference(admission_path, "resource"),
-            verifier_sha256=sha256_hex(inspect.getsource(verify_generation_contents).encode()),
+            verifier_sha256=verifier_sha256,
             policy_sha256=admission.resource_policy_sha256,
             preserved_tables=tuple(preserved),
             raw_count=raw_count,

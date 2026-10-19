@@ -9,15 +9,19 @@ contracts before a page checkpoint is advanced.
 from __future__ import annotations
 
 import ast
+import csv
 import hashlib
+import inspect
 import json
 import os
+import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
@@ -57,6 +61,7 @@ from investment_analyst.storage.serialization import (
 from investment_analyst.storage.workspace_v2 import WorkspaceV2Store
 from investment_analyst.storage.workspace_v2_inventory import (
     WorkspaceV2AnalyticalImporter,
+    WorkspaceV2GenerationLedger,
     WorkspaceV2InventorySummary,
     WorkspaceV2ProgressReconciler,
     historical_transition_fingerprints,
@@ -70,8 +75,11 @@ from investment_analyst.workspace.service import (
 )
 from investment_analyst.workspace.workspace_v2_lifecycle_models import FrozenSourceCut
 from investment_analyst.workspace.workspace_v2_migration_models import (
+    CutOwner,
+    GenerationContentProof,
     ProgressReconciliation,
     ProgressReconciliationReceipt,
+    ProgressReconciliationV2,
     ProgressRelationshipProof,
     ReconciliationFileReference,
     SuccessorCoverageProof,
@@ -90,11 +98,42 @@ class WorkspaceV2MigrationError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class _QuiescentSourceIntent:
+    """One-use session identity allocated by the worker before the stop intent.
+
+    The identifier cannot be supplied from a historical reservation. PREPARED
+    records intention only; the same live worker consumes it when obtaining the
+    actual source locks. Closing/reopening can never recreate this session.
+    """
+
+    source_root: Path
+    operation_id: UUID
+    writer_generation: UUID = field(default_factory=uuid4, init=False)
+    creator_pid: int = field(default_factory=os.getpid, init=False)
+    consumed: bool = field(default=False, init=False)
+
+    def consume(self, root: Path, operation_id: UUID) -> UUID:
+        if (
+            self.consumed
+            or self.creator_pid != os.getpid()
+            or (root, operation_id)
+            != (
+                self.source_root,
+                self.operation_id,
+            )
+        ):
+            raise WorkspaceV2MigrationError("source session intention was consumed or is foreign")
+        object.__setattr__(self, "consumed", True)
+        return self.writer_generation
+
+
+@dataclass(frozen=True)
 class _QuiescentSourceProof:
     cut: FrozenSourceCut
     inspection: WorkspaceInspection
     metadata_sha256: str
     writer_generation: UUID
+    release_native_reader: Callable[[], None]
 
 
 _QUIESCENT_SOURCE: ContextVar[_QuiescentSourceProof | None] = ContextVar(
@@ -147,12 +186,16 @@ def quiescent_source_cut(
     *,
     operation_id: UUID,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    _session_intent: _QuiescentSourceIntent | None = None,
 ) -> Iterator[FrozenSourceCut]:
     """Own the locks and reader for the whole cut; proof cannot survive this session."""
     if _QUIESCENT_SOURCE.get() is not None:
         raise WorkspaceV2MigrationError("quiescent source session is already active")
     root = service.resolve(source_root).root
     with _workspace_process_guard(root):
+        session = (_session_intent or _QuiescentSourceIntent(root, operation_id)).consume(
+            root, operation_id
+        )
         inspection = service.inspect(root)
         identity = service.manifest(root)
         if inspection.status != "ready" or identity.format_version != 1:
@@ -174,10 +217,27 @@ def quiescent_source_cut(
         # closing another descriptor of a file protected by process POSIX locks
         # can release those locks; keep the native reader for the session only
         # after the physical fingerprint has been established.
-        with service.open_storage(service.resolve(root), WorkspaceAccessMode.READ_ONLY):
+        with ExitStack() as native, ExitStack() as closed_database:
+            native.enter_context(
+                service.open_storage(service.resolve(root), WorkspaceAccessMode.READ_ONLY)
+            )
             if _source_generation(root) != before:
                 raise WorkspaceV2MigrationError("source changed before quiescent reader opened")
-            proof = _QuiescentSourceProof(cut, inspection, before, uuid4())
+            reader_closed = False
+
+            def release_reader() -> None:
+                nonlocal reader_closed
+                if reader_closed:
+                    return
+                from investment_analyst.workspace.workspace_v2_lifecycle import _closed_duckdb_file
+
+                native.close()
+                closed_database.enter_context(
+                    _closed_duckdb_file(root / "storage/data/processed/investment_analyst.duckdb")
+                )
+                reader_closed = True
+
+            proof = _QuiescentSourceProof(cut, inspection, before, session, release_reader)
             token = _QUIESCENT_SOURCE.set(proof)
             try:
                 yield cut
@@ -198,6 +258,14 @@ def _live_quiescent_source(
     if _source_generation(root) != proof.metadata_sha256:
         raise WorkspaceV2MigrationError("source changed during quiescent session")
     return proof
+
+
+def close_quiescent_native_reader(root: Path, cut: FrozenSourceCut) -> None:
+    """Keep the actual session and writer exclusion while admitting one restore reader."""
+    proof = _live_quiescent_source(root, cut)
+    if proof is None:
+        raise WorkspaceV2MigrationError("source reader handoff requires its live session")
+    proof.release_native_reader()
 
 
 class _SuccessorReservation(ContractModel):
@@ -408,6 +476,196 @@ def _verify_baseline_code_compatibility(
     return reconciliation_file_reference(path, "control")
 
 
+def _generation_core_evidence(progress: ProgressReconciliationV2) -> GenerationContentProof:
+    """Reuse actual C2 proofs; never synthesize a legacy reconciliation/core proof."""
+    from investment_analyst.storage.workspace_v2_inventory import (
+        GenerationRawCoverageProof,
+        verify_generation_contents,
+        verify_generation_raw_files,
+    )
+
+    if progress.inventory is None or progress.core_proof is None:
+        raise WorkspaceV2MigrationError("generation lacks a certified baseline")
+    policy = sha256_hex((Path(__file__).parent.parent / "storage/resource_policy.py").read_bytes())
+    core = GenerationContentProof.model_validate_json(
+        WorkspaceV2GenerationLedger._read(progress.core_proof)
+    )
+    if (
+        core.generation_id != progress.generation_id
+        or core.workspace_id != progress.destination_workspace_id
+        or core.database != progress.database
+        or core.policy_sha256 != policy
+        or core.verifier_sha256
+        != sha256_hex(inspect.getsource(verify_generation_contents).encode())
+        or (
+            core.raw_count,
+            core.observation_count,
+            core.metric_count,
+            core.metric_digest,
+            core.diagnostic_count,
+            core.diagnostic_digest,
+        )
+        != (
+            progress.inventory.raw_count,
+            progress.inventory.observation_count,
+            progress.inventory.metric_count,
+            progress.inventory.metric_digest,
+            progress.inventory.diagnostic_count,
+            progress.inventory.diagnostic_digest,
+        )
+    ):
+        raise WorkspaceV2MigrationError("generation corrective content binding differs")
+    raw_proofs = []
+    for ref in progress.corrective_proofs:
+        document = WorkspaceV2GenerationLedger._read(ref)
+        try:
+            raw = GenerationRawCoverageProof.model_validate_json(document)
+        except ValueError:
+            continue
+        raw_proofs.append(raw)
+    if len(raw_proofs) != 1:
+        raise WorkspaceV2MigrationError("generation requires its complete raw coverage")
+    raw = raw_proofs[0]
+    if (
+        raw.generation_id != progress.generation_id
+        or raw.destination_root != progress.destination_root
+        or raw.workspace_id != progress.destination_workspace_id
+        or raw.database != progress.database
+        or raw.content_proof != progress.core_proof
+        or raw.raw_count != core.raw_count
+        or raw.policy_sha256 != policy
+        or raw.verifier_sha256
+        != sha256_hex(inspect.getsource(verify_generation_raw_files).encode())
+    ):
+        raise WorkspaceV2MigrationError("generation raw coverage binding differs")
+    WorkspaceV2ProgressReconciler._verify(progress.inventory.delta_membership)
+    WorkspaceV2ProgressReconciler._verify(progress.inventory.relationships)
+    WorkspaceV2ProgressReconciler._verify(progress.parent_membership)
+    return core
+
+
+def _reserve_generation_successor(
+    *,
+    service: WorkspaceService,
+    destination_root: Path,
+    reconciliation_id: UUID,
+    frozen_source: FrozenSourceCut,
+    admission_path: Path,
+) -> ProgressReconciliationV2:
+    from investment_analyst.workspace.workspace_v2_lifecycle import (
+        _closed_duckdb_file,
+        _v2_writer_closed,
+    )
+
+    ledger = WorkspaceV2GenerationLedger(service, destination_root)
+    resolved = ledger.resolve()
+    if resolved is None:
+        raise WorkspaceV2MigrationError("generation head is missing")
+    head, progress = resolved
+    expected_head = ledger._head_digest()
+    if progress.generation_id != reconciliation_id or progress.phase == "PREPARED":
+        raise WorkspaceV2MigrationError("successor requires the current certified generation")
+    if (progress.source_root, progress.source_workspace_id, progress.source_created_at) != (
+        frozen_source.source_root,
+        frozen_source.workspace_id,
+        frozen_source.created_at,
+    ) or ledger.attempt_invalidated(frozen_source.operation_id):
+        raise WorkspaceV2MigrationError("generation source or attempt differs")
+    session = _live_quiescent_source(frozen_source.source_root, frozen_source)
+    if session is None:
+        raise WorkspaceV2MigrationError("generation requires a live source session")
+    admission = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+    ledger._admit(admission)
+    owner = CutOwner(
+        source_session=session.writer_generation,
+        pid=admission.pid,
+        start_ticks=admission.process_start_ticks,
+        boot_id=admission.boot_id,
+        cgroup=admission.cgroup_path,
+    )
+    _generation_core_evidence(progress)
+    assert progress.inventory is not None
+    path = ledger.state / f"progress-successor-reservation.{frozen_source.operation_id}.json"
+    module_sha = sha256_hex(Path(__file__).read_bytes())
+    resource = reconciliation_file_reference(admission_path, "resource")
+    if path.exists():
+        reservation = _SuccessorReservation.model_validate_json(
+            WorkspaceV2GenerationLedger._read(reconciliation_file_reference(path, "control"))
+        )
+        baseline = ProgressReconciliationV2.model_validate_json(ledger._read(reservation.baseline))
+        if (
+            (
+                reservation.reconciliation_id,
+                reservation.successor,
+                reservation.source_session,
+                reservation.module_sha256,
+                reservation.resource_receipt,
+                reservation.baseline_dataset_sha256,
+            )
+            != (
+                reconciliation_id,
+                frozen_source,
+                session.writer_generation,
+                module_sha,
+                resource,
+                progress.inventory.dataset_sha256,
+            )
+            or baseline.generation_id != reconciliation_id
+            or baseline.phase != "BASELINE_VERIFIED"
+            or baseline.reserved_successor is not None
+            or baseline.inventory != progress.inventory
+            or baseline.database != progress.database
+        ):
+            raise WorkspaceV2MigrationError("generation reservation session or baseline differs")
+    else:
+        if progress.reserved_successor is not None:
+            raise WorkspaceV2MigrationError("generation reservation receipt is missing")
+        # An intent whose session died must pass C1 invalidation/reconciliation;
+        # it must never be silently replaced by a different attempt.
+        for other in ledger.state.glob("progress-successor-reservation.*.json"):
+            if other.is_symlink():
+                raise WorkspaceV2MigrationError("generation reservation path is unsafe")
+            previous = _SuccessorReservation.model_validate_json(other.read_bytes())
+            if previous.baseline == head.certificate and previous.successor != frozen_source:
+                raise WorkspaceV2MigrationError("generation has another pending reservation")
+        reservation = _SuccessorReservation(
+            reconciliation_id=reconciliation_id,
+            successor=frozen_source,
+            source_session=session.writer_generation,
+            baseline=head.certificate,
+            baseline_dataset_sha256=progress.inventory.dataset_sha256,
+            module_sha256=module_sha,
+            resource_receipt=resource,
+            recorded_at=datetime.now(UTC),
+        )
+    if progress.reserved_successor is not None:
+        if (
+            progress.reserved_successor != frozen_source
+            or progress.successor_owner != owner
+            or progress.successor_admission != resource
+        ):
+            raise WorkspaceV2MigrationError("generation already reserved a different owner")
+        return progress
+    with _v2_writer_closed(destination_root), _closed_duckdb_file(progress.database.path):
+        ledger._read(progress.database)
+        if progress.wal is not None:
+            ledger._read(progress.wal)
+        elif progress.database.path.with_suffix(".duckdb.wal").exists():
+            raise WorkspaceV2MigrationError("generation baseline has an unexpected WAL")
+        WorkspaceV2ProgressReconciler._write_once(path, canonical_json_bytes(reservation) + b"\n")
+        reserved = progress.model_copy(
+            update={
+                "previous_certificate": head.certificate,
+                "reserved_successor": frozen_source,
+                "successor_owner": owner,
+                "successor_admission": resource,
+                "recorded_at": datetime.now(UTC),
+            }
+        )
+        ledger.publish(reserved, expected_head_sha256=expected_head, admission=admission)
+    return reserved
+
+
 def reserve_recovered_successor(
     *,
     service: WorkspaceService,
@@ -416,7 +674,7 @@ def reserve_recovered_successor(
     frozen_source: FrozenSourceCut,
     admission_path: Path,
     baseline_code_root: Path | None = None,
-) -> ProgressReconciliationReceipt:
+) -> ProgressReconciliationReceipt | ProgressReconciliationV2:
     """Reserve exactly one live F1 without claiming W subset F1 or completing F0."""
     from investment_analyst.workspace.workspace_v2_lifecycle import (
         _closed_duckdb_file,
@@ -441,6 +699,14 @@ def reserve_recovered_successor(
     session = _live_quiescent_source(frozen_source.source_root, frozen_source)
     if session is None:
         raise WorkspaceV2MigrationError("successor reservation requires live source quiescence")
+    if (destination_root / "state/reconciliation-head.json").exists():
+        return _reserve_generation_successor(
+            service=service,
+            destination_root=destination_root,
+            reconciliation_id=reconciliation_id,
+            frozen_source=frozen_source,
+            admission_path=admission_path,
+        )
     reconciler = WorkspaceV2ProgressReconciler(service, destination_root, reconciliation_id)
     with reconciler._exclusive():
         progress = ProgressReconciliation.model_validate_json(reconciler.path.read_bytes())
@@ -719,6 +985,11 @@ def _require_recovered_core(
     if reference.role != "control" or reference.path.is_symlink():
         raise WorkspaceV2MigrationError("recovered core proof reference differs")
     WorkspaceV2ProgressReconciler._verify(reference)
+    if (
+        json.loads(reference.path.read_bytes()).get("schema_version")
+        == "workspace-v2-generation-content-proof-v1"
+    ):
+        return _require_generation_core(destination, frozen_source, reference, admission_path)
     core = _RecoveredCoreBaseline.model_validate_json(reference.path.read_bytes())
     baseline = ProgressReconciliation.model_validate_json(core.reconciliation.path.read_bytes())
     for control in (
@@ -782,6 +1053,67 @@ def _require_recovered_core(
     return execution
 
 
+def _require_generation_core(
+    destination: LocalStorage,
+    frozen_source: FrozenSourceCut,
+    reference: ReconciliationFileReference,
+    admission_path: Path,
+) -> MaintenanceExecution:
+    root = destination.paths.root.parent.parent
+    ledger = WorkspaceV2GenerationLedger(WorkspaceService(), root)
+    resolved = ledger.resolve()
+    if resolved is None:
+        raise WorkspaceV2MigrationError("core generation head is missing")
+    _, progress = resolved
+    session = _live_quiescent_source(frozen_source.source_root, frozen_source)
+    admission = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+    execution = require_maintenance_admission(admission)
+    reservation_path = (
+        root / "state" / f"progress-successor-reservation.{frozen_source.operation_id}.json"
+    )
+    reservation = _SuccessorReservation.model_validate_json(
+        ledger._read(reconciliation_file_reference(reservation_path, "control"))
+    )
+    baseline = ProgressReconciliationV2.model_validate_json(ledger._read(reservation.baseline))
+    core = _generation_core_evidence(progress)
+    if (
+        progress.phase != "SUCCESSOR_BOUND"
+        or progress.core_proof != reference
+        or progress.reserved_successor != frozen_source
+        or session is None
+        or progress.successor_owner
+        != CutOwner(
+            source_session=session.writer_generation,
+            pid=admission.pid,
+            start_ticks=admission.process_start_ticks,
+            boot_id=admission.boot_id,
+            cgroup=admission.cgroup_path,
+        )
+        or progress.successor_admission != reconciliation_file_reference(admission_path, "resource")
+        or reservation.reconciliation_id != progress.generation_id
+        or reservation.successor != frozen_source
+        or reservation.source_session != session.writer_generation
+        or reservation.module_sha256 != sha256_hex(Path(__file__).read_bytes())
+        or baseline.phase != "BASELINE_VERIFIED"
+        or baseline.reserved_successor is not None
+        or baseline.inventory != progress.inventory
+        or baseline.core_proof != reference
+        or baseline.database != core.database
+        or core.database.path != destination.paths.database_path
+        or admission.budget.operation_id != frozen_source.operation_id
+        or admission.budget.profile != "verification"
+        or admission.budget.reader_worker is not None
+        or {item.database for item in admission.budget.assignments}
+        != {
+            frozen_source.source_root / "storage/data/processed/investment_analyst.duckdb",
+            destination.paths.database_path,
+        }
+        or ledger.attempt_invalidated(frozen_source.operation_id)
+    ):
+        raise WorkspaceV2MigrationError("generation core proof or source session changed")
+    return execution
+
+
 def _core_native_pages(
     connection: DuckDBPyConnection,
     execution: MaintenanceExecution,
@@ -793,6 +1125,70 @@ def _core_native_pages(
             if not rows:
                 return
             yield rows
+
+
+def _load_recovered_core_projection(
+    target: DuckDBPyConnection,
+    stream: DuckDBPyConnection,
+    source_database: Path,
+    execution: MaintenanceExecution,
+    page_limit: int,
+    *,
+    raw: bool,
+) -> None:
+    """Load only the two cut-comparison indexes through one admitted spill file."""
+    policy = connection_policy(source_database)
+    if policy.temp_directory is None:
+        raise WorkspaceV2MigrationError("core comparison requires its admitted spool")
+    table = "_recovered_raw" if raw else "_recovered_observations"
+    columns = "{'identifier':'VARCHAR','digest':'VARCHAR'" + (
+        ",'metadata':'VARCHAR'}" if raw else "}"
+    )
+    count = 0
+    longest = 1
+    with NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="",
+        dir=policy.temp_directory,
+        prefix="recovered-core-index-",
+        suffix=".tsv",
+    ) as projection:
+        writer = csv.writer(projection, delimiter="\t", quoting=csv.QUOTE_ALL, lineterminator="\n")
+        for rows in _core_native_pages(target, execution, page_limit):
+            for row in rows:
+                values = tuple(str(value) for value in row)
+                # Size the parser from the actual projected record, rather than
+                # imposing a new domain limit on an identifier or metadata text.
+                longest = max(
+                    longest,
+                    sum(len(v.encode()) + v.count('"') for v in values) + 3 * len(values) + 2,
+                )
+                writer.writerow(values)
+                count += 1
+        projection.flush()
+        if count:
+            # This is an unordered temporary lookup, never the persisted index.
+            # Avoid retaining an insertion-order buffer beside the join/sort.
+            execute_bounded(stream, "SET preserve_insertion_order=false")
+            execute_bounded(
+                stream,
+                f"INSERT INTO {table} SELECT * FROM read_csv(?,columns={columns}, "
+                "auto_detect=false, delim='\t', header=false, "
+                "quote='\"', escape='\"', strict_mode=true, max_line_size=?)",
+                [projection.name, max(2_097_152, longest)],
+            )
+            if (
+                execute_bounded(
+                    stream,
+                    f"SELECT identifier FROM {table} GROUP BY identifier "
+                    "HAVING count(*)<>1 LIMIT 1",
+                ).fetchone()
+                is not None
+            ):
+                raise WorkspaceV2MigrationError(
+                    "core comparison projection has duplicate identities"
+                )
 
 
 def _record_recovered_core_append(
@@ -827,6 +1223,461 @@ def _record_recovered_core_append(
     WorkspaceV2ProgressReconciler._write_once(path, document)
 
 
+def _recovered_raw_comparison_sql() -> tuple[str, str]:
+    """Share the exact metadata comparison with the read-only E4 measurement."""
+    fields = (
+        "record_id",
+        "asset_id",
+        "source_id",
+        "event_time",
+        "available_at",
+        "received_at",
+        "schema_version",
+    )
+    timestamps = {"event_time", "available_at", "received_at"}
+
+    def envelope(alias: str, *, target: bool) -> str:
+        return (
+            "json_array("
+            + ",".join(
+                _utc_document_timestamp(f"CAST({alias}.{field} AS TIMESTAMPTZ)")
+                if field in timestamps and target
+                else _utc_document_timestamp(f"{alias}.{field}")
+                if field in timestamps
+                else f"{alias}.{field}"
+                for field in fields
+            )
+            + ")"
+        )
+
+    paths = (
+        "["
+        + ",".join(
+            "'$.source.source_id'" if field == "source_id" else f"'$.{field}'" for field in fields
+        )
+        + "]"
+    )
+    expected = (
+        "["
+        + ",".join(
+            _utc_document_timestamp(f"r.{field}") if field in timestamps else f"r.{field}"
+            for field in fields
+        )
+        + "]"
+    )
+    return (
+        "SELECT record_id,checksum_sha256,CAST("
+        + envelope("r", target=True)
+        + " AS VARCHAR) FROM raw_v2_index r",
+        "SELECT r.record_id,r.checksum_sha256,sha256(r.document_json),w.digest,CAST("
+        + envelope("r", target=False)
+        + " AS VARCHAR) IS NOT DISTINCT FROM w.metadata,"
+        + f"json_extract_string(r.document_json,{paths}) IS NOT DISTINCT FROM "
+        + expected
+        + ",octet_length(encode(r.document_json)),r.relative_path,"
+        "r.source_id,r.schema_version,CAST("
+        + envelope("r", target=False)
+        + " AS VARCHAR) FROM raw_record_index r LEFT JOIN _recovered_raw w "
+        "ON r.record_id=w.identifier ORDER BY r.received_at,r.record_id",
+    )
+
+
+def _recovered_observations_comparison_sql() -> tuple[str, str, tuple[str, ...], set[str]]:
+    """Share the exact metadata comparison with the read-only E4 measurement."""
+    fields = (
+        "observation_id",
+        "raw_record_id",
+        "asset_id",
+        "field_name",
+        "frequency",
+        "observed_at",
+        "period_end",
+        "available_at",
+        "quality",
+    )
+    timestamps = {"observed_at", "period_end", "available_at"}
+    paths = "[" + ",".join(f"'$.{name}'" for name in fields) + "]"
+    envelope = (
+        "["
+        + ",".join(
+            _utc_document_timestamp(f"s.{name}") if name in timestamps else f"s.{name}"
+            for name in fields
+        )
+        + "]"
+    )
+    return (
+        "SELECT observation_id,sha256(CAST("
+        + _observation_canonical_sql("o")
+        + " AS VARCHAR)) FROM normalized_observations_v2 o",
+        "SELECT "
+        + ",".join(
+            _utc_document_timestamp(f"s.{name}") if name in timestamps else f"s.{name}"
+            for name in fields
+        )
+        + ",sha256(s.document_json),w.digest,"
+        + f"json_extract_string(s.document_json,{paths}) IS NOT DISTINCT FROM "
+        + envelope
+        + ",octet_length(encode(s.document_json)),"
+        "json_extract_string(s.document_json,'$.source.source_id') "
+        "FROM normalized_observations s LEFT JOIN _recovered_observations w "
+        "ON s.observation_id=w.identifier ORDER BY s.available_at,s.observation_id",
+        fields,
+        timestamps,
+    )
+
+
+def _successor_comparison_fields(family: str) -> tuple[str, str, list[str]]:
+    metric = family == "metrics"
+    table, key = (
+        ("metric_results", "result_id") if metric else ("diagnostic_results", "diagnostic_id")
+    )
+    fields = [
+        key,
+        "asset_id",
+        *(["metric_key"] if metric else ["mode", "verdict"]),
+        "as_of",
+        "available_at",
+        "computed_at",
+        "quality",
+    ]
+    return table, key, fields
+
+
+def _successor_comparison_sql(family: str, after: str = "") -> str:
+    table, key, fields = _successor_comparison_fields(family)
+    json_paths = "[" + ",".join(f"'$.{field}'" for field in fields) + "]"
+    envelope = (
+        "["
+        + ",".join(
+            _utc_document_timestamp(f"s.{field}")
+            if field in {"as_of", "available_at", "computed_at"}
+            else f"s.{field}"
+            for field in fields
+        )
+        + "]"
+    )
+    return (
+        f"SELECT s.{key},CAST(s.available_at AS VARCHAR),sha256(s.document_json),w.digest,"
+        f"json_extract_string(s.document_json,{json_paths})={envelope},"
+        "octet_length(encode(s.document_json)) "
+        f"FROM {table} s LEFT JOIN _successor_w w "
+        f"ON w.family_name='{family}' AND w.identifier=CAST(s.{key} AS UUID) "
+        f"WHERE TRUE{after} ORDER BY s.available_at,s.{key}"
+    )
+
+
+def _validate_successor_comparison_rows(
+    source: LocalStorage | DuckDBPyConnection,
+    family: str,
+    rows: list[tuple[object, ...]],
+    *,
+    timings: dict[str, float] | None = None,
+    execution: MaintenanceExecution | None = None,
+) -> dict[UUID, str]:
+    """Keep the existing typed fallback, in <=256 model/1 MiB source batches."""
+    from investment_analyst.core.models import DiagnosticResult, MetricResult
+    from investment_analyst.storage.compact_analytical_v2 import _instant
+    from investment_analyst.storage.serialization import model_from_json
+
+    if len(rows) > 256:
+        raise WorkspaceV2MigrationError("successor comparison page exceeds bounds")
+    table, key, fields = _successor_comparison_fields(family)
+    connection = source if isinstance(source, DuckDBPyConnection) else source.store.connection
+    metadata_columns = ",".join(
+        f"CAST({column} AS VARCHAR)"
+        if column in {"as_of", "available_at", "computed_at"}
+        else column
+        for column in fields
+    )
+    pending = [row for row in rows if row[3] is None or row[2] != row[3] or row[4] is not True]
+    verified: dict[UUID, str] = {}
+    start = 0
+    while start < len(pending):
+        end, size = start, 0
+        while end < len(pending):
+            length = int(pending[end][5])
+            if length > 1 << 20:
+                raise WorkspaceV2MigrationError("successor model exceeds buffer budget")
+            if end > start and size + length > 1 << 20:
+                break
+            size += length
+            end += 1
+        group = pending[start:end]
+        identifiers = tuple(UUID(str(row[0])) for row in group)
+        placeholders = ",".join("?" for _ in identifiers)
+        lookup = f" FROM {table} WHERE {key} IN ({placeholders})"
+        parameters = [str(identifier) for identifier in identifiers]
+        # Both document and physical columns come from the same bounded read.
+        # The stream is ordered by available_at; its range also enables native
+        # zone-map pruning instead of rescanning all historical documents.
+        query = (
+            f"SELECT {key},document_json,{metadata_columns}"
+            + lookup
+            + " AND available_at BETWEEN CAST(? AS TIMESTAMPTZ) AND CAST(? AS TIMESTAMPTZ)"
+        )
+        instants = [_instant(row[1]) for row in group]
+        bounded_parameters = [*parameters, min(instants), max(instants)]
+        if execution is not None and f"{family}_shared_lookup" not in execution.query_plans():
+            for name, sql, values in (
+                ("documents_lookup", f"SELECT {key},document_json" + lookup, parameters),
+                ("metadata_lookup", f"SELECT {key},{metadata_columns}" + lookup, parameters),
+                ("shared_lookup", query, bounded_parameters),
+            ):
+                plan = execute_bounded(connection, "EXPLAIN " + sql, values).fetchall()
+                execution.record_query_plan(
+                    f"{family}_{name}", "\n".join(str(row[-1]) for row in plan)
+                )
+        started = time.monotonic()
+        documents = execute_bounded(connection, query, bounded_parameters).fetchall()
+        if timings is not None:
+            timings["lookup_sql_seconds"] += time.monotonic() - started
+        if (
+            len(documents) != len(identifiers)
+            or {UUID(str(row[0])) for row in documents} != set(identifiers)
+            or sum(len(str(row[1]).encode("utf-8")) for row in documents) != size
+        ):
+            raise WorkspaceV2MigrationError("successor comparison metadata is incomplete")
+        for row in documents:
+            identifier = UUID(str(row[0]))
+            started = time.monotonic()
+            model = (
+                model_from_json(MetricResult, row[1])
+                if family == "metrics"
+                else model_from_json(DiagnosticResult, row[1])
+            )
+            if timings is not None:
+                timings["hydration_seconds"] += time.monotonic() - started
+            started = time.monotonic()
+            if family == "metrics":
+                CompactAnalyticalStore._validate_metric_identity(model)
+            for column, value in zip(fields, row[2:], strict=True):
+                expected = getattr(model, column)
+                equal = (
+                    (_instant(value) == expected)
+                    if column in {"as_of", "available_at", "computed_at"}
+                    else str(value) == str(getattr(expected, "value", expected))
+                )
+                if not equal:
+                    raise WorkspaceV2MigrationError("successor row metadata differs from model")
+            verified[identifier] = sha256_hex(canonical_json_bytes(model))
+            if timings is not None:
+                timings["canonical_validation_seconds"] += time.monotonic() - started
+        # Never retain hydrated models between bounded source batches.
+        del documents, model
+        start = end
+    return verified
+
+
+def measure_recovered_comparison(
+    service: WorkspaceService,
+    source_root: Path,
+    destination_root: Path,
+    generation_id: UUID,
+    admission_path: Path,
+) -> dict[str, object]:
+    """Time the current comparison queries without a cut, reservation or imports.
+
+    This is only E4 workload calibration, including the typed fallback. The
+    final source session still needs its own comparison and completion proof.
+    Both native databases are read-only and all projections are temporary.
+    """
+    receipt = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+    execution = require_maintenance_admission(receipt)
+    ledger = WorkspaceV2GenerationLedger(service, destination_root)
+    resolved = ledger.resolve()
+    if resolved is None:
+        raise WorkspaceV2MigrationError("comparison measurement requires certified W2")
+    head, baseline = resolved
+    if (
+        baseline.generation_id != generation_id
+        or baseline.phase != "BASELINE_VERIFIED"
+        or baseline.reserved_successor is not None
+        or baseline.source_root != source_root
+        or baseline.destination_root != destination_root
+        or baseline.inventory is None
+        or baseline.parent_membership is None
+        or service.manifest(source_root).format_version != 1
+        or service.manifest(destination_root).format_version != 2
+    ):
+        raise WorkspaceV2MigrationError("comparison measurement baseline binding differs")
+    source_database = source_root / "storage/data/processed/investment_analyst.duckdb"
+    target_database = destination_root / "storage/v2/index.duckdb"
+
+    def identities() -> tuple[tuple[int, ...], ...]:
+        observed = []
+        for database in (source_database, target_database):
+            if database.is_symlink() or database.with_suffix(database.suffix + ".wal").exists():
+                raise WorkspaceV2MigrationError("comparison measurement database is not closed")
+            metadata = database.stat()
+            observed.append(
+                (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                    metadata.st_size,
+                    metadata.st_mtime_ns,
+                    metadata.st_ctime_ns,
+                )
+            )
+        return tuple(observed)
+
+    before = identities()
+    measurements: dict[str, object] = {}
+    with (
+        connect_duckdb(source_database, read_only=True) as source,
+        connect_duckdb(target_database, read_only=True) as target,
+    ):
+        for family in ("raw", "observations"):
+            started = time.monotonic()
+            raw = family == "raw"
+            table = "_recovered_raw" if raw else "_recovered_observations"
+            execute_bounded(
+                source,
+                f"CREATE TEMP TABLE {table} "
+                "(identifier VARCHAR,digest VARCHAR" + (",metadata VARCHAR)" if raw else ")"),
+            )
+            target_sql, source_sql = (
+                _recovered_raw_comparison_sql()
+                if raw
+                else _recovered_observations_comparison_sql()[:2]
+            )
+            execute_bounded(target, target_sql)
+            _load_recovered_core_projection(
+                target, source, source_database, execution, 256, raw=raw
+            )
+            plan = execute_bounded(source, "EXPLAIN " + source_sql).fetchall()
+            execution.record_query_plan(family, "\n".join(str(row[-1]) for row in plan))
+            execute_bounded(source, source_sql)
+            count = known = typed = 0
+            digest = hashlib.sha256(b"").hexdigest()
+            for rows in _core_native_pages(source, execution, 256):
+                for row in rows:
+                    count += 1
+                    known += row[3 if raw else 10] is not None
+                    fast = (
+                        (
+                            row[3] is not None
+                            and row[3] == row[1] == row[2]
+                            and row[4] is True
+                            and row[5] is True
+                        )
+                        if raw
+                        else row[9] == row[10] and row[11] is True
+                    )
+                    typed += not fast
+                    digest = hashlib.sha256(f"{digest}:{row[1 if raw else 9]}".encode()).hexdigest()
+            execute_bounded(
+                target,
+                "SELECT checksum_sha256 FROM raw_v2_index "
+                "ORDER BY CAST(received_at AS TIMESTAMPTZ),record_id"
+                if raw
+                else "SELECT sha256(CAST("
+                + _observation_canonical_sql("o")
+                + " AS VARCHAR)) FROM normalized_observations_v2 o "
+                "ORDER BY CAST(available_at AS TIMESTAMPTZ),observation_id",
+            )
+            target_count = 0
+            target_digest = hashlib.sha256(b"").hexdigest()
+            for rows in _core_native_pages(target, execution, 256):
+                for row in rows:
+                    target_count += 1
+                    target_digest = hashlib.sha256(f"{target_digest}:{row[0]}".encode()).hexdigest()
+            measurements[family] = {
+                "elapsed_seconds": time.monotonic() - started,
+                "source_count": count,
+                "baseline_known_count": known,
+                "target_count": target_count,
+                "requires_typed_validation": typed,
+                "source_document_digest": digest,
+                "target_digest": target_digest,
+            }
+            execute_bounded(source, f"DROP TABLE {table}")
+        started = time.monotonic()
+        membership = (baseline.parent_membership, baseline.inventory.delta_membership)
+        for reference in membership:
+            WorkspaceV2ProgressReconciler._verify(reference)
+        execute_bounded(
+            source,
+            "CREATE TEMP TABLE _successor_w AS SELECT "
+            "json_extract_string(json,'$[0]') AS family_name,"
+            "CAST(json_extract_string(json,'$[1]') AS UUID) AS identifier,"
+            "json_extract_string(json,'$[2]') AS digest "
+            "FROM read_json_objects(?,format='newline_delimited',maximum_object_size=1024)",
+            [[str(reference.path) for reference in membership]],
+        )
+        duplicate = execute_bounded(
+            source,
+            "SELECT 1 FROM _successor_w GROUP BY family_name,identifier HAVING count(*)<>1 LIMIT 1",
+        ).fetchone()
+        if duplicate is not None:
+            raise WorkspaceV2MigrationError("comparison measurement membership is ambiguous")
+        measurements["financial_membership_seconds"] = time.monotonic() - started
+        execute_bounded(source, "SET index_scan_max_count=0")
+        execute_bounded(source, "SET index_scan_percentage=0")
+        # The ordinary v1 facade opens a physical RW engine even in logical
+        # read mode. Reuse the admitted physical RO instance through another
+        # registered cursor and the same typed repositories instead.
+        with connect_duckdb(source_database, read_only=True) as reader:
+            for family in ("metrics", "diagnostics"):
+                started = time.monotonic()
+                execute_bounded(source, _successor_comparison_sql(family))
+                comparison_sql_seconds = time.monotonic() - started
+                count = known = typed = 0
+                digest = hashlib.sha256(b"").hexdigest()
+                canonical_digest = hashlib.sha256(b"").hexdigest()
+                known_hash_mismatch = known_metadata_mismatch = 0
+                timings = dict.fromkeys(
+                    ("lookup_sql_seconds", "hydration_seconds", "canonical_validation_seconds"), 0.0
+                )
+                stream_started = time.monotonic()
+                typed_started = 0.0
+                for rows in _core_native_pages(source, execution, 256):
+                    started_typed = time.monotonic()
+                    validated = _validate_successor_comparison_rows(
+                        reader, family, rows, timings=timings, execution=execution
+                    )
+                    typed_started += time.monotonic() - started_typed
+                    for row in rows:
+                        count += 1
+                        known += row[3] is not None
+                        typed += not (row[3] is not None and row[2] == row[3] and row[4] is True)
+                        digest = hashlib.sha256(f"{digest}:{row[2]}".encode()).hexdigest()
+                        known_hash_mismatch += row[3] is not None and row[2] != row[3]
+                        known_metadata_mismatch += row[3] is not None and row[4] is not True
+                        actual = validated.get(UUID(str(row[0])), str(row[2]))
+                        if row[3] is not None and actual != row[3]:
+                            raise WorkspaceV2MigrationError("successor changes recovered W content")
+                        canonical_digest = hashlib.sha256(
+                            f"{canonical_digest}:{actual}".encode()
+                        ).hexdigest()
+                measurements[family] = {
+                    "elapsed_seconds": time.monotonic() - started,
+                    "source_count": count,
+                    "baseline_known_count": known,
+                    "requires_typed_validation": typed,
+                    "source_document_digest": digest,
+                    "canonical_digest": canonical_digest,
+                    "known_source_hash_mismatch": known_hash_mismatch,
+                    "known_metadata_mismatch": known_metadata_mismatch,
+                    "known_semantic_mismatch": 0,
+                    "comparison_sql_seconds": comparison_sql_seconds,
+                    "new_count": count - known,
+                    "comparison_stream_and_digest_seconds": (
+                        time.monotonic() - stream_started - typed_started
+                    ),
+                    **timings,
+                }
+    if identities() != before or ledger.resolve() != resolved:
+        raise WorkspaceV2MigrationError("comparison measurement inputs changed")
+    return {
+        "calibration_only": True,
+        "quiescence_claimed": False,
+        "successor_reserved": False,
+        "imports_performed": False,
+        "generation_certificate": head.certificate.model_dump(mode="json"),
+        "families": measurements,
+    }
+
+
 def _append_recovered_raw(
     *,
     source: LocalStorage,
@@ -855,30 +1706,7 @@ def _append_recovered_raw(
     ):
         raise WorkspaceV2MigrationError("recovered raw requires its live source and v2 destination")
     execution = _require_recovered_core(destination, frozen_source, core_baseline, admission_path)
-    fields = (
-        "record_id",
-        "asset_id",
-        "source_id",
-        "event_time",
-        "available_at",
-        "received_at",
-        "schema_version",
-    )
-    timestamps = {"event_time", "available_at", "received_at"}
-
-    def envelope(alias: str, *, target: bool) -> str:
-        return (
-            "json_array("
-            + ",".join(
-                _utc_document_timestamp(f"CAST({alias}.{field} AS TIMESTAMPTZ)")
-                if field in timestamps and target
-                else _utc_document_timestamp(f"{alias}.{field}")
-                if field in timestamps
-                else f"{alias}.{field}"
-                for field in fields
-            )
-            + ")"
-        )
+    target_sql, source_sql = _recovered_raw_comparison_sql()
 
     total = reused = max_hydrated = 0
     digest = hashlib.sha256(b"").hexdigest()
@@ -887,55 +1715,19 @@ def _append_recovered_raw(
     with connect_duckdb(source.paths.database_path, read_only=False) as stream:
         execute_bounded(
             stream,
-            "CREATE TEMP TABLE _recovered_raw "
-            "(identifier VARCHAR PRIMARY KEY,digest VARCHAR,metadata VARCHAR)",
+            "CREATE TEMP TABLE _recovered_raw (identifier VARCHAR,digest VARCHAR,metadata VARCHAR)",
         )
         target = destination.store.connection
         execute_bounded(
             target,
-            "SELECT record_id,checksum_sha256,CAST("
-            + envelope("r", target=True)
-            + " AS VARCHAR) FROM raw_v2_index r",
+            target_sql,
         )
-        for rows in _core_native_pages(target, execution, page_limit):
-            execute_bounded(
-                stream,
-                "INSERT INTO _recovered_raw SELECT unnest(?),unnest(?),unnest(?)",
-                [
-                    [str(row[0]) for row in rows],
-                    [str(row[1]) for row in rows],
-                    [str(row[2]) for row in rows],
-                ],
-            )
-        paths = (
-            "["
-            + ",".join(
-                "'$.source.source_id'" if field == "source_id" else f"'$.{field}'"
-                for field in fields
-            )
-            + "]"
-        )
-        expected = (
-            "["
-            + ",".join(
-                _utc_document_timestamp(f"r.{field}") if field in timestamps else f"r.{field}"
-                for field in fields
-            )
-            + "]"
+        _load_recovered_core_projection(
+            target, stream, source.paths.database_path, execution, page_limit, raw=True
         )
         execute_bounded(
             stream,
-            "SELECT r.record_id,r.checksum_sha256,sha256(r.document_json),"
-            "w.digest,CAST("
-            + envelope("r", target=False)
-            + " AS VARCHAR) IS NOT DISTINCT FROM w.metadata,"
-            + f"json_extract_string(r.document_json,{paths}) IS NOT DISTINCT FROM "
-            + expected
-            + ",octet_length(encode(r.document_json)),r.relative_path,"
-            "r.source_id,r.schema_version,CAST("
-            + envelope("r", target=False)
-            + " AS VARCHAR) FROM raw_record_index r LEFT JOIN _recovered_raw w "
-            "ON r.record_id=w.identifier ORDER BY r.received_at,r.record_id",
+            source_sql,
         )
         for rows in _core_native_pages(stream, execution, page_limit):
             pending_groups: list[tuple[UUID, ...]] = []
@@ -947,7 +1739,8 @@ def _append_recovered_raw(
                     row[3] is not None
                     and row[3] == row[1]
                     and row[4] is True
-                    and (row[2] is None or (row[2] == row[1] and row[5] is True))
+                    and row[2] == row[1]
+                    and row[5] is True
                 ):
                     continue
                 path = source.paths.raw_dir / str(row[7])
@@ -978,7 +1771,8 @@ def _append_recovered_raw(
                     known is not None
                     and known == actual
                     and row[4] is True
-                    and (row[2] is None or (row[2] == actual and row[5] is True))
+                    and row[2] == actual
+                    and row[5] is True
                 )
                 if not fast:
                     identifier = UUID(str(row[0]))
@@ -1120,18 +1914,7 @@ def _append_recovered_observations(
     if not isinstance(destination.store, WorkspaceV2Store):
         raise WorkspaceV2MigrationError("recovered observation destination is not v2")
     execution = _require_recovered_core(destination, frozen_source, core_baseline, admission_path)
-    fields = (
-        "observation_id",
-        "raw_record_id",
-        "asset_id",
-        "field_name",
-        "frequency",
-        "observed_at",
-        "period_end",
-        "available_at",
-        "quality",
-    )
-    timestamps = {"observed_at", "period_end", "available_at"}
+    target_sql, source_sql, fields, timestamps = _recovered_observations_comparison_sql()
     source_database = source.paths.database_path
     digest = hashlib.sha256(b"").hexdigest()
     total = reused = max_hydrated = 0
@@ -1141,45 +1924,19 @@ def _append_recovered_observations(
     with connect_duckdb(source_database, read_only=False) as stream:
         execute_bounded(
             stream,
-            "CREATE TEMP TABLE _recovered_observations "
-            "(identifier VARCHAR PRIMARY KEY,digest VARCHAR)",
+            "CREATE TEMP TABLE _recovered_observations (identifier VARCHAR,digest VARCHAR)",
         )
         target = destination.store.connection
         execute_bounded(
             target,
-            "SELECT observation_id,sha256(CAST("
-            + _observation_canonical_sql("o")
-            + " AS VARCHAR)) FROM normalized_observations_v2 o",
+            target_sql,
         )
-        for known in _core_native_pages(target, execution, page_limit):
-            execute_bounded(
-                stream,
-                "INSERT INTO _recovered_observations SELECT unnest(?),unnest(?)",
-                [[str(row[0]) for row in known], [str(row[1]) for row in known]],
-            )
-        paths = "[" + ",".join(f"'$.{name}'" for name in fields) + "]"
-        envelope = (
-            "["
-            + ",".join(
-                _utc_document_timestamp(f"s.{name}") if name in timestamps else f"s.{name}"
-                for name in fields
-            )
-            + "]"
+        _load_recovered_core_projection(
+            target, stream, source_database, execution, page_limit, raw=False
         )
         execute_bounded(
             stream,
-            "SELECT "
-            + ",".join(
-                _utc_document_timestamp(f"s.{name}") if name in timestamps else f"s.{name}"
-                for name in fields
-            )
-            + ",sha256(s.document_json),w.digest,"
-            + f"json_extract_string(s.document_json,{paths}) IS NOT DISTINCT FROM "
-            + envelope
-            + ",octet_length(encode(s.document_json)),"
-            "json_extract_string(s.document_json,'$.source.source_id') "
-            "FROM normalized_observations s LEFT JOIN _recovered_observations w "
-            "ON s.observation_id=w.identifier ORDER BY s.available_at,s.observation_id",
+            source_sql,
         )
         for rows in _core_native_pages(stream, execution, page_limit):
             # Only metadata crosses this cursor. Bound hydrated UTF-8 documents
@@ -1510,7 +2267,7 @@ def verify_recovered_successor(
     frozen_source: FrozenSourceCut,
     admission_path: Path,
     baseline_code_root: Path | None = None,
-) -> ProgressReconciliationReceipt:
+) -> ProgressReconciliationReceipt | ProgressReconciliationV2:
     """Prove W subset F1 by IDs and content, with one ordered source hash stream.
 
     A known canonical hash reuses the validated W model. Every new or
@@ -1535,13 +2292,26 @@ def verify_recovered_successor(
     execution = require_maintenance_admission(admission)
     reconciler = WorkspaceV2ProgressReconciler(service, destination_root, reconciliation_id)
     module_sha = sha256_hex(Path(__file__).read_bytes())
-    with reconciler._exclusive():
-        progress = ProgressReconciliation.model_validate_json(reconciler.path.read_bytes())
-        assert progress.inventory is not None and progress.database_after is not None
+    generational = isinstance(reservation, ProgressReconciliationV2)
+    ledger = WorkspaceV2GenerationLedger(service, destination_root) if generational else None
+    with nullcontext() if generational else reconciler._exclusive():
+        if ledger is not None:
+            resolved = ledger.resolve()
+            if resolved is None or resolved[1] != reservation:
+                raise WorkspaceV2MigrationError("successor generation head changed")
+            progress = resolved[1]
+            baseline_reference = resolved[0].certificate
+            expected_head = ledger._head_digest()
+            database = progress.database
+            page_limit = 256
+        else:
+            progress = ProgressReconciliation.model_validate_json(reconciler.path.read_bytes())
+            baseline_reference = reservation.certificate
+            database = progress.database_after
+            page_limit = progress.page_limit
+        assert progress.inventory is not None and database is not None
         inventory = progress.inventory
-        tree, environment = historical_transition_fingerprints(
-            progress.page_limit, progress.verifier_policy
-        )
+        tree, environment = historical_transition_fingerprints(page_limit, progress.verifier_policy)
         if progress.phase == "SUCCESSOR_BOUND":
             assert progress.coverage is not None
             path = reconciler.state / (
@@ -1571,8 +2341,12 @@ def verify_recovered_successor(
             reconciler._verify(comparison.baseline)
             reconciler._verify(comparison.resource_receipt)
             reconciler._verify(comparison.new_index)
-            original = ProgressReconciliation.model_validate_json(
-                comparison.baseline.path.read_bytes()
+            original = (
+                ProgressReconciliationV2.model_validate_json(comparison.baseline.path.read_bytes())
+                if generational
+                else ProgressReconciliation.model_validate_json(
+                    comparison.baseline.path.read_bytes()
+                )
             )
             if original.phase != "BASELINE_VERIFIED" or original.inventory != inventory:
                 raise WorkspaceV2MigrationError("successor comparison baseline differs")
@@ -1606,10 +2380,10 @@ def verify_recovered_successor(
         index_hash = hashlib.sha256()
         with (
             _v2_writer_closed(destination_root),
-            _closed_duckdb_file(progress.database_after.path),
+            _closed_duckdb_file(database.path),
             index_path.open("a+b") as index,
         ):
-            reconciler._verify(progress.database_after)
+            reconciler._verify(database)
             index.seek(0)
             remaining = work.new_index_bytes
             while remaining:
@@ -1662,31 +2436,7 @@ def verify_recovered_successor(
                         ):
                             continue
                         metric = family == "metrics"
-                        table, key = (
-                            ("metric_results", "result_id")
-                            if metric
-                            else ("diagnostic_results", "diagnostic_id")
-                        )
-                        fields = [
-                            key,
-                            "asset_id",
-                            *(["metric_key"] if metric else ["mode", "verdict"]),
-                            "as_of",
-                            "available_at",
-                            "computed_at",
-                            "quality",
-                        ]
-                        json_paths = "[" + ",".join(f"'$.{field}'" for field in fields) + "]"
-                        envelope = (
-                            "["
-                            + ",".join(
-                                _utc_document_timestamp(f"s.{field}")
-                                if field in {"as_of", "available_at", "computed_at"}
-                                else f"s.{field}"
-                                for field in fields
-                            )
-                            + "]"
-                        )
+                        _, key, _ = _successor_comparison_fields(family)
                         after, parameters = "", []
                         if work.available_at is not None:
                             after = (
@@ -1696,17 +2446,12 @@ def verify_recovered_successor(
                             parameters = [work.available_at.isoformat(), str(work.identifier)]
                         execute_bounded(
                             stream,
-                            f"SELECT s.{key},CAST(s.available_at AS VARCHAR),"
-                            f"sha256(s.document_json),w.digest,"
-                            f"json_extract_string(s.document_json,{json_paths})={envelope},"
-                            "octet_length(encode(s.document_json)) "
-                            f"FROM {table} s LEFT JOIN _successor_w w "
-                            f"ON w.family_name='{family}' AND w.identifier=CAST(s.{key} AS UUID) "
-                            f"WHERE TRUE{after} ORDER BY s.available_at,s.{key}",
+                            _successor_comparison_sql(family, after),
                             parameters,
                         )
-                        while rows := stream.fetchmany(progress.page_limit):
+                        while rows := stream.fetchmany(page_limit):
                             with execution.step("sql", admission.budget.sql_timeout_seconds):
+                                typed = _validate_successor_comparison_rows(source, family, rows)
                                 updates = work.model_dump()
                                 additions = bytearray()
                                 for row in rows:
@@ -1715,47 +2460,7 @@ def verify_recovered_successor(
                                     if known is not None and actual == known and row[4] is True:
                                         updates["fast_count"] += 1
                                     else:
-                                        if int(row[5]) > 1 << 20:
-                                            raise WorkspaceV2MigrationError(
-                                                "successor model exceeds buffer budget"
-                                            )
-                                        model = (
-                                            source.metric_results.get_many((identifier,))[
-                                                identifier
-                                            ]
-                                            if metric
-                                            else source.diagnostics.get_many((identifier,))[
-                                                identifier
-                                            ]
-                                        )
-                                        if metric:
-                                            CompactAnalyticalStore._validate_metric_identity(model)
-                                        metadata = execute_bounded(
-                                            source.store.connection,
-                                            "SELECT "
-                                            + ",".join(
-                                                f"CAST({field} AS VARCHAR)"
-                                                if field in {"as_of", "available_at", "computed_at"}
-                                                else field
-                                                for field in fields
-                                            )
-                                            + f" FROM {table} WHERE {key}=?",
-                                            [str(identifier)],
-                                        ).fetchone()
-                                        assert metadata is not None
-                                        for field, value in zip(fields, metadata, strict=True):
-                                            expected_value = getattr(model, field)
-                                            if field in {"as_of", "available_at", "computed_at"}:
-                                                equal = _instant(value) == expected_value
-                                            else:
-                                                equal = str(value) == str(
-                                                    getattr(expected_value, "value", expected_value)
-                                                )
-                                            if not equal:
-                                                raise WorkspaceV2MigrationError(
-                                                    "successor row metadata differs from model"
-                                                )
-                                        actual = sha256_hex(canonical_json_bytes(model))
+                                        actual = typed[identifier]
                                         updates["typed_count"] += 1
                                     if known is not None and actual != known:
                                         raise WorkspaceV2MigrationError(
@@ -1842,7 +2547,7 @@ def verify_recovered_successor(
             if _live_quiescent_source(frozen_source.source_root, frozen_source) is None:
                 raise WorkspaceV2MigrationError("successor lost source quiescence")
             comparison = _SuccessorComparison(
-                baseline=reservation.certificate,
+                baseline=baseline_reference,
                 work=work,
                 new_index=reconciliation_file_reference(index_path, "inventory"),
                 resource_receipt=reconciliation_file_reference(admission_path, "resource"),
@@ -1866,6 +2571,18 @@ def verify_recovered_successor(
                 verifier_tree_fingerprint=tree,
                 verified_at=comparison.verified_at,
             )
+            if ledger is not None:
+                assert isinstance(progress, ProgressReconciliationV2)
+                bound_v2 = progress.model_copy(
+                    update={
+                        "phase": "SUCCESSOR_BOUND",
+                        "coverage": coverage,
+                        "previous_certificate": baseline_reference,
+                        "recorded_at": datetime.now(UTC),
+                    }
+                )
+                ledger.publish(bound_v2, expected_head_sha256=expected_head, admission=admission)
+                return bound_v2
             bound = ProgressReconciliation.model_validate(
                 {
                     **progress.model_dump(),

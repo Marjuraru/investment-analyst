@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -15,6 +16,7 @@ from uuid import UUID, uuid4
 import pytest
 
 import investment_analyst.workspace.workspace_v2_migration as migration_module
+from investment_analyst.core.models import MetricResult, NormalizedObservation, RawRecord
 from investment_analyst.storage.compact_analytical_v2 import (
     _METRIC_SELECT_COLUMNS,
     CompactAnalyticalError,
@@ -51,7 +53,9 @@ from investment_analyst.workspace.workspace_v2_migration import (
 from investment_analyst.workspace.workspace_v2_migration_models import (
     HistoricalSealSnapshot,
     HistoricalTransition,
+    HistoricalTransitionReceipt,
     ProgressReconciliation,
+    ProgressReconciliationReceipt,
     ReconciliationFileReference,
     RecoveredProgressInventory,
     SuccessorCoverageProof,
@@ -269,7 +273,9 @@ def _verified_progress(tmp_path: Path) -> ProgressReconciliation:
     )
 
 
-def _generation_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def _generation_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, populated: bool = False
+):
     from types import SimpleNamespace
 
     from investment_analyst.application import local_release
@@ -293,7 +299,56 @@ def _generation_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     baseline = _progress_update(
         _verified_progress(tmp_path),
         destination_workspace_id=initialized.manifest.workspace_id,
+        parent_membership=ref.model_copy(update={"role": "inventory"}),
     )
+    if populated:
+        raw = make_raw_record()
+        observation = make_observation(raw_record_id=raw.record_id)
+        first = make_metric_result(observation_id=observation.observation_id)
+        second = first.model_copy(update={"result_id": uuid4(), "value": Decimal("7.00")})
+        added = first.model_copy(update={"result_id": uuid4(), "value": Decimal("8.00")})
+        diagnostic = make_diagnostic_result(metric_result_id=first.result_id)
+        with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+            storage.raw_records.save(raw)
+            storage.observations.save(observation)
+            compact = CompactAnalyticalStore(storage.store.connection)
+            compact.save_metrics((first, second), origin="HISTORICAL")
+            compact.save_diagnostics((diagnostic,), origin="HISTORICAL")
+            parent_values = compact.historical_inventory_digests()
+            members = state / "original-B.jsonl"
+            members.write_text(
+                "".join(
+                    json.dumps([family, str(identifier), sha256_hex(canonical_json_bytes(model))])
+                    + "\n"
+                    for family, identifier, model in (
+                        ("metrics", first.result_id, first),
+                        ("metrics", second.result_id, second),
+                        ("diagnostics", diagnostic.diagnostic_id, diagnostic),
+                    )
+                )
+            )
+            compact.save_metrics((added,), origin="HISTORICAL")
+            current_values = compact.historical_inventory_digests()
+        baseline = _progress_update(
+            baseline,
+            parent_membership=reconciliation_file_reference(members, "inventory"),
+            parent_seal=baseline.parent_seal.model_copy(
+                update={
+                    "metric_digest": parent_values[1],
+                    "diagnostic_digest": parent_values[3],
+                }
+            ),
+            inventory=baseline.inventory.model_copy(
+                update={
+                    "raw_count": 1,
+                    "observation_count": 1,
+                    "metric_count": 3,
+                    "diagnostic_count": 1,
+                    "metric_digest": current_values[1],
+                    "diagnostic_digest": current_values[3],
+                }
+            ),
+        )
     baseline_path = state / "fixture-baseline.json"
     baseline_path.write_bytes(canonical_json_bytes(baseline))
     baseline_ref = reconciliation_file_reference(baseline_path, "control")
@@ -378,7 +433,7 @@ def _generation_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         effective_settings=(),
         recorded_at=baseline.prepared_at,
     )
-    generation_id = uuid4()
+    generation_id = budget.operation_id
     event = CutInvalidation(
         event_id=uuid4(),
         generation_id=generation_id,
@@ -416,7 +471,7 @@ def _generation_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         previous_attempt=ref,
         previous_reservation=reservation_ref,
         previous_receipts=(ref,),
-        parent_membership=ref.model_copy(update={"role": "inventory"}),
+        parent_membership=baseline.parent_membership,
         parent_seal=baseline.parent_seal,
         verified_w=baseline_ref,
         database=event.database,
@@ -436,6 +491,202 @@ def _generation_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         ),
     )
     return WorkspaceV2GenerationLedger(service, root), event, generation_values, admission
+
+
+@pytest.mark.parametrize("crash", [None, "before_head", "after_head"])
+def test_coordinator_prepares_generation_and_resumes_exact_immutable_objects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crash: str | None
+) -> None:
+    import importlib.util
+    from types import SimpleNamespace
+
+    from investment_analyst.storage.workspace_v2_inventory import (
+        WorkspaceV2GenerationLedger,
+        reconciliation_file_reference,
+    )
+    from investment_analyst.workspace.workspace_v2_migration_models import (
+        HistoricalFrozenSource,
+        HistoricalTransitionReceipt,
+    )
+
+    ledger, event, values, admission = _generation_fixture(tmp_path, monkeypatch)
+    root, controls = ledger.root, tmp_path / "controls"
+    controls.mkdir()
+    run = controls / "run"
+    run.mkdir()
+    (run / "admission.json").write_text(admission.model_dump_json())
+    old_admission = controls / "old-admission.json"
+    old_admission.write_text(admission.model_dump_json())
+    reservation = migration_module._SuccessorReservation.model_validate_json(
+        event.reservation.path.read_bytes()
+    )
+    reservation = migration_module._SuccessorReservation.model_validate(
+        {
+            **reservation.model_dump(),
+            "resource_receipt": reconciliation_file_reference(old_admission, "resource"),
+        }
+    )
+    reservation_path = root / "state" / f"progress-successor-reservation.{event.attempt_id}.json"
+    reservation_path.write_text(reservation.model_dump_json())
+    proof = event.write_generation
+    pointer = next((root / "state").glob("progress-reconciliation.*.json"))
+    legacy = ProgressReconciliation.model_validate_json(pointer.read_bytes())
+    legacy = _progress_update(
+        legacy, predecessor=proof, parent_membership=proof.model_copy(update={"role": "inventory"})
+    )
+    pointer.write_bytes(canonical_json_bytes(legacy))
+    baseline = ProgressReconciliation.model_validate_json(values["verified_w"].path.read_bytes())
+    database = reconciliation_file_reference(root / "storage/v2/index.duckdb", "database")
+    core = migration_module._RecoveredCoreBaseline(
+        reconciliation=values["verified_w"],
+        raw_state=proof,
+        raw_terminal=proof,
+        observation_state=proof,
+        database=database,
+        resource_receipt=reservation.resource_receipt,
+        raw_count=5,
+        raw_digest="a" * 64,
+        raw_metadata_binding="b" * 64,
+        observation_count=4,
+        observation_digest="c" * 64,
+        raw_verifier_sha256="d" * 64,
+        verifier_module_sha256="e" * 64,
+        resource_policy_sha256="f" * 64,
+        verified_at=baseline.prepared_at,
+    )
+    core_path = controls / "core.json"
+    core_path.write_text(core.model_dump_json())
+    cut = legacy.reserved_successor
+    transition = HistoricalTransition(
+        operation_id=cut.operation_id,
+        phase="COMPLETE",
+        source=HistoricalFrozenSource(cut=cut),
+        source_workspace_id=cut.workspace_id,
+        source_created_at=cut.created_at,
+        source_root=cut.source_root,
+        source_fingerprint=cut.source_fingerprint,
+        destination_root=root,
+        destination_workspace_id=ledger.identity.workspace_id,
+        parent_seal=legacy.parent_seal,
+        parent_seal_sha256=sha256_hex(canonical_json_bytes(legacy.parent_seal)),
+        parent_membership_path=legacy.parent_membership.path,
+        parent_membership_sha256=legacy.parent_membership.sha256,
+        page_limit=256,
+        destination_inactive=True,
+        writer_closed=True,
+        tree_fingerprint="a" * 64,
+        environment_fingerprint="b" * 64,
+        prepared_at=baseline.prepared_at,
+        updated_at=baseline.prepared_at,
+    )
+    transition_path = root / "state" / f"historical-transition.{cut.operation_id}.json"
+    transition_path.write_text(transition.model_dump_json())
+    seal = HistoricalSealSnapshot(
+        source_fingerprint=cut.source_fingerprint,
+        metric_count=3,
+        metric_digest="c" * 64,
+        diagnostic_count=2,
+        diagnostic_digest="d" * 64,
+        sealed_at=baseline.prepared_at,
+    )
+    terminal = HistoricalTransitionReceipt(
+        transition=transition,
+        parent_preservation_sha256=transition.parent_membership_sha256,
+        final_seal=seal,
+        final_seal_sha256=sha256_hex(canonical_json_bytes(seal)),
+        final_inventory_digest=sha256_hex(
+            json.dumps((3, "c" * 64, 2, "d" * 64), separators=(",", ":")).encode()
+        ),
+        metric_created_count=1,
+        metric_reused_count=2,
+        diagnostic_created_count=1,
+        diagnostic_reused_count=1,
+        completed_at=baseline.prepared_at,
+    )
+    terminal_path = root / "state" / f"historical-transition-receipt.{cut.operation_id}.json"
+    terminal_path.write_text(terminal.model_dump_json())
+    repository = Path(__file__).resolve().parents[3]
+    monkeypatch.syspath_prepend(str(repository / "scripts"))
+    spec = importlib.util.spec_from_file_location(
+        "generation_cli_under_test", repository / "scripts/close_data_chassis.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(
+        module,
+        "LocalReleaseService",
+        lambda: SimpleNamespace(
+            load_workspace_bindings=lambda: SimpleNamespace(current=None, previous=None),
+            systemctl=SimpleNamespace(
+                show_properties=lambda *args: {
+                    "ActiveState": "active",
+                    "MainPID": "123",
+                    "ExecStart": f"python --workspace {legacy.source_root}",
+                }
+            ),
+        ),
+    )
+    manifest = ledger.service.manifest
+    monkeypatch.setattr(
+        ledger.service,
+        "manifest",
+        lambda path: (
+            SimpleNamespace(
+                workspace_id=legacy.source_workspace_id, created_at=legacy.source_created_at
+            )
+            if path == legacy.source_root
+            else manifest(path)
+        ),
+    )
+    args = SimpleNamespace(
+        source=legacy.source_root,
+        destination=root,
+        controls_root=controls,
+        operation_id=values["generation_id"],
+        reconciliation_id=legacy.operation_id,
+        resource_run_root=run,
+        predecessor_proof=[proof.path],
+        predecessor_transition=transition_path,
+        core_baseline_path=core_path,
+    )
+    immutable_before = {
+        p: p.read_bytes()
+        for p in (
+            pointer,
+            reservation_path,
+            transition_path,
+            terminal_path,
+            values["verified_w"].path,
+        )
+    }
+    publish = WorkspaceV2GenerationLedger.publish
+    crashed = False
+
+    def interrupt(self, *args, **kwargs):
+        nonlocal crashed
+        if not crashed:
+            crashed = True
+            if crash == "after_head":
+                publish(self, *args, **kwargs)
+            raise RuntimeError("simulated session loss")
+        return publish(self, *args, **kwargs)
+
+    budget = admission.budget
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(MaintenanceExecution(budget, lambda *_: None)),
+    ):
+        if crash is not None:
+            monkeypatch.setattr(WorkspaceV2GenerationLedger, "publish", interrupt)
+            with pytest.raises(RuntimeError, match="session loss"):
+                module._prepare_generation(args, ledger.service)
+        result = module._prepare_generation(args, ledger.service)
+        assert result["generation"]["phase"] == "PREPARED"
+        saved = {p: p.read_bytes() for p in ledger.state.glob("cut-invalidation.*.json")}
+        assert len(saved) == 2
+        assert module._prepare_generation(args, ledger.service)["reused"] is True
+    assert all(p.read_bytes() == content for p, content in {**immutable_before, **saved}.items())
+    assert ledger.resolve()[1].generation_id == args.operation_id
 
 
 def test_generation_invalidation_survives_before_head_and_cas_preserves_history(
@@ -459,6 +710,28 @@ def test_generation_invalidation_survives_before_head_and_cas_preserves_history(
         published = ledger.publish(generation, expected_head_sha256=None, admission=admission)
         head, resolved = ledger.resolve()
         assert head.certificate == published and resolved == generation
+        admission_path = tmp_path / "graph-admission.json"
+        admission_path.write_text(admission.model_dump_json())
+        relationships = ledger.verify_relationships(admission_path=admission_path)
+        assert relationships.reconciliation == published
+        assert relationships.operation_id == generation.generation_id
+        assert relationships.raw_count == relationships.metric_count == 0
+        relationships_path = tmp_path / "relationships.json"
+        relationships_path.write_text(relationships.model_dump_json())
+        assert (
+            ledger.reuse_relationships(relationships_path, admission_path=admission_path)
+            == relationships
+        )
+        for update in (
+            {"operation_id": uuid4()},
+            {"verifier_module_sha256": "0" * 64},
+            {"destination_root": tmp_path / "other"},
+            {"database": relationships.database.model_copy(update={"sha256": "0" * 64})},
+        ):
+            relationships_path.write_text(relationships.model_copy(update=update).model_dump_json())
+            with pytest.raises((WorkspaceV2InventoryError, ValueError)):
+                ledger.reuse_relationships(relationships_path, admission_path=admission_path)
+        relationships_path.write_text(relationships.model_dump_json())
         with pytest.raises(WorkspaceV2InventoryError, match="compare-and-swap"):
             ledger.publish(generation, expected_head_sha256=None, admission=admission)
         assert before == (
@@ -471,7 +744,150 @@ def test_generation_invalidation_survives_before_head_and_cas_preserves_history(
             )
 
 
-@pytest.mark.parametrize("fault", ["session", "destination", "active", "live_owner"])
+@pytest.mark.parametrize("fault", [None, "raw_count", "database", "policy", "delta_tail"])
+def test_generation_baseline_requires_corrective_proofs_and_preserves_original_B(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None
+) -> None:
+    import inspect
+
+    from investment_analyst.storage.workspace_v2_inventory import (
+        GenerationRawCoverageProof,
+        reconciliation_file_reference,
+        verify_generation_contents,
+        verify_generation_raw_files,
+    )
+    from investment_analyst.workspace import workspace_v2_physical_delta as physical
+    from investment_analyst.workspace.workspace_v2_migration_models import (
+        GenerationContentProof,
+        ProgressReconciliationV2,
+    )
+
+    ledger, event, values, admission = _generation_fixture(tmp_path, monkeypatch, populated=True)
+    budget = admission.budget
+    admission_path = tmp_path / "admission.json"
+    admission_path.write_text(admission.model_dump_json())
+    before = {p: p.read_bytes() for p in ledger.state.glob("fixture-*.json")}
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(MaintenanceExecution(budget, lambda *_: None)),
+    ):
+        invalidation = ledger.invalidate(event, admission=admission)
+        generation = ProgressReconciliationV2(**values, invalidation=invalidation)
+        ledger.publish(generation, expected_head_sha256=None, admission=admission)
+        graph = ledger.verify_relationships(admission_path=admission_path)
+        graph_path = tmp_path / "relationships.json"
+        graph_path.write_text(graph.model_dump_json())
+        original_w = ProgressReconciliation.model_validate_json(
+            generation.verified_w.path.read_bytes()
+        )
+        inventory = original_w.inventory
+        content = GenerationContentProof(
+            generation_id=generation.generation_id,
+            workspace_id=ledger.identity.workspace_id,
+            baseline_certificate=generation.verified_w,
+            baseline_database=generation.database,
+            database=generation.database,
+            resource_receipt=reconciliation_file_reference(admission_path, "resource"),
+            verifier_sha256=sha256_hex(inspect.getsource(verify_generation_contents).encode()),
+            policy_sha256=admission.resource_policy_sha256,
+            preserved_tables=(),
+            raw_count=1,
+            raw_digest="a" * 64,
+            observation_count=1,
+            observation_digest="b" * 64,
+            metric_count=inventory.metric_count,
+            metric_digest=inventory.metric_digest,
+            diagnostic_count=inventory.diagnostic_count,
+            diagnostic_digest=inventory.diagnostic_digest,
+            validated_additions=(),
+            verified_at=admission.recorded_at,
+        )
+        content_path = tmp_path / "content.json"
+        content_path.write_text(content.model_dump_json())
+        blob = next((ledger.root / "storage/v2/raw/raw/sha256").rglob("?" * 64))
+        member = physical.PhysicalDeltaFile(
+            path=blob.relative_to(ledger.root).as_posix(),
+            size_bytes=blob.stat().st_size,
+            sha256=blob.name,
+            blocks=(
+                physical.PhysicalDeltaBlock(
+                    offset_bytes=0,
+                    length_bytes=blob.stat().st_size,
+                    sha256=blob.name,
+                    origin="parent",
+                ),
+            ),
+        )
+        files = tmp_path / "files.jsonl"
+        files.write_text(member.model_dump_json() + "\n")
+        slot = tmp_path / "slot"
+        slot.mkdir()
+        header = physical.ImmutableLinkHeader(
+            operation_id=generation.generation_id,
+            action="LINK",
+            retained_root=ledger.root,
+            retained_workspace_id=ledger.identity.workspace_id,
+            slot=slot,
+            inventory=reconciliation_file_reference(files, "inventory"),
+            parent_manifest=generation.verified_w,
+            parent_index=generation.parent_membership,
+            parent_proof=generation.verified_w,
+            verifier_sha256=physical._immutable_link_verifier_sha256(),
+            byte_budget=1_000_000,
+            created_at=admission.recorded_at,
+        )
+        journal = physical.ImmutableLinkJournal(tmp_path / "links", header).open()
+        journal.apply_page(((0, member),))
+        witness = reconciliation_file_reference(
+            journal.root / "page-00000000.trailer.json", "control"
+        )
+        raw = verify_generation_raw_files(
+            ledger.service,
+            destination=ledger.root,
+            content_path=content_path,
+            link_witness=witness,
+            admission_path=admission_path,
+        )
+        raw_path = tmp_path / "raw-coverage.json"
+        if fault == "raw_count":
+            raw = raw.model_copy(update={"raw_count": 0})
+        elif fault == "database":
+            with generation.database.path.open("ab") as handle:
+                handle.write(b"unknown bytes")
+        elif fault == "policy":
+            raw = raw.model_copy(update={"policy_sha256": "0" * 64})
+        elif fault == "delta_tail":
+            (
+                ledger.state / f"generation-delta-membership.{generation.generation_id}.jsonl"
+            ).write_bytes(b"[]\n")
+        raw_path.write_text(raw.model_dump_json())
+        assert GenerationRawCoverageProof.model_validate_json(raw_path.read_bytes()) == raw
+        kwargs = dict(
+            content_path=content_path,
+            raw_coverage_path=raw_path,
+            relationships_path=graph_path,
+            admission_path=admission_path,
+            code=generation.code,
+        )
+        if fault is not None:
+            with pytest.raises(WorkspaceV2InventoryError):
+                ledger.certify_baseline(**kwargs)
+            assert ledger.resolve()[1].phase == "PREPARED"
+        else:
+            certificate = ledger.certify_baseline(**kwargs)
+            head, baseline = ledger.resolve()
+            assert head.certificate == certificate
+            assert baseline.phase == "BASELINE_VERIFIED" and baseline.reserved_successor is None
+            assert baseline.parent_membership == generation.parent_membership
+            additions = baseline.inventory.delta_membership.path.read_text().splitlines()
+            assert len(additions) == 1 and json.loads(additions[0])[0] == "metrics"
+            assert ledger.certify_baseline(**kwargs) == certificate
+        assert all(p.read_bytes() == data for p, data in before.items())
+
+
+@pytest.mark.parametrize(
+    "fault", ["session", "destination", "active", "previous_active", "live_owner"]
+)
 def test_generation_invalidation_rejects_wrong_identity_and_live_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -488,13 +904,18 @@ def test_generation_invalidation_rejects_wrong_identity_and_live_authority(
         changes["owner"] = CutOwner(source_session=uuid4())
     if fault == "destination":
         changes["destination_workspace_id"] = uuid4()
-    if fault == "active":
+    if fault in {"active", "previous_active"}:
         monkeypatch.setattr(
             local_release,
             "LocalReleaseService",
             lambda: SimpleNamespace(
                 load_workspace_bindings=lambda: SimpleNamespace(
                     current=SimpleNamespace(workspace_format_version=2)
+                    if fault == "active"
+                    else None,
+                    previous=SimpleNamespace(workspace_format_version=2)
+                    if fault == "previous_active"
+                    else None,
                 ),
             ),
         )
@@ -534,6 +955,12 @@ def test_generation_invalidation_rejects_wrong_identity_and_live_authority(
         "unknown_bad_segment",
         "unknown_bad_sequence",
         "orphan_membership",
+        "bucketed",
+        "bucketed_loss",
+        "derived_source",
+        "source_capture",
+        "missing_added_raw",
+        "foreign_added_asset",
     ],
 )
 def test_corrective_generation_reuses_native_w_and_validates_all_added_models(
@@ -541,6 +968,7 @@ def test_corrective_generation_reuses_native_w_and_validates_all_added_models(
     monkeypatch: pytest.MonkeyPatch,
     case: int | str,
 ) -> None:
+    from investment_analyst.storage.observation_v2 import ObservationV2Error
     from investment_analyst.storage.workspace_v2_inventory import (
         reconciliation_file_reference,
         verify_generation_contents,
@@ -551,6 +979,21 @@ def test_corrective_generation_reuses_native_w_and_validates_all_added_models(
     initialized = service.initialize(root, format_version=2)
     raw = make_raw_record()
     observation = make_observation(raw_record_id=raw.record_id)
+    if case == "derived_source":
+        raw = raw.model_copy(
+            update={
+                "source": raw.source.model_copy(
+                    update={"source_id": "sec-edgar:institutional-holdings-semantics"}
+                )
+            }
+        )
+        observation = observation.model_copy(
+            update={
+                "source": observation.source.model_copy(
+                    update={"source_id": "sec-edgar:institutional-holdings-observations"}
+                )
+            }
+        )
     metric = make_metric_result(observation_id=observation.observation_id)
     with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
         storage.raw_records.save(raw)
@@ -558,13 +1001,22 @@ def test_corrective_generation_reuses_native_w_and_validates_all_added_models(
         CompactAnalyticalStore(storage.store.connection).save_metrics(
             (metric,), origin="HISTORICAL"
         )
+        if case in {"bucketed", "bucketed_loss"}:
+            # Native-only W fixture: exercise the full comparison at a size
+            # requiring bounded SQL, without hydrating old W models or files.
+            storage.store.connection.execute(
+                "INSERT INTO raw_v2_index SELECT r.* REPLACE "
+                "(('00000000-0000-4000-8000-' || lpad(hex(i),12,'0')) AS record_id) "
+                "FROM raw_v2_index r CROSS JOIN range(1,70001) t(i) WHERE record_id=?",
+                [str(raw.record_id)],
+            )
     shutil.copytree(root, snapshot)  # Small fixture, never the real workspace.
     database = reconciliation_file_reference(root / "storage/v2/index.duckdb", "database")
     now = datetime(2026, 10, 17, tzinfo=UTC)
     prepared = _prepared_progress(tmp_path)
     parent = prepared.parent_seal.model_copy(update={"metric_count": 0, "diagnostic_count": 0})
     inventory = RecoveredProgressInventory(
-        raw_count=1,
+        raw_count=70_001 if case in {"bucketed", "bucketed_loss"} else 1,
         observation_count=1,
         metric_count=1,
         diagnostic_count=0,
@@ -590,6 +1042,31 @@ def test_corrective_generation_reuses_native_w_and_validates_all_added_models(
     certificate.write_bytes(canonical_json_bytes(baseline))
     with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
         compact = CompactAnalyticalStore(storage.store.connection)
+        if case in {"missing_added_raw", "foreign_added_asset"}:
+            changes = {
+                "observation_id": uuid4(),
+                "normalized_at": observation.normalized_at + timedelta(days=2),
+            }
+            if case != "missing_added_raw":
+                changes["asset_id"] = "equity:us:msft"
+            storage.observations.save(observation.model_copy(update=changes))
+            if case == "missing_added_raw":
+                # Ordinary persistence already rejects missing raw references.
+                # Simulate an invalid historical image for the corrective gate.
+                storage.store.connection.execute(
+                    "UPDATE normalized_observations_v2 SET raw_record_id=? WHERE observation_id=?",
+                    [str(uuid4()), str(changes["observation_id"])],
+                )
+        if case == 1:
+            storage.raw_records.save(
+                raw.model_copy(
+                    update={
+                        "record_id": uuid4(),
+                        "received_at": raw.received_at + timedelta(days=2),
+                        "payload": {"unicode": "acción", "exact": 184467440737095516160000},
+                    }
+                )
+            )
         count = case if isinstance(case, int) else 1
         new = []
         for index in range(count):
@@ -619,6 +1096,10 @@ def test_corrective_generation_reuses_native_w_and_validates_all_added_models(
         if case == "bad_seal":
             storage.store.connection.execute(
                 "UPDATE workspace_v2_historical_seal SET metric_digest=?", ["f" * 64]
+            )
+        if case == "bucketed_loss":
+            storage.store.connection.execute(
+                "DELETE FROM raw_v2_index WHERE record_id='00000000-0000-4000-8000-000000000001'"
             )
         if case == "extra_w_projection":
             storage.store.connection.execute(
@@ -685,8 +1166,25 @@ def test_corrective_generation_reuses_native_w_and_validates_all_added_models(
     admission_path.write_text(admission.model_dump_json())
     get_metrics = CompactAnalyticalStore.get_metrics
     seen = []
+    source_changed = False
+    expected_verifier = None
+    if case == "source_capture":
+        import inspect
+
+        original_source = inspect.getsource
+        verifier_source = original_source(verify_generation_contents)
+        expected_verifier = sha256_hex(verifier_source.encode())
+
+        def changing_source(value):
+            if value is verify_generation_contents and source_changed:
+                return "def another_function_after_source_lines_moved(): pass\n"
+            return original_source(value)
+
+        monkeypatch.setattr(inspect, "getsource", changing_source)
 
     def only_additions(self, identifiers):
+        nonlocal source_changed
+        source_changed = True
         assert metric.result_id not in identifiers, "known W financial model rehydrated"
         seen.extend(identifiers)
         return get_metrics(self, identifiers)
@@ -712,15 +1210,89 @@ def test_corrective_generation_reuses_native_w_and_validates_all_added_models(
             "unknown_bad_segment",
             "unknown_bad_sequence",
             "orphan_membership",
+            "bucketed_loss",
+            "missing_added_raw",
+            "foreign_added_asset",
         }:
-            with pytest.raises((WorkspaceV2InventoryError, CompactAnalyticalError)):
+            with pytest.raises(
+                (WorkspaceV2InventoryError, CompactAnalyticalError, ObservationV2Error)
+            ):
                 verify_generation_contents(service, **arguments)
         else:
             result = verify_generation_contents(service, **arguments)
+            if case == "source_capture":
+                assert source_changed and result.verifier_sha256 == expected_verifier
             assert result.metric_count == 1 + count
             assert dict(result.validated_additions)["metrics"] == count
             assert set(seen) == set(new)
             assert result.comparison_scope == "preserved-W-subset-current-destination"
+            if case in {0, 1, 3}:
+                from investment_analyst.storage.workspace_v2_inventory import (
+                    verify_generation_raw_files,
+                )
+                from investment_analyst.workspace import workspace_v2_physical_delta as physical
+
+                content_path = tmp_path / "content-proof.json"
+                content_path.write_text(result.model_dump_json())
+                raw_sha = sha256_hex(canonical_json_bytes(raw))
+                blob = root / f"storage/v2/raw/raw/sha256/{raw_sha[:2]}/{raw_sha[2:4]}/{raw_sha}"
+                relative = blob.relative_to(root).as_posix()
+                member = physical.PhysicalDeltaFile(
+                    path=relative,
+                    size_bytes=blob.stat().st_size,
+                    sha256=blob.name,
+                    blocks=(
+                        physical.PhysicalDeltaBlock(
+                            offset_bytes=0,
+                            length_bytes=blob.stat().st_size,
+                            sha256=blob.name,
+                            origin="parent",
+                        ),
+                    ),
+                )
+                files = tmp_path / "raw-files.jsonl"
+                files.write_text(member.model_dump_json() + "\n")
+                header = physical.ImmutableLinkHeader(
+                    operation_id=operation,
+                    action="LINK",
+                    retained_root=root,
+                    retained_workspace_id=initialized.manifest.workspace_id,
+                    slot=snapshot,
+                    inventory=reconciliation_file_reference(files, "inventory"),
+                    parent_manifest=reconciliation_file_reference(certificate, "control"),
+                    parent_index=reconciliation_file_reference(files, "inventory"),
+                    parent_proof=reconciliation_file_reference(certificate, "control"),
+                    verifier_sha256=physical._immutable_link_verifier_sha256(),
+                    byte_budget=1_000_000,
+                    created_at=now,
+                )
+                (snapshot / relative).unlink()  # Replace only the tiny fixture copy.
+                journal = physical.ImmutableLinkJournal(tmp_path / "links", header).open()
+                journal.apply_page(((0, member),))
+                witness = reconciliation_file_reference(
+                    journal.root / "page-00000000.trailer.json", "control"
+                )
+                kwargs = dict(
+                    destination=root,
+                    content_path=content_path,
+                    link_witness=witness,
+                    admission_path=admission_path,
+                )
+                covered = verify_generation_raw_files(service, **kwargs)
+                assert covered.witnessed_files == 1
+                assert covered.raw_count == result.raw_count
+                assert covered.hashed_files == (1 if case == 1 else 0)
+                if case == 0:
+                    extra = blob.with_name("f" * 64)
+                    extra.write_bytes(b"unindexed bytes")
+                elif case == 1:
+                    blob.write_bytes(b"unknown changed payload")
+                else:
+                    blob.unlink()
+                with pytest.raises(
+                    (WorkspaceV2InventoryError, physical.WorkspaceV2PhysicalDeltaError)
+                ):
+                    verify_generation_raw_files(service, **kwargs)
 
 
 def test_progress_recovery_is_not_baseline_or_successor(tmp_path: Path) -> None:
@@ -811,37 +1383,32 @@ def test_progress_rejects_foreign_roots_and_predecessor_epoch(tmp_path: Path) ->
             _progress_update(prepared, **changes)
 
 
-@pytest.mark.parametrize(
-    "financial_fault,successor_case",
-    [
-        (None, 0),
-        ("parent_value", 0),
-        ("new_quality", 0),
-        (None, 1),
-        (None, 3),
-        (None, "changed_w"),
-        (None, "noncanonical"),
-        (None, "metadata"),
-        (None, "missing_w"),
-        (None, "invalid_new"),
-        (None, "reservation_crash"),
-        (None, "coverage_crash"),
-        (None, "reopened_session"),
-        (None, "append_zero"),
-        (None, "append_crash"),
-        (None, "pipeline"),
-        (None, "observation_content"),
-        (None, "observation_metadata"),
-        (None, "observation_missing"),
-        (None, "observation_noncanonical"),
-    ],
-)
-def test_reconciliation_recovers_once_and_preserves_predecessor_after_receipt_crash(
+@dataclass(frozen=True)
+class _RecoveredBaselineFixture:
+    service: WorkspaceService
+    source: Path
+    destination: Path
+    raw: RawRecord
+    observation: NormalizedObservation
+    metric: MetricResult
+    extra: MetricResult
+    operation_id: UUID
+    reconciler: WorkspaceV2ProgressReconciler
+    baseline: ProgressReconciliationReceipt
+    core_reference: ReconciliationFileReference | None
+    verification_admission: MaintenanceResourceReceipt
+    verification_budget: MaintenanceResourceBudget
+    original: tuple[bytes, bytes]
+    predecessor: HistoricalTransition
+    predecessor_path: Path
+
+
+def _recovered_baseline_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    financial_fault: str | None,
-    successor_case: int | str,
-) -> None:
+    financial_fault: str | None = None,
+    successor_case: int | str = 0,
+) -> _RecoveredBaselineFixture | None:
     service = WorkspaceService(environ={}, home=tmp_path / "home")
     source, destination = tmp_path / "source", tmp_path / "destination"
     service.initialize(source, format_version=1)
@@ -1177,6 +1744,7 @@ def test_reconciliation_recovers_once_and_preserves_predecessor_after_receipt_cr
         predecessor.parent_membership_path.read_bytes(),
     )
 
+    core_reference = None
     if (
         isinstance(successor_case, int)
         or (isinstance(successor_case, str) and successor_case.startswith("observation_"))
@@ -1212,6 +1780,76 @@ def test_reconciliation_recovers_once_and_preserves_predecessor_after_receipt_cr
             ProgressReconciliation.model_validate_json(reconciler.path.read_bytes())
             == baseline.reconciliation
         )
+    return _RecoveredBaselineFixture(
+        service=service,
+        source=source,
+        destination=destination,
+        raw=raw,
+        observation=observation,
+        metric=metric,
+        extra=extra,
+        operation_id=operation_id,
+        reconciler=reconciler,
+        baseline=baseline,
+        core_reference=core_reference,
+        verification_admission=verification_admission,
+        verification_budget=verification_budget,
+        original=original,
+        predecessor=predecessor,
+        predecessor_path=predecessor_path,
+    )
+
+
+@pytest.mark.parametrize(
+    "financial_fault,successor_case",
+    [
+        (None, 0),
+        ("parent_value", 0),
+        ("new_quality", 0),
+        (None, 1),
+        (None, 3),
+        (None, "changed_w"),
+        (None, "noncanonical"),
+        (None, "metadata"),
+        (None, "missing_w"),
+        (None, "invalid_new"),
+        (None, "reservation_crash"),
+        (None, "coverage_crash"),
+        (None, "reopened_session"),
+        (None, "append_zero"),
+        (None, "append_crash"),
+        (None, "pipeline"),
+        (None, "observation_content"),
+        (None, "observation_metadata"),
+        (None, "observation_missing"),
+        (None, "observation_noncanonical"),
+    ],
+)
+def test_reconciliation_recovers_once_and_preserves_predecessor_after_receipt_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    financial_fault: str | None,
+    successor_case: int | str,
+) -> None:
+    fixture = _recovered_baseline_fixture(tmp_path, monkeypatch, financial_fault, successor_case)
+    if fixture is None:
+        return
+    service = fixture.service
+    source = fixture.source
+    destination = fixture.destination
+    raw = fixture.raw
+    observation = fixture.observation
+    metric = fixture.metric
+    extra = fixture.extra
+    operation_id = fixture.operation_id
+    reconciler = fixture.reconciler
+    baseline = fixture.baseline
+    core_reference = fixture.core_reference
+    verification_admission = fixture.verification_admission
+    verification_budget = fixture.verification_budget
+    original = fixture.original
+    predecessor = fixture.predecessor
+    predecessor_path = fixture.predecessor_path
     if successor_case == 0:
         # Exercise an actual archived-code receipt without rewriting the real
         # recovered baseline or executing any archived source.
@@ -1994,3 +2632,1741 @@ def test_append_requires_actual_source_page_and_keeps_ordinary_methods_immutable
                     with pytest.raises(CompactAnalyticalError, match="bound source page"):
                         getattr(compact, f"append_transition_{family}")(transition, rows)
             assert compact.historical_seal().model_dump() == transition.parent_seal.model_dump()
+
+
+@pytest.mark.parametrize("fault", [None, "foreign_baseline", "foreign_session"])
+def test_invalidation_covers_reservation_durable_before_head_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None
+) -> None:
+    from investment_analyst.workspace.workspace_v2_migration_models import (
+        ReconciliationGenerationReference,
+    )
+
+    ledger, event, values, admission = _generation_fixture(tmp_path, monkeypatch)
+    reservation = migration_module._SuccessorReservation.model_validate_json(
+        event.reservation.path.read_bytes()
+    )
+    pending = event.model_copy(
+        update={
+            "certificate": ReconciliationGenerationReference(
+                schema_type="workspace-v2-progress-reconciliation-v1",
+                artifact=reservation.baseline,
+            ),
+            "reason": "SESSION_ENDED",
+        }
+    )
+    if fault == "foreign_baseline":
+        baseline = ProgressReconciliation.model_validate_json(
+            reservation.baseline.path.read_bytes()
+        )
+        changed = _progress_update(baseline, source_workspace_id=uuid4())
+        other = tmp_path / "different-baseline.json"
+        other.write_bytes(canonical_json_bytes(changed))
+        from investment_analyst.storage.workspace_v2_inventory import reconciliation_file_reference
+
+        pending = pending.model_copy(
+            update={
+                "certificate": pending.certificate.model_copy(
+                    update={"artifact": reconciliation_file_reference(other, "control")}
+                )
+            }
+        )
+    elif fault == "foreign_session":
+        pending = pending.model_copy(
+            update={"owner": pending.owner.model_copy(update={"source_session": uuid4()})}
+        )
+    immutable = {p: p.read_bytes() for p in (event.reservation.path, reservation.baseline.path)}
+    with (
+        maintenance_resource_budget(admission.budget),
+        maintenance_execution(MaintenanceExecution(admission.budget, lambda *_: None)),
+    ):
+        if fault:
+            with pytest.raises(WorkspaceV2InventoryError):
+                ledger.invalidate(pending, admission=admission)
+        else:
+            reference = ledger.invalidate(pending, admission=admission)
+            assert reference.path.is_file()
+            assert ledger.resolve() is None
+            assert ledger.attempt_invalidated(pending.attempt_id)
+    assert all(p.read_bytes() == data for p, data in immutable.items())
+
+
+@pytest.mark.parametrize(
+    "fault", [None, "foreign_session", "foreign_admission", "foreign_baseline"]
+)
+@pytest.mark.parametrize("next_generation", [False, True])
+def test_generational_pending_reservation_can_be_invalidated_without_rebinding_dead_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None, next_generation: bool
+) -> None:
+    from investment_analyst.storage.workspace_v2_inventory import reconciliation_file_reference
+    from investment_analyst.workspace.workspace_v2_migration_models import (
+        CutOwner,
+        ProgressReconciliationV2,
+        ReconciliationGenerationReference,
+    )
+
+    ledger, event, values, admission = _generation_fixture(tmp_path, monkeypatch)
+    legacy = ProgressReconciliation.model_validate_json(values["verified_w"].path.read_bytes())
+    with (
+        maintenance_resource_budget(admission.budget),
+        maintenance_execution(MaintenanceExecution(admission.budget, lambda *_: None)),
+    ):
+        invalidation = ledger.invalidate(event, admission=admission)
+        prepared = ProgressReconciliationV2(**values, invalidation=invalidation)
+        prepared_ref = ledger.publish(prepared, expected_head_sha256=None, admission=admission)
+        generation = ProgressReconciliationV2.model_validate(
+            {
+                **prepared.model_dump(),
+                "phase": "BASELINE_VERIFIED",
+                "previous_certificate": prepared_ref,
+                "inventory": legacy.inventory,
+                "core_proof": values["verified_w"],
+                "corrective_proofs": (values["verified_w"],),
+            }
+        )
+        certificate = ledger.publish(
+            generation, expected_head_sha256=ledger._head_digest(), admission=admission
+        )
+        head_before = ledger.head_path.read_bytes()
+        attempt = uuid4()
+        cut = migration_module._SuccessorReservation.model_validate_json(
+            event.reservation.path.read_bytes()
+        ).successor.model_copy(update={"operation_id": attempt})
+        old_admission = admission.model_copy(
+            update={
+                "budget": admission.budget.model_copy(update={"operation_id": attempt}),
+                "pid": 999_999_999,
+            }
+        )
+        old_admission_path = tmp_path / "old-owner-admission.json"
+        old_admission_path.write_text(old_admission.model_dump_json())
+        owner = CutOwner(
+            source_session=uuid4(),
+            pid=old_admission.pid,
+            start_ticks=old_admission.process_start_ticks,
+            boot_id=old_admission.boot_id,
+            cgroup=old_admission.cgroup_path,
+        )
+        reservation = migration_module._SuccessorReservation(
+            reconciliation_id=generation.generation_id,
+            successor=cut,
+            source_session=owner.source_session,
+            baseline=certificate,
+            baseline_dataset_sha256=generation.inventory.dataset_sha256,
+            module_sha256="a" * 64,
+            resource_receipt=reconciliation_file_reference(old_admission_path, "resource"),
+            recorded_at=generation.recorded_at,
+        )
+        path = ledger.state / f"progress-successor-reservation.{attempt}.json"
+        path.write_text(reservation.model_dump_json())
+        pending = event.model_copy(
+            update={
+                "event_id": uuid4(),
+                "generation_id": uuid4() if next_generation else generation.generation_id,
+                "attempt_id": attempt,
+                "expected_head_sha256": ledger._head_digest(),
+                "certificate": ReconciliationGenerationReference(
+                    schema_type="workspace-v2-progress-reconciliation-v2", artifact=certificate
+                ),
+                "reservation": reconciliation_file_reference(path, "control"),
+                "owner": owner,
+                "reason": "SESSION_ENDED",
+            }
+        )
+        if fault == "foreign_session":
+            pending = pending.model_copy(
+                update={"owner": owner.model_copy(update={"source_session": uuid4()})}
+            )
+        elif fault == "foreign_admission":
+            pending = pending.model_copy(
+                update={"owner": owner.model_copy(update={"pid": 999_999_998})}
+            )
+        elif fault == "foreign_baseline":
+            pending = pending.model_copy(
+                update={
+                    "certificate": pending.certificate.model_copy(update={"artifact": prepared_ref})
+                }
+            )
+        immutable = {p: p.read_bytes() for p in (path, certificate.path, prepared_ref.path)}
+        if fault:
+            with pytest.raises(WorkspaceV2InventoryError):
+                ledger.invalidate(pending, admission=admission)
+        else:
+            saved = ledger.invalidate(pending, admission=admission)
+            assert ledger.invalidate(pending, admission=admission) == saved
+            assert ledger.attempt_invalidated(attempt)
+        assert ledger.head_path.read_bytes() == head_before
+        assert all(p.read_bytes() == data for p, data in immutable.items())
+
+
+@pytest.mark.parametrize("phase", ["PREPARED", "BASELINE_VERIFIED", "SUCCESSOR_BOUND"])
+def test_generation_status_cannot_reuse_legacy_complete_without_its_own_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    from types import SimpleNamespace
+
+    from investment_analyst.storage.workspace_v2_inventory import WorkspaceV2GenerationLedger
+
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    root = tmp_path / "empty-v2"
+    service.initialize(root, format_version=2)
+    generation = SimpleNamespace(
+        phase=phase, reserved_successor=SimpleNamespace(operation_id=uuid4())
+    )
+    monkeypatch.setattr(WorkspaceV2GenerationLedger, "resolve", lambda self: (object(), generation))
+    monkeypatch.setattr(WorkspaceV2GenerationLedger, "attempt_invalidated", lambda *_: False)
+    assert historical_transition_status(root) == "APPLYING"
+
+
+@pytest.mark.parametrize("fault", [None, "owner", "v2", "admission"])
+def test_coordinator_invalidates_orphan_without_changing_legacy_reservation_or_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None
+) -> None:
+    import importlib.util
+    from types import SimpleNamespace
+
+    from investment_analyst.storage.resource_policy import ResourcePolicyError
+    from investment_analyst.storage.workspace_v2_inventory import (
+        WorkspaceV2GenerationLedger,
+        reconciliation_file_reference,
+    )
+    from investment_analyst.workspace.workspace_v2_migration_models import CutInvalidation
+
+    ledger, event, values, admission = _generation_fixture(tmp_path, monkeypatch)
+    reservation = migration_module._SuccessorReservation.model_validate_json(
+        event.reservation.path.read_bytes()
+    )
+    controls = tmp_path / "controls"
+    controls.mkdir()
+    run = controls / "run"
+    run.mkdir()
+    old = admission.model_copy(update={"pid": 99999999})
+    old_path = controls / "old-admission.json"
+    old_path.write_text(old.model_dump_json())
+    reservation = reservation.model_copy(
+        update={"resource_receipt": reconciliation_file_reference(old_path, "resource")}
+    )
+    reservation_path = ledger.state / f"progress-successor-reservation.{event.attempt_id}.json"
+    reservation_path.write_text(reservation.model_dump_json())
+    budget = admission.budget.model_copy(update={"operation_id": reservation.reconciliation_id})
+    current = admission.model_copy(update={"budget": budget})
+    (run / "admission.json").write_text(
+        (admission if fault == "admission" else current).model_dump_json()
+    )
+    head = SimpleNamespace(model_dump=lambda **kw: {"certificate": "existing immutable head"})
+    generation = SimpleNamespace(
+        generation_id=values["generation_id"],
+        phase="BASELINE_VERIFIED",
+        reserved_successor=None,
+        verified_w=reservation.baseline,
+    )
+    monkeypatch.setattr(WorkspaceV2GenerationLedger, "resolve", lambda self: (head, generation))
+    original_manifest = ledger.service.manifest
+    monkeypatch.setattr(
+        ledger.service,
+        "manifest",
+        lambda path: (
+            SimpleNamespace(
+                workspace_id=event.source_workspace_id, created_at=reservation.successor.created_at
+            )
+            if path == event.source_root
+            else original_manifest(path)
+        ),
+    )
+    repository = Path(__file__).resolve().parents[3]
+    monkeypatch.syspath_prepend(str(repository / "scripts"))
+    spec = importlib.util.spec_from_file_location(
+        "orphan_cli", repository / "scripts/close_data_chassis.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "WorkspaceService", lambda: ledger.service)
+    monkeypatch.setattr(
+        module,
+        "LocalReleaseService",
+        lambda: SimpleNamespace(
+            load_workspace_bindings=lambda: SimpleNamespace(
+                current=SimpleNamespace(workspace_format_version=2) if fault == "v2" else None,
+                previous=None,
+            ),
+            systemctl=SimpleNamespace(
+                show_properties=lambda *a: {
+                    "ActiveState": "active",
+                    "MainPID": "42",
+                    "ExecStart": f"python --workspace {event.source_root}",
+                }
+            ),
+        ),
+    )
+    if fault == "owner":
+        boot = UUID(Path("/proc/sys/kernel/random/boot_id").read_text().strip())
+        old = old.model_copy(update={"boot_id": boot})
+        old_path.write_text(old.model_dump_json())
+        reservation = reservation.model_copy(
+            update={"resource_receipt": reconciliation_file_reference(old_path, "resource")}
+        )
+        reservation_path.write_text(reservation.model_dump_json())
+        monkeypatch.setattr(
+            module,
+            "_process_identity",
+            lambda pid: (old.process_start_ticks, boot, old.cgroup_path),
+        )
+    args = SimpleNamespace(
+        phase="invalidate-reservation",
+        source=event.source_root,
+        destination=ledger.root,
+        controls_root=controls,
+        operation_id=reservation.reconciliation_id,
+        reconciliation_id=values["generation_id"],
+        reservation_path=reservation_path,
+        resource_run_root=run,
+    )
+    original = {p: p.read_bytes() for p in (reservation_path, reservation.baseline.path)}
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(MaintenanceExecution(budget, lambda *_: None)),
+    ):
+        if fault:
+            with pytest.raises((module.MaintenancePhaseError, ResourcePolicyError, ValueError)):
+                module._execute(args)
+            assert not list(ledger.state.glob("cut-invalidation.*.json"))
+        else:
+            result = module._execute(args)
+            invalidation = CutInvalidation.model_validate_json(
+                Path(result["invalidation"]["path"]).read_bytes()
+            )
+            assert (
+                invalidation.reason == "SESSION_ENDED"
+                and invalidation.attempt_id == event.attempt_id
+            )
+            assert module._execute(args) == result
+    assert all(p.read_bytes() == data for p, data in original.items())
+    assert not ledger.head_path.exists()
+
+
+def _certified_successor_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Real small W→completed prior attempt→C1/C2 baseline; no proof producers mocked."""
+    from investment_analyst.application.local_release import (
+        DeploymentWorkspaceBindings,
+        LocalReleaseService,
+    )
+    from investment_analyst.storage.workspace_v2_inventory import (
+        WorkspaceV2GenerationLedger,
+        historical_transition_fingerprints,
+        reconciliation_file_reference,
+        verify_generation_contents,
+        verify_generation_raw_files,
+    )
+    from investment_analyst.workspace.workspace_v2_backup import WorkspaceV2BackupService
+    from investment_analyst.workspace.workspace_v2_migration_models import (
+        CutInvalidation,
+        CutOwner,
+        ProgressReconciliationV2,
+        ReconciliationGenerationReference,
+    )
+    from investment_analyst.workspace.workspace_v2_physical_delta import (
+        ImmutableLinkHeader,
+        ImmutableLinkJournal,
+        PhysicalDeltaBlock,
+        PhysicalDeltaFile,
+        WorkspaceV2PhysicalDeltaIndexService,
+        _immutable_link_verifier_sha256,
+    )
+    from investment_analyst.workspace.workspace_v2_remote import WorkspaceV2RemoteService
+
+    seed = _recovered_baseline_fixture(tmp_path, monkeypatch)
+    assert seed is not None and seed.core_reference is not None
+    service, source, destination = seed.service, seed.source, seed.destination
+    snapshot = tmp_path / "independent-W"
+    shutil.copytree(destination, snapshot)  # Small fixture, never any real workspace.
+    # Finish the historical attempt in a separate actual source session/process.
+    # Its recorded PID really disappears before the C1 invalidation below.
+    previous = uuid4()
+    child_input = tmp_path / "child-input.json"
+    child_input.write_text(
+        json.dumps(
+            {
+                "source": str(source),
+                "destination": str(destination),
+                "home": str(tmp_path / "home"),
+                "operation": str(previous),
+                "reconciliation": str(seed.operation_id),
+                "core": str(seed.core_reference.path),
+                "budget": seed.verification_budget.model_dump(mode="json"),
+                "admission": seed.verification_admission.model_dump(mode="json"),
+            }
+        )
+    )
+    script = """
+import json,os,sys
+from pathlib import Path
+from uuid import UUID
+from datetime import UTC,datetime
+from investment_analyst.storage.resource_policy import *
+from investment_analyst.workspace.service import WorkspaceService
+from investment_analyst.workspace.workspace_v2_migration import (
+ quiescent_source_cut,migrate_workspace_v1_to_v2,
+)
+v=json.loads(Path(sys.argv[1]).read_text())
+source=Path(v['source']); destination=Path(v['destination'])
+b=MaintenanceResourceBudget.model_validate_json(json.dumps(v['budget']))
+a=DatabaseResourceAssignment(database=source/'storage/data/processed/investment_analyst.duckdb',policy=DuckDBResourcePolicy(memory_limit_bytes=256000000,threads=1,spill_limit_bytes=0,temp_directory=source.parent/'child-spill'))
+b=b.model_copy(update={'operation_id':UUID(v['operation']),'assignments':(*b.assignments,a)})
+r=MaintenanceResourceReceipt.model_validate_json(json.dumps(v['admission']))
+ticks=int(Path('/proc/self/stat').read_text().split()[21]);boot=UUID(Path('/proc/sys/kernel/random/boot_id').read_text().strip())
+r=r.model_copy(update={'budget':b,'pid':os.getpid(),'process_start_ticks':ticks,'boot_id':boot,'recorded_at':datetime.now(UTC)})
+p=source.parent/'previous-admission.json';p.write_text(r.model_dump_json())
+s=WorkspaceService(environ={},home=Path(v['home']))
+with (
+ maintenance_resource_budget(b),
+ maintenance_execution(MaintenanceExecution(b,lambda *_:None)),
+ quiescent_source_cut(s,source,operation_id=UUID(v['operation'])) as cut,
+):
+ (source.parent/'previous-cut.json').write_text(cut.model_dump_json())
+ migrate_workspace_v1_to_v2(service=s,source_root=source,destination_root=destination,page_limit=1,host_free_bytes=lambda:30000000000,frozen_source=cut,reconciliation_id=UUID(v['reconciliation']),core_baseline_path=Path(v['core']),reconciliation_admission_path=p)
+"""
+    child = subprocess.run(
+        [sys.executable, "-c", script, str(child_input)], capture_output=True, text=True, timeout=30
+    )
+    assert child.returncode == 0, child.stderr[-4000:]
+    old_admission = MaintenanceResourceReceipt.model_validate_json(
+        (tmp_path / "previous-admission.json").read_bytes()
+    )
+    previous_cut = FrozenSourceCut.model_validate_json(
+        (tmp_path / "previous-cut.json").read_bytes()
+    )
+    previous_reservation = destination / "state" / f"progress-successor-reservation.{previous}.json"
+    reserved = migration_module._SuccessorReservation.model_validate_json(
+        previous_reservation.read_bytes()
+    )
+    previous_receipt = destination / "state" / f"historical-transition-receipt.{previous}.json"
+    terminal = HistoricalTransitionReceipt.model_validate_json(previous_receipt.read_bytes())
+    assert terminal.transition.phase == "COMPLETE"
+    assert not (Path("/proc") / str(old_admission.pid)).exists()
+
+    backup = WorkspaceV2BackupService(service)
+    packed = tmp_path / "parent-packed"
+    backup.create_packed(
+        destination,
+        packed,
+        volume_bytes=1_048_576,
+        fragment_bytes=65_536,
+        available_bytes=lambda: 30_000_000_000,
+    )
+    parent_root = tmp_path / "parent-restored"
+    backup.restore_packed(packed, parent_root, available_bytes=lambda: 30_000_000_000)
+    index_root = tmp_path / "parent-index"
+    WorkspaceV2PhysicalDeltaIndexService(backup).build(packed, index_root)
+    remote = (
+        WorkspaceV2RemoteService(backup)
+        .plan_base(packed, configuration_fingerprint="a" * 64)
+        .manifest
+    )
+    parent_manifest = tmp_path / "parent-remote-manifest.json"
+    parent_manifest.write_text(remote.model_dump_json())
+
+    generation_id = uuid4()
+    assignments = (
+        seed.verification_budget.assignments[0],
+        DatabaseResourceAssignment(
+            database=snapshot / "storage/v2/index.duckdb",
+            policy=DuckDBResourcePolicy(
+                memory_limit_bytes=256_000_000,
+                threads=1,
+                spill_limit_bytes=0,
+                temp_directory=tmp_path / "baseline-spill",
+            ),
+        ),
+    )
+    budget = seed.verification_budget.model_copy(
+        update={"operation_id": generation_id, "assignments": assignments}
+    )
+    policy = sha256_hex(
+        (Path(migration_module.__file__).parent.parent / "storage/resource_policy.py").read_bytes()
+    )
+    admission = seed.verification_admission.model_copy(
+        update={"budget": budget, "resource_policy_sha256": policy}
+    )
+    admission_path = tmp_path / "generation-admission.json"
+    admission_path.write_text(admission.model_dump_json())
+    ledger = WorkspaceV2GenerationLedger(service, destination)
+    legacy = ProgressReconciliation.model_validate_json(seed.reconciler.path.read_bytes())
+    previous_ref = reconciliation_file_reference(seed.reconciler.path, "control")
+    old = ReconciliationGenerationReference(
+        schema_type=legacy.schema_version, artifact=previous_ref
+    )
+    proof_path = tmp_path / "session-ended-evidence.json"
+    proof_path.write_text(
+        json.dumps(
+            {
+                "pid": old_admission.pid,
+                "owner_absent": True,
+                "source_session_closed": True,
+                "attempt": str(previous),
+                "prior_exit": child.returncode,
+            }
+        )
+    )
+    proof = reconciliation_file_reference(proof_path, "control")
+    event = CutInvalidation(
+        event_id=uuid4(),
+        generation_id=generation_id,
+        attempt_id=previous,
+        certificate=old,
+        reservation=reconciliation_file_reference(previous_reservation, "control"),
+        owner=CutOwner(
+            source_session=reserved.source_session,
+            pid=old_admission.pid,
+            start_ticks=old_admission.process_start_ticks,
+            boot_id=old_admission.boot_id,
+            cgroup=old_admission.cgroup_path,
+        ),
+        source_root=source,
+        source_workspace_id=previous_cut.workspace_id,
+        destination_root=destination,
+        destination_workspace_id=ledger.identity.workspace_id,
+        database=reconciliation_file_reference(destination / "storage/v2/index.duckdb", "database"),
+        wal=None,
+        write_generation=reconciliation_file_reference(previous_receipt, "control"),
+        historical_seal=reconciliation_file_reference(previous_receipt, "control"),
+        historical_receipt=reconciliation_file_reference(previous_receipt, "control"),
+        reason="SESSION_ENDED",
+        owner_absence=proof,
+        exclusivity=proof,
+        no_activation=proof,
+        code_sha256=sha256_hex(Path(migration_module.__file__).read_bytes()),
+        policy_sha256=policy,
+        recorded_at=datetime.now(UTC),
+    )
+    # Only the OS/deployment boundary is simulated. All data/proof production is real.
+    monkeypatch.setattr(
+        LocalReleaseService, "load_workspace_bindings", lambda self: DeploymentWorkspaceBindings()
+    )
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(MaintenanceExecution(budget, lambda *_: None)),
+    ):
+        invalidation = ledger.invalidate(event, admission=admission)
+        tree, environment = historical_transition_fingerprints(256, "shared-reference-verifier-v1")
+        generation = ProgressReconciliationV2(
+            generation_id=generation_id,
+            ordinal=1,
+            previous_generation=old,
+            invalidation=invalidation,
+            source_root=source,
+            source_workspace_id=previous_cut.workspace_id,
+            source_created_at=previous_cut.created_at,
+            destination_root=destination,
+            destination_workspace_id=ledger.identity.workspace_id,
+            predecessor=legacy.predecessor,
+            previous_attempt=reconciliation_file_reference(
+                destination / "state" / f"historical-transition.{previous}.json", "control"
+            ),
+            previous_reservation=event.reservation,
+            previous_receipts=(event.historical_receipt,),
+            parent_membership=legacy.parent_membership,
+            parent_seal=legacy.parent_seal,
+            verified_w=seed.baseline.certificate,
+            database=event.database,
+            wal=None,
+            code=(reconciliation_file_reference(Path(migration_module.__file__), "code"),),
+            tree_fingerprint=tree,
+            environment_fingerprint=environment,
+            resource_receipt=reconciliation_file_reference(admission_path, "resource"),
+            prepared_at=datetime.now(UTC),
+            recorded_at=datetime.now(UTC),
+        )
+        ledger.publish(generation, expected_head_sha256=None, admission=admission)
+        relationships = ledger.verify_relationships(admission_path=admission_path)
+        graph = tmp_path / "generation-relationships.json"
+        graph.write_text(relationships.model_dump_json())
+        content = verify_generation_contents(
+            service,
+            generation_id=generation_id,
+            destination=destination,
+            baseline_root=snapshot,
+            baseline_certificate=seed.baseline.certificate,
+            baseline_database_sha256=seed.baseline.reconciliation.database_after.sha256,
+            admission_path=admission_path,
+            relationships_path=graph,
+        )
+        content_path = tmp_path / "generation-content.json"
+        content_path.write_text(content.model_dump_json())
+        blob = next((destination / "storage/v2/raw/raw/sha256").rglob("?" * 64))
+        member = PhysicalDeltaFile(
+            path=blob.relative_to(destination).as_posix(),
+            size_bytes=blob.stat().st_size,
+            sha256=blob.name,
+            blocks=(
+                PhysicalDeltaBlock(
+                    offset_bytes=0,
+                    length_bytes=blob.stat().st_size,
+                    sha256=blob.name,
+                    origin="parent",
+                ),
+            ),
+        )
+        files = tmp_path / "raw-members.jsonl"
+        files.write_text(member.model_dump_json() + "\n")
+        link_slot = tmp_path / "raw-witness-slot"
+        link_slot.mkdir()
+        header = ImmutableLinkHeader(
+            operation_id=generation_id,
+            action="LINK",
+            retained_root=destination,
+            retained_workspace_id=ledger.identity.workspace_id,
+            slot=link_slot,
+            inventory=reconciliation_file_reference(files, "inventory"),
+            parent_manifest=reconciliation_file_reference(parent_manifest, "control"),
+            parent_index=reconciliation_file_reference(
+                index_root / "physical-delta-index.jsonl", "inventory"
+            ),
+            parent_proof=reconciliation_file_reference(previous_receipt, "control"),
+            verifier_sha256=_immutable_link_verifier_sha256(),
+            byte_budget=1_000_000,
+            created_at=datetime.now(UTC),
+        )
+        journal = ImmutableLinkJournal(tmp_path / "raw-witness", header).open()
+        journal.apply_page(((0, member),))
+        witness = reconciliation_file_reference(
+            journal.root / "page-00000000.trailer.json", "control"
+        )
+        raw = verify_generation_raw_files(
+            service,
+            destination=destination,
+            content_path=content_path,
+            link_witness=witness,
+            admission_path=admission_path,
+        )
+        raw_path = tmp_path / "generation-raw.json"
+        raw_path.write_text(raw.model_dump_json())
+        ledger.certify_baseline(
+            content_path=content_path,
+            raw_coverage_path=raw_path,
+            relationships_path=graph,
+            admission_path=admission_path,
+            code=generation.code,
+        )
+    return (
+        seed,
+        ledger,
+        admission,
+        parent_root,
+        index_root / "physical-delta-index.jsonl",
+        parent_manifest,
+    )
+
+
+@pytest.mark.parametrize("fault", [None, "epoch", "root"])
+def test_coverage_only_measures_retained_generation_without_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None
+):
+    import importlib.util
+
+    from investment_analyst.workspace.workspace_v2_physical_delta import (
+        WorkspaceV2PhysicalDeltaService,
+    )
+
+    seed, ledger, admission, _, index, parent = _certified_successor_fixture(tmp_path, monkeypatch)
+    generation = ledger.resolve()[1].generation_id
+    scripts = Path(__file__).resolve().parents[3] / "scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    spec = importlib.util.spec_from_file_location(
+        "coverage_closure", scripts / "close_data_chassis.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    controls = tmp_path / "coverage-controls"
+    controls.mkdir()
+    operation = uuid4() if fault == "epoch" else generation
+    budget = admission.budget.model_copy(
+        update={
+            "operation_id": operation,
+            "assignments": tuple(
+                item.model_copy(
+                    update={
+                        "policy": item.policy.model_copy(
+                            update={
+                                "temp_directory": controls
+                                / "resource-temporaries"
+                                / str(operation)
+                                / str(i)
+                            }
+                        )
+                    }
+                )
+                for i, item in enumerate(admission.budget.assignments)
+                if item.database == seed.destination / "storage/v2/index.duckdb"
+            ),
+        }
+    )
+    for item in budget.assignments:
+        item.policy.temp_directory.mkdir(parents=True)
+    budget_path = controls / "budget.json"
+    budget_path.write_text(budget.model_dump_json())
+    args = module._parser().parse_args(
+        [
+            "recovery-readback",
+            "--coverage-only",
+            "--source",
+            str(seed.source),
+            "--destination",
+            str(seed.destination),
+            "--controls-root",
+            str(controls),
+            "--operation-id",
+            str(operation),
+            "--code-sha",
+            "a" * 40,
+            "--delta-root",
+            str(tmp_path / "coverage-delta"),
+            "--resource-budget",
+            str(budget_path),
+            "--recovery-root",
+            str(seed.destination if fault != "root" else tmp_path / "absent-slot"),
+        ]
+    )
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(MaintenanceExecution(budget, lambda *_: None)),
+    ):
+        manifest = WorkspaceV2PhysicalDeltaService(seed.service).plan(
+            seed.destination,
+            index,
+            args.delta_root,
+            parent_manifest_sha256=hashlib.sha256(parent.read_bytes()).hexdigest(),
+            epoch=operation,
+            allow_incomplete_historical=True,
+        )
+        before = (seed.destination / "storage/v2/index.duckdb").read_bytes()
+        if fault is not None:
+            with pytest.raises(
+                module.MaintenancePhaseError, match="coverage_measurement_requires_retained_w2"
+            ):
+                module._execute(args)
+        else:
+            result = module._execute(args)
+            assert result["coverage_only"] and result["new_restore"] is False
+            assert result["coverage"]["physical_files"] == manifest.file_count
+            assert result["coverage"]["raw_files"] > 0
+            assert result["coverage"]["raw_files"] == result["coverage"]["raw_indexed"]
+        assert (seed.destination / "storage/v2/index.duckdb").read_bytes() == before
+
+
+@pytest.mark.parametrize("family", ["metrics", "diagnostics"])
+def test_successor_typed_fallback_batches_models_by_bytes_and_preserves_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, family: str
+) -> None:
+    from investment_analyst.storage.resource_policy import connect_duckdb
+
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    workspace = service.initialize(tmp_path / "source", format_version=1)
+    models = [
+        make_metric_result(observation_id=uuid4()).model_copy(
+            update={"parameters": {"payload": "雪" * 6000}}
+        )
+        if family == "metrics"
+        else make_diagnostic_result(metric_result_id=uuid4())
+        for _ in range(256)
+    ]
+    with service.open_storage(workspace.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        repository = storage.metric_results if family == "metrics" else storage.diagnostics
+        repository.save_many(models)
+    database = workspace.paths.root / "storage/data/processed/investment_analyst.duckdb"
+    identifiers = [
+        model.result_id if family == "metrics" else model.diagnostic_id for model in models
+    ]
+    sizes = {
+        identifier: len(canonical_json_bytes(model))
+        for identifier, model in zip(identifiers, models, strict=True)
+    }
+    rows = [
+        (str(identifier), model.available_at.isoformat(), "unused", None, False, sizes[identifier])
+        for identifier, model in zip(identifiers, models, strict=True)
+    ]
+    original = migration_module.execute_bounded
+    batches = []
+
+    def observe(connection, query, parameters=None):
+        if "document_json," in query and " IN (" in query:
+            requested = [UUID(value) for value in parameters[:-2]]
+            assert len(requested) <= 256
+            assert sum(sizes[identifier] for identifier in requested) <= 1 << 20
+            assert "available_at BETWEEN" in query
+            batches.append(len(requested))
+        return original(connection, query, parameters)
+
+    monkeypatch.setattr(migration_module, "execute_bounded", observe)
+    budget = MaintenanceResourceBudget(
+        operation_id=uuid4(),
+        profile="verification",
+        assignments=(
+            DatabaseResourceAssignment(
+                database=database,
+                policy=DuckDBResourcePolicy(
+                    memory_limit_bytes=256_000_000,
+                    threads=1,
+                    spill_limit_bytes=0,
+                    temp_directory=tmp_path / "typed-batches-temp",
+                ),
+            ),
+        ),
+    )
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(MaintenanceExecution(budget, lambda *_: None)),
+        connect_duckdb(database, read_only=True) as connection,
+    ):
+        result = migration_module._validate_successor_comparison_rows(connection, family, rows)
+        assert result == {
+            identifier: sha256_hex(canonical_json_bytes(model))
+            for identifier, model in zip(identifiers, models, strict=True)
+        }
+        assert sum(batches) == 256
+        assert (1 < len(batches) < 256) if family == "metrics" else len(batches) == 1
+        with pytest.raises(migration_module.WorkspaceV2MigrationError, match="page exceeds bounds"):
+            migration_module._validate_successor_comparison_rows(
+                connection, family, rows + rows[:1]
+            )
+
+
+@pytest.mark.parametrize(
+    "additions,fault",
+    [
+        (0, None),
+        (1, None),
+        (3, None),
+        (0, "wal"),
+        (0, "changed"),
+        (0, "generation"),
+        (0, "noncanonical"),
+        (0, "bad_metadata"),
+    ],
+)
+def test_comparison_measurement_is_read_only_unreserved_and_bound_to_current_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, additions: int, fault: str | None
+) -> None:
+    import os
+
+    from investment_analyst.workspace import workspace_v2_migration as migration
+
+    seed, ledger, admission, *_ = _certified_successor_fixture(tmp_path, monkeypatch)
+    baseline = ledger.resolve()[1]
+    for ordinal in range(additions):
+        raw = make_raw_record(source_id=f"fixture:measurement:{ordinal}")
+        observation = make_observation(raw_record_id=raw.record_id)
+        metric = make_metric_result(observation_id=observation.observation_id)
+        diagnostic = make_diagnostic_result(metric_result_id=metric.result_id)
+        with seed.service.open_storage(
+            seed.service.resolve(seed.source), WorkspaceAccessMode.READ_WRITE
+        ) as storage:
+            storage.raw_records.save(raw)
+            storage.observations.save(observation)
+            storage.metric_results.save(metric)
+            storage.diagnostics.save(diagnostic)
+    source_db = seed.source / "storage/data/processed/investment_analyst.duckdb"
+    candidate_db = seed.destination / "storage/v2/index.duckdb"
+    if fault in {"noncanonical", "bad_metadata"}:
+        with seed.service.open_storage(
+            seed.service.resolve(seed.source), WorkspaceAccessMode.READ_WRITE
+        ) as storage:
+            key, document = storage.store.connection.execute(
+                "SELECT result_id,document_json FROM metric_results ORDER BY result_id LIMIT 1"
+            ).fetchone()
+            if fault == "noncanonical":
+                storage.store.connection.execute(
+                    "UPDATE metric_results SET document_json=? WHERE result_id=?",
+                    [json.dumps(json.loads(document), indent=2), key],
+                )
+            else:
+                storage.store.connection.execute(
+                    "UPDATE metric_results SET metric_key='changed metadata' WHERE result_id=?",
+                    [key],
+                )
+    budget = admission.budget.model_copy(
+        update={
+            "assignments": (
+                admission.budget.assignments[0],
+                DatabaseResourceAssignment(
+                    database=source_db,
+                    policy=DuckDBResourcePolicy(
+                        memory_limit_bytes=256_000_000,
+                        threads=1,
+                        spill_limit_bytes=0,
+                        temp_directory=tmp_path / "measurement-source-temp",
+                    ),
+                ),
+            )
+        }
+    )
+    path = tmp_path / "measurement-admission.json"
+    path.write_text(admission.model_copy(update={"budget": budget}).model_dump_json())
+    before = {p: p.read_bytes() for p in (source_db, candidate_db, *ledger.state.glob("*.json"))}
+    if fault == "wal":
+        source_db.with_suffix(".duckdb.wal").write_bytes(b"unreplayed WAL")
+    if fault == "changed":
+        original = migration._core_native_pages
+        touched = False
+
+        def change_during_read(*args, **kwargs):
+            nonlocal touched
+            for page in original(*args, **kwargs):
+                if not touched:
+                    touched = True
+                    metadata = source_db.stat()
+                    os.utime(source_db, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000))
+                yield page
+
+        monkeypatch.setattr(migration, "_core_native_pages", change_during_read)
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(MaintenanceExecution(budget, lambda *_: None)),
+    ):
+        arguments = (
+            seed.service,
+            seed.source,
+            seed.destination,
+            uuid4() if fault == "generation" else baseline.generation_id,
+            path,
+        )
+        if fault and fault != "noncanonical":
+            with pytest.raises(
+                migration.WorkspaceV2MigrationError,
+                match="not closed|inputs changed|binding differs|metadata differs",
+            ):
+                migration.measure_recovered_comparison(*arguments)
+        else:
+            measured = migration.measure_recovered_comparison(*arguments)
+            assert measured["calibration_only"] is True
+            assert measured["quiescence_claimed"] is False
+            assert measured["successor_reserved"] is False
+            assert measured["imports_performed"] is False
+            for family, count in (
+                ("raw", 1),
+                ("observations", 1),
+                ("metrics", 2),
+                ("diagnostics", 1),
+            ):
+                data = measured["families"][family]
+                assert data["source_count"] == count + additions
+                assert data["baseline_known_count"] == count
+                assert data["requires_typed_validation"] == additions + (
+                    family == "metrics" and fault == "noncanonical"
+                )
+            if fault == "noncanonical":
+                metrics = measured["families"]["metrics"]
+                assert metrics["known_source_hash_mismatch"] == 1
+                assert metrics["known_metadata_mismatch"] == 0
+                assert metrics["canonical_digest"] != metrics["source_document_digest"]
+    assert ledger.resolve()[1] == baseline
+    assert all(p.read_bytes() == document for p, document in before.items())
+    assert not list((tmp_path / "measurement-source-temp").glob("recovered-core-index-*"))
+
+
+@pytest.mark.parametrize("additions,noncanonical", [(0, False), (1, False), (3, False), (0, True)])
+def test_certified_generation_reaches_real_incremental_financial_seal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, additions: int, noncanonical: bool
+) -> None:
+    seed, ledger, admission, parent_root, index, parent_manifest = _certified_successor_fixture(
+        tmp_path, monkeypatch
+    )
+    from investment_analyst.workspace.workspace_v2_migration_models import ProgressReconciliationV2
+
+    baseline = ledger.resolve()[1]
+    original = {p: p.read_bytes() for p in ledger.state.glob("progress-reconciliation*.json")}
+    source = seed.source
+    destination = seed.destination
+    if noncanonical:
+        with seed.service.open_storage(
+            seed.service.resolve(source), WorkspaceAccessMode.READ_WRITE
+        ) as storage:
+            key, document = storage.store.connection.execute(
+                "SELECT result_id,document_json FROM metric_results ORDER BY result_id LIMIT 1"
+            ).fetchone()
+            storage.store.connection.execute(
+                "UPDATE metric_results SET document_json=? WHERE result_id=?",
+                [json.dumps(json.loads(document), indent=2), key],
+            )
+    for ordinal in range(additions):
+        raw = make_raw_record(source_id=f"fixture:new:{ordinal}")
+        observation = make_observation(raw_record_id=raw.record_id)
+        metric = make_metric_result(observation_id=observation.observation_id)
+        diagnostic = make_diagnostic_result(metric_result_id=metric.result_id)
+        with seed.service.open_storage(
+            seed.service.resolve(source), WorkspaceAccessMode.READ_WRITE
+        ) as storage:
+            storage.raw_records.save(raw)
+            storage.observations.save(observation)
+            storage.metric_results.save(metric)
+            storage.diagnostics.save(diagnostic)
+    operation = uuid4()
+    budget = admission.budget.model_copy(
+        update={
+            "operation_id": operation,
+            "assignments": (
+                admission.budget.assignments[0],
+                DatabaseResourceAssignment(
+                    database=source / "storage/data/processed/investment_analyst.duckdb",
+                    policy=DuckDBResourcePolicy(
+                        memory_limit_bytes=256_000_000,
+                        threads=1,
+                        spill_limit_bytes=0,
+                        temp_directory=tmp_path / "successor-temp",
+                    ),
+                ),
+            ),
+        }
+    )
+    receipt = admission.model_copy(update={"budget": budget})
+    admission_path = tmp_path / "new-successor-admission.json"
+    admission_path.write_text(receipt.model_dump_json())
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(MaintenanceExecution(budget, lambda *_: None)),
+        quiescent_source_cut(seed.service, source, operation_id=operation) as cut,
+    ):
+        reserved = reserve_recovered_successor(
+            service=seed.service,
+            destination_root=destination,
+            reconciliation_id=baseline.generation_id,
+            frozen_source=cut,
+            admission_path=admission_path,
+        )
+        assert isinstance(reserved, ProgressReconciliationV2)
+        assert reserved.reserved_successor == cut and reserved.phase == "BASELINE_VERIFIED"
+        result = migrate_workspace_v1_to_v2(
+            service=seed.service,
+            source_root=source,
+            destination_root=destination,
+            page_limit=1,
+            host_free_bytes=lambda: 30_000_000_000,
+            frozen_source=cut,
+            reconciliation_id=baseline.generation_id,
+            core_baseline_path=baseline.core_proof.path,
+            reconciliation_admission_path=admission_path,
+        )
+        assert result.historical.complete
+        assert result.raw.imported_count == 1 + additions
+        bound = ledger.resolve()[1]
+        assert bound.phase == "SUCCESSOR_BOUND" and bound.reserved_successor == cut
+    terminal = HistoricalTransitionReceipt.model_validate_json(
+        (destination / "state" / f"historical-transition-receipt.{operation}.json").read_bytes()
+    )
+    assert terminal.transition.phase == "COMPLETE"
+    assert terminal.final_seal.metric_count == 2 + additions
+    with seed.service.open_storage(
+        seed.service.resolve(destination), WorkspaceAccessMode.READ_ONLY
+    ) as storage:
+        assert (
+            CompactAnalyticalStore(storage.store.connection).verify_complete()[
+                "historical_metric_count"
+            ]
+            == 2 + additions
+        )
+        assert storage.raw_records.count() == 1 + additions
+    assert all(p.read_bytes() == data for p, data in original.items())
+    # Same final epoch, real physical manifest and recovery independent from staging.
+    from investment_analyst.workspace.workspace_v2_physical_delta import (
+        WorkspaceV2PhysicalDeltaService,
+        _verify_full_recovery_coverage,
+    )
+
+    class IndependentDrive:
+        def __init__(self, root):
+            self.root = root
+            self.fetches = []
+
+        def copy_immutable_object(self, path, key):
+            target = self.root / key
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                assert target.read_bytes() == path.read_bytes()
+            else:
+                shutil.copyfile(path, target)
+            return ()
+
+        def fetch_sealed_object(self, key, path):
+            shutil.copyfile(self.root / key, path)
+            self.fetches.append(key)
+            return ()
+
+    physical = WorkspaceV2PhysicalDeltaService(seed.service)
+    delta = tmp_path / "final-delta"
+    manifest_sha = sha256_hex(parent_manifest.read_bytes())
+    transport = IndependentDrive(tmp_path / "external-drive")
+    plan_budget = budget.model_copy(update={"assignments": (budget.assignments[0],)})
+    with (
+        maintenance_resource_budget(plan_budget),
+        maintenance_execution(MaintenanceExecution(plan_budget, lambda *_: None)),
+    ):
+        manifest = physical.plan(
+            destination, index, delta, parent_manifest_sha256=manifest_sha, epoch=operation
+        )
+    assert manifest.historical_state == "COMPLETE"
+    upload = physical.upload(
+        delta,
+        transport,
+        checkpoint_path=delta / "upload-cursor.json",
+        receipt_path=delta / "upload-receipt.json",
+    )
+    hidden = tmp_path / "unavailable-upload-payload"
+    (delta / "physical-delta/objects").rename(hidden)
+    assert historical_transition_status(destination) == "COMPLETE"
+    destination.rename(tmp_path / "unavailable-candidate")
+    recovered = tmp_path / "same-epoch-recovery"
+    recovered_receipt = physical.restore(
+        delta,
+        parent_root=parent_root,
+        parent_index=index,
+        parent_manifest_sha256=manifest_sha,
+        destination=recovered,
+        transport=transport,
+        checkpoint_path=delta / "restore-cursor.json",
+        receipt_path=delta / "restore-receipt.json",
+    )
+    assert recovered_receipt.epoch == upload.epoch == operation
+    assert recovered_receipt.manifest_sha256 == upload.manifest_sha256
+    assert recovered_receipt.historical_state == "COMPLETE"
+    # A recovered photo is inspectable evidence, not a new live C1 owner.
+    # Preserve the ordinary operational-root rejection and all original bytes.
+    with pytest.raises(WorkspaceV2InventoryError, match="head workspace differs"):
+        historical_transition_status(recovered)
+    read_budget = plan_budget.model_copy(
+        update={
+            "assignments": (
+                DatabaseResourceAssignment(
+                    database=recovered / "storage/v2/index.duckdb",
+                    policy=plan_budget.assignments[0].policy,
+                ),
+            )
+        }
+    )
+    with (
+        maintenance_resource_budget(read_budget),
+        maintenance_execution(MaintenanceExecution(read_budget, lambda *_: None)),
+        seed.service.open_storage(
+            seed.service.resolve(recovered), WorkspaceAccessMode.READ_ONLY
+        ) as storage,
+    ):
+        coverage = _verify_full_recovery_coverage(
+            recovered, delta / "files.jsonl", manifest, storage.store.connection
+        )
+        assert coverage["physical_files"] == manifest.file_count
+        assert coverage["raw_indexed"] == coverage["raw_files"] == 1 + additions
+        assert storage.metric_results.count() == 2 + additions
+    assert any(key.startswith("physical-delta/objects/") for key in transport.fetches)
+    # Actual installed compatible reader, when this external runtime is present.
+    # CI still exercises all data/recovery checks above without depending on it.
+    from investment_analyst.application.local_release import LocalReleaseService
+
+    compatible = LocalReleaseService().paths.releases / "dbbdfd021b0fee20be31b2d2a845874b0e861067"
+    if (compatible / ".venv/bin/python").is_file():
+        import importlib.util
+        from types import SimpleNamespace
+
+        scripts = Path(__file__).resolve().parents[3] / "scripts"
+        monkeypatch.syspath_prepend(str(scripts))
+        spec = importlib.util.spec_from_file_location(
+            "generation_closure", scripts / "close_data_chassis.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        controls = tmp_path / "compatible-readback"
+        controls.mkdir()
+        profile = read_budget.model_copy(
+            update={
+                "profile": "compatible_44",
+                "assignments": (
+                    DatabaseResourceAssignment(
+                        database=recovered / "storage/v2/index.duckdb",
+                        policy=read_budget.assignments[0].policy.model_copy(
+                            update={
+                                "threads": 2,
+                                "memory_limit_bytes": 2_000_000_000,
+                                "temp_directory": controls
+                                / "resource-temporaries"
+                                / str(operation)
+                                / "reader",
+                            }
+                        ),
+                    ),
+                ),
+            }
+        )
+        profile_path = controls / "budget.json"
+        profile_path.write_text(profile.model_dump_json())
+        args = SimpleNamespace(
+            operation_id=operation,
+            source=source,
+            destination=destination,
+            controls_root=controls,
+            resource_budget=profile_path,
+            recovery_root=recovered,
+            delta_root=delta,
+            core_baseline_path=None,
+        )
+        with (
+            maintenance_resource_budget(profile),
+            maintenance_execution(MaintenanceExecution(profile, lambda *_: None)),
+        ):
+            readback = module._complete_recovery(args, recovered_receipt, manifest)
+        assert readback["readback"]["raw_count"] == 1 + additions
+        assert readback["coverage"]["physical_files"] == manifest.file_count
+
+
+@pytest.mark.parametrize(
+    "additions,fault",
+    [
+        (0, None),
+        (1, None),
+        (3, None),
+        (0, "before_reservation"),
+        (0, "after_reservation"),
+        (1, "after_writes"),
+        (0, "sql"),
+        (0, "network"),
+        (0, "host"),
+        (1, "after_activating"),
+        (0, "known_changed"),
+        (0, "known_missing"),
+        (0, "extra_invalid"),
+        (0, "sql_stall"),
+        (0, "prepared_epoch"),
+    ],
+)
+def test_global_controller_runs_certified_delta_recovery_and_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, additions: int, fault: str | None
+):
+    """Real data/ledger/clock/44 reader/release API; simulate only OS/Drive boundaries."""
+    import importlib.util
+    import shlex
+    import signal
+    import threading
+    import time
+    import traceback
+    import urllib.request
+    from dataclasses import replace
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from investment_analyst.application.local_release import (
+        DeploymentState,
+        LocalReleaseService,
+        RealHealthChecker,
+    )
+    from investment_analyst.storage.resource_policy import MaintenanceResourceSample
+    from investment_analyst.storage.workspace_v2_inventory import reconciliation_file_reference
+    from investment_analyst.workspace.workspace_v2_migration_models import (
+        CutWindowBound,
+        CutWindowGo,
+    )
+
+    production = LocalReleaseService()
+    release_sha = "dbbdfd021b0fee20be31b2d2a845874b0e861067"
+    if not (production.paths.releases / release_sha / ".venv/bin/python").is_file():
+        pytest.skip(
+            "external prepared release 44 unavailable; portable data route tested separately"
+        )
+    real_bindings = LocalReleaseService.load_workspace_bindings
+    old_state = production.load_deployment_state()
+    seed, ledger, admission, _, index, parent_manifest = _certified_successor_fixture(
+        tmp_path, monkeypatch
+    )
+    from investment_analyst.workspace.workspace_v2_physical_delta import (
+        WorkspaceV2PhysicalDeltaService,
+    )
+
+    prepared_delta = tmp_path / "prepared-W2"
+    WorkspaceV2PhysicalDeltaService(seed.service).plan(
+        seed.destination,
+        index,
+        prepared_delta,
+        parent_manifest_sha256=hashlib.sha256(parent_manifest.read_bytes()).hexdigest(),
+        epoch=ledger.resolve()[1].generation_id,
+        allow_incomplete_historical=True,
+    )
+    monkeypatch.setattr(LocalReleaseService, "load_workspace_bindings", real_bindings)
+    for ordinal in range(additions):
+        raw = make_raw_record(source_id=f"fixture:controller:{ordinal}")
+        observation = make_observation(raw_record_id=raw.record_id)
+        metric = make_metric_result(observation_id=observation.observation_id)
+        with seed.service.open_storage(
+            seed.service.resolve(seed.source), WorkspaceAccessMode.READ_WRITE
+        ) as storage:
+            storage.raw_records.save(raw)
+            storage.observations.save(observation)
+            storage.metric_results.save(metric)
+            storage.diagnostics.save(make_diagnostic_result(metric_result_id=metric.result_id))
+    if fault in {"known_changed", "known_missing", "extra_invalid"}:
+        with seed.service.open_storage(
+            seed.service.resolve(seed.source), WorkspaceAccessMode.READ_WRITE
+        ) as storage:
+            if fault == "known_missing":
+                storage.store.connection.execute(
+                    "DELETE FROM metric_results WHERE result_id=?", [str(seed.metric.result_id)]
+                )
+            elif fault == "known_changed":
+                document = canonical_json_bytes(
+                    seed.metric.model_copy(update={"value": Decimal("999")})
+                ).decode()
+                storage.store.connection.execute(
+                    "UPDATE metric_results SET document_json=? WHERE result_id=?",
+                    [document, str(seed.metric.result_id)],
+                )
+            else:
+                extra = seed.metric.model_copy(update={"result_id": uuid4()})
+                storage.metric_results.save(extra)
+                document = json.loads(canonical_json_bytes(extra))
+                document["quality"] = "invalid"
+                storage.store.connection.execute(
+                    "UPDATE metric_results SET document_json=? WHERE result_id=?",
+                    [json.dumps(document), str(extra.result_id)],
+                )
+    scripts = Path(__file__).resolve().parents[3] / "scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    spec = importlib.util.spec_from_file_location(
+        "controller_closure", scripts / "close_data_chassis.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    controls = tmp_path / "controller-controls"
+    controls.mkdir()
+    operation = uuid4()
+    recovery_root = tmp_path / "controller-recovery"
+    budget = MaintenanceResourceBudget(
+        operation_id=operation,
+        profile="verification",
+        assignments=tuple(
+            DatabaseResourceAssignment(
+                database=database,
+                policy=DuckDBResourcePolicy(
+                    memory_limit_bytes=1_000_000_000,
+                    threads=1,
+                    temp_directory=controls / "resource-temporaries" / str(operation) / label,
+                    spill_limit_bytes=0,
+                ),
+            )
+            for label, database in (
+                ("source", seed.source / "storage/data/processed/investment_analyst.duckdb"),
+                ("destination", seed.destination / "storage/v2/index.duckdb"),
+            )
+        ),
+    )
+    read_budget = MaintenanceResourceBudget(
+        operation_id=operation,
+        profile="compatible_44",
+        assignments=(
+            DatabaseResourceAssignment(
+                database=recovery_root / "storage/v2/index.duckdb",
+                policy=DuckDBResourcePolicy(
+                    memory_limit_bytes=2_000_000_000,
+                    threads=2,
+                    spill_limit_bytes=0,
+                    temp_directory=controls / "resource-temporaries" / str(operation) / "reader",
+                ),
+            ),
+        ),
+    )
+    for path, value in (
+        (controls / "budget.json", budget),
+        (controls / "reader-budget.json", read_budget),
+    ):
+        path.write_text(value.model_dump_json())
+    proof = controls / "fixture-measurement.json"
+    proof.write_text('{"universe":"small fixture only"}')
+    ref = reconciliation_file_reference(proof, "control")
+    head, baseline = ledger.resolve()
+    go = CutWindowGo(
+        bounds=tuple(
+            CutWindowBound(
+                step=step,
+                upper_seconds=100,
+                measurement=ref,
+                measured_at=datetime.now(UTC),
+                universe="fixture",
+                workload="nonempty fixture",
+                changes_since_measurement="none",
+            )
+            for step in (
+                "freeze",
+                "comparison_delta",
+                "operational",
+                "physical_plan",
+                "upload",
+                "restore_open",
+                "activation_health",
+                "cancel_close_restart",
+            )
+        ),
+        margin_seconds=100,
+        baseline=head.certificate,
+        prerequisites=(
+            ref,
+            reconciliation_file_reference(prepared_delta / "delta-manifest.json", "control"),
+        ),
+        guard=ref,
+        capacity=ref,
+        source_workspace_id=baseline.source_workspace_id,
+        destination_workspace_id=baseline.destination_workspace_id,
+        admitted_at=datetime.now(UTC),
+    )
+    go_path = controls / "go.json"
+    go_path.write_text(go.model_dump_json())
+    if fault == "prepared_epoch":
+        path = prepared_delta / "delta-manifest.json"
+        data = json.loads(path.read_bytes())
+        data["epoch"] = str(uuid4())
+        path.write_text(json.dumps(data))
+    run = controls / "run"
+    (run / "code/scripts").mkdir(parents=True)
+    shutil.copyfile(scripts / "close_data_chassis.py", run / "code/scripts/close_data_chassis.py")
+    args = module._parser().parse_args(
+        [
+            "cut",
+            "--source",
+            str(seed.source),
+            "--destination",
+            str(seed.destination),
+            "--controls-root",
+            str(controls),
+            "--operation-id",
+            str(operation),
+            "--code-sha",
+            "a" * 40,
+            "--resource-budget",
+            str(controls / "budget.json"),
+            "--cut-readback-budget",
+            str(controls / "reader-budget.json"),
+            "--cut-go",
+            str(go_path),
+            "--cut-window",
+            str(controls / "window.json"),
+            "--parent-index",
+            str(index),
+            "--parent-manifest",
+            str(parent_manifest),
+            "--parent-manifest-sha256",
+            sha256_hex(parent_manifest.read_bytes()),
+            "--delta-root",
+            str(tmp_path / "controller-delta"),
+            "--prepared-delta",
+            str(prepared_delta),
+            "--recovery-root",
+            str(recovery_root),
+            "--reconciliation-id",
+            str(baseline.generation_id),
+            "--supervised-worker",
+            "--resource-run-root",
+            str(run),
+        ]
+    )
+    unit = tmp_path / "fixture.service"
+    env = tmp_path / "fixture.env"
+    env.write_text("SEC_USER_AGENT=Fixture fixture@example.test\n")
+    env.chmod(0o600)
+    previous = production.paths.releases / old_state.current
+    unit.write_text(
+        f"[Service]\nWorkingDirectory={previous}\nEnvironmentFile={env}\n"
+        f'ExecStart="{previous}/.venv/bin/python" '
+        f'"{previous}/scripts/serve_investment_analyst.py" '
+        f'"--workspace" "{seed.source}" "--port" "8765"\n'
+    )
+
+    active_path = tmp_path / "fixture-active"
+    active_path.write_text("1")
+    stops_path = tmp_path / "fixture-stops"
+    stops_path.write_text("0")
+
+    class FixtureSystemctl:
+        @property
+        def active(self):
+            return active_path.read_text() == "1"
+
+        @property
+        def stops(self):
+            return int(stops_path.read_text())
+
+        def show_properties(self, service, properties):
+            fields = dict(
+                line.split("=", 1) for line in unit.read_text().splitlines() if "=" in line
+            )
+            fields.update(
+                ActiveState="active" if self.active else "inactive",
+                MainPID=str(os.getpid()) if self.active else "0",
+            )
+            return fields
+
+        def stop(self, service):
+            active_path.write_text("0")
+            stops_path.write_text(str(self.stops + 1))
+
+        def restart(self, service):
+            active_path.write_text("1")
+
+        def is_active(self, service):
+            return self.active
+
+        def daemon_reload(self):
+            pass
+
+    runner = FixtureSystemctl()
+    release = LocalReleaseService(
+        paths=tmp_path / "fixture-runtime",
+        systemctl=runner,
+        systemd_unit_path=unit,
+        service_env_path=env,
+        health_checker=RealHealthChecker(),
+    )
+    release.paths = replace(release.paths, releases=production.paths.releases)
+    release._save_deployment_state(
+        DeploymentState(
+            current=old_state.current,
+            current_release_path=str(previous),
+            updated_at=datetime.now(UTC),
+        )
+    )
+    monkeypatch.setattr(module, "LocalReleaseService", lambda: release)
+    monkeypatch.setattr(
+        LocalReleaseService,
+        "load_workspace_bindings",
+        lambda self: (
+            real_bindings(release)
+            if self.paths.root == production.paths.root
+            else real_bindings(self)
+        ),
+    )
+    unit_started = time.monotonic_ns() // 1000
+    monkeypatch.setattr(
+        module,
+        "_unit_properties",
+        lambda: {
+            "ActiveState": "active",
+            "MainPID": str(os.getpid()),
+            "ControlPID": "0",
+            "ActiveEnterTimestampMonotonic": str(unit_started),
+        },
+    )
+    monkeypatch.setattr(module, "_capacity", lambda: 40_000_000_000)
+    monkeypatch.setattr(module, "_memory_composition", lambda *_: None)
+    sample = MaintenanceResourceSample(
+        host_free_bytes=40_000_000_000,
+        memory_high_bytes=budget.memory_high_bytes,
+        memory_max_bytes=budget.memory_max_bytes,
+        swap_max_bytes=0,
+        memory_current_bytes=100_000_000,
+        available_memory_bytes=8_000_000_000,
+        parent_headroom_bytes=(8_000_000_000,),
+        temp_allocated_bytes=0,
+        temp_logical_bytes=0,
+        log_bytes=0,
+        heartbeat_age_seconds=0,
+        events=(0, 0, 0),
+    )
+    monkeypatch.setattr(
+        module,
+        "sample_cgroup_resources",
+        lambda *_a, **kw: sample.model_copy(update={"host_free_bytes": kw["host_free_bytes"]}),
+    )
+    native_run = subprocess.run
+
+    def fixture_run(command, **kwargs):
+        if any("check_workflow_guards.py" in str(arg) for arg in command):
+            return subprocess.CompletedProcess(
+                command, 0, '{"authoritative":true,"decision":"CONTINUE"}', ""
+            )
+        return native_run(command, **kwargs)
+
+    monkeypatch.setattr(module.subprocess, "run", fixture_run)
+    real_read = Path.read_bytes
+
+    def process_bytes(path):
+        if path == Path(f"/proc/{os.getpid()}/cmdline"):
+            command = runner.show_properties("fixture", ())["ExecStart"]
+            return b"\0".join(arg.encode() for arg in shlex.split(command)) + b"\0"
+        return real_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", process_bytes)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            properties = runner.show_properties("fixture", ())
+            arguments = shlex.split(properties["ExecStart"])
+            root = Path(arguments[arguments.index("--workspace") + 1])
+            self.send_response(200 if runner.active else 503)
+            self.end_headers()
+            self.wfile.write(
+                json.dumps({"workspace_id": str(seed.service.manifest(root).workspace_id)}).encode()
+            )
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    real_urlopen = urllib.request.urlopen
+
+    def fixture_http(request, **kwargs):
+        address = request.full_url if isinstance(request, urllib.request.Request) else request
+        assert address.startswith("http://127.0.0.1:8765/")
+        return real_urlopen(address.replace(":8765/", f":{server.server_port}/"), **kwargs)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fixture_http)
+
+    class Drive:
+        def copy_immutable_object(self, path, key):
+            target = tmp_path / "fixture-drive" / key
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target)
+            return ()
+
+        def fetch_sealed_object(self, key, path):
+            if fault == "network":
+                raise ConnectionError("fixture remote read interrupted")
+            shutil.copyfile(tmp_path / "fixture-drive" / key, path)
+            return ()
+
+    monkeypatch.setattr(module, "_transport", lambda *_: Drive())
+    try:
+        # All native handles from fixture construction are closed before fork.
+        # The child owns the actual cut PID/session; SIGKILL cannot kill Pytest.
+        child = os.fork()
+        if child == 0:
+            try:
+                if fault in {"before_reservation", "after_reservation"}:
+                    reserve = migration_module.reserve_recovered_successor
+
+                    def crash_reservation(**kwargs):
+                        if fault == "before_reservation":
+                            os._exit(70)
+                        reserve(**kwargs)
+                        os._exit(71)
+
+                    monkeypatch.setattr(
+                        migration_module, "reserve_recovered_successor", crash_reservation
+                    )
+                if fault == "after_writes":
+                    step = module._cut_step
+
+                    def crash_after_writes(*a, **kw):
+                        result = step(*a, **kw)
+                        if a[1] == "catchup":
+                            os._exit(72)
+                        return result
+
+                    monkeypatch.setattr(module, "_cut_step", crash_after_writes)
+                if fault in {"sql", "sql_stall"}:
+                    execute = migration_module.execute_bounded
+                    actual_ns = time.monotonic_ns
+                    stalled = [False]
+                    if fault == "sql_stall":
+                        monkeypatch.setattr(
+                            module.time,
+                            "monotonic_ns",
+                            lambda: actual_ns() + (1701_000_000_000 if stalled[0] else 0),
+                        )
+
+                    def fail_sql(connection, query, *a, **kw):
+                        if query.startswith("CREATE TEMP TABLE _successor_w"):
+                            if fault == "sql_stall":
+                                stalled[0] = True
+                                return execute(
+                                    connection, "SELECT sum(i) FROM range(1000000000000) t(i)"
+                                )
+                            connection.execute("SELECT * FROM fixture_missing_sql_table")
+                        return execute(connection, query, *a, **kw)
+
+                    monkeypatch.setattr(migration_module, "execute_bounded", fail_sql)
+                if fault == "host":
+                    monkeypatch.setattr(
+                        module, "_capacity", lambda: 40_000_000_000 if runner.active else 0
+                    )
+                if fault == "after_activating":
+                    monkeypatch.setattr(
+                        LocalReleaseService, "_save_workspace_bindings", lambda *_: os._exit(73)
+                    )
+                result = module._run_global_cut(args)
+                (tmp_path / "controller-result.json").write_text(json.dumps(result))
+                os._exit(0)
+            except BaseException:
+                (tmp_path / "controller-error.txt").write_text(traceback.format_exc())
+                os._exit(74)
+        deadline = time.monotonic() + 60
+        status = None
+        while time.monotonic() < deadline:
+            waited, code = os.waitpid(child, os.WNOHANG)
+            if waited:
+                status = code
+                break
+            time.sleep(0.05)
+        if status is None:
+            os.kill(child, signal.SIGKILL)
+            os.waitpid(child, 0)
+            pytest.fail("fixture controller exceeded its bounded test time")
+        if fault is None:
+            assert status == 0, (tmp_path / "controller-error.txt").read_text()
+            result = json.loads((tmp_path / "controller-result.json").read_bytes())
+        else:
+            assert status != 0
+            if fault == "prepared_epoch":
+                assert not args.cut_window.exists()
+                assert runner.active and runner.stops == 0
+                assert (
+                    hashlib.sha256(
+                        (seed.destination / "storage/v2/index.duckdb").read_bytes()
+                    ).hexdigest()
+                    == baseline.database.sha256
+                )
+                return
+            before = (seed.destination / "storage/v2/index.duckdb").read_bytes()
+            reservations = {
+                p: p.read_bytes()
+                for p in ledger.state.glob("progress-successor-reservation.*.json")
+            }
+            monkeypatch.setattr(
+                module,
+                "_unit_properties",
+                lambda: {
+                    "ActiveState": "deactivating",
+                    "MainPID": "0",
+                    "ControlPID": str(os.getpid()),
+                },
+            )
+            args.cut_recover = True
+            result = module._recover_global_cut(args)
+            assert before == (seed.destination / "storage/v2/index.duckdb").read_bytes()
+            assert all(path.read_bytes() == data for path, data in reservations.items())
+            if fault != "after_activating":
+                assert runner.active
+                assert '"--workspace" "' + str(seed.source) + '"' in unit.read_text()
+                assert result["window_receipt"]["phase"] == "HEALTHY_V1"
+                if fault not in {"before_reservation", "host"}:
+                    assert ledger.attempt_invalidated(operation)
+                return
+        assert result["window_receipt"]["phase"] == "HEALTHY_V2"
+        assert ledger.resolve()[1].phase == "SUCCESSOR_BOUND"
+        assert runner.stops == 1
+        assert (
+            release.load_workspace_bindings().current.workspace_id
+            == baseline.destination_workspace_id
+        )
+        receipt = json.loads((args.delta_root / "restore-receipt.json").read_bytes())
+        assert receipt["epoch"] == str(operation) and receipt["historical_state"] == "COMPLETE"
+        assert result["health"]["http"]["/api/v1/overview"] == 200
+        capture = json.loads((args.controls_root / "paired-cut-byte-capture.json").read_bytes())
+        assert capture["operation_id"] == str(operation)
+        assert capture["source_cut"]["operation_id"] == str(operation)
+        assert (
+            capture["source_session"]
+            == json.loads(args.cut_window.read_bytes())["owner"]["source_session"]
+        )
+        source_bytes, target_bytes = capture["pairs"]
+        assert source_bytes["format_version"] == 1 and target_bytes["format_version"] == 2
+        assert [m["row_count"] for m in source_bytes["analytical_payloads"]] == [
+            m["row_count"] for m in target_bytes["analytical_payloads"]
+        ]
+        assert source_bytes["workspace_bytes"]["logical_bytes"] > 0
+        assert capture["collector_elapsed_seconds"] > 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

@@ -151,6 +151,75 @@ class ClosedOrdinaryDay(_Model):
     evidence: AcceptanceReference
 
 
+class OrdinaryBatchBoundary(_Model):
+    """Observed DB/WAL sizes at each real attempt boundary, including gaps."""
+
+    attempt_id: UUID
+    job_pair: tuple[NonEmptyStr, NonEmptyStr]
+    edge: Literal["before", "after"]
+    observed_at: UTCDateTime
+    database_bytes: int = Field(ge=0)
+    wal_bytes: int = Field(ge=0)
+
+
+class OrdinaryBatchGrowth(_Model):
+    scenario: Literal["ordinary", "same_inputs"]
+    started_at: UTCDateTime
+    completed_at: UTCDateTime
+    runtime_sha: CodeSHA
+    workspace_id: UUID
+    scope: AcceptanceScope
+    job_pairs: tuple[tuple[NonEmptyStr, NonEmptyStr], ...]
+    attempt_ids: tuple[UUID, ...]
+    boundaries: tuple[OrdinaryBatchBoundary, ...]
+    complete: bool
+    exclusive_writer: bool
+    evidence: tuple[AcceptanceReference, ...] = Field(min_length=1)
+
+    @property
+    def positive_growth_bytes(self) -> int:
+        # No decrease in either file cancels a positive allocation elsewhere,
+        # including checkpoint/compaction between two successive attempts.
+        return sum(
+            max(0, after.database_bytes - before.database_bytes)
+            + max(0, after.wal_bytes - before.wal_bytes)
+            for before, after in zip(self.boundaries, self.boundaries[1:], strict=False)
+        )
+
+    def covers(self, pairs: tuple[tuple[str, str], ...]) -> bool:
+        if (
+            not self.complete
+            or not self.exclusive_writer
+            or self.completed_at <= self.started_at
+            or len(self.job_pairs) != len(set(self.job_pairs))
+            or set(self.job_pairs) != set(pairs)
+            or not self.attempt_ids
+            or len(self.attempt_ids) != len(set(self.attempt_ids))
+            or len(self.boundaries) != 2 * len(self.attempt_ids)
+            or self.boundaries[0].observed_at != self.started_at
+            or self.boundaries[-1].observed_at != self.completed_at
+            or any(
+                after.observed_at <= before.observed_at
+                for before, after in zip(self.boundaries, self.boundaries[1:], strict=False)
+            )
+        ):
+            return False
+        covered = set()
+        for index, attempt in enumerate(self.attempt_ids):
+            before, after = self.boundaries[2 * index : 2 * index + 2]
+            if (
+                before.attempt_id != attempt
+                or after.attempt_id != attempt
+                or before.edge != "before"
+                or after.edge != "after"
+                or before.job_pair != after.job_pair
+                or before.job_pair not in self.job_pairs
+            ):
+                return False
+            covered.add(before.job_pair)
+        return covered == set(pairs)
+
+
 class IdempotenceComparison(_Model):
     family: NonEmptyStr
     asset_id: NonEmptyStr
@@ -235,6 +304,10 @@ class FinalAcceptanceInput(_Model):
     workspace_comparison: ByteComparison | None = None
     payload_comparisons: tuple[ByteComparison, ...] = ()
     funding_comparison: ByteComparison | None = None
+    q4_policy: Literal["seven-closed-utc-days-v1", "ordinary-batch-growth-v1"] = (
+        "seven-closed-utc-days-v1"
+    )
+    ordinary_batches: tuple[OrdinaryBatchGrowth, ...] = ()
     ordinary_days: tuple[ClosedOrdinaryDay, ...] = ()
     durations: tuple[DurationComparison, ...] = ()
     idempotence: tuple[IdempotenceComparison, ...] = ()
@@ -276,7 +349,13 @@ class ObjectiveResult(_Model):
 
 
 class FinalAcceptanceReport(_Model):
-    schema_version: Literal["workspace-v2-final-acceptance-v1"] = "workspace-v2-final-acceptance-v1"
+    schema_version: Literal[
+        "workspace-v2-final-acceptance-v1", "workspace-v2-final-acceptance-v2"
+    ] = "workspace-v2-final-acceptance-v1"
+    q4_policy: Literal["seven-closed-utc-days-v1", "ordinary-batch-growth-v1"] = (
+        "seven-closed-utc-days-v1"
+    )
+    q4_unit: Literal["B/day", "B/batch"] = "B/day"
     evaluated_at: UTCDateTime
     measurements: FinalAcceptanceInput
     objectives: tuple[ObjectiveResult, ...]
@@ -395,35 +474,71 @@ def build_final_acceptance(
         "Persisted funding and recoverable lineage: >=90% paired reduction",
     )
 
-    first = (
-        None
-        if measurements.activated_at is None
-        else measurements.activated_at.date() + timedelta(days=1)
-    )
-    expected = () if first is None else tuple(first + timedelta(days=i) for i in range(7))
-    days = {item.utc_date: item for item in measurements.ordinary_days}
-    valid = (
-        bool(expected)
-        and expected[-1] < measurements.reported_at.date()
-        and expected[-1] < evaluated_at.date()
-        and all(day in days for day in expected)
-        and all(
-            days[day].scope.universe == measurements.scope.universe
-            and days[day].scope.workload == measurements.scope.workload
-            for day in expected
+    if measurements.q4_policy == "ordinary-batch-growth-v1":
+        batches = measurements.ordinary_batches
+        valid = (
+            measurements.activated_at is not None
+            and measurements.reported_at <= evaluated_at
+            and len(batches) == 2
+            and tuple(batch.scenario for batch in batches) == ("ordinary", "same_inputs")
+            and all(
+                batch.covers(measurements.required_job_pairs)
+                and batch.runtime_sha == measurements.runtime_sha
+                and batch.workspace_id == measurements.workspace_id
+                and batch.scope == measurements.scope
+                and measurements.activated_at < batch.started_at
+                and batch.completed_at <= measurements.reported_at
+                for batch in batches
+            )
+            and batches[0].completed_at < batches[1].started_at
+            and not set(batches[0].attempt_ids).intersection(batches[1].attempt_ids)
+            and set((item.family, item.asset_id) for item in measurements.idempotence)
+            == set(measurements.required_job_pairs)
+            and all(
+                item.baseline_scope == item.current_scope == measurements.scope
+                for item in measurements.idempotence
+            )
         )
-    )
-    record(
-        "DC-Q4",
-        None
-        if not valid
-        else all(
-            days[day].database_bytes_delta + days[day].wal_bytes_delta <= 30_000_000
-            for day in expected
-        ),
-        "Seven complete ordinary UTC days after activation; <=30000000 B/day",
-        tuple(day.isoformat() for day in expected if day not in days),
-    )
+        record(
+            "DC-Q4",
+            None
+            if not valid
+            else all(batch.positive_growth_bytes <= 30_000_000 for batch in batches)
+            and all(item.before_count == item.after_count for item in measurements.idempotence),
+            "ordinary-batch-growth-v1: positive DB+WAL growth <=30000000 B/batch; "
+            "ordinary and same_inputs; does not establish B/day",
+            tuple(f"{batch.scenario}: {batch.positive_growth_bytes} B/batch" for batch in batches),
+        )
+    else:
+        first = (
+            None
+            if measurements.activated_at is None
+            else measurements.activated_at.date() + timedelta(days=1)
+        )
+        expected = () if first is None else tuple(first + timedelta(days=i) for i in range(7))
+        days = {item.utc_date: item for item in measurements.ordinary_days}
+        valid = (
+            bool(expected)
+            and expected[-1] < measurements.reported_at.date()
+            and expected[-1] < evaluated_at.date()
+            and all(day in days for day in expected)
+            and all(
+                days[day].scope.universe == measurements.scope.universe
+                and days[day].scope.workload == measurements.scope.workload
+                for day in expected
+            )
+        )
+        record(
+            "DC-Q4",
+            None
+            if not valid
+            else all(
+                days[day].database_bytes_delta + days[day].wal_bytes_delta <= 30_000_000
+                for day in expected
+            ),
+            "Seven complete ordinary UTC days after activation; <=30000000 B/day",
+            tuple(day.isoformat() for day in expected if day not in days),
+        )
 
     durations = measurements.durations
     valid = (
@@ -497,7 +612,13 @@ def build_final_acceptance(
         and set(gates) == set(measurements.required_gates)
         and all(item.status == "MET" for item in gates.values())
     )
+    finite = measurements.q4_policy == "ordinary-batch-growth-v1"
     return FinalAcceptanceReport(
+        schema_version=(
+            "workspace-v2-final-acceptance-v2" if finite else "workspace-v2-final-acceptance-v1"
+        ),
+        q4_policy=measurements.q4_policy,
+        q4_unit="B/batch" if finite else "B/day",
         evaluated_at=evaluated_at,
         measurements=measurements,
         objectives=tuple(results),
