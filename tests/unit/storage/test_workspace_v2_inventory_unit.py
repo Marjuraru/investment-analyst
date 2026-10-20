@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -56,6 +57,10 @@ from investment_analyst.workspace.workspace_v2_migration import (
 )
 from investment_analyst.workspace.workspace_v2_migration_models import (
     CutOwner,
+    CutWindow,
+    CutWindowBound,
+    CutWindowGo,
+    CutWindowReceipt,
     HistoricalSealSnapshot,
     HistoricalTransition,
     HistoricalTransitionReceipt,
@@ -4575,7 +4580,47 @@ def _publication_repair_fixture(
         cgroup=old_admission.cgroup_path,
     )
     now = datetime.now(UTC)
-    admission_ref = reconciliation_file_reference(root / "previous-admission.json", "resource")
+    session_budget = MaintenanceResourceBudget(
+        operation_id=h1_cut.operation_id,
+        profile="verification",
+        assignments=(
+            DatabaseResourceAssignment(
+                database=baseline0.source_root / "storage/data/processed/investment_analyst.duckdb",
+                policy=DuckDBResourcePolicy(
+                    memory_limit_bytes=256_000_000,
+                    threads=1,
+                    spill_limit_bytes=0,
+                    temp_directory=tmp_path / "session-source-spill",
+                ),
+            ),
+            DatabaseResourceAssignment(
+                database=ledger.root / "storage/v2/index.duckdb",
+                policy=DuckDBResourcePolicy(
+                    memory_limit_bytes=256_000_000,
+                    threads=1,
+                    spill_limit_bytes=0,
+                    temp_directory=tmp_path / "session-destination-spill",
+                ),
+            ),
+        ),
+    )
+    session_admission = MaintenanceResourceReceipt(
+        budget=session_budget,
+        pid=owner.pid,
+        process_start_ticks=owner.start_ticks,
+        boot_id=owner.boot_id,
+        cgroup_path=owner.cgroup,
+        stage="admitted",
+        observed_memory_high_bytes=session_budget.memory_high_bytes,
+        observed_memory_max_bytes=session_budget.memory_max_bytes,
+        observed_swap_max_bytes=0,
+        host_free_bytes=30_000_000_000,
+        effective_settings=(),
+        recorded_at=now,
+    )
+    session_admission_path = tmp_path / "publication-repair-session-admission.json"
+    session_admission_path.write_text(session_admission.model_dump_json() + "\n")
+    session_admission_ref = reconciliation_file_reference(session_admission_path, "resource")
 
     def small(name: str, document: object, role: str = "control") -> ReconciliationFileReference:
         path = tmp_path / name
@@ -4612,7 +4657,7 @@ def _publication_repair_fixture(
             "previous_certificate": head0.certificate,
             "reserved_successor": h1_cut,
             "successor_owner": owner,
-            "successor_admission": admission_ref,
+            "successor_admission": session_admission_ref,
             "recorded_at": now,
         }
     )
@@ -4632,21 +4677,107 @@ def _publication_repair_fixture(
     reserved_head_ref = archive_head(reserved_document)
     reserved_head_digest = sha256_hex(reserved_document)
 
+    repository = Path(__file__).resolve().parents[3]
+    code_paths = (
+        "src/investment_analyst/storage/workspace_v2_inventory.py",
+        "src/investment_analyst/storage/compact_analytical_v2.py",
+        "src/investment_analyst/storage/historical_analytical_import.py",
+        "src/investment_analyst/workspace/workspace_v2_migration_models.py",
+    )
+    archived_root = tmp_path / "publication-repair-archived-code"
+    files: dict[str, dict[str, object]] = {}
+    verifier_digest = hashlib.sha256()
+    for relative in code_paths:
+        source = repository / relative
+        archived = archived_root / relative
+        archived.parent.mkdir(parents=True, exist_ok=True)
+        data = b"# archived verifier tree fixture\n" + source.read_bytes()
+        archived.write_bytes(data)
+        digest = sha256_hex(data)
+        files[relative] = {"sha256": digest, "size_bytes": len(data)}
+        verifier_digest.update(bytes.fromhex(digest))
+    migration_source = repository / "src/investment_analyst/workspace/workspace_v2_migration.py"
+    migration_digest = sha256_hex(migration_source.read_bytes())
+    files["src/investment_analyst/workspace/workspace_v2_migration.py"] = {
+        "sha256": migration_digest,
+        "size_bytes": migration_source.stat().st_size,
+    }
+    archived_script = repository / "scripts/close_data_chassis.py"
+    files["scripts/close_data_chassis.py"] = {
+        "sha256": sha256_hex(archived_script.read_bytes()),
+        "size_bytes": archived_script.stat().st_size,
+    }
+    verifier_tree = verifier_digest.hexdigest()
+    code_sha = hashlib.sha256(
+        bytes.fromhex(verifier_tree) + b"publication-repair-release"
+    ).hexdigest()[:40]
+    source_bindings_ref = small(
+        "publication-repair-source-bindings.json",
+        {"files": files, "code_sha": code_sha, "verifier_tree": verifier_tree},
+    )
+    archived_code_ref = reconciliation_file_reference(archived_script, "code")
+    environment_ref = small(
+        "publication-repair-environment.json",
+        {
+            "environment_fingerprint": baseline0.environment_fingerprint,
+            "code_sha": code_sha,
+        },
+    )
+    new_index_path = tmp_path / "publication-repair-new-index.jsonl"
+    new_index_path.write_text(
+        json.dumps(
+            {
+                "generation": str(baseline0.generation_id),
+                "metric_count": baseline0.inventory.metric_count,
+                "diagnostic_count": baseline0.inventory.diagnostic_count,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    new_index_ref = reconciliation_file_reference(new_index_path, "inventory")
+    comparison = migration_module._SuccessorComparison(
+        baseline=reserved_cert_ref,
+        work=migration_module._SuccessorCoverageWork(
+            successor=h1_cut,
+            baseline_dataset_sha256=baseline0.inventory.dataset_sha256,
+            module_sha256=migration_digest,
+            family="complete",
+            metric_count=baseline0.inventory.metric_count,
+            diagnostic_count=baseline0.inventory.diagnostic_count,
+            covered_metric_count=baseline0.inventory.metric_count,
+            covered_diagnostic_count=baseline0.inventory.diagnostic_count,
+            new_index_bytes=new_index_ref.size_bytes,
+            new_index_sha256=new_index_ref.sha256,
+        ),
+        new_index=new_index_ref,
+        resource_receipt=session_admission_ref,
+        verifier_tree_fingerprint=verifier_tree,
+        environment_fingerprint=baseline0.environment_fingerprint,
+        verified_at=now,
+    )
+    comparison_document = canonical_json_bytes(comparison) + b"\n"
+    comparison_digest = sha256_hex(comparison_document)
+    comparison_path = ledger.state / (
+        f"progress-successor-comparison.{h1_cut.operation_id}.{comparison_digest}.json"
+    )
+    WorkspaceV2ProgressReconciler._write_once(comparison_path, comparison_document)
     coverage = SuccessorCoverageProof(
         successor=h1_cut,
         baseline_dataset_sha256=baseline0.inventory.dataset_sha256,
         covered_metric_count=baseline0.inventory.metric_count,
         covered_diagnostic_count=baseline0.inventory.diagnostic_count,
-        comparison_sha256="a" * 64,
-        verifier_tree_fingerprint="e" * 64,
+        comparison_sha256=comparison_digest,
+        verifier_tree_fingerprint=verifier_tree,
         verified_at=now,
     )
+    defect_time = now + timedelta(seconds=1)
     defective_cert = reserved_cert.model_copy(
         update={
             "phase": "SUCCESSOR_BOUND",
             "previous_certificate": reserved_cert_ref,
             "coverage": coverage,
-            "recorded_at": now,
+            "recorded_at": defect_time,
         }
     )
     with pytest.raises(ValueError, match="generation successor coverage differs"):
@@ -4673,8 +4804,8 @@ def _publication_repair_fixture(
         source_session=owner.source_session,
         baseline=head0.certificate,
         baseline_dataset_sha256=baseline0.inventory.dataset_sha256,
-        module_sha256=sha256_hex(Path(migration_module.__file__).read_bytes()),
-        resource_receipt=admission_ref,
+        module_sha256=migration_digest,
+        resource_receipt=session_admission_ref,
         verifier_compatibility=None,
         recorded_at=now,
     )
@@ -4683,11 +4814,93 @@ def _publication_repair_fixture(
         reservation_path, canonical_json_bytes(reservation) + b"\n"
     )
     reservation_ref = reconciliation_file_reference(reservation_path, "control")
-    source_bindings = small(
-        "publication-repair-source-bindings.json",
-        {"files": {}, "code_sha": "b" * 40},
+
+    measurement_ref = small(
+        "publication-repair-measurement.json",
+        {"universe": "small fixture", "workload": "publication repair", "measured": True},
     )
-    archived_code = small("publication-repair-archived-code.py", "archived verifier\n", "code")
+    guard_ref = small("publication-repair-guard.json", {"capacity_guard": "verified"})
+    capacity_ref = small("publication-repair-capacity.json", {"host_free_bytes": 30_000_000_000})
+    go = CutWindowGo(
+        bounds=tuple(
+            CutWindowBound(
+                step=step,
+                upper_seconds=400,
+                measurement=measurement_ref,
+                measured_at=now,
+                universe="small fixture",
+                workload="publication repair",
+                changes_since_measurement="none",
+            )
+            for step in (
+                "freeze",
+                "comparison_delta",
+                "operational",
+                "physical_plan",
+                "upload",
+                "restore_open",
+                "activation_health",
+                "cancel_close_restart",
+            )
+        ),
+        margin_seconds=100,
+        baseline=head0.certificate,
+        prerequisites=(measurement_ref, guard_ref),
+        guard=guard_ref,
+        capacity=capacity_ref,
+        source_workspace_id=baseline0.source_workspace_id,
+        destination_workspace_id=ledger.identity.workspace_id,
+        admitted_at=now,
+        window_limit_seconds=5400,
+        window_authorization="human-dc45-cut-5400-20261019",
+        attempt_id=h1_cut.operation_id,
+    )
+    go_ref = small("publication-repair-go.json", go.model_dump(mode="json"))
+    cut_window = CutWindow(
+        window_id=uuid4(),
+        attempt_id=h1_cut.operation_id,
+        source_root=baseline0.source_root,
+        source_workspace_id=baseline0.source_workspace_id,
+        destination_root=ledger.root,
+        destination_workspace_id=ledger.identity.workspace_id,
+        release_sha=code_sha,
+        owner=owner,
+        boot_id=owner.boot_id,
+        started_monotonic_ns=0,
+        deadline_monotonic_ns=5400 * 1_000_000_000,
+        stop_started_at=now,
+        recovery_reserve_seconds=600,
+        window_limit_seconds=5400,
+        window_authorization="human-dc45-cut-5400-20261019",
+        go=go_ref,
+        baseline=head0.certificate,
+        code=archived_code_ref,
+        environment_sha256=baseline0.environment_fingerprint,
+        resource_receipt=session_admission_ref,
+        phase="HEALTHY_V1",
+        step="returned_to_v1",
+        updated_at=now,
+    )
+    cut_window_ref = small("publication-repair-cut-window.json", cut_window.model_dump(mode="json"))
+    identity_ref = small(
+        "publication-repair-identity.json",
+        {"unit": "investment-analyst.service", "pid": owner.pid, "boot_id": str(owner.boot_id)},
+    )
+    health_ref = small(
+        "publication-repair-health.json",
+        {"http_status": 200, "overview": True, "candidate_notifications": True},
+    )
+    terminal = CutWindowReceipt(
+        window=cut_window_ref,
+        phase="HEALTHY_V1",
+        completed_monotonic_ns=cut_window.deadline_monotonic_ns,
+        completed_at=now,
+        identity=identity_ref,
+        health=health_ref,
+    )
+    terminal_ref = small(
+        "publication-repair-terminal-receipt.json", terminal.model_dump(mode="json")
+    )
     request = LedgerPublicationRepairInput(
         repair_id=uuid4(),
         source_root=baseline0.source_root,
@@ -4726,26 +4939,20 @@ def _publication_repair_fixture(
         ),
         reservation=reservation_ref,
         frozen_cut=small("publication-repair-frozen-cut.json", h1_cut.model_dump(mode="json")),
-        cut_window=small("publication-repair-cut-window.json", {"phase": "HEALTHY_V1"}),
-        terminal_receipt=small("publication-repair-terminal-receipt.json", {"phase": "HEALTHY_V1"}),
+        cut_window=cut_window_ref,
+        terminal_receipt=terminal_ref,
         owner_absence=small("publication-repair-owner-absence.json", {"owner_absent": True}),
         no_activation=small("publication-repair-no-activation.json", {"v2_active": False}),
         exclusivity=small(
             "publication-repair-exclusivity.json", {"other_live_reservations": False}
         ),
-        source_bindings=source_bindings,
-        archived_code=(archived_code,),
-        environment=small(
-            "publication-repair-environment.json",
-            {
-                "environment_fingerprint": baseline0.environment_fingerprint,
-                "code_sha": "b" * 40,
-            },
-        ),
+        source_bindings=source_bindings_ref,
+        archived_code=(archived_code_ref,),
+        environment=environment_ref,
         database=baseline0.database,
         wal=None,
-        admission=admission_ref,
-        producer=source_bindings,
+        admission=session_admission_ref,
+        producer=source_bindings_ref,
         recorded_at=now,
     )
     intent_path = tmp_path / "publication-repair-intent.json"
@@ -4769,10 +4976,207 @@ def _publication_repair_fixture(
         "reservation_path": reservation_path,
         "request": request,
         "intent": intent_ref,
+        "intent_path": intent_path,
         "previous_cut": h1_cut,
         "reserved_cert": reserved_cert,
         "defective_cert": defective_cert,
+        "comparison_path": comparison_path,
+        "session_admission": session_admission,
+        "session_budget": session_budget,
     }
+
+
+def _publication_repair_admission(
+    state: dict[str, object], request: LedgerPublicationRepairInput
+) -> MaintenanceResourceReceipt:
+    session_budget = state["session_budget"]
+    session_admission = state["session_admission"]
+    assert isinstance(session_budget, MaintenanceResourceBudget)
+    assert isinstance(session_admission, MaintenanceResourceReceipt)
+    return session_admission.model_copy(
+        update={
+            "budget": session_budget.model_copy(update={"operation_id": request.repair_id}),
+            "pid": os.getpid(),
+            "process_start_ticks": 1,
+            "boot_id": uuid4(),
+            "recorded_at": datetime.now(UTC),
+        }
+    )
+
+
+def test_publication_repair_full_entrypoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certified_successor_template: tuple[Path, Path, tuple],
+) -> None:
+    state = _publication_repair_fixture(tmp_path, monkeypatch, certified_successor_template)
+    seed = state["seed"]
+    ledger = state["ledger"]
+    request = state["request"]
+    baseline = state["baseline"]
+    intent_path = state["intent_path"]
+    assert isinstance(seed, object)
+    assert isinstance(ledger, inventory_module.WorkspaceV2GenerationLedger)
+    assert isinstance(request, LedgerPublicationRepairInput)
+    assert isinstance(baseline, ProgressReconciliationV2)
+    assert isinstance(intent_path, Path)
+    admission = _publication_repair_admission(state, request)
+    database = ledger.root / "storage/v2/index.duckdb"
+    wal = database.with_suffix(".duckdb.wal")
+    assert not wal.exists()
+    originals = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (
+            ledger.state / f"reconciliation-head.{state['head0_digest']}.json",
+            ledger.state / f"reconciliation-head.{state['reserved_head_digest']}.json",
+            ledger.state / f"reconciliation-head.{state['defect_digest']}.json",
+            state["reserved_cert_ref"].path,
+            state["defective_cert_ref"].path,
+            state["reservation_path"],
+            state["comparison_path"],
+            database,
+        )
+    }
+    before_head = ledger._head_digest()
+    with (
+        maintenance_resource_budget(admission.budget),
+        maintenance_execution(MaintenanceExecution(admission.budget, lambda *_: None)),
+    ):
+        dry = ledger.repair_publication(
+            request,
+            intent_path=intent_path,
+            admission=admission,
+            dry_run=True,
+        )
+    assert dry["dry_run"] is True
+    assert dry["idempotent"] is False
+    assert ledger._head_digest() == before_head
+    assert not list(ledger.state.glob(f"publication-repair.{request.repair_id}.*.json"))
+    with (
+        maintenance_resource_budget(admission.budget),
+        maintenance_execution(MaintenanceExecution(admission.budget, lambda *_: None)),
+    ):
+        repaired = ledger.repair_publication(request, intent_path=intent_path, admission=admission)
+    assert repaired["dry_run"] is False
+    assert repaired["idempotent"] is False
+    assert repaired["head_sha256"] == ledger._head_digest()
+    assert repaired["head_sha256"] != before_head
+    receipts = list(ledger.state.glob(f"publication-repair.{request.repair_id}.*.json"))
+    assert len(receipts) == 1
+    receipt = LedgerPublicationRepairReceipt.model_validate_json(receipts[0].read_bytes())
+    assert receipt.request == request
+    assert receipt.intent == state["intent"]
+    reopened = inventory_module.WorkspaceV2GenerationLedger(seed.service, ledger.root)
+    resolved = reopened.resolve()
+    assert resolved is not None
+    resolved_head, recovered_baseline = resolved
+    assert resolved_head.publication_repair is not None
+    assert resolved_head.publication_repair.path == receipts[0]
+    assert recovered_baseline.phase == "BASELINE_VERIFIED"
+    assert recovered_baseline.reserved_successor is None
+    assert reopened.attempt_invalidated(request.revoked_attempt_id)
+    assert reopened._head_digest() == repaired["head_sha256"]
+    for path, digest in originals.items():
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+    assert not wal.exists()
+    before = {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()}
+    with (
+        maintenance_resource_budget(admission.budget),
+        maintenance_execution(MaintenanceExecution(admission.budget, lambda *_: None)),
+    ):
+        replay = ledger.repair_publication(request, intent_path=intent_path, admission=admission)
+    assert replay["idempotent"] is True
+    assert replay["head_sha256"] == repaired["head_sha256"]
+    after = {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()}
+    assert before == after
+
+
+@pytest.mark.parametrize(
+    "fault",
+    (
+        "owner_alive",
+        "other_reservation",
+        "wal",
+        "v2_activation",
+        "foreign_environment",
+        "tampered_comparison",
+    ),
+)
+def test_publication_repair_full_entrypoint_rejects_invalid_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certified_successor_template: tuple[Path, Path, tuple],
+    fault: str,
+) -> None:
+    state = _publication_repair_fixture(tmp_path, monkeypatch, certified_successor_template)
+    ledger = state["ledger"]
+    request = state["request"]
+    intent_path = state["intent_path"]
+    assert isinstance(ledger, inventory_module.WorkspaceV2GenerationLedger)
+    assert isinstance(request, LedgerPublicationRepairInput)
+    assert isinstance(intent_path, Path)
+    admission = _publication_repair_admission(state, request)
+    database = ledger.root / "storage/v2/index.duckdb"
+    expected = {
+        "owner_alive": "owner is still alive",
+        "other_reservation": "another live reservation",
+        "wal": "database/WAL differs",
+        "v2_activation": "cannot follow v2 activation",
+        "foreign_environment": "environment differs",
+        "tampered_comparison": "comparison differs",
+    }[fault]
+    if fault == "owner_alive":
+        monkeypatch.setattr(
+            inventory_module.WorkspaceV2GenerationLedger,
+            "_cut_owner_alive",
+            staticmethod(lambda owner: True),
+        )
+    elif fault == "other_reservation":
+        reservation = migration_module._SuccessorReservation.model_validate_json(
+            state["reservation_path"].read_bytes()
+        )
+        other_cut = state["previous_cut"].model_copy(update={"operation_id": uuid4()})
+        other = migration_module._SuccessorReservation.model_validate(
+            {**reservation.model_dump(), "successor": other_cut.model_dump()}
+        )
+        (ledger.state / f"progress-successor-reservation.{other_cut.operation_id}.json").write_text(
+            canonical_json_bytes(other).decode() + "\n"
+        )
+    elif fault == "wal":
+        database.with_suffix(".duckdb.wal").write_bytes(b"fixture-wal")
+    elif fault == "v2_activation":
+        from investment_analyst.application.local_release import LocalReleaseService
+
+        monkeypatch.setattr(
+            LocalReleaseService,
+            "load_workspace_bindings",
+            lambda self: SimpleNamespace(
+                current=SimpleNamespace(workspace_format_version=2), previous=None
+            ),
+        )
+    elif fault == "foreign_environment":
+        foreign = tmp_path / "foreign-environment.json"
+        foreign.write_text(
+            json.dumps({"environment_fingerprint": "f" * 64, "code_sha": "f" * 40}) + "\n"
+        )
+        request = request.model_copy(
+            update={"environment": reconciliation_file_reference(foreign, "control")}
+        )
+        intent_path.write_text(json.dumps(request.model_dump(mode="json"), sort_keys=True) + "\n")
+    else:
+        comparison_path = state["comparison_path"]
+        comparison_path.write_bytes(comparison_path.read_bytes() + b" ")
+    before_head = ledger._head_digest()
+    before = {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()}
+    with (
+        maintenance_resource_budget(admission.budget),
+        maintenance_execution(MaintenanceExecution(admission.budget, lambda *_: None)),
+        pytest.raises((WorkspaceV2InventoryError, ValueError), match=expected),
+    ):
+        ledger.repair_publication(request, intent_path=intent_path, admission=admission)
+    assert ledger._head_digest() == before_head
+    after = {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()}
+    assert after == before
 
 
 def test_publication_repair_resumes_after_receipt_before_head(
