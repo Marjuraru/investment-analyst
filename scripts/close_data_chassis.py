@@ -463,6 +463,7 @@ def _parser() -> argparse.ArgumentParser:
             "recovery-readback",
             "profile-relationships",
             "cut",
+            "repair-publication",
         ),
     )
     parser.add_argument("--source", type=_absolute, required=True)
@@ -506,6 +507,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--retire-root", type=_absolute)
     parser.add_argument("--owned-payload-input", type=_absolute)
+    parser.add_argument("--publication-repair-input", type=_absolute)
     parser.add_argument("--retained-controls", type=_absolute)
     parser.add_argument("--retire-release-sha", type=_sha)
     parser.add_argument("--retained-release-path", type=_absolute, action="append")
@@ -2675,6 +2677,32 @@ def _execute(args: argparse.Namespace) -> dict[str, object]:
         time.sleep(2)
         return {"resource_admission": "verified", "database_opened": False}
     service = WorkspaceService()
+    if args.phase == "repair-publication":
+        from investment_analyst.workspace.workspace_v2_migration_models import (
+            LedgerPublicationRepairInput,
+        )
+
+        request_path = _required(args.publication_repair_input, "publication_repair_input")
+        request = LedgerPublicationRepairInput.model_validate_json(request_path.read_bytes())
+        if (
+            request.repair_id != args.operation_id
+            or request.source_root != args.source
+            or request.destination_root != args.destination
+            or request.generation_id != args.reconciliation_id
+            or request.source_workspace_id != service.manifest(args.source).workspace_id
+            or request.destination_workspace_id != service.manifest(args.destination).workspace_id
+        ):
+            raise MaintenancePhaseError("publication_repair_command_binding_differs")
+        admission_path = _required(args.resource_run_root, "resource_run_root") / "admission.json"
+        admission = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+        health = _cut_service_identity(args, v2=False)
+        result = WorkspaceV2GenerationLedger(service, args.destination).repair_publication(
+            request,
+            intent_path=request_path,
+            admission=admission,
+            dry_run=args.dry_run,
+        )
+        return {"publication_repair": result, "v1_health": health}
     if args.phase == "retire-owned-payload":
         request = OwnedPayloadRetirementInput.model_validate_json(
             _required(args.owned_payload_input, "owned_payload_input").read_bytes()
@@ -3459,7 +3487,7 @@ def main(argv: list[str] | None = None) -> int:
             or args.controls_root.is_relative_to(args.destination)
         ):
             raise MaintenancePhaseError("roots_must_be_disjoint")
-        if args.phase == "status" or args.dry_run:
+        if args.phase == "status" or (args.dry_run and args.phase != "repair-publication"):
             print(json.dumps(_status(args), sort_keys=True))
             return 0
         head = subprocess.check_output(

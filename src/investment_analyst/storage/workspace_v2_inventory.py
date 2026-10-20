@@ -45,12 +45,17 @@ from investment_analyst.storage.serialization import canonical_json_bytes, sha25
 from investment_analyst.workspace.workspace_v2_lifecycle_models import FrozenSourceCut
 from investment_analyst.workspace.workspace_v2_migration_models import (
     CutInvalidation,
+    CutOwner,
+    CutWindow,
+    CutWindowReceipt,
     GenerationContentProof,
     HistoricalFrozenSource,
     HistoricalSealSnapshot,
     HistoricalSnapshotSource,
     HistoricalTransition,
     HistoricalTransitionReceipt,
+    LedgerPublicationRepairInput,
+    LedgerPublicationRepairReceipt,
     ProgressReconciliation,
     ProgressReconciliationReceipt,
     ProgressReconciliationV2,
@@ -2846,6 +2851,143 @@ class WorkspaceV2GenerationLedger:
             return None
         return reconciliation_file_reference(self.head_path, "control").sha256
 
+    def _validate_repair_branch(
+        self, request: LedgerPublicationRepairInput, *, expected_head_sha256: str
+    ) -> dict[str, object]:
+        if (
+            request.destination_root != self.root
+            or request.destination_workspace_id != self.identity.workspace_id
+            or request.invalid_head.sha256 != expected_head_sha256
+        ):
+            raise WorkspaceV2InventoryError("publication repair head binding differs")
+        invalid_head = ReconciliationHead.model_validate_json(self._read(request.invalid_head))
+        if (
+            invalid_head.certificate != request.invalid_certificate.artifact
+            or invalid_head.publication_repair is not None
+            or invalid_head.root != self.root
+            or invalid_head.workspace_id != self.identity.workspace_id
+            or invalid_head.generation_id != request.generation_id
+            or invalid_head.ordinal != request.ordinal
+        ):
+            raise WorkspaceV2InventoryError("publication repair invalid head differs")
+        entries = {entry.head.sha256: entry for entry in request.superseded_branch}
+        if len(entries) != len(request.superseded_branch):
+            raise WorkspaceV2InventoryError("publication repair branch is ambiguous")
+        invalid_entry = entries.get(request.invalid_head.sha256)
+        if (
+            invalid_entry is None
+            or invalid_entry.head != request.invalid_head
+            or invalid_entry.certificate != request.invalid_certificate
+        ):
+            raise WorkspaceV2InventoryError("publication repair branch omits the invalid head")
+        invalid_document = json.loads(self._read(request.invalid_certificate.artifact))
+        if (
+            invalid_document.get("phase") != "SUCCESSOR_BOUND"
+            or invalid_document.get("generation_id") != str(request.generation_id)
+            or invalid_document.get("ordinal") != request.ordinal
+            or invalid_document.get("destination_root") != str(self.root)
+            or invalid_document.get("destination_workspace_id") != str(self.identity.workspace_id)
+            or invalid_document.get("reserved_successor", {}).get("operation_id")
+            != str(request.revoked_attempt_id)
+        ):
+            raise WorkspaceV2InventoryError("publication repair invalid certificate differs")
+        if invalid_head.last_event != ReconciliationFileReference.model_validate_json(
+            json.dumps(invalid_document.get("invalidation"))
+        ):
+            raise WorkspaceV2InventoryError("publication repair invalid event differs")
+        invalid_event = CutInvalidation.model_validate_json(self._read(invalid_head.last_event))
+        if (
+            invalid_event.destination_root != self.root
+            or invalid_event.generation_id != request.generation_id
+        ):
+            raise WorkspaceV2InventoryError("publication repair invalid event differs")
+        current_head = invalid_head
+        current_document = invalid_document
+        current_certificate: ProgressReconciliationV2 | None = None
+        seen = {request.invalid_head.sha256}
+        while current_head.previous_head_sha256 != request.retained_baseline_head.sha256:
+            if current_head.previous_head_sha256 is None:
+                raise WorkspaceV2InventoryError("publication repair branch is incomplete")
+            next_entry = entries.get(current_head.previous_head_sha256)
+            if next_entry is None or next_entry.head.sha256 in seen:
+                raise WorkspaceV2InventoryError("publication repair branch is incomplete")
+            seen.add(next_entry.head.sha256)
+            next_head = ReconciliationHead.model_validate_json(self._read(next_entry.head))
+            if next_head.certificate != next_entry.certificate.artifact:
+                raise WorkspaceV2InventoryError("publication repair branch certificate differs")
+            next_certificate = ProgressReconciliationV2.model_validate_json(
+                self._read(next_entry.certificate.artifact)
+            )
+            if (
+                next_head.root != self.root
+                or next_head.workspace_id != self.identity.workspace_id
+                or next_head.generation_id != request.generation_id
+                or next_head.ordinal != request.ordinal
+                or next_certificate.destination_root != self.root
+                or next_certificate.destination_workspace_id != self.identity.workspace_id
+                or next_certificate.generation_id != request.generation_id
+                or next_certificate.ordinal != request.ordinal
+                or next_certificate.invalidation != next_head.last_event
+                or ReconciliationFileReference.model_validate_json(
+                    json.dumps(current_document.get("previous_certificate"))
+                )
+                != next_entry.certificate.artifact
+            ):
+                raise WorkspaceV2InventoryError("publication repair branch ancestry differs")
+            event = CutInvalidation.model_validate_json(self._read(next_head.last_event))
+            if event.destination_root != self.root or event.generation_id != request.generation_id:
+                raise WorkspaceV2InventoryError("publication repair branch event differs")
+            current_head = next_head
+            current_document = next_certificate.model_dump(mode="json")
+            current_certificate = next_certificate
+        if (
+            current_document.get("previous_certificate") is None
+            or ReconciliationFileReference.model_validate_json(
+                json.dumps(current_document.get("previous_certificate"))
+            )
+            != request.retained_baseline_certificate.artifact
+        ):
+            raise WorkspaceV2InventoryError("publication repair branch retained edge differs")
+        retained_head = ReconciliationHead.model_validate_json(
+            self._read(request.retained_baseline_head)
+        )
+        if (
+            retained_head.certificate != request.retained_baseline_certificate.artifact
+            or retained_head.publication_repair is not None
+            or retained_head.root != self.root
+            or retained_head.workspace_id != self.identity.workspace_id
+            or retained_head.generation_id != request.generation_id
+            or retained_head.ordinal != request.ordinal
+        ):
+            raise WorkspaceV2InventoryError("publication repair retained head differs")
+        baseline = ProgressReconciliationV2.model_validate_json(
+            self._read(request.retained_baseline_certificate.artifact)
+        )
+        if (
+            baseline.phase != "BASELINE_VERIFIED"
+            or baseline.reserved_successor is not None
+            or baseline.successor_owner is not None
+            or baseline.successor_admission is not None
+            or baseline.coverage is not None
+            or baseline.generation_id != request.generation_id
+            or baseline.ordinal != request.ordinal
+            or baseline.destination_root != self.root
+            or baseline.destination_workspace_id != self.identity.workspace_id
+            or baseline.invalidation != retained_head.last_event
+        ):
+            raise WorkspaceV2InventoryError("publication repair retained baseline differs")
+        event = CutInvalidation.model_validate_json(self._read(retained_head.last_event))
+        if event.destination_root != self.root or event.generation_id != request.generation_id:
+            raise WorkspaceV2InventoryError("publication repair retained event differs")
+        return {
+            "invalid_head": invalid_head,
+            "invalid_document": invalid_document,
+            "reserved_head": current_head if current_certificate is not None else None,
+            "reserved_certificate": current_certificate,
+            "retained_head": retained_head,
+            "baseline": baseline,
+        }
+
     def resolve(self) -> tuple[ReconciliationHead, ProgressReconciliationV2] | None:
         """Validate the pointer and complete ancestry, never choose by glob ordering."""
         digest = self._head_digest()
@@ -2907,6 +3049,43 @@ class WorkspaceV2GenerationLedger:
                     raise WorkspaceV2InventoryError("reconciliation generation ancestry differs")
             if current is None:
                 current = head, generation
+            repair_branch = None
+            if head.publication_repair is not None:
+                receipt = LedgerPublicationRepairReceipt.model_validate_json(
+                    self._read(head.publication_repair)
+                )
+                if (
+                    receipt.request.destination_root != self.root
+                    or receipt.request.destination_workspace_id != self.identity.workspace_id
+                    or receipt.request.expected_head_sha256 != head.previous_head_sha256
+                    or receipt.request.retained_baseline_certificate.artifact != head.certificate
+                    or receipt.request.generation_id != head.generation_id
+                    or receipt.request.ordinal != head.ordinal
+                ):
+                    raise WorkspaceV2InventoryError("publication repair head differs")
+                repair_branch = self._validate_repair_branch(
+                    receipt.request,
+                    expected_head_sha256=receipt.request.expected_head_sha256,
+                )
+                retained_head = repair_branch["retained_head"]
+                assert isinstance(retained_head, ReconciliationHead)
+                if retained_head.certificate != head.certificate:
+                    raise WorkspaceV2InventoryError("publication repair retained cert differs")
+            if repair_branch is not None:
+                retained_head = repair_branch["retained_head"]
+                assert isinstance(retained_head, ReconciliationHead)
+                if retained_head.previous_head_sha256 is None:
+                    if generation.ordinal != 1:
+                        raise WorkspaceV2InventoryError("reconciliation initial ordinal differs")
+                    break
+                digest = retained_head.previous_head_sha256
+                child = generation
+                path = self.state / f"reconciliation-head.{digest}.json"
+                reference = reconciliation_file_reference(path, "control")
+                if reference.sha256 != digest:
+                    raise WorkspaceV2InventoryError("reconciliation previous head digest differs")
+                document = path.read_bytes()
+                continue
             if head.previous_head_sha256 is None:
                 if generation.ordinal != 1:
                     raise WorkspaceV2InventoryError("reconciliation initial ordinal differs")
@@ -3299,6 +3478,21 @@ class WorkspaceV2GenerationLedger:
                 if previous.attempt_id != attempt_id:
                     raise WorkspaceV2InventoryError("invalidation event ancestry differs")
             found = True
+        for path in self.state.glob("publication-repair.*.json"):
+            if path.is_symlink() or not path.is_file():
+                raise WorkspaceV2InventoryError("publication repair receipt is unsafe")
+            data = path.read_bytes()
+            if not path.name.endswith(f".{sha256_hex(data)}.json"):
+                raise WorkspaceV2InventoryError("publication repair receipt digest differs")
+            receipt = LedgerPublicationRepairReceipt.model_validate_json(data)
+            if (
+                receipt.request.destination_root != self.root
+                or receipt.request.destination_workspace_id != self.identity.workspace_id
+                or not path.name.startswith(f"publication-repair.{receipt.request.repair_id}.")
+            ):
+                raise WorkspaceV2InventoryError("publication repair receipt binding differs")
+            if receipt.request.revoked_attempt_id == attempt_id:
+                found = True
         return found
 
     def _admit(self, admission: MaintenanceResourceReceipt) -> None:
@@ -3490,6 +3684,19 @@ class WorkspaceV2GenerationLedger:
             return reconciliation_file_reference(path, "control")
 
     @staticmethod
+    def _cut_owner_alive(owner: CutOwner) -> bool:
+        if owner.pid is None or owner.start_ticks is None or owner.boot_id is None:
+            return False
+        if owner.boot_id != UUID(Path("/proc/sys/kernel/random/boot_id").read_text().strip()):
+            return False
+        path = Path("/proc") / str(owner.pid) / "stat"
+        try:
+            ticks = int(path.read_text().rsplit(") ", 1)[1].split()[19])
+        except FileNotFoundError:
+            return False
+        return ticks == owner.start_ticks
+
+    @staticmethod
     def _owner_alive(event: CutInvalidation) -> bool:
         owner = event.owner
         if owner.boot_id != UUID(Path("/proc/sys/kernel/random/boot_id").read_text().strip()):
@@ -3509,6 +3716,7 @@ class WorkspaceV2GenerationLedger:
         admission: MaintenanceResourceReceipt,
     ) -> ReconciliationFileReference:
         """Publish immutable bytes before a compare-and-swap of the sole mutable head."""
+        generation = ProgressReconciliationV2.model_validate(generation.model_dump())
         self._admit(admission)
         with _reconciliation_lock(self.state):
             if self._head_digest() != expected_head_sha256:
@@ -3681,6 +3889,558 @@ class WorkspaceV2GenerationLedger:
             finally:
                 temporary.unlink(missing_ok=True)
             return reference
+
+    @staticmethod
+    def _stream_hash(path: Path) -> tuple[int, str]:
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as stream:
+            while chunk := stream.read(1 << 20):
+                digest.update(chunk)
+                size += len(chunk)
+        return size, digest.hexdigest()
+
+    def _validate_publication_repair_evidence(
+        self,
+        request: LedgerPublicationRepairInput,
+        branch: dict[str, object],
+        session_admission: MaintenanceResourceReceipt,
+    ) -> dict[str, object]:
+        from investment_analyst.application.local_release import LocalReleaseService
+        from investment_analyst.workspace.workspace_v2_migration import (
+            _SuccessorComparison,
+            _SuccessorReservation,
+        )
+        from investment_analyst.workspace.workspace_v2_migration_models import (
+            CutWindowGo,
+            SuccessorCoverageProof,
+        )
+
+        reserved = branch["reserved_certificate"]
+        baseline = branch["baseline"]
+        invalid_document = branch["invalid_document"]
+        reserved_head = branch["reserved_head"]
+        assert isinstance(reserved, ProgressReconciliationV2)
+        assert isinstance(baseline, ProgressReconciliationV2)
+        assert isinstance(invalid_document, dict)
+        assert isinstance(reserved_head, ReconciliationHead)
+        reserved_doc = reserved.model_dump(mode="json")
+        baseline_doc = baseline.model_dump(mode="json")
+        reserved_diff = {
+            "previous_certificate",
+            "reserved_successor",
+            "successor_owner",
+            "successor_admission",
+            "recorded_at",
+        }
+        if {key for key in baseline_doc if baseline_doc[key] != reserved_doc[key]} != reserved_diff:
+            raise WorkspaceV2InventoryError("publication repair reserved baseline differs")
+        invalid_diff = {"phase", "coverage", "previous_certificate", "recorded_at"}
+        if {
+            key for key in reserved_doc if reserved_doc[key] != invalid_document.get(key)
+        } != invalid_diff:
+            raise WorkspaceV2InventoryError("publication repair invalid branch differs")
+        if (
+            reserved.phase != "BASELINE_VERIFIED"
+            or baseline.phase != "BASELINE_VERIFIED"
+            or reserved.reserved_successor is None
+            or reserved.reserved_successor.operation_id != request.revoked_attempt_id
+            or reserved.successor_owner is None
+            or reserved.successor_admission is None
+            or baseline.reserved_successor is not None
+            or reserved.inventory is None
+            or baseline.inventory is None
+            or reserved.inventory != baseline.inventory
+            or reserved.database != baseline.database
+            or reserved.wal != baseline.wal
+            or request.database != baseline.database
+            or request.wal != baseline.wal
+        ):
+            raise WorkspaceV2InventoryError("publication repair certificates differ")
+        try:
+            ProgressReconciliationV2.model_validate_json(
+                self._read(request.invalid_certificate.artifact)
+            )
+        except ValueError as error:
+            if "generation successor coverage differs" not in str(error):
+                raise WorkspaceV2InventoryError(
+                    "publication repair invalid certificate was not the known defect"
+                ) from error
+        else:
+            raise WorkspaceV2InventoryError("publication repair invalid certificate validates")
+        coverage = SuccessorCoverageProof.model_validate_json(
+            json.dumps(invalid_document.get("coverage"))
+        )
+        inventory = reserved.inventory
+        assert inventory is not None
+        if (
+            coverage.successor != reserved.reserved_successor
+            or coverage.baseline_dataset_sha256 != inventory.dataset_sha256
+            or coverage.covered_metric_count != inventory.metric_count
+            or coverage.covered_diagnostic_count != inventory.diagnostic_count
+        ):
+            raise WorkspaceV2InventoryError("publication repair coverage differs")
+        comparison_path = self.state / (
+            f"progress-successor-comparison.{request.revoked_attempt_id}."
+            f"{coverage.comparison_sha256}.json"
+        )
+        comparison_ref = reconciliation_file_reference(comparison_path, "control")
+        comparison = _SuccessorComparison.model_validate_json(self._read(comparison_ref))
+        if (
+            comparison.baseline != reserved_head.certificate
+            or comparison.work.successor != reserved.reserved_successor
+            or comparison.work.baseline_dataset_sha256 != inventory.dataset_sha256
+            or (
+                comparison.work.covered_metric_count,
+                comparison.work.covered_diagnostic_count,
+            )
+            != (inventory.metric_count, inventory.diagnostic_count)
+            or comparison.work.family != "complete"
+            or comparison.new_index.role != "inventory"
+            or comparison.resource_receipt != request.admission
+            or comparison.verifier_tree_fingerprint != coverage.verifier_tree_fingerprint
+            or comparison.verified_at != coverage.verified_at
+            or comparison_ref.sha256 != coverage.comparison_sha256
+        ):
+            raise WorkspaceV2InventoryError("publication repair comparison differs")
+        self._read(comparison.new_index)
+        if (
+            comparison.new_index.sha256 != comparison.work.new_index_sha256
+            or comparison.new_index.size_bytes != comparison.work.new_index_bytes
+        ):
+            raise WorkspaceV2InventoryError("publication repair new index differs")
+        source_bindings = json.loads(self._read(request.source_bindings))
+        files = source_bindings.get("files")
+        if not isinstance(files, dict) or not isinstance(source_bindings.get("code_sha"), str):
+            raise WorkspaceV2InventoryError("publication repair source bindings differ")
+        code_paths = (
+            "src/investment_analyst/storage/workspace_v2_inventory.py",
+            "src/investment_analyst/storage/compact_analytical_v2.py",
+            "src/investment_analyst/storage/historical_analytical_import.py",
+            "src/investment_analyst/workspace/workspace_v2_migration_models.py",
+        )
+        tree = hashlib.sha256()
+        for path in code_paths:
+            entry = files.get(path)
+            if not isinstance(entry, dict) or not isinstance(entry.get("sha256"), str):
+                raise WorkspaceV2InventoryError("publication repair archived code is incomplete")
+            tree.update(bytes.fromhex(entry["sha256"]))
+        if (
+            tree.hexdigest() != coverage.verifier_tree_fingerprint
+            or tree.hexdigest() != comparison.verifier_tree_fingerprint
+            or comparison.work.module_sha256
+            != files["src/investment_analyst/workspace/workspace_v2_migration.py"]["sha256"]
+        ):
+            raise WorkspaceV2InventoryError("publication repair verifier tree differs")
+        if request.producer != request.source_bindings:
+            raise WorkspaceV2InventoryError("publication repair producer differs")
+        for reference in request.archived_code:
+            self._read(reference)
+        archived_script = source_bindings.get("files", {}).get("scripts/close_data_chassis.py")
+        if not isinstance(archived_script, dict) or any(
+            reference.sha256 != archived_script.get("sha256")
+            for reference in request.archived_code
+            if reference.path.name == "close_data_chassis.py"
+        ):
+            raise WorkspaceV2InventoryError("publication repair archived script differs")
+        environment = json.loads(self._read(request.environment))
+        if (
+            environment.get("environment_fingerprint") != baseline.environment_fingerprint
+            or environment.get("environment_fingerprint") != comparison.environment_fingerprint
+            or environment.get("code_sha") != source_bindings.get("code_sha")
+        ):
+            raise WorkspaceV2InventoryError("publication repair environment differs")
+        reservation = _SuccessorReservation.model_validate_json(self._read(request.reservation))
+        frozen = FrozenSourceCut.model_validate_json(self._read(request.frozen_cut))
+        owner = reserved.successor_owner
+        assert owner is not None
+        if (
+            reservation.reconciliation_id != request.generation_id
+            or reservation.successor != frozen
+            or reservation.successor != reserved.reserved_successor
+            or reservation.source_session != owner.source_session
+            or reservation.baseline != request.retained_baseline_certificate.artifact
+            or reservation.baseline_dataset_sha256 != inventory.dataset_sha256
+            or reservation.resource_receipt != request.admission
+            or reservation.module_sha256 != comparison.work.module_sha256
+            or frozen.source_root != request.source_root
+            or frozen.workspace_id != request.source_workspace_id
+            or frozen.created_at != baseline.source_created_at
+            or not frozen.writer_closed
+        ):
+            raise WorkspaceV2InventoryError("publication repair reservation differs")
+        cut_window = CutWindow.model_validate_json(self._read(request.cut_window))
+        terminal = CutWindowReceipt.model_validate_json(self._read(request.terminal_receipt))
+        if (
+            cut_window.attempt_id != request.revoked_attempt_id
+            or cut_window.source_root != request.source_root
+            or cut_window.destination_root != self.root
+            or cut_window.source_workspace_id != request.source_workspace_id
+            or cut_window.destination_workspace_id != self.identity.workspace_id
+            or cut_window.owner != owner
+            or cut_window.phase != "HEALTHY_V1"
+            or cut_window.window_limit_seconds != 5400
+            or cut_window.window_authorization != "human-dc45-cut-5400-20261019"
+            or terminal.window != request.cut_window
+            or terminal.phase != "HEALTHY_V1"
+        ):
+            raise WorkspaceV2InventoryError("publication repair cut window differs")
+        self._read(terminal.health)
+        self._read(terminal.identity)
+        self._read(cut_window.baseline)
+        self._read(cut_window.code)
+        self._read(cut_window.resource_receipt)
+        go = CutWindowGo.model_validate_json(self._read(cut_window.go))
+        if (
+            go.attempt_id != request.revoked_attempt_id
+            or go.baseline != request.retained_baseline_certificate.artifact
+            or go.window_limit_seconds != 5400
+            or go.window_authorization != "human-dc45-cut-5400-20261019"
+            or cut_window.baseline != request.retained_baseline_certificate.artifact
+            or cut_window.environment_sha256 != baseline.environment_fingerprint
+        ):
+            raise WorkspaceV2InventoryError("publication repair cut authority differs")
+        if (
+            session_admission.budget.operation_id != request.revoked_attempt_id
+            or session_admission.budget.profile != "verification"
+            or session_admission.budget.reader_worker is not None
+            or {item.database for item in session_admission.budget.assignments}
+            != {
+                request.source_root / "storage/data/processed/investment_analyst.duckdb",
+                self.root / "storage/v2/index.duckdb",
+            }
+            or (
+                session_admission.pid,
+                session_admission.process_start_ticks,
+                session_admission.boot_id,
+                session_admission.cgroup_path,
+            )
+            != (owner.pid, owner.start_ticks, owner.boot_id, owner.cgroup)
+            or session_admission.stage != "admitted"
+            or reserved.successor_admission != request.admission
+            or comparison.resource_receipt != request.admission
+        ):
+            raise WorkspaceV2InventoryError("publication repair session admission differs")
+        if self._cut_owner_alive(owner):
+            raise WorkspaceV2InventoryError("publication repair owner is still alive")
+        owner_evidence = json.loads(self._read(request.owner_absence))
+        no_activation = json.loads(self._read(request.no_activation))
+        exclusivity = json.loads(self._read(request.exclusivity))
+        if (
+            owner_evidence.get("owner_absent") is not True
+            or no_activation.get("v2_active") is not False
+            or exclusivity.get("other_live_reservations") is not False
+        ):
+            raise WorkspaceV2InventoryError("publication repair absence evidence differs")
+        bindings = LocalReleaseService().load_workspace_bindings()
+        if any(
+            binding is not None and binding.workspace_format_version == 2
+            for binding in (bindings.current, getattr(bindings, "previous", None))
+        ):
+            raise WorkspaceV2InventoryError("publication repair cannot follow v2 activation")
+        for path in self.state.glob("progress-successor-reservation.*.json"):
+            if path.is_symlink() or not path.is_file():
+                raise WorkspaceV2InventoryError("publication repair reservation is unsafe")
+            other = _SuccessorReservation.model_validate_json(path.read_bytes())
+            if other.successor.operation_id == request.revoked_attempt_id:
+                if path != request.reservation.path:
+                    raise WorkspaceV2InventoryError("publication repair reservation path differs")
+                continue
+            if not self.attempt_invalidated(other.successor.operation_id):
+                raise WorkspaceV2InventoryError("publication repair found another live reservation")
+        for reference in (
+            request.invalid_certificate.artifact,
+            request.retained_baseline_certificate.artifact,
+            request.frozen_cut,
+            request.cut_window,
+            request.terminal_receipt,
+            request.owner_absence,
+            request.no_activation,
+            request.exclusivity,
+            request.source_bindings,
+            request.environment,
+            request.admission,
+            request.producer,
+            *request.archived_code,
+        ):
+            self._read(reference)
+        return {
+            "baseline": baseline,
+            "reserved": reserved,
+            "coverage": coverage,
+            "comparison": comparison,
+            "reservation": reservation,
+            "frozen": frozen,
+            "cut_window": cut_window,
+            "terminal": terminal,
+            "owner": owner,
+            "environment": environment,
+        }
+
+    def repair_publication(
+        self,
+        request: LedgerPublicationRepairInput,
+        *,
+        intent_path: Path,
+        admission: MaintenanceResourceReceipt,
+        dry_run: bool = False,
+    ) -> dict[str, object]:
+        """Supersede one invalid SUCCESSOR_BOUND publication without mutating data."""
+        from investment_analyst.workspace.workspace_v2_backup import _v2_writer_guard
+
+        intent_target = intent_path.expanduser()
+        if (
+            not intent_target.is_absolute()
+            or intent_target.is_symlink()
+            or not intent_target.is_file()
+        ):
+            raise WorkspaceV2InventoryError("publication repair intent is unavailable")
+        intent_ref = reconciliation_file_reference(intent_target, "control")
+        intent_request = LedgerPublicationRepairInput.model_validate_json(self._read(intent_ref))
+        if intent_request != request or request.recorded_at > datetime.now(UTC):
+            raise WorkspaceV2InventoryError("publication repair intent differs")
+        self._admit(admission)
+        if admission.budget.operation_id != request.repair_id:
+            raise WorkspaceV2InventoryError("publication repair admission differs")
+        session_admission = MaintenanceResourceReceipt.model_validate_json(
+            self._read(request.admission)
+        )
+        database = self.root / "storage/v2/index.duckdb"
+        if (
+            request.database.path != database
+            or request.database.role != "database"
+            or request.wal is not None
+            or database.with_suffix(".duckdb.wal").exists()
+        ):
+            raise WorkspaceV2InventoryError("publication repair database/WAL differs")
+        with _reconciliation_lock(self.state), _v2_writer_guard(self.root):
+            size, digest = self._stream_hash(database)
+            if (size, digest) != (request.database.size_bytes, request.database.sha256):
+                raise WorkspaceV2InventoryError("publication repair database changed")
+            branch = self._validate_repair_branch(
+                request, expected_head_sha256=request.expected_head_sha256
+            )
+            evidence = self._validate_publication_repair_evidence(
+                request, branch, session_admission
+            )
+            baseline = evidence["baseline"]
+            assert isinstance(baseline, ProgressReconciliationV2)
+            return self._publish_publication_repair(
+                request,
+                intent_ref=intent_ref,
+                baseline=baseline,
+                dry_run=dry_run,
+            )
+
+    @staticmethod
+    def _publication_repair_head(
+        request: LedgerPublicationRepairInput,
+        receipt: LedgerPublicationRepairReceipt,
+        receipt_ref: ReconciliationFileReference,
+        baseline: ProgressReconciliationV2,
+        *,
+        root: Path,
+        workspace_id: UUID,
+    ) -> ReconciliationHead:
+        return ReconciliationHead(
+            root=root,
+            workspace_id=workspace_id,
+            generation_id=request.generation_id,
+            ordinal=request.ordinal,
+            certificate=request.retained_baseline_certificate.artifact,
+            last_event=baseline.invalidation,
+            previous_head_sha256=request.expected_head_sha256,
+            publication_repair=receipt_ref,
+            recorded_at=receipt.recorded_at,
+        )
+
+    def _write_publication_repair_head_history(
+        self, head_document: bytes, head_digest: str
+    ) -> None:
+        path = self.state / f"reconciliation-head.{head_digest}.json"
+        if path.is_symlink():
+            raise WorkspaceV2InventoryError("publication repair head history is unsafe")
+        if path.exists():
+            if path.read_bytes() != head_document:
+                raise WorkspaceV2InventoryError("publication repair head history differs")
+            return
+        WorkspaceV2ProgressReconciler._write_once(path, head_document)
+
+    def _cas_publication_repair_head(self, head_document: bytes) -> None:
+        temporary = self.head_path.with_name(f".reconciliation-head.{uuid4().hex}.tmp")
+        try:
+            WorkspaceV2ProgressReconciler._write_once(temporary, head_document)
+            os.replace(temporary, self.head_path)
+            _fsync_parent(self.head_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _publish_publication_repair(
+        self,
+        request: LedgerPublicationRepairInput,
+        *,
+        intent_ref: ReconciliationFileReference,
+        baseline: ProgressReconciliationV2,
+        dry_run: bool,
+    ) -> dict[str, object]:
+        current_digest = self._head_digest()
+        if current_digest is None:
+            raise WorkspaceV2InventoryError("publication repair head is missing")
+        current_head = ReconciliationHead.model_validate_json(self.head_path.read_bytes())
+        existing_paths = sorted(self.state.glob(f"publication-repair.{request.repair_id}.*.json"))
+        if len(existing_paths) > 1:
+            raise WorkspaceV2InventoryError("publication repair receipt is ambiguous")
+        if existing_paths:
+            receipt_path = existing_paths[0]
+            receipt_ref = reconciliation_file_reference(receipt_path, "control")
+            receipt = LedgerPublicationRepairReceipt.model_validate_json(self._read(receipt_ref))
+            if receipt.request != request or receipt.intent != intent_ref:
+                raise WorkspaceV2InventoryError("publication repair receipt differs")
+            head = self._publication_repair_head(
+                request,
+                receipt,
+                receipt_ref,
+                baseline,
+                root=self.root,
+                workspace_id=self.identity.workspace_id,
+            )
+            head_document = canonical_json_bytes(head) + b"\n"
+            head_digest = sha256_hex(head_document)
+            if current_digest == request.expected_head_sha256:
+                if current_head.publication_repair is not None:
+                    raise WorkspaceV2InventoryError("publication repair expected head differs")
+                if dry_run:
+                    return self._publication_repair_result(
+                        request,
+                        receipt,
+                        receipt_ref,
+                        baseline,
+                        dry_run=True,
+                        idempotent=False,
+                    )
+                self._write_publication_repair_head_history(head_document, head_digest)
+                self._cas_publication_repair_head(head_document)
+                return self._publication_repair_result(
+                    request,
+                    receipt,
+                    receipt_ref,
+                    baseline,
+                    dry_run=False,
+                    idempotent=False,
+                )
+            if current_digest != head_digest or current_head.publication_repair != receipt_ref:
+                raise WorkspaceV2InventoryError("publication repair head differs")
+            self.resolve()
+            return self._publication_repair_result(
+                request,
+                receipt,
+                receipt_ref,
+                baseline,
+                dry_run=dry_run,
+                idempotent=True,
+            )
+        if current_head.publication_repair is not None or current_digest != (
+            request.expected_head_sha256
+        ):
+            raise WorkspaceV2InventoryError("publication repair expected head differs")
+        now = datetime.now(UTC)
+        receipt = LedgerPublicationRepairReceipt(
+            request=request, intent=intent_ref, created_at=now, recorded_at=now
+        )
+        receipt_document = canonical_json_bytes(receipt) + b"\n"
+        receipt_digest = sha256_hex(receipt_document)
+        receipt_path = self.state / f"publication-repair.{request.repair_id}.{receipt_digest}.json"
+        receipt_ref = ReconciliationFileReference(
+            path=receipt_path,
+            sha256=receipt_digest,
+            size_bytes=len(receipt_document),
+            role="control",
+        )
+        head = self._publication_repair_head(
+            request,
+            receipt,
+            receipt_ref,
+            baseline,
+            root=self.root,
+            workspace_id=self.identity.workspace_id,
+        )
+        head_document = canonical_json_bytes(head) + b"\n"
+        head_digest = sha256_hex(head_document)
+        if dry_run:
+            return self._publication_repair_result(
+                request,
+                receipt,
+                receipt_ref,
+                baseline,
+                dry_run=True,
+                idempotent=False,
+            )
+        for path in self.state.glob("reconciliation-head.*.json"):
+            existing = ReconciliationHead.model_validate_json(path.read_bytes())
+            if (
+                existing.previous_head_sha256 == request.expected_head_sha256
+                and path.read_bytes() != head_document
+            ):
+                raise WorkspaceV2InventoryError("publication repair head fork detected")
+        WorkspaceV2ProgressReconciler._write_once(receipt_path, receipt_document)
+        WorkspaceV2ProgressReconciler._write_once(
+            self.state / f"reconciliation-head.{head_digest}.json", head_document
+        )
+        temporary = self.head_path.with_name(f".reconciliation-head.{uuid4().hex}.tmp")
+        try:
+            WorkspaceV2ProgressReconciler._write_once(temporary, head_document)
+            os.replace(temporary, self.head_path)
+            _fsync_parent(self.head_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return self._publication_repair_result(
+            request,
+            receipt,
+            receipt_ref,
+            baseline,
+            dry_run=False,
+            idempotent=False,
+        )
+
+    def _publication_repair_result(
+        self,
+        request: LedgerPublicationRepairInput,
+        receipt: LedgerPublicationRepairReceipt,
+        receipt_ref: ReconciliationFileReference,
+        baseline: ProgressReconciliationV2,
+        *,
+        dry_run: bool,
+        idempotent: bool,
+    ) -> dict[str, object]:
+        head = ReconciliationHead(
+            root=self.root,
+            workspace_id=self.identity.workspace_id,
+            generation_id=request.generation_id,
+            ordinal=request.ordinal,
+            certificate=request.retained_baseline_certificate.artifact,
+            last_event=baseline.invalidation,
+            previous_head_sha256=request.expected_head_sha256,
+            publication_repair=receipt_ref,
+            recorded_at=receipt.recorded_at,
+        )
+        head_document = canonical_json_bytes(head) + b"\n"
+        return {
+            "dry_run": dry_run,
+            "idempotent": idempotent,
+            "repair_id": str(request.repair_id),
+            "revoked_attempt_id": str(request.revoked_attempt_id),
+            "receipt": receipt.model_dump(mode="json"),
+            "head": head.model_dump(mode="json"),
+            "head_sha256": sha256_hex(head_document),
+            "head_before_sha256": request.expected_head_sha256,
+            "database": {
+                "path": str(request.database.path),
+                "sha256": request.database.sha256,
+                "size_bytes": request.database.size_bytes,
+            },
+            "invalid_certificate": str(request.invalid_certificate.artifact.path),
+            "valid_chain": True,
+        }
 
 
 class GenerationRawCoverageProof(ContractModel):

@@ -1787,3 +1787,69 @@ def test_5400_cut_rejects_foreign_attempt_before_creating_a_window(
     ):
         module._run_global_cut(args)
     assert not (controls / "window.json").exists()
+
+
+def test_repair_publication_parser_and_dry_run_dispatch_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resource_cli_module: ModuleType,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = resource_cli_module
+    controls = tmp_path / "controls"
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    input_path = tmp_path / "publication-repair-input.json"
+    budget_path = tmp_path / "repair-budget.json"
+    output_path = tmp_path / "repair-dry-run.json"
+    operation = uuid4()
+    reconciliation = uuid4()
+    code_sha = subprocess.check_output(
+        ["git", "-C", str(Path(module.__file__).resolve().parents[1]), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    calls: list[tuple[object, list[str]]] = []
+
+    def supervise(args: object, argv: list[str]) -> dict[str, object]:
+        calls.append((args, argv))
+        return {"supervised": True, "phase": args.phase}
+
+    monkeypatch.setattr(module, "_supervise", supervise)
+    argv = [
+        "repair-publication",
+        "--source",
+        str(source),
+        "--destination",
+        str(destination),
+        "--controls-root",
+        str(controls),
+        "--operation-id",
+        str(operation),
+        "--reconciliation-id",
+        str(reconciliation),
+        "--code-sha",
+        code_sha,
+        "--resource-budget",
+        str(budget_path),
+        "--publication-repair-input",
+        str(input_path),
+        "--output",
+        str(output_path),
+        "--dry-run",
+    ]
+    assert module.main(argv) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["supervised"] is True
+    assert len(calls) == 1
+    args, forwarded = calls[0]
+    assert args.phase == "repair-publication"
+    assert args.dry_run is True
+    assert args.publication_repair_input == input_path
+    assert args.operation_id == operation
+    assert args.reconciliation_id == reconciliation
+    assert forwarded == argv
+    parser = module._parser()
+    parsed = parser.parse_args(argv)
+    assert parsed.phase == "repair-publication"
+    assert parsed.publication_repair_input == input_path
+    assert parsed.dry_run is True

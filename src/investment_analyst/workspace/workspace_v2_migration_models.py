@@ -830,7 +830,140 @@ class ReconciliationHead(ContractModel):
     certificate: ReconciliationFileReference
     last_event: ReconciliationFileReference
     previous_head_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    publication_repair: ReconciliationFileReference | None = None
     recorded_at: UTCDateTime
+
+
+class LedgerPublicationRepairGeneration(ContractModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    head: ReconciliationFileReference
+    certificate: ReconciliationGenerationReference
+
+    @model_validator(mode="after")
+    def require_repository_roles(self) -> LedgerPublicationRepairGeneration:
+        if self.head.role != "control" or self.certificate.artifact.role != "control":
+            raise ValueError("publication repair generation roles differ")
+        return self
+
+
+class LedgerPublicationRepairInput(ContractModel):
+    """One exact preactivation supersession of an invalid SUCCESSOR_BOUND publication."""
+
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    schema_version: Literal["workspace-v2-ledger-publication-repair-v1"] = (
+        "workspace-v2-ledger-publication-repair-v1"
+    )
+    repair_id: UUID
+    reason: Literal["SUCCESSOR_PUBLICATION_INVALID_NO_DATA_MUTATION"] = (
+        "SUCCESSOR_PUBLICATION_INVALID_NO_DATA_MUTATION"
+    )
+    source_root: Path
+    source_workspace_id: UUID
+    destination_root: Path
+    destination_workspace_id: UUID
+    generation_id: UUID
+    ordinal: int = Field(ge=1)
+    revoked_attempt_id: UUID
+    expected_head_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    invalid_head: ReconciliationFileReference
+    invalid_certificate: ReconciliationGenerationReference
+    superseded_branch: tuple[LedgerPublicationRepairGeneration, ...] = Field(min_length=1)
+    retained_baseline_head: ReconciliationFileReference
+    retained_baseline_certificate: ReconciliationGenerationReference
+    reservation: ReconciliationFileReference
+    frozen_cut: ReconciliationFileReference
+    cut_window: ReconciliationFileReference
+    terminal_receipt: ReconciliationFileReference
+    owner_absence: ReconciliationFileReference
+    no_activation: ReconciliationFileReference
+    exclusivity: ReconciliationFileReference
+    source_bindings: ReconciliationFileReference
+    archived_code: tuple[ReconciliationFileReference, ...] = Field(min_length=1)
+    environment: ReconciliationFileReference
+    database: ReconciliationFileReference
+    wal: ReconciliationFileReference | None
+    admission: ReconciliationFileReference
+    producer: ReconciliationFileReference
+    recorded_at: UTCDateTime
+
+    @model_validator(mode="after")
+    def coherent_publication_repair(self) -> LedgerPublicationRepairInput:
+        roots = (self.source_root, self.destination_root)
+        if (
+            any(not root.is_absolute() for root in roots)
+            or self.source_root == self.destination_root
+            or self.source_root.is_relative_to(self.destination_root)
+            or self.destination_root.is_relative_to(self.source_root)
+        ):
+            raise ValueError("publication repair roots must be absolute and disjoint")
+        if (
+            self.invalid_head.role != "control"
+            or self.invalid_certificate.artifact.role != "control"
+            or self.retained_baseline_head.role != "control"
+            or self.retained_baseline_certificate.artifact.role != "control"
+            or self.reservation.role != "control"
+            or self.frozen_cut.role != "control"
+            or self.cut_window.role != "control"
+            or self.terminal_receipt.role != "control"
+            or self.owner_absence.role != "control"
+            or self.no_activation.role != "control"
+            or self.exclusivity.role != "control"
+            or self.source_bindings.role != "control"
+            or self.environment.role != "control"
+            or self.producer.role != "control"
+        ):
+            raise ValueError("publication repair evidence roles differ")
+        if (
+            self.invalid_certificate.schema_type != "workspace-v2-progress-reconciliation-v2"
+            or self.retained_baseline_certificate.schema_type
+            != "workspace-v2-progress-reconciliation-v2"
+            or any(
+                item.certificate.schema_type != "workspace-v2-progress-reconciliation-v2"
+                for item in self.superseded_branch
+            )
+        ):
+            raise ValueError("publication repair certificate type differs")
+        if self.database.role != "database" or self.database.path != (
+            self.destination_root / "storage/v2/index.duckdb"
+        ):
+            raise ValueError("publication repair database binding differs")
+        if self.wal is not None and (
+            self.wal.role != "wal"
+            or self.wal.path != self.destination_root / "storage/v2/index.duckdb.wal"
+        ):
+            raise ValueError("publication repair WAL binding differs")
+        if self.admission.role != "resource" or any(
+            item.role != "code" for item in self.archived_code
+        ):
+            raise ValueError("publication repair resource/code roles differ")
+        if not any(
+            item.head == self.invalid_head and item.certificate == self.invalid_certificate
+            for item in self.superseded_branch
+        ):
+            raise ValueError("publication repair branch omits the invalid publication")
+        if any(
+            item.head == self.retained_baseline_head
+            or item.certificate == self.retained_baseline_certificate
+            for item in self.superseded_branch
+        ):
+            raise ValueError("publication repair branch overlaps the retained baseline")
+        return self
+
+
+class LedgerPublicationRepairReceipt(ContractModel):
+    schema_version: Literal["workspace-v2-ledger-publication-repair-v1"] = (
+        "workspace-v2-ledger-publication-repair-v1"
+    )
+    request: LedgerPublicationRepairInput
+    intent: ReconciliationFileReference
+    created_at: UTCDateTime
+    recorded_at: UTCDateTime
+
+    @model_validator(mode="after")
+    def coherent_receipt(self) -> LedgerPublicationRepairReceipt:
+        if self.intent.role != "control" or self.created_at > self.recorded_at:
+            raise ValueError("publication repair receipt timing or intent differs")
+        return self
 
 
 class GenerationContentProof(ContractModel):

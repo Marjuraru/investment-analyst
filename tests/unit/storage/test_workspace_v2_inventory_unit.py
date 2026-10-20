@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+import investment_analyst.storage.workspace_v2_inventory as inventory_module
 import investment_analyst.workspace.workspace_v2_migration as migration_module
 from investment_analyst.core.models import MetricResult, NormalizedObservation, RawRecord
 from investment_analyst.storage.compact_analytical_v2 import (
@@ -37,11 +38,14 @@ from investment_analyst.storage.workspace_v2_inventory import (
     WorkspaceV2AnalyticalImporter,
     WorkspaceV2InventoryError,
     WorkspaceV2ProgressReconciler,
+    _reconciliation_lock,
     _VerifiedParentMetricHasher,
     historical_transition_status,
+    reconciliation_file_reference,
 )
 from investment_analyst.workspace.models import WorkspaceAccessMode
 from investment_analyst.workspace.service import WorkspaceService
+from investment_analyst.workspace.workspace_v2_backup import _v2_writer_guard
 from investment_analyst.workspace.workspace_v2_lifecycle_models import FrozenSourceCut
 from investment_analyst.workspace.workspace_v2_migration import (
     WorkspaceV2MigrationError,
@@ -51,12 +55,19 @@ from investment_analyst.workspace.workspace_v2_migration import (
     verify_recovered_successor,
 )
 from investment_analyst.workspace.workspace_v2_migration_models import (
+    CutOwner,
     HistoricalSealSnapshot,
     HistoricalTransition,
     HistoricalTransitionReceipt,
+    LedgerPublicationRepairGeneration,
+    LedgerPublicationRepairInput,
+    LedgerPublicationRepairReceipt,
     ProgressReconciliation,
     ProgressReconciliationReceipt,
+    ProgressReconciliationV2,
     ReconciliationFileReference,
+    ReconciliationGenerationReference,
+    ReconciliationHead,
     RecoveredProgressInventory,
     SuccessorCoverageProof,
 )
@@ -4529,3 +4540,742 @@ def test_global_controller_runs_certified_delta_recovery_and_activation(
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def _publication_repair_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    template: tuple[Path, Path, tuple],
+) -> dict[str, object]:
+    """Small real baseline -> reserved -> defective publication for C1-P state tests."""
+    root, _, _ = template
+    seed, ledger, admission, _, _, _ = _certified_successor_fixture(tmp_path, monkeypatch, template)
+    head0, baseline0 = ledger.resolve()
+    assert baseline0.inventory is not None
+    head0_digest = ledger._head_digest()
+    assert head0_digest is not None
+    head0_ref = reconciliation_file_reference(
+        ledger.state / f"reconciliation-head.{head0_digest}.json", "control"
+    )
+    old_admission = MaintenanceResourceReceipt.model_validate_json(
+        (root / "previous-admission.json").read_bytes()
+    )
+    previous_cut = FrozenSourceCut.model_validate_json((root / "previous-cut.json").read_bytes())
+    previous_reservation = migration_module._SuccessorReservation.model_validate_json(
+        (
+            ledger.state / f"progress-successor-reservation.{previous_cut.operation_id}.json"
+        ).read_bytes()
+    )
+    h1_cut = previous_cut.model_copy(update={"operation_id": uuid4()})
+    owner = CutOwner(
+        source_session=previous_reservation.source_session,
+        pid=old_admission.pid,
+        start_ticks=old_admission.process_start_ticks,
+        boot_id=old_admission.boot_id,
+        cgroup=old_admission.cgroup_path,
+    )
+    now = datetime.now(UTC)
+    admission_ref = reconciliation_file_reference(root / "previous-admission.json", "resource")
+
+    def small(name: str, document: object, role: str = "control") -> ReconciliationFileReference:
+        path = tmp_path / name
+        path.write_text(json.dumps(document, sort_keys=True) + "\n")
+        return reconciliation_file_reference(path, role)
+
+    def cert_ref(cert: ProgressReconciliationV2) -> ReconciliationFileReference:
+        document = canonical_json_bytes(cert) + b"\n"
+        path = ledger.state / (
+            f"progress-generation.{cert.generation_id}.{sha256_hex(document)}.json"
+        )
+        WorkspaceV2ProgressReconciler._write_once(path, document)
+        return reconciliation_file_reference(path, "control")
+
+    def head_document(head: ReconciliationHead) -> bytes:
+        return canonical_json_bytes(head) + b"\n"
+
+    def archive_head(document: bytes) -> ReconciliationFileReference:
+        digest = sha256_hex(document)
+        path = ledger.state / f"reconciliation-head.{digest}.json"
+        WorkspaceV2ProgressReconciler._write_once(path, document)
+        return reconciliation_file_reference(path, "control")
+
+    def point_head(document: bytes) -> None:
+        temporary = ledger.head_path.with_name(f".reconciliation-head.{uuid4().hex}.tmp")
+        try:
+            WorkspaceV2ProgressReconciler._write_once(temporary, document)
+            os.replace(temporary, ledger.head_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    reserved_cert = baseline0.model_copy(
+        update={
+            "previous_certificate": head0.certificate,
+            "reserved_successor": h1_cut,
+            "successor_owner": owner,
+            "successor_admission": admission_ref,
+            "recorded_at": now,
+        }
+    )
+    ProgressReconciliationV2.model_validate(reserved_cert.model_dump())
+    reserved_cert_ref = cert_ref(reserved_cert)
+    reserved_head = ReconciliationHead(
+        root=ledger.root,
+        workspace_id=ledger.identity.workspace_id,
+        generation_id=baseline0.generation_id,
+        ordinal=baseline0.ordinal,
+        certificate=reserved_cert_ref,
+        last_event=head0.last_event,
+        previous_head_sha256=head0_digest,
+        recorded_at=now,
+    )
+    reserved_document = head_document(reserved_head)
+    reserved_head_ref = archive_head(reserved_document)
+    reserved_head_digest = sha256_hex(reserved_document)
+
+    coverage = SuccessorCoverageProof(
+        successor=h1_cut,
+        baseline_dataset_sha256=baseline0.inventory.dataset_sha256,
+        covered_metric_count=baseline0.inventory.metric_count,
+        covered_diagnostic_count=baseline0.inventory.diagnostic_count,
+        comparison_sha256="a" * 64,
+        verifier_tree_fingerprint="e" * 64,
+        verified_at=now,
+    )
+    defective_cert = reserved_cert.model_copy(
+        update={
+            "phase": "SUCCESSOR_BOUND",
+            "previous_certificate": reserved_cert_ref,
+            "coverage": coverage,
+            "recorded_at": now,
+        }
+    )
+    with pytest.raises(ValueError, match="generation successor coverage differs"):
+        ProgressReconciliationV2.model_validate_json(canonical_json_bytes(defective_cert) + b"\n")
+    defective_cert_ref = cert_ref(defective_cert)
+    defective_head = ReconciliationHead(
+        root=ledger.root,
+        workspace_id=ledger.identity.workspace_id,
+        generation_id=baseline0.generation_id,
+        ordinal=baseline0.ordinal,
+        certificate=defective_cert_ref,
+        last_event=head0.last_event,
+        previous_head_sha256=reserved_head_digest,
+        recorded_at=now,
+    )
+    defective_document = head_document(defective_head)
+    defective_head_ref = archive_head(defective_document)
+    defect_digest = sha256_hex(defective_document)
+    point_head(defective_document)
+
+    reservation = migration_module._SuccessorReservation(
+        reconciliation_id=baseline0.generation_id,
+        successor=h1_cut,
+        source_session=owner.source_session,
+        baseline=head0.certificate,
+        baseline_dataset_sha256=baseline0.inventory.dataset_sha256,
+        module_sha256=sha256_hex(Path(migration_module.__file__).read_bytes()),
+        resource_receipt=admission_ref,
+        verifier_compatibility=None,
+        recorded_at=now,
+    )
+    reservation_path = ledger.state / (f"progress-successor-reservation.{h1_cut.operation_id}.json")
+    WorkspaceV2ProgressReconciler._write_once(
+        reservation_path, canonical_json_bytes(reservation) + b"\n"
+    )
+    reservation_ref = reconciliation_file_reference(reservation_path, "control")
+    source_bindings = small(
+        "publication-repair-source-bindings.json",
+        {"files": {}, "code_sha": "b" * 40},
+    )
+    archived_code = small("publication-repair-archived-code.py", "archived verifier\n", "code")
+    request = LedgerPublicationRepairInput(
+        repair_id=uuid4(),
+        source_root=baseline0.source_root,
+        source_workspace_id=baseline0.source_workspace_id,
+        destination_root=ledger.root,
+        destination_workspace_id=ledger.identity.workspace_id,
+        generation_id=baseline0.generation_id,
+        ordinal=baseline0.ordinal,
+        revoked_attempt_id=h1_cut.operation_id,
+        expected_head_sha256=defect_digest,
+        invalid_head=defective_head_ref,
+        invalid_certificate=ReconciliationGenerationReference(
+            schema_type="workspace-v2-progress-reconciliation-v2",
+            artifact=defective_cert_ref,
+        ),
+        superseded_branch=(
+            LedgerPublicationRepairGeneration(
+                head=defective_head_ref,
+                certificate=ReconciliationGenerationReference(
+                    schema_type="workspace-v2-progress-reconciliation-v2",
+                    artifact=defective_cert_ref,
+                ),
+            ),
+            LedgerPublicationRepairGeneration(
+                head=reserved_head_ref,
+                certificate=ReconciliationGenerationReference(
+                    schema_type="workspace-v2-progress-reconciliation-v2",
+                    artifact=reserved_cert_ref,
+                ),
+            ),
+        ),
+        retained_baseline_head=head0_ref,
+        retained_baseline_certificate=ReconciliationGenerationReference(
+            schema_type="workspace-v2-progress-reconciliation-v2",
+            artifact=head0.certificate,
+        ),
+        reservation=reservation_ref,
+        frozen_cut=small("publication-repair-frozen-cut.json", h1_cut.model_dump(mode="json")),
+        cut_window=small("publication-repair-cut-window.json", {"phase": "HEALTHY_V1"}),
+        terminal_receipt=small("publication-repair-terminal-receipt.json", {"phase": "HEALTHY_V1"}),
+        owner_absence=small("publication-repair-owner-absence.json", {"owner_absent": True}),
+        no_activation=small("publication-repair-no-activation.json", {"v2_active": False}),
+        exclusivity=small(
+            "publication-repair-exclusivity.json", {"other_live_reservations": False}
+        ),
+        source_bindings=source_bindings,
+        archived_code=(archived_code,),
+        environment=small(
+            "publication-repair-environment.json",
+            {
+                "environment_fingerprint": baseline0.environment_fingerprint,
+                "code_sha": "b" * 40,
+            },
+        ),
+        database=baseline0.database,
+        wal=None,
+        admission=admission_ref,
+        producer=source_bindings,
+        recorded_at=now,
+    )
+    intent_path = tmp_path / "publication-repair-intent.json"
+    intent_path.write_text(json.dumps(request.model_dump(mode="json"), sort_keys=True) + "\n")
+    intent_ref = reconciliation_file_reference(intent_path, "control")
+    return {
+        "seed": seed,
+        "ledger": ledger,
+        "admission": admission,
+        "baseline": baseline0,
+        "head0": head0,
+        "head0_digest": head0_digest,
+        "head0_ref": head0_ref,
+        "reserved_head_ref": reserved_head_ref,
+        "reserved_head_digest": reserved_head_digest,
+        "reserved_cert_ref": reserved_cert_ref,
+        "defective_head_ref": defective_head_ref,
+        "defective_cert_ref": defective_cert_ref,
+        "defect_digest": defect_digest,
+        "reservation_ref": reservation_ref,
+        "reservation_path": reservation_path,
+        "request": request,
+        "intent": intent_ref,
+        "previous_cut": h1_cut,
+        "reserved_cert": reserved_cert,
+        "defective_cert": defective_cert,
+    }
+
+
+def test_publication_repair_resumes_after_receipt_before_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certified_successor_template: tuple[Path, Path, tuple],
+) -> None:
+    state = _publication_repair_fixture(tmp_path, monkeypatch, certified_successor_template)
+    ledger = state["ledger"]
+    request = state["request"]
+    intent_ref = state["intent"]
+    baseline = state["baseline"]
+    assert isinstance(ledger, object)
+    assert isinstance(request, LedgerPublicationRepairInput)
+    assert isinstance(intent_ref, ReconciliationFileReference)
+    assert isinstance(baseline, ProgressReconciliationV2)
+    originals = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (
+            ledger.state / f"reconciliation-head.{state['head0_digest']}.json",
+            ledger.state / f"reconciliation-head.{state['reserved_head_digest']}.json",
+            ledger.state / f"reconciliation-head.{state['defect_digest']}.json",
+            state["reserved_cert_ref"].path,
+            state["defective_cert_ref"].path,
+            state["reservation_path"],
+            ledger.root / "storage/v2/index.duckdb",
+        )
+    }
+    original_write_once = WorkspaceV2ProgressReconciler._write_once
+
+    def injected(path: Path, document: bytes) -> None:
+        if path.name.startswith("reconciliation-head.") and not path.name.startswith(
+            ".reconciliation-head."
+        ):
+            raise RuntimeError("injected crash after durable receipt")
+        original_write_once(path, document)
+
+    monkeypatch.setattr(WorkspaceV2ProgressReconciler, "_write_once", staticmethod(injected))
+    with (
+        _reconciliation_lock(ledger.state),
+        _v2_writer_guard(ledger.root),
+        pytest.raises(RuntimeError, match="injected crash"),
+    ):
+        ledger._publish_publication_repair(
+            request,
+            intent_ref=intent_ref,
+            baseline=baseline,
+            dry_run=False,
+        )
+    monkeypatch.setattr(
+        WorkspaceV2ProgressReconciler, "_write_once", staticmethod(original_write_once)
+    )
+    receipts = list(ledger.state.glob(f"publication-repair.{request.repair_id}.*.json"))
+    assert len(receipts) == 1
+    receipt = LedgerPublicationRepairReceipt.model_validate_json(receipts[0].read_bytes())
+    receipt_ref = reconciliation_file_reference(receipts[0], "control")
+    assert receipt.request == request
+    assert receipt.intent == intent_ref
+    assert ledger._head_digest() == request.expected_head_sha256
+    assert ledger.attempt_invalidated(request.revoked_attempt_id)
+    with pytest.raises((WorkspaceV2InventoryError, ValueError)):
+        ledger.resolve()
+    with _reconciliation_lock(ledger.state), _v2_writer_guard(ledger.root):
+        result = ledger._publish_publication_repair(
+            request,
+            intent_ref=intent_ref,
+            baseline=baseline,
+            dry_run=False,
+        )
+    assert result["dry_run"] is False
+    assert result["head"]["previous_head_sha256"] == request.expected_head_sha256
+    assert result["head"][
+        "certificate"
+    ] == request.retained_baseline_certificate.artifact.model_dump(mode="json")
+    assert result["head"]["publication_repair"] == receipt_ref.model_dump(mode="json")
+    assert result["head"]["recorded_at"] == receipt.model_dump(mode="json")["recorded_at"]
+    assert result["head_sha256"] == ledger._head_digest()
+    resolved_head, resolved_baseline = ledger.resolve()
+    assert resolved_head.publication_repair == receipt_ref
+    assert resolved_baseline.phase == "BASELINE_VERIFIED"
+    assert resolved_baseline.reserved_successor is None
+    assert ledger.attempt_invalidated(request.revoked_attempt_id)
+    for path, digest in originals.items():
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+    state_before = {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()}
+    with _reconciliation_lock(ledger.state), _v2_writer_guard(ledger.root):
+        replay = ledger._publish_publication_repair(
+            request,
+            intent_ref=intent_ref,
+            baseline=baseline,
+            dry_run=False,
+        )
+    assert replay["idempotent"] is True
+    assert replay["head_sha256"] == result["head_sha256"]
+    state_after = {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()}
+    assert state_before == state_after
+
+
+def test_publication_repair_happy_path_dry_run_reopen_and_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certified_successor_template: tuple[Path, Path, tuple],
+) -> None:
+    state = _publication_repair_fixture(tmp_path, monkeypatch, certified_successor_template)
+    ledger = state["ledger"]
+    request = state["request"]
+    intent_ref = state["intent"]
+    baseline = state["baseline"]
+    assert isinstance(request, LedgerPublicationRepairInput)
+    assert isinstance(intent_ref, ReconciliationFileReference)
+    assert isinstance(baseline, ProgressReconciliationV2)
+    before_head = ledger._head_digest()
+    with _reconciliation_lock(ledger.state), _v2_writer_guard(ledger.root):
+        dry = ledger._publish_publication_repair(
+            request,
+            intent_ref=intent_ref,
+            baseline=baseline,
+            dry_run=True,
+        )
+    assert dry["dry_run"] is True
+    assert ledger._head_digest() == before_head
+    assert not list(ledger.state.glob(f"publication-repair.{request.repair_id}.*.json"))
+    with _reconciliation_lock(ledger.state), _v2_writer_guard(ledger.root):
+        live = ledger._publish_publication_repair(
+            request,
+            intent_ref=intent_ref,
+            baseline=baseline,
+            dry_run=False,
+        )
+    assert live["dry_run"] is False
+    assert ledger._head_digest() == live["head_sha256"]
+    resolved_head, resolved_baseline = ledger.resolve()
+    assert resolved_head.publication_repair is not None
+    assert resolved_baseline.phase == "BASELINE_VERIFIED"
+    assert resolved_baseline.reserved_successor is None
+    before = {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()}
+    with _reconciliation_lock(ledger.state), _v2_writer_guard(ledger.root):
+        replay = ledger._publish_publication_repair(
+            request,
+            intent_ref=intent_ref,
+            baseline=baseline,
+            dry_run=False,
+        )
+    assert replay["idempotent"] is True
+    assert replay["head_sha256"] == live["head_sha256"]
+    after = {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()}
+    assert before == after
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    (
+        "before_receipt",
+        "after_receipt",
+        "after_history",
+        "before_replace",
+        "after_replace",
+    ),
+)
+def test_publication_repair_resumes_at_each_durable_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certified_successor_template: tuple[Path, Path, tuple],
+    boundary: str,
+) -> None:
+    state = _publication_repair_fixture(tmp_path, monkeypatch, certified_successor_template)
+    ledger = state["ledger"]
+    request = state["request"]
+    intent_ref = state["intent"]
+    baseline = state["baseline"]
+    assert isinstance(request, LedgerPublicationRepairInput)
+    assert isinstance(intent_ref, ReconciliationFileReference)
+    assert isinstance(baseline, ProgressReconciliationV2)
+    original_write = WorkspaceV2ProgressReconciler._write_once
+    original_replace = inventory_module.os.replace
+
+    def fail_write(path: Path, document: bytes) -> None:
+        if boundary == "before_receipt" and path.name.startswith("publication-repair."):
+            raise RuntimeError(f"injected at {boundary}")
+        if (
+            boundary == "after_receipt"
+            and path.name.startswith("reconciliation-head.")
+            and not path.name.startswith(".reconciliation-head.")
+        ):
+            raise RuntimeError(f"injected at {boundary}")
+        if boundary == "after_history" and path.name.startswith(".reconciliation-head."):
+            raise RuntimeError(f"injected at {boundary}")
+        original_write(path, document)
+
+    def fail_replace(source: object, target: object) -> None:
+        raise RuntimeError(f"injected at {boundary}")
+
+    def replace_then_fail(source: object, target: object) -> None:
+        original_replace(source, target)
+        raise RuntimeError(f"injected at {boundary}")
+
+    if boundary in {"before_receipt", "after_receipt", "after_history"}:
+        monkeypatch.setattr(WorkspaceV2ProgressReconciler, "_write_once", staticmethod(fail_write))
+    if boundary == "before_replace":
+        monkeypatch.setattr(inventory_module.os, "replace", fail_replace)
+    if boundary == "after_replace":
+        monkeypatch.setattr(inventory_module.os, "replace", replace_then_fail)
+    with (
+        _reconciliation_lock(ledger.state),
+        _v2_writer_guard(ledger.root),
+        pytest.raises(RuntimeError, match=boundary),
+    ):
+        ledger._publish_publication_repair(
+            request,
+            intent_ref=intent_ref,
+            baseline=baseline,
+            dry_run=False,
+        )
+    monkeypatch.setattr(WorkspaceV2ProgressReconciler, "_write_once", staticmethod(original_write))
+    monkeypatch.setattr(inventory_module.os, "replace", original_replace)
+    receipts = list(ledger.state.glob(f"publication-repair.{request.repair_id}.*.json"))
+    if boundary == "before_receipt":
+        assert not receipts
+        assert ledger._head_digest() == state["defect_digest"]
+        assert not ledger.attempt_invalidated(request.revoked_attempt_id)
+    else:
+        assert len(receipts) == 1
+        assert ledger.attempt_invalidated(request.revoked_attempt_id)
+        if boundary == "after_replace":
+            assert ledger._head_digest() != state["defect_digest"]
+        else:
+            assert ledger._head_digest() == state["defect_digest"]
+    with _reconciliation_lock(ledger.state), _v2_writer_guard(ledger.root):
+        resumed = ledger._publish_publication_repair(
+            request,
+            intent_ref=intent_ref,
+            baseline=baseline,
+            dry_run=False,
+        )
+    assert resumed["head_sha256"] == ledger._head_digest()
+    resolved_head, resolved_baseline = ledger.resolve()
+    assert resolved_head.publication_repair is not None
+    assert resolved_baseline.phase == "BASELINE_VERIFIED"
+    assert ledger.attempt_invalidated(request.revoked_attempt_id)
+    for path in (
+        ledger.state / f"reconciliation-head.{state['head0_digest']}.json",
+        ledger.state / f"reconciliation-head.{state['reserved_head_digest']}.json",
+        ledger.state / f"reconciliation-head.{state['defect_digest']}.json",
+        state["reserved_cert_ref"].path,
+        state["defective_cert_ref"].path,
+        state["reservation_path"],
+        ledger.root / "storage/v2/index.duckdb",
+    ):
+        assert path.is_file()
+
+
+def test_publication_repair_new_successor_preserves_bridge_without_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certified_successor_template: tuple[Path, Path, tuple],
+) -> None:
+    state = _publication_repair_fixture(tmp_path, monkeypatch, certified_successor_template)
+    ledger = state["ledger"]
+    request = state["request"]
+    intent_ref = state["intent"]
+    baseline = state["baseline"]
+    assert isinstance(request, LedgerPublicationRepairInput)
+    assert isinstance(intent_ref, ReconciliationFileReference)
+    assert isinstance(baseline, ProgressReconciliationV2)
+    with _reconciliation_lock(ledger.state), _v2_writer_guard(ledger.root):
+        repaired = ledger._publish_publication_repair(
+            request,
+            intent_ref=intent_ref,
+            baseline=baseline,
+            dry_run=False,
+        )
+    head3, _ = ledger.resolve()
+    assert head3.publication_repair is not None
+    now = datetime.now(UTC)
+    new_cut = FrozenSourceCut(
+        operation_id=uuid4(),
+        source_root=baseline.source_root,
+        workspace_id=baseline.source_workspace_id,
+        created_at=baseline.source_created_at,
+        frozen_at=now,
+        source_fingerprint="f" * 64,
+        workspace_format_version=1,
+        writer_closed=True,
+    )
+    new_owner = CutOwner(
+        source_session=uuid4(),
+        pid=state["admission"].pid,
+        start_ticks=state["admission"].process_start_ticks,
+        boot_id=state["admission"].boot_id,
+        cgroup=state["admission"].cgroup_path,
+    )
+    h4_cert = baseline.model_copy(
+        update={
+            "previous_certificate": head3.certificate,
+            "reserved_successor": new_cut,
+            "successor_owner": new_owner,
+            "successor_admission": request.admission,
+            "recorded_at": now,
+        }
+    )
+    ProgressReconciliationV2.model_validate(h4_cert.model_dump())
+    h4_document = canonical_json_bytes(h4_cert) + b"\n"
+    h4_path = ledger.state / (
+        f"progress-generation.{h4_cert.generation_id}.{sha256_hex(h4_document)}.json"
+    )
+    WorkspaceV2ProgressReconciler._write_once(h4_path, h4_document)
+    h4_cert_ref = reconciliation_file_reference(h4_path, "control")
+    head3_digest = ledger._head_digest()
+    assert head3_digest is not None
+    h4_head = ReconciliationHead(
+        root=ledger.root,
+        workspace_id=ledger.identity.workspace_id,
+        generation_id=baseline.generation_id,
+        ordinal=baseline.ordinal,
+        certificate=h4_cert_ref,
+        last_event=head3.last_event,
+        previous_head_sha256=head3_digest,
+        recorded_at=now,
+    )
+    h4_head_document = canonical_json_bytes(h4_head) + b"\n"
+    h4_digest = sha256_hex(h4_head_document)
+    WorkspaceV2ProgressReconciler._write_once(
+        ledger.state / f"reconciliation-head.{h4_digest}.json", h4_head_document
+    )
+    temporary = ledger.head_path.with_name(f".reconciliation-head.{uuid4().hex}.tmp")
+    try:
+        WorkspaceV2ProgressReconciler._write_once(temporary, h4_head_document)
+        os.replace(temporary, ledger.head_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    resolved_head, resolved_baseline = ledger.resolve()
+    assert resolved_head == h4_head
+    assert resolved_baseline.reserved_successor == new_cut
+    before = {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()}
+    with (
+        _reconciliation_lock(ledger.state),
+        _v2_writer_guard(ledger.root),
+        pytest.raises(WorkspaceV2InventoryError, match="head differs"),
+    ):
+        ledger._publish_publication_repair(
+            request,
+            intent_ref=intent_ref,
+            baseline=baseline,
+            dry_run=False,
+        )
+    after = {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()}
+    assert before == after
+    assert ledger._head_digest() == h4_digest
+    assert ledger.resolve()[0] == h4_head
+    assert ledger.attempt_invalidated(request.revoked_attempt_id)
+    assert repaired["head_sha256"] == head3_digest
+
+
+def test_publication_repair_rejects_foreign_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certified_successor_template: tuple[Path, Path, tuple],
+) -> None:
+    state = _publication_repair_fixture(tmp_path, monkeypatch, certified_successor_template)
+    ledger = state["ledger"]
+    request = state["request"]
+    intent_ref = state["intent"]
+    baseline = state["baseline"]
+    assert isinstance(request, LedgerPublicationRepairInput)
+    assert isinstance(intent_ref, ReconciliationFileReference)
+    assert isinstance(baseline, ProgressReconciliationV2)
+    with _reconciliation_lock(ledger.state), _v2_writer_guard(ledger.root):
+        ledger._publish_publication_repair(
+            request,
+            intent_ref=intent_ref,
+            baseline=baseline,
+            dry_run=False,
+        )
+    head = ledger._head_digest()
+    before = {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()}
+    foreign = request.model_copy(update={"repair_id": uuid4()})
+    with (
+        _reconciliation_lock(ledger.state),
+        _v2_writer_guard(ledger.root),
+        pytest.raises(WorkspaceV2InventoryError),
+    ):
+        ledger._publish_publication_repair(
+            foreign,
+            intent_ref=intent_ref,
+            baseline=baseline,
+            dry_run=False,
+        )
+    after = {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()}
+    assert before == after
+    assert ledger._head_digest() == head
+
+
+def test_publication_repair_rejects_tampered_head_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certified_successor_template: tuple[Path, Path, tuple],
+) -> None:
+    state = _publication_repair_fixture(tmp_path, monkeypatch, certified_successor_template)
+    ledger = state["ledger"]
+    request = state["request"]
+    intent_ref = state["intent"]
+    baseline = state["baseline"]
+    assert isinstance(request, LedgerPublicationRepairInput)
+    assert isinstance(intent_ref, ReconciliationFileReference)
+    assert isinstance(baseline, ProgressReconciliationV2)
+    original_write = WorkspaceV2ProgressReconciler._write_once
+
+    def stop_after_receipt(path: Path, document: bytes) -> None:
+        if path.name.startswith("reconciliation-head.") and not path.name.startswith(
+            ".reconciliation-head."
+        ):
+            raise RuntimeError("stop after receipt")
+        original_write(path, document)
+
+    monkeypatch.setattr(
+        WorkspaceV2ProgressReconciler, "_write_once", staticmethod(stop_after_receipt)
+    )
+    with (
+        _reconciliation_lock(ledger.state),
+        _v2_writer_guard(ledger.root),
+        pytest.raises(RuntimeError, match="stop after receipt"),
+    ):
+        ledger._publish_publication_repair(
+            request,
+            intent_ref=intent_ref,
+            baseline=baseline,
+            dry_run=False,
+        )
+    monkeypatch.setattr(WorkspaceV2ProgressReconciler, "_write_once", staticmethod(original_write))
+    receipts = list(ledger.state.glob(f"publication-repair.{request.repair_id}.*.json"))
+    assert len(receipts) == 1
+    receipt = LedgerPublicationRepairReceipt.model_validate_json(receipts[0].read_bytes())
+    receipt_ref = reconciliation_file_reference(receipts[0], "control")
+    head = ledger._publication_repair_head(
+        request,
+        receipt,
+        receipt_ref,
+        baseline,
+        root=ledger.root,
+        workspace_id=ledger.identity.workspace_id,
+    )
+    digest = sha256_hex(canonical_json_bytes(head) + b"\n")
+    tampered = head.model_copy(update={"recorded_at": receipt.recorded_at + timedelta(seconds=1)})
+    workspace_path = ledger.state / f"reconciliation-head.{digest}.json"
+    WorkspaceV2ProgressReconciler._write_once(
+        workspace_path, canonical_json_bytes(tampered) + b"\n"
+    )
+    with (
+        _reconciliation_lock(ledger.state),
+        _v2_writer_guard(ledger.root),
+        pytest.raises(WorkspaceV2InventoryError, match="history differs"),
+    ):
+        ledger._publish_publication_repair(
+            request,
+            intent_ref=intent_ref,
+            baseline=baseline,
+            dry_run=False,
+        )
+    assert ledger._head_digest() == state["defect_digest"]
+    assert ledger.attempt_invalidated(request.revoked_attempt_id)
+
+
+def test_publication_repair_normal_publish_rejects_invalid_model_copy_before_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certified_successor_template: tuple[Path, Path, tuple],
+) -> None:
+    state = _publication_repair_fixture(tmp_path, monkeypatch, certified_successor_template)
+    ledger = state["ledger"]
+    request = state["request"]
+    baseline = state["baseline"]
+    assert isinstance(request, LedgerPublicationRepairInput)
+    assert isinstance(baseline, ProgressReconciliationV2)
+    defective = state["defective_cert"]
+    assert isinstance(defective, ProgressReconciliationV2)
+    before_head = ledger._head_digest()
+    before_certificates = set(ledger.state.glob("progress-generation.*.json"))
+    with pytest.raises(ValueError, match="generation successor coverage differs"):
+        ledger.publish(
+            defective,
+            expected_head_sha256=request.expected_head_sha256,
+            admission=state["admission"],
+        )
+    assert ledger._head_digest() == before_head
+    assert set(ledger.state.glob("progress-generation.*.json")) == before_certificates
+
+
+def test_publication_repair_rejects_retained_certificate_in_branch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certified_successor_template: tuple[Path, Path, tuple],
+) -> None:
+    state = _publication_repair_fixture(tmp_path, monkeypatch, certified_successor_template)
+    request = state["request"]
+    assert isinstance(request, LedgerPublicationRepairInput)
+    invalid, reserved = request.superseded_branch
+    bad = request.model_copy(
+        update={
+            "superseded_branch": (
+                invalid,
+                reserved.model_copy(update={"certificate": request.retained_baseline_certificate}),
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="overlaps the retained baseline"):
+        LedgerPublicationRepairInput.model_validate(bad.model_dump())

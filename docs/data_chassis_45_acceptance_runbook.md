@@ -1,6 +1,44 @@
 # DATA-CHASSIS-45: operación y aceptación
 
-Registro versionado del incidente y límites del diagnóstico: [INC-DC45-WSL-20261016](incidents/data_chassis_45_wsl_spill_20261016.md). Autoridad operativa: #345 actualizado 2026-10-19T19:53:20Z; manifest `9bcfad4eb3c66824d873f7729126c26aa09e9cf5a7d220fa0c49c658a6720a51`. Secuencia restante exclusiva E4a→E4b→E4c→E5→E6. E0–E3 acreditados: no repetir. R0–R7/P0–P5 y las recetas anteriores se conservan como antecedentes.
+Registro versionado del incidente y límites del diagnóstico: [INC-DC45-WSL-20261016](incidents/data_chassis_45_wsl_spill_20261016.md). Autoridad operativa: #345 actualizado 2026-10-20T01:43:24Z; manifest `34e573472f9ca1752a5a8c18b7c36d2e9a39997a7d1d361e993131f81ff5cf9f`. Secuencia restante exclusiva E4b-P→E4b-C→E4b-R→E4c→E5→E6. E0–E4a y W2 acreditados: no repetir. R0–R7/P0–P5 y las recetas anteriores se conservan como antecedentes.
+
+## Actualización 2026-10-20 — C1-P P.1–P.3 probado; matriz E5 preparada
+
+- **Target vivo:** #345 único `workflow:active`; base `dbbdfd021b0fee20be31b2d2a845874b0e861067`; branch `codex/data-chassis-45`; PR #346 draft; HEAD `5d6799c6d7190e8aac418d4c778e5af714754f9c` más C1-P/P.1–P.3 local (3 fuentes, 2 tests, este runbook), sin commit ni CI todavía. El handoff untracked sigue fuera de publicación.
+- **Estado vivo:** v1 PID `80515`, overview/candidates HTTP 200/200; mantenimiento inactivo. El head defectuoso `b033…/7cba8e…`, la reserva `15220…`, comparison/work/new-index y originales están preservados; no existe receipt/head de reparación y la DB sigue `fd18cb94…`/2.166.632.448 B. El dry-run real previo del `repair_publication` completo fue PASS con v1 activo, sin writes al ledger; el código cambió después, por lo que E4b-R exige dry-run fresco y reparación real.
+- **E4b-P.1 RED real:** segunda llamada con receipt durable y head original lanzó `publication repair head is inconsistent`. **P.2** distingue: sin receipt+head esperado → crea; receipt+head esperado → recuperación pendiente con mismo receipt/recorded_at/head byte-exact y CAS; receipt+head reparado exacto → idempotente sin writes; cualquier otro head → rechazo sin mutación. **P.1 GREEN.**
+- **E4b-P.3:** `test_workspace_v2_inventory_unit.py -k publication_repair` **11 passed** (dry-run/replay, before/after receipt, after history, before/after replace, descendiente, receipt ajeno, historia manipulada y publish inválido antes de artefactos); CLI parser/dry-run **1 passed**. La integración real obligatoria del `repair_publication` completo será E4b-R sobre la cadena real; el dry-run anterior no acredita este código.
+- **E5 matrix fija (derivada del metadata W2, no de tests):**
+  - `required_families = ("cazatiburones","crypto","fundamental","market","valuation")`.
+  - `required_job_pairs` = los **82** pares `(family, asset_id)` distintos de `workspace_metric_results_v2`: `cazatiburones` × {aapl, amd, cat, cde, cvx, hymc, intc, msft, mstr, mu, mux, nem, nvda, pltr, scco, tsm}; `crypto` × {btc-usd, eth-usd}; `fundamental` × {aapl, amd, amzn, b, bvn, cat, cde, cvx, hymc, intc, jnj, msft, mstr, mu, mux, nem, nvda, pltr, scco, tsm}; `market` × {crypto:ada-usd, crypto:btc-usd, crypto:eth-usd, crypto:link-usd, crypto:sol-usd; equity:us:aapl, equity:us:amd, equity:us:amzn, equity:us:b, equity:us:bvn, equity:us:cat, equity:us:cde, equity:us:cvx, equity:us:hymc, equity:us:intc, equity:us:jnj, equity:us:msft, equity:us:mstr, equity:us:mu, equity:us:mux, equity:us:nem, equity:us:nvda, equity:us:pltr, equity:us:scco, equity:us:tsm; etf:us:gbtc, etf:us:gld, etf:us:ibit, etf:us:qqq, etf:us:spy, etf:us:tlt}; `valuation` × {aapl, amd, amzn, cat, cde, hymc, intc, msft, mu, mux, nem, nvda, pltr}.
+  - `required_memory_scenarios = ("ordinary","same_inputs")`; `required_gates = REQUIRED_GATES` completo: `full_incremental_decimal`, `revision_invalidation`, `pit_isolation`, `bounded_pages`, `features_explanation`, `f_core_operational_equivalence`, `f_recovery`, `compatible_rollback`, `immutable_drive`, `runtime_identity`, `operational_continuity`, `retirement_coverage`.
+- **Matriz Q/gate:** todas las filas usan el MISMO F/v2 activo y los MISMOS dos intentos Q4-F; el colector queda fuera de Q5.
+
+| Q | Input/ref | Productor/runtime+carga | Comando | Consumidor | Falta |
+| --- | --- | --- | --- | --- | --- |
+| Q1 | `workspace_comparison` active_workspace, refs v1/v2 | inventario real v1 y v2; misma unidad/representación | `acceptance` (input final) | Q1 | v2 activo, `activated_at`, F |
+| Q2 | `payload_comparisons` para las 5 familias | compact/raw payloads reales por familia; linaje compartido una vez | `acceptance` | Q2 | v2 activo y refs de payload |
+| Q3 | `funding_comparison` `funding_with_lineage` | subconjunto funding real dentro de `crypto` | `acceptance` | Q3 | v2 activo y refs funding |
+| Q4 | `ordinary_batches` ordinary+same_inputs, 82 pares | runtime v2/release44, jobs existentes; DB+WAL por frontera | jobs ordinary existentes, dos ciclos | Q4-F | v2 activo y dos intentos |
+| Q5 | `durations` 82 pares | mismos dos intentos; colector excluido | mismos jobs | Q5 | mismos intentos |
+| Q6 | `idempotence` 82 pares | mismos inputs/versiones/parámetros, reloj distinto | mismos jobs | Q6 | mismos intentos |
+| Q7 | `memory` ordinary+same_inputs | cgroup/runtime de los mismos intentos | mismos jobs | Q7 | mismos intentos |
+| full_incremental_decimal | gate + refs reales | runtime incremental/compact, ciclo ordinary v2 | `acceptance` | gate | intento real |
+| revision_invalidation | gate + refs | transición histórica/revisión existente | `acceptance` | gate | evidencia F nuevo |
+| pit_isolation | gate + refs | PIT/available_at del ciclo real | `acceptance` | gate | evidencia F nuevo |
+| bounded_pages | gate + refs | lector acotado 256/1MiB | `acceptance` | gate | evidencia F nuevo |
+| features_explanation | gate + refs | análisis/features/explain sobre snapshot v2 | `acceptance` | gate | v2 activo |
+| f_core_operational_equivalence | gate + refs | cutover/estado operacional E4c | `acceptance` | gate | E4c |
+| f_recovery | gate + refs | recovery/readback del MISMO F | `acceptance` | gate | E4c |
+| compatible_rollback | gate + refs | LocalReleaseService/release44 | `acceptance` | gate | E4c/activación |
+| immutable_drive | gate + refs | padre/delta remoto E1/E3 reutilizados | `acceptance` | gate | refs F nuevo |
+| runtime_identity | gate + refs | root/UUID/release/PID/boot/cgroup | `acceptance` | gate | activación |
+| operational_continuity | gate + refs | outbox/acks/estado de la MISMA sesión | `acceptance` | gate | E4c |
+| retirement_coverage | gate + refs | C5 por consumidor | `retire` | gate | E5/C5 |
+- **Comandos literales existentes:** `acceptance` con `--acceptance-input`, `--resource-budget`, `--output`; `retire` con el mismo input y `--retire-root`; retiros específicos `retire-owned-payload`/`retire-preparatory`/`preclean`; jobs ordinary del runtime v2/release44, sin backfill ni CLI nueva. La matriz no ejecuta lotes: sólo prepara inputs/refs/productores/consumidores y declara qué falta.
+- **Siguiente:** tanda focalizada de los tres módulos C1-P → commit/push de scope → CI exact-SHA; después E4b-R (dry-run fresco + reparación real con v1 activo), GO/único tercer corte y E5. No se declara PASS/READY.
+
+
 
 ## Actualización 2026-10-19T19:53Z — readiness/caché/C5 y segundo intento autorizado
 
