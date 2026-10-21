@@ -1560,6 +1560,26 @@ def _prepare_generation_from_revoked_head(
             raise MaintenancePhaseError("generation_continuation_invalidation_unsafe")
         event = CutInvalidation.model_validate_json(path.read_bytes())
         if (
+            event.attempt_id == attempt
+            and event.generation_id == args.operation_id
+            and event.certificate
+            == ReconciliationGenerationReference(
+                schema_type="workspace-v2-progress-reconciliation-v2",
+                artifact=head.certificate,
+            )
+            and event.reservation == reconciliation_file_reference(reservation_path, "control")
+            and event.owner == previous.successor_owner
+            and event.destination_root == args.destination
+            and event.destination_workspace_id == ledger.identity.workspace_id
+            and event.source_root == args.source
+            and event.source_workspace_id == source.workspace_id
+            and event.reason == "SESSION_ENDED"
+        ):
+            # Own continuation revocation from a crash before head publication.
+            # The intent/publish path revalidates it and records it as the new
+            # generation invalidation; it is never the revoked predecessor.
+            continue
+        if (
             event.attempt_id != attempt
             or event.generation_id != previous.generation_id
             or event.certificate
