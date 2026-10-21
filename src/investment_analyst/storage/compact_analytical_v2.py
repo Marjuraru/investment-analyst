@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     )
 
 _BATCH = 256
+_RELATIONSHIP_BUILD_BUCKETS = 8
 _QUERY_CHUNK = 240
 _ORIGINS = ("HISTORICAL", "LIVE")
 
@@ -2794,6 +2795,9 @@ class CompactAnalyticalStore:
         # Each segment is joined to its children once, independent of the number
         # of metrics/components sharing it. LEFT JOIN and explicit counts retain
         # missing segments/members/children instead of silently dropping them.
+        # Build the metadata in disjoint identity buckets: the global join and
+        # GROUP BY over millions of members otherwise exceed one admitted native
+        # instance. Buckets are unioned into the same exact temporary tables.
         projections: list[str] = []
         for predicate, target, key in (
             (
@@ -2816,37 +2820,50 @@ class CompactAnalyticalStore:
                 "max(CAST(child.available_at AS TIMESTAMPTZ)) latest_available "
                 f"FROM {_SEGMENT_TABLE} s LEFT JOIN {_SEGMENT_MEMBER_TABLE} m "
                 f"ON m.segment_id=s.segment_id LEFT JOIN {target} child ON child.{key}=m.member_id "
-                f"WHERE {predicate} GROUP BY s.segment_id,s.link_type,s.member_count"
+                f"WHERE ({predicate}) AND hash(s.segment_id) % ? = ? "
+                "AND (m.segment_id IS NULL OR hash(m.segment_id) % ? = ?) "
+                "GROUP BY s.segment_id,s.link_type,s.member_count"
             )
-        # Execute the two independent child-family aggregates sequentially.
-        # Their rows remain UNION ALL-equivalent, while their hash tables no
-        # longer have to coexist in the same admitted native query.
+        # Execute the two independent child-family aggregates sequentially and
+        # one bounded identity bucket at a time.
         for index, projection in enumerate(projections):
+            for bucket in range(_RELATIONSHIP_BUILD_BUCKETS):
+                self._relationship_sql(
+                    (
+                        "CREATE OR REPLACE TEMP TABLE _workspace_v2_reference_segments AS "
+                        if index == 0 and bucket == 0
+                        else "INSERT INTO _workspace_v2_reference_segments "
+                    )
+                    + projection,
+                    [_RELATIONSHIP_BUILD_BUCKETS, bucket, _RELATIONSHIP_BUILD_BUCKETS, bucket],
+                )
+        for bucket in range(_RELATIONSHIP_BUILD_BUCKETS):
             self._relationship_sql(
                 (
-                    "CREATE OR REPLACE TEMP TABLE _workspace_v2_reference_segments AS "
-                    if index == 0
-                    else "INSERT INTO _workspace_v2_reference_segments "
+                    "CREATE OR REPLACE TEMP TABLE _workspace_v2_reference_sequences AS "
+                    if bucket == 0
+                    else "INSERT INTO _workspace_v2_reference_sequences "
                 )
-                + projection
+                + "SELECT q.sequence_id,q.link_type,q.member_count, "
+                "count(l.segment_position) link_count,min(l.segment_position) first_link, "
+                "max(l.segment_position) last_link, "
+                "coalesce(sum(s.actual_members),0) actual_members, "
+                "coalesce(sum(s.covered_members),0) covered_members, "
+                "count(*) FILTER (WHERE l.segment_position IS NOT NULL AND "
+                "(s.segment_id IS NULL OR s.link_type<>q.link_type "
+                "OR s.actual_members<>s.member_count OR s.covered_members<>s.member_count "
+                "OR (s.member_count>0 AND (s.first_member<>0 OR "
+                "s.last_member<>s.member_count-1)))) "
+                "invalid_segments, min(s.first_asset) first_asset,max(s.last_asset) last_asset, "
+                "max(s.latest_available) latest_available "
+                f"FROM {_SEQUENCE_TABLE} q LEFT JOIN {_SEQUENCE_SEGMENT_TABLE} l "
+                "ON l.sequence_id=q.sequence_id LEFT JOIN _workspace_v2_reference_segments s "
+                "ON s.segment_id=l.segment_id "
+                "WHERE hash(q.sequence_id) % ? = ? "
+                "AND (l.sequence_id IS NULL OR hash(l.sequence_id) % ? = ?) "
+                "GROUP BY q.sequence_id,q.link_type,q.member_count",
+                [_RELATIONSHIP_BUILD_BUCKETS, bucket, _RELATIONSHIP_BUILD_BUCKETS, bucket],
             )
-        self._relationship_sql(
-            "CREATE OR REPLACE TEMP TABLE _workspace_v2_reference_sequences AS "
-            "SELECT q.sequence_id,q.link_type,q.member_count, "
-            "count(l.segment_position) link_count,min(l.segment_position) first_link, "
-            "max(l.segment_position) last_link, "
-            "coalesce(sum(s.actual_members),0) actual_members, "
-            "coalesce(sum(s.covered_members),0) covered_members, "
-            "count(*) FILTER (WHERE l.segment_position IS NOT NULL AND "
-            "(s.segment_id IS NULL OR s.link_type<>q.link_type "
-            "OR s.actual_members<>s.member_count OR s.covered_members<>s.member_count "
-            "OR (s.member_count>0 AND (s.first_member<>0 OR s.last_member<>s.member_count-1)))) "
-            "invalid_segments, min(s.first_asset) first_asset,max(s.last_asset) last_asset, "
-            "max(s.latest_available) latest_available "
-            f"FROM {_SEQUENCE_TABLE} q LEFT JOIN {_SEQUENCE_SEGMENT_TABLE} l "
-            "ON l.sequence_id=q.sequence_id LEFT JOIN _workspace_v2_reference_segments s "
-            "ON s.segment_id=l.segment_id GROUP BY q.sequence_id,q.link_type,q.member_count"
-        )
 
     def verify_historical_seal(self) -> HistoricalAnalyticalSeal | None:
         seal = self.historical_seal()
