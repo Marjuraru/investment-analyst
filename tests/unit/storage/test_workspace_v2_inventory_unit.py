@@ -56,6 +56,7 @@ from investment_analyst.workspace.workspace_v2_migration import (
     verify_recovered_successor,
 )
 from investment_analyst.workspace.workspace_v2_migration_models import (
+    CutInvalidation,
     CutOwner,
     CutWindow,
     CutWindowBound,
@@ -3641,17 +3642,47 @@ def test_comparison_measurement_is_read_only_unreserved_and_bound_to_current_inp
     assert not list((tmp_path / "measurement-source-temp").glob("recovered-core-index-*"))
 
 
-@pytest.mark.parametrize("additions,noncanonical", [(0, False), (1, False), (3, False), (0, True)])
+@pytest.mark.parametrize(
+    "additions,noncanonical,post_repair",
+    [(0, False, False), (1, False, False), (3, False, False), (0, True, False), (1, False, True)],
+)
 def test_certified_generation_reaches_real_incremental_financial_seal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     additions: int,
     noncanonical: bool,
+    post_repair: bool,
     certified_successor_template: tuple[Path, tuple],
 ) -> None:
-    seed, ledger, admission, parent_root, index, parent_manifest = _certified_successor_fixture(
-        tmp_path, monkeypatch, certified_successor_template
-    )
+    if post_repair:
+        repair_state = _publication_repair_fixture(
+            tmp_path, monkeypatch, certified_successor_template
+        )
+        seed = repair_state["seed"]
+        ledger = repair_state["ledger"]
+        admission = repair_state["admission"]
+        parent_root = repair_state["parent_root"]
+        index = repair_state["index"]
+        parent_manifest = repair_state["parent_manifest"]
+        request = repair_state["request"]
+        assert isinstance(ledger, inventory_module.WorkspaceV2GenerationLedger)
+        assert isinstance(request, LedgerPublicationRepairInput)
+        repair_admission = _publication_repair_admission(repair_state, request)
+        with (
+            maintenance_resource_budget(repair_admission.budget),
+            maintenance_execution(MaintenanceExecution(repair_admission.budget, lambda *_: None)),
+        ):
+            repaired = ledger.repair_publication(
+                request,
+                intent_path=repair_state["intent_path"],
+                admission=repair_admission,
+            )
+        assert repaired["dry_run"] is False
+        assert repaired["idempotent"] is False
+    else:
+        seed, ledger, admission, parent_root, index, parent_manifest = _certified_successor_fixture(
+            tmp_path, monkeypatch, certified_successor_template
+        )
     from investment_analyst.workspace.workspace_v2_migration_models import ProgressReconciliationV2
 
     baseline = ledger.resolve()[1]
@@ -4554,7 +4585,9 @@ def _publication_repair_fixture(
 ) -> dict[str, object]:
     """Small real baseline -> reserved -> defective publication for C1-P state tests."""
     root, _, _ = template
-    seed, ledger, admission, _, _, _ = _certified_successor_fixture(tmp_path, monkeypatch, template)
+    seed, ledger, admission, parent_root, index, parent_manifest = _certified_successor_fixture(
+        tmp_path, monkeypatch, template
+    )
     head0, baseline0 = ledger.resolve()
     assert baseline0.inventory is not None
     head0_digest = ledger._head_digest()
@@ -4983,6 +5016,9 @@ def _publication_repair_fixture(
         "comparison_path": comparison_path,
         "session_admission": session_admission,
         "session_budget": session_budget,
+        "parent_root": parent_root,
+        "index": index,
+        "parent_manifest": parent_manifest,
     }
 
 
@@ -5177,6 +5213,374 @@ def test_publication_repair_full_entrypoint_rejects_invalid_operation(
     assert ledger._head_digest() == before_head
     after = {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()}
     assert after == before
+
+
+def _successor_reservation_budget(
+    state: dict[str, object], operation: UUID, tmp_path: Path
+) -> MaintenanceResourceBudget:
+    budget = state["session_budget"]
+    assert isinstance(budget, MaintenanceResourceBudget)
+    assignments = tuple(
+        item.model_copy(
+            update={
+                "policy": item.policy.model_copy(
+                    update={"temp_directory": tmp_path / f"successor-temp-{index}"}
+                )
+            }
+        )
+        for index, item in enumerate(budget.assignments)
+    )
+    return budget.model_copy(update={"operation_id": operation, "assignments": assignments})
+
+
+def test_publication_repair_reserves_successor_through_public_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certified_successor_template: tuple[Path, Path, tuple],
+) -> None:
+    state = _publication_repair_fixture(tmp_path, monkeypatch, certified_successor_template)
+    seed = state["seed"]
+    ledger = state["ledger"]
+    request = state["request"]
+    baseline = state["baseline"]
+    intent_path = state["intent_path"]
+    session_admission = state["session_admission"]
+    assert isinstance(ledger, inventory_module.WorkspaceV2GenerationLedger)
+    assert isinstance(request, LedgerPublicationRepairInput)
+    assert isinstance(baseline, ProgressReconciliationV2)
+    assert isinstance(intent_path, Path)
+    assert isinstance(session_admission, MaintenanceResourceReceipt)
+    repair_admission = _publication_repair_admission(state, request)
+    with (
+        maintenance_resource_budget(repair_admission.budget),
+        maintenance_execution(MaintenanceExecution(repair_admission.budget, lambda *_: None)),
+    ):
+        repaired = ledger.repair_publication(
+            request, intent_path=intent_path, admission=repair_admission
+        )
+    assert repaired["dry_run"] is False
+    assert repaired["idempotent"] is False
+    reopened = inventory_module.WorkspaceV2GenerationLedger(seed.service, ledger.root)
+    repaired_head, repaired_baseline = reopened.resolve()
+    assert repaired_baseline.phase == "BASELINE_VERIFIED"
+    assert repaired_baseline.reserved_successor is None
+    repaired_head_sha = reopened._head_digest()
+    old_reservation_path = state["reservation_path"]
+    old_reservation = old_reservation_path.read_bytes()
+    baseline_certificate_path = state["head0"].certificate.path
+    baseline_certificate = baseline_certificate_path.read_bytes()
+    database = ledger.root / "storage/v2/index.duckdb"
+    database_sha256 = hashlib.sha256(database.read_bytes()).hexdigest()
+    operation = uuid4()
+    budget = _successor_reservation_budget(state, operation, tmp_path)
+    reservation_admission = session_admission.model_copy(
+        update={
+            "budget": budget,
+            "pid": os.getpid(),
+            "process_start_ticks": 1,
+            "boot_id": uuid4(),
+            "cgroup_path": Path("/fixture"),
+            "recorded_at": datetime.now(UTC),
+        }
+    )
+    admission_path = tmp_path / "successor-reservation-admission.json"
+    admission_path.write_text(reservation_admission.model_dump_json())
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(MaintenanceExecution(budget, lambda *_: None)),
+        quiescent_source_cut(seed.service, seed.source, operation_id=operation) as cut,
+    ):
+        reserved = reserve_recovered_successor(
+            service=seed.service,
+            destination_root=ledger.root,
+            reconciliation_id=baseline.generation_id,
+            frozen_source=cut,
+            admission_path=admission_path,
+        )
+        assert isinstance(reserved, ProgressReconciliationV2)
+        assert reserved.phase == "BASELINE_VERIFIED"
+        assert reserved.reserved_successor == cut
+        reservation_path = ledger.state / f"progress-successor-reservation.{operation}.json"
+        assert reservation_path.is_file()
+        before_replay = reservation_path.read_bytes()
+        replay = reserve_recovered_successor(
+            service=seed.service,
+            destination_root=ledger.root,
+            reconciliation_id=baseline.generation_id,
+            frozen_source=cut,
+            admission_path=admission_path,
+        )
+        assert isinstance(replay, ProgressReconciliationV2)
+        assert replay.reserved_successor == cut
+        assert reservation_path.read_bytes() == before_replay
+    resolved_head, resolved_baseline = reopened.resolve()
+    assert resolved_head.previous_head_sha256 == repaired_head_sha
+    assert resolved_baseline.reserved_successor == cut
+    assert reopened.attempt_invalidated(request.revoked_attempt_id)
+    assert old_reservation_path.read_bytes() == old_reservation
+    assert baseline_certificate_path.read_bytes() == baseline_certificate
+    assert hashlib.sha256(database.read_bytes()).hexdigest() == database_sha256
+
+
+def _write_conflicting_reservation(
+    state: dict[str, object], operation: UUID
+) -> tuple[Path, ReconciliationFileReference]:
+    ledger = state["ledger"]
+    assert isinstance(ledger, inventory_module.WorkspaceV2GenerationLedger)
+    base = migration_module._SuccessorReservation.model_validate_json(
+        state["reservation_path"].read_bytes()
+    )
+    successor = base.successor.model_copy(update={"operation_id": operation})
+    conflict = base.model_copy(update={"successor": successor, "recorded_at": datetime.now(UTC)})
+    path = ledger.state / f"progress-successor-reservation.{operation}.json"
+    path.write_bytes(canonical_json_bytes(conflict) + b"\n")
+    return path, reconciliation_file_reference(path, "control")
+
+
+def _write_c1_invalidation(
+    state: dict[str, object],
+    attempt: UUID,
+    *,
+    reservation: ReconciliationFileReference,
+    foreign: bool,
+) -> None:
+    ledger = state["ledger"]
+    baseline = state["baseline"]
+    request = state["request"]
+    head0 = state["head0"]
+    assert isinstance(ledger, inventory_module.WorkspaceV2GenerationLedger)
+    assert isinstance(baseline, ProgressReconciliationV2)
+    assert isinstance(request, LedgerPublicationRepairInput)
+    assert isinstance(head0, ReconciliationHead)
+    if foreign:
+        destination_root = ledger.root.parent / f"foreign-destination-{uuid4().hex}"
+        database_path = destination_root / "storage/v2/index.duckdb"
+        database_path.parent.mkdir(parents=True)
+        database_path.write_bytes(b"foreign database evidence\n")
+        database = reconciliation_file_reference(database_path, "database")
+        destination_workspace_id = uuid4()
+    else:
+        destination_root = ledger.root
+        database = baseline.database
+        destination_workspace_id = ledger.identity.workspace_id
+    event = CutInvalidation(
+        event_id=uuid4(),
+        generation_id=baseline.generation_id,
+        attempt_id=attempt,
+        expected_head_sha256=ledger._head_digest(),
+        certificate=ReconciliationGenerationReference(
+            schema_type="workspace-v2-progress-reconciliation-v2",
+            artifact=head0.certificate,
+        ),
+        reservation=reservation,
+        owner=CutOwner(
+            source_session=uuid4(),
+            pid=74963,
+            start_ticks=1,
+            boot_id=uuid4(),
+            cgroup=Path("/fixture"),
+        ),
+        source_root=baseline.source_root,
+        source_workspace_id=baseline.source_workspace_id,
+        destination_root=destination_root,
+        destination_workspace_id=destination_workspace_id,
+        database=database,
+        wal=None,
+        write_generation=state["reservation_ref"],
+        historical_seal=state["reservation_ref"],
+        historical_receipt=state["reservation_ref"],
+        reason="SESSION_ENDED",
+        owner_absence=request.owner_absence,
+        exclusivity=request.exclusivity,
+        no_activation=request.no_activation,
+        code_sha256="a" * 64,
+        policy_sha256="b" * 64,
+        recorded_at=datetime.now(UTC),
+    )
+    document = canonical_json_bytes(event) + b"\n"
+    digest = sha256_hex(document)
+    (ledger.state / f"cut-invalidation.{attempt}.{digest}.json").write_bytes(document)
+
+
+def _write_corrupt_repair_receipt(state: dict[str, object], attempt: UUID) -> None:
+    ledger = state["ledger"]
+    assert isinstance(ledger, inventory_module.WorkspaceV2GenerationLedger)
+    (ledger.state / f"publication-repair.{attempt}.{'0' * 64}.json").write_bytes(b"corrupt\n")
+
+
+def _repair_publication_state(
+    state: dict[str, object],
+    ledger: inventory_module.WorkspaceV2GenerationLedger,
+    request: LedgerPublicationRepairInput,
+    intent_path: Path,
+) -> None:
+    repair_admission = _publication_repair_admission(state, request)
+    with (
+        maintenance_resource_budget(repair_admission.budget),
+        maintenance_execution(MaintenanceExecution(repair_admission.budget, lambda *_: None)),
+    ):
+        repaired = ledger.repair_publication(
+            request, intent_path=intent_path, admission=repair_admission
+        )
+    assert repaired["dry_run"] is False
+    assert repaired["idempotent"] is False
+
+
+def _reserve_after_repair(
+    state: dict[str, object],
+    seed: object,
+    ledger: inventory_module.WorkspaceV2GenerationLedger,
+    baseline: ProgressReconciliationV2,
+    tmp_path: Path,
+    *,
+    expect_error: str | None = None,
+    operation: UUID | None = None,
+) -> ProgressReconciliationV2 | None:
+    session_admission = state["session_admission"]
+    assert isinstance(session_admission, MaintenanceResourceReceipt)
+    operation = uuid4() if operation is None else operation
+    budget = _successor_reservation_budget(state, operation, tmp_path)
+    admission = session_admission.model_copy(
+        update={
+            "budget": budget,
+            "pid": os.getpid(),
+            "process_start_ticks": 1,
+            "boot_id": uuid4(),
+            "cgroup_path": Path("/fixture"),
+            "recorded_at": datetime.now(UTC),
+        }
+    )
+    admission_path = tmp_path / f"successor-admission-{operation}.json"
+    admission_path.write_text(admission.model_dump_json())
+    before_head = ledger._head_digest()
+    before_files = {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()}
+    database = ledger.root / "storage/v2/index.duckdb"
+    before_database = hashlib.sha256(database.read_bytes()).hexdigest()
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(MaintenanceExecution(budget, lambda *_: None)),
+        quiescent_source_cut(seed.service, seed.source, operation_id=operation) as cut,
+    ):
+        if expect_error is None:
+            reserved = reserve_recovered_successor(
+                service=seed.service,
+                destination_root=ledger.root,
+                reconciliation_id=baseline.generation_id,
+                frozen_source=cut,
+                admission_path=admission_path,
+            )
+            assert isinstance(reserved, ProgressReconciliationV2)
+            return reserved
+        with pytest.raises(
+            (WorkspaceV2MigrationError, WorkspaceV2InventoryError), match=expect_error
+        ):
+            reserve_recovered_successor(
+                service=seed.service,
+                destination_root=ledger.root,
+                reconciliation_id=baseline.generation_id,
+                frozen_source=cut,
+                admission_path=admission_path,
+            )
+    assert ledger._head_digest() == before_head
+    assert {path: path.read_bytes() for path in ledger.state.glob("*") if path.is_file()} == (
+        before_files
+    )
+    assert not (ledger.state / f"progress-successor-reservation.{operation}.json").exists()
+    assert hashlib.sha256(database.read_bytes()).hexdigest() == before_database
+    return None
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ("live_conflict", "corrupt_revocation", "foreign_revocation", "new_attempt_revoked"),
+)
+def test_publication_repair_reservation_rejects_unproven_revocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certified_successor_template: tuple[Path, Path, tuple],
+    fault: str,
+) -> None:
+    state = _publication_repair_fixture(tmp_path, monkeypatch, certified_successor_template)
+    seed = state["seed"]
+    ledger = state["ledger"]
+    request = state["request"]
+    baseline = state["baseline"]
+    intent_path = state["intent_path"]
+    assert isinstance(ledger, inventory_module.WorkspaceV2GenerationLedger)
+    assert isinstance(request, LedgerPublicationRepairInput)
+    assert isinstance(baseline, ProgressReconciliationV2)
+    _repair_publication_state(state, ledger, request, intent_path)
+    conflict_operation = uuid4()
+    conflict_path, conflict_ref = _write_conflicting_reservation(state, conflict_operation)
+    if fault == "corrupt_revocation":
+        _write_corrupt_repair_receipt(state, conflict_operation)
+        expected = "receipt digest differs"
+    elif fault == "foreign_revocation":
+        _write_c1_invalidation(state, conflict_operation, reservation=conflict_ref, foreign=True)
+        expected = "invalidation event binding differs"
+    elif fault == "new_attempt_revoked":
+        revoked_operation = uuid4()
+        _write_c1_invalidation(
+            state,
+            revoked_operation,
+            reservation=conflict_ref,
+            foreign=False,
+        )
+        expected = "generation source or attempt differs"
+        assert conflict_path.is_file()
+        _reserve_after_repair(
+            state,
+            seed,
+            ledger,
+            baseline,
+            tmp_path,
+            expect_error=expected,
+            operation=revoked_operation,
+        )
+        return
+    else:
+        expected = "generation has another pending reservation"
+    assert conflict_path.is_file()
+    _reserve_after_repair(
+        state,
+        seed,
+        ledger,
+        baseline,
+        tmp_path,
+        expect_error=expected,
+    )
+
+
+def test_publication_repair_reservation_accepts_c1_revoked_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certified_successor_template: tuple[Path, Path, tuple],
+) -> None:
+    state = _publication_repair_fixture(tmp_path, monkeypatch, certified_successor_template)
+    seed = state["seed"]
+    ledger = state["ledger"]
+    request = state["request"]
+    baseline = state["baseline"]
+    intent_path = state["intent_path"]
+    assert isinstance(ledger, inventory_module.WorkspaceV2GenerationLedger)
+    assert isinstance(request, LedgerPublicationRepairInput)
+    assert isinstance(baseline, ProgressReconciliationV2)
+    _repair_publication_state(state, ledger, request, intent_path)
+    conflict_operation = uuid4()
+    _, conflict_ref = _write_conflicting_reservation(state, conflict_operation)
+    _write_c1_invalidation(state, conflict_operation, reservation=conflict_ref, foreign=False)
+    reserved = _reserve_after_repair(
+        state,
+        seed,
+        ledger,
+        baseline,
+        tmp_path,
+    )
+    assert reserved is not None
+    assert reserved.reserved_successor is not None
+    assert reserved.reserved_successor.operation_id != conflict_operation
+    assert ledger.attempt_invalidated(conflict_operation)
+    assert ledger.attempt_invalidated(request.revoked_attempt_id)
 
 
 def test_publication_repair_resumes_after_receipt_before_head(

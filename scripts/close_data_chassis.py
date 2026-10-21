@@ -83,6 +83,7 @@ from investment_analyst.workspace.workspace_v2_migration import (
     _live_quiescent_source,
     _QuiescentSourceIntent,
     _RecoveredCoreBaseline,
+    _reject_conflicting_successor_reservation,
     _SuccessorReservation,
     close_quiescent_native_reader,
     measure_recovered_comparison,
@@ -2281,7 +2282,8 @@ def _run_global_cut(args: argparse.Namespace) -> dict[str, object]:
             and go.attempt_id != args.operation_id
         ):
             raise MaintenancePhaseError("cut_window_authorization_attempt_differs")
-        resolved = WorkspaceV2GenerationLedger(service, args.destination).resolve()
+        ledger = WorkspaceV2GenerationLedger(service, args.destination)
+        resolved = ledger.resolve()
         if resolved is None:
             raise MaintenancePhaseError("cut_requires_certified_baseline")
         head, baseline = resolved
@@ -2294,6 +2296,10 @@ def _run_global_cut(args: argparse.Namespace) -> dict[str, object]:
             or baseline.destination_workspace_id != go.destination_workspace_id
         ):
             raise MaintenancePhaseError("cut_go_baseline_differs")
+        # Fail before the window/stop when a same-baseline reservation still
+        # lacks durable revocation. The real reservation rechecks this under
+        # its own guards; this preflight never opens a DB or writes a receipt.
+        _reject_conflicting_successor_reservation(ledger, head)
         prepared_root = _required(args.prepared_delta, "prepared_delta")
         prepared_path = prepared_root / "delta-manifest.json"
         prepared = PhysicalDeltaManifest.model_validate_json(prepared_path.read_bytes())

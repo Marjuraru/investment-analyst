@@ -1789,6 +1789,220 @@ def test_5400_cut_rejects_foreign_attempt_before_creating_a_window(
     assert not (controls / "window.json").exists()
 
 
+@pytest.mark.parametrize("fault", ("live_conflict", "corrupt_revocation", "revoked_valid"))
+def test_cut_preflight_reservation_gate_blocks_stop_and_accepts_durable_revocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resource_cli_module: ModuleType,
+    fault: str,
+) -> None:
+    from investment_analyst.storage.workspace_v2_inventory import (
+        WorkspaceV2InventoryError,
+        reconciliation_file_reference,
+    )
+    from investment_analyst.workspace.workspace_v2_lifecycle_models import FrozenSourceCut
+    from investment_analyst.workspace.workspace_v2_migration import (
+        WorkspaceV2MigrationError,
+        _SuccessorReservation,
+    )
+    from investment_analyst.workspace.workspace_v2_migration_models import (
+        CutWindowBound,
+        CutWindowGo,
+    )
+    from investment_analyst.workspace.workspace_v2_physical_delta import (
+        PhysicalDeltaBlock,
+        PhysicalDeltaFile,
+        PhysicalDeltaManifest,
+    )
+
+    module = resource_cli_module
+    controls = tmp_path / "controls"
+    controls.mkdir()
+    run = controls / "run"
+    run.mkdir()
+    destination = tmp_path / "destination"
+    state = destination / "state"
+    state.mkdir(parents=True)
+    database_path = destination / "storage/v2/index.duckdb"
+    database_path.parent.mkdir(parents=True)
+    database_path.write_bytes(b"fixture database\n")
+    database = reconciliation_file_reference(database_path, "database")
+    proof = controls / "proof.json"
+    proof.write_text("{}")
+    reference = reconciliation_file_reference(proof, "control")
+    generation = uuid4()
+    source_workspace = uuid4()
+    destination_workspace = uuid4()
+    baseline = SimpleNamespace(
+        phase="BASELINE_VERIFIED",
+        reserved_successor=None,
+        generation_id=generation,
+        source_workspace_id=source_workspace,
+        destination_workspace_id=destination_workspace,
+        database=database,
+    )
+    head = SimpleNamespace(certificate=reference)
+    conflict_operation = uuid4()
+    conflict = _SuccessorReservation(
+        reconciliation_id=generation,
+        successor=FrozenSourceCut(
+            operation_id=conflict_operation,
+            source_root=tmp_path / "source",
+            workspace_id=source_workspace,
+            created_at=datetime.now(UTC),
+            frozen_at=datetime.now(UTC),
+            source_fingerprint="a" * 64,
+            workspace_format_version=1,
+            writer_closed=True,
+        ),
+        source_session=uuid4(),
+        baseline=reference,
+        baseline_dataset_sha256="b" * 64,
+        module_sha256="c" * 64,
+        resource_receipt=reference,
+        recorded_at=datetime.now(UTC),
+    )
+    (state / f"progress-successor-reservation.{conflict_operation}.json").write_text(
+        conflict.model_dump_json() + "\n"
+    )
+
+    def attempt_invalidated(attempt):
+        if fault == "corrupt_revocation" and attempt == conflict_operation:
+            raise WorkspaceV2InventoryError("corrupt revocation")
+        return fault == "revoked_valid" and attempt == conflict_operation
+
+    ledger = SimpleNamespace(
+        state=state,
+        resolve=lambda: (head, baseline),
+        attempt_invalidated=attempt_invalidated,
+    )
+    prepared_root = tmp_path / "prepared"
+    prepared_root.mkdir()
+    prepared = PhysicalDeltaManifest(
+        epoch=generation,
+        source_root=destination,
+        source_workspace_id=destination_workspace,
+        parent_backup_id=uuid4(),
+        parent_manifest_sha256="d" * 64,
+        parent_index_sha256="e" * 64,
+        files_sha256="f" * 64,
+        file_count=1,
+        deleted_count=0,
+        logical_bytes=database.size_bytes,
+        new_bytes=database.size_bytes,
+        reused_bytes=0,
+    )
+    prepared_path = prepared_root / "delta-manifest.json"
+    prepared_path.write_text(prepared.model_dump_json())
+    (prepared_root / "files.jsonl").write_text(
+        PhysicalDeltaFile(
+            path="storage/v2/index.duckdb",
+            size_bytes=database.size_bytes,
+            sha256=database.sha256,
+            blocks=(
+                PhysicalDeltaBlock(
+                    offset_bytes=0,
+                    length_bytes=database.size_bytes,
+                    sha256=database.sha256,
+                    origin="delta",
+                    object_key=f"physical-delta/objects/{database.sha256}.bin",
+                ),
+            ),
+        ).model_dump_json()
+        + "\n"
+    )
+    go = CutWindowGo(
+        bounds=tuple(
+            CutWindowBound(
+                step=step,
+                upper_seconds=100,
+                measurement=reference,
+                measured_at=datetime.now(UTC),
+                universe="fixture",
+                workload="preflight fixture",
+                changes_since_measurement="none",
+            )
+            for step in (
+                "freeze",
+                "comparison_delta",
+                "operational",
+                "physical_plan",
+                "upload",
+                "restore_open",
+                "activation_health",
+                "cancel_close_restart",
+            )
+        ),
+        margin_seconds=100,
+        baseline=reference,
+        prerequisites=(reconciliation_file_reference(prepared_path, "control"),),
+        guard=reference,
+        capacity=reference,
+        source_workspace_id=source_workspace,
+        destination_workspace_id=destination_workspace,
+        admitted_at=datetime.now(UTC),
+        window_limit_seconds=5400,
+        window_authorization="human-dc45-cut-5400-20261019",
+        attempt_id=uuid4(),
+    )
+    go_path = controls / "go.json"
+    go_path.write_text(go.model_dump_json())
+    args = SimpleNamespace(
+        cut_window=controls / "window.json",
+        cut_go=go_path,
+        controls_root=controls,
+        resource_run_root=run,
+        prepared_delta=prepared_root,
+        source=tmp_path / "source",
+        destination=destination,
+        operation_id=go.attempt_id,
+        reconciliation_id=generation,
+    )
+    monkeypatch.setattr(module, "WorkspaceService", lambda: SimpleNamespace())
+    monkeypatch.setattr(module, "LocalReleaseService", lambda: SimpleNamespace())
+    monkeypatch.setattr(
+        module,
+        "WorkspaceV2GenerationLedger",
+        lambda *unused: ledger,
+    )
+    monkeypatch.setattr(
+        module,
+        "_CutMonitor",
+        lambda unused: SimpleNamespace(
+            start_ready=lambda *args, **kwargs: None,
+            require_continue=lambda: None,
+            close=lambda: None,
+        ),
+    )
+
+    @contextmanager
+    def resources(unused):
+        yield
+
+    monkeypatch.setattr(module, "_worker_resources", resources)
+    reached_service = []
+
+    def service_identity(*args, **kwargs):
+        reached_service.append((args, kwargs))
+        raise RuntimeError("preflight-passed")
+
+    monkeypatch.setattr(module, "_cut_service_identity", service_identity)
+    if fault == "revoked_valid":
+        with pytest.raises(RuntimeError, match="preflight-passed"):
+            module._run_global_cut(args)
+        assert reached_service
+    else:
+        expected = (
+            "corrupt revocation"
+            if fault == "corrupt_revocation"
+            else "generation has another pending reservation"
+        )
+        with pytest.raises((WorkspaceV2MigrationError, WorkspaceV2InventoryError), match=expected):
+            module._run_global_cut(args)
+        assert not reached_service
+    assert not (controls / "window.json").exists()
+
+
 def test_repair_publication_parser_and_dry_run_dispatch_bindings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

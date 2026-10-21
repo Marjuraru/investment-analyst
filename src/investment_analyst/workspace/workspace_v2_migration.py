@@ -82,6 +82,7 @@ from investment_analyst.workspace.workspace_v2_migration_models import (
     ProgressReconciliationV2,
     ProgressRelationshipProof,
     ReconciliationFileReference,
+    ReconciliationHead,
     SuccessorCoverageProof,
     WorkspaceV1MigrationSourceSnapshot,
     WorkspaceV2MigrationPhase,
@@ -544,6 +545,30 @@ def _generation_core_evidence(progress: ProgressReconciliationV2) -> GenerationC
     return core
 
 
+def _reject_conflicting_successor_reservation(
+    ledger: WorkspaceV2GenerationLedger,
+    head: ReconciliationHead,
+    frozen_source: FrozenSourceCut | None = None,
+) -> None:
+    """Block only reservations that still lack a durable revocation.
+
+    A historical reservation with the same baseline stops blocking only when
+    ``attempt_invalidated`` validates its revocation. Path/model/hash errors and
+    corrupt revocations remain fatal; a dead owner or an arbitrary filename is
+    never accepted as proof.
+    """
+    for other in ledger.state.glob("progress-successor-reservation.*.json"):
+        if other.is_symlink() or not other.is_file():
+            raise WorkspaceV2MigrationError("generation reservation path is unsafe")
+        previous = _SuccessorReservation.model_validate_json(other.read_bytes())
+        if previous.baseline != head.certificate:
+            continue
+        if frozen_source is not None and previous.successor == frozen_source:
+            continue
+        if not ledger.attempt_invalidated(previous.successor.operation_id):
+            raise WorkspaceV2MigrationError("generation has another pending reservation")
+
+
 def _reserve_generation_successor(
     *,
     service: WorkspaceService,
@@ -621,13 +646,9 @@ def _reserve_generation_successor(
         if progress.reserved_successor is not None:
             raise WorkspaceV2MigrationError("generation reservation receipt is missing")
         # An intent whose session died must pass C1 invalidation/reconciliation;
-        # it must never be silently replaced by a different attempt.
-        for other in ledger.state.glob("progress-successor-reservation.*.json"):
-            if other.is_symlink():
-                raise WorkspaceV2MigrationError("generation reservation path is unsafe")
-            previous = _SuccessorReservation.model_validate_json(other.read_bytes())
-            if previous.baseline == head.certificate and previous.successor != frozen_source:
-                raise WorkspaceV2MigrationError("generation has another pending reservation")
+        # it must never be silently replaced by a different attempt. C1-P
+        # revocation is durable evidence and is the only admissible exception.
+        _reject_conflicting_successor_reservation(ledger, head, frozen_source)
         reservation = _SuccessorReservation(
             reconciliation_id=reconciliation_id,
             successor=frozen_source,
