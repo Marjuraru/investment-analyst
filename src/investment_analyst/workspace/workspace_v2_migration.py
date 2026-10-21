@@ -480,6 +480,7 @@ def _generation_core_evidence(progress: ProgressReconciliationV2) -> GenerationC
     from investment_analyst.storage.workspace_v2_inventory import (
         GenerationRawCoverageProof,
         verify_generation_contents,
+        verify_generation_contents_typed_baseline,
         verify_generation_raw_files,
     )
 
@@ -495,7 +496,10 @@ def _generation_core_evidence(progress: ProgressReconciliationV2) -> GenerationC
         or core.database != progress.database
         or core.policy_sha256 != policy
         or core.verifier_sha256
-        != sha256_hex(inspect.getsource(verify_generation_contents).encode())
+        not in {
+            sha256_hex(inspect.getsource(verify_generation_contents).encode()),
+            sha256_hex(inspect.getsource(verify_generation_contents_typed_baseline).encode()),
+        }
         or (
             core.raw_count,
             core.observation_count,

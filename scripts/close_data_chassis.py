@@ -3178,9 +3178,14 @@ def _execute(args: argparse.Namespace) -> dict[str, object]:
                 content.database != baseline.database
                 or content.generation_id != generation_id
                 or content.verifier_sha256
-                != hashlib.sha256(
-                    inspect.getsource(verify_generation_contents).encode()
-                ).hexdigest()
+                not in {
+                    hashlib.sha256(
+                        inspect.getsource(verify_generation_contents).encode()
+                    ).hexdigest(),
+                    hashlib.sha256(
+                        inspect.getsource(verify_generation_contents_typed_baseline).encode()
+                    ).hexdigest(),
+                }
             ):
                 raise MaintenancePhaseError("prepared_delta_corrective_verifier_differs")
             for reference in (baseline.database, *baseline.corrective_proofs):
