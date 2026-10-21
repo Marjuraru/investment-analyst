@@ -4504,7 +4504,10 @@ def verify_generation_raw_files(
         or content.database.path != destination / "storage/v2/index.duckdb"
         or content.policy_sha256 != admission.resource_policy_sha256
         or content.verifier_sha256
-        != sha256_hex(inspect.getsource(verify_generation_contents).encode())
+        not in {
+            sha256_hex(inspect.getsource(verify_generation_contents).encode()),
+            sha256_hex(inspect.getsource(verify_generation_contents_typed_baseline).encode()),
+        }
         or header.operation_id != content.generation_id
         or header.retained_root != destination
         or header.retained_workspace_id != identity.workspace_id
