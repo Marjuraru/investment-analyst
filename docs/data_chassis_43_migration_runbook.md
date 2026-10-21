@@ -1,5 +1,8 @@
 # DATA-CHASSIS-43: migración, recuperación y handoff
 
+> Decisión PLAN 2026-10-21: [plan vigente de arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Primero datos nuevos y aceptación; historia v1/F5 preservada e incorporación selectiva posterior. Esta decisión está planificada, no acredita activación. Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+
+
 Ejecutar desde el worktree aislado de #341 con
 `PYTHONPATH=<worktree>/src` y el intérprete
 `/home/marjuraru/projects/investment-analyst/.venv/bin/python`. El workspace

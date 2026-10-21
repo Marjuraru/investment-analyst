@@ -1,5 +1,8 @@
 # Plan de cierre de la versión básica funcional
 
+> Decisión PLAN 2026-10-21: [plan vigente de arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Primero datos nuevos y aceptación; historia v1/F5 preservada e incorporación selectiva posterior. Esta decisión está planificada, no acredita activación. Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+
+
 ## Objetivo
 
 La herramienta tiene por finalidad declarada entregar alertas accionables **no personalizadas** y
@@ -161,7 +164,9 @@ del universo (`cazatiburones-universe-activity-v1` la devuelve presente en 19 de
 producto del refresh de actividad declarada que exige su propio Work Block; no se repara aquí ni propone fila
 nueva.
 
-## Diagnóstico de la estructura actual
+## Diagnóstico histórico de la estructura
+
+Las carencias descritas aquí no forman el backlog vivo: contrastar con la tabla de ruta integrada y el plan de arranque. En particular, los privilegios por activo y el corpus SEC ya tienen avances/cierres posteriores documentados.
 
 ### Base que debe conservarse
 
@@ -781,14 +786,17 @@ posterior desde `main` integrado: exige guard vivo, capacidad física fresca,
 corte congelado y recibo de delta. No activa v2 ni retira el workspace default;
 esas decisiones operacionales permanecen en DATA-CHASSIS-45.
 
-## Cutover real y aceptación (`DATA-CHASSIS-45` / #345)
+## Arranque v2 nuevo (`DATA-CHASSIS-45` / #345)
 
-El bloque activo propone `route_effect: COMPLETES` con limpieza temprana, transición histórica
-explícita A→B→F y delta físico recuperable, reutilizando el padre Drive de 44, sus controles
-verificados y el release integrado preparado. La receta operativa única es
-[`data_chassis_45_acceptance_runbook.md`](data_chassis_45_acceptance_runbook.md).
-La propuesta no equivale a cierre: Q1–Q7 conservan comparadores y denominador 7, y Q4 exige siete
-días UTC completos posteriores a la activación v2. Hasta demostrar aceptación, CI exact-SHA y los
-gates del protocolo, DATA-CHASSIS conserva su estado y FUNDAMENTALS-COVERAGE sigue `PLANNED`.
-Después de integración aceptada, el siguiente único `NEXT` propuesto es FUNDAMENTALS-COVERAGE,
-resuelto por PLAN fresco desde main, servicio y evidencia vivos.
+Decisión humana 2026-10-21: este candidato propone ADVANCES, no COMPLETES. DATA-CHASSIS sigue NEXT
+con v2 nuevo, adquisición reciente y warm-up suficiente, validación completa por alcance y
+observabilidad por intento; archivo v1/F5 conservado e incorporación selectiva posterior.
+FUNDAMENTALS-COVERAGE permanece PLANNED. No hay sexto corte de migración autorizado.
+
+Plan: [arranque](data_chassis_v2_fresh_start_plan.md). Ejecución única:
+[runbook45](data_chassis_45_acceptance_runbook.md). Continuación:
+[reincorporación](data_chassis_v1_reintegration_plan.md). No prometer Q1–Q7 MET por comparar
+cargas distintas ni exigir siete días para esta aceptación finita. Los criterios globales del
+protocolo permanecen pendientes para el cierre; esta propuesta se integra sólo con el PR.
+
+route_transition:DATA-CHASSIS:ADVANCES

@@ -1,8 +1,10 @@
 # INC-DC45-WSL-20261016: spill SQL, WSL y recuperación preservada
 
+> Histórico preservado. Decisión 2026-10-21: v2 nuevo; F5 y sus controles quedan archivados, sin borrado ni reparación como prerrequisito del arranque.
+
 Estado: capacidad recuperada; recuperación lógica, reconciliación y optimización pendientes.
 Work Block: [#345](https://github.com/Marjuraru/investment-analyst/issues/345).
-El orden vigente es R0–R7 del cuerpo consolidado. Este registro no acredita aceptación.
+R0–R7 describe la recuperación histórica. La receta vigente es ../data_chassis_v2_fresh_start_plan.md; este registro no autoriza reanudar F5 ni acredita aceptación.
 
 ## Hechos y límites del diagnóstico
 

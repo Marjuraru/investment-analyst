@@ -118,3 +118,104 @@ def test_scripts_use_environment_and_missing_inspection_fails_cleanly(tmp_path) 
     assert "manifest was not found" in missing.stderr
     assert "Traceback" not in missing.stderr
     assert not (tmp_path / "missing").exists()
+
+
+def _snapshot(root: Path) -> tuple[list[str], dict[str, bytes]]:
+    entries = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+    files = {
+        str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()
+    }
+    return entries, files
+
+
+def test_init_format_version_is_opt_in_and_preserves_existing_manifest(tmp_path) -> None:
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    environment = _environment()
+    v1 = (tmp_path / "v1").resolve()
+    v2 = (tmp_path / "v2").resolve()
+
+    default_init = _run(
+        "init_workspace.py", "--workspace", str(v1), cwd=cwd, environment=environment
+    )
+    v2_init = _run(
+        "init_workspace.py",
+        "--workspace",
+        str(v2),
+        "--format-version",
+        "2",
+        cwd=cwd,
+        environment=environment,
+    )
+    v2_reused = _run("init_workspace.py", "--workspace", str(v2), cwd=cwd, environment=environment)
+
+    assert default_init.returncode == 0, default_init.stderr
+    assert json.loads(default_init.stdout)["format_version"] == 1
+    assert v2_init.returncode == 0, v2_init.stderr
+    v2_payload = json.loads(v2_init.stdout)
+    assert v2_payload["format_version"] == 2
+    assert v2_payload["reused"] is False
+    assert json.loads((v2 / "manifest.json").read_text(encoding="utf-8"))["format_version"] == 2
+    assert v2_reused.returncode == 0, v2_reused.stderr
+    assert json.loads(v2_reused.stdout)["format_version"] == 2
+    assert json.loads(v2_reused.stdout)["reused"] is True
+
+    before = _snapshot(v1)
+    mismatch = _run(
+        "init_workspace.py",
+        "--workspace",
+        str(v1),
+        "--format-version",
+        "2",
+        cwd=cwd,
+        environment=environment,
+    )
+
+    assert mismatch.returncode != 0
+    assert "does not match" in mismatch.stderr
+    assert "Traceback" not in mismatch.stderr
+    assert _snapshot(v1) == before
+
+
+def test_init_format_version_rejects_invalid_selection_without_writes(tmp_path) -> None:
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    environment = _environment()
+    workspace = (tmp_path / "workspace").resolve()
+    missing = (tmp_path / "missing").resolve()
+
+    initialized = _run(
+        "init_workspace.py",
+        "--workspace",
+        str(workspace),
+        "--format-version",
+        "2",
+        cwd=cwd,
+        environment=environment,
+    )
+    before = _snapshot(workspace)
+    mismatch = _run(
+        "init_workspace.py",
+        "--workspace",
+        str(workspace),
+        "--format-version",
+        "1",
+        cwd=cwd,
+        environment=environment,
+    )
+    invalid = _run(
+        "init_workspace.py",
+        "--workspace",
+        str(missing),
+        "--format-version",
+        "3",
+        cwd=cwd,
+        environment=environment,
+    )
+
+    assert initialized.returncode == 0, initialized.stderr
+    assert mismatch.returncode != 0
+    assert "does not match" in mismatch.stderr
+    assert _snapshot(workspace) == before
+    assert invalid.returncode != 0
+    assert not missing.exists()

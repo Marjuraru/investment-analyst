@@ -1,5 +1,10 @@
 # Runbook de aceptación operacional exact-SHA
 
+> Decisión PLAN 2026-10-21: [plan vigente de arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Primero datos nuevos y aceptación; historia v1/F5 preservada e incorporación selectiva posterior. Esta decisión está planificada, no acredita activación. Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+
+#345 autoriza candidato exact-SHA en raíz v2 nueva después de CI/recuperación/gates; la autorización está en el Issue, no en el observer. El observer sigue siendo read-only y no ejecuta providers; éstos usan sus fachadas normales bajo alcance separado.
+
+
 Este runbook describe el cierre de `RELEASE-ACCEPTANCE-1`. Es una aceptación de operación local,
 no una capacidad analítica: no cambia providers, scheduler, storage, workspace, outbox, UI ni la
 semántica de los datos. El candidate se congela por SHA y tree; cualquier nuevo commit invalida BUILD,

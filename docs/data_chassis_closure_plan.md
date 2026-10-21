@@ -1,55 +1,39 @@
-# Cierre de la ruta DATA-CHASSIS
+# DATA-CHASSIS: arranque v2 y cierre posterior
 
-Este plan conserva la decisión humana de seis Work Blocks fijos, `DATA-CHASSIS-40` a
-`DATA-CHASSIS-45`. Cuenta el bloque 40 como el primero. Los otros cinco son fronteras de
-planificación, no autorización anticipada para crear o ejecutar Issues. Cada PLAN futuro debe
-reconciliar `main`, GitHub, el workspace y la evidencia vigentes, y declarar desviaciones materiales.
-No se agrega un séptimo bloque ni se rebajan gates automáticamente si el presupuesto no alcanza.
+Decisión humana de 2026-10-21: primero un workspace v2 nuevo, probado y observable; después,
+incorporación de historia necesaria desde un archivo recuperable. Esta decisión sustituye el
+compromiso anterior de cerrar toda la ruta dentro de seis bloques 40–45. No autoriza destruir v1,
+retirar el estado F5, crear varios Issues activos ni llamar terminado a un objetivo pendiente.
 
-## Autoridad y estado de los objetivos
+## Ruta y autoridad
 
-El registro canónico de objetivos, baselines, comparadores y snapshot Q1–Q7 está en
-[`investment-analyst-core.md`](../.agents/rules/investment-analyst-core.md). Este documento no duplica
-ni modifica sus estados, denominadores o metas. Resultados de scratch, integración o CI describen
-implementación y no convierten objetivos operacionales en `MET`.
+DATA-CHASSIS-45 / #345 / PR346 pasa de propuesta COMPLETES a ADVANCES. DATA-CHASSIS permanece como
+único NEXT; FUNDAMENTALS-COVERAGE sigue PLANNED. El cierre global conserva el protocolo y Q1–Q7:
+comparadores no equivalentes permanecen UNKNOWN. Una base nueva pequeña no acredita reducción
+sobre el inventario histórico completo. La propuesta se integra sólo al fusionar el candidato.
 
-El Work Block 40 entrega un backend v2 seleccionable mediante un manifiesto de workspace nuevo y
-adopta repositorios tipados y consumidores existentes en un workspace scratch. El formato v1 sigue
-siendo el default. El smoke de este bloque no abre el workspace permanente, no hace migración real,
-no activa v2 productivo y no acredita ahorro del host.
+El ledger AUTO integrado sólo vincula 45 con COMPLETES. Al cambiar a ADVANCES se usa HUMAN;
+ningún documento candidato amplía ese ledger. BUILD y AUDIT pueden completar su trabajo sin pedir
+aprobaciones intermedias; la integración HUMAN requiere el receipt posterior a AUDIT exact-SHA.
 
-## Seis fronteras planificadas
+## Capacidades conservadas y trabajo siguiente
 
-| Work Block | Capacidad sustancial | Criterio de salida y evidencia |
+| Tramo | Situación | Siguiente uso |
 | --- | --- | --- |
-| 40 | Backend v2 compatible, compacto y recuperable: workspace versionado, lectura histórica y escrituras tipadas, archivo histórico sellado, repositorios compatibles y backup v2. | Mismos modelos, IDs, JSON, Decimal y cortes PIT en scratch restaurado; consumidores existentes; perfiles de fidelidad, recuperación y escala. Sin cutover real. |
-| 41 | Corregir revisiones de metadata y adquisición SEC con disponibilidad point-in-time y entregar un colector acotado que conserve un resultado terminal por intento aunque falle la medición. | Cinco emisores: Submissions frescos, v3 sólo con bytes idénticos y v4 sólo con prueba byte-exact terminal; historia v1/v2/v3/v4 y restore verificados. Ciclo scratch de 102/102 intentos terminales con fallos inyectados, deadlines completos y comparación ABBA reproducible. No reescribe metadata ni resultados históricos. |
-| 42 | Adoptar checkpoints diarios recursivos e incrementalidad exacta en mercado, derivados, fundamentales, valoración, instituciones y eventos junto con lecturas filtradas/paginadas, identidad semántica separada de snapshot y acceso de features/explicación desacoplado. | Full/incremental Decimal y deltas 0/1/3 con revisión; cero resultados equivalentes añadidos, cero modelos ajenos hidratados, lecturas por IDs candidatos, lotes ≤256 y snapshots/lineage exactos. V1 se conserva hasta el bloque 43. No introduce ML, LLM ni paneles nuevos. |
-| 43 | Migración y recovery A→B aislados, transporte directo y backup packed reanudable. | Inventario y restore independientes conservados; default v1 continúa activo. No acredita cutover productivo. |
-| 44 | Backup cifrado en Drive, restore independiente y costuras tipadas de cutover/bindings. Drive es archivo, nunca DuckDB activo. | Padre de 676 volúmenes restaurado y controles reconciliados. No acredita activación v2 ni delta F físico. |
-| 45 | Limpieza temprana, transición histórica A→B→F, delta físico, cutover real y aceptación final. | Recuperación padre+delta F y release integrado 44 sobre v2; retiros estrechamente probados; Q1–Q7 y gates obligatorios satisfechos, con Q4-F en B/lote (no B/día) sobre dos lotes compartidos ordinary/same_inputs. |
+| 40–42 | Backend v2, incrementalidad y consultas implementados | Reutilizar; probar el recorrido nuevo y optimizar defectos medidos |
+| 43–44 | Migración/backup/restore y transporte previamente acreditados | Conservar archivo/evidencia; no repetir 676 volúmenes |
+| 45 anterior | Cinco cortes abortados, mejoras y progreso parcial preservados | No activar F5 ni fingir cierre; historia consultable |
+| 45 vigente | V2 nuevo + datos recientes + recuperación nueva + activación + observabilidad | [Plan ejecutable](data_chassis_v2_fresh_start_plan.md) y [runbook](data_chassis_45_acceptance_runbook.md) |
+| Continuación | Archivo final y selección/importación progresiva | [Plan de reincorporación](data_chassis_v1_reintegration_plan.md), sin ejecución anticipada |
+| Cierre de DATA-CHASSIS | Pendiente | Gates operacionales, recuperación/retención y Q1–Q7 comparables |
 
-La adopción de #337 está acotada al formato v2 opt-in y conserva el formato 1 como default hasta
-resolver el inventario y el cutover en el bloque 43. La decisión humana `AUTO` aplica sólo a este
-Work Block: requiere BUILD completo, CI del SHA exacto y AUDIT independiente PASS antes de FINALIZE;
-no adelanta la migración, el backup Drive ni la limpieza. Su transición propuesta es `ADVANCES`, no
-cierre de DATA-CHASSIS. Q1–Q7 mantienen sus estados, comparadores y denominador canónicos. Cualquier
-oportunidad opcional se registra en PLAN y no extiende la aceptación de #337.
+## Fronteras que no se relajan
 
-## Gates de cierre que atraviesan los bloques
+Decimal/IDs/PIT/append-only y separación de dominios; lectura completa dentro de cobertura declarada;
+full/incremental equivalentes; checkpoints/revisión; páginas≤256 y cero hidratación ajena; backup
+restaurado; un writer y recuperación que preserve escrituras nuevas. No reetiquetar históricos como
+LIVE, copiar DB antigua sobre v2, saltar trazabilidad ni declarar ausencia como cero.
 
-- Igualdad Decimal entre ejecución completa e incremental v2; checkpoints persistidos e invalidados
-  por revisiones, cambios de fuente, período o versión.
-- Selección point-in-time y aislamiento por activo, fuente, dominio, frecuencia y corte; sin inferir
-  huecos internos por días sin barras.
-- Páginas y lotes de hasta 256 modelos y cero hidratación de filas ajenas en consultas filtradas.
-- Inventario completo de migración, restore y rollback antes de activar v2; backup de Drive restaurado.
-- Features y explicación desacopladas del almacenamiento físico y reproducibles desde evidencia PIT.
-- Q1–Q7 conservan su comparador y nivel de evidencia; los gates no numéricos también son obligatorios.
-
-El bloque 40 sólo demuestra comportamiento aislado con fixtures. La secuencia reconciliada de
-#341/#343/#345 lleva el cutover productivo y su aceptación a 45. La receta vigente está en
-[`data_chassis_45_acceptance_runbook.md`](data_chassis_45_acceptance_runbook.md); los recibos de
-43/44 conservan sus bindings originales y se reutilizan sin remigración ni restore base.
-Esta reconciliación no declara DATA-CHASSIS completado: requiere aceptación operacional y
-gates exact-SHA antes de la transición propuesta `COMPLETES`.
+Los gates de migración completa siguen siendo criterios del cierre global, no condiciones para
+probar o arrancar una raíz nueva que no afirma contener esa migración. Los resultados antiguos
+mantienen sus bindings, no acreditan por sí solos la nueva raíz ni una cobertura mayor.

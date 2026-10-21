@@ -1,5 +1,12 @@
 # Hoja de ruta estratégica del producto
 
+> Decisión PLAN 2026-10-21: [plan vigente de arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Primero datos nuevos y aceptación; historia v1/F5 preservada e incorporación selectiva posterior. Esta decisión está planificada, no acredita activación. Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+
+## Prioridad operativa de 2026-10-21
+
+DATA-CHASSIS sigue NEXT. #345 ADVANCES con arranque nuevo; no cierre por base vacía. Se permite adquisición reciente y warm-up necesario mediante fuentes existentes; el archivo anterior no se re-descarga masivamente. FUNDAMENTALS-COVERAGE permanece PLANNED. Las cronologías inferiores conservan contexto histórico, no autoridad para sustituir esta secuencia.
+
+
 ## Tres conceptos que no deben confundirse
 
 Esta hoja de ruta usa tres conceptos distintos y no intercambiables. La confusión entre ellos es la
@@ -665,7 +672,7 @@ local, sin elevar artificialmente el mínimo global antes de cubrir el código h
 - caché por hash de evidencia, feature set, modelo y versión de explicación;
 - límites diarios de llamadas, tokens y moneda para cada proveedor LLM.
 
-## Orden inmediato recomendado
+## Antecedentes de priorización (históricos)
 
 La ruta crítica vigente se mantiene en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md). Su orden es:

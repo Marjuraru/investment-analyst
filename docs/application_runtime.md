@@ -1,5 +1,10 @@
 # Application runtime
 
+> Decisión PLAN 2026-10-21: [plan vigente de arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Primero datos nuevos y aceptación; historia v1/F5 preservada e incorporación selectiva posterior. Esta decisión está planificada, no acredita activación. Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+
+El runtime elige v2 por manifest, sin conversión al abrir. La aceptación nueva verifica cobertura declarada, reinicio, full/incremental y lectura completa; no mezcla la raíz v1 con consultas del nuevo workspace.
+
+
 `ApplicationRuntime` is the common composition root for command-line tools. It resolves the data
 location, opens `LocalStorage` in an explicit access mode, loads the static asset catalog once, and
 creates one provider-context resolver. Domain clients and pipelines still receive ordinary typed
