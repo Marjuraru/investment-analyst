@@ -3264,7 +3264,10 @@ class WorkspaceV2GenerationLedger:
                 content.diagnostic_count,
             )
             or content.verifier_sha256
-            != sha256_hex(inspect.getsource(verify_generation_contents).encode())
+            not in {
+                sha256_hex(inspect.getsource(verify_generation_contents).encode()),
+                sha256_hex(inspect.getsource(verify_generation_contents_typed_baseline).encode()),
+            }
             or raw.verifier_sha256
             != sha256_hex(inspect.getsource(verify_generation_raw_files).encode())
             or content.policy_sha256 != admission.resource_policy_sha256
@@ -5017,9 +5020,356 @@ def verify_generation_contents(
         return proof
 
 
+def verify_generation_contents_typed_baseline(
+    service: WorkspaceService,
+    *,
+    generation_id: UUID,
+    destination: Path,
+    expected_database: ReconciliationFileReference,
+    baseline_certificate: ReconciliationFileReference,
+    baseline_content_proof: ReconciliationFileReference,
+    admission_path: Path,
+    relationships_path: Path | None = None,
+) -> GenerationContentProof:
+    """Verify a continuation image against its certified logical W baseline.
+
+    The independent baseline database is no longer required. The preserved W
+    certificate and its content proof supply the authentic raw/observation
+    digests; baseline raws are the first certified identities in current image
+    order, and baseline observations are selected by raw membership. Every
+    later row is read through its typed repository. The current image is never
+    used as its own baseline. Financial baseline membership and the historical
+    seal remain the responsibility of ``certify_baseline``.
+    """
+    from investment_analyst.storage.resource_policy import execute_bounded
+    from investment_analyst.storage.serialization import canonical_json_digest
+    from investment_analyst.workspace.models import WorkspaceAccessMode
+    from investment_analyst.workspace.workspace_v2_backup import _v2_writer_guard
+    from investment_analyst.workspace.workspace_v2_migration import (
+        _iter_catchup_partitions,
+        _observation_canonical_sql,
+    )
+
+    verifier_sha256 = sha256_hex(
+        inspect.getsource(verify_generation_contents_typed_baseline).encode()
+    )
+    admission = MaintenanceResourceReceipt.model_validate_json(admission_path.read_bytes())
+    execution = require_maintenance_admission(admission)
+    database = destination / "storage/v2/index.duckdb"
+    identity = service.manifest(destination)
+    if (
+        admission.budget.operation_id != generation_id
+        or admission.budget.profile != "verification"
+        or admission.budget.reader_worker is not None
+        or database not in {item.database for item in admission.budget.assignments}
+        or expected_database.role != "database"
+        or expected_database.path != database
+    ):
+        raise WorkspaceV2InventoryError("typed baseline admission binding differs")
+    WorkspaceV2ProgressReconciler._verify(baseline_certificate)
+    baseline_bytes = baseline_certificate.path.read_bytes()
+    schema_version = json.loads(baseline_bytes).get("schema_version")
+    if schema_version == "workspace-v2-progress-reconciliation-v1":
+        baseline = ProgressReconciliation.model_validate_json(baseline_bytes)
+    elif schema_version == "workspace-v2-progress-reconciliation-v2":
+        baseline = ProgressReconciliationV2.model_validate_json(baseline_bytes)
+    else:
+        raise WorkspaceV2InventoryError("typed baseline certificate schema differs")
+    if (
+        baseline.phase != "BASELINE_VERIFIED"
+        or baseline.inventory is None
+        or baseline.destination_workspace_id != identity.workspace_id
+    ):
+        raise WorkspaceV2InventoryError("typed baseline certificate is not verified W")
+    WorkspaceV2ProgressReconciler._verify(baseline_content_proof)
+    baseline_content = GenerationContentProof.model_validate_json(
+        baseline_content_proof.path.read_bytes()
+    )
+    if (
+        baseline_content.baseline_certificate != baseline_certificate
+        or baseline_content.workspace_id != identity.workspace_id
+        or baseline_content.database.path != database
+        or baseline_content.database.role != "database"
+        or baseline_content.raw_count < 0
+        or baseline_content.observation_count < 0
+    ):
+        raise WorkspaceV2InventoryError("typed baseline content proof differs")
+    with (
+        _reconciliation_lock(destination / "state"),
+        _v2_writer_guard(destination),
+    ):
+        if database.with_suffix(".duckdb.wal").exists():
+            raise WorkspaceV2InventoryError("typed baseline requires a closed image")
+        database_reference = reconciliation_file_reference(database, "database")
+        if database_reference != expected_database:
+            raise WorkspaceV2InventoryError("typed baseline image differs from its generation")
+        with service.open_storage(
+            service.resolve(destination), WorkspaceAccessMode.READ_ONLY
+        ) as storage:
+            connection = storage.store.connection
+            execute_bounded(
+                connection,
+                "CREATE TEMP TABLE _certified_baseline_raw(record_id VARCHAR)",
+            )
+            inserted = 0
+            if baseline_content.raw_count:
+                for partition in _iter_catchup_partitions(
+                    connection,
+                    execution,
+                    family="certified_baseline_raw",
+                    table="raw_v2_index",
+                    order_column="CAST(received_at AS TIMESTAMPTZ)",
+                    id_column="record_id",
+                    width_expression="octet_length(encode(record_id))+64",
+                ):
+                    remaining = baseline_content.raw_count - inserted
+                    if remaining <= 0:
+                        break
+                    take = min(remaining, partition.row_count)
+                    execute_bounded(
+                        connection,
+                        "INSERT INTO _certified_baseline_raw "
+                        "SELECT record_id FROM raw_v2_index "
+                        f"WHERE {partition.predicate} "
+                        "ORDER BY CAST(received_at AS TIMESTAMPTZ),record_id LIMIT ?",
+                        [*partition.parameters, take],
+                    )
+                    inserted += take
+            if inserted != baseline_content.raw_count:
+                raise WorkspaceV2InventoryError("typed baseline raw prefix is incomplete")
+            raw_count = baseline_raw_count = 0
+            raw_digest = baseline_raw_digest = hashlib.sha256(b"").hexdigest()
+            for partition in _iter_catchup_partitions(
+                connection,
+                execution,
+                family="certified_current_raw",
+                table="raw_v2_index",
+                order_column="CAST(received_at AS TIMESTAMPTZ)",
+                id_column="record_id",
+                width_expression="octet_length(encode(record_id))+64",
+            ):
+                execute_bounded(
+                    connection,
+                    "SELECT record_id,checksum_sha256 FROM raw_v2_index "
+                    f"WHERE {partition.predicate} "
+                    "ORDER BY CAST(received_at AS TIMESTAMPTZ),record_id",
+                    list(partition.parameters),
+                )
+                while rows := connection.fetchmany(256):
+                    for row in rows:
+                        value = str(row[1])
+                        raw_digest = hashlib.sha256(f"{raw_digest}:{value}".encode()).hexdigest()
+                        raw_count += 1
+                        if baseline_raw_count < baseline_content.raw_count:
+                            baseline_raw_digest = hashlib.sha256(
+                                f"{baseline_raw_digest}:{value}".encode()
+                            ).hexdigest()
+                            baseline_raw_count += 1
+                        else:
+                            model = storage.store.raw_staging.get_verified_bounded(
+                                UUID(str(row[0]))
+                            )
+                            if canonical_json_digest(model) != value:
+                                raise WorkspaceV2InventoryError(
+                                    "typed baseline addition raw differs"
+                                )
+                            del model
+            if (
+                baseline_raw_count != baseline_content.raw_count
+                or baseline_raw_digest != baseline_content.raw_digest
+            ):
+                raise WorkspaceV2InventoryError("certified baseline raw content differs")
+            if (
+                execute_bounded(
+                    connection,
+                    "SELECT 1 FROM workspace_raw_json_projections_v2 p WHERE NOT EXISTS "
+                    "(SELECT 1 FROM raw_v2_index r WHERE r.record_id=p.record_id) LIMIT 1",
+                ).fetchone()
+                is not None
+            ):
+                raise WorkspaceV2InventoryError("typed baseline projection has no owner")
+            canonical = _observation_canonical_sql("o")
+            observation_count = baseline_observation_count = 0
+            observation_digest = baseline_observation_digest = hashlib.sha256(b"").hexdigest()
+            for partition in _iter_catchup_partitions(
+                connection,
+                execution,
+                family="certified_current_observations",
+                table="normalized_observations_v2",
+                order_column="CAST(available_at AS TIMESTAMPTZ)",
+                id_column="observation_id",
+                width_expression="octet_length(encode(observation_id))+64",
+            ):
+                execute_bounded(
+                    connection,
+                    "SELECT o.observation_id,o.raw_record_id,sha256(CAST("
+                    + canonical
+                    + " AS VARCHAR)),EXISTS(SELECT 1 FROM _certified_baseline_raw b "
+                    "WHERE b.record_id=o.raw_record_id) FROM normalized_observations_v2 o "
+                    f"WHERE {partition.predicate} "
+                    "ORDER BY CAST(o.available_at AS TIMESTAMPTZ),o.observation_id",
+                    list(partition.parameters),
+                )
+                additions: list[tuple[UUID, str]] = []
+                while rows := connection.fetchmany(256):
+                    for row in rows:
+                        value = str(row[2])
+                        observation_digest = hashlib.sha256(
+                            f"{observation_digest}:{value}".encode()
+                        ).hexdigest()
+                        observation_count += 1
+                        if row[3] is True:
+                            baseline_observation_digest = hashlib.sha256(
+                                f"{baseline_observation_digest}:{value}".encode()
+                            ).hexdigest()
+                            baseline_observation_count += 1
+                        else:
+                            additions.append((UUID(str(row[0])), value))
+                    if additions:
+                        models = storage.observations.get_many(
+                            tuple(identifier for identifier, _ in additions)
+                        )
+                        for identifier, expected in additions:
+                            if canonical_json_digest(models[identifier]) != expected:
+                                raise WorkspaceV2InventoryError(
+                                    "typed baseline addition observation differs"
+                                )
+                        additions = []
+            if (
+                baseline_observation_count != baseline_content.observation_count
+                or baseline_observation_digest != baseline_content.observation_digest
+            ):
+                raise WorkspaceV2InventoryError("certified baseline observations differ")
+            lineage = execute_bounded(
+                connection,
+                "SELECT count(*) FROM normalized_observations_v2 o "
+                "LEFT JOIN raw_v2_index r ON r.record_id=o.raw_record_id "
+                "WHERE r.record_id IS NULL OR r.asset_id<>o.asset_id",
+            ).fetchone()
+            if lineage != (0,):
+                raise WorkspaceV2InventoryError("typed baseline raw observation lineage differs")
+
+            def fold_financial(family: str) -> tuple[int, str]:
+                table, key = (
+                    ("workspace_metric_results_v2", "result_id")
+                    if family == "metrics"
+                    else ("workspace_diagnostic_results_v2", "diagnostic_id")
+                )
+                digest = hashlib.sha256(b"").hexdigest()
+                count = 0
+                for partition in _iter_catchup_partitions(
+                    connection,
+                    execution,
+                    family=f"certified_{family}",
+                    table=table,
+                    order_column="available_at",
+                    id_column=key,
+                    width_expression=f"octet_length(encode({key}))+64",
+                    extra_predicate="origin='HISTORICAL'",
+                ):
+                    execute_bounded(
+                        connection,
+                        f"SELECT checksum_sha256 FROM {table} "
+                        f"WHERE {partition.predicate} ORDER BY available_at,{key}",
+                        list(partition.parameters),
+                    )
+                    while rows := connection.fetchmany(256):
+                        for row in rows:
+                            value = str(row[0])
+                            if len(value) != 64:
+                                raise WorkspaceV2InventoryError(
+                                    "typed baseline financial digest is malformed"
+                                )
+                            digest = hashlib.sha256(f"{digest}:{value}".encode()).hexdigest()
+                            count += 1
+                return count, digest
+
+            metric_count, metric_digest = fold_financial("metrics")
+            diagnostic_count, diagnostic_digest = fold_financial("diagnostics")
+            if (
+                metric_count != baseline_content.metric_count
+                or diagnostic_count != baseline_content.diagnostic_count
+            ):
+                raise WorkspaceV2InventoryError(
+                    "typed baseline financial additions require membership verification"
+                )
+            baseline_counts = dict(baseline_content.preserved_tables)
+            added = dict(baseline_content.validated_additions)
+            for family, table in (
+                ("content", "workspace_analytical_content_v2"),
+                ("sequences", "workspace_analytical_sequences_v2"),
+                ("segments", "workspace_analytical_segments_v2"),
+            ):
+                current = execute_bounded(connection, f"SELECT count(*) FROM {table}").fetchone()
+                assert current is not None
+                if int(current[0]) != baseline_counts.get(table, 0) + added.get(family, 0):
+                    raise WorkspaceV2InventoryError("typed baseline fragment inventory differs")
+            compact = CompactAnalyticalStore(connection)
+            if relationships_path is None:
+                compact.verify_historical_relationships(read_only_units=True)
+            else:
+                reference = reconciliation_file_reference(relationships_path, "control")
+                relationships = ProgressRelationshipProof.model_validate_json(
+                    reference.path.read_bytes()
+                )
+                if (
+                    relationships.operation_id != generation_id
+                    or relationships.destination_root != destination
+                    or relationships.destination_workspace_id != identity.workspace_id
+                    or relationships.database != database_reference
+                    or relationships.wal is not None
+                    or relationships.verifier_module_sha256
+                    != sha256_hex(Path(__file__).with_name("compact_analytical_v2.py").read_bytes())
+                    or relationships.resource_policy_sha256 != admission.resource_policy_sha256
+                ):
+                    raise WorkspaceV2InventoryError(
+                        "typed baseline relationship proof binding differs"
+                    )
+                WorkspaceV2ProgressReconciler._verify(relationships.reconciliation)
+                WorkspaceV2ProgressReconciler._verify(relationships.resource_receipt)
+            for family, table in (
+                ("raw", "raw_v2_index"),
+                ("observations", "normalized_observations_v2"),
+                ("metrics", "workspace_metric_results_v2"),
+                ("diagnostics", "workspace_diagnostic_results_v2"),
+                ("content", "workspace_analytical_content_v2"),
+                ("sequences", "workspace_analytical_sequences_v2"),
+                ("segments", "workspace_analytical_segments_v2"),
+            ):
+                baseline_counts[table] = baseline_counts.get(table, 0) + added.get(family, 0)
+            proof = GenerationContentProof(
+                generation_id=generation_id,
+                workspace_id=identity.workspace_id,
+                baseline_certificate=baseline_certificate,
+                baseline_database=baseline_content.database,
+                database=database_reference,
+                resource_receipt=reconciliation_file_reference(admission_path, "resource"),
+                verifier_sha256=verifier_sha256,
+                policy_sha256=admission.resource_policy_sha256,
+                preserved_tables=tuple(sorted(baseline_counts.items())),
+                raw_count=raw_count,
+                raw_digest=raw_digest,
+                observation_count=observation_count,
+                observation_digest=observation_digest,
+                metric_count=metric_count,
+                metric_digest=metric_digest,
+                diagnostic_count=diagnostic_count,
+                diagnostic_digest=diagnostic_digest,
+                validated_additions=(
+                    ("raw", raw_count - baseline_content.raw_count),
+                    ("observations", observation_count - baseline_content.observation_count),
+                ),
+                verified_at=datetime.now(UTC),
+            )
+            if database_reference != reconciliation_file_reference(database, "database"):
+                raise WorkspaceV2InventoryError("typed baseline database changed")
+            return proof
+
+
 __all__ = [
     "WorkspaceV2AnalyticalImporter",
     "WorkspaceV2InventoryError",
     "WorkspaceV2InventoryState",
     "WorkspaceV2InventorySummary",
+    "verify_generation_contents_typed_baseline",
 ]

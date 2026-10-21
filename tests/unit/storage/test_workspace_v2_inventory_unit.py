@@ -902,6 +902,149 @@ def test_generation_baseline_requires_corrective_proofs_and_preserves_original_B
         assert all(p.read_bytes() == data for p, data in before.items())
 
 
+def test_typed_baseline_verifier_preserves_certified_prefix_and_rejects_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import inspect
+
+    from investment_analyst.storage.workspace_v2_inventory import (
+        reconciliation_file_reference,
+        verify_generation_contents_typed_baseline,
+    )
+    from investment_analyst.workspace.workspace_v2_migration import _observation_canonical_sql
+    from investment_analyst.workspace.workspace_v2_migration_models import GenerationContentProof
+
+    ledger, _, values, admission = _generation_fixture(tmp_path, monkeypatch, populated=True)
+    database = ledger.root / "storage/v2/index.duckdb"
+    database_ref = reconciliation_file_reference(database, "database")
+    admission_path = tmp_path / "typed-admission.json"
+    admission_path.write_text(admission.model_dump_json())
+    with ledger.service.open_storage(
+        ledger.service.resolve(ledger.root), WorkspaceAccessMode.READ_ONLY
+    ) as storage:
+        connection = storage.store.connection
+        raw_values = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT checksum_sha256 FROM raw_v2_index ORDER BY received_at,record_id"
+            ).fetchall()
+        ]
+        observation_values = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT sha256(CAST("
+                + _observation_canonical_sql("o")
+                + " AS VARCHAR)) FROM normalized_observations_v2 o "
+                "ORDER BY available_at,observation_id"
+            ).fetchall()
+        ]
+        metric_values = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT checksum_sha256 FROM workspace_metric_results_v2 "
+                "WHERE origin='HISTORICAL' ORDER BY available_at,result_id"
+            ).fetchall()
+        ]
+        diagnostic_values = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT checksum_sha256 FROM workspace_diagnostic_results_v2 "
+                "WHERE origin='HISTORICAL' ORDER BY available_at,diagnostic_id"
+            ).fetchall()
+        ]
+        fragment_counts = {
+            table: int(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+            for table in (
+                "workspace_analytical_content_v2",
+                "workspace_analytical_sequences_v2",
+                "workspace_analytical_segments_v2",
+            )
+        }
+
+    def chain(values: list[str]) -> str:
+        digest = hashlib.sha256(b"").hexdigest()
+        for value in values:
+            digest = hashlib.sha256(f"{digest}:{value}".encode()).hexdigest()
+        return digest
+
+    preserved = (
+        ("raw_v2_index", len(raw_values)),
+        ("normalized_observations_v2", len(observation_values)),
+        ("workspace_metric_results_v2", len(metric_values)),
+        ("workspace_diagnostic_results_v2", len(diagnostic_values)),
+        *sorted(fragment_counts.items()),
+    )
+    content = GenerationContentProof(
+        generation_id=values["generation_id"],
+        workspace_id=ledger.identity.workspace_id,
+        baseline_certificate=values["verified_w"],
+        baseline_database=database_ref,
+        database=database_ref,
+        resource_receipt=reconciliation_file_reference(admission_path, "resource"),
+        verifier_sha256=sha256_hex(
+            inspect.getsource(verify_generation_contents_typed_baseline).encode()
+        ),
+        policy_sha256=admission.resource_policy_sha256,
+        preserved_tables=preserved,
+        raw_count=len(raw_values),
+        raw_digest=chain(raw_values),
+        observation_count=len(observation_values),
+        observation_digest=chain(observation_values),
+        metric_count=len(metric_values),
+        metric_digest=chain(metric_values),
+        diagnostic_count=len(diagnostic_values),
+        diagnostic_digest=chain(diagnostic_values),
+        validated_additions=(),
+        verified_at=admission.recorded_at,
+    )
+    content_path = tmp_path / "typed-content.json"
+    content_path.write_text(content.model_dump_json())
+    content_ref = reconciliation_file_reference(content_path, "control")
+    budget = admission.budget
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(MaintenanceExecution(budget, lambda *_: None)),
+    ):
+        proof = verify_generation_contents_typed_baseline(
+            ledger.service,
+            generation_id=values["generation_id"],
+            destination=ledger.root,
+            expected_database=database_ref,
+            baseline_certificate=values["verified_w"],
+            baseline_content_proof=content_ref,
+            admission_path=admission_path,
+        )
+        assert (proof.raw_count, proof.raw_digest) == (len(raw_values), chain(raw_values))
+        assert (proof.observation_count, proof.observation_digest) == (
+            len(observation_values),
+            chain(observation_values),
+        )
+        assert (proof.metric_count, proof.metric_digest) == (
+            len(metric_values),
+            chain(metric_values),
+        )
+        assert (proof.diagnostic_count, proof.diagnostic_digest) == (
+            len(diagnostic_values),
+            chain(diagnostic_values),
+        )
+        corrupt_path = tmp_path / "typed-corrupt.json"
+        corrupt_path.write_text(
+            content.model_copy(update={"raw_digest": "0" * 64}).model_dump_json()
+        )
+        with pytest.raises(
+            WorkspaceV2InventoryError, match="certified baseline raw content differs"
+        ):
+            verify_generation_contents_typed_baseline(
+                ledger.service,
+                generation_id=values["generation_id"],
+                destination=ledger.root,
+                expected_database=database_ref,
+                baseline_certificate=values["verified_w"],
+                baseline_content_proof=reconciliation_file_reference(corrupt_path, "control"),
+                admission_path=admission_path,
+            )
+
+
 @pytest.mark.parametrize(
     "fault", ["session", "destination", "active", "previous_active", "live_owner"]
 )

@@ -49,10 +49,11 @@ from investment_analyst.storage.workspace_v2_inventory import (
     historical_transition_fingerprints,
     reconciliation_file_reference,
     verify_generation_contents,
+    verify_generation_contents_typed_baseline,
     verify_generation_raw_files,
 )
 from investment_analyst.workspace.drive_transport import DriveTransport, DriveTransportConfig
-from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.models import WorkspaceAccessMode, WorkspaceManifest
 from investment_analyst.workspace.service import WorkspaceService
 from investment_analyst.workspace.workspace_v2_acceptance import (
     CompatibleRecoveryReadback,
@@ -105,6 +106,7 @@ from investment_analyst.workspace.workspace_v2_migration_models import (
     ProgressReconciliationV2,
     ReconciliationFileReference,
     ReconciliationGenerationReference,
+    ReconciliationHead,
 )
 from investment_analyst.workspace.workspace_v2_operational_state import compare_operational_models
 from investment_analyst.workspace.workspace_v2_physical_delta import (
@@ -1520,6 +1522,211 @@ def _status(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def _prepare_generation_from_revoked_head(
+    args: argparse.Namespace,
+    service: WorkspaceService,
+    ledger: WorkspaceV2GenerationLedger,
+    admission: MaintenanceResourceReceipt,
+    head: ReconciliationHead,
+    previous: ProgressReconciliationV2,
+    source: WorkspaceManifest,
+) -> dict[str, object]:
+    """Publish the next generation from a revoked SUCCESSOR_BOUND head.
+
+    Partial writes stay in the current image. The revoked attempt, its dead
+    owner and the historical W certificate remain immutable ancestors; this
+    function never synthesizes COMPLETE or reuses the dead session.
+    """
+    attempt = previous.reserved_successor.operation_id if previous.reserved_successor else None
+    if (
+        previous.phase != "SUCCESSOR_BOUND"
+        or attempt is None
+        or previous.successor_owner is None
+        or previous.successor_admission is None
+        or previous.coverage is None
+    ):
+        raise MaintenancePhaseError("generation_continuation_requires_revoked_successor")
+    reservation_path = ledger.state / f"progress-successor-reservation.{attempt}.json"
+    reservation = _SuccessorReservation.model_validate_json(reservation_path.read_bytes())
+    if (
+        reservation.reconciliation_id != previous.generation_id
+        or reservation.successor != previous.reserved_successor
+        or reservation.resource_receipt != previous.successor_admission
+    ):
+        raise MaintenancePhaseError("generation_continuation_reservation_differs")
+    invalidations = []
+    for path in sorted(ledger.state.glob(f"cut-invalidation.{attempt}.*.json")):
+        if path.is_symlink():
+            raise MaintenancePhaseError("generation_continuation_invalidation_unsafe")
+        event = CutInvalidation.model_validate_json(path.read_bytes())
+        if (
+            event.attempt_id != attempt
+            or event.generation_id != previous.generation_id
+            or event.certificate
+            != ReconciliationGenerationReference(
+                schema_type="workspace-v2-progress-reconciliation-v2",
+                artifact=head.certificate,
+            )
+            or event.reservation != reconciliation_file_reference(reservation_path, "control")
+            or event.owner != previous.successor_owner
+            or event.destination_root != args.destination
+            or event.destination_workspace_id != ledger.identity.workspace_id
+            or event.source_root != args.source
+            or event.source_workspace_id != source.workspace_id
+            or event.reason != "SESSION_ENDED"
+        ):
+            raise MaintenancePhaseError("generation_continuation_invalidation_differs")
+        WorkspaceV2ProgressReconciler._verify(event.database)
+        if event.wal is not None:
+            WorkspaceV2ProgressReconciler._verify(event.wal)
+        invalidations.append((event, reconciliation_file_reference(path, "control")))
+    if len(invalidations) != 1:
+        raise MaintenancePhaseError("generation_continuation_invalidation_not_unique")
+    revoked, revoked_reference = invalidations[0]
+    database = args.destination / "storage/v2/index.duckdb"
+    if database.with_suffix(".duckdb.wal").exists():
+        raise MaintenancePhaseError("generation_continuation_requires_closed_image")
+    image = reconciliation_file_reference(database, "database")
+    if image != revoked.database:
+        raise MaintenancePhaseError("generation_continuation_database_changed")
+    core = _RecoveredCoreBaseline.model_validate_json(
+        _required(args.core_baseline_path, "core_baseline_path").read_bytes()
+    )
+    WorkspaceV2ProgressReconciler._verify(core.reconciliation)
+    if (
+        core.reconciliation != previous.verified_w
+        or core.database.role != "database"
+        or previous.inventory is None
+        or core.raw_count > previous.inventory.raw_count
+        or core.observation_count > previous.inventory.observation_count
+        or (source.workspace_id, source.created_at)
+        != (previous.source_workspace_id, previous.source_created_at)
+    ):
+        raise MaintenancePhaseError("generation_continuation_core_baseline_differs")
+    expected_head = ledger._head_digest()
+    intent_path = args.controls_root / f"continuation-invalidation.{args.operation_id}.intent.json"
+    if intent_path.exists():
+        event = CutInvalidation.model_validate_json(intent_path.read_bytes())
+    else:
+        event = CutInvalidation(
+            event_id=uuid5(args.operation_id, "SESSION_ENDED"),
+            generation_id=args.operation_id,
+            attempt_id=attempt,
+            previous_event=None,
+            certificate=ReconciliationGenerationReference(
+                schema_type="workspace-v2-progress-reconciliation-v2",
+                artifact=head.certificate,
+            ),
+            reservation=reconciliation_file_reference(reservation_path, "control"),
+            owner=previous.successor_owner,
+            source_root=args.source,
+            source_workspace_id=source.workspace_id,
+            destination_root=args.destination,
+            destination_workspace_id=ledger.identity.workspace_id,
+            database=image,
+            wal=None,
+            write_generation=revoked.write_generation,
+            historical_seal=None,
+            historical_receipt=None,
+            reason="SESSION_ENDED",
+            owner_absence=revoked.owner_absence,
+            exclusivity=revoked.exclusivity,
+            no_activation=revoked.no_activation,
+            code_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            policy_sha256=admission.resource_policy_sha256,
+            recorded_at=datetime.now(UTC),
+            expected_head_sha256=expected_head,
+        )
+        WorkspaceV2ProgressReconciler._write_once(
+            intent_path, event.model_dump_json().encode() + b"\n"
+        )
+    if (
+        event.generation_id != args.operation_id
+        or event.attempt_id != attempt
+        or event.certificate.artifact != head.certificate
+        or event.reservation != reconciliation_file_reference(reservation_path, "control")
+        or event.owner != previous.successor_owner
+        or event.database != image
+        or event.expected_head_sha256 != expected_head
+    ):
+        raise MaintenancePhaseError("generation_continuation_intent_differs")
+    invalidation = ledger.invalidate(event, admission=admission)
+    prepared_path = args.controls_root / f"prepared-generation.{args.operation_id}.intent.json"
+    if prepared_path.exists():
+        generation = ProgressReconciliationV2.model_validate_json(prepared_path.read_bytes())
+    else:
+        code = []
+        repository = Path(__file__).resolve().parents[1]
+        for relative in GENERATION_CODE_PATHS:
+            target = args.controls_root / "generation-code" / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            WorkspaceV2ProgressReconciler._write_once(target, (repository / relative).read_bytes())
+            code.append(reconciliation_file_reference(target, "code"))
+        tree, environment = historical_transition_fingerprints(256, "shared-reference-verifier-v1")
+        now = datetime.now(UTC)
+        receipts = [*previous.previous_receipts, revoked_reference]
+        cut_window_receipt = args.controls_root / "cut-window-receipt.json"
+        if cut_window_receipt.exists() and not cut_window_receipt.is_symlink():
+            receipts.append(reconciliation_file_reference(cut_window_receipt, "control"))
+        generation = ProgressReconciliationV2(
+            generation_id=args.operation_id,
+            ordinal=previous.ordinal + 1,
+            phase="PREPARED",
+            previous_generation=ReconciliationGenerationReference(
+                schema_type="workspace-v2-progress-reconciliation-v2",
+                artifact=head.certificate,
+            ),
+            previous_certificate=None,
+            invalidation=invalidation,
+            source_root=args.source,
+            source_workspace_id=source.workspace_id,
+            source_created_at=source.created_at,
+            destination_root=args.destination,
+            destination_workspace_id=ledger.identity.workspace_id,
+            predecessor=previous.predecessor,
+            previous_attempt=previous.previous_attempt,
+            previous_reservation=reconciliation_file_reference(reservation_path, "control"),
+            previous_receipts=tuple(receipts),
+            parent_membership=previous.parent_membership,
+            parent_seal=previous.parent_seal,
+            verified_w=previous.verified_w,
+            database=image,
+            wal=None,
+            inventory=None,
+            core_proof=None,
+            corrective_proofs=(),
+            code=tuple(code),
+            tree_fingerprint=tree,
+            environment_fingerprint=environment,
+            resource_receipt=reconciliation_file_reference(
+                args.resource_run_root / "admission.json", "resource"
+            ),
+            prepared_at=now,
+            recorded_at=now,
+        )
+        WorkspaceV2ProgressReconciler._write_once(
+            prepared_path, generation.model_dump_json().encode() + b"\n"
+        )
+    if (
+        generation.generation_id != args.operation_id
+        or generation.phase != "PREPARED"
+        or generation.ordinal != previous.ordinal + 1
+        or generation.previous_generation.artifact != head.certificate
+        or generation.invalidation != invalidation
+        or generation.verified_w != previous.verified_w
+        or generation.database != image
+    ):
+        raise MaintenancePhaseError("generation_continuation_prepared_differs")
+    reference = ledger.publish(generation, expected_head_sha256=expected_head, admission=admission)
+    return {
+        "generation": generation.model_dump(mode="json"),
+        "certificate": reference.model_dump(mode="json"),
+        "reused": False,
+        "continuation_of": str(previous.generation_id),
+        "revoked_attempt_id": str(attempt),
+    }
+
+
 def _prepare_generation(args: argparse.Namespace, service: WorkspaceService) -> dict[str, object]:
     """Publish C1 through the typed ledger, preserving the exact legacy objects.
 
@@ -1554,13 +1761,21 @@ def _prepare_generation(args: argparse.Namespace, service: WorkspaceService) -> 
     resolved = ledger.resolve()
     if resolved is not None:
         head, generation = resolved
-        if generation.generation_id != args.operation_id:
-            raise MaintenancePhaseError("generation_already_owned_by_another_attempt")
-        return {
-            "generation": generation.model_dump(mode="json"),
-            "certificate": head.certificate.model_dump(mode="json"),
-            "reused": True,
-        }
+        if generation.generation_id == args.operation_id:
+            return {
+                "generation": generation.model_dump(mode="json"),
+                "certificate": head.certificate.model_dump(mode="json"),
+                "reused": True,
+            }
+        return _prepare_generation_from_revoked_head(
+            args,
+            service,
+            ledger,
+            admission,
+            head,
+            generation,
+            service.manifest(args.source),
+        )
     reconciliation_id = args.reconciliation_id
     if reconciliation_id is None or not args.predecessor_proof:
         raise MaintenancePhaseError("generation_requires_legacy_identity_and_invalidity_evidence")
@@ -1895,6 +2110,26 @@ def _verify_generation(args: argparse.Namespace, service: WorkspaceService) -> d
     )
     if generation.verified_w != core.reconciliation:
         raise MaintenancePhaseError("corrective_verification_original_w_binding_differs")
+    continuation = (
+        generation.previous_generation.schema_type == "workspace-v2-progress-reconciliation-v2"
+    )
+    previous_certificate = None
+    if continuation:
+        previous_certificate = ProgressReconciliationV2.model_validate_json(
+            ledger._read(generation.previous_generation.artifact)
+        )
+        if (
+            previous_certificate.phase != "SUCCESSOR_BOUND"
+            or previous_certificate.core_proof is None
+            or previous_certificate.reserved_successor is None
+        ):
+            raise MaintenancePhaseError("continuation_verification_requires_revoked_head")
+    allowed_verifiers = {
+        hashlib.sha256(inspect.getsource(verify_generation_contents).encode()).hexdigest(),
+        hashlib.sha256(
+            inspect.getsource(verify_generation_contents_typed_baseline).encode()
+        ).hexdigest(),
+    }
     proof_path = getattr(args, "generation_content_proof", None) or (
         args.controls_root / "corrective-content-proof.json"
     )
@@ -1904,22 +2139,37 @@ def _verify_generation(args: argparse.Namespace, service: WorkspaceService) -> d
         if (
             proof.generation_id != args.operation_id
             or proof.baseline_certificate != core.reconciliation
-            or proof.verifier_sha256
-            != hashlib.sha256(inspect.getsource(verify_generation_contents).encode()).hexdigest()
+            or proof.verifier_sha256 not in allowed_verifiers
+            or (continuation and proof.database != generation.database)
         ):
             raise MaintenancePhaseError("corrective_content_proof_binding_differs")
     else:
-        proof = verify_generation_contents(
-            service,
-            generation_id=args.operation_id,
-            destination=args.destination,
-            baseline_root=_required(args.recovery_root, "recovery_root"),
-            baseline_certificate=core.reconciliation,
-            baseline_database_sha256=core.database.sha256,
-            admission_path=_required(args.resource_run_root, "resource_run_root")
-            / "admission.json",
-            relationships_path=args.relationships_proof,
-        )
+        if continuation:
+            assert previous_certificate is not None
+            assert previous_certificate.core_proof is not None
+            proof = verify_generation_contents_typed_baseline(
+                service,
+                generation_id=args.operation_id,
+                destination=args.destination,
+                expected_database=generation.database,
+                baseline_certificate=core.reconciliation,
+                baseline_content_proof=previous_certificate.core_proof,
+                admission_path=_required(args.resource_run_root, "resource_run_root")
+                / "admission.json",
+                relationships_path=args.relationships_proof,
+            )
+        else:
+            proof = verify_generation_contents(
+                service,
+                generation_id=args.operation_id,
+                destination=args.destination,
+                baseline_root=_required(args.recovery_root, "recovery_root"),
+                baseline_certificate=core.reconciliation,
+                baseline_database_sha256=core.database.sha256,
+                admission_path=_required(args.resource_run_root, "resource_run_root")
+                / "admission.json",
+                relationships_path=args.relationships_proof,
+            )
         WorkspaceV2ProgressReconciler._write_once(
             proof_path, proof.model_dump_json().encode() + b"\n"
         )

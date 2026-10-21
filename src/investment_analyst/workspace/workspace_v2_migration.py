@@ -9,7 +9,6 @@ contracts before a page checkpoint is advanced.
 from __future__ import annotations
 
 import ast
-import csv
 import hashlib
 import inspect
 import json
@@ -19,9 +18,8 @@ from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
@@ -1148,68 +1146,168 @@ def _core_native_pages(
             yield rows
 
 
-def _load_recovered_core_projection(
-    target: DuckDBPyConnection,
-    stream: DuckDBPyConnection,
-    source_database: Path,
+_CATCHUP_ROW_BUDGET = 65_536
+_CATCHUP_BYTE_BUDGET = 64 * 1024 * 1024
+_CATCHUP_MAX_SPLIT_DEPTH = 96
+
+
+@dataclass(frozen=True)
+class _CatchupRange:
+    """One half-open time range plus optional inclusive identity bounds."""
+
+    lower: datetime
+    upper: datetime
+    id_after: str | None = None
+    id_upto: str | None = None
+
+    def predicate(self, order_column: str, id_column: str) -> tuple[str, tuple[object, ...]]:
+        clauses = [f"{order_column} >= ?", f"{order_column} < ?"]
+        parameters: list[object] = [self.lower, self.upper]
+        if self.id_after is not None:
+            clauses.append(f"{id_column} > ?")
+            parameters.append(self.id_after)
+        if self.id_upto is not None:
+            clauses.append(f"{id_column} <= ?")
+            parameters.append(self.id_upto)
+        return " AND ".join(clauses), tuple(parameters)
+
+
+@dataclass(frozen=True)
+class _CatchupPartition:
+    """One bounded ordered slice, never a full-table sort/projection."""
+
+    predicate: str
+    parameters: tuple[object, ...]
+    row_count: int
+    byte_count: int
+    ordinal: int
+
+
+def _iter_catchup_partitions(
+    connection: DuckDBPyConnection,
     execution: MaintenanceExecution,
-    page_limit: int,
     *,
-    raw: bool,
-) -> None:
-    """Load only the two cut-comparison indexes through one admitted spill file."""
-    policy = connection_policy(source_database)
-    if policy.temp_directory is None:
-        raise WorkspaceV2MigrationError("core comparison requires its admitted spool")
-    table = "_recovered_raw" if raw else "_recovered_observations"
-    columns = "{'identifier':'VARCHAR','digest':'VARCHAR'" + (
-        ",'metadata':'VARCHAR'}" if raw else "}"
-    )
-    count = 0
-    longest = 1
-    with NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        newline="",
-        dir=policy.temp_directory,
-        prefix="recovered-core-index-",
-        suffix=".tsv",
-    ) as projection:
-        writer = csv.writer(projection, delimiter="\t", quoting=csv.QUOTE_ALL, lineterminator="\n")
-        for rows in _core_native_pages(target, execution, page_limit):
-            for row in rows:
-                values = tuple(str(value) for value in row)
-                # Size the parser from the actual projected record, rather than
-                # imposing a new domain limit on an identifier or metadata text.
-                longest = max(
-                    longest,
-                    sum(len(v.encode()) + v.count('"') for v in values) + 3 * len(values) + 2,
-                )
-                writer.writerow(values)
-                count += 1
-        projection.flush()
-        if count:
-            # This is an unordered temporary lookup, never the persisted index.
-            # Avoid retaining an insertion-order buffer beside the join/sort.
-            execute_bounded(stream, "SET preserve_insertion_order=false")
-            execute_bounded(
-                stream,
-                f"INSERT INTO {table} SELECT * FROM read_csv(?,columns={columns}, "
-                "auto_detect=false, delim='\t', header=false, "
-                "quote='\"', escape='\"', strict_mode=true, max_line_size=?)",
-                [projection.name, max(2_097_152, longest)],
+    family: str,
+    table: str,
+    order_column: str,
+    id_column: str,
+    width_expression: str,
+    row_budget: int = _CATCHUP_ROW_BUDGET,
+    byte_budget: int = _CATCHUP_BYTE_BUDGET,
+    extra_predicate: str = "TRUE",
+    extra_parameters: tuple[object, ...] = (),
+) -> Iterator[_CatchupPartition]:
+    """Partition before the native sort, so each ordered slice is finite.
+
+    Recursive time halving preserves the global ``(order_column, id_column)``
+    order; a single-microsecond range is split by identity midpoint. No query
+    materializes a whole-index projection, JOIN or ORDER BY state.
+    """
+    if row_budget < 1 or byte_budget < 1:
+        raise WorkspaceV2MigrationError("catchup partition budget differs")
+    queries = 1
+    partitions = rows_total = bytes_total = 0
+
+    def measure(
+        lower: datetime,
+        upper: datetime,
+        id_after: str | None,
+        id_upto: str | None,
+    ) -> tuple[int, int, str, tuple[object, ...]]:
+        nonlocal queries
+        range_predicate, range_parameters = _CatchupRange(
+            lower, upper, id_after, id_upto
+        ).predicate(order_column, id_column)
+        predicate = f"({range_predicate}) AND ({extra_predicate})"
+        parameters = (*range_parameters, *extra_parameters)
+        row = execute_bounded(
+            connection,
+            f"SELECT count(*),coalesce(sum({width_expression}),0) FROM {table} WHERE {predicate}",
+            list(parameters),
+        ).fetchone()
+        queries += 1
+        if row is None or int(row[0]) < 0 or int(row[1]) < 0:
+            raise WorkspaceV2MigrationError("catchup partition measurement is invalid")
+        return int(row[0]), int(row[1]), predicate, parameters
+
+    try:
+        bounds = execute_bounded(
+            connection,
+            f"SELECT CAST(min({order_column}) AS VARCHAR),"
+            f"CAST(max({order_column}) AS VARCHAR) FROM {table} WHERE {extra_predicate}",
+            list(extra_parameters),
+        ).fetchone()
+        if bounds is None or bounds[0] is None or bounds[1] is None:
+            return
+        try:
+            lower = datetime.fromisoformat(str(bounds[0]))
+            upper = datetime.fromisoformat(str(bounds[1]))
+        except ValueError as error:
+            raise WorkspaceV2MigrationError("catchup partition order is not temporal") from error
+        if lower.tzinfo is None or upper.tzinfo is None:
+            raise WorkspaceV2MigrationError("catchup partition order lacks UTC")
+        lower, upper = lower.astimezone(UTC), upper.astimezone(UTC)
+        if lower > upper:
+            raise WorkspaceV2MigrationError("catchup partition bounds are inverted")
+        upper = upper + timedelta(microseconds=1)
+        stack: list[tuple[datetime, datetime, str | None, str | None, int]] = [
+            (lower, upper, None, None, 0)
+        ]
+        while stack:
+            range_lower, range_upper, id_after, id_upto, depth = stack.pop()
+            rows, bytes_, predicate, parameters = measure(
+                range_lower, range_upper, id_after, id_upto
             )
-            if (
-                execute_bounded(
-                    stream,
-                    f"SELECT identifier FROM {table} GROUP BY identifier "
-                    "HAVING count(*)<>1 LIMIT 1",
-                ).fetchone()
-                is not None
-            ):
+            if rows == 0:
+                continue
+            if rows <= row_budget and bytes_ <= byte_budget:
+                partitions += 1
+                rows_total += rows
+                bytes_total += bytes_
+                yield _CatchupPartition(predicate, parameters, rows, bytes_, partitions)
+                continue
+            if depth >= _CATCHUP_MAX_SPLIT_DEPTH:
+                raise WorkspaceV2MigrationError("catchup partition split budget exhausted")
+            if range_upper - range_lower > timedelta(microseconds=1):
+                midpoint = range_lower + (range_upper - range_lower) / 2
+                if not range_lower < midpoint < range_upper:
+                    midpoint = range_lower + timedelta(microseconds=1)
+                if range_lower < midpoint < range_upper:
+                    stack.append((midpoint, range_upper, None, None, depth + 1))
+                    stack.append((range_lower, midpoint, None, None, depth + 1))
+                    continue
+            identity_bounds = execute_bounded(
+                connection,
+                f"SELECT min({id_column}),max({id_column}) FROM {table} WHERE {predicate}",
+                list(parameters),
+            ).fetchone()
+            queries += 1
+            if identity_bounds is None or identity_bounds[0] is None:
+                continue
+            identity_lower, identity_upper = str(identity_bounds[0]), str(identity_bounds[1])
+            if identity_lower == identity_upper:
+                partitions += 1
+                rows_total += rows
+                bytes_total += bytes_
+                yield _CatchupPartition(predicate, parameters, rows, bytes_, partitions)
+                continue
+            try:
+                low, high = UUID(identity_lower).int, UUID(identity_upper).int
+            except ValueError as error:
                 raise WorkspaceV2MigrationError(
-                    "core comparison projection has duplicate identities"
-                )
+                    "catchup partition identity is not a UUID"
+                ) from error
+            midpoint_id = (low + high) // 2
+            if not low <= midpoint_id < high:
+                raise WorkspaceV2MigrationError("catchup identity split has no progress")
+            midpoint_text = str(UUID(int=midpoint_id))
+            stack.append((range_lower, range_upper, midpoint_text, id_upto, depth + 1))
+            stack.append((range_lower, range_upper, id_after, midpoint_text, depth + 1))
+    finally:
+        execution.record_measurement(f"catchup_{family}_partitions", partitions)
+        execution.record_measurement(f"catchup_{family}_rows", rows_total)
+        execution.record_measurement(f"catchup_{family}_bytes", bytes_total)
+        execution.record_measurement(f"catchup_{family}_queries", queries)
 
 
 def _record_recovered_core_append(
@@ -1244,107 +1342,238 @@ def _record_recovered_core_append(
     WorkspaceV2ProgressReconciler._write_once(path, document)
 
 
-def _recovered_raw_comparison_sql() -> tuple[str, str]:
-    """Share the exact metadata comparison with the read-only E4 measurement."""
-    fields = (
-        "record_id",
-        "asset_id",
-        "source_id",
-        "event_time",
-        "available_at",
-        "received_at",
-        "schema_version",
-    )
-    timestamps = {"event_time", "available_at", "received_at"}
+_RAW_COMPARISON_FIELDS = (
+    "record_id",
+    "asset_id",
+    "source_id",
+    "event_time",
+    "available_at",
+    "received_at",
+    "schema_version",
+)
+_RAW_COMPARISON_TIMESTAMPS = {"event_time", "available_at", "received_at"}
 
-    def envelope(alias: str, *, target: bool) -> str:
-        return (
-            "json_array("
-            + ",".join(
-                _utc_document_timestamp(f"CAST({alias}.{field} AS TIMESTAMPTZ)")
-                if field in timestamps and target
-                else _utc_document_timestamp(f"{alias}.{field}")
-                if field in timestamps
-                else f"{alias}.{field}"
-                for field in fields
-            )
-            + ")"
-        )
 
-    paths = (
-        "["
-        + ",".join(
-            "'$.source.source_id'" if field == "source_id" else f"'$.{field}'" for field in fields
-        )
-        + "]"
-    )
-    expected = (
-        "["
-        + ",".join(
-            _utc_document_timestamp(f"r.{field}") if field in timestamps else f"r.{field}"
-            for field in fields
-        )
-        + "]"
-    )
+def _raw_metadata_envelope(alias: str, *, target: bool) -> str:
     return (
-        "SELECT record_id,checksum_sha256,CAST("
-        + envelope("r", target=True)
-        + " AS VARCHAR) FROM raw_v2_index r",
-        "SELECT r.record_id,r.checksum_sha256,sha256(r.document_json),w.digest,CAST("
-        + envelope("r", target=False)
-        + " AS VARCHAR) IS NOT DISTINCT FROM w.metadata,"
-        + f"json_extract_string(r.document_json,{paths}) IS NOT DISTINCT FROM "
-        + expected
-        + ",octet_length(encode(r.document_json)),r.relative_path,"
-        "r.source_id,r.schema_version,CAST("
-        + envelope("r", target=False)
-        + " AS VARCHAR) FROM raw_record_index r LEFT JOIN _recovered_raw w "
-        "ON r.record_id=w.identifier ORDER BY r.received_at,r.record_id",
+        "json_array("
+        + ",".join(
+            _utc_document_timestamp(f"CAST({alias}.{field} AS TIMESTAMPTZ)")
+            if field in _RAW_COMPARISON_TIMESTAMPS and target
+            else _utc_document_timestamp(f"{alias}.{field}")
+            if field in _RAW_COMPARISON_TIMESTAMPS
+            else f"{alias}.{field}"
+            for field in _RAW_COMPARISON_FIELDS
+        )
+        + ")"
     )
 
 
-def _recovered_observations_comparison_sql() -> tuple[str, str, tuple[str, ...], set[str]]:
-    """Share the exact metadata comparison with the read-only E4 measurement."""
-    fields = (
-        "observation_id",
-        "raw_record_id",
-        "asset_id",
-        "field_name",
-        "frequency",
-        "observed_at",
-        "period_end",
-        "available_at",
-        "quality",
-    )
-    timestamps = {"observed_at", "period_end", "available_at"}
-    paths = "[" + ",".join(f"'$.{name}'" for name in fields) + "]"
-    envelope = (
+def _raw_metadata_paths() -> str:
+    return (
         "["
         + ",".join(
-            _utc_document_timestamp(f"s.{name}") if name in timestamps else f"s.{name}"
-            for name in fields
+            "'$.source.source_id'" if field == "source_id" else f"'$.{field}'"
+            for field in _RAW_COMPARISON_FIELDS
         )
         + "]"
     )
+
+
+def _raw_metadata_expected(alias: str) -> str:
     return (
-        "SELECT observation_id,sha256(CAST("
-        + _observation_canonical_sql("o")
-        + " AS VARCHAR)) FROM normalized_observations_v2 o",
+        "["
+        + ",".join(
+            _utc_document_timestamp(f"{alias}.{field}")
+            if field in _RAW_COMPARISON_TIMESTAMPS
+            else f"{alias}.{field}"
+            for field in _RAW_COMPARISON_FIELDS
+        )
+        + "]"
+    )
+
+
+def _raw_source_partition_sql(predicate: str) -> str:
+    """One ordered source slice; no target JOIN or full-index projection."""
+    return (
+        "SELECT r.record_id,r.checksum_sha256,sha256(r.document_json),CAST("
+        + _raw_metadata_envelope("r", target=False)
+        + " AS VARCHAR),"
+        + f"json_extract_string(r.document_json,{_raw_metadata_paths()}) "
+        + f"IS NOT DISTINCT FROM {_raw_metadata_expected('r')},"
+        + "octet_length(encode(r.document_json)),r.relative_path,"
+        "r.source_id,r.schema_version FROM raw_record_index r "
+        f"WHERE {predicate} ORDER BY r.received_at,r.record_id"
+    )
+
+
+def _raw_target_lookup_sql(count: int) -> str:
+    return (
+        "SELECT r.record_id,r.checksum_sha256,CAST("
+        + _raw_metadata_envelope("r", target=True)
+        + " AS VARCHAR) FROM raw_v2_index r WHERE r.record_id IN ("
+        + ",".join("?" for _ in range(count))
+        + ")"
+    )
+
+
+_OBSERVATION_COMPARISON_FIELDS = (
+    "observation_id",
+    "raw_record_id",
+    "asset_id",
+    "field_name",
+    "frequency",
+    "observed_at",
+    "period_end",
+    "available_at",
+    "quality",
+)
+_OBSERVATION_COMPARISON_TIMESTAMPS = {"observed_at", "period_end", "available_at"}
+
+
+def _observation_metadata_paths() -> str:
+    return "[" + ",".join(f"'$.{name}'" for name in _OBSERVATION_COMPARISON_FIELDS) + "]"
+
+
+def _observation_metadata_envelope() -> str:
+    return (
+        "["
+        + ",".join(
+            _utc_document_timestamp(f"s.{name}")
+            if name in _OBSERVATION_COMPARISON_TIMESTAMPS
+            else f"s.{name}"
+            for name in _OBSERVATION_COMPARISON_FIELDS
+        )
+        + "]"
+    )
+
+
+def _observation_source_partition_sql(predicate: str) -> str:
+    """One ordered observation slice; no target JOIN or global order state."""
+    return (
         "SELECT "
         + ",".join(
-            _utc_document_timestamp(f"s.{name}") if name in timestamps else f"s.{name}"
-            for name in fields
+            _utc_document_timestamp(f"s.{name}")
+            if name in _OBSERVATION_COMPARISON_TIMESTAMPS
+            else f"s.{name}"
+            for name in _OBSERVATION_COMPARISON_FIELDS
         )
-        + ",sha256(s.document_json),w.digest,"
-        + f"json_extract_string(s.document_json,{paths}) IS NOT DISTINCT FROM "
-        + envelope
-        + ",octet_length(encode(s.document_json)),"
-        "json_extract_string(s.document_json,'$.source.source_id') "
-        "FROM normalized_observations s LEFT JOIN _recovered_observations w "
-        "ON s.observation_id=w.identifier ORDER BY s.available_at,s.observation_id",
-        fields,
-        timestamps,
+        + ",sha256(s.document_json),"
+        + f"json_extract_string(s.document_json,{_observation_metadata_paths()}) "
+        + f"IS NOT DISTINCT FROM {_observation_metadata_envelope()},"
+        + "octet_length(encode(s.document_json)),"
+        + "json_extract_string(s.document_json,'$.source.source_id') "
+        + f"FROM normalized_observations s WHERE {predicate} "
+        "ORDER BY s.available_at,s.observation_id"
     )
+
+
+def _observation_target_lookup_sql(count: int) -> str:
+    return (
+        "SELECT o.observation_id,sha256(CAST("
+        + _observation_canonical_sql("o")
+        + " AS VARCHAR)) FROM normalized_observations_v2 o "
+        "WHERE o.observation_id IN (" + ",".join("?" for _ in range(count)) + ")"
+    )
+
+
+def _target_digest_sql(family: str, predicate: str) -> str:
+    if family == "raw":
+        return (
+            "SELECT checksum_sha256 FROM raw_v2_index "
+            f"WHERE {predicate} ORDER BY CAST(received_at AS TIMESTAMPTZ),record_id"
+        )
+    return (
+        "SELECT sha256(CAST("
+        + _observation_canonical_sql("o")
+        + " AS VARCHAR)) FROM normalized_observations_v2 o "
+        f"WHERE {predicate} ORDER BY CAST(available_at AS TIMESTAMPTZ),observation_id"
+    )
+
+
+def _target_raw_lookup(
+    connection: DuckDBPyConnection, identifiers: tuple[UUID, ...]
+) -> dict[str, tuple[str, str]]:
+    """Read at most one page of target rows by primary key, never the full index."""
+    if not identifiers:
+        return {}
+    rows = execute_bounded(
+        connection,
+        _raw_target_lookup_sql(len(identifiers)),
+        [str(identifier) for identifier in identifiers],
+    ).fetchall()
+    lookup = {str(row[0]): (str(row[1]), str(row[2])) for row in rows}
+    if len(lookup) != len(rows):
+        raise WorkspaceV2MigrationError("recovered raw target lookup is ambiguous")
+    return lookup
+
+
+def _target_observation_lookup(
+    connection: DuckDBPyConnection, identifiers: tuple[UUID, ...]
+) -> dict[str, str]:
+    if not identifiers:
+        return {}
+    rows = execute_bounded(
+        connection,
+        _observation_target_lookup_sql(len(identifiers)),
+        [str(identifier) for identifier in identifiers],
+    ).fetchall()
+    lookup = {str(row[0]): str(row[1]) for row in rows}
+    if len(lookup) != len(rows):
+        raise WorkspaceV2MigrationError("recovered observation target lookup is ambiguous")
+    return lookup
+
+
+def _fold_target_digest(
+    connection: DuckDBPyConnection,
+    execution: MaintenanceExecution,
+    *,
+    family: Literal["raw", "observations"],
+    row_budget: int = _CATCHUP_ROW_BUDGET,
+    byte_budget: int = _CATCHUP_BYTE_BUDGET,
+) -> tuple[int, str]:
+    """Chain the exact target order through bounded slices, never one global sort."""
+    if family == "raw":
+        table = "raw_v2_index"
+        order_column = "CAST(received_at AS TIMESTAMPTZ)"
+        id_column = "record_id"
+        width = "octet_length(encode(record_id))+octet_length(encode(checksum_sha256))+64"
+    else:
+        table = "normalized_observations_v2"
+        order_column = "CAST(available_at AS TIMESTAMPTZ)"
+        id_column = "observation_id"
+        width = "octet_length(encode(observation_id))+64"
+    digest = hashlib.sha256(b"").hexdigest()
+    count = 0
+    partitions = _iter_catchup_partitions(
+        connection,
+        execution,
+        family=f"{family}_target",
+        table=table,
+        order_column=order_column,
+        id_column=id_column,
+        width_expression=width,
+        row_budget=row_budget,
+        byte_budget=byte_budget,
+    )
+    for partition in partitions:
+        execute_bounded(
+            connection,
+            _target_digest_sql(family, partition.predicate),
+            list(partition.parameters),
+        )
+        partition_count = 0
+        for rows in _core_native_pages(connection, execution, 256):
+            for row in rows:
+                value = str(row[0])
+                if len(value) != 64:
+                    raise WorkspaceV2MigrationError("recovered digest value is malformed")
+                digest = hashlib.sha256(f"{digest}:{value}".encode()).hexdigest()
+                count += 1
+                partition_count += 1
+        if partition_count != partition.row_count:
+            raise WorkspaceV2MigrationError("recovered target partition inventory differs")
+    return count, digest
 
 
 def _successor_comparison_fields(family: str) -> tuple[str, str, list[str]]:
@@ -1550,58 +1779,83 @@ def measure_recovered_comparison(
         for family in ("raw", "observations"):
             started = time.monotonic()
             raw = family == "raw"
-            table = "_recovered_raw" if raw else "_recovered_observations"
-            execute_bounded(
-                source,
-                f"CREATE TEMP TABLE {table} "
-                "(identifier VARCHAR,digest VARCHAR" + (",metadata VARCHAR)" if raw else ")"),
-            )
-            target_sql, source_sql = (
-                _recovered_raw_comparison_sql()
-                if raw
-                else _recovered_observations_comparison_sql()[:2]
-            )
-            execute_bounded(target, target_sql)
-            _load_recovered_core_projection(
-                target, source, source_database, execution, 256, raw=raw
-            )
-            plan = execute_bounded(source, "EXPLAIN " + source_sql).fetchall()
-            execution.record_query_plan(family, "\n".join(str(row[-1]) for row in plan))
-            execute_bounded(source, source_sql)
+            if raw:
+                partitions = _iter_catchup_partitions(
+                    source,
+                    execution,
+                    family="raw_measure",
+                    table="raw_record_index",
+                    order_column="received_at",
+                    id_column="record_id",
+                    width_expression=(
+                        "octet_length(encode(record_id))+octet_length(encode(checksum_sha256))+"
+                        "octet_length(encode(document_json))+octet_length(encode(relative_path))+"
+                        "octet_length(encode(source_id))+octet_length(encode(schema_version))+128"
+                    ),
+                )
+            else:
+                partitions = _iter_catchup_partitions(
+                    source,
+                    execution,
+                    family="observations_measure",
+                    table="normalized_observations",
+                    order_column="available_at",
+                    id_column="observation_id",
+                    width_expression=(
+                        "octet_length(encode(observation_id))+octet_length(encode(raw_record_id))+"
+                        "octet_length(encode(asset_id))+octet_length(encode(field_name))+"
+                        "octet_length(encode(frequency))+octet_length(encode(quality))+"
+                        "octet_length(encode(document_json))+128"
+                    ),
+                )
             count = known = typed = 0
+            partition_count = partition_rows = partition_bytes = 0
             digest = hashlib.sha256(b"").hexdigest()
-            for rows in _core_native_pages(source, execution, 256):
-                for row in rows:
-                    count += 1
-                    known += row[3 if raw else 10] is not None
-                    fast = (
-                        (
-                            row[3] is not None
-                            and row[3] == row[1] == row[2]
-                            and row[4] is True
-                            and row[5] is True
-                        )
+            planned = False
+            for partition in partitions:
+                partition_count += 1
+                partition_rows += partition.row_count
+                partition_bytes += partition.byte_count
+                source_sql = (
+                    _raw_source_partition_sql(partition.predicate)
+                    if raw
+                    else _observation_source_partition_sql(partition.predicate)
+                )
+                if not planned:
+                    plan = execute_bounded(
+                        source, "EXPLAIN " + source_sql, list(partition.parameters)
+                    ).fetchall()
+                    execution.record_query_plan(family, "\n".join(str(row[-1]) for row in plan))
+                    planned = True
+                execute_bounded(source, source_sql, list(partition.parameters))
+                for rows in _core_native_pages(source, execution, 256):
+                    identifiers = tuple(UUID(str(row[0])) for row in rows)
+                    target_rows = (
+                        _target_raw_lookup(target, identifiers)
                         if raw
-                        else row[9] == row[10] and row[11] is True
+                        else _target_observation_lookup(target, identifiers)
                     )
-                    typed += not fast
-                    digest = hashlib.sha256(f"{digest}:{row[1 if raw else 9]}".encode()).hexdigest()
-            execute_bounded(
-                target,
-                "SELECT checksum_sha256 FROM raw_v2_index "
-                "ORDER BY CAST(received_at AS TIMESTAMPTZ),record_id"
-                if raw
-                else "SELECT sha256(CAST("
-                + _observation_canonical_sql("o")
-                + " AS VARCHAR)) FROM normalized_observations_v2 o "
-                "ORDER BY CAST(available_at AS TIMESTAMPTZ),observation_id",
-            )
-            target_count = 0
-            target_digest = hashlib.sha256(b"").hexdigest()
-            for rows in _core_native_pages(target, execution, 256):
-                for row in rows:
-                    target_count += 1
-                    target_digest = hashlib.sha256(f"{target_digest}:{row[0]}".encode()).hexdigest()
+                    for row in rows:
+                        count += 1
+                        target_row = target_rows.get(str(row[0]))
+                        known += target_row is not None
+                        if raw:
+                            fast = (
+                                target_row is not None
+                                and target_row[0] == row[1] == row[2]
+                                and target_row[1] == row[3]
+                                and row[4] is True
+                            )
+                            digest = hashlib.sha256(f"{digest}:{row[1]}".encode()).hexdigest()
+                        else:
+                            fast = (
+                                target_row is not None
+                                and target_row == str(row[9])
+                                and row[10] is True
+                            )
+                            digest = hashlib.sha256(f"{digest}:{row[9]}".encode()).hexdigest()
+                        typed += not fast
+            target_count, target_digest = _fold_target_digest(target, execution, family=family)
             measurements[family] = {
                 "elapsed_seconds": time.monotonic() - started,
                 "source_count": count,
@@ -1610,8 +1864,10 @@ def measure_recovered_comparison(
                 "requires_typed_validation": typed,
                 "source_document_digest": digest,
                 "target_digest": target_digest,
+                "partition_count": partition_count,
+                "partition_rows": partition_rows,
+                "partition_bytes": partition_bytes,
             }
-            execute_bounded(source, f"DROP TABLE {table}")
         started = time.monotonic()
         membership = (baseline.parent_membership, baseline.inventory.delta_membership)
         for reference in membership:
@@ -1727,169 +1983,176 @@ def _append_recovered_raw(
     ):
         raise WorkspaceV2MigrationError("recovered raw requires its live source and v2 destination")
     execution = _require_recovered_core(destination, frozen_source, core_baseline, admission_path)
-    target_sql, source_sql = _recovered_raw_comparison_sql()
 
     total = reused = max_hydrated = 0
     digest = hashlib.sha256(b"").hexdigest()
     by_source: dict[str, int] = {}
     by_schema: dict[str, int] = {}
+    raw_width = (
+        "octet_length(encode(record_id))+octet_length(encode(checksum_sha256))+"
+        "octet_length(encode(document_json))+octet_length(encode(relative_path))+"
+        "octet_length(encode(source_id))+octet_length(encode(schema_version))+128"
+    )
     with connect_duckdb(source.paths.database_path, read_only=False) as stream:
-        execute_bounded(
-            stream,
-            "CREATE TEMP TABLE _recovered_raw (identifier VARCHAR,digest VARCHAR,metadata VARCHAR)",
-        )
         target = destination.store.connection
-        execute_bounded(
-            target,
-            target_sql,
-        )
-        _load_recovered_core_projection(
-            target, stream, source.paths.database_path, execution, page_limit, raw=True
-        )
-        execute_bounded(
+        for partition in _iter_catchup_partitions(
             stream,
-            source_sql,
-        )
-        for rows in _core_native_pages(stream, execution, page_limit):
-            pending_groups: list[tuple[UUID, ...]] = []
-            pending_ids: list[UUID] = []
-            pending_size = 0
-            large_ids: set[UUID] = set()
-            for row in rows:
-                if (
-                    row[3] is not None
-                    and row[3] == row[1]
-                    and row[4] is True
-                    and row[2] == row[1]
-                    and row[5] is True
-                ):
-                    continue
-                path = source.paths.raw_dir / str(row[7])
-                if path.is_symlink() or not path.resolve().is_relative_to(source.paths.raw_dir):
-                    raise WorkspaceV2MigrationError("recovered raw source path is unsafe")
-                length = path.stat().st_size
-                if length > 1 << 20 or (row[6] is not None and int(row[6]) > 1 << 20):
-                    if pending_ids:
+            execution,
+            family="raw_source",
+            table="raw_record_index",
+            order_column="received_at",
+            id_column="record_id",
+            width_expression=raw_width,
+        ):
+            execute_bounded(
+                stream,
+                _raw_source_partition_sql(partition.predicate),
+                list(partition.parameters),
+            )
+            partition_rows = 0
+            for rows in _core_native_pages(stream, execution, page_limit):
+                partition_rows += len(rows)
+                target_rows = _target_raw_lookup(target, tuple(UUID(str(row[0])) for row in rows))
+                pending_groups: list[tuple[UUID, ...]] = []
+                pending_ids: list[UUID] = []
+                pending_size = 0
+                large_ids: set[UUID] = set()
+                for row in rows:
+                    target_row = target_rows.get(str(row[0]))
+                    known = target_row[0] if target_row is not None else None
+                    target_metadata = target_row[1] if target_row is not None else None
+                    if (
+                        known is not None
+                        and known == row[1] == row[2]
+                        and target_metadata == row[3]
+                        and row[4] is True
+                    ):
+                        continue
+                    path = source.paths.raw_dir / str(row[6])
+                    if path.is_symlink() or not path.resolve().is_relative_to(source.paths.raw_dir):
+                        raise WorkspaceV2MigrationError("recovered raw source path is unsafe")
+                    length = path.stat().st_size
+                    if length > 1 << 20 or (row[5] is not None and int(row[5]) > 1 << 20):
+                        if pending_ids:
+                            pending_groups.append(tuple(pending_ids))
+                            pending_ids, pending_size = [], 0
+                        large_ids.add(UUID(str(row[0])))
+                        pending_groups.append((UUID(str(row[0])),))
+                        continue
+                    if pending_ids and (pending_size + length > 1 << 20 or len(pending_ids) == 255):
                         pending_groups.append(tuple(pending_ids))
                         pending_ids, pending_size = [], 0
-                    large_ids.add(UUID(str(row[0])))
-                    pending_groups.append((UUID(str(row[0])),))
-                    continue
-                if pending_ids and (pending_size + length > 1 << 20 or len(pending_ids) == 255):
+                    pending_ids.append(UUID(str(row[0])))
+                    pending_size += length
+                if pending_ids:
                     pending_groups.append(tuple(pending_ids))
-                    pending_ids, pending_size = [], 0
-                pending_ids.append(UUID(str(row[0])))
-                pending_size += length
-            if pending_ids:
-                pending_groups.append(tuple(pending_ids))
-            groups = iter(pending_groups)
-            models: dict[UUID, RawRecord] = {}
-            model: RawRecord | None = None
-            for row in rows:
-                known = row[3]
-                actual = str(row[1])
-                fast = (
-                    known is not None
-                    and known == actual
-                    and row[4] is True
-                    and row[2] == actual
-                    and row[5] is True
-                )
-                if not fast:
-                    identifier = UUID(str(row[0]))
-                    if identifier not in models:
-                        # Release the preceding batch before loading another;
-                        # leave one model slot for noncanonical inline fallback.
-                        model = None
-                        models = {}
-                        group = next(groups)
-                        models = (
-                            {group[0]: source.raw_records.get_verified_bounded(group[0])}
-                            if len(group) == 1 and group[0] in large_ids
-                            else source.raw_records.get_many(group)
-                        )
-                        max_hydrated = max(max_hydrated, len(models))
-                    model = models[identifier]
-                    actual = canonical_json_digest(model)
-                    expected_metadata = [
-                        str(model.record_id),
-                        model.asset_id,
-                        model.source.source_id,
-                        *(
-                            None if value is None else value.isoformat().replace("+00:00", "Z")
-                            for value in (model.event_time, model.available_at, model.received_at)
-                        ),
-                        model.schema_version,
-                    ]
-                    if json.loads(str(row[10])) != expected_metadata or actual != row[1]:
-                        raise WorkspaceV2MigrationError(
-                            "recovered raw metadata or checksum changed"
-                        )
-                    if row[2] is not None and row[2] != actual:
-                        inline = execute_bounded(
-                            source.store.connection,
-                            "SELECT document_json FROM raw_record_index WHERE record_id=?",
-                            [str(identifier)],
-                        ).fetchone()
-                        assert inline is not None
-                        inline_model = model_from_json(RawRecord, str(inline[0]))
-                        if canonical_json_digest(inline_model) != actual:
-                            raise WorkspaceV2MigrationError("recovered raw inline content changed")
-                        del inline_model
-                    if known is not None and known != actual:
-                        raise WorkspaceV2MigrationError("recovered raw content changed")
-                    if known is None:
-                        _record_recovered_core_append(
-                            destination,
-                            frozen_source,
-                            core_baseline,
-                            "raw",
-                            ((identifier, actual),),
-                        )
-                        staging = destination.store.raw_staging
-                        if identifier in large_ids:
-                            policy = connection_policy(destination.paths.database_path)
-                            if policy.temp_directory is None:
-                                raise WorkspaceV2MigrationError(
-                                    "raw spool requires admitted directory"
+                groups = iter(pending_groups)
+                models: dict[UUID, RawRecord] = {}
+                model: RawRecord | None = None
+                for row in rows:
+                    target_row = target_rows.get(str(row[0]))
+                    known = target_row[0] if target_row is not None else None
+                    target_metadata = target_row[1] if target_row is not None else None
+                    actual = str(row[1])
+                    fast = (
+                        known is not None
+                        and known == actual == row[2]
+                        and target_metadata == row[3]
+                        and row[4] is True
+                    )
+                    if not fast:
+                        identifier = UUID(str(row[0]))
+                        if identifier not in models:
+                            # Release the preceding batch before loading another;
+                            # leave one model slot for noncanonical inline fallback.
+                            model = None
+                            models = {}
+                            group = next(groups)
+                            models = (
+                                {group[0]: source.raw_records.get_verified_bounded(group[0])}
+                                if len(group) == 1 and group[0] in large_ids
+                                else source.raw_records.get_many(group)
+                            )
+                            max_hydrated = max(max_hydrated, len(models))
+                        model = models[identifier]
+                        actual = canonical_json_digest(model)
+                        expected_metadata = [
+                            str(model.record_id),
+                            model.asset_id,
+                            model.source.source_id,
+                            *(
+                                None if value is None else value.isoformat().replace("+00:00", "Z")
+                                for value in (
+                                    model.event_time,
+                                    model.available_at,
+                                    model.received_at,
                                 )
-                            staging.save_bounded(model, spool_directory=policy.temp_directory)
-                        else:
-                            relative = staging._write_blob(actual, canonical_json_bytes(model))
-                            blob = staging._resolve_blob(relative.as_posix())
-                            with blob.open("rb") as stream_file:
-                                os.fsync(stream_file.fileno())
-                            parent = blob.parent
-                            while True:
-                                descriptor = os.open(parent, os.O_RDONLY)
-                                try:
-                                    os.fsync(descriptor)
-                                finally:
-                                    os.close(descriptor)
-                                if parent == destination.paths.raw_dir:
-                                    break
-                                parent = parent.parent
-                            destination.raw_records.save_many((model,))
-                    elif row[4] is not True:
-                        raise WorkspaceV2MigrationError(
-                            "recovered raw destination metadata changed"
-                        )
-                digest = hashlib.sha256(f"{digest}:{actual}".encode()).hexdigest()
-                total += 1
-                reused += known is not None
-                by_source[str(row[8])] = by_source.get(str(row[8]), 0) + 1
-                by_schema[str(row[9])] = by_schema.get(str(row[9]), 0) + 1
-        target_count = 0
-        target_digest = hashlib.sha256(b"").hexdigest()
-        execute_bounded(
-            target,
-            "SELECT checksum_sha256 FROM raw_v2_index "
-            "ORDER BY CAST(received_at AS TIMESTAMPTZ),record_id",
-        )
-        for rows in _core_native_pages(target, execution, page_limit):
-            for row in rows:
-                target_count += 1
-                target_digest = hashlib.sha256(f"{target_digest}:{row[0]}".encode()).hexdigest()
+                            ),
+                            model.schema_version,
+                        ]
+                        if json.loads(str(row[3])) != expected_metadata or actual != row[1]:
+                            raise WorkspaceV2MigrationError(
+                                "recovered raw metadata or checksum changed"
+                            )
+                        if row[2] is not None and row[2] != actual:
+                            inline = execute_bounded(
+                                source.store.connection,
+                                "SELECT document_json FROM raw_record_index WHERE record_id=?",
+                                [str(identifier)],
+                            ).fetchone()
+                            assert inline is not None
+                            inline_model = model_from_json(RawRecord, str(inline[0]))
+                            if canonical_json_digest(inline_model) != actual:
+                                raise WorkspaceV2MigrationError(
+                                    "recovered raw inline content changed"
+                                )
+                            del inline_model
+                        if known is not None and known != actual:
+                            raise WorkspaceV2MigrationError("recovered raw content changed")
+                        if known is None:
+                            _record_recovered_core_append(
+                                destination,
+                                frozen_source,
+                                core_baseline,
+                                "raw",
+                                ((identifier, actual),),
+                            )
+                            staging = destination.store.raw_staging
+                            if identifier in large_ids:
+                                policy = connection_policy(destination.paths.database_path)
+                                if policy.temp_directory is None:
+                                    raise WorkspaceV2MigrationError(
+                                        "raw spool requires admitted directory"
+                                    )
+                                staging.save_bounded(model, spool_directory=policy.temp_directory)
+                            else:
+                                relative = staging._write_blob(actual, canonical_json_bytes(model))
+                                blob = staging._resolve_blob(relative.as_posix())
+                                with blob.open("rb") as stream_file:
+                                    os.fsync(stream_file.fileno())
+                                parent = blob.parent
+                                while True:
+                                    descriptor = os.open(parent, os.O_RDONLY)
+                                    try:
+                                        os.fsync(descriptor)
+                                    finally:
+                                        os.close(descriptor)
+                                    if parent == destination.paths.raw_dir:
+                                        break
+                                    parent = parent.parent
+                                destination.raw_records.save_many((model,))
+                        elif target_metadata != row[3]:
+                            raise WorkspaceV2MigrationError(
+                                "recovered raw destination metadata changed"
+                            )
+                    digest = hashlib.sha256(f"{digest}:{actual}".encode()).hexdigest()
+                    total += 1
+                    reused += known is not None
+                    by_source[str(row[7])] = by_source.get(str(row[7]), 0) + 1
+                    by_schema[str(row[8])] = by_schema.get(str(row[8]), 0) + 1
+            if partition_rows != partition.row_count:
+                raise WorkspaceV2MigrationError("recovered raw source partition differs")
+        target_count, target_digest = _fold_target_digest(target, execution, family="raw")
         if (target_count, target_digest) != (total, digest):
             raise WorkspaceV2MigrationError("recovered raw full inventory differs")
     return RawV2ImportSummary(
@@ -1935,119 +2198,129 @@ def _append_recovered_observations(
     if not isinstance(destination.store, WorkspaceV2Store):
         raise WorkspaceV2MigrationError("recovered observation destination is not v2")
     execution = _require_recovered_core(destination, frozen_source, core_baseline, admission_path)
-    target_sql, source_sql, fields, timestamps = _recovered_observations_comparison_sql()
+    fields = _OBSERVATION_COMPARISON_FIELDS
+    timestamps = _OBSERVATION_COMPARISON_TIMESTAMPS
     source_database = source.paths.database_path
     digest = hashlib.sha256(b"").hexdigest()
     total = reused = max_hydrated = 0
     by_source: dict[str, int] = {}
     by_frequency: dict[str, int] = {}
+    observation_width = (
+        "octet_length(encode(observation_id))+octet_length(encode(raw_record_id))+"
+        "octet_length(encode(asset_id))+octet_length(encode(field_name))+"
+        "octet_length(encode(frequency))+octet_length(encode(quality))+"
+        "octet_length(encode(document_json))+128"
+    )
     # Use registered connections, not unregistered DuckDB .cursor() clones.
     with connect_duckdb(source_database, read_only=False) as stream:
-        execute_bounded(
-            stream,
-            "CREATE TEMP TABLE _recovered_observations (identifier VARCHAR,digest VARCHAR)",
-        )
         target = destination.store.connection
-        execute_bounded(
-            target,
-            target_sql,
-        )
-        _load_recovered_core_projection(
-            target, stream, source_database, execution, page_limit, raw=False
-        )
-        execute_bounded(
+        for partition in _iter_catchup_partitions(
             stream,
-            source_sql,
-        )
-        for rows in _core_native_pages(stream, execution, page_limit):
-            # Only metadata crosses this cursor. Bound hydrated UTF-8 documents
-            # independently from the model count, including noncanonical rows.
-            pending = [row for row in rows if row[9] != row[10] or row[11] is not True]
-            canonical: dict[str, str] = {}
-            start = 0
-            while start < len(pending):
-                end, size = start, 0
-                while end < len(pending):
-                    length = pending[end][12]
-                    if length is None or int(length) > 1 << 20:
-                        raise WorkspaceV2MigrationError(
-                            "recovered observation exceeds buffer budget"
-                        )
-                    if size + int(length) > 1 << 20:
-                        break
-                    size += int(length)
-                    end += 1
-                batch = pending[start:end]
-                models = source.observations.get_many(tuple(UUID(str(row[0])) for row in batch))
-                max_hydrated = max(max_hydrated, len(models))
-                encoded_size = 0
-                for row in batch:
-                    model = models[UUID(str(row[0]))]
-                    for field, actual in zip(fields, row[:9], strict=True):
-                        expected = getattr(model, field)
-                        if field in timestamps:
-                            equal = (
-                                None if actual is None else datetime.fromisoformat(str(actual))
-                            ) == expected
-                        else:
-                            equal = str(actual) == str(getattr(expected, "value", expected))
-                        if not equal:
-                            raise WorkspaceV2MigrationError(
-                                "recovered observation metadata changed"
-                            )
-                    document = canonical_json_bytes(model)
-                    encoded_size += len(document)
-                    if encoded_size > 1 << 20:
-                        raise WorkspaceV2MigrationError(
-                            "canonical observations exceed buffer budget"
-                        )
-                    checksum = sha256_hex(document)
-                    if row[10] is not None and row[10] != checksum:
-                        raise WorkspaceV2MigrationError("recovered observation content changed")
-                    canonical[str(row[0])] = checksum
-                # Existing append-only writer validates lineage and all typed
-                # fields. Never pass the confirmed canonical W rows to it.
-                missing_ids = {UUID(str(row[0])) for row in batch if row[10] is None}
-                missing = tuple(
-                    model for identifier, model in models.items() if identifier in missing_ids
+            execution,
+            family="observations_source",
+            table="normalized_observations",
+            order_column="available_at",
+            id_column="observation_id",
+            width_expression=observation_width,
+        ):
+            execute_bounded(
+                stream,
+                _observation_source_partition_sql(partition.predicate),
+                list(partition.parameters),
+            )
+            partition_rows = 0
+            for rows in _core_native_pages(stream, execution, page_limit):
+                partition_rows += len(rows)
+                target_rows = _target_observation_lookup(
+                    target, tuple(UUID(str(row[0])) for row in rows)
                 )
-                if missing:
-                    _record_recovered_core_append(
-                        destination,
-                        frozen_source,
-                        core_baseline,
-                        "observations",
-                        tuple(
-                            (model.observation_id, canonical[str(model.observation_id)])
-                            for model in missing
-                        ),
+                # Only metadata crosses this cursor. Bound hydrated UTF-8 documents
+                # independently from the model count, including noncanonical rows.
+                pending = [
+                    row
+                    for row in rows
+                    if not (
+                        target_rows.get(str(row[0])) is not None
+                        and target_rows[str(row[0])] == str(row[9])
+                        and row[10] is True
                     )
-                    destination.observations.save_many(missing)
-                start = end
-            for row in rows:
-                checksum = canonical.get(str(row[0]), str(row[9]))
-                digest = hashlib.sha256(f"{digest}:{checksum}".encode()).hexdigest()
-                total += 1
-                reused += row[10] is not None
-                source_id = str(row[13])
-                by_source[source_id] = by_source.get(source_id, 0) + 1
-                frequency = str(row[4])
-                by_frequency[frequency] = by_frequency.get(frequency, 0) + 1
-        # A full ordered comparison catches missing W and foreign target rows,
-        # including IDs inserted earlier than the old cursor.
-        execute_bounded(
-            target,
-            "SELECT sha256(CAST("
-            + _observation_canonical_sql("o")
-            + " AS VARCHAR)) FROM normalized_observations_v2 o "
-            "ORDER BY CAST(available_at AS TIMESTAMPTZ),observation_id",
-        )
-        target_count = 0
-        target_digest = hashlib.sha256(b"").hexdigest()
-        for rows in _core_native_pages(target, execution, page_limit):
-            for row in rows:
-                target_count += 1
-                target_digest = hashlib.sha256(f"{target_digest}:{row[0]}".encode()).hexdigest()
+                ]
+                canonical: dict[str, str] = {}
+                start = 0
+                while start < len(pending):
+                    end, size = start, 0
+                    while end < len(pending):
+                        length = pending[end][11]
+                        if length is None or int(length) > 1 << 20:
+                            raise WorkspaceV2MigrationError(
+                                "recovered observation exceeds buffer budget"
+                            )
+                        if size + int(length) > 1 << 20:
+                            break
+                        size += int(length)
+                        end += 1
+                    batch = pending[start:end]
+                    models = source.observations.get_many(tuple(UUID(str(row[0])) for row in batch))
+                    max_hydrated = max(max_hydrated, len(models))
+                    encoded_size = 0
+                    for row in batch:
+                        model = models[UUID(str(row[0]))]
+                        for field, actual in zip(fields, row[:9], strict=True):
+                            expected = getattr(model, field)
+                            if field in timestamps:
+                                equal = (
+                                    None if actual is None else datetime.fromisoformat(str(actual))
+                                ) == expected
+                            else:
+                                equal = str(actual) == str(getattr(expected, "value", expected))
+                            if not equal:
+                                raise WorkspaceV2MigrationError(
+                                    "recovered observation metadata changed"
+                                )
+                        document = canonical_json_bytes(model)
+                        encoded_size += len(document)
+                        if encoded_size > 1 << 20:
+                            raise WorkspaceV2MigrationError(
+                                "canonical observations exceed buffer budget"
+                            )
+                        checksum = sha256_hex(document)
+                        known = target_rows.get(str(row[0]))
+                        if known is not None and known != checksum:
+                            raise WorkspaceV2MigrationError("recovered observation content changed")
+                        canonical[str(row[0])] = checksum
+                    # Existing append-only writer validates lineage and all typed
+                    # fields. Never pass the confirmed canonical W rows to it.
+                    missing_ids = {
+                        UUID(str(row[0])) for row in batch if target_rows.get(str(row[0])) is None
+                    }
+                    missing = tuple(
+                        model for identifier, model in models.items() if identifier in missing_ids
+                    )
+                    if missing:
+                        _record_recovered_core_append(
+                            destination,
+                            frozen_source,
+                            core_baseline,
+                            "observations",
+                            tuple(
+                                (model.observation_id, canonical[str(model.observation_id)])
+                                for model in missing
+                            ),
+                        )
+                        destination.observations.save_many(missing)
+                    start = end
+                for row in rows:
+                    checksum = canonical.get(str(row[0]), str(row[9]))
+                    digest = hashlib.sha256(f"{digest}:{checksum}".encode()).hexdigest()
+                    total += 1
+                    reused += target_rows.get(str(row[0])) is not None
+                    source_id = str(row[12])
+                    by_source[source_id] = by_source.get(source_id, 0) + 1
+                    frequency = str(row[4])
+                    by_frequency[frequency] = by_frequency.get(frequency, 0) + 1
+            if partition_rows != partition.row_count:
+                raise WorkspaceV2MigrationError("recovered observation source partition differs")
+        target_count, target_digest = _fold_target_digest(target, execution, family="observations")
         if (target_count, target_digest) != (total, digest):
             raise WorkspaceV2MigrationError("recovered observation full inventory differs")
     return ObservationV2ImportSummary(

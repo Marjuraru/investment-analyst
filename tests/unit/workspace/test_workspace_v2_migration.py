@@ -39,10 +39,10 @@ from investment_analyst.workspace.workspace_v2_migration_models import (
 _MOMENT = datetime(2026, 10, 7, tzinfo=UTC)
 
 
-@pytest.mark.parametrize("raw", [False, True])
-@pytest.mark.parametrize("row_count", [0, 1, 257])
-def test_core_comparison_projection_is_bounded_exact_and_temporary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: bool, row_count: int
+@pytest.mark.parametrize("row_count", [0, 1, 257, 2000])
+@pytest.mark.parametrize("skew", [False, True])
+def test_catchup_partitions_are_bounded_ordered_and_complete(
+    tmp_path: Path, row_count: int, skew: bool
 ) -> None:
     from uuid import uuid4
 
@@ -56,91 +56,195 @@ def test_core_comparison_projection_is_bounded_exact_and_temporary(
         maintenance_resource_budget,
     )
 
-    source, target = tmp_path / "source-db/index.duckdb", tmp_path / "target-db/index.duckdb"
-    source.parent.mkdir()
-    target.parent.mkdir()
+    database = tmp_path / "source-db/index.duckdb"
+    database.parent.mkdir()
     budget = MaintenanceResourceBudget(
         operation_id=uuid4(),
         profile="verification",
-        assignments=tuple(
+        assignments=(
             DatabaseResourceAssignment(
-                database=path,
+                database=database,
                 policy=DuckDBResourcePolicy(
                     memory_limit_bytes=1_000_000_000,
                     threads=1,
                     spill_limit_bytes=500_000_000,
-                    temp_directory=tmp_path / label,
+                    temp_directory=tmp_path / "source-temp",
                 ),
-            )
-            for path, label in [(source, "source-temp"), (target, "target-temp")]
+            ),
         ),
     )
-    pages = []
-    original = migration_module._core_native_pages
-
-    def bounded_pages(*args):
-        for rows in original(*args):
-            pages.append(len(rows))
-            yield rows
-
-    monkeypatch.setattr(migration_module, "_core_native_pages", bounded_pages)
     execution = MaintenanceExecution(budget, lambda *_: None)
     with (
         maintenance_resource_budget(budget),
         maintenance_execution(execution),
-        connect_duckdb(source, read_only=False) as left,
-        connect_duckdb(target, read_only=False) as right,
+        connect_duckdb(database, read_only=False) as connection,
     ):
-        columns = "identifier VARCHAR,digest VARCHAR" + (",metadata VARCHAR" if raw else "")
-        table = "_recovered_raw" if raw else "_recovered_observations"
-        left.execute(f"CREATE TEMP TABLE {table}({columns})")
-        right.execute(f"CREATE TEMP TABLE input({columns})")
-        # The large metadata field proves there is no accidental 1 MiB or
-        # CSV-default line limit. No RawRecord/domain payload is hydrated.
-        metadata = '雪\t\n"\\' + ("x" * (3 * 1024 * 1024) if row_count == 1 else "short")
-        expected = [
-            tuple([str(uuid5(NAMESPACE_URL, str(i))), "a" * 64] + ([metadata] if raw else []))
-            for i in range(row_count)
-        ]
-        if expected:
-            right.executemany(
-                "INSERT INTO input VALUES (" + ",".join("?" for _ in expected[0]) + ")",
-                expected,
-            )
-        right.execute("SELECT * FROM input ORDER BY identifier")
-        migration_module._load_recovered_core_projection(
-            right, left, source, execution, 256, raw=raw
+        connection.execute(
+            "CREATE TABLE raw_record_index("
+            "record_id VARCHAR PRIMARY KEY,received_at TIMESTAMPTZ NOT NULL,"
+            "document_json VARCHAR NOT NULL)"
         )
-        assert left.execute(f"SELECT * FROM {table} ORDER BY identifier").fetchall() == sorted(
-            expected
-        )
-        assert all(size <= 256 for size in pages)
-        assert not list((tmp_path / "source-temp").glob("recovered-core-index-*"))
-        if row_count == 1:
-            right.execute("SELECT * FROM input ORDER BY identifier")
-            with pytest.raises(WorkspaceV2MigrationError, match="duplicate identities"):
-                migration_module._load_recovered_core_projection(
-                    right, left, source, execution, 256, raw=raw
-                )
-            assert not list((tmp_path / "source-temp").glob("recovered-core-index-*"))
-        if raw and row_count == 257:
-            execute = migration_module.execute_bounded
-
-            def interrupted(connection, sql, *args):
-                if "read_csv(" in sql:
-                    raise RuntimeError("fixture core projection SQL interrupted")
-                return execute(connection, sql, *args)
-
-            monkeypatch.setattr(migration_module, "execute_bounded", interrupted)
-            right.execute("SELECT * FROM input ORDER BY identifier")
-            with pytest.raises(RuntimeError, match="projection SQL interrupted"):
-                migration_module._load_recovered_core_projection(
-                    right, left, source, execution, 256, raw=raw
-                )
-            assert left.execute(f"SELECT * FROM {table} ORDER BY identifier").fetchall() == sorted(
-                expected
+        if row_count:
+            document = (
+                '{"payload":"' + ("x" * (3 * 1024 * 1024)) + '"}'
+                if row_count == 1
+                else '{"payload":"short"}'
             )
-            assert not list((tmp_path / "source-temp").glob("recovered-core-index-*"))
+            rows = [
+                (
+                    str(uuid5(NAMESPACE_URL, f"catchup-{index}")),
+                    (
+                        _MOMENT
+                        if skew
+                        else _MOMENT + timedelta(days=index % 7, microseconds=index // 7)
+                    ),
+                    document,
+                )
+                for index in range(row_count)
+            ]
+            connection.executemany("INSERT INTO raw_record_index VALUES (?, ?, ?)", rows)
+            reference = [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT record_id FROM raw_record_index ORDER BY received_at,record_id"
+                ).fetchall()
+            ]
+            particles = list(
+                migration_module._iter_catchup_partitions(
+                    connection,
+                    execution,
+                    family="fixture",
+                    table="raw_record_index",
+                    order_column="received_at",
+                    id_column="record_id",
+                    width_expression="octet_length(encode(document_json))+128",
+                    row_budget=32,
+                    byte_budget=256 * 1024,
+                )
+            )
+            assert particles
+            assert all(particle.row_count > 0 for particle in particles)
+            observed: list[str] = []
+            for particle in particles:
+                measured = connection.execute(
+                    "SELECT count(*),coalesce(sum(octet_length(encode(document_json))+128),0) "
+                    f"FROM raw_record_index WHERE {particle.predicate}",
+                    list(particle.parameters),
+                ).fetchone()
+                assert measured == (particle.row_count, particle.byte_count)
+                observed.extend(
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT record_id FROM raw_record_index "
+                        f"WHERE {particle.predicate} ORDER BY received_at,record_id",
+                        list(particle.parameters),
+                    ).fetchall()
+                )
+            assert observed == reference
+            if skew and row_count > 32:
+                # The single timestamp can only be split by identity, never by time.
+                assert len(particles) > 1
+            if row_count == 1:
+                assert particles[0].byte_count > 256 * 1024
+        else:
+            assert (
+                list(
+                    migration_module._iter_catchup_partitions(
+                        connection,
+                        execution,
+                        family="fixture",
+                        table="raw_record_index",
+                        order_column="received_at",
+                        id_column="record_id",
+                        width_expression="octet_length(encode(document_json))+128",
+                    )
+                )
+                == []
+            )
+
+
+def test_catchup_partitions_survive_spill_quota_that_breaks_global_projection(
+    tmp_path: Path,
+) -> None:
+    """Small quota: the old full projection/ORDER BY dies, bounded slices complete."""
+    from uuid import uuid4
+
+    from investment_analyst.storage.resource_policy import (
+        DatabaseResourceAssignment,
+        DuckDBResourcePolicy,
+        MaintenanceExecution,
+        MaintenanceResourceBudget,
+        connect_duckdb,
+        maintenance_execution,
+        maintenance_resource_budget,
+    )
+
+    database = tmp_path / "source-db/index.duckdb"
+    database.parent.mkdir()
+    with duckdb.connect(str(database)) as build:
+        build.execute(
+            "CREATE TABLE raw_record_index("
+            "record_id VARCHAR PRIMARY KEY,received_at TIMESTAMPTZ NOT NULL,"
+            "document_json VARCHAR NOT NULL)"
+        )
+        build.execute(
+            "INSERT INTO raw_record_index SELECT uuid()::VARCHAR,"
+            "TIMESTAMPTZ '2026-01-01 00:00:00+00' + (i % 28) * INTERVAL 1 DAY "
+            "+ (i % 60) * INTERVAL 1 SECOND, repeat('x', 4096) FROM range(20000) t(i)"
+        )
+    budget = MaintenanceResourceBudget(
+        operation_id=uuid4(),
+        profile="verification",
+        assignments=(
+            DatabaseResourceAssignment(
+                database=database,
+                policy=DuckDBResourcePolicy(
+                    memory_limit_bytes=64_000_000,
+                    threads=1,
+                    spill_limit_bytes=1_000_000,
+                    temp_directory=tmp_path / "source-temp",
+                ),
+            ),
+        ),
+    )
+    execution = MaintenanceExecution(budget, lambda *_: None)
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(execution),
+        connect_duckdb(database, read_only=False) as connection,
+    ):
+        with pytest.raises(duckdb.Error):
+            connection.execute(
+                "CREATE TEMP TABLE _old_projection AS SELECT record_id,"
+                "md5(document_json) AS digest,document_json AS metadata FROM raw_record_index"
+            )
+            connection.execute(
+                "CREATE TEMP TABLE _old_sorted AS SELECT r.record_id,w.digest,w.metadata "
+                "FROM raw_record_index r LEFT JOIN _old_projection w "
+                "ON r.record_id=w.record_id ORDER BY r.received_at,r.record_id"
+            )
+        connection.execute("DROP TABLE IF EXISTS _old_sorted")
+        connection.execute("DROP TABLE IF EXISTS _old_projection")
+        observed = 0
+        for particle in migration_module._iter_catchup_partitions(
+            connection,
+            execution,
+            family="quota",
+            table="raw_record_index",
+            order_column="received_at",
+            id_column="record_id",
+            width_expression="octet_length(encode(document_json))+128",
+            row_budget=512,
+            byte_budget=1024 * 1024,
+        ):
+            rows = connection.execute(
+                "SELECT record_id FROM raw_record_index "
+                f"WHERE {particle.predicate} ORDER BY received_at,record_id",
+                list(particle.parameters),
+            ).fetchall()
+            assert len(rows) == particle.row_count
+            observed += len(rows)
+        assert observed == 20000
 
 
 @pytest.mark.parametrize("value", ["1.00", "3E-12", "-0.00", "123456789012345678.123456789"])
