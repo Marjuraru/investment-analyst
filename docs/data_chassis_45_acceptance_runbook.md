@@ -1,8 +1,12 @@
-# DATA-CHASSIS-45: ejecución vigente del arranque v2 nuevo
+# DATA-CHASSIS-45: ejecución histórica del arranque v2 nuevo
 
-Decisión PLAN de 2026-10-21. Estado observado 2026-10-22: v2 activo en el candidato54acfd6, v1
-detenido y preservado; scheduler habilitado con13 jobs/3 activos; F11/F12 en candidato con probes
-pendientes hasta receipt; backup final pendiente. Único Work Block #345, PR346, rama codex/data-chassis-45.
+> Ejecutado e integrado por #346 MERGED. Estado vigente en el
+> [registro de continuidad](data_chassis_continuity_plan.md).
+
+Decisión PLAN de 2026-10-21. Estado observado 2026-10-22: v2 activo en la release `daad58d`, v1
+detenido y preservado; scheduler habilitado con13 jobs/3 activos; F11/F12 integrados; backup final
+c0080d96 restaurado de forma independiente sobre `252.456.960 B`; delta posterior `29.360.128 B`
+pendiente de backup nuevo. Work Block histórico #345, PR346, rama codex/data-chassis-45.
 El builder debe refrescar HEAD/CI/bindings; nunca ejecutar desde los SHA históricos de este texto.
 
 ## Una sola receta

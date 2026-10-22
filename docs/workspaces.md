@@ -1,6 +1,6 @@
 # Persistent workspaces
 
-> Decisión PLAN 2026-10-21: [plan vigente de arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Primero datos nuevos y aceptación; historia v1/F5 preservada e incorporación selectiva posterior. Esta decisión está planificada, no acredita activación. Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+> Decisión PLAN 2026-10-21: [arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Activación verificada por #346 MERGED (`daad58d`), workspace UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; historia v1/F5 preservada. La formalización, neutralidad y retención continúan en [DATA-CHASSIS-46](data_chassis_continuity_plan.md) (#349). Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
 
 La descripción del layout antiguo es v1. Un manifest v2 selecciona storage/v2/index.duckdb y repositorios tipados. La CLI opt-in --format-version es una entrega pendiente de #345; hasta implementarla se mantiene la API WorkspaceService.initialize(..., format_version=2).
 

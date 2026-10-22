@@ -1,24 +1,30 @@
 # V2 nuevo: arranque, aceptación y medición
 
 Decisión humana de 2026-10-21, Work Block DATA-CHASSIS-45 / Issue #345 / PR #346.
-Estado observado 2026-10-22: v2 activo en el candidato54acfd6, UUID70c64668-1738-4dfe-ba1f-7e72026bb7fe;
-coverage200 sin writes. El candidato de cierre incorpora F11 (enum contractual del comparador) y
-F12 (colector v2 resuelto por manifest), con probes pendientes hasta receipt. Scheduler habilitado
-con13 jobs/3 activos; 2 jobs13F incomplete por backlog contractual y FRED external-unavailable.
-Replay local de5 familias con ventana90d y digests exactos:0 creadas/6.996 reutilizadas, DB+WAL0;
-las14.758 métricas de un ensayo full-range distinto se conservan como carga distinta, no como
-idempotencia PASS. El punto recuperable final, que incluye esas escrituras, queda pendiente hasta
-su receipt y restore independiente. v1/F5 intactos. La autoridad ejecutable sigue siendo el Issue
-activo, su manifest y los guards vivos; los recibos históricos mantienen sus propios bindings.
+Estado observado 2026-10-22: v2 activo en la release `daad58d`; #346 MERGED en `b5e714a`; UUID
+`70c64668-1738-4dfe-ba1f-7e72026bb7fe`; DB `281.817.088 B`; coverage200 sin writes. El candidato de
+cierre incorporó F11 (enum contractual del comparador) y F12 (colector v2 resuelto por manifest).
+Scheduler habilitado con13 jobs/3 activos; 2 jobs13F incomplete por backlog contractual y FRED
+external-unavailable. Replay local de5 familias con ventana90d y digests exactos:0 creadas/6.996
+reutilizadas, DB+WAL0; las14.758 métricas de un ensayo full-range distinto se conservan como carga
+distinta, no como idempotencia PASS. El punto recuperable c0080d96 fue restaurado de forma
+independiente sobre `252.456.960 B` (SHA-256 `bebdd299...`); el delta posterior de `29.360.128 B`
+requiere un backup nuevo. v1/F5 intactos. La autoridad ejecutable es el Issue activo, su manifest y
+los guards vivos; los recibos históricos mantienen sus propios bindings.
 
 ## Estado de cierre 2026-10-22
+
+Este plan describe la ejecución histórica de 45. El estado vigente, el backup/restore c0080d96 y la
+secuencia obligatoria 46→47→48→49 están en el
+[registro de continuidad](data_chassis_continuity_plan.md).
 
 El punto de reanudación es mantenimiento del v2 activo, no otra inicialización ni un sexto cutover.
 F11 debe demostrar HTTP AAPL+AMD200 con fachada real, PIT/lineage y sin writes; F12 debe contrastar
 el delta DB/WAL real por intento con la medición del colector v2 y un replay sin cambios. La
 aceptación conserva los fallos históricos77.594.624/48.234.496B como incumplimiento del criterio
-anterior, no como instrucciones. El backup final se fija tras las pruebas mutantes con inventario/
-corte T y comparación de UUID, conteos, digests y últimas páginas; después se reanudan servicio y
+anterior, no como instrucciones. El backup final c0080d96 se fijó tras las pruebas mutantes con
+inventario/corte T y comparación de UUID, conteos, digests y últimas páginas; fue restaurado de forma
+independiente. El delta posterior requiere un backup nuevo en 47. Después se reanudan servicio y
 scheduler y se declara cualquier delta posterior.
 
 Main sigue siendo la autoridad de lo integrado.

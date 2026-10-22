@@ -1,5 +1,9 @@
 # DATA-CHASSIS: arranque v2 y cierre posterior
 
+> Documento histórico de la decisión de 2026-10-21. #345/#346 ya está MERGED; el estado vigente y
+> la secuencia obligatoria 46→47→48→49 están en el
+> [registro de continuidad](data_chassis_continuity_plan.md).
+
 Decisión humana de 2026-10-21: primero un workspace v2 nuevo, probado y observable; después,
 incorporación de historia necesaria desde un archivo recuperable. Esta decisión sustituye el
 compromiso anterior de cerrar toda la ruta dentro de seis bloques 40–45. No autoriza destruir v1,
@@ -23,8 +27,8 @@ aprobaciones intermedias; la integración HUMAN requiere el receipt posterior a 
 | 40–42 | Backend v2, incrementalidad y consultas implementados | Reutilizar; probar el recorrido nuevo y optimizar defectos medidos |
 | 43–44 | Migración/backup/restore y transporte previamente acreditados | Conservar archivo/evidencia; no repetir 676 volúmenes |
 | 45 anterior | Cinco cortes abortados, mejoras y progreso parcial preservados | No activar F5 ni fingir cierre; historia consultable |
-| 45 vigente | V2 activo en54acfd6; coverage200; F11/F12 en candidato con probes pendientes; scheduler13 jobs/3 activos; 13F/FRED visibles; backup final pendiente | [Plan ejecutable](data_chassis_v2_fresh_start_plan.md) y [runbook](data_chassis_45_acceptance_runbook.md) |
-| Continuación | Archivo final y selección/importación progresiva | [Plan de reincorporación](data_chassis_v1_reintegration_plan.md), sin ejecución anticipada |
+| 45 integrado | V2 activo en `daad58d`; UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; scheduler 13 jobs/3 activos; backup c0080d96 restaurado sobre `252.456.960 B`; delta posterior `29.360.128 B` y backlog 13F pendientes | [Continuidad](data_chassis_continuity_plan.md) y [runbook](data_chassis_45_acceptance_runbook.md) |
+| Continuación | Secuencia obligatoria 46→47→48→49 | [Continuidad](data_chassis_continuity_plan.md) y [reincorporación](data_chassis_v1_reintegration_plan.md); 46 no importa ni borra |
 | Cierre de DATA-CHASSIS | Pendiente | Gates operacionales, recuperación/retención y Q1–Q7 comparables |
 
 ## Fronteras que no se relajan
