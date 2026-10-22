@@ -58,11 +58,11 @@ columna `Refs` cuenta documentos tracked que mencionan el nombre o la ruta.
 | `docs/README.md` | CANONICAL | Índice documental único; nuevo en 46 | — | — | nuevo |
 | `docs/data_chassis_continuity_plan.md` | CANONICAL | Registro único de continuidad, retención y neutralidad; nuevo en 46 | — | — | nuevo |
 | `.agents/rules/investment-analyst-core.md` | PROTECTED | Gobernanza o evidencia inmutable; el guard verifica su hash de base | 4 | scripts/check_workflow_guards.py | 9111 |
-| `.agents/skills/audit/SKILL.md` | PROTECTED | Gobernanza o evidencia inmutable; el guard verifica su hash de base | 2 | scripts/check_workflow_guards.py | 3709 |
-| `.agents/skills/build/SKILL.md` | PROTECTED | Gobernanza o evidencia inmutable; el guard verifica su hash de base | 2 | scripts/check_workflow_guards.py | 5077 |
-| `.agents/skills/investment-block-flow/SKILL.md` | PROTECTED | Gobernanza o evidencia inmutable; el guard verifica su hash de base | 2 | scripts/check_workflow_guards.py | 1683 |
-| `.agents/skills/plan/SKILL.md` | PROTECTED | Gobernanza o evidencia inmutable; el guard verifica su hash de base | 2 | scripts/check_workflow_guards.py | 3402 |
-| `.agents/skills/ui/SKILL.md` | PROTECTED | Gobernanza o evidencia inmutable; el guard verifica su hash de base | 1 | scripts/check_workflow_guards.py | 1666 |
+| `.agents/skills/audit/SKILL.md` | PROTECTED | Ruta de governance; BUILD_PRODUCT no puede modificarla y el guard rechaza el cambio | 2 | scripts/check_workflow_guards.py | 3709 |
+| `.agents/skills/build/SKILL.md` | PROTECTED | Ruta de governance; BUILD_PRODUCT no puede modificarla y el guard rechaza el cambio | 2 | scripts/check_workflow_guards.py | 5077 |
+| `.agents/skills/investment-block-flow/SKILL.md` | PROTECTED | Ruta de governance; BUILD_PRODUCT no puede modificarla y el guard rechaza el cambio | 2 | scripts/check_workflow_guards.py | 1683 |
+| `.agents/skills/plan/SKILL.md` | PROTECTED | Ruta de governance; BUILD_PRODUCT no puede modificarla y el guard rechaza el cambio | 2 | scripts/check_workflow_guards.py | 3402 |
+| `.agents/skills/ui/SKILL.md` | PROTECTED | Ruta de governance; BUILD_PRODUCT no puede modificarla y el guard rechaza el cambio | 1 | scripts/check_workflow_guards.py | 1666 |
 | `.claude/commands/audit.md` | PROTECTED | Herramienta de cliente o plantilla de gobernanza; no es documentación de producto | 0 | — | 317 |
 | `.claude/commands/build.md` | PROTECTED | Herramienta de cliente o plantilla de gobernanza; no es documentación de producto | 0 | — | 311 |
 | `.claude/commands/plan-review.md` | PROTECTED | Herramienta de cliente o plantilla de gobernanza; no es documentación de producto | 0 | — | 303 |
