@@ -1,5 +1,8 @@
 # Investment Analyst
 
+> Ruta operativa actual: [v2 nuevo, validación y observabilidad](docs/data_chassis_v2_fresh_start_plan.md); [historia selectiva posterior](docs/data_chassis_v1_reintegration_plan.md). Planificado en #345; no implica despliegue ya realizado ni pérdida de v1.
+
+
 ## Propósito y límites
 
 Herramienta personal local-first para recolectar, procesar, relacionar, visualizar y explicar información útil para el análisis de inversiones, diseñada para apoyar el criterio de un analista humano. Ofrece diagnósticos independientes de mercado y fundamentales con evidencia auditable point-in-time (`available_at`), identidades deterministas y persistencia append-only en DuckDB y Parquet.

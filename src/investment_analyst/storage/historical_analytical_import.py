@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -52,6 +52,38 @@ class DirectHistoricalAnalyticalSource:
         if not source.read_only:
             raise HistoricalAnalyticalImportError("direct historical source must be read-only")
         self._source = source
+        self._transition_page: tuple[MetricResult, ...] | tuple[DiagnosticResult, ...] | None = None
+        self._transition_family: Literal["metrics", "diagnostics"] | None = None
+
+    def validate_transition_source(self, root: Path, workspace_id: UUID) -> None:
+        """Bind the actual read-only connection, rather than caller-supplied IDs."""
+        from investment_analyst.storage.paths import StoragePaths
+        from investment_analyst.workspace.service import WorkspaceService
+
+        manifest = WorkspaceService().manifest(root)
+        expected = StoragePaths.from_workspace_root(
+            root,
+            format_version=manifest.format_version,
+            workspace_id=manifest.workspace_id,
+        )
+        self._source.require_open()
+        if (
+            manifest.workspace_id != workspace_id
+            or manifest.format_version != 1
+            or not self._source.read_only
+            or self._source.paths != expected
+        ):
+            raise HistoricalAnalyticalImportError("historical transition source connection differs")
+
+    def is_current_transition_page(
+        self,
+        page: Collection[MetricResult] | Collection[DiagnosticResult],
+        family: Literal["metrics", "diagnostics"],
+    ) -> bool:
+        return self._transition_family == family and self._transition_page is page
+
+    def transition_source_counts(self) -> tuple[int, int]:
+        return self._source.metric_results.count(), self._source.diagnostics.count()
 
     def list_metrics_page(
         self, *, limit: int, after: HistoricalAnalyticalCursor | None
@@ -98,8 +130,14 @@ class DirectHistoricalAnalyticalSource:
                     raise HistoricalAnalyticalImportError(
                         "direct historical metric page is incomplete"
                     )
-                yield tuple(records[identifier] for identifier in identifiers)
+                page = tuple(records[identifier] for identifier in identifiers)
+                self._transition_page = page
+                self._transition_family = "metrics"
+                yield page
+                self._transition_page = None
         finally:
+            self._transition_page = None
+            self._transition_family = None
             cursor.close()
 
     def iter_diagnostic_pages(
@@ -121,9 +159,115 @@ class DirectHistoricalAnalyticalSource:
                     raise HistoricalAnalyticalImportError(
                         "direct historical diagnostic page is incomplete"
                     )
-                yield tuple(records[identifier] for identifier in identifiers)
+                page = tuple(records[identifier] for identifier in identifiers)
+                self._transition_page = page
+                self._transition_family = "diagnostics"
+                yield page
+                self._transition_page = None
         finally:
+            self._transition_page = None
+            self._transition_family = None
             cursor.close()
+
+    def iter_recovered_pages(
+        self,
+        *,
+        index_path: Path,
+        index_sha256: str,
+        family: Literal["metrics", "diagnostics"],
+        limit: int,
+    ) -> Iterator[tuple[MetricResult, ...] | tuple[DiagnosticResult, ...]]:
+        """Hydrate only the verified F1 IDs outside W, within the byte budget."""
+        from typing import Annotated
+
+        from pydantic import TypeAdapter
+
+        from investment_analyst.storage.resource_policy import execute_bounded
+
+        _validate_page_limit(limit)
+        if index_path.is_symlink() or not index_path.is_file():
+            raise HistoricalAnalyticalImportError("recovered index is unsafe")
+        digest = hashlib.sha256()
+        with index_path.open("rb") as handle:
+            while chunk := handle.read(1 << 20):
+                digest.update(chunk)
+        if digest.hexdigest() != index_sha256:
+            raise HistoricalAnalyticalImportError("recovered index checksum differs")
+        adapter = TypeAdapter(
+            tuple[
+                Literal["metrics", "diagnostics"],
+                UUID,
+                Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
+                UTCDateTime,
+            ]
+        )
+        metric = family == "metrics"
+        table, key = (
+            ("metric_results", "result_id") if metric else ("diagnostic_results", "diagnostic_id")
+        )
+        entries: list[tuple[UUID, str, datetime]] = []
+
+        def hydrate() -> Iterator[tuple[MetricResult, ...] | tuple[DiagnosticResult, ...]]:
+            sizes = dict(
+                execute_bounded(
+                    self._source.store.connection,
+                    f"SELECT {key},octet_length(encode(document_json)) FROM {table} "
+                    f"WHERE {key} IN (SELECT unnest(?))",
+                    [[str(identifier) for identifier, _, _ in entries]],
+                ).fetchall()
+            )
+            if len(sizes) != len(entries):
+                raise HistoricalAnalyticalImportError("recovered source page is incomplete")
+            start = 0
+            while start < len(entries):
+                end, used = start, 0
+                while end < len(entries):
+                    size = int(sizes[str(entries[end][0])])
+                    if size > 1 << 20:
+                        raise HistoricalAnalyticalImportError("recovered model exceeds byte budget")
+                    if used + size > 1 << 20:
+                        break
+                    used += size
+                    end += 1
+                selected = entries[start:end]
+                identifiers = tuple(identifier for identifier, _, _ in selected)
+                records = (
+                    self._source.metric_results.get_many(identifiers)
+                    if metric
+                    else self._source.diagnostics.get_many(identifiers)
+                )
+                if len(records) != len(identifiers):
+                    raise HistoricalAnalyticalImportError("recovered source page is incomplete")
+                page = tuple(records[identifier] for identifier in identifiers)
+                for item, (_, expected, available) in zip(page, selected, strict=True):
+                    if (
+                        sha256_hex(canonical_json_bytes(item)) != expected
+                        or item.available_at != available
+                    ):
+                        raise HistoricalAnalyticalImportError("recovered source model changed")
+                self._transition_page = page
+                self._transition_family = family
+                yield page
+                self._transition_page = None
+                start = end
+
+        try:
+            with index_path.open("rb") as handle:
+                while line := handle.readline(1024):
+                    if len(line) == 1024 or not line.endswith(b"\n"):
+                        raise HistoricalAnalyticalImportError("recovered index row is invalid")
+                    kind, identifier, checksum, available = adapter.validate_json(line)
+                    if kind != family:
+                        continue
+                    entries.append((identifier, checksum, available))
+                    if len(entries) == limit:
+                        yield from hydrate()
+                        entries.clear()
+                if entries:
+                    yield from hydrate()
+        finally:
+            self._transition_page = None
+            self._transition_family = None
 
     def verify_rows(self) -> HistoricalAnalyticalRowsSummary:
         metric_count, metric_digest, metric_cursor = self._inventory_metrics()

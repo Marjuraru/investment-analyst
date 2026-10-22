@@ -29,10 +29,418 @@ from investment_analyst.storage.compact_analytical_v2 import (
     CompactAnalyticalError,
     CompactAnalyticalStore,
 )
+from investment_analyst.storage.resource_policy import DuckDBResourcePolicy
 from investment_analyst.workspace.models import WorkspaceAccessMode
 from investment_analyst.workspace.service import WorkspaceService
 
 _BASE = datetime(2026, 8, 1, tzinfo=UTC)
+
+
+def test_cut_byte_collector_counts_shared_persisted_lineage_once(tmp_path: Path) -> None:
+    from investment_analyst.application.storage_observability import measure_cut_analytical_payloads
+
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "workspace", format_version=2)
+    raw, observation = _observation(1)
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        storage.raw_records.save(raw)
+        storage.observations.save(observation)
+        first = _metric(
+            [observation],
+            key="crypto.derivatives.funding.mean_1h",
+            identity="first-cut-byte",
+            v8=False,
+        )
+        storage.metric_results.save(first)
+        before = {
+            m.table_name: m
+            for m in measure_cut_analytical_payloads(storage.store.connection, format_version=2)
+        }
+        second = _metric(
+            [observation],
+            key="crypto.derivatives.funding.sum_1h",
+            identity="second-cut-byte",
+            v8=False,
+        )
+        storage.metric_results.save(second)
+        after = {
+            m.table_name: m
+            for m in measure_cut_analytical_payloads(storage.store.connection, format_version=2)
+        }
+        # Only one typed metric row is new: content, sequences and segments are
+        # shared. IDs here are stored VARCHARs, not reconstructed UUID objects.
+        row_bytes = storage.store.connection.execute(
+            "SELECT octet_length(encode(result_id)) + 8*4 + 4 + "
+            "octet_length(encode(origin)) + octet_length(encode(asset_id)) + "
+            "octet_length(encode(metric_key)) + octet_length(encode(value_text)) + "
+            "octet_length(encode(unit)) + octet_length(encode(parameters_content_id)) + "
+            "octet_length(encode(observation_sequence_id)) + "
+            "octet_length(encode(metric_sequence_id)) + octet_length(encode(algorithm_version)) + "
+            "octet_length(encode(quality)) + octet_length(encode(checksum_sha256)) "
+            "FROM workspace_metric_results_v2 WHERE result_id=?",
+            [second.result_id],
+        ).fetchone()[0]
+        assert after["funding"].row_count == after["metrics"].row_count == 2
+        assert after["funding"].document_bytes == after["metrics"].document_bytes
+        assert after["funding"].document_bytes - before["funding"].document_bytes == row_bytes
+        assert after["diagnostics"].row_count == after["diagnostics"].document_bytes == 0
+
+
+def test_cut_byte_collector_measures_utf8_and_rejects_unknown_scalar(tmp_path: Path) -> None:
+    import duckdb
+
+    from investment_analyst.application.storage_observability import (
+        StorageObservabilityError,
+        measure_cut_analytical_payloads,
+    )
+
+    with duckdb.connect() as source:
+        source.execute("CREATE TABLE metric_results(metric_key VARCHAR, document_json VARCHAR)")
+        source.execute("CREATE TABLE diagnostic_results(document_json VARCHAR)")
+        source.execute(
+            "INSERT INTO metric_results VALUES (?,?)", ["crypto.derivatives.funding.mean_1h", "ñ€"]
+        )
+        result = {
+            m.table_name: m for m in measure_cut_analytical_payloads(source, format_version=1)
+        }
+        assert result["metrics"].document_bytes == result["funding"].document_bytes == 5
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "workspace", format_version=2)
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        storage.store.connection.execute(
+            "ALTER TABLE workspace_metric_results_v2 ADD COLUMN unknown DOUBLE"
+        )
+        with pytest.raises(StorageObservabilityError, match="scalar type"):
+            measure_cut_analytical_payloads(storage.store.connection, format_version=2)
+
+
+def test_cut_funding_bytes_include_transitive_shared_metric_dependencies(tmp_path: Path) -> None:
+    from investment_analyst.application.storage_observability import measure_cut_analytical_payloads
+
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "workspace", format_version=2)
+    raw, observation = _observation(1)
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        storage.raw_records.save(raw)
+        storage.observations.save(observation)
+        parent = _metric([observation], key="fixture.base", identity="base-cut-byte", v8=False)
+        child = _metric(
+            [observation],
+            key="crypto.derivatives.funding.sum_1h",
+            identity="funding-cut-byte",
+            v8=False,
+        ).model_copy(update={"input_metric_result_ids": [parent.result_id]})
+        storage.metric_results.save(parent)
+        storage.metric_results.save(child)
+        measured = {
+            m.table_name: m
+            for m in measure_cut_analytical_payloads(storage.store.connection, format_version=2)
+        }
+        assert measured["funding"].row_count == 1
+        assert measured["metrics"].row_count == 2
+        assert measured["funding"].document_bytes == measured["metrics"].document_bytes
+        storage.metric_results.save(
+            _metric([observation], key="fixture.unrelated", identity="unrelated-cut-byte", v8=False)
+        )
+        after = {
+            m.table_name: m
+            for m in measure_cut_analytical_payloads(storage.store.connection, format_version=2)
+        }
+        assert after["funding"] == measured["funding"]
+        assert after["metrics"].document_bytes > measured["metrics"].document_bytes
+
+
+@pytest.mark.parametrize("boundary", ["metadata", "cycle"])
+def test_graph_failure_is_not_masked_by_cleanup_in_aborted_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "workspace", format_version=2)
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        compact = CompactAnalyticalStore(storage.store.connection)
+        execute = compact._relationship_sql
+
+        def failure(*args, **kwargs):
+            raise RuntimeError("original graph failure")
+
+        def checked_sql(sql, *args, **kwargs):
+            if sql.startswith("DROP TABLE"):
+                pytest.fail("cleanup must not mask an aborted transaction's original failure")
+            if boundary == "cycle":
+                failure()
+            return execute(sql, *args, **kwargs)
+
+        monkeypatch.setattr(compact, "_relationship_sql", checked_sql)
+        monkeypatch.setattr(compact, "_build_relationship_metadata", failure)
+        with pytest.raises(RuntimeError, match="original graph failure"):
+            if boundary == "metadata":
+                compact.verify_historical_relationships()
+            else:
+                compact._require_acyclic_bucket(0)
+
+
+@pytest.mark.parametrize("parents,members", [(32, 32), (128, 256), (512, 512)])
+def test_shared_reference_metadata_scales_with_segments_not_parent_fanout(
+    tmp_path: Path,
+    parents: int,
+    members: int,
+) -> None:
+    root = tmp_path / "workspace"
+    policy = DuckDBResourcePolicy(memory_limit_bytes=256_000_000, threads=1, spill_limit_bytes=0)
+    service = WorkspaceService(
+        environ={},
+        home=tmp_path / "home",
+        resource_policies={root / "storage/v2/index.duckdb": policy},
+    )
+    initialized = service.initialize(root, format_version=2)
+    pairs = [_observation(index) for index in range(members)]
+    observations = [observation for _, observation in pairs]
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        storage.raw_records.save_many([raw for raw, _ in pairs])
+        storage.observations.save_many(observations)
+        for start in range(0, parents, 128):
+            storage.metric_results.save_many(
+                [
+                    _metric(
+                        observations, key="fixture.shared", identity=f"shared-{index}", v8=False
+                    )
+                    for index in range(start, min(start + 128, parents))
+                ]
+            )
+        compact = CompactAnalyticalStore(storage.store.connection)
+        compact._build_relationship_metadata("workspace_metric_results_v2")
+        connection = storage.store.connection
+        assert connection.execute(
+            "SELECT count(*) FROM _workspace_v2_reference_segments"
+        ).fetchone() == ((members + 255) // 256,)
+        row = connection.execute(
+            "SELECT member_count,actual_members,covered_members "
+            "FROM _workspace_v2_reference_sequences WHERE link_type='metric-input-observation-v1'"
+        ).fetchone()
+        assert row == (members, members, members)
+        compact.verify_historical_relationships()
+        assert not connection.execute(
+            "SELECT table_name FROM duckdb_tables() WHERE temporary"
+        ).fetchall()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing_child",
+        "foreign_child",
+        "future_child",
+        "missing_sequence",
+        "missing_segment",
+        "missing_member",
+        "member_order",
+        "link_order",
+        "wrong_type",
+        "diagnostic_component",
+        "diagnostic_evidence",
+    ],
+)
+def test_shared_reference_verifier_rejects_full_coverage_and_pit_faults(
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "workspace", format_version=2)
+    pairs = [_observation(index) for index in range(3)]
+    metric = _metric(
+        [observation for _, observation in pairs],
+        key="market.funding_rate",
+        identity="shared-fault",
+        v8=False,
+    )
+    diagnostic = _diagnostic(metric, identity="shared-diagnostic")
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        storage.raw_records.save_many([raw for raw, _ in pairs])
+        storage.observations.save_many([observation for _, observation in pairs])
+        storage.metric_results.save(metric)
+        storage.diagnostics.save(diagnostic)
+        connection = storage.store.connection
+        mutations = {
+            "missing_child": "DELETE FROM normalized_observations_v2 WHERE observation_id=?",
+            "foreign_child": "UPDATE normalized_observations_v2 "
+            "SET asset_id='equity:us:aapl' WHERE observation_id=?",
+            "future_child": "UPDATE normalized_observations_v2 "
+            "SET available_at='2099-01-01T00:00:00Z' WHERE observation_id=?",
+            "missing_sequence": "DELETE FROM workspace_analytical_sequences_v2 "
+            "WHERE link_type='metric-input-observation-v1'",
+            "missing_segment": "DELETE FROM workspace_analytical_segments_v2 "
+            "WHERE link_type='metric-input-observation-v1'",
+            "missing_member": "DELETE FROM workspace_analytical_segment_members_v2 "
+            "WHERE member_id=?",
+            "member_order": "UPDATE workspace_analytical_segment_members_v2 "
+            "SET member_position=10 WHERE member_id=?",
+            "link_order": "UPDATE workspace_analytical_sequence_segments_v2 "
+            "SET segment_position=10",
+            "wrong_type": "UPDATE workspace_analytical_sequences_v2 SET link_type='unknown' "
+            "WHERE link_type='metric-input-observation-v1'",
+            "diagnostic_component": "UPDATE workspace_analytical_components_v2 "
+            "SET metric_sequence_id='missing'",
+            "diagnostic_evidence": "UPDATE workspace_analytical_evidence_v2 "
+            "SET metric_result_id='00000000-0000-0000-0000-000000000000'",
+        }
+        sql = mutations[fault]
+        connection.execute(sql, [pairs[0][1].observation_id] if "?" in sql else None)
+        with pytest.raises(CompactAnalyticalError, match="missing, foreign or future"):
+            CompactAnalyticalStore(connection).verify_historical_relationships()
+
+
+@pytest.mark.parametrize("cycle", [False, True])
+def test_compact_typed_cycle_graph_preserves_shared_paths_without_false_cycles(
+    tmp_path: Path,
+    cycle: bool,
+) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "workspace", format_version=2)
+    raw, observation = _observation(0)
+    metrics = [
+        _metric([observation], key="fixture.graph", identity=f"graph-{i}", v8=False)
+        for i in range(4)
+    ]
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        storage.raw_records.save(raw)
+        storage.observations.save(observation)
+        storage.metric_results.save_many(metrics)
+        compact = CompactAnalyticalStore(storage.store.connection)
+        # 0 and 1 share exactly the same sequence/segment; sharing is not a cycle.
+        adjacency = [[2, 3], [2, 3], [1] if cycle else [], []]
+        sequences = compact._ensure_sequences_batch(
+            [
+                ("metric-input-result-v1", tuple(metrics[child].result_id for child in children))
+                for children in adjacency
+            ]
+        )
+        for metric, sequence in zip(metrics, sequences, strict=True):
+            storage.store.connection.execute(
+                "UPDATE workspace_metric_results_v2 SET metric_sequence_id=? WHERE result_id=?",
+                [sequence, metric.result_id],
+            )
+        profile = compact.profile_historical_relationships()
+        assert profile["metric_equal_edges"] == (3 if cycle else 2)
+        assert profile["sequence_equal_edges"] == (2 if cycle else 1)
+        assert profile["segment_equal_edges"] == (3 if cycle else 2)
+        if cycle:
+            with pytest.raises(CompactAnalyticalError, match="contains a cycle"):
+                compact.verify_historical_relationships()
+        else:
+            compact.verify_historical_relationships()
+
+
+def test_cycle_scan_retains_only_equal_time_metric_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "workspace", format_version=2)
+    pairs = [_observation(index) for index in range(3)]
+    metrics = [
+        _metric([observation], key="fixture.partition", identity=str(index), v8=False)
+        for index, (_, observation) in enumerate(pairs)
+    ]
+    # Earlier-time dependencies are valid but cannot be part of a cycle.
+    metrics[1] = metrics[1].model_copy(update={"input_metric_result_ids": [metrics[0].result_id]})
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        storage.raw_records.save_many([raw for raw, _ in pairs])
+        storage.observations.save_many([observation for _, observation in pairs])
+        storage.metric_results.save_many(metrics)
+        compact = CompactAnalyticalStore(storage.store.connection)
+        metric_edges: list[int] = []
+        original = CompactAnalyticalStore._relationship_sql
+
+        def visit(instance: CompactAnalyticalStore, sql: str, parameters=None):
+            result = original(instance, sql, parameters)
+            if sql.startswith("CREATE OR REPLACE TEMP TABLE _workspace_v2_cycle_edges AS"):
+                metric_edges.append(
+                    int(
+                        instance._connection.execute(
+                            "SELECT count(*) FROM _workspace_v2_cycle_edges "
+                            "WHERE starts_with(parent_id,'m:')"
+                        ).fetchone()[0]
+                    )
+                )
+            return result
+
+        monkeypatch.setattr(CompactAnalyticalStore, "_relationship_sql", visit)
+        compact._require_acyclic_inventory()
+        assert metric_edges == []
+        peer = metrics[2].model_copy(
+            update={"result_id": uuid4(), "input_metric_result_ids": [metrics[2].result_id]}
+        )
+        storage.metric_results.save(peer)
+        compact._require_acyclic_inventory()
+        assert metric_edges == [1]
+
+
+@pytest.mark.parametrize("cycle_in_last_bucket", [False, True])
+def test_read_only_units_preserve_all_buckets_and_reject_late_cycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cycle_in_last_bucket: bool,
+) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "workspace", format_version=2)
+    raw, observation = _observation(0)
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        connection = storage.store.connection
+        moments = {}
+        for hour in range(1, 17):
+            moment = _BASE + timedelta(hours=hour)
+            bucket = int(
+                connection.execute("SELECT hash(?::TIMESTAMPTZ)%16", [moment]).fetchone()[0]
+            )
+            moments[bucket] = moment
+        low, high = min(moments), max(moments)
+        assert low < high
+        metrics = []
+        for index, bucket in enumerate((low, low, high, high)):
+            moment = moments[bucket]
+            metrics.append(
+                _metric(
+                    [observation], key="fixture.bucket", identity=f"bucket-{index}", v8=False
+                ).model_copy(
+                    update={"available_at": moment, "computed_at": moment + timedelta(minutes=1)}
+                )
+            )
+        storage.raw_records.save(raw)
+        storage.observations.save(observation)
+        storage.metric_results.save_many(metrics)
+        compact = CompactAnalyticalStore(connection)
+        adjacency = [[], [0], [3] if cycle_in_last_bucket else [], [2]]
+        sequences = compact._ensure_sequences_batch(
+            [
+                ("metric-input-result-v1", tuple(metrics[i].result_id for i in children))
+                for children in adjacency
+            ]
+        )
+        for metric, sequence in zip(metrics, sequences, strict=True):
+            connection.execute(
+                "UPDATE workspace_metric_results_v2 SET metric_sequence_id=? WHERE result_id=?",
+                [sequence, metric.result_id],
+            )
+        with pytest.raises(CompactAnalyticalError, match="physical read-only"):
+            compact.verify_historical_relationships(read_only_units=True)
+    visited: list[int] = []
+    original = CompactAnalyticalStore._require_acyclic_bucket
+
+    def visit(instance: CompactAnalyticalStore, bucket: int) -> None:
+        visited.append(bucket)
+        original(instance, bucket)
+
+    monkeypatch.setattr(CompactAnalyticalStore, "_require_acyclic_bucket", visit)
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_ONLY) as storage:
+        compact = CompactAnalyticalStore(storage.store.connection)
+        if cycle_in_last_bucket:
+            with pytest.raises(CompactAnalyticalError, match="contains a cycle"):
+                compact.verify_historical_relationships(read_only_units=True)
+        else:
+            compact.verify_historical_relationships(read_only_units=True)
+            assert storage.store.connection.execute(
+                "SELECT count(*) FROM workspace_metric_results_v2"
+            ).fetchone() == (4,)
+        assert visited == [low, high]
 
 
 def _observation(index: int) -> tuple[RawRecord, NormalizedObservation]:

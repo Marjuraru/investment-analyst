@@ -112,6 +112,30 @@ def test_initialize_is_idempotent_canonical_and_preserves_files(tmp_path) -> Non
     assert first.storage_initialized
 
 
+def test_initialize_format_selection_is_explicit_and_fail_closed(tmp_path) -> None:
+    service = _service(home=tmp_path / "home")
+    v2_root = tmp_path / "v2"
+
+    v2 = service.initialize(v2_root, format_version=2)
+    manifest_bytes = v2.paths.manifest_path.read_bytes()
+    reused = service.initialize(v2_root)
+
+    assert v2.manifest.format_version == 2
+    assert reused.reused is True
+    assert reused.manifest.format_version == 2
+    assert reused.paths.manifest_path.read_bytes() == manifest_bytes
+    with pytest.raises(WorkspaceVersionError, match="does not match"):
+        service.initialize(v2_root, format_version=1)
+    assert v2.paths.manifest_path.read_bytes() == manifest_bytes
+
+    v1 = service.initialize(tmp_path / "v1", format_version=1)
+    assert v1.manifest.format_version == 1
+    unsupported = tmp_path / "unsupported"
+    with pytest.raises(WorkspaceVersionError, match="not supported"):
+        service.initialize(unsupported, format_version=3)
+    assert not unsupported.exists()
+
+
 def test_manifest_errors_are_typed_and_never_overwritten(tmp_path) -> None:
     service = _service(home=tmp_path / "home")
     malformed = tmp_path / "malformed"

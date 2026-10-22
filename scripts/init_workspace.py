@@ -19,6 +19,7 @@ _NOTICE = (
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path)
+    parser.add_argument("--format-version", type=int, choices=(1, 2))
     return parser
 
 
@@ -26,7 +27,10 @@ def main() -> int:
     """Initialize the resolved workspace and print compact JSON."""
     arguments = _parser().parse_args()
     try:
-        result = WorkspaceService().initialize(arguments.workspace)
+        result = WorkspaceService().initialize(
+            arguments.workspace,
+            format_version=arguments.format_version,
+        )
         payload = result.to_json_dict()
         payload["notice"] = _NOTICE
         print(json.dumps(payload, indent=2, sort_keys=True))

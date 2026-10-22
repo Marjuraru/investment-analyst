@@ -61,6 +61,12 @@ import duckdb
 from pydantic import ConfigDict, Field, model_validator
 
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
+from investment_analyst.storage.resource_policy import (
+    DuckDBResourcePolicy,
+    connect_duckdb,
+    execute_with_resource_budget,
+    reader_worker_policy,
+)
 
 _ARTIFACT_FILE_NAME = "storage_observability_v1.jsonl"
 _MAX_RETAINED_DAYS = 90
@@ -153,6 +159,151 @@ class StorageObservabilityTableRows(ContractModel):
 
     def to_json_dict(self) -> dict[str, object]:
         return {"table_name": self.table_name, "row_count": self.row_count}
+
+
+def measure_cut_analytical_payloads(
+    connection: duckdb.DuckDBPyConnection, *, format_version: Literal[1, 2]
+) -> tuple[StorageObservabilityTableBytes, ...]:
+    """Measure persisted analytical bytes on an already admitted cut connection.
+
+    This collector neither opens an engine nor reconstructs domain documents.
+    V1 counts persisted UTF-8 documents; v2 counts persisted typed scalars and
+    referenced content/sequences/segments, once per selected family. Funding
+    includes its transitive metric dependencies. Physical DB bytes are separate.
+    The caller must bind these measurements to the complete cut comparison;
+    equal row counts alone do not establish semantic comparability.
+    """
+    funding = (
+        "metric_key IN ('crypto.derivatives.funding.mean_1h','crypto.derivatives.funding.sum_1h')"
+    )
+    if format_version == 1:
+        output = []
+        for family, table, predicate in (
+            ("metrics", "metric_results", "TRUE"),
+            ("diagnostics", "diagnostic_results", "TRUE"),
+            ("funding", "metric_results", funding),
+        ):
+            # The funding document already persists its recoverable input IDs.
+            row = execute_with_resource_budget(
+                connection,
+                f"SELECT count(*), coalesce(sum(octet_length(encode(document_json))),0) "
+                f"FROM {table} WHERE {predicate}",
+            ).fetchone()
+            if row is None:
+                raise StorageObservabilityError("cut document measurement is unavailable")
+            output.append(
+                StorageObservabilityTableBytes(
+                    table_name=family, row_count=int(row[0]), document_bytes=int(row[1])
+                )
+            )
+        return tuple(output)
+    if format_version != 2:
+        raise StorageObservabilityError("unsupported cut storage format")
+
+    metric = "workspace_metric_results_v2"
+    diagnostic = "workspace_diagnostic_results_v2"
+    sequence = "workspace_analytical_sequences_v2"
+    sequence_segment = "workspace_analytical_sequence_segments_v2"
+    member = "workspace_analytical_segment_members_v2"
+    component = "workspace_analytical_components_v2"
+    evidence = "workspace_analytical_evidence_v2"
+    output = []
+    for family in ("metrics", "diagnostics", "funding"):
+        if family == "funding":
+            selected = (
+                f"WITH RECURSIVE selected AS (SELECT result_id FROM {metric} WHERE {funding} "
+                f"UNION SELECT child.result_id FROM selected s JOIN {metric} parent "
+                f"ON parent.result_id=s.result_id JOIN {sequence_segment} ss "
+                f"ON ss.sequence_id=parent.metric_sequence_id JOIN {member} sm "
+                f"ON sm.segment_id=ss.segment_id JOIN {metric} child "
+                "ON CAST(child.result_id AS VARCHAR)=CAST(sm.member_id AS VARCHAR)) "
+            )
+            metrics = f"SELECT * FROM {metric} WHERE result_id IN (SELECT result_id FROM selected)"
+            root_count = f"SELECT count(*) FROM {metric} WHERE {funding}"
+        else:
+            selected = ""
+            metrics = f"SELECT * FROM {metric}" + (
+                " WHERE FALSE" if family == "diagnostics" else ""
+            )
+            root_count = f"SELECT count(*) FROM {diagnostic if family == 'diagnostics' else metric}"
+        diagnostics = f"SELECT * FROM {diagnostic}" + (
+            "" if family == "diagnostics" else " WHERE FALSE"
+        )
+        prefix = (
+            selected
+            + (", " if selected else "WITH ")
+            + (
+                f"m AS ({metrics}), d AS ({diagnostics}), "
+                f"c AS (SELECT * FROM {component} "
+                "WHERE diagnostic_id IN (SELECT diagnostic_id FROM d)), "
+                f"e AS (SELECT * FROM {evidence} "
+                "WHERE diagnostic_id IN (SELECT diagnostic_id FROM d)), "
+                "sequence_ids AS (SELECT observation_sequence_id id FROM m UNION "
+                "SELECT metric_sequence_id FROM m UNION SELECT metric_sequence_id FROM c), "
+                f"ss AS (SELECT * FROM {sequence_segment} "
+                "WHERE sequence_id IN (SELECT id FROM sequence_ids)), "
+                "content_ids AS (SELECT parameters_content_id id FROM m UNION "
+                "SELECT summary_content_id FROM d UNION SELECT explanation_content_id FROM c UNION "
+                "SELECT reason_content_id FROM e) "
+            )
+        )
+        selections = (
+            (metric, "result_id IN (SELECT result_id FROM m)"),
+            (diagnostic, "diagnostic_id IN (SELECT diagnostic_id FROM d)"),
+            (component, "diagnostic_id IN (SELECT diagnostic_id FROM d)"),
+            (evidence, "diagnostic_id IN (SELECT diagnostic_id FROM d)"),
+            ("workspace_analytical_content_v2", "content_id IN (SELECT id FROM content_ids)"),
+            (sequence, "sequence_id IN (SELECT id FROM sequence_ids)"),
+            (sequence_segment, "sequence_id IN (SELECT id FROM sequence_ids)"),
+            ("workspace_analytical_segments_v2", "segment_id IN (SELECT segment_id FROM ss)"),
+            (member, "segment_id IN (SELECT segment_id FROM ss)"),
+        )
+        total = 0
+        for table, predicate in selections:
+            columns = execute_with_resource_budget(
+                connection,
+                "SELECT column_name,data_type FROM information_schema.columns "
+                "WHERE table_schema='main' AND table_name=? ORDER BY ordinal_position",
+                [table],
+            ).fetchall()
+            if not columns:
+                raise StorageObservabilityError("cut payload table is unavailable")
+            sizes = []
+            for column, kind in columns:
+                if not _TABLE_IDENTIFIER.fullmatch(str(column)):
+                    raise StorageObservabilityError("unsafe cut payload column")
+                quoted = f'"{column}"'
+                if kind == "VARCHAR":
+                    sizes.append(f"coalesce(octet_length(encode({quoted})),0)")
+                elif kind == "BLOB":
+                    sizes.append(f"coalesce(octet_length({quoted}),0)")
+                else:
+                    width = {
+                        "INTEGER": 4,
+                        "BIGINT": 8,
+                        "UUID": 16,
+                        "TIMESTAMP WITH TIME ZONE": 8,
+                    }.get(str(kind))
+                    if width is None:
+                        raise StorageObservabilityError("unmeasured cut payload scalar type")
+                    sizes.append(f"CASE WHEN {quoted} IS NULL THEN 0 ELSE {width} END")
+            row = execute_with_resource_budget(
+                connection,
+                prefix
+                + f"SELECT coalesce(sum({' + '.join(sizes)}),0) FROM {table} WHERE {predicate}",
+            ).fetchone()
+            if row is None:
+                raise StorageObservabilityError("cut payload measurement is unavailable")
+            total += int(row[0])
+        row = execute_with_resource_budget(connection, root_count).fetchone()
+        if row is None:
+            raise StorageObservabilityError("cut payload count is unavailable")
+        output.append(
+            StorageObservabilityTableBytes(
+                table_name=family, row_count=int(row[0]), document_bytes=total
+            )
+        )
+    return tuple(output)
 
 
 class StorageObservabilityDurations(ContractModel):
@@ -1090,7 +1241,9 @@ class _ReadOnlyMeasurement:
     select_count: int
 
 
-def _read_only_measurement_worker(database_path: str, channel: Connection) -> None:
+def _read_only_measurement_worker(
+    database_path: str, channel: Connection, policy: DuckDBResourcePolicy | None = None
+) -> None:
     """Serve bounded read requests, opening and closing a fresh read-only connection each time."""
     table_names: tuple[str, ...] | None = None
     count_query: str | None = None
@@ -1108,9 +1261,13 @@ def _read_only_measurement_worker(database_path: str, channel: Connection) -> No
         select_count = 0
         connection: duckdb.DuckDBPyConnection | None = None
         try:
-            connection = duckdb.connect(database_path, read_only=True)
-            connection.execute(f"SET memory_limit = '{_COLLECTOR_MEMORY_LIMIT}'")
-            connection.execute(f"SET threads = {_COLLECTOR_THREADS}")
+            connection = connect_duckdb(
+                database_path,
+                read_only=True,
+                policy=policy,
+                default_memory_bytes=256_000_000,
+                default_threads=1,
+            )
             connection_opened = True
             query_open_ns = time.perf_counter_ns() - opened_at
             select_started = time.perf_counter_ns()
@@ -1716,7 +1873,11 @@ class StorageObservabilityCollector:
         parent_channel, child_channel = context.Pipe(duplex=True)
         process = context.Process(
             target=_read_only_measurement_worker,
-            args=(str(self._database_path), child_channel),
+            args=(
+                str(self._database_path),
+                child_channel,
+                reader_worker_policy(self._database_path),
+            ),
             name="investment-analyst-storage-reader",
             daemon=False,
         )
@@ -1875,13 +2036,12 @@ class StorageObservabilityCollector:
     def _open_read_only_engine(self) -> duckdb.DuckDBPyConnection:
         """Open the engine read-only so no measurement can ever write."""
         try:
-            connection = duckdb.connect(str(self._database_path), read_only=True)
-            try:
-                connection.execute(f"SET memory_limit = '{_COLLECTOR_MEMORY_LIMIT}'")
-                connection.execute(f"SET threads = {_COLLECTOR_THREADS}")
-            except Exception:
-                connection.close()
-                raise
+            connection = connect_duckdb(
+                self._database_path,
+                read_only=True,
+                default_memory_bytes=256_000_000,
+                default_threads=1,
+            )
             return connection
         except duckdb.Error as error:
             raise StorageObservabilityError(

@@ -13,7 +13,12 @@ from investment_analyst.application.universe_coverage_models import (
     EvidenceState,
     UniverseCoverageRequest,
 )
-from investment_analyst.core.models import DataFrequency, DataQuality, NormalizedObservation
+from investment_analyst.core.models import (
+    DataFrequency,
+    DataQuality,
+    NormalizedObservation,
+    RawRecord,
+)
 from investment_analyst.storage import LocalStorage, StoragePaths
 from investment_analyst.workspace.service import WorkspaceService
 
@@ -156,7 +161,7 @@ def _sec_observation(
     )
 
 
-def _seed_scoped_matrix(storage: LocalStorage) -> dict[str, datetime]:
+def _seed_scoped_matrix(storage: LocalStorage, *, seed_raw: bool = False) -> dict[str, datetime]:
     early = datetime(2026, 8, 29, tzinfo=UTC)
     late = datetime(2026, 9, 5, tzinfo=UTC)
     period = date(2025, 9, 27)
@@ -228,6 +233,22 @@ def _seed_scoped_matrix(storage: LocalStorage) -> dict[str, datetime]:
             available_at=early,
         )
     )
+    if seed_raw:
+        storage.raw_records.save_many(
+            [
+                RawRecord(
+                    record_id=row.raw_record_id,
+                    asset_id=row.asset_id,
+                    source=row.source,
+                    event_time=row.observed_at,
+                    available_at=row.available_at,
+                    received_at=row.source.retrieved_at,
+                    payload={"fixture": row.field_name},
+                    schema_version="sec-companyfacts-snapshot-v1",
+                )
+                for row in rows
+            ]
+        )
     storage.observations.save_many(rows)
     return {"early": early, "late": late}
 
@@ -284,3 +305,28 @@ def test_scoped_sec_reads_preserve_universe_matrix_at_distinct_cuts(tmp_path) ->
     assert by_id["etf:us:spy"].fundamentals.capability is CoverageCapability.NOT_APPLICABLE
     assert by_id["crypto:btc-usd"].fundamentals.capability is CoverageCapability.NOT_APPLICABLE
     assert elapsed >= 0
+
+
+def test_v2_read_only_coverage_reaches_valuation_without_writes(tmp_path) -> None:
+    initialized = WorkspaceService().initialize(tmp_path / "workspace", format_version=2)
+    workspace = initialized.paths.root
+    storage_paths = StoragePaths.from_workspace_root(
+        workspace,
+        format_version=2,
+        workspace_id=initialized.manifest.workspace_id,
+    )
+    with LocalStorage(storage_paths) as storage:
+        cuts = _seed_scoped_matrix(storage, seed_raw=True)
+    before = storage_paths.database_path.read_bytes()
+
+    result = UniverseCoverageApplication.create_default().query(
+        StorageLocationRequest(workspace=workspace),
+        _matrix_request(cuts["late"]),
+    )
+
+    assert storage_paths.database_path.read_bytes() == before
+    by_id = {item.asset_id: item for item in result.assets}
+    assert by_id["equity:us:aapl"].fundamentals.evidence is EvidenceState.PRESENT
+    assert by_id["equity:us:amd"].fundamentals.evidence is EvidenceState.PRESENT
+    assert by_id["equity:us:aapl"].corporate_valuation.capability is CoverageCapability.SUPPORTED
+    assert by_id["equity:us:amd"].corporate_valuation.capability is CoverageCapability.SUPPORTED

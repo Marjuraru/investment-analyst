@@ -44,7 +44,7 @@ from investment_analyst.application.storage_observability import (
 )
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
-from investment_analyst.storage import StoragePaths
+from investment_analyst.storage import LocalStorage, StoragePaths
 from investment_analyst.workspace.service import WorkspaceService
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -187,14 +187,17 @@ def _compose(
     *,
     collector_mode: str = _COLLECTOR_WIRED,
     no_scheduler: bool = False,
+    format_version: int = 1,
+    job_writes: bool = False,
+    no_change: bool = False,
 ) -> _Composed:
     """Drive the production composition with an isolated stub job and no provider access."""
     module = _script_module()
-    paths = (
-        WorkspaceService(environ={}, home=tmp_path / "home")
-        .initialize(tmp_path / "workspace")
-        .paths
+    initialized = WorkspaceService(environ={}, home=tmp_path / "home").initialize(
+        tmp_path / "workspace",
+        format_version=format_version,
     )
+    paths = initialized.paths
     collector_calls: list[dict[str, object]] = []
     collectors: list[StorageObservabilityCollector | None] = []
     scheduler_args: list[tuple[object, ...]] = []
@@ -233,13 +236,25 @@ def _compose(
 
     def _run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
         job_runs.append(invocation.definition.job_id)
+        if job_writes:
+            with LocalStorage(
+                StoragePaths.from_workspace_root(
+                    paths.root,
+                    format_version=initialized.manifest.format_version,
+                    workspace_id=initialized.manifest.workspace_id,
+                )
+            ) as storage:
+                storage.store.connection.execute(
+                    "CREATE TABLE IF NOT EXISTS composition_probe (value INTEGER)"
+                )
+                storage.store.connection.execute("INSERT INTO composition_probe VALUES (1)")
         return ScheduledJobExecution(
             job_id=invocation.definition.job_id,
             effective_known_at=invocation.started_at,
-            evidence_changed=True,
+            evidence_changed=not no_change,
             source_ids=(f"source:{invocation.definition.job_id}",),
-            created_count=1,
-            reused_count=0,
+            created_count=0 if no_change else 1,
+            reused_count=1 if no_change else 0,
         )
 
     def _jobs(
@@ -270,7 +285,11 @@ def _compose(
         workspace_root=paths.root,
         storage_root=paths.storage_root,
         state_root=paths.state_root,
-        database_path=StoragePaths.from_root(paths.storage_root).database_path,
+        database_path=StoragePaths.from_workspace_root(
+            paths.root,
+            format_version=initialized.manifest.format_version,
+            workspace_id=initialized.manifest.workspace_id,
+        ).database_path,
         exit_code=exit_code,
         collector_calls=tuple(collector_calls),
         collectors=tuple(collectors),
@@ -324,6 +343,23 @@ def test_composition_injects_the_collector_into_the_scheduler(
     assert not composed.artifact_path.exists()
 
 
+def test_composition_uses_versioned_v2_database_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    composed = _compose(tmp_path, monkeypatch, format_version=2)
+
+    assert composed.exit_code == 0
+    assert composed.database_path == (composed.workspace_root / "storage" / "v2" / "index.duckdb")
+    assert composed.collector_calls[0] == {
+        "state_root": composed.state_root,
+        "database_path": composed.database_path,
+    }
+    collector = composed.collectors[0]
+    assert collector is not None
+    assert composed.scheduler_kwargs[0]["storage_observability"] is collector
+
+
 def test_running_a_job_writes_one_observability_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -344,6 +380,45 @@ def test_running_a_job_writes_one_observability_record(
     assert record["database_bytes_before"] == database_bytes
     assert record["database_bytes_after"] == database_bytes
     assert composed.artifact_path.read_text(encoding="utf-8").endswith("\n")
+
+
+def test_v2_collector_measures_real_delta_and_no_change_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    composed = _compose(tmp_path, monkeypatch, format_version=2, job_writes=True)
+    database_before = composed.database_path.stat().st_size
+    wal_path = Path(f"{composed.database_path}.wal")
+    wal_before = wal_path.stat().st_size if wal_path.exists() else 0
+
+    completed = composed.scheduler().tick()
+
+    assert [item.status for item in completed] == [ScheduledJobAttemptStatus.SUCCEEDED]
+    database_after = composed.database_path.stat().st_size
+    wal_after = wal_path.stat().st_size if wal_path.exists() else 0
+    record = composed.records()[0]
+    assert record["measurement_state"] == "complete"
+    assert record["database_bytes_before"] == database_before
+    assert record["database_bytes_after"] == database_after
+    assert record["wal_bytes_before"] == wal_before
+    assert record["wal_bytes_after"] == wal_after
+    assert (database_after, wal_after) != (database_before, wal_before)
+    assert record["evidence_changed"] is True
+    assert record["rows_created"] == 1
+
+    no_change = _compose(
+        tmp_path / "no-change",
+        monkeypatch,
+        format_version=2,
+        no_change=True,
+    )
+    no_change.scheduler().tick()
+    repeated = no_change.records()[0]
+    assert repeated["measurement_state"] == "complete"
+    assert repeated["database_bytes_before"] == repeated["database_bytes_after"]
+    assert repeated["wal_bytes_before"] == repeated["wal_bytes_after"]
+    assert repeated["evidence_changed"] is False
+    assert repeated["rows_created"] == 0
 
 
 def test_written_record_parses_and_correlates_by_attempt_id(

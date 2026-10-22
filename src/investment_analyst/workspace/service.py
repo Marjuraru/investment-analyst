@@ -12,6 +12,7 @@ import duckdb
 from pydantic import ValidationError
 
 from investment_analyst.storage import LocalStorage, StorageError, StoragePaths
+from investment_analyst.storage.resource_policy import DuckDBResourcePolicy
 from investment_analyst.workspace.models import (
     APPLICATION_NAME,
     SUPPORTED_WORKSPACE_FORMAT_VERSIONS,
@@ -90,12 +91,14 @@ class WorkspaceService:
         environ: Mapping[str, str] | None = None,
         home: Path | None = None,
         clock: Callable[[], datetime] = _utc_now,
+        resource_policies: Mapping[Path, DuckDBResourcePolicy] | None = None,
     ) -> None:
         environment = os.environ if environ is None else environ
         self._configured_workspace = environment.get(_WORKSPACE_ENVIRONMENT_VARIABLE)
         self._xdg_data_home = environment.get(_XDG_DATA_HOME)
         self._home = (Path.home() if home is None else Path(home)).expanduser().resolve()
         self._clock = clock
+        self._resource_policies = dict(resource_policies or {})
 
     def resolve(self, explicit_path: Path | None = None) -> WorkspacePaths:
         """Resolve workspace paths without creating or modifying filesystem entries."""
@@ -537,6 +540,7 @@ class WorkspaceService:
         storage = LocalStorage(
             storage_paths,
             read_only=mode is WorkspaceAccessMode.READ_ONLY,
+            resource_policy=self._resource_policies.get(storage_paths.database_path),
         )
         try:
             return storage.open()

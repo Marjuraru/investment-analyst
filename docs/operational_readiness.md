@@ -1,5 +1,10 @@
 # Readiness operacional y rehearsal de recuperación
 
+> Decisión PLAN 2026-10-21: [plan vigente de arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Primero datos nuevos y aceptación; historia v1/F5 preservada e incorporación selectiva posterior. Esta decisión está planificada, no acredita activación. Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+
+La sonda de readiness mantiene su contrato y sus ausencias. El arranque nuevo usa escenarios finitos explícitos; no fabrica fechas o intentos para cumplir --min-local-dates ni confunde HTTP200 con aceptación completa.
+
+
 ## Alcance
 
 `operational-readiness-report-v1` convierte el estado operacional persistido en una decisión

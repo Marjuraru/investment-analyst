@@ -63,13 +63,46 @@ def canonical_digest(value: dict[str, object]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+_REUSE_TABLE = "workspace_execution_reuse_v2"
+_BUNDLE_TABLE = "workspace_execution_reuse_bundles_v2"
+_BUNDLE_RESULTS_TABLE = "workspace_execution_reuse_bundle_results_v2"
+_BUNDLE_OUTCOMES_TABLE = "workspace_execution_reuse_bundle_outcomes_v2"
+_REQUIRED_TABLES = frozenset(
+    {_REUSE_TABLE, _BUNDLE_TABLE, _BUNDLE_RESULTS_TABLE, _BUNDLE_OUTCOMES_TABLE}
+)
+
+
 class ExecutionReuseV2Store:
     """Store reusable result bindings without making them result identity."""
 
     def __init__(self, connection: DuckDBPyConnection) -> None:
         self._connection = connection
 
+    def _read_layout(self) -> bool:
+        """Return whether the complete cache layout exists without initializing it."""
+        present = {
+            str(row[0])
+            for row in self._connection.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = current_schema()"
+            ).fetchall()
+        }
+        layout = present & _REQUIRED_TABLES
+        if not layout:
+            return False
+        if layout != _REQUIRED_TABLES:
+            raise ExecutionReuseV2Error("execution reuse layout is incomplete")
+        return True
+
+    def _require_writable(self) -> None:
+        access_mode = self._connection.execute("SELECT current_setting('access_mode')").fetchone()
+        if access_mode is None or str(access_mode[0]) == "read_only":
+            raise ExecutionReuseV2Error(
+                "execution reuse initialization requires a writable connection"
+            )
+
     def ensure(self) -> None:
+        self._require_writable()
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS workspace_execution_reuse_v2 (
@@ -174,7 +207,8 @@ class ExecutionReuseV2Store:
     def find(self, key: ExecutionReuseKey, *, known_at: datetime) -> ExecutionReuseEntry | None:
         if known_at.tzinfo is None or known_at.utcoffset() is None:
             raise ExecutionReuseV2Error("execution reuse known_at must be timezone-aware")
-        self.ensure()
+        if not self._read_layout():
+            return None
         row = self._connection.execute(
             """
             SELECT result_id, available_at, stored_at
@@ -248,7 +282,8 @@ class ExecutionReuseV2Store:
         """Return a PIT-visible complete result set, or ``None`` on a miss."""
         if known_at.tzinfo is None or known_at.utcoffset() is None:
             raise ExecutionReuseV2Error("execution reuse known_at must be timezone-aware")
-        self.ensure()
+        if not self._read_layout():
+            return None
         values = self._key_values(key)
         row = self._connection.execute(
             """

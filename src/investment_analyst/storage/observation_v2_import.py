@@ -30,13 +30,18 @@ from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCD
 from investment_analyst.storage.errors import StorageError
 from investment_analyst.storage.local import LocalStorage
 from investment_analyst.storage.observation_v2 import (
+    OBSERVATION_V2_TABLE,
     ObservationV2Error,
     ObservationV2Store,
     ensure_observation_v2_table,
     observation_to_row,
 )
 from investment_analyst.storage.raw_v2 import RawV2Staging
-from investment_analyst.storage.raw_v2_import import RawV2Importer, RawV2ImportSummary
+from investment_analyst.storage.raw_v2_import import (
+    RawV2Importer,
+    RawV2ImportState,
+    RawV2ImportSummary,
+)
 from investment_analyst.storage.serialization import canonical_json_bytes, sha256_hex
 
 OBSERVATION_V2_IMPORT_STATE_FORMAT = "observation-v2-import-state-v1"
@@ -168,6 +173,7 @@ class ObservationV2Importer:
         raw_digest: str,
         historic_source_fingerprint: str | None = None,
         historic_raw_digest: str | None = None,
+        epoch: UUID | None = None,
         clock: Callable[[], datetime] | None = None,
         progress: Callable[[ObservationV2ImportProgress], None] | None = None,
     ) -> None:
@@ -183,6 +189,7 @@ class ObservationV2Importer:
         self._raw_digest = raw_digest
         self._historic_fingerprint = historic_source_fingerprint
         self._historic_raw_digest = historic_raw_digest
+        self._epoch = epoch
         self._clock = clock or (lambda: datetime.now(UTC))
         self._progress = progress
         self._destination_key = str(staging.destination.absolute())
@@ -213,6 +220,8 @@ class ObservationV2Importer:
             raise ObservationV2ImportError("fail_after_page must be an integer")
         self._require_disjoint_destination()
         self._require_complete_raw()
+        if self._epoch is not None:
+            return self._run_epoch(page_limit, allow_writes=True, fail_after_page=fail_after_page)
         state = self._load_or_initialize_state(page_limit)
         imported = state.confirmed_count
         reused_total = 0
@@ -282,6 +291,166 @@ class ObservationV2Importer:
             max_page_hydrated=max_hydrated,
         )
 
+    def _run_epoch(
+        self, page_limit: int, *, allow_writes: bool, fail_after_page: int | None
+    ) -> ObservationV2ImportSummary:
+        """Share import, prefix verification and completion in one F traversal."""
+        assert self._epoch is not None
+        path = self._state_path()
+        if path.is_symlink():
+            raise ObservationV2ImportError("observation epoch checkpoint is unsafe")
+        if path.exists():
+            try:
+                state = ObservationV2ImportState.model_validate_json(path.read_bytes())
+            except ValueError as error:
+                raise ObservationV2ImportError(
+                    "observation epoch checkpoint is malformed"
+                ) from error
+            self._check_state_binding(state)
+            if state.page_limit != page_limit:
+                raise ObservationV2ImportError("observation import page limit does not match state")
+        elif allow_writes:
+            state = self._write_state(
+                cursor=ObservationV2ImportCursor(),
+                confirmed_count=0,
+                accumulated_digest=observation_empty_digest(),
+                page_limit=page_limit,
+            )
+        else:
+            raise ObservationV2ImportError("complete observation epoch checkpoint is missing")
+        original = state
+        if original.confirmed_count == 0 and (
+            original.accumulated_digest != observation_empty_digest()
+            or original.cursor.available_at is not None
+            or original.cursor.observation_id is not None
+        ):
+            raise ObservationV2ImportError("observation epoch empty prefix differs")
+        source_connection = self._source.store.connection
+        inventory = f"observation_epoch_inventory_{self._epoch.hex}"
+        source_connection.execute(
+            f"CREATE OR REPLACE TEMP TABLE {inventory} AS "
+            "SELECT observation_id, "
+            "row_number() OVER (ORDER BY available_at, observation_id) AS ordinal "
+            "FROM normalized_observations"
+        )
+        verified = reused = imported_pages = max_hydrated = 0
+        digest = observation_empty_digest()
+        counts_source: dict[str, int] = {}
+        counts_frequency: dict[str, int] = {}
+        try:
+            while True:
+                rows = source_connection.execute(
+                    f"SELECT observation_id FROM {inventory} WHERE ordinal > ? AND ordinal <= ? "
+                    "ORDER BY ordinal",
+                    [verified, verified + page_limit],
+                ).fetchall()
+                page = [UUID(row[0]) for row in rows]
+                if not page:
+                    break
+                max_hydrated = max(max_hydrated, len(page))
+                records = self._source.observations.get_many(page)
+                is_prefix = verified < original.confirmed_count
+                if is_prefix and verified + len(page) > original.confirmed_count:
+                    raise ObservationV2ImportError("observation epoch prefix ends inside a page")
+                if not is_prefix:
+                    if not allow_writes:
+                        raise ObservationV2ImportError(
+                            "complete observation epoch does not cover source"
+                        )
+                    placeholders = ", ".join("?" for _ in page)
+                    present_rows = self._staging._connection.execute(
+                        f"SELECT observation_id FROM {OBSERVATION_V2_TABLE} "
+                        f"WHERE observation_id IN ({placeholders})",
+                        [str(key) for key in page],
+                    ).fetchall()
+                    present = {UUID(str(row[0])) for row in present_rows}
+                    missing = [records[key] for key in page if key not in present]
+                    if missing:
+                        receipt = self._staging.save_observations(missing)
+                        if receipt.created_count + receipt.reused_count != len(missing):
+                            raise ObservationV2ImportError("observation epoch page did not settle")
+                        reused += receipt.reused_count
+                    reused += len(present)
+                reread = self._staging.get_observations(page)
+                for key in page:
+                    value = records[key]
+                    if reread[key] != value:
+                        raise ObservationV2ImportError("observation epoch projection differs")
+                    self._assert_same_raw_reference(value, reread[key])
+                    self._assert_same_projection(value, reread[key])
+                    digest = observation_extend_digest(digest, observation_checksum(value))
+                    counts_source[value.source.source_id] = (
+                        counts_source.get(value.source.source_id, 0) + 1
+                    )
+                    counts_frequency[value.frequency.value] = (
+                        counts_frequency.get(value.frequency.value, 0) + 1
+                    )
+                last = records[page[-1]]
+                verified += len(page)
+                if (
+                    is_prefix
+                    and verified == original.confirmed_count
+                    and (
+                        digest != original.accumulated_digest
+                        or last.observation_id != original.cursor.observation_id
+                        or last.available_at != original.cursor.available_at
+                    )
+                ):
+                    raise ObservationV2ImportError("observation epoch confirmed prefix differs")
+                if not is_prefix:
+                    state = self._write_state(
+                        cursor=ObservationV2ImportCursor(
+                            available_at=last.available_at, observation_id=last.observation_id
+                        ),
+                        confirmed_count=verified,
+                        accumulated_digest=digest,
+                        page_limit=page_limit,
+                    )
+                    imported_pages += 1
+                    self._emit(
+                        "import_page_checkpointed",
+                        confirmed_count=verified,
+                        page_count=imported_pages,
+                        page_size=len(page),
+                    )
+                    if fail_after_page is not None and imported_pages > fail_after_page:
+                        raise ObservationV2ImportError(
+                            "observation import interrupted before next page"
+                        )
+            row = self._staging._connection.execute(
+                "SELECT count(*) FROM normalized_observations_v2"
+            ).fetchone()
+            if (
+                row is None
+                or row[0] != verified
+                or verified != state.confirmed_count
+                or digest != state.accumulated_digest
+            ):
+                raise ObservationV2ImportError("observation epoch inventory or digest differs")
+            self._emit(
+                "completion_validation_completed",
+                confirmed_count=verified,
+                page_count=imported_pages,
+                page_size=0,
+            )
+            return ObservationV2ImportSummary(
+                source_workspace_id=self._workspace_id,
+                source_fingerprint=self._fingerprint,
+                raw_digest=self._raw_digest,
+                destination=self._destination_key,
+                complete=True,
+                imported_count=verified,
+                reused_count=reused,
+                corpus_digest=digest,
+                counts_by_source=counts_source,
+                counts_by_frequency=counts_frequency,
+                max_page_requested=page_limit,
+                max_page_hydrated=max_hydrated,
+                traceability_verified=True,
+            )
+        finally:
+            source_connection.execute(f"DROP TABLE IF EXISTS {inventory}")
+
     def verify_complete(self) -> ObservationV2ImportSummary:
         """Verify raw and observation checkpoints against both live inventories."""
         self._require_disjoint_destination()
@@ -290,10 +459,18 @@ class ObservationV2Importer:
             self._staging,
             source_workspace_id=self._workspace_id,
             source_fingerprint=self._fingerprint,
+            epoch=self._epoch,
             clock=self._clock,
         ).verify_complete()
         if not raw_summary.complete or raw_summary.corpus_digest != self._raw_digest:
             raise ObservationV2ImportError("verified raw corpus does not match observation import")
+        if self._epoch is not None:
+            self._require_complete_raw()
+            path = self._state_path()
+            if path.is_symlink() or not path.is_file():
+                raise ObservationV2ImportError("complete observation epoch checkpoint is missing")
+            state = ObservationV2ImportState.model_validate_json(path.read_bytes())
+            return self._run_epoch(state.page_limit, allow_writes=False, fail_after_page=None)
         path = self._state_path()
         if path.is_symlink() or not path.is_file():
             raise ObservationV2ImportError("complete observation import state is missing or unsafe")
@@ -330,6 +507,8 @@ class ObservationV2Importer:
     def _require_complete_raw(self) -> None:
         staging = self._staging
         marker = staging.destination / "raw-v2-import-state.json"
+        if self._epoch is not None:
+            marker = staging.destination / f"raw-v2-import-state.F.{self._epoch}.json"
         if not marker.is_file() or marker.is_symlink():
             raise ObservationV2ImportError("observation import requires a complete raw import")
         try:
@@ -340,8 +519,21 @@ class ObservationV2Importer:
             ) from error
         if self._raw_digest not in document and '"confirmed_count"' not in document:
             raise ObservationV2ImportError("observation import raw checkpoint is incompatible")
+        if self._epoch is not None:
+            try:
+                state = RawV2ImportState.model_validate_json(document)
+            except ValueError as error:
+                raise ObservationV2ImportError("raw epoch checkpoint is incompatible") from error
+            if (
+                state.source_workspace_id != self._workspace_id
+                or state.source_fingerprint != self._fingerprint
+                or state.accumulated_digest != self._raw_digest
+            ):
+                raise ObservationV2ImportError("raw epoch checkpoint binding differs")
 
     def _state_path(self) -> Path:
+        if self._epoch is not None:
+            return self._staging.destination / f"observation-v2-import-state.F.{self._epoch}.json"
         return self._staging.destination / _OBSERVATION_IMPORT_STATE_FILENAME
 
     def _check_state_binding(self, state: ObservationV2ImportState) -> None:
@@ -555,8 +747,16 @@ class ObservationV2Importer:
         document = state.model_dump_json() + "\n"
         temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
         try:
-            temporary.write_text(document, encoding="utf-8")
+            with temporary.open("w", encoding="utf-8") as stream:
+                stream.write(document)
+                stream.flush()
+                os.fsync(stream.fileno())
             os.replace(temporary, path)
+            descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
         finally:
             temporary.unlink(missing_ok=True)
         return state

@@ -1,5 +1,8 @@
 # Plan de cierre de la versión básica funcional
 
+> Decisión PLAN 2026-10-21: [plan vigente de arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Primero datos nuevos y aceptación; historia v1/F5 preservada e incorporación selectiva posterior. Esta decisión está planificada, no acredita activación. Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+
+
 ## Objetivo
 
 La herramienta tiene por finalidad declarada entregar alertas accionables **no personalizadas** y
@@ -161,7 +164,9 @@ del universo (`cazatiburones-universe-activity-v1` la devuelve presente en 19 de
 producto del refresh de actividad declarada que exige su propio Work Block; no se repara aquí ni propone fila
 nueva.
 
-## Diagnóstico de la estructura actual
+## Diagnóstico histórico de la estructura
+
+Las carencias descritas aquí no forman el backlog vivo: contrastar con la tabla de ruta integrada y el plan de arranque. En particular, los privilegios por activo y el corpus SEC ya tienen avances/cierres posteriores documentados.
 
 ### Base que debe conservarse
 
@@ -780,3 +785,37 @@ release y workspace. La activación productiva sigue siendo una operación
 posterior desde `main` integrado: exige guard vivo, capacidad física fresca,
 corte congelado y recibo de delta. No activa v2 ni retira el workspace default;
 esas decisiones operacionales permanecen en DATA-CHASSIS-45.
+
+## Arranque v2 nuevo (`DATA-CHASSIS-45` / #345)
+
+Decisión humana 2026-10-21: este candidato propone ADVANCES, no COMPLETES. DATA-CHASSIS sigue NEXT
+con v2 nuevo, adquisición reciente y warm-up suficiente, validación completa por alcance y
+observabilidad por intento; archivo v1/F5 conservado e incorporación selectiva posterior.
+FUNDAMENTALS-COVERAGE permanece PLANNED. No hay sexto corte de migración autorizado.
+
+Plan: [arranque](data_chassis_v2_fresh_start_plan.md). Ejecución única:
+[runbook45](data_chassis_45_acceptance_runbook.md). Continuación:
+[reincorporación](data_chassis_v1_reintegration_plan.md). No prometer Q1–Q7 MET por comparar
+cargas distintas ni exigir siete días para esta aceptación finita. Los criterios globales del
+protocolo permanecen pendientes para el cierre; esta propuesta se integra sólo con el PR.
+
+route_transition:DATA-CHASSIS:ADVANCES
+
+## Candidatos posteriores: revisión técnica externa de2026-10-21
+
+Registro de decisión: [contraste y prioridades](planning_context/external_technical_review_decisions_2026-10-21.md).
+Esta sección es prospectiva y aditiva; no sustituye la receta viva del Issue345 ni sus documentos
+candidatos, no crea IDs de Work Block, no altera el manifest ni modifica filas de estado.
+
+| Orden de evaluación | Alcance cohesivo posible | Condición para seleccionarlo |
+| --- | --- | --- |
+|1 | Reducir duración CI conservando el gate agregado y todas las regresiones críticas | Run definitivo perfilado; bloque posterior con autoridad de gobernanza; no promesa4min ni retirar tests a nightly |
+|2 | Inventario y piloto de incorporación histórica selectiva | V2 estable/recuperable; datos necesarios por consumidor, PIT y lineage; precede mejoras cosméticas |
+|3 | Reducir hidratación en escritura/replay | Perfil demuestra cuello de botella; checksum actual no sustituye equivalencia sin computed_at; cero pérdida de detección de conflictos |
+|4 | Concurrencia de red acotada | Espera de red medida; límites de fuente, cola por bytes, writer único y progreso por etapa |
+|5 | UX/servidor o tiering/UUID | Evidencia de presupuesto incumplido; ensayo aislado y compatibilidad; no condición añadida al cierre del chasis |
+
+El siguiente PLAN refresca main/GitHub/runtime, compara valor y riesgo y elige sólo lo necesario.
+Si CI no domina, el piloto histórico tiene prioridad. No autorizar limpieza/Optimize-VHD ni cambiar
+schema por esta tabla; toda retirada necesita inventario y autorización concreta. No modificar el
+informe externo original para ocultar discrepancias: el registro enlazado conserva la trazabilidad.

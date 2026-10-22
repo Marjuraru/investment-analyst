@@ -1,5 +1,10 @@
 # Workspace local y staging de datos
 
+> Decisión PLAN 2026-10-21: [plan vigente de arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Primero datos nuevos y aceptación; historia v1/F5 preservada e incorporación selectiva posterior. Esta decisión está planificada, no acredita activación. Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+
+V2 nuevo tiene UUID propio y escrituras LIVE desde sus adquisiciones. No requiere importar v1 ni fabricar un sello de archivo histórico. Las comprobaciones de migración siguen aplicando a raíces que sí contienen esa transición.
+
+
 `investment-analyst` conserva evidencia financiera en un workspace local con
 identidad propia. El formato v1 sigue siendo el default. Un manifiesto puede
 seleccionar explícitamente el backend v2 para un workspace nuevo; seleccionar

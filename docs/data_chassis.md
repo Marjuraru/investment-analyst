@@ -1,5 +1,8 @@
 # Ruta DATA-CHASSIS: Chasis de Datos y Almacenamiento
 
+> Decisión PLAN 2026-10-21: [plan vigente de arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Primero datos nuevos y aceptación; historia v1/F5 preservada e incorporación selectiva posterior. Esta decisión está planificada, no acredita activación. Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+
+
 El plan de cierre vigente y las seis fronteras 40–45 están en
 [`data_chassis_closure_plan.md`](data_chassis_closure_plan.md). El registro Q1–Q7, sus estados y
 comparadores permanecen en [`.agents/rules/investment-analyst-core.md`](../.agents/rules/investment-analyst-core.md);

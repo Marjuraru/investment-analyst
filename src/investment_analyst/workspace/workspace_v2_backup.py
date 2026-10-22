@@ -1736,6 +1736,10 @@ def _verify_v2_workspace(
     expected_counts: WorkspaceBackupCounts,
     checkpoint_path: Path | None = None,
 ) -> None:
+    from investment_analyst.storage.workspace_v2_inventory import historical_transition_status
+
+    if historical_transition_status(root) != "COMPLETE":
+        raise WorkspaceV2BackupError("incomplete historical transition cannot be a complete backup")
     semantic = _open_semantic_verification_checkpoint(
         checkpoint_path,
         expected_counts=expected_counts,

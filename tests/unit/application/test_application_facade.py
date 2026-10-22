@@ -12,9 +12,17 @@ from investment_analyst.analytics.fundamental_trend_models import AaplFundamenta
 from investment_analyst.analytics.fundamentals.research_models import (
     AaplFundamentalResearchRequest,
 )
+from investment_analyst.analytics.market.bar_schemas import (
+    COINBASE_INTRADAY_SOURCE_ID,
+    get_market_bar_schema,
+)
 from investment_analyst.analytics.market.chart_models import (
     AaplMarketChartRequest,
     CryptoSpotDailyMarketChartRequest,
+)
+from investment_analyst.analytics.market.comparison_models import MarketComparisonRequest
+from investment_analyst.analytics.market.comparison_service import (
+    InsufficientCommonMarketSampleError,
 )
 from investment_analyst.analytics.market.intraday_models import IntradayInterval
 from investment_analyst.analytics.valuation import (
@@ -23,6 +31,7 @@ from investment_analyst.analytics.valuation import (
     ValuationReasonCode,
     ValuationSnapshotStatus,
 )
+from investment_analyst.application import facade as facade_module
 from investment_analyst.application.btc_intraday_models import CryptoSpotIntradayChartRequest
 from investment_analyst.application.crypto_derivatives_models import (
     CryptoDerivativesQueryRequest,
@@ -598,3 +607,53 @@ def test_query_missing_workspace_fails_without_creating_it(tmp_path: Path) -> No
         )
 
     assert not missing.exists()
+
+
+def test_market_comparison_uses_contractual_daily_enum_and_rejects_non_daily(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    application = _application(home)
+    workspace = (
+        WorkspaceService(environ={}, home=home)
+        .initialize(tmp_path / "workspace", format_version=2)
+        .paths.root
+    )
+    request = MarketComparisonRequest(
+        asset_ids=("equity:us:aapl", "equity:us:amd"),
+        benchmark_id="equity:us:aapl",
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 2, 5),
+        known_at=datetime(2025, 2, 6, tzinfo=UTC),
+    )
+
+    with pytest.raises(InsufficientCommonMarketSampleError):
+        application.query_market_comparison(
+            request,
+            location=StorageLocationRequest(workspace=workspace),
+        )
+
+    not_visible = request.model_copy(
+        update={
+            "asset_ids": ("equity:us:aapl", "equity:us:missing"),
+            "benchmark_id": "equity:us:aapl",
+        }
+    )
+    with pytest.raises(ValueError, match="not in the visible market universe"):
+        application.query_market_comparison(
+            not_visible,
+            location=StorageLocationRequest(workspace=workspace),
+        )
+
+    real_schema = get_market_bar_schema
+    monkeypatch.setattr(
+        facade_module,
+        "get_market_bar_schema",
+        lambda source_id: real_schema(COINBASE_INTRADAY_SOURCE_ID),
+    )
+    with pytest.raises(ValueError, match="visible daily market asset"):
+        application.query_market_comparison(
+            request,
+            location=StorageLocationRequest(workspace=workspace),
+        )

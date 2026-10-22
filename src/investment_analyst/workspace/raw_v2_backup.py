@@ -51,6 +51,7 @@ from investment_analyst.storage.raw_v2_import import (
     empty_digest,
     extend_digest,
 )
+from investment_analyst.storage.resource_policy import connect_duckdb
 from investment_analyst.workspace.historical_analytical_backup import (
     HistoricalAnalyticalBackupCounts,
     HistoricalAnalyticalBackupError,
@@ -1337,7 +1338,6 @@ class RawV2StagingBackupService:
             raise RawV2BackupError("backup manifest is truncated or incompatible") from error
 
     def _verify_restored_staging(self, root: Path, manifest: RawV2StagingBackupManifest) -> None:
-        import duckdb
 
         marker_path = root / "raw-v2-staging.json"
         try:
@@ -1352,7 +1352,7 @@ class RawV2StagingBackupService:
         index_path = root / index_names[0]
         if index_path.is_symlink() or not index_path.is_file():
             raise RawV2BackupError("restored staging index is missing")
-        connection = duckdb.connect(str(index_path), read_only=True)
+        connection = connect_duckdb(index_path, read_only=True)
         try:
             rows = connection.execute(
                 "SELECT record_id, relative_path, checksum_sha256, asset_id, source_id, "
@@ -1406,7 +1406,7 @@ class RawV2StagingBackupService:
                 self._verify_restored_analysis(root, index_path, manifest)
             if manifest.incremental_counts is not None:
                 self._verify_restored_incremental(index_path, manifest)
-            connection = duckdb.connect(str(index_path), read_only=True)
+            connection = connect_duckdb(index_path, read_only=True)
             try:
                 verify_historical_analytical_backup(
                     connection,
@@ -1517,12 +1517,11 @@ class RawV2StagingBackupService:
     def _verify_restored_incremental(
         self, index_path: Path, manifest: RawV2StagingBackupManifest
     ) -> None:
-        import duckdb
 
         expected = manifest.incremental_counts
         if expected is None:
             raise RawV2BackupError("restored v5 manifest is missing incremental counts")
-        connection = duckdb.connect(str(index_path), read_only=True)
+        connection = connect_duckdb(index_path, read_only=True)
         try:
             actual = self._count_incremental(connection)
             if actual is None or actual != expected:
@@ -1533,12 +1532,11 @@ class RawV2StagingBackupService:
     def _verify_restored_observations(
         self, root: Path, index_path: Path, manifest: RawV2StagingBackupManifest
     ) -> None:
-        import duckdb
 
         expected = manifest.observation_counts
         if expected is None:
             raise RawV2BackupError("restored v2 manifest is missing observation counts")
-        connection = duckdb.connect(str(index_path), read_only=True)
+        connection = connect_duckdb(index_path, read_only=True)
         try:
             try:
                 names = {
@@ -1622,8 +1620,6 @@ class RawV2StagingBackupService:
     ) -> None:
         import collections
 
-        import duckdb
-
         from investment_analyst.storage.analytical_v2_validation import (
             AnalyticalV2ValidationError,
             fetch_metrics_chunked,
@@ -1642,7 +1638,7 @@ class RawV2StagingBackupService:
         expected = manifest.metric_counts
         if expected is None:
             raise RawV2BackupError("restored v3 manifest is missing metric counts")
-        connection = duckdb.connect(str(index_path), read_only=True)
+        connection = connect_duckdb(index_path, read_only=True)
         try:
             try:
                 names = {
@@ -1824,7 +1820,6 @@ class RawV2StagingBackupService:
     def _verify_restored_analysis(
         self, root: Path, index_path: Path, manifest: RawV2StagingBackupManifest
     ) -> None:
-        import duckdb
 
         from investment_analyst.storage.analysis_snapshot_v2 import (
             ANALYSIS_SNAPSHOT_V2_TABLE,
@@ -1842,7 +1837,7 @@ class RawV2StagingBackupService:
         if expected is None:
             raise RawV2BackupError("restored v4 manifest is missing analysis counts")
 
-        connection = duckdb.connect(str(index_path), read_only=True)
+        connection = connect_duckdb(index_path, read_only=True)
         try:
             if not diagnostic_v2_tables_exist(connection) or not analysis_snapshot_v2_tables_exist(
                 connection
