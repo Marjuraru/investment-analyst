@@ -1,8 +1,9 @@
 # V2 nuevo: arranque, aceptación y medición
 
 Decisión humana de 2026-10-21, Work Block DATA-CHASSIS-45 / Issue #345 / PR #346.
-Estado: PLAN aprobado como enfoque; implementación y operación pendientes. Este documento NO
-acredita activación. Sustituye la receta de completar A→B→F antes de arrancar v2.
+Estado observado: v2 activado en el candidato5fb973d, UUID70c64668-1738-4dfe-ba1f-7e72026bb7fe;
+validación pendiente por coverage500 y escenarios operacionales. La enmienda de estabilización al
+final fija el punto de reanudación. Sustituye completar A→B→F antes de arrancar v2.
 La autoridad ejecutable es el Issue activo, su manifest y los guards vivos; los recibos históricos
 mantienen sus propios bindings. Main sigue siendo la autoridad de lo integrado.
 
@@ -57,7 +58,11 @@ no elevarlos por OOM. Configurar mediante mecanismos existentes y verificar padr
 mientras coexista la prueba; serializar fases pesadas. C: libre≥max(25GB,5GB+crecimiento máximo
 siguiente unidad+spill+staging). Un dato ausente no es cero ni permiso para escribir.
 
-## Secuencia única BUILD
+## Secuencia de arranque y evidencia conservada
+
+Pasos1–7 ya tienen entregas/recibos en5fb973d: comprobarlos, no reinicializar ni repetirlos por
+rutina. Las brechas de aceptación siguen pendientes. Reanudar por la enmienda de estabilización.
+
 
 1. **Preflight y archivo lógico.** Guard, SHA/árbol/entorno, bindings del servicio, inventario de
    capacidades configuradas, preferencias y jobs reales. Verificar checkpoint F5/hash y controles
@@ -143,8 +148,10 @@ historia descargada ni rendimiento perfecto a cualquier volumen.
 - Cero divergencias Decimal/PIT/IDs, pérdida de página o duplicados equivalentes en same_inputs.
 - Cero modelos ajenos hidratados, cero accesos a v1 por consultas nuevas y cero OOM/oom_kill/max
   nuevos; pico cgroup≤floor(0,9×MemoryHigh). No extrapolar RSS de una consulta al servicio completo.
-- Dos lotes: delta positivo DB+WAL≤30MB por lote, sin netear bajas ni llamar B/día a B/lote. Una
-  descarga inicial y su warm-up se miden aparte y no se presentan como lote de reutilización.
+- Dos escenarios según enmienda: adquisición ordinary acotada con delta DB+WAL íntegro y
+  recursos medidos; replay local con inputs idénticos, delta positivo DB+WAL≤30.000.000B y cero
+  métricas equivalentes nuevas. Los dos excesos previos siguen incumpliendo el criterio anterior.
+  No es evidencia de B/día ni cambio del Q4 global; no excluir13F ni confundir fecha con inputs.
 - Registrar duración por fase/job, p50/p95 HTTP con número de muestras y escenario, filas leídas/
   hidratadas, bytes físicos/representación, cache hits/misses cuando exista contador, cgroup/spill y
   bytes escritos. Ausente=UNKNOWN. Para lecturas técnicas conservar cotas ya contratadas por tests;
@@ -165,3 +172,102 @@ La recuperación física de C: no se infiere de du/TRIM; compactación WSL es ot
 
 El inventario y las reglas de selección histórica están en data_chassis_v1_reintegration_plan.md.
 El runbook45 contiene únicamente la ejecución vigente; los cinco intentos antiguos están archivados.
+
+## Enmienda de estabilización — estado verificado 2026-10-21
+
+Esta enmienda continúa el mismo bloque. El punto de reanudación es v2 ACTIVO, no init/cutover.
+PR346 head 5fb973d9883ace4c4d55cf39bdc587e0b8dc66bc; CI39667169223 SUCCESS (38m05s).
+UUID70c64668-1738-4dfe-ba1f-7e72026bb7fe, raíz active-v2-20261021, v1 detenido e intacto,
+F5 preservado. Scheduler deshabilitado. Backup cifrado pre/final transferido y restore independiente
+con UUID/conteos iguales según receipts: final raw226992/observaciones17332/métricas7703/diagnósticos6.
+Evidencia: ~/.local/share/investment-analyst/ops/data-chassis-45/fresh-start-20261021/
+activation-receipt.json, consumer-probe.json, build-blocker.json y remote-restore-final.json.
+Son hechos del candidato, no integración en main, ni BUILD PASS. No repetir OAuth, inicialización,
+adquisición inicial o restauración histórica. Reutilizar bindings válidos; registrar por qué una
+prueba necesita repetirse y acreditar en el nuevo SHA todo gate afectado.
+
+### Trabajo único y secuencia restante
+
+1. **FIX-READ-ONLY.** Reproducir RED en DB v2 en disco abierta read_only=True y en transacción
+   read-only: find/find_bundle invocan ensure y éste ejecuta CREATE. Separar lectura de creación
+   dentro de ExecutionReuseV2Store. Las búsquedas sólo consultan; ensure/save/save_bundle conservan
+   inicialización en escritor autorizado. Para tablas opcionales ausentes devolver cache miss sin
+   DDL; para layouts incompletos no devolver un hit ni fabricar outcome/resultados. Mantener
+   compatibilidad de ausencia de outcomes y validación existente; no capturar genéricamente todos
+   los errores SQL como miss. No alterar schema, IDs, keys, Decimal, available_at o semántica de
+   conflicto. No abrir otra conexión writable desde GET, ni inicializar globalmente para ocultarlo.
+   Contrato REUTILIZADO: cache opcional de ejecución, identidad por key existente y UUID del workspace;
+   corrección de acceso, ninguna nueva representación del dominio. El caller atraviesa analytics,
+   pero eso NO autoriza editar analytics: la corrección queda en storage. Tres paths añadidos a
+   allowlist: implementación, unit test e integración application del recorrido de coverage.
+   Regresiones: hit/miss individual y bundle, tablas ausentes, PIT antes/después, reloj distinto,
+   orden íntegro de IDs y ausencia de escrituras; save/conflicto siguen funcionando. La integración
+   usa workspace2 y evidencia suficiente para alcanzar valoración→lookup_bundle, no sólo un
+   universo vacío que salte esa rama. No mockear find_bundle para declarar la regresión resuelta.
+2. **Consumidores y verdad de cobertura.** Tras fix, GET universe-coverage sobre el UUID activo debe
+   responder200 con contenido/traza/PIT correctos y sin writes. Repetir el probe de consumidores.
+   market-comparison devolvió400; probe PLAN read-only confirmó invalid_request: “comparison
+   requires a visible daily market asset”. No presentarlo como PASS ni cambiar el contrato para
+   admitir evidencia inexistente. Resolver visibilidad/known_at/warm-up con datos existentes y
+   adquisición mínima ya autorizada; conservar el negativo400 y demostrar solicitud soportada
+   con evidencia visible200. Si aparece un defecto distinto, adjuntar reproducción y archivo,
+   sin ampliar por anticipado frontend/analytics/providers. Derivados tardó32,83s: medir repetición
+   acotada con misma carga, reportar muestras/recursos; no inventar un objetivo porcentual.
+   Matriz: 102 jobs inventariados y 10 casos representativos, no 102 ejecuciones exitosas. Cada job
+   debe mapear a caso/familia/cobertura y estado; cada consumidor requerido tiene evidencia propia.
+   FRED/ALFRED sigue external-unavailable con fallo visible, sin PASS ficticio ni cambio provider.
+   Esa indisponibilidad ya contemplada en F02 no bloquea familias independientes; no declarar
+   cobertura macro nueva. Registrar error saneado/última cobertura y tarea futura concreta.
+3. **F07: decisión explícita de denominador y crecimiento.** Los lotes previos de 77.594.624 y
+   48.234.496 B excedieron el criterio anterior de30.000.000B/lote; conservarlos como incumplidos
+   respecto de ese criterio. Same-date NO es same_inputs. Los223339 checksums únicos no prueban
+   por sí solos ausencia de duplicación semántica ni igualdad de inputs. No eliminar 13F/Deribit,
+   filtrar casos caros, restar evidencia nueva del delta observado ni reescribir receipts.
+   Para el arranque se sustituye explícitamente el gate de dos lotes≤30MB por DOS escenarios:
+   (a) adquisición ordinary acotada por matriz/rangos/warm-up/cursores existentes, midiendo delta
+   positivo DB+WAL completo y por familia, bytes/registro/filing, revisiones, inputs y recursos;
+   no límite fijo30MB cuando se incorpora evidencia necesaria nueva. Antes de escribir declarar
+   el conjunto/rango/límite de páginas contractuales y presupuesto de espacio de la siguiente
+   unidad; sin descarga histórica general, bucles de descubrimiento ni levantar recursos.
+   (b) replay real local de inputs ya persistidos, sin adquisición nueva, mismo digest de evidencia,
+   parámetros/algoritmos/UUID y reloj posterior: delta positivo DB+WAL≤30.000.000B y cero métricas
+   equivalentes adicionales, con trazabilidad completa. Usar fachadas analíticas existentes;
+   nombrarlo replay local, no job de provider exitoso ni prueba de descarga externa. Cubrir todas
+   las familias disponibles de la matriz, incluidas13F y derivados; distinguir raw no duplicado,
+   idempotencia de observaciones y reutilización analítica donde aplique. Si no hay replay de una
+   familia, la evidencia sigue pendiente, no se quita del denominador. SEC continúa consultándose
+   en cada bootstrap real; un replay analítico local no es bootstrap. No usar relojes de octubre17
+   como adquisición efectiva de datos consultados octubre21: auditar esa procedencia en lotes
+   existentes; no modificar historia, acreditar PIT con available_at verificable y reloj UTC real.
+   Inventario, digest, versiones, conteos antes/después y DB/WAL se guardan por escenario. Ambos
+   conservan techos de memoria/spill/disco y cero OOM. Esta decisión limita la aceptación de
+   arranque, NO modifica el objetivo global Q4 ni acredita ahorro sobre v1 o B/día. Los registros
+   globales no comparables siguen UNKNOWN; los fallos físicos observados permanecen explícitos.
+4. **Nuevo candidato y actualización del servicio.** Ruff/pruebas focalizadas (incluidas las tres
+   regresiones declaradas), diff-check y CI Python3.12 quality del nuevo SHA. Autorizar por servicios
+   existentes candidate-stage/candidate-update del candidato corregido sobre MISMA raíz/UUID v2,
+   con parada ordenada, un writer, límites efectivos y forward recovery. Esto es mantenimiento
+   de v2 activo, no segunda inicialización ni sexto corte F. No editar un release instalado.
+   Si hay fallo corregible dentro del scope, FIX y nueva validación del candidato; no solicitar
+   otra autorización por cada iteración de ese fix. Sin bucles ciegos de restart ni pérdida de writes.
+5. **Comisionado acotado.** Con lectura sana y recursos verificados, habilitar gradualmente jobs
+   configurados mediante configuración pública existente. Registrar conjunto habilitado/excluido,
+   motivo y siguiente ejecución; observar despacho real y resultado terminal sin doble writer y
+   HTTP concurrente. No disparar102 jobs simultáneos para “probar todo”. No llamar scheduler activo
+   a una colección manual mientras --no-scheduler sigue vigente. Fallos externos visibles sin
+   bucle de reintentos; usar backoff existente. Si no existe control por job, utilizar la selección
+   pública soportada, no introducir un scheduler nuevo. Prueba finita, sin esperar días. Backup:
+   conservar recibos previos; si cambió el inventario, actualizar punto recuperable cifrado y
+   readback independiente antes de PASS. No repetir toda v1 ni crear nuevos slots/cuentas.
+6. **Cierre documental y handoff.** Actualizar cabeceras fresh_start/runbook45/closure y reflejar
+   candidato activo, UUID, scheduler, FRED, lotes históricos fallidos, nuevos escenarios y evidencia
+   faltante en una única receta. Reconciliar README/roadmap/ruta/readiness si contradicen ese estado;
+   no reescribir cronologías archivadas ni Q1–Q7. Renovar marker BUILD propio con digest del manifest
+   enmendado; PLAN no lo modifica. Mapear F01–F10/I01/N01–N03 a evidencia del SHA candidato, repetir
+   sólo gates afectados, ningún PASS heredado. BUILD PASS→AUDIT fresco→receipt HUMAN posterior.
+
+No hay cleanup de datos autorizado. Sólo staging nuevo propio, con path literal, bytes, último
+consumidor y restore verificado conforme lifecycle existente; ante duda conservar. No VACUUM,
+borrado raw/13F, checkpoints, backups ni v1/F5 para maquillar crecimiento. Optimización adicional
+sin defecto probado queda fuera; el objetivo restante es lectura correcta, operación acotada y
+aceptación honesta, no rediseño de storage o reimportación de semanas.
