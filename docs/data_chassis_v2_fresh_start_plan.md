@@ -193,7 +193,7 @@ Sólo staging NUEVO propio regenerable tras recuperación probada puede retirars
 La recuperación física de C: no se infiere de du/TRIM; compactación WSL es otra operación.
 
 El inventario y las reglas de selección histórica están en data_chassis_v1_reintegration_plan.md.
-El runbook45 contiene únicamente la ejecución vigente; los cinco intentos antiguos están archivados.
+El runbook45 contiene únicamente la ejecución de 45; los cinco intentos antiguos están archivados.
 
 ## Enmienda de estabilización — estado verificado 2026-10-21
 
