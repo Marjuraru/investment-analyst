@@ -213,7 +213,7 @@ se abrió la base v2. Los bytes asignados y aparentes se presentan separados; no
 | `ops/data-chassis-45/physical-delta-pre-f-20261015` | `337M` | RETIRE_AFTER | Igual gate que la base de delta |
 | `ops/data-chassis-45/cleanup-E0-20261018` | `54M` | RETIRE_AFTER | Evidencia de limpieza previa; recibo retenido |
 | `ops/data-chassis-45/f-complement-20261015` | `54M` | RETIRE_AFTER | Complemento de corte; 49 tras cubrir su diferencia |
-| `ops/data-chassis-44` | `411M` | Mixta | `drive-restore-staging` `421M` y recibos; ARCHIVE_ONLY hasta 47 |
+| `ops/data-chassis-44` | `411M` | Mixta | `drive-restore-staging` ~`402 MiB` aparentes (dos JSONL `421.403.653 B`) y recibos; ARCHIVE_ONLY hasta 47 |
 | `ops/data-chassis-43` | `5,0M` | ARCHIVE_ONLY | Intentos, presupuestos y logs; trazabilidad de 43 |
 | `ops/reports` | `21M` | ARCHIVE_ONLY | Baseline y ciclos; no se reescriben |
 | `ops/samples` | `191M` | ARCHIVE_ONLY | Muestras del colector; 49 decide sin borrar evidencia única |
@@ -345,7 +345,7 @@ que el artefacto es reconstruible desde Git/`uv.lock`; no se infiere de nombre, 
 | `workspaces/default` v1 | `16G` | Archivo final y selección histórica | 47 archiva y restaura el delta; 48 importa y verifica el último consumidor | Backup externo final + restore independiente + manifiesto/hash; B no cubre todo v1 | BUILD_PRODUCT / 49 | RETIRE_AFTER |
 | `workspaces/data-chassis-43-rehearsal` | `8,3G` | Evidencia de 43/44 y restore-v2 | 47 demuestra cero bytes únicos; 49 retira | Backup 6c69b9df restaurado (workspace 9ffeb53b) y recibos de lifecycle | BUILD_PRODUCT / 49 | RETIRE_AFTER |
 | `ops/data-chassis-45/*` grandes deltas | `~12G` | Informes de cortes 45 | Agregado/hash retenido; ningún informe abre el archivo; 49 | Manifiesto y SHA-256 registrados; par duplicado `1854b18...` conservado en el otro path | BUILD_PRODUCT / 49 | RETIRE_AFTER |
-| `ops/data-chassis-44/drive-restore-staging` | `421M` | Evidencia de restore 44 | 47 confirma que el remoto retenido cubre el staging; 49 | Manifiesto remoto y recibos de restore 44 | BUILD_PRODUCT / 49 | RETIRE_AFTER |
+| `ops/data-chassis-44/drive-restore-staging` | ~`402 MiB` aparentes | Evidencia de restore 44 | 47 confirma que el remoto retenido cubre el staging; 49 | Manifiesto remoto y recibos de restore 44 | BUILD_PRODUCT / 49 | RETIRE_AFTER |
 | `ops/__pycache__` y `.bak` | `100K` | Ninguno | 49 | Regenerable; no contiene evidencia única | BUILD_PRODUCT / 49 | RETIRE_AFTER |
 | Releases `0e93c6d`, `5fb973d`, `e10c592`, `dbbdfd0` | `~203M` | Recuperación de releases no referenciadas | 49 confirma release actual+previa y rebuild probado | SHA de Git + `uv.lock` + `stage` hermético | BUILD_PRODUCT / 49 | RETIRE_AFTER |
 | Worktrees `data-chassis-43`, `44`, `dev-ci-timeout-45` | `~67M` | Git y evidencia de PR | Merge comprobado, cero cambios únicos y ningún checkpoint; 49 usa `git worktree remove` | Commit/ref de Git; sin `clean --force` ni `rm` | BUILD_PRODUCT / 49 | RETIRE_AFTER |
