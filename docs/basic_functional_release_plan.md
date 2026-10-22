@@ -1,6 +1,6 @@
 # Plan de cierre de la versión básica funcional
 
-> Decisión PLAN 2026-10-21: [plan vigente de arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Primero datos nuevos y aceptación; historia v1/F5 preservada e incorporación selectiva posterior. Esta decisión está planificada, no acredita activación. Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+> Decisión PLAN 2026-10-21: [arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Activación verificada por #346 MERGED en `b5e714a`; release observada `daad58d`; workspace UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; historia v1/F5 preservada. La formalización, neutralidad y retención continúan en [DATA-CHASSIS-46](data_chassis_continuity_plan.md) (#349). Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
 
 
 ## Objetivo
@@ -788,16 +788,37 @@ esas decisiones operacionales permanecen en DATA-CHASSIS-45.
 
 ## Arranque v2 nuevo (`DATA-CHASSIS-45` / #345)
 
-Decisión humana 2026-10-21: este candidato propone ADVANCES, no COMPLETES. DATA-CHASSIS sigue NEXT
-con v2 nuevo, adquisición reciente y warm-up suficiente, validación completa por alcance y
-observabilidad por intento; archivo v1/F5 conservado e incorporación selectiva posterior.
+Integrado por #346 MERGED en `b5e714a`. Estado observado 2026-10-22: release `daad58d`, workspace
+UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`, DB v2 `281.817.088 B`; v1/F5 conservados y backup
+c0080d96 restaurado byte-idéntico sobre `252.456.960 B`. DATA-CHASSIS sigue NEXT;
 FUNDAMENTALS-COVERAGE permanece PLANNED. No hay sexto corte de migración autorizado.
 
-Plan: [arranque](data_chassis_v2_fresh_start_plan.md). Ejecución única:
+Plan histórico: [arranque](data_chassis_v2_fresh_start_plan.md). Ejecución:
 [runbook45](data_chassis_45_acceptance_runbook.md). Continuación:
+[continuidad y retención](data_chassis_continuity_plan.md) y
 [reincorporación](data_chassis_v1_reintegration_plan.md). No prometer Q1–Q7 MET por comparar
 cargas distintas ni exigir siete días para esta aceptación finita. Los criterios globales del
-protocolo permanecen pendientes para el cierre; esta propuesta se integra sólo con el PR.
+protocolo permanecen pendientes para el cierre.
+
+route_transition:DATA-CHASSIS:ADVANCES
+
+## Formalización, neutralidad e inventario (`DATA-CHASSIS-46` / #349)
+
+Este Work Block propone ADVANCES, no COMPLETES. Corrige la selección inicial privilegiada de AAPL,
+publica el índice documental y el registro único de continuidad, inventaría raíces locales/remotas y
+selección histórica, y fija la secuencia obligatoria 47–49. No importa datos, no borra payloads, no
+cambia schema ni declara cierre.
+
+| Tramo | Salida obligatoria | Entrada / límite |
+| --- | --- | --- |
+| 46, este bloque | Documentación vigente, selección neutral, inventario y calendario por eventos | Sin importación ni retirada de datos grandes |
+| 47 | Archivo recuperable del delta histórico y piloto scratch con representación autorizada | Inventario/presupuesto de 46; no copiar DB sobre el activo |
+| 48 | Reincorporación por lotes acotados con consumidor, lineage y backup/restore por corte | Piloto/contrato verificados; no importar todo el archivo |
+| 49 | Limpieza física obligatoria con lista literal, recuperación probada y cierre reconciliado | Últimos consumidores satisfechos; sin borrar evidencia única |
+
+Los tramos 47–49 son ruta obligatoria, no Issues activos ni autoridad ejecutable anticipada. Cada
+PLAN los resuelve desde main, runtime y evidencia nueva. Ninguna fila de esta sección declara
+Q1–Q7 `MET`.
 
 route_transition:DATA-CHASSIS:ADVANCES
 

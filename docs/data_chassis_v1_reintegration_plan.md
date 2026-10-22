@@ -1,7 +1,13 @@
 # Reincorporación selectiva de v1 y de las semanas de transición
 
 PLAN posterior al arranque v2 nuevo aprobado el 2026-10-21. No autoriza importar ni borrar ahora.
-Autoridad presente: Issue #345 y data_chassis_v2_fresh_start_plan.md. DATA-CHASSIS permanece NEXT.
+Autoridad presente: Issue #349 (`DATA-CHASSIS-46`), base `b5e714a`, y el
+[registro de continuidad](data_chassis_continuity_plan.md). DATA-CHASSIS permanece NEXT y esta
+secuencia no declara Q1–Q7 `MET`.
+
+La ruta obligatoria es 46 → 47 → 48 → 49: 46 formaliza inventario y selección; 47 cubre el archivo
+recuperable y ejecuta el piloto; 48 reincorpora por lotes con consumidor; 49 retira físicamente y
+cierra. Los tramos 47–49 no son Issues activos ni autoridad ejecutable anticipada.
 
 ## Objetivo y frontera
 

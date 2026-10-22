@@ -1,6 +1,6 @@
 # Local storage
 
-> Decisión PLAN 2026-10-21: [plan vigente de arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Primero datos nuevos y aceptación; historia v1/F5 preservada e incorporación selectiva posterior. Esta decisión está planificada, no acredita activación. Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+> Decisión PLAN 2026-10-21: [arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Activación verificada por #346 MERGED en `b5e714a`; release observada `daad58d`; workspace UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; historia v1/F5 preservada. La formalización, neutralidad y retención continúan en [DATA-CHASSIS-46](data_chassis_continuity_plan.md) (#349). Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
 
 Distinguir índice/proyección y payload: filtrar antes de hidratar; cargar evidencia y dependencias sólo para el consumidor que las requiere, sin truncar resultados ni saltar hashes. Las secciones de document_json que describen v1 no cambian la representación compacta v2.
 

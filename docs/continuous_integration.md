@@ -35,9 +35,10 @@ environment synchronization and installs the project in editable mode. `setup-py
 pip downloads used to bootstrap the pinned uv version; the lock remains the dependency source of
 truth.
 
-Coverage uses branch measurement and subprocess instrumentation from `pyproject.toml`. The current
-894-test baseline is 82.54%, and the enforced floor is 82.00%. `pip-audit` examines the exact
-installed locked environment and fails when its vulnerability service reports a known issue.
+Coverage uses branch measurement and subprocess instrumentation from `pyproject.toml`. The enforced
+floor is 82.00%; the collected count and coverage for a candidate are read from the exact-SHA CI run,
+not inferred from a historical local number. `pip-audit` examines the exact installed locked
+environment and fails when its vulnerability service reports a known issue.
 
 ## Security and resource limits
 
@@ -48,7 +49,8 @@ installed locked environment and fails when its vulnerability service reports a 
 - The workflow uses `pull_request`, not `pull_request_target`, so untrusted pull-request code does
   not receive a privileged base-repository context.
 - A concurrency group cancels superseded runs for the same workflow and ref.
-- The job has a 20-minute timeout and never calls market or fundamental providers.
+- The job has a 45-minute timeout (extended from 20 minutes by `DEV-CI-TIMEOUT-45`) and never calls
+  market or fundamental providers.
 - CI requires no Alpaca, SEC, broker, or trading credentials.
 - Dependency synchronization cannot update `uv.lock` during CI.
 - The security audit never applies automatic dependency fixes.

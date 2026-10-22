@@ -573,7 +573,7 @@ let marketChartViewport = null;
 let marketChartRenderFrame = null;
 let marketChartDrag = null;
 let selectedChartPoint = -1;
-let selectedMarketAsset = "equity:us:aapl";
+let selectedMarketAsset = null;
 let selectMarketAssetForNavigation = null;
 const marketStartByAsset = new Map();
 const knownAtByAsset = new Map();
@@ -662,6 +662,13 @@ function marketAssetFromDescriptor(descriptor) {
   });
 }
 
+function resolveMarketAssetSelection(assets, selectedAssetId) {
+  if (selectedAssetId && assets.some((asset) => asset.asset_id === selectedAssetId)) {
+    return selectedAssetId;
+  }
+  return assets[0].asset_id;
+}
+
 async function loadMarketAssets() {
   const payload = await api("/api/market-assets");
   if (
@@ -679,7 +686,7 @@ async function loadMarketAssets() {
       ]),
     ),
   );
-  if (!marketAssets[selectedMarketAsset]) selectedMarketAsset = payload.assets[0].asset_id;
+  selectedMarketAsset = resolveMarketAssetSelection(payload.assets, selectedMarketAsset);
   marketStartByAsset.clear();
   for (const [assetId, presentation] of Object.entries(marketAssets)) {
     marketStartByAsset.set(assetId, presentation.defaultMarketStart);

@@ -1,6 +1,6 @@
 # Hoja de ruta estratégica del producto
 
-> Decisión PLAN 2026-10-21: [plan vigente de arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Primero datos nuevos y aceptación; historia v1/F5 preservada e incorporación selectiva posterior. Esta decisión está planificada, no acredita activación. Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+> Decisión PLAN 2026-10-21: [arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Activación verificada por #346 MERGED en `b5e714a`; release observada `daad58d`; workspace UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; historia v1/F5 preservada. La formalización, neutralidad y retención continúan en [DATA-CHASSIS-46](data_chassis_continuity_plan.md) (#349). Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
 
 ## Prioridad operativa de 2026-10-21
 
@@ -741,6 +741,16 @@ amplían activos del catálogo y no se re-descarga evidencia histórica.
 `EXTENDED-SOAK /
 DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
 Block independiente.
+
+La continuación vigente de `DATA-CHASSIS` es la secuencia obligatoria
+[46 → 47 → 48 → 49](data_chassis_continuity_plan.md): 46 formaliza documentación, neutralidad e
+inventario; 47 produce archivo recuperable y piloto; 48 reincorpora por lotes con consumidor; 49
+ejecuta la limpieza física y el cierre formal. `DATA-CHASSIS` permanece único `NEXT` y
+`FUNDAMENTALS-COVERAGE` sigue `PLANNED`. Los tramos 47–49 no son Issues activos ni autoridad
+ejecutable anticipada: cada PLAN los resuelve desde main, runtime y evidencia nueva. Ningún tramo
+declara Q1–Q7 `MET` por comparar universos o cargas distintas.
+
+`route_transition:DATA-CHASSIS:ADVANCES`
 
 Mercado BVL, macro diario columnar, extensiones Cazatiburones para BVL/cripto e investigación
 predictiva conservan sus fases de esta hoja de ruta, pero no desplazan la estabilización de la
