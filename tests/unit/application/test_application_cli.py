@@ -101,10 +101,11 @@ def test_scripts_and_facade_keep_explicit_storage_access_modes() -> None:
     facade = (_PROJECT_ROOT / "src" / "investment_analyst" / "application" / "facade.py").read_text(
         encoding="utf-8"
     )
-    assert facade.count("access_mode=WorkspaceAccessMode.READ_ONLY") == 11
+    assert facade.count("access_mode=WorkspaceAccessMode.READ_ONLY") == 12
     assert "def query_fred_point_in_time(" in facade
     assert "def query_bvl_registry(" in facade
     assert "def query_aapl_diagnostics(" in facade
+    assert "def read_dependency_signature(" in facade
     assert "def query_btc_market_chart(" in facade
     assert "def query_listed_market_chart(" in facade
     assert "def query_btc_intraday_chart(" in facade
