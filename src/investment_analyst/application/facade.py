@@ -225,6 +225,7 @@ from investment_analyst.catalog.provider_configuration import (
     resolve_deribit_configuration,
     resolve_sec_configuration,
 )
+from investment_analyst.core.models import DataFrequency
 from investment_analyst.core.models.base import ContractModel, UTCDateTime
 from investment_analyst.evidence.sec_declared_activity_observations.service import (
     DeclaredActivityObservationService,
@@ -539,7 +540,7 @@ class InvestmentAnalystApplication:
                 raise ValueError(
                     f"asset_id is not in the visible market universe: {asset_id}"
                 ) from error
-            if get_market_bar_schema(descriptor.source_id).frequency.value != "1d":
+            if get_market_bar_schema(descriptor.source_id).frequency is not DataFrequency.DAY_1:
                 raise ValueError("comparison requires a visible daily market asset")
             resolved[asset_id] = MarketComparisonAsset(
                 asset_id=descriptor.asset_id,

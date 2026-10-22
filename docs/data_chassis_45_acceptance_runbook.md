@@ -1,7 +1,8 @@
 # DATA-CHASSIS-45: ejecución vigente del arranque v2 nuevo
 
-Decisión PLAN de 2026-10-21. Estado observado en receipts: v2 activo, v1 detenido y preservado;
-scheduler deshabilitado y aceptación pendiente. Único Work Block #345, PR346, rama codex/data-chassis-45.
+Decisión PLAN de 2026-10-21. Estado observado 2026-10-22: v2 activo en el candidato54acfd6, v1
+detenido y preservado; scheduler habilitado con13 jobs/3 activos; F11/F12 en candidato con probes
+pendientes hasta receipt; backup final pendiente. Único Work Block #345, PR346, rama codex/data-chassis-45.
 El builder debe refrescar HEAD/CI/bindings; nunca ejecutar desde los SHA históricos de este texto.
 
 ## Una sola receta
@@ -55,10 +56,15 @@ Q1–Q7 y los gates globales del protocolo no se borran: se resolverán en la co
 DATA-CHASSIS. Manifest nuevo reemplaza la aceptación operativa del bloque; no convierte la antigua
 en PASS. AUDIT revisa todo el diff del PR y mantiene regresiones de código retenido.
 
-## Pendientes actuales
+## Estado de cierre 2026-10-22
 
-Coverage500 por DDL en lectura; market-comparison400 por ausencia de activo diario visible;
-scheduler aún deshabilitado; FRED externo indisponible. Los10 casos no equivalen a102 ejecuciones.
-Lotes77.594.624/48.234.496B excedieron30MB: conservar el fallo, aplicar escenarios distintos de
-adquisición y replay del plan. Backups/restore pre y final acreditados por receipts del candidato;
-actualizar recuperación sólo por inventario/bindings nuevos. No retirar v1/F5 ni borrar13F.
+F10 coverage200 en37 assets, con DB/WAL/tablas sin cambios. F11/F12 están en el candidato y sus
+probes se acreditan en el marker BUILD exact-SHA: HTTP AAPL+AMD200 con fachada real, PIT/lineage y
+sin writes; colector v2 contrastado con delta DB/WAL independiente y replay sin cambios. Scheduler
+habilitado con13 jobs/3 activos (AAPL, AMD, BTC +13F/SMV); 11 current y2 13F incomplete por backlog
+contractual; FRED external-unavailable. Replay local de5 familias con ventana90d y digests exactos:
+0 creadas/6.996 reutilizadas, DB+WAL0. Las14.758 métricas de un ensayo full-range distinto se
+conservan como carga distinta; no son idempotencia PASS ni se deben reescribir. Los lotes históricos
+77.594.624/48.234.496B conservan su fallo frente al criterio anterior de30MB. El backup final que
+incluya todas las escrituras de aceptación queda pendiente hasta su receipt/restore independiente.
+No repetir OAuth, init ni migración; no retirar v1/F5 ni borrar13F.

@@ -347,9 +347,15 @@ def _serve_after_lock(
         analytical_monitor.reconcile(schedule_attempts)
         notification_monitor = CandidateNotificationMonitor(notification_store, analytical_store)
         notification_monitor.reconcile()
+        manifest = runtime.workspace_service.manifest(workspace_root)
+        storage_paths = StoragePaths.from_workspace_root(
+            workspace_root,
+            format_version=manifest.format_version,
+            workspace_id=manifest.workspace_id,
+        )
         storage_observability = StorageObservabilityCollector(
             state_root=state_root,
-            database_path=StoragePaths.from_root(storage_root).database_path,
+            database_path=storage_paths.database_path,
         )
         scheduler = MultiAssetScheduler(
             jobs,

@@ -23,7 +23,7 @@ aprobaciones intermedias; la integración HUMAN requiere el receipt posterior a 
 | 40–42 | Backend v2, incrementalidad y consultas implementados | Reutilizar; probar el recorrido nuevo y optimizar defectos medidos |
 | 43–44 | Migración/backup/restore y transporte previamente acreditados | Conservar archivo/evidencia; no repetir 676 volúmenes |
 | 45 anterior | Cinco cortes abortados, mejoras y progreso parcial preservados | No activar F5 ni fingir cierre; historia consultable |
-| 45 vigente | V2 activo en5fb973d; backup/restore acreditados; lectura coverage, medición y scheduler pendientes | [Plan ejecutable](data_chassis_v2_fresh_start_plan.md) y [runbook](data_chassis_45_acceptance_runbook.md) |
+| 45 vigente | V2 activo en54acfd6; coverage200; F11/F12 en candidato con probes pendientes; scheduler13 jobs/3 activos; 13F/FRED visibles; backup final pendiente | [Plan ejecutable](data_chassis_v2_fresh_start_plan.md) y [runbook](data_chassis_45_acceptance_runbook.md) |
 | Continuación | Archivo final y selección/importación progresiva | [Plan de reincorporación](data_chassis_v1_reintegration_plan.md), sin ejecución anticipada |
 | Cierre de DATA-CHASSIS | Pendiente | Gates operacionales, recuperación/retención y Q1–Q7 comparables |
 

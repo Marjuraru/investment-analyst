@@ -800,3 +800,22 @@ cargas distintas ni exigir siete días para esta aceptación finita. Los criteri
 protocolo permanecen pendientes para el cierre; esta propuesta se integra sólo con el PR.
 
 route_transition:DATA-CHASSIS:ADVANCES
+
+## Candidatos posteriores: revisión técnica externa de2026-10-21
+
+Registro de decisión: [contraste y prioridades](planning_context/external_technical_review_decisions_2026-10-21.md).
+Esta sección es prospectiva y aditiva; no sustituye la receta viva del Issue345 ni sus documentos
+candidatos, no crea IDs de Work Block, no altera el manifest ni modifica filas de estado.
+
+| Orden de evaluación | Alcance cohesivo posible | Condición para seleccionarlo |
+| --- | --- | --- |
+|1 | Reducir duración CI conservando el gate agregado y todas las regresiones críticas | Run definitivo perfilado; bloque posterior con autoridad de gobernanza; no promesa4min ni retirar tests a nightly |
+|2 | Inventario y piloto de incorporación histórica selectiva | V2 estable/recuperable; datos necesarios por consumidor, PIT y lineage; precede mejoras cosméticas |
+|3 | Reducir hidratación en escritura/replay | Perfil demuestra cuello de botella; checksum actual no sustituye equivalencia sin computed_at; cero pérdida de detección de conflictos |
+|4 | Concurrencia de red acotada | Espera de red medida; límites de fuente, cola por bytes, writer único y progreso por etapa |
+|5 | UX/servidor o tiering/UUID | Evidencia de presupuesto incumplido; ensayo aislado y compatibilidad; no condición añadida al cierre del chasis |
+
+El siguiente PLAN refresca main/GitHub/runtime, compara valor y riesgo y elige sólo lo necesario.
+Si CI no domina, el piloto histórico tiene prioridad. No autorizar limpieza/Optimize-VHD ni cambiar
+schema por esta tabla; toda retirada necesita inventario y autorización concreta. No modificar el
+informe externo original para ocultar discrepancias: el registro enlazado conserva la trazabilidad.

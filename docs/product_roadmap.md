@@ -6,6 +6,22 @@
 
 DATA-CHASSIS sigue NEXT. #345 ADVANCES con arranque nuevo; no cierre por base vacía. Se permite adquisición reciente y warm-up necesario mediante fuentes existentes; el archivo anterior no se re-descarga masivamente. FUNDAMENTALS-COVERAGE permanece PLANNED. Las cronologías inferiores conservan contexto histórico, no autoridad para sustituir esta secuencia.
 
+## Revisión técnica externa: oportunidades posteriores al bloque activo
+
+La [revisión contrastada de2026-10-21](planning_context/external_technical_review_decisions_2026-10-21.md)
+registra qué críticas son verificables y cuáles son estimaciones o datos obsoletos. Es planificación
+futura, no un Work Block ni ampliación de #345. DATA-CHASSIS conserva NEXT y FUNDAMENTALS-COVERAGE
+PLANNED; no cambia criterios globales ni declara integración/activación por este documento.
+
+Prioridad: terminar aceptación vigente; evaluar CI si domina el coste de iteración; continuar archivo
+histórico y piloto de incorporación selectiva. Optimizar escritura compacta sólo con perfil y
+semántica de equivalencia preservada. Concurrencia de adquisición, modularización web, SSE/canvas,
+UUID nativo y tiering quedan condicionados a mediciones, no como requisitos de cierre. No prometer
+99,2% de ahorro con inventarios distintos, CI4min o102jobs/2min sin ensayo comparable. La reducción
+del metatrabajo consiste en una receta vigente, evidencia reutilizable y bloques cohesivos, sin
+eliminar garantías de recuperación, PIT o progreso durable. Ver condiciones y aceptación propuestas
+en el registro enlazado; seleccionar un único siguiente bloque cuando corresponda.
+
 
 ## Tres conceptos que no deben confundirse
 
