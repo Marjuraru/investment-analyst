@@ -1311,6 +1311,8 @@ async function queryMarketChart(deferredRequest = null) {
       `${intraday ? "/api/market-intraday" : "/api/market-chart"}?${parameters.toString()}`,
     );
     if (!isCurrentRequest()) return;
+    rememberViewPreview(`market-chart:${assetId}:${knownAt}`, payload);
+    clearPreviousCutNotice();
     renderMarketChart(intraday ? normalizeBtcIntradayChart(payload) : payload);
   } catch (error) {
     if (!isCurrentRequest()) return;
@@ -2057,6 +2059,8 @@ async function queryFundamentalResearch(deferredRequest = null) {
   try {
     const payload = await api(`/api/fundamental-analysis?${parameters.toString()}`);
     if (!isCurrentRequest()) return;
+    rememberViewPreview(`fundamental-analysis:${assetId}:${knownAt}:${frequency}`, payload);
+    clearPreviousCutNotice();
     renderFundamentalResearch(payload);
   } catch (error) {
     if (!isCurrentRequest()) return;
@@ -2704,6 +2708,8 @@ async function queryReport() {
       || (deferredRequest && !isCurrentActivoBoardRequest(deferredRequest))
       || report?.asset?.asset_id !== assetId
     ) return;
+    rememberViewPreview(`report:${assetId}:${knownAt}`, report);
+    clearPreviousCutNotice();
     renderReport(report);
     setMessage(operationalIssues.join(" · "), operationalIssues.length > 0);
   } catch (error) {

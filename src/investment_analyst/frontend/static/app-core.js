@@ -11,6 +11,15 @@ const NYSE_CORE_CLOSE_MINUTES = 16 * 60;
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const THEME_STORAGE_KEY = "investment-analyst-theme-v1";
 const CHART_SETTINGS_STORAGE_KEY = "investment-analyst-chart-settings-v1";
+const VIEW_CONTEXT_STORAGE_KEY = "investment-analyst-view-context-v1";
+const VIEW_CONTEXT_PREVIEW_PREFIX = "investment-analyst-view-preview-v1:";
+const VIEW_CONTEXT_MAX_ENTRIES = 8;
+const VIEW_CONTEXT_MAX_BYTES = 2 * 1024 * 1024;
+const VIEW_CONTEXT_PREVIEW_MAX_BYTES = 256 * 1024;
+
+const apiInFlightRequests = new Map();
+let currentWorkspaceId = null;
+let readRuntimeGeneration = null;
 
 // Every rendered color, including JS-driven SVG strokes, resolves from the
 // tokens declared once in tokens.css: no color literal lives in this file.
@@ -1872,22 +1881,150 @@ function localizedIssue(issue) {
   return ISSUE_TRANSLATIONS.get(issue) || issue;
 }
 
-async function api(path, options = {}) {
-  const response = await fetch(path, {
-    cache: "no-store",
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    const error = payload.error || {};
-    const message = ERROR_MESSAGES[error.code] || error.message || `Error HTTP ${response.status}`;
-    const failure = new Error(message);
-    failure.code = error.code;
-    failure.status = response.status;
-    throw failure;
+function currentViewContext() {
+  return {
+    schemaVersion: "local-view-context-v1",
+    workspaceId: currentWorkspaceId,
+    release: readRuntimeGeneration,
+    board: (location.hash || "#mesa").replace(/^#/, "") || "mesa",
+    assetId: selectedMarketAsset,
+    knownAt: byId("report-known-at") ? byId("report-known-at").value.trim() : "",
+    frequency: selectedFundamentalFrequency,
+    capturedAt: new Date().toISOString(),
+  };
+}
+
+function readViewContexts() {
+  try {
+    const raw = sessionStorage.getItem(VIEW_CONTEXT_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item) => item && item.schemaVersion === "local-view-context-v1");
+  } catch (error) {
+    return [];
   }
-  return payload;
+}
+
+function persistViewContext(context = currentViewContext()) {
+  try {
+    const entries = readViewContexts().filter(
+      (item) => !(item.board === context.board && item.assetId === context.assetId),
+    );
+    entries.push(context);
+    while (entries.length > VIEW_CONTEXT_MAX_ENTRIES) entries.shift();
+    const encoded = JSON.stringify(entries);
+    if (new TextEncoder().encode(encoded).length > VIEW_CONTEXT_MAX_BYTES) return false;
+    sessionStorage.setItem(VIEW_CONTEXT_STORAGE_KEY, encoded);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function restoreLastViewContext() {
+  const entries = readViewContexts();
+  return entries.length ? entries[entries.length - 1] : null;
+}
+
+function clearViewContext() {
+  try {
+    sessionStorage.removeItem(VIEW_CONTEXT_STORAGE_KEY);
+  } catch (error) {
+    // Session persistence is optional; the current view remains authoritative.
+  }
+}
+
+function showPreviousCutNotice(context) {
+  if (!context || !context.knownAt) return;
+  const element = byId("global-message");
+  if (!element) return;
+  element.textContent = `Datos al ${context.knownAt}. Actualizando el corte actual…`;
+  element.classList.remove("hidden", "error");
+  element.dataset.viewContextNotice = "true";
+}
+
+function clearPreviousCutNotice() {
+  const element = byId("global-message");
+  if (!element || element.dataset.viewContextNotice !== "true") return;
+  element.textContent = "";
+  element.classList.add("hidden");
+  delete element.dataset.viewContextNotice;
+}
+
+function updateReadRuntimeContext(payload) {
+  if (!payload || typeof payload !== "object") return;
+  if (typeof payload.workspace_id === "string") currentWorkspaceId = payload.workspace_id;
+  const runtime = payload.read_runtime;
+  if (runtime && typeof runtime.generation === "string") {
+    readRuntimeGeneration = runtime.generation;
+  }
+}
+
+function rememberViewPreview(key, payload) {
+  try {
+    const encoded = JSON.stringify({
+      schemaVersion: "local-view-preview-v1",
+      key,
+      capturedAt: new Date().toISOString(),
+      payload,
+    });
+    if (new TextEncoder().encode(encoded).length > VIEW_CONTEXT_PREVIEW_MAX_BYTES) return false;
+    sessionStorage.setItem(VIEW_CONTEXT_PREVIEW_PREFIX + key, encoded);
+    const keys = [];
+    for (let index = 0; index < sessionStorage.length; index += 1) {
+      const name = sessionStorage.key(index);
+      if (name && name.startsWith(VIEW_CONTEXT_PREVIEW_PREFIX)) keys.push(name);
+    }
+    while (keys.length > VIEW_CONTEXT_MAX_ENTRIES) {
+      const oldest = keys.shift();
+      if (oldest) sessionStorage.removeItem(oldest);
+    }
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function loadViewPreview(key) {
+  try {
+    const raw = sessionStorage.getItem(VIEW_CONTEXT_PREVIEW_PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && parsed.schemaVersion === "local-view-preview-v1" ? parsed.payload : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+async function api(path, options = {}) {
+  const method = String(options.method || "GET").toUpperCase();
+  const dedupeKey = method === "GET" ? path : null;
+  if (dedupeKey && apiInFlightRequests.has(dedupeKey)) {
+    return apiInFlightRequests.get(dedupeKey);
+  }
+  const request = (async () => {
+    const response = await fetch(path, {
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      ...options,
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      const error = payload.error || {};
+      const message = ERROR_MESSAGES[error.code] || error.message || `Error HTTP ${response.status}`;
+      const failure = new Error(message);
+      failure.code = error.code;
+      failure.status = response.status;
+      throw failure;
+    }
+    return payload;
+  })();
+  if (dedupeKey) {
+    apiInFlightRequests.set(dedupeKey, request);
+    request.finally(() => apiInFlightRequests.delete(dedupeKey)).catch(() => {});
+  }
+  return request;
 }
 
 function setButtonBusy(button, busy, busyLabel, idleLabel) {

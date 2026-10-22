@@ -1,5 +1,10 @@
 # DATA-CHASSIS: arranque v2 y cierre posterior
 
+> **Supersesión de ruta (2026-10-22):** este documento conserva evidencia histórica de
+> 45/closure y no se reabre como receta. El bloque 47 (#353) está implementado; la secuencia
+> vigente y sus límites viven en [data_chassis_continuity_plan.md](data_chassis_continuity_plan.md).
+
+
 > Documento histórico de la decisión de 2026-10-21. #345 cerrado y #346 MERGED; el estado vigente y
 > la secuencia obligatoria 46→47→48→49 están en el
 > [registro de continuidad](data_chassis_continuity_plan.md).

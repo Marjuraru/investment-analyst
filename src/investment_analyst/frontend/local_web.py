@@ -1,18 +1,20 @@
 """Loopback-only HTTP adapter for the local investment-analysis application."""
 
 import gzip
+import hashlib
 import json
 import threading
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 from urllib.parse import parse_qs, urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
@@ -181,6 +183,10 @@ from investment_analyst.application.peru_registry import (
     BvlRegistryRefreshRequest,
     BvlRegistryRefreshSummary,
 )
+from investment_analyst.application.read_cache_policy import (
+    ReadCachePolicy,
+    ReadPerformanceRegistry,
+)
 from investment_analyst.application.runtime import ApplicationRuntimeError, StorageLocationRequest
 from investment_analyst.application.sec_declared_activity_refresh_models import (
     SecDeclaredActivityRefreshRequest,
@@ -232,10 +238,17 @@ from investment_analyst.providers.macro.fred_catalog_refresh import (
 )
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
 from investment_analyst.storage import StorageError
+from investment_analyst.storage.read_dependency_signature import (
+    ReadDependencyFamily,
+    ReadDependencyQuery,
+    ReadDependencySignature,
+    ReadSignatureUnavailable,
+)
 from investment_analyst.workspace.service import WorkspaceError
 
 _MAX_REQUEST_BYTES = 16_384
 _MAX_READ_CACHE_ENTRIES = 8
+_ReadValue = TypeVar("_ReadValue")
 _MIN_GZIP_BYTES = 1_024
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _ASSETS = {
@@ -407,6 +420,15 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> AaplDailyDiagnosticReport:
         """Query one persisted report."""
+        ...
+
+    def read_dependency_signature(
+        self,
+        query: ReadDependencyQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> ReadDependencySignature:
+        """Return a content-bound read signature for bounded server reuse."""
         ...
 
     def query_listed_company_diagnostics(
@@ -669,6 +691,10 @@ class _WebOperations(Protocol):
         """Return the catalog-backed market watchlist."""
         ...
 
+    def read_performance(self) -> dict[str, object]:
+        """Return bounded in-memory critical-read telemetry."""
+        ...
+
     def runtime_capabilities(self) -> dict[str, object]:
         """Return the catalog-derived provider/domain/frequency dispatch inventory."""
         ...
@@ -840,6 +866,8 @@ class AaplLocalController:
         self._writer_lock = threading.RLock()
         self._cache_lock = threading.RLock()
         self._state_lock = threading.RLock()
+        self._read_telemetry = ReadPerformanceRegistry(generation=uuid4().hex)
+        self._signature_cache = ReadCachePolicy(telemetry=self._read_telemetry)
         self._crypto_spot_daily_chart_cache: dict[
             CryptoSpotDailyMarketChartRequest, CryptoSpotDailyMarketChart
         ] = {}
@@ -869,6 +897,8 @@ class AaplLocalController:
             CazatiburonesUniverseActivityRequest, CazatiburonesUniverseActivityResult
         ] = {}
         self._market_assets = self._application.list_market_assets()
+        self._market_assets_by_id = {asset.asset_id: asset for asset in self._market_assets.assets}
+        self._catalog_asset_ids = tuple(sorted(self._market_assets_by_id))
         self._runtime_capabilities = build_capability_runtime_plan(self._market_assets)
         self._health_snapshot = self._runner.inspect(workspace=self._workspace)
 
@@ -908,6 +938,40 @@ class AaplLocalController:
         """Return immutable capability routes resolved at process startup."""
         return self._runtime_capabilities
 
+    def read_performance(self) -> dict[str, object]:
+        """Return bounded in-memory critical-read telemetry without touching storage."""
+        return self._read_telemetry.summary()
+
+    def _descriptor_source_ids(self, asset_id: str) -> tuple[str, ...]:
+        descriptor = self._market_assets_by_id.get(asset_id)
+        if descriptor is None:
+            return ()
+        return tuple(sorted((descriptor.source_id, *descriptor.fundamental_source_ids)))
+
+    def _signature(self, query: ReadDependencyQuery) -> ReadDependencySignature | None:
+        try:
+            return self._application.read_dependency_signature(
+                query,
+                location=StorageLocationRequest(workspace=self._workspace),
+            )
+        except ReadSignatureUnavailable:
+            return None
+
+    def _signed_read(
+        self,
+        query: ReadDependencyQuery,
+        loader: Callable[[], _ReadValue],
+    ) -> _ReadValue:
+        signature = self._signature(query)
+        if signature is None:
+            return loader()
+        return self._signature_cache.get_or_load(
+            signature,
+            loader,
+            revalidate=lambda: self._signature(query),
+            family=query.family.value,  # type: ignore[arg-type]
+        )
+
     def run_payload(self, payload: dict[str, object]) -> AaplDailyRunState:
         """Adapt the stored request snapshot and execute it once."""
         snapshot = LegacyCompleteRefreshSnapshotAdapter.adapt(payload)
@@ -924,6 +988,7 @@ class AaplLocalController:
                     sec_identity=self._sec_identity,
                 )
             finally:
+                self._signature_cache.invalidate_assets((APPLE_ASSET_ID,))
                 self._refresh_health_snapshot()
             self._invalidate_aapl_refresh_caches()
             return result
@@ -943,9 +1008,21 @@ class AaplLocalController:
         request: ListedCompanyReportRequest,
     ) -> ListedCompanyDiagnosticReport:
         """Query a generic report without providers, writes, or writer acquisition."""
-        return self._application.query_listed_company_diagnostics(
-            request,
-            location=StorageLocationRequest(workspace=self._workspace),
+        query = ReadDependencyQuery(
+            family=ReadDependencyFamily.LISTED_COMPANY_REPORT,
+            endpoint="/api/listed-company-report",
+            asset_ids=(request.asset_id,),
+            source_ids=self._descriptor_source_ids(request.asset_id),
+            frequency=request.fundamental_frequency.value,
+            known_at=request.known_at,
+            selector="listed-company-report",
+        )
+        return self._signed_read(
+            query,
+            lambda: self._application.query_listed_company_diagnostics(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
         )
 
     def corporate_valuation_request(
@@ -953,19 +1030,21 @@ class AaplLocalController:
         request: CorporateValuationRequest,
     ) -> CorporateValuationSnapshot:
         """Read cached valuation evidence without providers or writer acquisition."""
-        with self._cache_lock:
-            cached = self._corporate_valuation_cache.get(request)
-            if cached is not None:
-                return cached
-        snapshot = self._application.query_corporate_valuation(
-            request,
-            location=StorageLocationRequest(workspace=self._workspace),
+        query = ReadDependencyQuery(
+            family=ReadDependencyFamily.VALUATION,
+            endpoint="/api/v1/valuation",
+            asset_ids=(request.asset_id,),
+            source_ids=self._descriptor_source_ids(request.asset_id),
+            known_at=request.known_at,
+            selector=f"valuation_date={request.valuation_date.isoformat()};basis={request.basis}",
         )
-        with self._cache_lock:
-            if len(self._corporate_valuation_cache) >= _MAX_READ_CACHE_ENTRIES:
-                self._corporate_valuation_cache.pop(next(iter(self._corporate_valuation_cache)))
-            self._corporate_valuation_cache[request] = snapshot
-        return snapshot
+        return self._signed_read(
+            query,
+            lambda: self._application.query_corporate_valuation(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
+        )
 
     def corporate_valuation_history_request(
         self,
@@ -991,9 +1070,31 @@ class AaplLocalController:
         request: MarketComparisonRequest,
     ) -> MarketMultiAssetComparisonResult:
         """Query a comparison without provider, writer, or scheduler access."""
-        return self._application.query_market_comparison(
-            request,
-            location=StorageLocationRequest(workspace=self._workspace),
+        asset_ids = tuple(sorted(set(request.asset_ids)))
+        sources = tuple(
+            sorted(
+                {
+                    source
+                    for asset_id in asset_ids
+                    for source in self._descriptor_source_ids(asset_id)
+                }
+            )
+        )
+        query = ReadDependencyQuery(
+            family=ReadDependencyFamily.MARKET_BARS,
+            endpoint="/api/v1/market-comparison",
+            asset_ids=asset_ids,
+            source_ids=sources,
+            frequency="day_1",
+            known_at=request.known_at,
+            selector="market-comparison",
+        )
+        return self._signed_read(
+            query,
+            lambda: self._application.query_market_comparison(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
         )
 
     def crypto_spot_daily_market_chart_request(
@@ -1032,26 +1133,57 @@ class AaplLocalController:
         query: SecDocumentTimelineQuery,
     ) -> SecDocumentTimelineResult:
         """Query persisted SEC document timeline without writes."""
-        return self._application.query_sec_document_timeline(
-            query,
-            location=StorageLocationRequest(workspace=self._workspace),
+        asset_ids = tuple(sorted(query.asset_ids)) or self._catalog_asset_ids
+        signature_query = ReadDependencyQuery(
+            family=ReadDependencyFamily.DOCUMENTS,
+            endpoint="/api/v1/sec-document-timeline",
+            asset_ids=asset_ids,
+            known_at=query.known_at,
+            selector=(
+                f"ciks={','.join(query.filer_ciks)};forms={','.join(query.forms)};"
+                f"accession={query.accession or ''};from={query.available_from or ''};"
+                f"to={query.available_to or ''};limit={query.limit or ''}"
+            ),
+        )
+        return self._signed_read(
+            signature_query,
+            lambda: self._application.query_sec_document_timeline(
+                query,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
         )
 
     def coverage_request(self, request: UniverseCoverageRequest) -> UniverseCoverageResult:
         """Read cached universe coverage evidence without providers or writer acquisition."""
-        with self._cache_lock:
-            cached = self._coverage_cache.get(request)
-            if cached is not None:
-                return cached
-        result = self._application.query_universe_coverage(
-            request,
-            location=StorageLocationRequest(workspace=self._workspace),
+        asset_ids = request.asset_ids or self._catalog_asset_ids
+        sources = tuple(
+            sorted(
+                {
+                    source
+                    for asset_id in asset_ids
+                    for source in self._descriptor_source_ids(asset_id)
+                }
+            )
         )
-        with self._cache_lock:
-            if len(self._coverage_cache) >= _MAX_READ_CACHE_ENTRIES:
-                self._coverage_cache.pop(next(iter(self._coverage_cache)))
-            self._coverage_cache[request] = result
-        return result
+        query = ReadDependencyQuery(
+            family=ReadDependencyFamily.COVERAGE,
+            endpoint="/api/v1/universe-coverage",
+            asset_ids=tuple(sorted(asset_ids)),
+            source_ids=sources,
+            known_at=request.known_at,
+            selector=(
+                f"market={request.market_start}..{request.market_end};"
+                f"fundamental={request.fundamental_start}..{request.fundamental_end};"
+                f"frequency={request.frequency}"
+            ),
+        )
+        return self._signed_read(
+            query,
+            lambda: self._application.query_universe_coverage(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
+        )
 
     def cazatiburones_universe_activity_request(
         self, request: CazatiburonesUniverseActivityRequest
@@ -1089,9 +1221,23 @@ class AaplLocalController:
         query: InstitutionalObservationQuery,
     ) -> InstitutionalObservationQueryResult:
         """Query persisted institutional observations without writes."""
-        return self._application.query_cazatiburones_institutional_observations(
-            query,
-            location=StorageLocationRequest(workspace=self._workspace),
+        signature_query = ReadDependencyQuery(
+            family=ReadDependencyFamily.INSTITUTIONAL,
+            endpoint="/api/v1/cazatiburones/institutional-observations",
+            asset_ids=(query.asset_id,),
+            known_at=query.known_at,
+            selector=(
+                f"manager={query.manager_cik or ''};report={query.report_id or ''};"
+                f"cusip={query.cusip or ''};field={query.field_name or ''};"
+                f"offset={query.offset};limit={query.limit}"
+            ),
+        )
+        return self._signed_read(
+            signature_query,
+            lambda: self._application.query_cazatiburones_institutional_observations(
+                query,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
         )
 
     def listed_market_chart_request(
@@ -1099,22 +1245,24 @@ class AaplLocalController:
         asset_id: str,
         request: AaplMarketChartRequest,
     ) -> ListedMarketChart:
-        """Query one cached catalog-backed Alpaca chart without writes."""
-        cache_key = (asset_id, request)
-        with self._cache_lock:
-            cached = self._listed_market_chart_cache.get(cache_key)
-            if cached is not None:
-                return cached
-        chart = self._application.query_listed_market_chart(
-            request,
-            asset_id=asset_id,
-            location=StorageLocationRequest(workspace=self._workspace),
+        """Query one catalog-backed Alpaca chart without writes."""
+        query = ReadDependencyQuery(
+            family=ReadDependencyFamily.MARKET_BARS,
+            endpoint="/api/market-chart",
+            asset_ids=(asset_id,),
+            source_ids=self._descriptor_source_ids(asset_id),
+            frequency="day_1",
+            known_at=request.known_at,
+            selector=f"period={request.period.value};interval={request.interval.value}",
         )
-        with self._cache_lock:
-            if len(self._listed_market_chart_cache) >= _MAX_READ_CACHE_ENTRIES:
-                self._listed_market_chart_cache.pop(next(iter(self._listed_market_chart_cache)))
-            self._listed_market_chart_cache[cache_key] = chart
-        return chart
+        return self._signed_read(
+            query,
+            lambda: self._application.query_listed_market_chart(
+                request,
+                asset_id=asset_id,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
+        )
 
     def btc_intraday_chart_request(
         self,
@@ -1151,6 +1299,7 @@ class AaplLocalController:
                     self._crypto_spot_daily_chart_cache.clear()
                     self._coverage_cache.clear()
                     self._universe_activity_cache.clear()
+                self._signature_cache.clear()
                 self._refresh_health_snapshot()
 
     def listed_market_refresh_request(
@@ -1171,6 +1320,7 @@ class AaplLocalController:
                     self._corporate_valuation_cache.clear()
                     self._coverage_cache.clear()
                     self._universe_activity_cache.clear()
+                self._signature_cache.clear()
                 self._refresh_health_snapshot()
 
     def btc_intraday_refresh_request(
@@ -1187,6 +1337,7 @@ class AaplLocalController:
             finally:
                 with self._cache_lock:
                     self._btc_intraday_chart_cache.clear()
+                self._signature_cache.clear()
                 self._refresh_health_snapshot()
 
     def sec_fundamental_refresh_request(
@@ -1210,6 +1361,7 @@ class AaplLocalController:
                     self._corporate_valuation_cache.clear()
                     self._coverage_cache.clear()
                     self._universe_activity_cache.clear()
+                self._signature_cache.clear()
                 self._refresh_health_snapshot()
 
     def sec_primary_document_refresh_request(
@@ -1225,6 +1377,7 @@ class AaplLocalController:
                     sec_identity=self._sec_identity,
                 )
             finally:
+                self._signature_cache.clear()
                 self._refresh_health_snapshot()
 
     def sec_declared_activity_refresh_request(
@@ -1243,6 +1396,7 @@ class AaplLocalController:
                 with self._cache_lock:
                     self._coverage_cache.clear()
                     self._universe_activity_cache.clear()
+                self._signature_cache.clear()
                 self._refresh_health_snapshot()
 
     def fred_catalog_refresh_request(
@@ -1274,6 +1428,7 @@ class AaplLocalController:
                 with self._cache_lock:
                     self._coverage_cache.clear()
                     self._universe_activity_cache.clear()
+                self._signature_cache.clear()
 
     def sec_institutional_cycle_request(
         self,
@@ -1291,6 +1446,7 @@ class AaplLocalController:
                 with self._cache_lock:
                     self._coverage_cache.clear()
                     self._universe_activity_cache.clear()
+                self._signature_cache.clear()
                 self._refresh_health_snapshot()
 
     def sec_institutional_history_request(
@@ -1309,7 +1465,25 @@ class AaplLocalController:
                 with self._cache_lock:
                     self._coverage_cache.clear()
                     self._universe_activity_cache.clear()
+                self._signature_cache.clear()
                 self._refresh_health_snapshot()
+
+    def _fundamental_signature_query(
+        self,
+        *,
+        endpoint: str,
+        asset_id: str,
+        request: AaplFundamentalResearchRequest | AaplFundamentalTrendRequest,
+    ) -> ReadDependencyQuery:
+        return ReadDependencyQuery(
+            family=ReadDependencyFamily.FUNDAMENTALS,
+            endpoint=endpoint,
+            asset_ids=(asset_id,),
+            source_ids=self._descriptor_source_ids(asset_id),
+            frequency=request.frequency.value,
+            known_at=request.known_at,
+            selector=f"frequency={request.frequency.value}",
+        )
 
     def fundamental_trend_request(
         self,
@@ -1318,21 +1492,19 @@ class AaplLocalController:
         asset_id: str,
     ) -> AaplFundamentalTrend:
         """Query persisted SEC facts without providers, recomputation, or writes."""
-        cache_key = (asset_id, request)
-        with self._cache_lock:
-            cached = self._fundamental_trend_cache.get(cache_key)
-            if cached is not None:
-                return cached
-        trend = self._application.query_sec_fundamental_trend(
-            request,
+        query = self._fundamental_signature_query(
+            endpoint="/api/fundamental-trend",
             asset_id=asset_id,
-            location=StorageLocationRequest(workspace=self._workspace),
+            request=request,
         )
-        with self._cache_lock:
-            if len(self._fundamental_trend_cache) >= _MAX_READ_CACHE_ENTRIES:
-                self._fundamental_trend_cache.pop(next(iter(self._fundamental_trend_cache)))
-            self._fundamental_trend_cache[cache_key] = trend
-        return trend
+        return self._signed_read(
+            query,
+            lambda: self._application.query_sec_fundamental_trend(
+                request,
+                asset_id=asset_id,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
+        )
 
     def fundamental_research_request(
         self,
@@ -1341,21 +1513,19 @@ class AaplLocalController:
         asset_id: str,
     ) -> AaplFundamentalResearchResult:
         """Calculate cached SEC research metrics without providers or writes."""
-        cache_key = (asset_id, request)
-        with self._cache_lock:
-            cached = self._fundamental_research_cache.get(cache_key)
-            if cached is not None:
-                return cached
-        research = self._application.query_sec_fundamental_research(
-            request,
+        query = self._fundamental_signature_query(
+            endpoint="/api/fundamental-research",
             asset_id=asset_id,
-            location=StorageLocationRequest(workspace=self._workspace),
+            request=request,
         )
-        with self._cache_lock:
-            if len(self._fundamental_research_cache) >= _MAX_READ_CACHE_ENTRIES:
-                self._fundamental_research_cache.pop(next(iter(self._fundamental_research_cache)))
-            self._fundamental_research_cache[cache_key] = research
-        return research
+        return self._signed_read(
+            query,
+            lambda: self._application.query_sec_fundamental_research(
+                request,
+                asset_id=asset_id,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
+        )
 
     def fundamental_research_history_request(
         self,
@@ -1364,23 +1534,19 @@ class AaplLocalController:
         asset_id: str,
     ) -> AaplFundamentalResearchHistoryResult:
         """Calculate cached historical research statistics without writes."""
-        cache_key = (asset_id, request)
-        with self._cache_lock:
-            cached = self._fundamental_research_history_cache.get(cache_key)
-            if cached is not None:
-                return cached
-        history = self._application.query_sec_fundamental_research_history(
-            request,
+        query = self._fundamental_signature_query(
+            endpoint="/api/fundamental-research-history",
             asset_id=asset_id,
-            location=StorageLocationRequest(workspace=self._workspace),
+            request=request,
         )
-        with self._cache_lock:
-            if len(self._fundamental_research_history_cache) >= _MAX_READ_CACHE_ENTRIES:
-                self._fundamental_research_history_cache.pop(
-                    next(iter(self._fundamental_research_history_cache))
-                )
-            self._fundamental_research_history_cache[cache_key] = history
-        return history
+        return self._signed_read(
+            query,
+            lambda: self._application.query_sec_fundamental_research_history(
+                request,
+                asset_id=asset_id,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
+        )
 
     def fundamental_analysis_request(
         self,
@@ -1389,25 +1555,24 @@ class AaplLocalController:
         asset_id: str,
     ) -> AaplFundamentalAnalysisResult:
         """Return cached analytical sections without providers or writes."""
-        cache_key = (asset_id, request)
-        with self._cache_lock:
-            cached = self._fundamental_analysis_cache.get(cache_key)
-            if cached is not None:
-                return cached
-        analysis = self._application.query_sec_fundamental_analysis(
-            request,
+        query = self._fundamental_signature_query(
+            endpoint="/api/fundamental-analysis",
             asset_id=asset_id,
-            location=StorageLocationRequest(workspace=self._workspace),
+            request=request,
         )
-        with self._cache_lock:
-            if len(self._fundamental_analysis_cache) >= _MAX_READ_CACHE_ENTRIES:
-                self._fundamental_analysis_cache.pop(next(iter(self._fundamental_analysis_cache)))
-            self._fundamental_analysis_cache[cache_key] = analysis
-        return analysis
+        return self._signed_read(
+            query,
+            lambda: self._application.query_sec_fundamental_analysis(
+                request,
+                asset_id=asset_id,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
+        )
 
     def _invalidate_aapl_refresh_caches(self) -> None:
         """Invalidate only read models refreshed by a completed Apple bootstrap."""
         with self._cache_lock:
+            self._signature_cache.invalidate_assets((APPLE_ASSET_ID,))
             self._drop_asset_cache_entries(self._listed_market_chart_cache, APPLE_ASSET_ID)
             self._drop_valuation_cache_entries(APPLE_ASSET_ID)
             self._drop_asset_cache_entries(self._fundamental_trend_cache, APPLE_ASSET_ID)
@@ -1499,6 +1664,9 @@ class AaplLocalWebApplication:
             "candidates": candidates,
             "notifications": notifications,
             "asset_preferences": preferences,
+            "read_runtime": {
+                "generation": self._controller.read_performance()["generation"],
+            },
         }
 
     def compact_overview(self) -> dict[str, object]:
@@ -1539,7 +1707,7 @@ class AaplLocalWebApplication:
             )
         queue_snapshot = self._manual_operations.snapshot() if self._manual_operations else None
         preferences = self._asset_preferences.view() if self._asset_preferences else None
-        return OperationalOverviewSnapshot.now(
+        snapshot = OperationalOverviewSnapshot.now(
             operational_status=str(health["status"]),
             workspace_status=str(workspace["status"]),
             workspace_id=workspace.get("workspace_id"),
@@ -1566,6 +1734,10 @@ class AaplLocalWebApplication:
             scheduled_asset_count=preferences.scheduled_asset_count if preferences else 0,
             unavailable_preference_count=preferences.unavailable_count if preferences else 0,
         ).to_json_dict()
+        snapshot["read_runtime"] = {
+            "generation": self._controller.read_performance()["generation"],
+        }
+        return snapshot
 
     def asset_preferences(self) -> dict[str, object]:
         """Return effective preferences without creating missing state."""
@@ -1840,6 +2012,10 @@ class AaplLocalWebApplication:
     def runtime_capabilities(self) -> dict[str, object]:
         """Return the strict dispatch plan without storage or provider access."""
         return self._controller.runtime_capabilities().to_json_dict()
+
+    def read_performance(self) -> dict[str, object]:
+        """Return additive, bounded critical-read telemetry without storage access."""
+        return self._controller.read_performance()
 
     def report(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate query parameters and return the versioned report contract."""
@@ -2450,6 +2626,10 @@ class AaplLocalHttpServer(ThreadingHTTPServer):
             route: (static_root.joinpath(name).read_bytes(), content_type)
             for route, (name, content_type) in _ASSETS.items()
         }
+        self.asset_etags = {
+            route: '"' + hashlib.sha256(body).hexdigest() + '"'
+            for route, (body, _) in self.assets.items()
+        }
         super().__init__(address, AaplLocalRequestHandler)
 
 
@@ -2480,18 +2660,39 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
         super().log_message(format, *args)
 
     def _dispatch(self, *, head_only: bool) -> None:
+        self._request_started = time.perf_counter()
         try:
             self._require_loopback_host()
             parsed = urlsplit(self.path)
             server = cast(AaplLocalHttpServer, self.server)
             if parsed.path in server.assets:
                 body, content_type = server.assets[parsed.path]
-                self._send_bytes(HTTPStatus.OK, body, content_type, head_only=head_only)
+                etag = server.asset_etags[parsed.path]
+                if self.headers.get("If-None-Match") == etag:
+                    self._send_not_modified(etag)
+                    return
+                self._send_bytes(
+                    HTTPStatus.OK,
+                    body,
+                    content_type,
+                    head_only=head_only,
+                    etag=etag,
+                    cache_control="public, max-age=0, must-revalidate",
+                )
                 return
             if head_only:
                 raise _HttpError(
                     HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed", "method not allowed"
                 )
+            if parsed.path == "/api/v1/read-performance":
+                if parsed.query:
+                    raise ValueError("read performance does not accept parameters")
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.read_performance(),
+                    include_timing=False,
+                )
+                return
             if parsed.path == "/api/overview":
                 self._send_json(HTTPStatus.OK, server.application.overview())
                 return
@@ -2918,9 +3119,32 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
     def _send_error(self, status: HTTPStatus, code: str, message: str) -> None:
         self._send_json(status, {"error": {"code": code, "message": message}})
 
-    def _send_json(self, status: HTTPStatus, payload: dict[str, object]) -> None:
+    def _send_json(
+        self,
+        status: HTTPStatus,
+        payload: dict[str, object],
+        *,
+        include_timing: bool = True,
+    ) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        self._send_bytes(status, body, "application/json; charset=utf-8", head_only=False)
+        self._send_bytes(
+            status,
+            body,
+            "application/json; charset=utf-8",
+            head_only=False,
+            include_timing=include_timing,
+        )
+
+    def _send_not_modified(self, etag: str) -> None:
+        self.send_response(HTTPStatus.NOT_MODIFIED)
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "public, max-age=0, must-revalidate")
+        self.send_header("Content-Security-Policy", _CSP)
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _send_bytes(
         self,
@@ -2929,6 +3153,9 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
         content_type: str,
         *,
         head_only: bool,
+        cache_control: str = "no-store",
+        etag: str | None = None,
+        include_timing: bool = True,
     ) -> None:
         accepts_gzip = {
             item.partition(";")[0].strip().casefold()
@@ -2944,7 +3171,12 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
         if encoded_body is not body:
             self.send_header("Content-Encoding", "gzip")
             self.send_header("Vary", "Accept-Encoding")
-        self.send_header("Cache-Control", "no-store")
+        if etag is not None:
+            self.send_header("ETag", etag)
+        self.send_header("Cache-Control", cache_control)
+        if include_timing:
+            elapsed_ms = (time.perf_counter() - getattr(self, "_request_started", 0.0)) * 1000.0
+            self.send_header("Server-Timing", f"total;dur={elapsed_ms:.3f}")
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")

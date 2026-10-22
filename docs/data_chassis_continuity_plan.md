@@ -1,11 +1,36 @@
 # Continuidad, retención y neutralidad de activos
 
-Registro único de la secuencia `DATA-CHASSIS 46 → 47 → 48 → 49`. Autoridad vigente: Issue #349,
-base `origin/main@b5e714ab87d269b01bf2e41c99cfde8ae807f2df`, `route_effect: ADVANCES`, policy
-`HUMAN`. Este documento es evidencia y planificación; no autoriza importar, borrar, cambiar schema,
+Registro único de la secuencia `DATA-CHASSIS 46 → 47 → 48 → 49`. Autoridad vigente: Issue #353
+(`DATA-CHASSIS-47`), base `origin/main@012bbc5e41ade21318c02af343ed4c20436624d1`, rama
+`codex/data-chassis-47`, `route_effect: ADVANCES`, policy `AUTO` con autorización CRITICAL
+integrada. #349 conserva el registro de 46. Este documento es evidencia y planificación; no autoriza importar, borrar, cambiar schema,
 activar otro workspace ni declarar el cierre de `DATA-CHASSIS` o Q1–Q7.
 
 `route_transition:DATA-CHASSIS:ADVANCES`
+
+## 0. Implementación y evidencia de DATA-CHASSIS-47
+
+El bloque activo entrega cuatro contratos aislados y una receta canónica:
+
+- `read-dependency-signature-v1` (`storage/read_dependency_signature.py`): identidad por UUID,
+  versión de código/contrato/catálogo, endpoint, argumentos completos, `known_at` y selección
+  semántica; dependencias ordenadas por ID y checksum canónico visible. No usa count/MAX, tamaño
+  DB/WAL, mtime, TTL ni reloj del último job. v1 no firma y ejecuta la lectura filtrada sin caché.
+- `application/read_cache_policy.py`: LRU global ≤128 entradas/32 MiB, coalescing de requests
+  idénticas, invalidación por workspace/activo y telemetría acotada por familia (últimas 64
+  duraciones). Un cambio entre firma y resultado impide almacenar.
+- `historical-selection-v1` + `historical-selection-progress-v1`: manifiesto cerrado con
+  source/destination UUID, fingerprint, corte, IDs+hashes por familia, documentos, exclusiones
+  y digest; checkpoint por familia/cursor confirmado. El replay reutiliza IDs idénticos y falla
+  cerrado ante conflicto, checkpoint ajeno o fuente cambiada.
+- `continuity-archive-v1`: archivo externo cifrado/transportable por chunks ≤64 MiB; manifiesto
+  completo sólo tras verificar TODOS los chunks y reconstruir streaming CADA archivo. Restore
+  selectivo y fixture funcional; no acredita apertura funcional completa de v1.
+
+El piloto selecciona AMD/AAPL diario 2026-07-01..2026-10-21 con warm-up, AMD fundamentales
+annual/quarterly desde 2023-01-01 con periodos previos y un filing SEC no vacío con CAS/lineage.
+Corre sobre un scratch v2 distinto del UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; no importa
+raw/obs v1 a producción. La limpieza masiva sigue exclusivamente en 49.
 
 ## 1. Estado observado y límites de esta medición
 

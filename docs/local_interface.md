@@ -9,6 +9,16 @@ El refresh incremental de documentos SEC primarios se ejecuta sólo desde el sch
 el mutex writer compartido; no añade endpoint, botón, polling ni cambios de assets. Su evidencia
 queda disponible para las lecturas documentales existentes sin mezclarla con fundamentales.
 
+## Eficiencia y reapertura (`DATA-CHASSIS-47`)
+
+La vista local conserva un contexto versionado por UUID, generación/release, tablero, activo,
+argumentos y corte explícito en `sessionStorage` (máximo 8 vistas/2 MiB). Al reabrir muestra el
+corte previo como «Datos al …», indica que actualiza y solicita el corte actual; un resultado viejo
+nunca se presenta como vigente. No se persisten raw, documentos ni corpus. El cliente coalesce
+requests GET idénticas y descarta respuestas de un activo/corte anterior con las secuencias ya
+existentes. Los assets se revalidan por `ETag`/`304`; las APIs financieras mantienen `no-store`.
+`Server-Timing` es aditivo y `/api/v1/read-performance` expone sólo contadores acotados en memoria.
+
 ## Assets estáticos componentizados (`UI-12`)
 
 La entrega local conserva los entrypoints públicos `/assets/app.js` y
