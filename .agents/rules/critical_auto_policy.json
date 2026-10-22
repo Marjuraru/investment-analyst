@@ -27,6 +27,43 @@
           "route_effect": "COMPLETES"
         }
       ]
+    },
+    {
+      "authorization_id": "human-data-chassis-continuity-finalize-20261022",
+      "granted_at": "2026-10-22T19:47:53Z",
+      "human_instruction": "«quiero que la finalizacion sea auto, ya no HUMAN APPROVAL. Esto para los siguientes bloques» y «las lecturas de todo tipo siempre sean eficiente y optimizadas. No cargar o hacer procesos innecesarios, es estricto esto». Registrado al formalizar este bloque el 2026-10-22T19:47:53Z; la hora exacta de la instrucción original no quedó registrada.",
+      "purpose": "finalize_only",
+      "writer_role": "BUILD_PRODUCT",
+      "profile": "CRITICAL",
+      "finalize_policy": "AUTO",
+      "route_item": "DATA-CHASSIS",
+      "blocks": [
+        {
+          "id": "DATA-CHASSIS-READ-1",
+          "expected_branch": "codex/data-chassis-read-1",
+          "route_effect": "ADVANCES"
+        },
+        {
+          "id": "DATA-CHASSIS-47",
+          "expected_branch": "codex/data-chassis-47",
+          "route_effect": "ADVANCES"
+        },
+        {
+          "id": "DATA-CHASSIS-48",
+          "expected_branch": "codex/data-chassis-48",
+          "route_effect": "ADVANCES"
+        },
+        {
+          "id": "DATA-CHASSIS-49",
+          "expected_branch": "codex/data-chassis-49",
+          "route_effect": "ADVANCES"
+        },
+        {
+          "id": "DATA-CHASSIS-CLOSE",
+          "expected_branch": "codex/data-chassis-close",
+          "route_effect": "COMPLETES"
+        }
+      ]
     }
   ]
 }

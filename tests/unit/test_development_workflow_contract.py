@@ -255,6 +255,50 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "id: owner" not in template
 
 
+def test_efficient_read_rule_preserves_pit_lineage_and_grants_no_new_operations() -> None:
+    agents = _read("AGENTS.md")
+    normalized = " ".join(agents.split())
+
+    assert agents.count("### Efficient reads and mandatory revalidation") == 1
+    for clause in (
+        "filter by asset, source, frequency, range, and `available_at` before hydration",
+        "read through every page",
+        "must not hydrate unrelated assets or load raw records, documents, or full lineage",
+        "A query GET does not acquire providers, write domain data, or open a second writer",
+        "identical concurrent requests coalesce",
+        "`known_at`, revisions, UUIDs, parameters, and versions are never ignored to obtain a hit",
+        "Absence of measurement is `UNKNOWN`",
+        "A SQL plan that traverses indexes is not equivalent to hydrating everything",
+        "no global suite or benchmark for each documentation change",
+        "This section changes no financial contract and grants no new acquisition, deletion, "
+        "schema, provider, or execution operation",
+        "point-in-time selection and lineage remain authoritative",
+    ):
+        assert clause in normalized
+
+
+def test_continuity_decision_is_bounded_and_does_not_rewrite_historical_goals() -> None:
+    core_rule = _read(".agents/rules/investment-analyst-core.md")
+    normalized = " ".join(core_rule.split())
+
+    assert "human-data-chassis-continuity-finalize-20261022" in core_rule
+    assert "La secuencia es READ-1 → 47 → 48 → 49" in core_rule
+    for block_id in (
+        "DATA-CHASSIS-READ-1",
+        "DATA-CHASSIS-47",
+        "DATA-CHASSIS-48",
+        "DATA-CHASSIS-49",
+        "DATA-CHASSIS-CLOSE",
+    ):
+        assert block_id in core_rule
+    assert "no altera los objetivos Q1–Q7 ni su snapshot histórico" in normalized
+    assert (
+        "no autoriza importaciones, retiradas, adquisición masiva ni cambios de schema"
+        in normalized
+    )
+    assert "no concede operaciones nuevas ni relaja PIT, lineage, Decimal" in normalized
+
+
 def test_governance_writer_frontier_has_one_authoritative_classifier() -> None:
     guard = _read("scripts/check_workflow_guards.py")
     protocol = _read("docs/development_protocol.md")

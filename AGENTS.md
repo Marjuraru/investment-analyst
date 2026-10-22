@@ -219,6 +219,39 @@ results, and pending risks.
   hash-protected mientras el único Work Block activo usa un worktree aislado; el writer no accede ni
   modifica ese checkpoint. Parallel agents that may write require isolated Git worktrees.
 
+### Efficient reads and mandatory revalidation
+
+- Product readers (HTTP, CLI, reports, pipelines, lifecycle) request only the rows and columns they
+  need and filter by asset, source, frequency, range, and `available_at` before hydration. Required
+  dependencies and warm-up work belong to the contract; never truncate or approximate results to
+  appear fast.
+- Listings are paginated with a stable order and read through every page. A view must not hydrate
+  unrelated assets or load raw records, documents, or full lineage it does not use, and must not
+  create avoidable N+1 reads.
+- A query GET does not acquire providers, write domain data, or open a second writer. Explicit
+  acquisition, backup, and verification operations keep their contracts: a full scan is allowed
+  only when integrity requires it and never inside each interactive request.
+- Reopening or repeating equivalent inputs reuses valid work only when the key and validity are
+  proven; identical concurrent requests coalesce. Caches stay bounded by memory or entry count and
+  never become growing database copies. `known_at`, revisions, UUIDs, parameters, and versions are
+  never ignored to obtain a hit; relevant changes invalidate and late responses are discarded per
+  asset.
+- Measure critical paths, not every function: time, result or error, rows and bytes already
+  available, DB/WAL delta, and observed RSS peak when applicable. Absence of measurement is
+  `UNKNOWN`. Collector `query_ms` is not user-query latency. No daemon, remote telemetry, or scans
+  performed only to measure.
+- A read-path change requires integrity and structural-cost tests with the same result and load:
+  total IDs, PIT/`Decimal`/order, and zero foreign models, plus cold/warm opening baselines and a
+  1x/10x foreign-corpus check in scratch when applicable. A SQL plan that traverses indexes is not
+  equivalent to hydrating everything, but exceeding an observed budget requires a fix or an
+  explicit decision.
+- A critical read path is not concluded while it repeats demonstrated avoidable heavy work or
+  keeps an unresolved regression. Do not claim "everything optimized" without a coverage matrix.
+  Instrumentation and tests remain proportional: no global suite or benchmark for each
+  documentation change.
+- This section changes no financial contract and grants no new acquisition, deletion, schema,
+  provider, or execution operation; point-in-time selection and lineage remain authoritative.
+
 ## Development environment
 
 - Primary environment: Windows, WSL2, Ubuntu 24.04, Python 3.12, VS Code, Git, Ruff, and Pytest.

@@ -348,6 +348,10 @@ def test_metadata_requires_unique_structural_fields_and_human_critical() -> None
         parse_work_block(_body(policy="AUTO"))
     with pytest.raises(ValueError, match="requires BUILD_PRODUCT"):
         parse_work_block(_body(policy="AUTO", writer_role="UI_WORKER", authorization="human-dev-7"))
+    with pytest.raises(ValueError, match="requires BUILD_PRODUCT"):
+        parse_work_block(
+            _body(policy="AUTO", writer_role="BUILD_GOVERNANCE", authorization="human-dev-7")
+        )
     with pytest.raises(ValueError, match="only valid for CRITICAL/AUTO"):
         parse_work_block(_body(authorization="human-dev-7"))
     with pytest.raises(ValueError, match="missing Work Block fields"):
@@ -383,24 +387,54 @@ def test_critical_auto_requires_a_verified_base_policy(
     assert "Explicit human authorization" not in json.dumps(result.as_json())
 
 
-def test_committed_critical_auto_policy_is_bounded_to_data_chassis_43_through_45() -> None:
+def test_committed_critical_auto_policy_is_bounded_to_declared_blocks() -> None:
     policy = (ROOT / ".agents" / "rules" / "critical_auto_policy.json").read_bytes()
 
     authorizations = _MODULE._parse_critical_auto_policy(policy)
 
-    assert len(authorizations) == 1
-    authorization = authorizations[0]
-    assert authorization.authorization_id == "human-data-chassis-finalize-20261007"
-    assert authorization.purpose == "finalize_only"
-    assert authorization.writer_role == "BUILD_PRODUCT"
-    blocks = [
-        (block.block, block.expected_branch, block.route_effect) for block in authorization.blocks
+    assert [authorization.authorization_id for authorization in authorizations] == [
+        "human-data-chassis-finalize-20261007",
+        "human-data-chassis-continuity-finalize-20261022",
     ]
-    assert blocks == [
+    legacy, continuity = authorizations
+    assert legacy.purpose == "finalize_only"
+    assert legacy.writer_role == "BUILD_PRODUCT"
+    assert [
+        (block.block, block.expected_branch, block.route_effect) for block in legacy.blocks
+    ] == [
         ("DATA-CHASSIS-43", "codex/data-chassis-43", "ADVANCES"),
         ("DATA-CHASSIS-44", "codex/data-chassis-44", "ADVANCES"),
         ("DATA-CHASSIS-45", "codex/data-chassis-45", "COMPLETES"),
     ]
+    assert continuity.purpose == "finalize_only"
+    assert continuity.writer_role == "BUILD_PRODUCT"
+    assert continuity.profile == "CRITICAL"
+    assert continuity.policy == "AUTO"
+    assert continuity.route_item == "DATA-CHASSIS"
+    assert [
+        (block.block, block.expected_branch, block.route_effect) for block in continuity.blocks
+    ] == [
+        ("DATA-CHASSIS-READ-1", "codex/data-chassis-read-1", "ADVANCES"),
+        ("DATA-CHASSIS-47", "codex/data-chassis-47", "ADVANCES"),
+        ("DATA-CHASSIS-48", "codex/data-chassis-48", "ADVANCES"),
+        ("DATA-CHASSIS-49", "codex/data-chassis-49", "ADVANCES"),
+        ("DATA-CHASSIS-CLOSE", "codex/data-chassis-close", "COMPLETES"),
+    ]
+
+
+def test_continuity_authorization_is_absent_from_candidate_or_unbound_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = _body(
+        policy="AUTO",
+        authorization="human-data-chassis-continuity-finalize-20261022",
+    )
+    monkeypatch.setattr(_MODULE, "_git_bytes", lambda _arguments, _label: _critical_auto_policy())
+
+    result = evaluate(_snapshot(body=body), phase="build")
+
+    assert result.decision == "GUARD FAILURE"
+    assert "absent from the verified base policy" in result.reasons[0]
 
 
 @pytest.mark.parametrize(
