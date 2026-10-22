@@ -9,12 +9,12 @@ activar otro workspace ni declarar el cierre de `DATA-CHASSIS` o Q1–Q7.
 
 ## 1. Estado observado y límites de esta medición
 
-Medición read-only del 2026-10-22. No se adquirieron datos de proveedores, no se abrió un writer v1,
+Medición read-only del 2026-10-22, antes del despliegue candidato de este bloque. No se adquirieron datos de proveedores, no se abrió un writer v1,
 no se modificó el workspace activo y no se borró ningún payload.
 
 | Superficie | Estado medido | Evidencia |
 | --- | --- | --- |
-| Release activa | `daad58d97032dfaa9ae3023c9f7475d1b8687db6`; previa `54acfd644426e92034f7c42e29e1b3b06e97d8c4` | `runtime/deployment_state.json` |
+| Release activa (medición previa al despliegue) | `daad58d97032dfaa9ae3023c9f7475d1b8687db6`; previa `54acfd644426e92034f7c42e29e1b3b06e97d8c4` | `runtime/deployment_state.json` |
 | Workspace v2 | UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; root `active-v2-20261021`; formato 2 | `runtime/deployment_workspace_binding.json` |
 | DB v2 actual | `281.817.088 B` | `stat` sobre `storage/v2/index.duckdb` |
 | Último inventario durable v2 | raw `235.416`; observaciones `24.920`; métricas `25.348`; diagnósticos `11` | `ops/data-chassis-45/fresh-start-20261021/final-inventory.json` (2026-10-21T23:54Z) |

@@ -1,6 +1,6 @@
 # Investment Analyst
 
-> Ruta operativa actual: v2 activo (`daad58d`, UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`), [continuidad y retención](docs/data_chassis_continuity_plan.md), [reincorporación selectiva](docs/data_chassis_v1_reintegration_plan.md) e [índice documental](docs/README.md). v1/F5 se conserva; no se declara cierre Q1–Q7.
+> Ruta operativa actual: v2 activo (release observada al 2026-10-22: `daad58d`, UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`), [continuidad y retención](docs/data_chassis_continuity_plan.md), [reincorporación selectiva](docs/data_chassis_v1_reintegration_plan.md) e [índice documental](docs/README.md). v1/F5 se conserva; no se declara cierre Q1–Q7.
 
 
 ## Propósito y límites

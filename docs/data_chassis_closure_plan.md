@@ -1,6 +1,6 @@
 # DATA-CHASSIS: arranque v2 y cierre posterior
 
-> Documento histórico de la decisión de 2026-10-21. #345/#346 ya está MERGED; el estado vigente y
+> Documento histórico de la decisión de 2026-10-21. #345 cerrado y #346 MERGED; el estado vigente y
 > la secuencia obligatoria 46→47→48→49 están en el
 > [registro de continuidad](data_chassis_continuity_plan.md).
 
@@ -27,7 +27,7 @@ aprobaciones intermedias; la integración HUMAN requiere el receipt posterior a 
 | 40–42 | Backend v2, incrementalidad y consultas implementados | Reutilizar; probar el recorrido nuevo y optimizar defectos medidos |
 | 43–44 | Migración/backup/restore y transporte previamente acreditados | Conservar archivo/evidencia; no repetir 676 volúmenes |
 | 45 anterior | Cinco cortes abortados, mejoras y progreso parcial preservados | No activar F5 ni fingir cierre; historia consultable |
-| 45 integrado | V2 activo en `daad58d`; UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; scheduler 13 jobs/3 activos; backup c0080d96 restaurado sobre `252.456.960 B`; delta posterior `29.360.128 B` y backlog 13F pendientes | [Continuidad](data_chassis_continuity_plan.md) y [runbook](data_chassis_45_acceptance_runbook.md) |
+| 45 integrado | V2 activo observado en `daad58d` (2026-10-22); UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; scheduler 13 jobs/3 activos; backup c0080d96 restaurado sobre `252.456.960 B`; delta posterior `29.360.128 B` y backlog 13F pendientes | [Continuidad](data_chassis_continuity_plan.md) y [runbook](data_chassis_45_acceptance_runbook.md) |
 | Continuación | Secuencia obligatoria 46→47→48→49 | [Continuidad](data_chassis_continuity_plan.md) y [reincorporación](data_chassis_v1_reintegration_plan.md); 46 no importa ni borra |
 | Cierre de DATA-CHASSIS | Pendiente | Gates operacionales, recuperación/retención y Q1–Q7 comparables |
 
