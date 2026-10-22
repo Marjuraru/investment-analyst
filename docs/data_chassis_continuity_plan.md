@@ -55,8 +55,8 @@ columna `Refs` cuenta documentos tracked que mencionan el nombre o la ruta.
 
 | Documento | Decisión | Autoridad / consumidor | Refs | Scripts | Bytes |
 | --- | --- | --- | ---: | --- | ---: |
-| `docs/README.md` | CANONICAL | Índice documental único; nuevo en 46 | 0 | — | nuevo |
-| `docs/data_chassis_continuity_plan.md` | CANONICAL | Registro único de continuidad, retención y neutralidad; nuevo en 46 | 0 | — | nuevo |
+| `docs/README.md` | CANONICAL | Índice documental único; nuevo en 46 | — | — | nuevo |
+| `docs/data_chassis_continuity_plan.md` | CANONICAL | Registro único de continuidad, retención y neutralidad; nuevo en 46 | — | — | nuevo |
 | `.agents/rules/investment-analyst-core.md` | PROTECTED | Gobernanza o evidencia inmutable; el guard verifica su hash de base | 4 | scripts/check_workflow_guards.py | 9111 |
 | `.agents/skills/audit/SKILL.md` | PROTECTED | Gobernanza o evidencia inmutable; el guard verifica su hash de base | 2 | scripts/check_workflow_guards.py | 3709 |
 | `.agents/skills/build/SKILL.md` | PROTECTED | Gobernanza o evidencia inmutable; el guard verifica su hash de base | 2 | scripts/check_workflow_guards.py | 5077 |
@@ -165,7 +165,9 @@ columna `Refs` cuenta documentos tracked que mencionan el nombre o la ruta.
 | `docs/workspace.md` | CANONICAL | Contrato o guía vigente; consumidor: operación, desarrollo o consulta | 0 | — | 5997 |
 | `docs/workspaces.md` | CANONICAL | Contrato o guía vigente; consumidor: operación, desarrollo o consulta | 0 | — | 7324 |
 
-Los tres Markdown protegidos no tracked conservan los hashes declarados por el Issue:
+Los tres Markdown protegidos no tracked conservan los hashes declarados por el Issue y se clasifican
+`PROTECTED`: no se borran, mueven ni editan en 46. En los dos documentos nuevos, `Refs` y `Scripts`
+figuran como `—` porque no existían en la base; sus referencias entrantes se crean con este cambio.
 `issue230_body.md` `5cd428c38b50780ce750cc8ff629f31e9a34972a6d4cbe8d4ba3d63e6574453d`,
 `docs/storage_cleanup_decision_2026-10-11.md`
 `6886f2ea181ea2b8c548edecf8bd89a97f6a1f4fe05d8a611c0caf9bf1e2fdee` y
@@ -352,6 +354,10 @@ que el artefacto es reconstruible desde Git/`uv.lock`; no se infiere de nombre, 
 | Remoto `ia_drive_crypt` | `8,6G` | Recuperación de backups y controles | No se retira en 46–48; 49 sólo duplicados con restore del conjunto retenido | Manifiestos, controles y clave recuperable; restore independiente | BUILD_PRODUCT / 49 | KEEP_ACTIVE |
 | `data_chassis_0_backup` y cold copy | ausentes | — | 47 verifica host/papelera/externo | No hay objeto que retirar; ausencia no es prueba de borrado | PLAN / 47 | UNKNOWN |
 | `active-v2-20261021` | `2,0G` | Operación v2 | Nunca se retira en esta secuencia | Backup c0080d96 cubre sólo `252.456.960 B`; delta nuevo exige backup | Operación / — | KEEP_ACTIVE |
+
+Las filas de `ops/data-chassis-45/*` son agregados de familia y no se suman con las subraíces del
+inventario; esta tabla no produce un total físico. Los bytes de una fila no se suman con los de otra
+cuando una contiene a la otra.
 
 ## 7. Evidencia ejecutada
 
