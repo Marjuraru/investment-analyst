@@ -21,7 +21,7 @@ no se modificó el workspace activo y no se borró ningún payload.
 | Backup restaurado c0080d96 | DB `252.456.960 B`, SHA-256 `bebdd2997292768ab6dbef5d1ca3d8973599b2ab2f7305ded1a0fb258d3d9f6c`; 144 volúmenes; `375.562.914 B` descargados | `remote-restore-closure.json` y `final-readback.json` (2026-10-22T04:54Z) |
 | Delta posterior al backup | `29.360.128 B` entre DB restaurada y DB actual; no cubierto por c0080d96 | diferencia de tamaños; requiere backup nuevo antes de importar o retirar |
 | Scheduler observado | 13 jobs, 3 activos; FRED unavailable y backlog 13F explícitos | Issue #349; no se reejecutó adquisición en este bloque |
-| v1 local | UUID `19cf83b5-8df3-4663-9369-4b61f86eceea`; DB `10.802.704.384 B`; detenido e intacto | `workspaces/default/manifest.json` y `stat` |
+| v1 local | UUID `19cf83b5-8df3-4663-9369-4b61f86eceea`; DB `10.802.704.384 B`; sin binding activo en runtime | `workspaces/default/manifest.json`, `stat` y `deployment_workspace_binding.json` |
 
 La copia `source-copy-b-20261008` fue una copia de la misma identidad v1 y ya fue retirada el
 2026-10-13 con recibo: `928.706` archivos y `14.337.762.116 B` confirmados
@@ -242,8 +242,8 @@ Los `du -sh` por directorio de `runtime/releases` se redondean (≈`281M`) y no 
 físico porque comparten site-packages por hardlink. Contabilizando por inodo único hay **14.582
 inodos, `255.033.576 B` aparentes y `286.097.408 B` asignados** para el conjunto de releases. Por
 tanto, el total físico no es la suma de los `du` por directorio. La pasada `-links +1` encontró
-hardlinks en site-packages de releases; no se acreditó un hardlink equivalente para las DB o los
-JSONL grandes, que se contabilizan por archivo.
+**3.837 archivos hardlinked en `runtime`** (site-packages de releases) y **0 en `ops` y
+`workspaces`**; las DB y los JSONL grandes se contabilizan por archivo.
 
 ### Backup remoto cifrado
 
@@ -297,6 +297,13 @@ read-only, con `threads=1`, `memory_limit=1GiB` y sin escritura.
 | Scheduler/outbox/acks | estado v1 | estado v2 vigente | ARCHIVE_ONLY; no reintroducir trabajo pendiente | Operación; 47 |
 | Backups/controles | B y W/W2/G | c0080d96 y remoto | KEEP_ACTIVE/ARCHIVE_ONLY; no borrar | Recuperación; 47 verifica |
 | Documentos/CAS | corpus SEC v1 | CAS v2 parcial | IMPORT_LATER de documentos seleccionados y sus dependencias | Corpus/timeline; 47 piloto, 48 lotes |
+
+Cobertura de backup: el backup B `6c69b9df` conserva totales de la copia v1 migrada (raw `928.043`,
+observaciones `520.180`, métricas `1.947.523`, diagnósticos `1.777`), pero su manifiesto no desagrega
+esas cifras por familia/activo/rango. El backup c0080d96 cubre sólo el v2 nuevo. El workspace v1
+`default` no tiene todavía un archivo externo final restaurado; obtenerlo y probar su restore es el
+gate de 47. Por eso ninguna fila de esta tabla declara cobertura completa. El warm-up y las
+dependencias transitivas se resuelven por consumidor en 47; no se asume un rango universal de días.
 
 Rangos `available_at` v1 (UTC, consulta read-only): raw `2002-05-06T14:21:32Z` a
 `2026-10-21T18:58:12Z`; observaciones `2009-08-03T19:45:52Z` a `2026-10-21T18:51:55Z`; métricas

@@ -1,9 +1,9 @@
 # Índice documental
 
 Este índice es la entrada única a la documentación tracked del repositorio. La disposición completa
-de los 107 Markdown tracked y de los 3 Markdown protegidos no tracked vive en el
-[registro de continuidad](data_chassis_continuity_plan.md); aquí sólo se enlaza la documentación
-vigente y el archivo histórico.
+de los 109 Markdown tracked (107 de la base más los dos documentos nuevos) y de los 3 Markdown
+protegidos no tracked vive en el [registro de continuidad](data_chassis_continuity_plan.md); aquí
+sólo se enlaza la documentación vigente y el archivo histórico.
 
 ## Operación actual
 
