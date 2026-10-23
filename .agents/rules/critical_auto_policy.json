@@ -51,7 +51,7 @@
         {
           "id": "DATA-CHASSIS-48",
           "expected_branch": "codex/data-chassis-48",
-          "route_effect": "ADVANCES"
+          "route_effect": "COMPLETES"
         },
         {
           "id": "DATA-CHASSIS-49",

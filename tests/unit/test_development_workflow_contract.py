@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import json
 import os
 import shlex
 import subprocess
@@ -13,6 +15,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 FULL_SHA = "a" * 40
+CI_SUPPORT = ROOT / ".github" / "workflows" / "ci_support"
+_CI_SPEC = importlib.util.spec_from_file_location("ci_shards", CI_SUPPORT / "shards.py")
+assert _CI_SPEC is not None and _CI_SPEC.loader is not None
+_CI_SHARDS = importlib.util.module_from_spec(_CI_SPEC)
+sys.modules["ci_shards"] = _CI_SHARDS
+_CI_SPEC.loader.exec_module(_CI_SHARDS)
 
 
 def _read(relative_path: str) -> str:
@@ -50,6 +58,20 @@ def _workflow_step_command(workflow: str, step_name: str) -> str:
         if line.strip():
             command_lines.append(line.strip())
     return " ".join(command_lines)
+
+
+def _job_block(workflow: str, job: str) -> str:
+    lines = workflow.splitlines()
+    start = lines.index(f"  {job}:")
+    end = next(
+        (
+            index
+            for index in range(start + 1, len(lines))
+            if lines[index].startswith("  ") and not lines[index].startswith("    ")
+        ),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
 
 
 def _frontmatter_value(text: str, key: str) -> str:
@@ -282,7 +304,10 @@ def test_continuity_decision_is_bounded_and_does_not_rewrite_historical_goals() 
     normalized = " ".join(core_rule.split())
 
     assert "human-data-chassis-continuity-finalize-20261022" in core_rule
-    assert "La secuencia es READ-1 → 47 → 48 → 49" in core_rule
+    assert "DEV-CI-SHARDS-1" in core_rule
+    assert "https://github.com/Marjuraru/investment-analyst/issues/355" in core_rule
+    assert "49/CLOSE quedan absorbidos por 48" in normalized
+    assert "el binding de 48 pasa a" in normalized
     for block_id in (
         "DATA-CHASSIS-READ-1",
         "DATA-CHASSIS-47",
@@ -316,78 +341,691 @@ def test_governance_writer_frontier_has_one_authoritative_classifier() -> None:
 def test_ci_preserves_complete_assertions_coverage_and_failure_gate() -> None:
     workflow = _read(".github/workflows/ci.yml")
     project = _read("pyproject.toml")
+    plan = _job_block(workflow, "plan")
+    tests = _job_block(workflow, "tests")
+    audit = _job_block(workflow, "audit")
+    serial = _job_block(workflow, "serial-reference")
+    quality = _job_block(workflow, "quality")
 
     assert "  pull_request:\n" in workflow
     assert "  push:\n    branches:\n      - main\n" in workflow
     assert "  workflow_dispatch:\n" in workflow
-    assert "name: Python 3.12 quality" in workflow
-    assert "runs-on: ubuntu-24.04" in workflow
-    assert "timeout-minutes: 45" in workflow
+    assert "      compare_serial:\n" in workflow
+    assert "        type: boolean\n" in workflow
+    assert "        default: false\n" in workflow
     assert "permissions:\n  contents: read" in workflow
+    assert "  group: ci-${{ github.workflow }}-${{ github.ref }}\n" in workflow
+    assert "  cancel-in-progress: true\n" in workflow
     assert 'UV_VERSION: "0.11.29"' in workflow
-    assert "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" in workflow
-    assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1" in workflow
+    assert workflow.count("name: Python 3.12 quality") == 1
+    assert quality.startswith("  quality:\n    name: Python 3.12 quality")
+    assert "  runs-on: ubuntu-24.04" in workflow
+    for pin in (
+        "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+        "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    ):
+        assert pin in workflow
+    for forbidden in (
+        "continue-on-error:",
+        "pull_request_target",
+        "secrets.",
+        "--admin",
+        "pytest-xdist",
+        "pytest-rerunfailures",
+        "|| true",
+        "python -O",
+        "PYTHONOPTIMIZE",
+        " -k ",
+    ):
+        assert forbidden not in workflow
 
-    step_names = [
-        line.removeprefix("      - name: ")
-        for line in workflow.splitlines()
-        if line.startswith("      - name: ")
-    ]
-    assert step_names == [
-        "Check out repository",
-        "Set up Python 3.12",
-        "Install pinned uv",
-        "Verify dependency lock",
-        "Synchronize locked development environment",
-        "Run Ruff lint",
-        "Check Ruff formatting",
-        "Run test suite with coverage gate",
-        "Audit locked environment",
-    ]
+    for job in (plan, tests, audit, serial, quality):
+        assert "timeout-minutes:" in job
+    assert "max-parallel: 4" in tests
+    assert "fail-fast: false" in tests
+    assert "shard: [1, 2, 3, 4]" in tests
+    assert "name: Test shard ${{ matrix.shard }}" in tests
+    assert "CI_PARTITION_MODE: shard" in tests
+    assert "CI_PARTITION_MODE: collect" in plan
+    assert "CI_RECEIPT_OUT:" in tests
+    assert "COVERAGE_FILE:" in tests
+    assert "if-no-files-found: error" in tests
 
-    assert _workflow_step_command(workflow, "Verify dependency lock") == "uv lock --check"
+    assert _workflow_step_command(plan, "Verify dependency lock") == "uv lock --check"
     assert (
-        _workflow_step_command(workflow, "Synchronize locked development environment")
+        _workflow_step_command(plan, "Synchronize locked development environment")
         == "uv sync --locked --extra dev"
     )
     assert (
-        _workflow_step_command(workflow, "Run Ruff lint")
+        _workflow_step_command(plan, "Run Ruff lint")
         == "uv run --locked --extra dev python -m ruff check ."
     )
     assert (
-        _workflow_step_command(workflow, "Check Ruff formatting")
+        _workflow_step_command(plan, "Check Ruff formatting")
         == "uv run --locked --extra dev python -m ruff format --check ."
     )
+    collect_command = _workflow_step_command(plan, "Collect the complete test universe")
+    assert "--collect-only" in collect_command
+    assert "-p pytest_partition" in collect_command
+    plan_command = _workflow_step_command(plan, "Create deterministic test partitions")
+    assert "shards.py plan" in plan_command
+    assert "--shards 4" in plan_command
+    assert "--source-sha" in plan_command
+    assert "--run-attempt" in plan_command
+    assert "ci-partition-manifest.json" in plan_command
 
-    pytest_argv = shlex.split(_workflow_step_command(workflow, "Run test suite with coverage gate"))
+    pytest_argv = shlex.split(_workflow_step_command(tests, "Run test shard"))
     pytest_prefix = ["uv", "run", "--locked", "--extra", "dev", "python", "-m", "pytest"]
     assert pytest_argv[: len(pytest_prefix)] == pytest_prefix
     assert set(pytest_argv[len(pytest_prefix) :]) == {
-        "--cov=investment_analyst",
-        "--cov-report=term-missing",
         "--assert=plain",
         "--verbose",
         "--durations=30",
         "--durations-min=1.0",
-        "--junitxml=${{ runner.temp }}/pytest-results.xml",
+        "--junitxml=$RUNNER_TEMP/ci-artifacts/junit-shard-${{ matrix.shard }}.xml",
+        "--cov=investment_analyst",
+        "--cov-report=term-missing",
+        "--cov-fail-under=0",
+        "-p",
+        "pytest_partition",
     }
+
+    assert (
+        _workflow_step_command(audit, "Audit locked environment")
+        == "uv run --locked --extra dev pip-audit --local --skip-editable --progress-spinner off"
+    )
+
+    assert "if: ${{ inputs.compare_serial == true }}" in serial
+    assert "CI_PARTITION_MODE: serial" in serial
+    serial_command = _workflow_step_command(serial, "Run serial reference suite")
+    assert "--cov-fail-under=0" in serial_command
+    assert "-p pytest_partition" in serial_command
+
+    assert "needs:\n      - plan\n      - tests\n      - audit\n      - serial-reference" in quality
+    assert "if: always()" in quality
+    gate_command = _workflow_step_command(quality, "Check required job outcomes")
+    assert "shards.py gate" in gate_command
+    assert "--compare-serial" in gate_command
+    validate_command = _workflow_step_command(quality, "Validate shard receipts")
+    assert "shards.py validate" in validate_command
+    assert "--receipts-dir" in validate_command
+    coverage_command = _workflow_step_command(
+        quality, "Combine coverage and enforce the global floor"
+    )
+    assert "shards.py coverage" in coverage_command
+    assert "--fail-under 82" in coverage_command
+    compare_command = _workflow_step_command(quality, "Compare serial reference")
+    assert "--aggregate-started-at" in compare_command
+    assert "--aggregate-finished-at" in compare_command
+    assert "--max-ratio 0.6" in compare_command
+    assert "if-no-files-found: warn" in quality
 
     assert "[tool.coverage.run]\nbranch = true" in project
     assert "[tool.coverage.report]\nfail_under = 82.0" in project
-    assert (
-        _workflow_step_command(workflow, "Audit locked environment")
-        == "uv run --locked --extra dev pip-audit --local --skip-editable --progress-spinner off"
+
+
+CI_SOURCE_SHA = "a" * 40
+CI_WEIGHTS_SHA = "c" * 40
+CI_RUN_ID = "77"
+CI_RUN_ATTEMPT = "3"
+
+
+def _ci_environment(**values: str) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.update(values)
+    return environment
+
+
+def _run_ci_pytest(
+    root: Path,
+    *arguments: str,
+    environment: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--assert=plain",
+            "-q",
+            "-p",
+            "pytest_partition",
+            *arguments,
+        ],
+        cwd=root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
     )
-    for forbidden in (
-        "continue-on-error:",
-        "|| true",
-        "python -O",
-        "PYTHONOPTIMIZE",
-        "sys.modules",
-        "pytest-xdist",
-        "pytest-rerunfailures",
-    ):
-        assert forbidden not in workflow
+
+
+def _write_mini_suite(root: Path, *, failures: bool) -> None:
+    tests = root / "tests"
+    tests.mkdir()
+    (tests / "test_alpha.py").write_text(
+        "import pytest\n\n"
+        "@pytest.mark.parametrize('value', [1, 2])\n"
+        "def test_param(value):\n"
+        "    assert value > 0\n\n"
+        "def test_pass():\n"
+        "    assert True\n\n"
+        "@pytest.mark.skip(reason='legitimate skip probe')\n"
+        "def test_skip():\n"
+        "    pass\n\n"
+        "@pytest.mark.xfail(reason='xfail probe')\n"
+        "def test_xfail():\n"
+        "    assert False\n\n"
+        "@pytest.mark.xfail(reason='xpass probe')\n"
+        "def test_xpass():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+    (tests / "test_beta.py").write_text("def test_beta():\n    assert True\n", encoding="utf-8")
+    (tests / "test_delta.py").write_text("def test_delta():\n    assert True\n", encoding="utf-8")
+    if failures:
+        (tests / "test_gamma.py").write_text(
+            "import pytest\n\n"
+            "@pytest.fixture\n"
+            "def broken_setup():\n"
+            "    raise RuntimeError('setup probe')\n\n"
+            "def test_setup_failure(broken_setup):\n"
+            "    assert True\n\n"
+            "@pytest.fixture\n"
+            "def broken_teardown():\n"
+            "    yield\n"
+            "    raise RuntimeError('teardown probe')\n\n"
+            "def test_teardown_failure(broken_teardown):\n"
+            "    assert True\n",
+            encoding="utf-8",
+        )
+    else:
+        (tests / "test_gamma.py").write_text(
+            "def test_gamma():\n    assert True\n", encoding="utf-8"
+        )
+
+
+def _plan_mini_suite(root: Path) -> tuple[Path, Path]:
+    collection = root / "collection.json"
+    collect = _run_ci_pytest(
+        root,
+        "--collect-only",
+        environment=_ci_environment(
+            PYTHONPATH=str(CI_SUPPORT),
+            CI_PARTITION_MODE="collect",
+            CI_COLLECTION_OUT=str(collection),
+        ),
+    )
+    assert collect.returncode == 0, collect.stderr
+    weights = root / "weights.json"
+    weights.write_text(
+        json.dumps(
+            {
+                "schema_version": "ci-module-weights-v1",
+                "version": "probe-weights",
+                "source": {
+                    "workflow_run_id": "1",
+                    "job_id": "2",
+                    "source_sha": CI_WEIGHTS_SHA,
+                    "method": "probe",
+                    "observed_seconds": 4.0,
+                },
+                "default_weight_seconds": 1.0,
+                "modules": {"tests/test_alpha.py": 1.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest, selections = _CI_SHARDS.plan(
+        collection,
+        weights,
+        shards=4,
+        source_sha=CI_SOURCE_SHA,
+        run_id=CI_RUN_ID,
+        run_attempt=CI_RUN_ATTEMPT,
+        python_version="3.12.11",
+        lock_path=weights,
+        parallel_started_at_epoch=1000,
+    )
+    parts = root / "parts"
+    parts.mkdir()
+    manifest_path = parts / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    for selection in selections:
+        (parts / f"selected-shard-{selection['shard']}.json").write_text(
+            json.dumps(selection), encoding="utf-8"
+        )
+    return manifest_path, parts
+
+
+def _run_all_shards(
+    root: Path, parts: Path, receipts: Path
+) -> list[subprocess.CompletedProcess[str]]:
+    receipts.mkdir()
+    results: list[subprocess.CompletedProcess[str]] = []
+    for shard in range(1, 5):
+        results.append(
+            _run_ci_pytest(
+                root,
+                environment=_ci_environment(
+                    PYTHONPATH=str(CI_SUPPORT),
+                    CI_PARTITION_MODE="shard",
+                    CI_SHARD=str(shard),
+                    CI_SELECTION_FILE=str(parts / f"selected-shard-{shard}.json"),
+                    CI_RECEIPT_OUT=str(receipts / f"receipt-shard-{shard}.json"),
+                    GITHUB_SHA=CI_SOURCE_SHA,
+                    GITHUB_RUN_ID=CI_RUN_ID,
+                    GITHUB_RUN_ATTEMPT=CI_RUN_ATTEMPT,
+                    COVERAGE_FILE=str(root / f"coverage-shard-{shard}"),
+                ),
+            )
+        )
+    return results
+
+
+def test_ci_partition_is_deterministic_complete_and_balanced() -> None:
+    universe = tuple(
+        f"tests/test_{module}.py::test_{index}"
+        for module in ("alpha", "beta", "gamma", "delta", "epsilon")
+        for index in range(3)
+    )
+    weights = _CI_SHARDS.Weights(
+        "probe-weights",
+        {"workflow_run_id": "1", "job_id": "2", "source_sha": CI_WEIGHTS_SHA},
+        2.0,
+        {"tests/test_alpha.py": 5.0},
+    )
+
+    first = _CI_SHARDS.build_partitions(universe, weights, 4)
+    second = _CI_SHARDS.build_partitions(universe, weights, 4)
+
+    assert first == second
+    assert len(first) == 4
+    assert all(partition.nodeids for partition in first)
+    union = sorted(node for partition in first for node in partition.nodeids)
+    assert union == sorted(universe)
+    assert len(set(union)) == len(universe)
+    default_modules = [
+        module for partition in first for module in partition.modules if module.source == "default"
+    ]
+    assert default_modules
+    assert all(module.weight_seconds == 2.0 for module in default_modules)
+    loads = [partition.weight_seconds for partition in first]
+    assert max(loads) - min(loads) <= 5.0
+
+
+@pytest.mark.parametrize("weight", [0, -1, True, "1", None])
+def test_ci_weights_reject_corrupt_values(tmp_path: Path, weight: object) -> None:
+    path = tmp_path / "weights.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "ci-module-weights-v1",
+                "version": "probe-weights",
+                "source": {
+                    "workflow_run_id": "1",
+                    "job_id": "2",
+                    "source_sha": CI_WEIGHTS_SHA,
+                    "method": "probe",
+                    "observed_seconds": 4.0,
+                },
+                "default_weight_seconds": 1.0,
+                "modules": {"tests/test_alpha.py": weight},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(_CI_SHARDS.ContractError):
+        _CI_SHARDS.load_weights(path)
+
+
+def test_ci_strict_json_rejects_duplicate_and_non_finite_fields(tmp_path: Path) -> None:
+    duplicate = tmp_path / "duplicate.json"
+    duplicate.write_text('{"schema_version":"x","schema_version":"y"}', encoding="utf-8")
+    with pytest.raises(_CI_SHARDS.ContractError, match="duplicate JSON field"):
+        _CI_SHARDS.read_json(duplicate)
+
+    non_finite = tmp_path / "non-finite.json"
+    non_finite.write_text('{"value":NaN}', encoding="utf-8")
+    with pytest.raises(_CI_SHARDS.ContractError, match="non-finite"):
+        _CI_SHARDS.read_json(non_finite)
+
+
+def test_ci_plugin_executes_exact_selection_and_reports_terminal_outcomes(
+    tmp_path: Path,
+) -> None:
+    _write_mini_suite(tmp_path, failures=True)
+    manifest_path, parts = _plan_mini_suite(tmp_path)
+    manifest = _CI_SHARDS.load_manifest(manifest_path)
+    results = _run_all_shards(tmp_path, parts, tmp_path / "receipts")
+
+    assert any(result.returncode != 0 for result in results)
+    outcomes: dict[str, str] = {}
+    for shard in range(1, 5):
+        receipt = json.loads(
+            (tmp_path / "receipts" / f"receipt-shard-{shard}.json").read_text(encoding="utf-8")
+        )
+        assert receipt["terminal"] is True
+        assert receipt["universe_sha256"] == _CI_SHARDS.universe_sha256(manifest.universe)
+        partition = next(item for item in manifest.partitions if item.shard == shard)
+        assert set(receipt["outcomes"]) == set(partition.nodeids)
+        outcomes.update(receipt["outcomes"])
+
+    assert set(outcomes) == set(manifest.universe)
+    assert "passed" in outcomes.values()
+    assert "skipped" in outcomes.values()
+    assert "xfailed" in outcomes.values()
+    assert "xpassed" in outcomes.values()
+    assert "error" in outcomes.values()
+
+
+def test_ci_plugin_fails_closed_on_foreign_identity_and_collection_difference(
+    tmp_path: Path,
+) -> None:
+    _write_mini_suite(tmp_path, failures=False)
+    manifest_path, parts = _plan_mini_suite(tmp_path)
+    selection = json.loads((parts / "selected-shard-1.json").read_text(encoding="utf-8"))
+    base_environment = _ci_environment(
+        PYTHONPATH=str(CI_SUPPORT),
+        CI_PARTITION_MODE="shard",
+        CI_SHARD="1",
+        CI_SELECTION_FILE=str(parts / "selected-shard-1.json"),
+        GITHUB_SHA="d" * 40,
+        GITHUB_RUN_ID=CI_RUN_ID,
+        GITHUB_RUN_ATTEMPT=CI_RUN_ATTEMPT,
+    )
+    foreign = _run_ci_pytest(
+        tmp_path,
+        environment={
+            **base_environment,
+            "CI_RECEIPT_OUT": str(tmp_path / "receipt-foreign.json"),
+        },
+    )
+    assert foreign.returncode != 0
+    foreign_receipt = json.loads((tmp_path / "receipt-foreign.json").read_text(encoding="utf-8"))
+    assert foreign_receipt["terminal"] is False
+
+    selection["nodeids"] = sorted([*selection["nodeids"], "tests/test_alpha.py::test_absent"])
+    selection["selected_count"] = len(selection["nodeids"])
+    selection["selected_sha256"] = _CI_SHARDS.universe_sha256(selection["nodeids"])
+    absent_selection = parts / "selected-absent.json"
+    absent_selection.write_text(json.dumps(selection), encoding="utf-8")
+    absent = _run_ci_pytest(
+        tmp_path,
+        environment={
+            **_ci_environment(
+                PYTHONPATH=str(CI_SUPPORT),
+                CI_PARTITION_MODE="shard",
+                CI_SHARD="1",
+                CI_SELECTION_FILE=str(absent_selection),
+                GITHUB_SHA=CI_SOURCE_SHA,
+                GITHUB_RUN_ID=CI_RUN_ID,
+                GITHUB_RUN_ATTEMPT=CI_RUN_ATTEMPT,
+            ),
+            "CI_RECEIPT_OUT": str(tmp_path / "receipt-absent.json"),
+        },
+    )
+    assert absent.returncode != 0
+    absent_receipt = json.loads((tmp_path / "receipt-absent.json").read_text(encoding="utf-8"))
+    assert absent_receipt["terminal"] is False
+
+    tampered = json.loads((parts / "selected-shard-1.json").read_text(encoding="utf-8"))
+    tampered["universe_sha256"] = "0" * 64
+    tampered_selection = parts / "selected-tampered.json"
+    tampered_selection.write_text(json.dumps(tampered), encoding="utf-8")
+    mismatch = _run_ci_pytest(
+        tmp_path,
+        environment={
+            **_ci_environment(
+                PYTHONPATH=str(CI_SUPPORT),
+                CI_PARTITION_MODE="shard",
+                CI_SHARD="1",
+                CI_SELECTION_FILE=str(tampered_selection),
+                GITHUB_SHA=CI_SOURCE_SHA,
+                GITHUB_RUN_ID=CI_RUN_ID,
+                GITHUB_RUN_ATTEMPT=CI_RUN_ATTEMPT,
+            ),
+            "CI_RECEIPT_OUT": str(tmp_path / "receipt-mismatch.json"),
+        },
+    )
+    assert mismatch.returncode != 0
+    mismatch_receipt = json.loads((tmp_path / "receipt-mismatch.json").read_text(encoding="utf-8"))
+    assert mismatch_receipt["terminal"] is False
+
+
+def test_ci_receipt_validation_rejects_missing_duplicate_and_foreign_evidence(
+    tmp_path: Path,
+) -> None:
+    _write_mini_suite(tmp_path, failures=False)
+    manifest_path, parts = _plan_mini_suite(tmp_path)
+    manifest = _CI_SHARDS.load_manifest(manifest_path)
+    receipts = tmp_path / "receipts"
+    _run_all_shards(tmp_path, parts, receipts)
+
+    summary = _CI_SHARDS.validate_receipts(manifest, receipts)
+    assert summary["universe_count"] == len(manifest.universe)
+
+    first = receipts / "receipt-shard-1.json"
+    original = json.loads(first.read_text(encoding="utf-8"))
+
+    missing = receipts / "receipt-shard-4.json"
+    missing_bytes = missing.read_bytes()
+    missing.unlink()
+    with pytest.raises(_CI_SHARDS.ContractError, match="missing"):
+        _CI_SHARDS.validate_receipts(manifest, receipts)
+    missing.write_bytes(missing_bytes)
+
+    foreign = {**original, "source_sha": "d" * 40}
+    first.write_text(json.dumps(foreign), encoding="utf-8")
+    with pytest.raises(_CI_SHARDS.ContractError, match="source SHA"):
+        _CI_SHARDS.validate_receipts(manifest, receipts)
+
+    first.write_text(json.dumps(original), encoding="utf-8")
+    duplicate = json.loads(json.dumps(original))
+    duplicate["outcomes"]["tests/test_beta.py::test_beta"] = "passed"
+    first.write_text(json.dumps(duplicate), encoding="utf-8")
+    with pytest.raises(_CI_SHARDS.ContractError, match="outcomes do not match"):
+        _CI_SHARDS.validate_receipts(manifest, receipts)
+
+    first.write_text(json.dumps(original), encoding="utf-8")
+    missing_outcome = json.loads(json.dumps(original))
+    missing_outcome["outcomes"].pop(next(iter(missing_outcome["outcomes"])))
+    first.write_text(json.dumps(missing_outcome), encoding="utf-8")
+    with pytest.raises(_CI_SHARDS.ContractError, match="outcomes do not match"):
+        _CI_SHARDS.validate_receipts(manifest, receipts)
+
+    first.write_text(json.dumps(original), encoding="utf-8")
+    non_terminal = json.loads(json.dumps(original))
+    non_terminal["outcomes"][next(iter(non_terminal["outcomes"]))] = "missing"
+    first.write_text(json.dumps(non_terminal), encoding="utf-8")
+    with pytest.raises(_CI_SHARDS.ContractError, match="not terminal"):
+        _CI_SHARDS.validate_receipts(manifest, receipts)
+
+    first.write_text(json.dumps(original), encoding="utf-8")
+    failed = json.loads(json.dumps(original))
+    failed["outcomes"][next(iter(failed["outcomes"]))] = "failed"
+    first.write_text(json.dumps(failed), encoding="utf-8")
+    with pytest.raises(_CI_SHARDS.ContractError, match="non-success"):
+        _CI_SHARDS.validate_receipts(manifest, receipts)
+
+    first.write_text(json.dumps(original), encoding="utf-8")
+    manifest_bytes = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_bytes["extra"] = True
+    manifest_path.write_text(json.dumps(manifest_bytes), encoding="utf-8")
+    with pytest.raises(_CI_SHARDS.ContractError, match="unknown or missing"):
+        _CI_SHARDS.load_manifest(manifest_path)
+
+    manifest_bytes.pop("extra")
+    manifest_bytes["partitions"][0]["nodeids"][0] = "tests/test_alpha.py::test_other"
+    manifest_path.write_text(json.dumps(manifest_bytes), encoding="utf-8")
+    with pytest.raises(_CI_SHARDS.ContractError):
+        _CI_SHARDS.load_manifest(manifest_path)
+
+    selection_path = parts / "selected-shard-1.json"
+    with pytest.raises(_CI_SHARDS.ContractError, match="universe digest"):
+        _CI_SHARDS.load_selection(
+            selection_path,
+            mode="shard",
+            shard=1,
+            source_sha=CI_SOURCE_SHA,
+            run_id=CI_RUN_ID,
+            run_attempt=CI_RUN_ATTEMPT,
+            expected_universe_sha256="0" * 64,
+            expected_universe_count=len(manifest.universe),
+        )
+    with pytest.raises(_CI_SHARDS.ContractError, match="run attempt"):
+        _CI_SHARDS.load_selection(
+            selection_path,
+            mode="shard",
+            shard=1,
+            source_sha=CI_SOURCE_SHA,
+            run_id=CI_RUN_ID,
+            run_attempt="9",
+            expected_universe_sha256=_CI_SHARDS.universe_sha256(manifest.universe),
+            expected_universe_count=len(manifest.universe),
+        )
+
+
+def test_ci_gate_rejects_non_success_or_unexpected_serial_reference() -> None:
+    base = {
+        "plan_result": "success",
+        "tests_result": "success",
+        "audit_result": "success",
+        "serial_result": "skipped",
+        "compare_serial": "",
+    }
+
+    assert _CI_SHARDS.evaluate_gate(**base)["compare_serial"] is False
+    for field in ("plan_result", "tests_result", "audit_result"):
+        with pytest.raises(_CI_SHARDS.ContractError):
+            _CI_SHARDS.evaluate_gate(**{**base, field: "failure"})
+    with pytest.raises(_CI_SHARDS.ContractError, match="requested serial"):
+        _CI_SHARDS.evaluate_gate(**{**base, "compare_serial": "true"})
+    assert (
+        _CI_SHARDS.evaluate_gate(**{**base, "compare_serial": "true", "serial_result": "success"})[
+            "compare_serial"
+        ]
+        is True
+    )
+    with pytest.raises(_CI_SHARDS.ContractError, match="must be skipped"):
+        _CI_SHARDS.evaluate_gate(**{**base, "serial_result": "success"})
+    with pytest.raises(_CI_SHARDS.ContractError, match="input is invalid"):
+        _CI_SHARDS.evaluate_gate(**{**base, "compare_serial": "yes"})
+
+
+def _write_coverage_project(root: Path) -> None:
+    package = root / "src" / "probe_pkg"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "a.py").write_text(
+        "def branch(flag):\n    if flag:\n        return 1\n    return 2\n",
+        encoding="utf-8",
+    )
+    (package / "b.py").write_text("def unused():\n    return 3\n", encoding="utf-8")
+    (root / "test_true.py").write_text(
+        "from probe_pkg.a import branch\n\ndef test_true():\n    assert branch(True) == 1\n",
+        encoding="utf-8",
+    )
+    (root / "test_false.py").write_text(
+        "from probe_pkg.a import branch\n\ndef test_false():\n    assert branch(False) == 2\n",
+        encoding="utf-8",
+    )
+
+
+def test_ci_coverage_combines_fragments_and_keeps_unexecuted_files(tmp_path: Path) -> None:
+    _write_coverage_project(tmp_path)
+    for index, test_file in enumerate(("test_true.py", "test_false.py"), start=1):
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = "src"
+        environment["COVERAGE_FILE"] = str(tmp_path / f"coverage-shard-{index}")
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "coverage",
+                "run",
+                "--branch",
+                "--source=probe_pkg",
+                "-m",
+                "pytest",
+                "-q",
+                test_file,
+            ],
+            cwd=tmp_path,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
+    summary = _CI_SHARDS.run_coverage(
+        tmp_path,
+        shard_count=2,
+        data_file=tmp_path / "combined.data",
+        json_out=tmp_path / "combined.json",
+        source_root="src/probe_pkg",
+        fail_under=1,
+        repo_root=tmp_path,
+    )
+    assert summary["num_branches"] == 2
+    assert summary["covered_branches"] == 2
+    assert summary["percent_covered"] < 82
+    assert any(path.endswith("b.py") for path in summary["measured_files"])
+    export = json.loads((tmp_path / "combined.json").read_text(encoding="utf-8"))
+    assert export["files"]["src/probe_pkg/b.py"]["summary"]["percent_covered"] == 0
+
+    with pytest.raises(_CI_SHARDS.ContractError, match="below the global floor"):
+        _CI_SHARDS.run_coverage(
+            tmp_path,
+            shard_count=2,
+            data_file=tmp_path / "combined.data",
+            json_out=tmp_path / "combined.json",
+            source_root="src/probe_pkg",
+            fail_under=82,
+            repo_root=tmp_path,
+        )
+    with pytest.raises(_CI_SHARDS.ContractError, match="outside the declared source root"):
+        _CI_SHARDS.run_coverage(
+            tmp_path,
+            shard_count=2,
+            data_file=tmp_path / "combined.data",
+            json_out=tmp_path / "combined.json",
+            source_root="src/other",
+            fail_under=1,
+            repo_root=tmp_path,
+        )
+
+    parallel_suffix = tmp_path / "coverage-shard-1.parallel"
+    parallel_suffix.write_bytes((tmp_path / "coverage-shard-1").read_bytes())
+    with_suffix = _CI_SHARDS.run_coverage(
+        tmp_path,
+        shard_count=2,
+        data_file=tmp_path / "combined.data",
+        json_out=tmp_path / "combined.json",
+        source_root="src/probe_pkg",
+        fail_under=1,
+        repo_root=tmp_path,
+    )
+    assert with_suffix["percent_covered"] == summary["percent_covered"]
+    parallel_suffix.unlink()
+
+    unexpected = tmp_path / "coverage-shard-3"
+    unexpected.write_bytes((tmp_path / "coverage-shard-1").read_bytes())
+    with pytest.raises(_CI_SHARDS.ContractError, match="unexpected coverage evidence"):
+        _CI_SHARDS.run_coverage(
+            tmp_path,
+            shard_count=2,
+            data_file=tmp_path / "combined.data",
+            json_out=tmp_path / "combined.json",
+            source_root="src/probe_pkg",
+            fail_under=1,
+            repo_root=tmp_path,
+        )
+    unexpected.unlink()
 
 
 def test_ci_plain_assert_failure_is_not_hidden(tmp_path: Path) -> None:
