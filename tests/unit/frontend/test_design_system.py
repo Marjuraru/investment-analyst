@@ -3676,9 +3676,9 @@ def test_probe_deferred_loads_rule_catches_a_reintroduced_toggle_listener() -> N
 def test_probe_board_switch_rule_catches_a_known_at_reference() -> None:
     _check_board_switch_never_touches_the_known_at_cut_or_session_clock(APP_JS)  # baseline: clean
     corrupted = APP_JS.replace(
-        "    loadDeferredBoardData(resolvedId);",
-        '    byId("known-at-status").textContent = "poked";\n'
-        "    loadDeferredBoardData(resolvedId);",
+        "  if (boardDataReady) loadDeferredBoardData(resolvedId);",
+        '  byId("known-at-status").textContent = "poked";\n'
+        "  if (boardDataReady) loadDeferredBoardData(resolvedId);",
         1,
     )
     assert corrupted != APP_JS, "probe fixture did not inject a known_at reference"
@@ -3902,8 +3902,8 @@ def test_probe_deferred_table_rule_catches_a_board_missing_from_the_table() -> N
 def test_probe_dispatch_rule_catches_an_undeclared_activate_board_trigger() -> None:
     _check_activate_board_fires_exactly_the_declared_loads(APP_JS)
     corrupted = APP_JS.replace(
-        "    loadDeferredBoardData(resolvedId);",
-        "    loadDeferredBoardData(resolvedId);\n    void queryReport();",
+        "  if (boardDataReady) loadDeferredBoardData(resolvedId);",
+        "  if (boardDataReady) loadDeferredBoardData(resolvedId);\n  void queryReport();",
         1,
     )
     assert corrupted != APP_JS, "probe fixture did not add an undeclared trigger"
@@ -3947,8 +3947,8 @@ def test_probe_invalidation_rule_catches_a_loaded_mark_not_invalidated() -> None
 def test_probe_activate_board_rule_catches_a_cut_reference() -> None:
     _check_activate_board_fires_exactly_the_declared_loads(APP_JS)
     corrupted = APP_JS.replace(
-        "    loadDeferredBoardData(resolvedId);",
-        '    loadDeferredBoardData(resolvedId);\n    byId("report-known-at");',
+        "  if (boardDataReady) loadDeferredBoardData(resolvedId);",
+        '  if (boardDataReady) loadDeferredBoardData(resolvedId);\n  byId("report-known-at");',
         1,
     )
     assert corrupted != APP_JS, "probe fixture did not add a cut reference"

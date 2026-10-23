@@ -514,7 +514,7 @@ class InvestmentAnalystApplication:
         """Return a content-bound read signature without hydrating analytical models."""
         with self._runtime.open_storage(
             location,
-            access_mode=WorkspaceAccessMode.READ_ONLY,
+            access_mode=WorkspaceAccessMode("read_only"),
         ) as storage:
             return build_read_dependency_signature(storage, query)
 

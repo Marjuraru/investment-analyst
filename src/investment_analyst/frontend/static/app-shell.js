@@ -800,10 +800,8 @@ function activateBoard(boardId, { focus = true } = {}) {
   }
   const activeSection = byId(`board-${resolvedId}`);
   if (focus && activeSection) activeSection.focus({ preventScroll: true });
-  if (boardDataReady) {
-    persistViewContext();
-    loadDeferredBoardData(resolvedId);
-  }
+  if (boardDataReady) persistViewContext();
+  if (boardDataReady) loadDeferredBoardData(resolvedId);
 }
 
 function initializeBoardShell() {
