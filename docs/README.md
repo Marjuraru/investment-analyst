@@ -7,6 +7,11 @@ sólo se enlaza la documentación vigente y el archivo histórico.
 
 ## Operación actual
 
+- [Eficiencia de lectura](read_path_efficiency.md): firma `read-dependency-signature-v1`, caché
+  acotada, telemetría `critical-read-performance-v1` y reapertura de vista.
+- [Continuidad](data_chassis_continuity_plan.md): archivo `continuity-archive-v1`, selección
+  `historical-selection-v1` y estado de 47; 48/49 siguen futuros.
+
 - [Interfaz local y operación continua](local_interface.md)
 - [Readiness operacional y recuperación](operational_readiness.md)
 - [Aceptación operacional exact-SHA](release_acceptance.md)

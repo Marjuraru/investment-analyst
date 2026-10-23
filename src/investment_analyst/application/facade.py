@@ -308,6 +308,11 @@ from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials, 
 from investment_analyst.providers.ownership.sec_ownership_pipeline import SecOwnershipPipeline
 from investment_analyst.providers.peru.smv_open_data import SmvOpenDataClient
 from investment_analyst.storage import LocalStorage
+from investment_analyst.storage.read_dependency_signature import (
+    ReadDependencyQuery,
+    ReadDependencySignature,
+    build_read_dependency_signature,
+)
 from investment_analyst.workspace.models import WorkspaceAccessMode, WorkspaceInitialization
 
 HttpTransportFactory = Callable[[], HttpTransport]
@@ -499,6 +504,19 @@ class InvestmentAnalystApplication:
             access_mode=WorkspaceAccessMode.READ_ONLY,
         ) as storage:
             return AaplDailyReportService(storage).query(request)
+
+    def read_dependency_signature(
+        self,
+        query: ReadDependencyQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> ReadDependencySignature:
+        """Return a content-bound read signature without hydrating analytical models."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode("read_only"),
+        ) as storage:
+            return build_read_dependency_signature(storage, query)
 
     def query_listed_company_diagnostics(
         self,

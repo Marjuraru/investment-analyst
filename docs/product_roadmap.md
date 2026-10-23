@@ -2,6 +2,14 @@
 
 > Decisión PLAN 2026-10-21: [arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Activación verificada por #346 MERGED en `b5e714a`; release observada `daad58d`; workspace UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; historia v1/F5 preservada. La formalización, neutralidad y retención continúan en [DATA-CHASSIS-46](data_chassis_continuity_plan.md) (#349). Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
 
+> **DATA-CHASSIS-47 (#353, 2026-10-22):** el bloque activo ejecuta la unión READ-1+47 sobre
+> `origin/main@012bbc5e41ade21318c02af343ed4c20436624d1`, rama `codex/data-chassis-47`,
+> policy `AUTO` con autorización CRITICAL integrada. Entrega el contrato de lectura
+> `read-dependency-signature-v1`, caché acotada con telemetría, reapertura de vista
+> versionada, `historical-selection-v1`/`historical-selection-progress-v1`, archivo
+> `continuity-archive-v1` y el piloto scratch con replay. 48 y 49 siguen siendo ruta
+> futura, no autoridad ejecutable.
+
 ## Prioridad operativa de 2026-10-21
 
 DATA-CHASSIS sigue NEXT. #345 ADVANCES con arranque nuevo; no cierre por base vacía. Se permite adquisición reciente y warm-up necesario mediante fuentes existentes; el archivo anterior no se re-descarga masivamente. FUNDAMENTALS-COVERAGE permanece PLANNED. Las cronologías inferiores conservan contexto histórico, no autoridad para sustituir esta secuencia.
@@ -744,9 +752,9 @@ Block independiente.
 
 La continuación vigente de `DATA-CHASSIS` es la secuencia obligatoria
 [46 → 47 → 48 → 49](data_chassis_continuity_plan.md): 46 formaliza documentación, neutralidad e
-inventario; 47 produce archivo recuperable y piloto; 48 reincorpora por lotes con consumidor; 49
-ejecuta la limpieza física y el cierre formal. `DATA-CHASSIS` permanece único `NEXT` y
-`FUNDAMENTALS-COVERAGE` sigue `PLANNED`. Los tramos 47–49 no son Issues activos ni autoridad
+inventario; 47 queda implementado por #353 con archivo recuperable y piloto scratch; 48 reincorpora
+por lotes con consumidor; 49 ejecuta la limpieza física y el cierre formal. `DATA-CHASSIS` permanece
+único `NEXT` y `FUNDAMENTALS-COVERAGE` sigue `PLANNED`. 48 y 49 no son Issues activos ni autoridad
 ejecutable anticipada: cada PLAN los resuelve desde main, runtime y evidencia nueva. Ningún tramo
 declara Q1–Q7 `MET` por comparar universos o cargas distintas.
 

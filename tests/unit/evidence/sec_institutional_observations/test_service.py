@@ -440,3 +440,34 @@ def test_read_only_query_returns_verified_views_and_rejects_corruption(tmp_path:
         pytest.raises(InstitutionalObservationLineageError, match="content conflicts"),
     ):
         InstitutionalObservationService(storage).query(query)
+
+
+def test_manager_query_selects_before_hydrating_foreign_observations(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = StoragePaths.from_root(tmp_path)
+    with LocalStorage(root) as storage:
+        report, _ = _seed(storage)
+        InstitutionalObservationService(storage, clock=lambda: _NOW + timedelta(hours=1)).normalize(
+            InstitutionalObservationRequest(
+                asset_id="equity:us:aapl",
+                manager_cik="1067983",
+                report_ids=(report.report_id,),
+                known_at=_NOW,
+            )
+        )
+    with LocalStorage(root, read_only=True) as storage:
+        monkeypatch.setattr(
+            storage.observations,
+            "list",
+            lambda **_: pytest.fail("manager query hydrated the complete observation family"),
+        )
+        result = InstitutionalObservationService(storage).query(
+            InstitutionalObservationQuery(
+                asset_id="equity:us:aapl",
+                known_at=_NOW + timedelta(days=1),
+                manager_cik="1067983",
+                limit=10,
+            )
+        )
+    assert result.total_matching == 4

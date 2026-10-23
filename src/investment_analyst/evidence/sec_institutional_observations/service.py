@@ -253,14 +253,24 @@ class InstitutionalObservationService:
     def query(self, query: InstitutionalObservationQuery) -> InstitutionalObservationQueryResult:
         if not self._storage.read_only:
             raise StorageError("institutional observation query requires read-only storage")
-        observations = tuple(
-            self._storage.observations.list(
-                asset_id=query.asset_id,
-                source_id=SOURCE_ID,
-                field_name=query.field_name,
-                available_to=query.known_at,
+        if query.manager_cik is not None:
+            observations = tuple(
+                self.list_for_manager(
+                    asset_id=query.asset_id,
+                    manager_cik=query.manager_cik,
+                    known_at=query.known_at,
+                    field_name=query.field_name,
+                )
             )
-        )
+        else:
+            observations = tuple(
+                self._storage.observations.list(
+                    asset_id=query.asset_id,
+                    source_id=SOURCE_ID,
+                    field_name=query.field_name,
+                    available_to=query.known_at,
+                )
+            )
         keys = {item.observation_id: _record_key(item) for item in observations}
         artifact_ids = {UUID(key["artifact_id"]) for key in keys.values()}
         correspondence_ids = {UUID(key["correspondence_id"]) for key in keys.values()}

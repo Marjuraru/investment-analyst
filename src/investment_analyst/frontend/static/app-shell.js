@@ -283,7 +283,9 @@ async function refreshOverview({ manual = false } = {}) {
   const button = byId("refresh-overview");
   if (manual) setButtonBusy(button, true, "Verificando…", "Verificar");
   try {
-    applyOverview(await api("/api/v1/overview"));
+    const overview = await api("/api/v1/overview");
+    applyOverview(overview);
+    updateReadRuntimeContext(overview);
     overviewFailureCount = 0;
   } catch (error) {
     overviewFailureCount += 1;
@@ -798,6 +800,7 @@ function activateBoard(boardId, { focus = true } = {}) {
   }
   const activeSection = byId(`board-${resolvedId}`);
   if (focus && activeSection) activeSection.focus({ preventScroll: true });
+  if (boardDataReady) persistViewContext();
   if (boardDataReady) loadDeferredBoardData(resolvedId);
 }
 
@@ -825,6 +828,10 @@ async function initialize() {
   initializeChartSettings();
   applySelectedMarketAsset();
   initializeCazatiburonesUniverseFilters();
+  const previousContext = restoreLastViewContext();
+  if (previousContext && previousContext.board === boardIdFromLocationHash()) {
+    showPreviousCutNotice(previousContext);
+  }
   boardDataReady = true;
   // A deep link waits for the catalog and then uses the same canonical
   // board-to-loaders matrix as every other board. Cazatiburones therefore

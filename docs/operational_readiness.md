@@ -2,6 +2,19 @@
 
 > Decisión PLAN 2026-10-21: [arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Activación verificada por #346 MERGED en `b5e714a`; release observada `daad58d`; workspace UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; historia v1/F5 preservada. La formalización, neutralidad y retención continúan en [DATA-CHASSIS-46](data_chassis_continuity_plan.md) (#349). Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
 
+## Lectura, reapertura y telemetría (`DATA-CHASSIS-47`)
+
+- Los assets estáticos se sirven con `ETag` de contenido, `Cache-Control: public, max-age=0,
+  must-revalidate` y `304` ante `If-None-Match`; las APIs financieras conservan `no-store`.
+- Las respuestas JSON incorporan `Server-Timing: total;dur=…` aditivo, sin secretos. El endpoint
+  read-only `/api/v1/read-performance` expone `critical-read-performance-v1` desde memoria, sin
+  consultar DuckDB ni medir su propia petición recursivamente.
+- La vista local guarda UUID, generación/release, tablero, activo, argumentos y corte explícito en
+  `sessionStorage` (≤8 vistas/2 MiB). Al reabrir muestra «Datos al …» y solicita el corte actual;
+  nunca presenta un resultado viejo como actual. No persiste raw, documentos ni corpus.
+- No se añaden daemons, polling, SSE, canvas, dependencias ni telemetría remota. La caché de
+  servidor es acotada y se invalida por firma de contenido, no por tiempo.
+
 La sonda de readiness mantiene su contrato y sus ausencias. El arranque nuevo usa escenarios finitos explícitos; no fabrica fechas o intentos para cumplir --min-local-dates ni confunde HTTP200 con aceptación completa.
 
 

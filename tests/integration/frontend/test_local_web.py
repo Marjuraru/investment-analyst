@@ -159,6 +159,7 @@ from investment_analyst.application.peru_registry import (
     BvlRegistryRefreshRequest,
     BvlRegistryRefreshSummary,
 )
+from investment_analyst.application.read_cache_policy import DEFAULT_MAX_CACHE_ENTRIES
 from investment_analyst.application.runtime import StorageLocationRequest
 from investment_analyst.application.sec_declared_activity_refresh_models import (
     SecDeclaredActivityRefreshRequest,
@@ -210,6 +211,11 @@ from investment_analyst.frontend.local_web import (
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
 from investment_analyst.storage import DuckDBStore, StoragePaths
+from investment_analyst.storage.read_dependency_signature import (
+    ReadDependency,
+    ReadDependencyKind,
+    ReadDependencySignature,
+)
 
 _CANONICAL_STATIC_ASSETS = (
     "/assets/app-core.js",
@@ -350,6 +356,27 @@ class _FakeAnalyticalBacktest:
 
 
 class _FakeApplication:
+    def read_dependency_signature(self, query, *, location):
+        payload = query.model_dump_json()
+        return ReadDependencySignature(
+            workspace_id=UUID("00000000-0000-4000-8000-000000000047"),
+            code_version="test",
+            contract_version="test",
+            catalog_version="0" * 64,
+            endpoint=query.endpoint,
+            arguments_digest=hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            known_at=query.known_at,
+            asset_ids=query.asset_ids,
+            semantic_selection=query.family.value,
+            dependencies=(
+                ReadDependency(
+                    kind=ReadDependencyKind.CATALOG,
+                    dependency_id="test",
+                    content_sha256="1" * 64,
+                ),
+            ),
+        )
+
     def __init__(self) -> None:
         self.requests: list[ConsolidatedDiagnosticRequest] = []
         self.locations: list[StorageLocationRequest] = []
@@ -1573,7 +1600,7 @@ def test_local_server_serves_packaged_assets_with_security_headers() -> None:
         assert "Investment Analyst" in body
         assert "default-src 'self'" in headers["Content-Security-Policy"]
         assert headers["X-Frame-Options"] == "DENY"
-        assert headers["Cache-Control"] == "no-store"
+        assert headers["Cache-Control"] == "public, max-age=0, must-revalidate"
         assert head_response.status == 200
         assert head_body == b""
 
@@ -1601,7 +1628,7 @@ def test_fixed_asset_registry_serves_every_component_with_correct_mime_get_head_
                 headers = dict(response.headers.items())
             assert response.status == 200
             assert headers["Content-Type"] == _ASSETS[route][1]
-            assert headers["Cache-Control"] == "no-store"
+            assert headers["Cache-Control"] == "public, max-age=0, must-revalidate"
             assert headers["X-Content-Type-Options"] == "nosniff"
             assert headers["X-Frame-Options"] == "DENY"
             assert "default-src 'self'" in headers["Content-Security-Policy"]
@@ -1610,7 +1637,9 @@ def test_fixed_asset_registry_serves_every_component_with_correct_mime_get_head_
                 assert head_response.status == 200
                 assert head_response.read() == b""
                 assert head_response.headers["Content-Type"] == _ASSETS[route][1]
-                assert head_response.headers["Cache-Control"] == "no-store"
+                assert head_response.headers["Cache-Control"] == (
+                    "public, max-age=0, must-revalidate"
+                )
 
             with urlopen(
                 Request(f"{root}{route}", headers={"Accept-Encoding": "gzip"}),
@@ -5219,7 +5248,7 @@ def test_universe_coverage_cache_respects_the_shared_bound_and_hits_on_repeat(
     )
     distinct_requests = [
         base_request.model_copy(update={"asset_ids": (f"equity:us:sym{index}",)})
-        for index in range(_MAX_READ_CACHE_ENTRIES + 1)
+        for index in range(DEFAULT_MAX_CACHE_ENTRIES + 1)
     ]
 
     controller.coverage_request(distinct_requests[0])
@@ -5228,11 +5257,73 @@ def test_universe_coverage_cache_respects_the_shared_bound_and_hits_on_repeat(
 
     for request in distinct_requests[1:]:
         controller.coverage_request(request)
-    assert len(application.universe_coverage_requests) == 1 + _MAX_READ_CACHE_ENTRIES
+    assert len(application.universe_coverage_requests) == 1 + DEFAULT_MAX_CACHE_ENTRIES
 
-    # The bound is the one shared constant; no second policy or unbounded growth.
+    # The global signature cache is bounded; the oldest entry is evicted.
     controller.coverage_request(distinct_requests[0])
-    assert len(application.universe_coverage_requests) == 2 + _MAX_READ_CACHE_ENTRIES
+    assert len(application.universe_coverage_requests) == 2 + DEFAULT_MAX_CACHE_ENTRIES
+    controller.coverage_request(distinct_requests[2])
+    assert len(application.universe_coverage_requests) == 2 + DEFAULT_MAX_CACHE_ENTRIES
+
+
+class _MutableSignatureApplication(_FakeApplication):
+    def __init__(self) -> None:
+        super().__init__()
+        self.signature_salt = "a"
+        self.signature_workspace = UUID("00000000-0000-4000-8000-000000000047")
+
+    def read_dependency_signature(self, query, *, location):
+        return ReadDependencySignature(
+            workspace_id=self.signature_workspace,
+            code_version="test",
+            contract_version="test",
+            catalog_version="0" * 64,
+            endpoint=query.endpoint,
+            arguments_digest=hashlib.sha256(query.model_dump_json().encode("utf-8")).hexdigest(),
+            known_at=query.known_at,
+            asset_ids=query.asset_ids,
+            semantic_selection=query.family.value,
+            dependencies=(
+                ReadDependency(
+                    kind=ReadDependencyKind.CATALOG,
+                    dependency_id="content",
+                    content_sha256=self.signature_salt * 64,
+                ),
+            ),
+        )
+
+
+def test_signature_cache_discards_new_data_and_workspace_generation(
+    tmp_path: Path,
+) -> None:
+    application = _MutableSignatureApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    request = UniverseCoverageRequest(
+        known_at=datetime(2026, 7, 16, tzinfo=UTC),
+        market_start=date(2026, 1, 1),
+        market_end=date(2026, 7, 15),
+        fundamental_start=date(2020, 1, 1),
+        fundamental_end=date(2026, 7, 15),
+    )
+    controller.coverage_request(request)
+    controller.coverage_request(request)
+    assert len(application.universe_coverage_requests) == 1
+
+    application.signature_salt = "b"
+    controller.coverage_request(request)
+    assert len(application.universe_coverage_requests) == 2
+
+    application.signature_workspace = UUID("00000000-0000-4000-8000-000000000048")
+    controller.coverage_request(request)
+    assert len(application.universe_coverage_requests) == 3
+    controller.coverage_request(request)
+    assert len(application.universe_coverage_requests) == 3
 
 
 def test_universe_coverage_cache_is_invalidated_after_a_completed_run(tmp_path: Path) -> None:
