@@ -6,6 +6,12 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      compare_serial:
+        description: Run the complete serial reference on the same SHA for the CI-T1 comparison
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -19,12 +25,19 @@ env:
   UV_VERSION: "0.11.29"
 
 jobs:
-  quality:
-    name: Python 3.12 quality
+  plan:
+    name: Plan test partitions
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 20
 
     steps:
+      - name: Record parallel path start
+        run: |
+          started=$(date +%s)
+          mkdir -p "$RUNNER_TEMP/ci-partitions"
+          printf '%s\n' "$started" > "$RUNNER_TEMP/ci-partitions/parallel-started-at"
+          echo "CI_PARALLEL_STARTED_AT=$started" >> "$GITHUB_ENV"
+
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -54,14 +67,414 @@ jobs:
       - name: Check Ruff formatting
         run: uv run --locked --extra dev python -m ruff format --check .
 
-      - name: Run test suite with coverage gate
+      - name: Record interpreter version
+        run: >-
+          echo "CI_PYTHON_VERSION=$(uv run --locked --extra dev python -c
+          'import platform; print(platform.python_version())')" >> "$GITHUB_ENV"
+
+      - name: Collect the complete test universe
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.github/workflows/ci_support
+          CI_PARTITION_MODE: collect
+          CI_COLLECTION_OUT: ${{ runner.temp }}/ci-collection.json
         run: >-
           uv run --locked --extra dev python -m pytest
-          --cov=investment_analyst --cov-report=term-missing
+          --assert=plain --collect-only -q -p pytest_partition
+
+      - name: Create deterministic test partitions
+        run: >-
+          uv run --locked --extra dev python .github/workflows/ci_support/shards.py plan
+          --collection "$RUNNER_TEMP/ci-collection.json"
+          --weights .github/workflows/ci_support/module_weights.json
+          --shards 4
+          --source-sha "$GITHUB_SHA"
+          --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT"
+          --python-version "$CI_PYTHON_VERSION"
+          --lock-file uv.lock
+          --parallel-started-at "$CI_PARALLEL_STARTED_AT"
+          --output-dir "$RUNNER_TEMP/ci-partitions"
+          --manifest "$RUNNER_TEMP/ci-partitions/ci-partition-manifest.json"
+
+      - name: Record plan timing
+        run: |
+          finished=$(date +%s)
+          started=$(cat "$RUNNER_TEMP/ci-partitions/parallel-started-at")
+          printf '{"started_at_epoch": %s, "finished_at_epoch": %s, "duration_seconds": %s}\n' \
+            "$started" "$finished" "$((finished - started))" \
+            > "$RUNNER_TEMP/ci-partitions/timing-plan.json"
+
+      - name: Upload partition manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-partition-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-partitions/
+          retention-days: 7
+          if-no-files-found: error
+
+  tests:
+    name: Test shard ${{ matrix.shard }}
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [1, 2, 3, 4]
+
+    steps:
+      - name: Record shard start
+        run: |
+          started=$(date +%s)
+          mkdir -p "$RUNNER_TEMP/ci-artifacts"
+          printf '%s\n' "$started" > "$RUNNER_TEMP/ci-artifacts/started-at"
+          echo "CI_SHARD_STARTED_AT=$started" >> "$GITHUB_ENV"
+
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install pinned uv
+        run: python -m pip install --disable-pip-version-check "uv==${UV_VERSION}"
+
+      - name: Verify dependency lock
+        run: uv lock --check
+
+      - name: Synchronize locked development environment
+        run: uv sync --locked --extra dev
+
+      - name: Download partition manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ci-partition-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-partition
+
+      - name: Select this shard
+        run: >-
+          uv run --locked --extra dev python .github/workflows/ci_support/shards.py select
+          --manifest "$RUNNER_TEMP/ci-partition/ci-partition-manifest.json"
+          --shard "${{ matrix.shard }}"
+          --source-sha "$GITHUB_SHA"
+          --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT"
+          --output "$RUNNER_TEMP/ci-partition/selected-shard-${{ matrix.shard }}.json"
+
+      - name: Run test shard
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.github/workflows/ci_support
+          CI_PARTITION_MODE: shard
+          CI_SHARD: ${{ matrix.shard }}
+          CI_SELECTION_FILE: ${{ runner.temp }}/ci-partition/selected-shard-${{ matrix.shard }}.json
+          CI_RECEIPT_OUT: ${{ runner.temp }}/ci-artifacts/receipt-shard-${{ matrix.shard }}.json
+          COVERAGE_FILE: ${{ runner.temp }}/ci-artifacts/coverage-shard-${{ matrix.shard }}
+        run: >-
+          uv run --locked --extra dev python -m pytest
           --assert=plain --verbose --durations=30 --durations-min=1.0
-          --junitxml="${{ runner.temp }}/pytest-results.xml"
+          --junitxml="$RUNNER_TEMP/ci-artifacts/junit-shard-${{ matrix.shard }}.xml"
+          --cov=investment_analyst --cov-report=term-missing --cov-fail-under=0
+          -p pytest_partition
+
+      - name: Record shard timing
+        if: always()
+        run: |
+          finished=$(date +%s)
+          started=$(cat "$RUNNER_TEMP/ci-artifacts/started-at")
+          printf '{"shard": %s, "started_at_epoch": %s, "finished_at_epoch": %s, "duration_seconds": %s}\n' \
+            "${{ matrix.shard }}" "$started" "$finished" "$((finished - started))" \
+            > "$RUNNER_TEMP/ci-artifacts/timing-shard-${{ matrix.shard }}.json"
+
+      - name: Upload shard evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-shard-${{ github.sha }}-${{ github.run_attempt }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/ci-artifacts/
+          retention-days: 7
+          if-no-files-found: error
+
+  audit:
+    name: Audit locked environment
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install pinned uv
+        run: python -m pip install --disable-pip-version-check "uv==${UV_VERSION}"
+
+      - name: Verify dependency lock
+        run: uv lock --check
+
+      - name: Synchronize locked development environment
+        run: uv sync --locked --extra dev
 
       - name: Audit locked environment
         run: >-
           uv run --locked --extra dev pip-audit
           --local --skip-editable --progress-spinner off
+
+  serial-reference:
+    name: Serial reference
+    needs: plan
+    if: ${{ inputs.compare_serial == true }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Record serial start
+        run: |
+          started=$(date +%s)
+          mkdir -p "$RUNNER_TEMP/ci-serial"
+          printf '%s\n' "$started" > "$RUNNER_TEMP/ci-serial/started-at"
+          echo "CI_SERIAL_STARTED_AT=$started" >> "$GITHUB_ENV"
+
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install pinned uv
+        run: python -m pip install --disable-pip-version-check "uv==${UV_VERSION}"
+
+      - name: Verify dependency lock
+        run: uv lock --check
+
+      - name: Synchronize locked development environment
+        run: uv sync --locked --extra dev
+
+      - name: Download partition manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ci-partition-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-partition
+
+      - name: Preserve plan timing for the comparison
+        run: cp "$RUNNER_TEMP/ci-partition/timing-plan.json" "$RUNNER_TEMP/ci-serial/timing-plan.json"
+
+      - name: Select the complete universe
+        run: >-
+          uv run --locked --extra dev python .github/workflows/ci_support/shards.py select
+          --manifest "$RUNNER_TEMP/ci-partition/ci-partition-manifest.json"
+          --serial
+          --source-sha "$GITHUB_SHA"
+          --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT"
+          --output "$RUNNER_TEMP/ci-serial/selected-serial.json"
+
+      - name: Run serial reference suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.github/workflows/ci_support
+          CI_PARTITION_MODE: serial
+          CI_SHARD: "0"
+          CI_SELECTION_FILE: ${{ runner.temp }}/ci-serial/selected-serial.json
+          CI_RECEIPT_OUT: ${{ runner.temp }}/ci-serial/receipt-serial.json
+          COVERAGE_FILE: ${{ runner.temp }}/ci-serial/coverage-shard-1
+        run: >-
+          uv run --locked --extra dev python -m pytest
+          --assert=plain --verbose --durations=30 --durations-min=1.0
+          --junitxml="$RUNNER_TEMP/ci-serial/junit-serial.xml"
+          --cov=investment_analyst --cov-report=term-missing --cov-fail-under=0
+          -p pytest_partition
+
+      - name: Export serial reference coverage
+        if: always()
+        run: >-
+          uv run --locked --extra dev python .github/workflows/ci_support/shards.py coverage
+          --shards-dir "$RUNNER_TEMP/ci-serial"
+          --shards 1
+          --data-file "$RUNNER_TEMP/ci-serial/coverage-serial.data"
+          --json-out "$RUNNER_TEMP/ci-serial/coverage-serial.json"
+          --source-root src/investment_analyst
+          --fail-under 82
+          --summary-out "$RUNNER_TEMP/ci-serial/coverage-serial-summary.json"
+
+      - name: Record serial timing
+        if: always()
+        run: |
+          finished=$(date +%s)
+          started=$(cat "$RUNNER_TEMP/ci-serial/started-at")
+          printf '{"started_at_epoch": %s, "finished_at_epoch": %s, "duration_seconds": %s}\n' \
+            "$started" "$finished" "$((finished - started))" \
+            > "$RUNNER_TEMP/ci-serial/timing-serial.json"
+
+      - name: Upload serial reference evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-serial-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-serial/
+          retention-days: 7
+          if-no-files-found: warn
+
+  quality:
+    name: Python 3.12 quality
+    needs:
+      - plan
+      - tests
+      - audit
+      - serial-reference
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Record aggregate start
+        run: |
+          started=$(date +%s)
+          mkdir -p "$RUNNER_TEMP/ci-quality"
+          printf '%s\n' "$started" > "$RUNNER_TEMP/ci-quality/aggregate-started-at"
+          echo "CI_AGGREGATE_STARTED_AT=$started" >> "$GITHUB_ENV"
+
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install pinned uv
+        run: python -m pip install --disable-pip-version-check "uv==${UV_VERSION}"
+
+      - name: Verify dependency lock
+        run: uv lock --check
+
+      - name: Synchronize locked development environment
+        run: uv sync --locked --extra dev
+
+      - name: Check required job outcomes
+        if: always()
+        env:
+          COMPARE_SERIAL: ${{ inputs.compare_serial }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+          AUDIT_RESULT: ${{ needs.audit.result }}
+          SERIAL_RESULT: ${{ needs.serial-reference.result }}
+        run: >-
+          uv run --locked --extra dev python .github/workflows/ci_support/shards.py gate
+          --plan-result "$PLAN_RESULT"
+          --tests-result "$TESTS_RESULT"
+          --audit-result "$AUDIT_RESULT"
+          --serial-result "$SERIAL_RESULT"
+          --compare-serial "$COMPARE_SERIAL"
+
+      - name: Download partition manifest
+        if: always()
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ci-partition-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-partition
+
+      - name: Download shard evidence
+        if: always()
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: ci-shard-${{ github.sha }}-${{ github.run_attempt }}-*
+          path: ${{ runner.temp }}/ci-shards
+          merge-multiple: true
+
+      - name: Download serial reference
+        if: ${{ inputs.compare_serial == true }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ci-serial-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-serial
+
+      - name: Validate shard receipts
+        if: always()
+        run: >-
+          uv run --locked --extra dev python .github/workflows/ci_support/shards.py validate
+          --manifest "$RUNNER_TEMP/ci-partition/ci-partition-manifest.json"
+          --receipts-dir "$RUNNER_TEMP/ci-shards"
+          --source-sha "$GITHUB_SHA"
+          --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT"
+          --summary-out "$RUNNER_TEMP/ci-quality/validation.json"
+
+      - name: Combine coverage and enforce the global floor
+        if: always()
+        run: >-
+          uv run --locked --extra dev python .github/workflows/ci_support/shards.py coverage
+          --shards-dir "$RUNNER_TEMP/ci-shards"
+          --shards 4
+          --data-file "$RUNNER_TEMP/ci-quality/coverage-combined.data"
+          --json-out "$RUNNER_TEMP/ci-quality/coverage-combined.json"
+          --source-root src/investment_analyst
+          --fail-under 82
+          --summary-out "$RUNNER_TEMP/ci-quality/coverage-summary.json"
+
+      - name: Record gate finish
+        if: always()
+        run: |
+          finished=$(date +%s)
+          mkdir -p "$RUNNER_TEMP/ci-quality"
+          printf '%s\n' "$finished" > "$RUNNER_TEMP/ci-quality/gate-finished-at"
+          echo "CI_GATE_FINISHED_AT=$finished" >> "$GITHUB_ENV"
+
+      - name: Compare serial reference
+        if: ${{ inputs.compare_serial == true }}
+        run: >-
+          uv run --locked --extra dev python .github/workflows/ci_support/shards.py compare
+          --manifest "$RUNNER_TEMP/ci-partition/ci-partition-manifest.json"
+          --receipts-dir "$RUNNER_TEMP/ci-shards"
+          --serial-dir "$RUNNER_TEMP/ci-serial"
+          --combined-coverage "$RUNNER_TEMP/ci-quality/coverage-combined.json"
+          --serial-coverage "$RUNNER_TEMP/ci-serial/coverage-serial.json"
+          --aggregate-started-at "$CI_AGGREGATE_STARTED_AT"
+          --aggregate-finished-at "$CI_GATE_FINISHED_AT"
+          --max-ratio 0.6
+          --summary-out "$RUNNER_TEMP/ci-quality/comparison.json"
+
+      - name: Collect aggregate evidence
+        if: always()
+        run: >-
+          cp "$RUNNER_TEMP/ci-partition/ci-partition-manifest.json"
+          "$RUNNER_TEMP/ci-quality/ci-partition-manifest.json"
+
+      - name: Upload aggregate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-quality-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-quality/
+          retention-days: 7
+          if-no-files-found: warn

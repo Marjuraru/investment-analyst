@@ -312,6 +312,7 @@ def _critical_auto_policy(
     block: str = "DEV-7",
     expected_branch: str = "codex/dev-7-finalize-policy-guard",
     route_effect: str = "NONE",
+    route_item: str = "DEV",
 ) -> bytes:
     return json.dumps(
         {
@@ -325,7 +326,7 @@ def _critical_auto_policy(
                     "writer_role": "BUILD_PRODUCT",
                     "profile": "CRITICAL",
                     "finalize_policy": "AUTO",
-                    "route_item": "DEV",
+                    "route_item": route_item,
                     "blocks": [
                         {
                             "id": block,
@@ -416,10 +417,67 @@ def test_committed_critical_auto_policy_is_bounded_to_declared_blocks() -> None:
     ] == [
         ("DATA-CHASSIS-READ-1", "codex/data-chassis-read-1", "ADVANCES"),
         ("DATA-CHASSIS-47", "codex/data-chassis-47", "ADVANCES"),
-        ("DATA-CHASSIS-48", "codex/data-chassis-48", "ADVANCES"),
+        ("DATA-CHASSIS-48", "codex/data-chassis-48", "COMPLETES"),
         ("DATA-CHASSIS-49", "codex/data-chassis-49", "ADVANCES"),
         ("DATA-CHASSIS-CLOSE", "codex/data-chassis-close", "COMPLETES"),
     ]
+    assert continuity.blocks[2].route_effect == "COMPLETES"
+
+
+def _continuity_body(route_effect: str, block: str, branch: str) -> str:
+    return (
+        _body(policy="AUTO", authorization="human-dev-7", route_effect=route_effect)
+        .replace("DEV-7", block)
+        .replace("codex/dev-7-finalize-policy-guard", branch)
+    )
+
+
+def test_critical_auto_binds_data_chassis_48_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _critical_auto_policy(
+        block="DATA-CHASSIS-48",
+        expected_branch="codex/data-chassis-48",
+        route_effect="COMPLETES",
+        route_item="DATA-CHASSIS",
+    )
+    monkeypatch.setattr(_MODULE, "_git_bytes", lambda _arguments, _label: policy)
+    metadata = parse_work_block(
+        _continuity_body("COMPLETES", "DATA-CHASSIS-48", "codex/data-chassis-48")
+    )
+
+    evidence = _MODULE._critical_auto_evidence(metadata)
+
+    assert evidence is not None
+    assert evidence.authorization_id == "human-dev-7"
+    assert evidence.source == "verified_base"
+
+
+@pytest.mark.parametrize(
+    ("block", "branch", "route_effect"),
+    [
+        ("DATA-CHASSIS-48", "codex/data-chassis-48", "ADVANCES"),
+        ("DATA-CHASSIS-48", "codex/data-chassis-49", "COMPLETES"),
+        ("DATA-CHASSIS-49", "codex/data-chassis-49", "COMPLETES"),
+    ],
+)
+def test_critical_auto_rejects_wrong_data_chassis_48_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    block: str,
+    branch: str,
+    route_effect: str,
+) -> None:
+    policy = _critical_auto_policy(
+        block="DATA-CHASSIS-48",
+        expected_branch="codex/data-chassis-48",
+        route_effect="COMPLETES",
+        route_item="DATA-CHASSIS",
+    )
+    monkeypatch.setattr(_MODULE, "_git_bytes", lambda _arguments, _label: policy)
+    metadata = parse_work_block(_continuity_body(route_effect, block, branch))
+
+    with pytest.raises(_MODULE.GuardFailure, match="does not bind the Work Block"):
+        _MODULE._critical_auto_evidence(metadata)
 
 
 def test_continuity_authorization_is_absent_from_candidate_or_unbound_policy(

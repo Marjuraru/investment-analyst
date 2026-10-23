@@ -362,7 +362,10 @@ Enlaza logs, no los copia. GitHub es el bus de handoff.
 
 `Python 3.12 quality` es la autoridad de la suite determinista para el SHA publicado. BUILD usa
 Ruff y pruebas focalizadas; `bash scripts/check.sh` sólo se ejecuta si cambian CI/dependencias/lock/
-toolchain, CI no está disponible, el bloque lo justifica o el usuario lo pide.
+toolchain, CI no está disponible, el bloque lo justifica o el usuario lo pide. El gate agrega ahora
+las cuatro particiones paralelas, la combinación de cobertura y la auditoría de dependencias;
+`.github/workflows/ci_support/README.md` conserva la receta vigente. La comparación serial opcional
+de `workflow_dispatch` es evidencia de CI-T1 y no crea un segundo check requerido.
 
 ## AUDIT semántico independiente
 

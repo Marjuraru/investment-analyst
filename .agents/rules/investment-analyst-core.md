@@ -36,18 +36,20 @@ texto y la secuencia completos; esta sección es sólo el resumen operativo.
 `human-data-chassis-continuity-finalize-20261022` reutiliza `critical-auto-policy-v1` y
 `finalize_only`, con `writer_role=BUILD_PRODUCT`, `profile=CRITICAL`, `finalize_policy=AUTO` y
 `route_item=DATA-CHASSIS`. Vincula exactamente `DATA-CHASSIS-READ-1`
-(`codex/data-chassis-read-1`, `ADVANCES`), `DATA-CHASSIS-47`, `DATA-CHASSIS-48` y
-`DATA-CHASSIS-49` (sus ramas canónicas, `ADVANCES`), más `DATA-CHASSIS-CLOSE`
-(`codex/data-chassis-close`, `COMPLETES`). Otros IDs, ramas, roles o `route_effect` siguen
-rechazados; no se amplía automáticamente a ramas futuras desconocidas.
+(`codex/data-chassis-read-1`, `ADVANCES`), `DATA-CHASSIS-47` (`ADVANCES`), `DATA-CHASSIS-48`
+(`codex/data-chassis-48`, `COMPLETES`) y `DATA-CHASSIS-49` (`codex/data-chassis-49`, `ADVANCES`),
+más `DATA-CHASSIS-CLOSE` (`codex/data-chassis-close`, `COMPLETES`). Otros IDs, ramas, roles o
+`route_effect` siguen rechazados; no se amplía automáticamente a ramas futuras desconocidas.
 
-La secuencia es READ-1 → 47 → 48 → 49, con limpieza y reconciliación obligatorias en 49, y CLOSE
-sólo cuando exista evidencia global suficiente y un PLAN fresco; ADVANCES evita fingir un cierre
-global. Ningún bloque se completa por agotar tiempo. Esta autorización no publica esos Issues, no
-autoriza importaciones, retiradas, adquisición masiva ni cambios de schema antes de un Work Block
-específico, y no altera los objetivos Q1–Q7 ni su snapshot histórico. La obligación de lectura
-eficiente vive en `AGENTS.md`; no concede operaciones nuevas ni relaja PIT, lineage, Decimal,
-identidad determinista o append-only.
+Decisión humana posterior, registrada en el Issue #355
+(https://github.com/Marjuraru/investment-analyst/issues/355): 47 cerrado → DEV-CI-SHARDS-1 (CI
+paralelo) → DATA-CHASSIS-48 (recuperación integral, limpieza y cierre). 49/CLOSE quedan absorbidos
+por 48 y no se publican por rutina; el binding de 48 pasa a `COMPLETES` para que el producto cierre
+DATA-CHASSIS sin otro bloque administrativo. READ-1, 47 y los bindings históricos se conservan.
+Ningún bloque se completa por agotar tiempo. Esta autorización no publica Issues, no autoriza
+importaciones, retiradas, adquisición masiva ni cambios de schema antes de un Work Block
+específico, y no altera los objetivos Q1–Q7 ni su snapshot histórico. La obligación de lectura eficiente vive en `AGENTS.md`; no concede operaciones nuevas ni
+relaja PIT, lineage, Decimal, identidad determinista o append-only.
 
 ## Objetivos, evidencia y cierre
 
