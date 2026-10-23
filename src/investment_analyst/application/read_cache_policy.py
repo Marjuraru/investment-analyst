@@ -199,9 +199,8 @@ class ReadCachePolicy:
                     cacheable = revalidate().digest == key
                 except Exception:
                     cacheable = False
-            if cacheable:
-                self.store(signature, value)
-            self._record(family, "miss" if cacheable else "uncacheable", started)
+            stored = self.store(signature, value) if cacheable else False
+            self._record(family, "miss" if stored else "uncacheable", started)
             return value
         except BaseException as error:
             wait_for.error = error

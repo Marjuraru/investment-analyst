@@ -70,6 +70,12 @@ def test_entry_larger_than_the_byte_budget_is_not_retained() -> None:
     assert estimate_payload_bytes(payload) > 16
     assert cache.store(signature, payload) is False
     assert cache.lookup(signature) is None
+    telemetry = ReadPerformanceRegistry(generation="generation-1")
+    cache = ReadCachePolicy(max_bytes=16, telemetry=telemetry)
+    assert cache.get_or_load(signature, lambda: payload, family="market-bars") == payload
+    summary = telemetry.summary()
+    families = summary["families"]
+    assert families["market-bars"]["uncacheable"] == 1
 
 
 def test_identical_concurrent_loads_are_coalesced() -> None:
