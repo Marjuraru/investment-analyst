@@ -8,8 +8,9 @@ selección/histórico de 48 sigue futura. Autoridad previa: Issue #349 (`DATA-CH
 secuencia no declara Q1–Q7 `MET`.
 
 La ruta obligatoria es 46 → 47 → 48 → 49: 46 formaliza inventario y selección; 47 cubre el archivo
-recuperable y ejecuta el piloto; 48 reincorpora por lotes con consumidor; 49 retira físicamente y
-cierra. Los tramos 47–49 no son Issues activos ni autoridad ejecutable anticipada.
+recuperable y ejecuta el piloto; 48 recupera selectivamente por consumidor con un manifiesto sellado
+y un writer único; 49 retira físicamente y cierra. Los tramos 47–49 no son Issues activos ni
+autoridad ejecutable anticipada.
 
 ## Objetivo y frontera
 
@@ -66,10 +67,11 @@ de fórmulas/fuentes para reducir volumen. Orden por valor para el analista y co
    aislamiento; mantenimiento de un writer con checkpoints y continuación, nunca copia de DB sobre
    el activo. Rechazar mismo ID con contenido distinto; no renombrar históricos como LIVE ni cambiar
    available_at/received_at por la fecha de importación. No rechazar automáticamente IDs tardíos.
-5. **Verificación y publicación por lote.** Fuente seleccionada⊆destino por conjuntos/hash canónico,
-   conteos y lineage; resultados y revisiones nuevas v2 intactos. Publicar cobertura, rango y ausencias
-   sólo tras verificación durable. Backup/restore y medición por lote; no bloquear consultas hasta que
-   vuelva todo el archivo. No prometer lectura de historia que aún no está incorporada.
+5. **Verificación y publicación de la selección.** Fuente seleccionada⊆destino por conjuntos/hash
+   canónico, conteos y lineage; resultados y revisiones nuevas v2 intactos. Publicar cobertura, rango
+   y ausencias sólo tras verificación durable. Un único backup sucesor reutiliza bytes idénticos del
+   parent y se valida antes de publicar; no se crea un backup por lote ni se bloquean consultas por
+   un mínimo universal de 25 GB. No prometer lectura de historia que aún no está incorporada.
 6. **Cierre/retención.** Lista de raíces cuyo último consumidor terminó, recuperación externa probada,
    coste físico medido y recibo de lifecycle. Después retirar payloads redundantes, conservando índices
    de archivo y evidencia. Cierre DATA-CHASSIS sólo cuando criterios vigentes se satisfagan o una

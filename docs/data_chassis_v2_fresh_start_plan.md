@@ -77,8 +77,10 @@ cgroup mantenimiento High2684354560/Max3221225472/Swap0, SQL120s/open180s y spil
 1GB DuckDB por instancia, agregado≤2GB. Runtime: comprobar límites efectivos antes de habilitar
 scheduler; DuckDB≤2GB, threads≤2, spill≤1GB y cgroup sin límite infinito. Mantener estos techos,
 no elevarlos por OOM. Configurar mediante mecanismos existentes y verificar padres/margen para v1
-mientras coexista la prueba; serializar fases pesadas. C: libre≥max(25GB,5GB+crecimiento máximo
-siguiente unidad+spill+staging). Un dato ausente no es cero ni permiso para escribir.
+mientras coexista la prueba; serializar fases pesadas. Para la recuperación 48, `C:` libre debe
+superar 5 GB + el pico calculado y WSL debe admitir importación, backup sucesor y restore; el mínimo
+universal de 25 GB no aplica a lecturas/inventarios read-only ni bloquea la selección. Un dato
+ausente no es cero ni permiso para escribir.
 
 ## Secuencia de arranque y evidencia conservada
 

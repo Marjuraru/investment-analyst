@@ -2635,6 +2635,154 @@ class CompactAnalyticalStore:
             raise CompactAnalyticalError("historical seal was not persisted")
         return result
 
+    def repair_historical_inventory(
+        self,
+        *,
+        metric_ids: Collection[UUID],
+        diagnostic_ids: Collection[UUID],
+        before_seal: HistoricalAnalyticalSeal,
+        after_metric_count: int,
+        after_metric_digest: str,
+        after_diagnostic_count: int,
+        after_diagnostic_digest: str,
+        sealed_at: datetime,
+    ) -> HistoricalAnalyticalSeal:
+        """Remove one exact authorized historical subset and publish its valid seal.
+
+        The operation is deliberately separate from ``seal_historical_inventory``:
+        it resolves only diagnostic-owned component/evidence rows and the exact
+        metric/diagnostic identities supplied by an external repair authorization.
+        Shared sequences, segments, content, raw and observations are never touched.
+        """
+        metric_ids = tuple(sorted(set(metric_ids), key=str))
+        diagnostic_ids = tuple(sorted(set(diagnostic_ids), key=str))
+        if not metric_ids or not diagnostic_ids:
+            raise CompactAnalyticalError("historical repair requires both exact ID sets")
+        if sealed_at.tzinfo is None or sealed_at.utcoffset() is None:
+            raise CompactAnalyticalError("historical repair timestamp must be timezone-aware")
+        if self.historical_seal() != before_seal:
+            raise CompactAnalyticalError("historical repair pre-seal differs")
+        metric_text = [str(identifier) for identifier in metric_ids]
+        diagnostic_text = [str(identifier) for identifier in diagnostic_ids]
+        metric_placeholders = ", ".join("?" for _ in metric_text)
+        diagnostic_placeholders = ", ".join("?" for _ in diagnostic_text)
+        with write_transaction(self._connection):
+            if self.historical_seal() != before_seal:
+                raise CompactAnalyticalError("historical repair pre-seal differs")
+            metric_rows = self._connection.execute(
+                f"SELECT count(*) FROM {_METRIC_TABLE} "
+                f"WHERE result_id IN ({metric_placeholders}) AND origin='HISTORICAL'",
+                metric_text,
+            ).fetchone()[0]
+            if int(metric_rows) != len(metric_text):
+                raise CompactAnalyticalError("historical repair metric origin or identity differs")
+            diagnostic_rows = self._connection.execute(
+                f"SELECT count(*) FROM {_DIAGNOSTIC_TABLE} "
+                f"WHERE diagnostic_id IN ({diagnostic_placeholders}) "
+                "AND origin='HISTORICAL'",
+                diagnostic_text,
+            ).fetchone()[0]
+            if int(diagnostic_rows) != len(diagnostic_text):
+                raise CompactAnalyticalError(
+                    "historical repair diagnostic origin or identity differs"
+                )
+            metric_survivors = self._connection.execute(
+                f"SELECT count(*) FROM {_METRIC_TABLE} p "
+                f"JOIN {_SEQUENCE_SEGMENT_TABLE} l ON l.sequence_id=p.metric_sequence_id "
+                f"JOIN {_SEGMENT_MEMBER_TABLE} m ON m.segment_id=l.segment_id "
+                f"WHERE m.member_id IN ({metric_placeholders}) "
+                f"AND p.result_id NOT IN ({metric_placeholders})",
+                metric_text + metric_text,
+            ).fetchone()[0]
+            component_survivors = self._connection.execute(
+                f"SELECT count(DISTINCT c.diagnostic_id) FROM {_COMPONENT_TABLE} c "
+                f"JOIN {_SEQUENCE_SEGMENT_TABLE} l ON l.sequence_id=c.metric_sequence_id "
+                f"JOIN {_SEGMENT_MEMBER_TABLE} m ON m.segment_id=l.segment_id "
+                f"WHERE m.member_id IN ({metric_placeholders}) "
+                f"AND c.diagnostic_id NOT IN ({diagnostic_placeholders})",
+                metric_text + diagnostic_text,
+            ).fetchone()[0]
+            evidence_survivors = self._connection.execute(
+                f"SELECT count(DISTINCT diagnostic_id) FROM {_EVIDENCE_TABLE} "
+                f"WHERE metric_result_id IN ({metric_placeholders}) "
+                f"AND diagnostic_id NOT IN ({diagnostic_placeholders})",
+                metric_text + diagnostic_text,
+            ).fetchone()[0]
+            if metric_survivors or component_survivors or evidence_survivors:
+                raise CompactAnalyticalError("historical repair has a surviving reference")
+            self._connection.execute(
+                f"DELETE FROM {_COMPONENT_TABLE} "
+                f"WHERE diagnostic_id IN ({diagnostic_placeholders})",
+                diagnostic_text,
+            )
+            self._connection.execute(
+                f"DELETE FROM {_EVIDENCE_TABLE} WHERE diagnostic_id IN ({diagnostic_placeholders})",
+                diagnostic_text,
+            )
+            self._connection.execute(
+                f"DELETE FROM {_DIAGNOSTIC_TABLE} "
+                f"WHERE diagnostic_id IN ({diagnostic_placeholders}) "
+                "AND origin='HISTORICAL'",
+                diagnostic_text,
+            )
+            self._connection.execute(
+                f"DELETE FROM {_METRIC_TABLE} "
+                f"WHERE result_id IN ({metric_placeholders}) AND origin='HISTORICAL'",
+                metric_text,
+            )
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS workspace_v2_historical_seal_history "
+                "(source_fingerprint VARCHAR NOT NULL, metric_count BIGINT NOT NULL, "
+                "metric_digest VARCHAR NOT NULL, diagnostic_count BIGINT NOT NULL, "
+                "diagnostic_digest VARCHAR NOT NULL, sealed_at TIMESTAMPTZ NOT NULL)"
+            )
+            self._connection.execute(
+                "INSERT INTO workspace_v2_historical_seal_history VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    before_seal.source_fingerprint,
+                    before_seal.metric_count,
+                    before_seal.metric_digest,
+                    before_seal.diagnostic_count,
+                    before_seal.diagnostic_digest,
+                    before_seal.sealed_at,
+                ],
+            )
+            self._connection.execute(f"DELETE FROM {_SEAL_TABLE}")
+            actual = self.historical_inventory_digests()
+            expected = (
+                after_metric_count,
+                after_metric_digest,
+                after_diagnostic_count,
+                after_diagnostic_digest,
+            )
+            if actual != expected:
+                raise CompactAnalyticalError(
+                    "historical repair post-inventory differs from the authorized projection"
+                )
+            self.verify_historical_relationships()
+            self._connection.execute(
+                f"INSERT INTO {_SEAL_TABLE} VALUES ('historical-analytical-v1', ?, ?, ?, ?, ?, ?)",
+                [
+                    before_seal.source_fingerprint,
+                    after_metric_count,
+                    after_metric_digest,
+                    after_diagnostic_count,
+                    after_diagnostic_digest,
+                    sealed_at.astimezone(UTC),
+                ],
+            )
+            result = self.historical_seal()
+            if (
+                result is None
+                or result.metric_count != after_metric_count
+                or result.metric_digest != after_metric_digest
+                or result.diagnostic_count != after_diagnostic_count
+                or result.diagnostic_digest != after_diagnostic_digest
+                or result.source_fingerprint != before_seal.source_fingerprint
+            ):
+                raise CompactAnalyticalError("historical repair seal was not persisted")
+            return result
+
     def verify_historical_relationships(self, *, read_only_units: bool = False) -> None:
         """Resolve shared references once before projecting each parent invariant.
 

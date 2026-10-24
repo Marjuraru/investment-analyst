@@ -7,12 +7,12 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from migrate_workspace_v2 import _host_free_bytes
-
+from investment_analyst.workspace.backup_reuse import BackupReuseError, BackupReuseService
 from investment_analyst.workspace.drive_transport import (
     DriveTransport,
     DriveTransportConfig,
@@ -156,6 +156,27 @@ def _parser() -> argparse.ArgumentParser:
     restore_remote.add_argument("--reserve-bytes", type=int, default=5_000_000_000)
     restore_remote.add_argument("--minimum-host-free-bytes", type=int, default=25_000_000_000)
     restore_remote.add_argument("--receipt", type=_new_file, required=True)
+
+    create_reuse = commands.add_parser(
+        "create-reuse", help="create a verified successor reusing identical parent files"
+    )
+    create_reuse.add_argument("--source", type=Path, required=True)
+    create_reuse.add_argument("--destination", type=Path, required=True)
+    create_reuse.add_argument("--parent", type=Path, required=True)
+    create_reuse.add_argument("--reserve-bytes", type=int, default=5_000_000_000)
+    create_reuse.add_argument("--allow-copy-fallback", action="store_true")
+    create_reuse.add_argument("--receipt", type=_new_file, required=True)
+
+    create_packed = commands.add_parser(
+        "create-packed", help="create a resumable packed backup from a verified source"
+    )
+    create_packed.add_argument("--source", type=Path, required=True)
+    create_packed.add_argument("--destination", type=Path, required=True)
+    create_packed.add_argument("--volume-bytes", type=int, default=8 * 1024 * 1024)
+    create_packed.add_argument("--fragment-bytes", type=int, default=1024 * 1024)
+    create_packed.add_argument("--reserve-bytes", type=int, default=5_000_000_000)
+    create_packed.add_argument("--writer-closed", action="store_true")
+    create_packed.add_argument("--receipt", type=_new_file, required=True)
     return parser
 
 
@@ -183,6 +204,10 @@ def _load_inventory(path: Path) -> LifecycleInventory:
         return LifecycleInventory.model_validate_json(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise ValueError("lifecycle inventory is malformed") from error
+
+
+def _host_free_bytes() -> int:
+    return int(shutil.disk_usage(Path("/mnt/c")).free)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -319,6 +344,38 @@ def main(argv: list[str] | None = None) -> int:
                 receipt_path=args.receipt,
             )
             return 0
+        if args.command == "create-reuse":
+            service = BackupReuseService(workspace_service)
+            receipt = service.create_successor(
+                args.source,
+                args.destination,
+                args.parent,
+                available_bytes=_host_free_bytes if args.allow_copy_fallback else None,
+                reserve_bytes=args.reserve_bytes,
+                allow_copy_fallback=args.allow_copy_fallback,
+            )
+            _write_output(args.receipt, receipt.model_dump(mode="json"))
+            return 0
+        if args.command == "create-packed":
+            service = WorkspaceV2BackupService(workspace_service)
+            manifest = service.create_packed(
+                args.source,
+                args.destination,
+                volume_bytes=args.volume_bytes,
+                fragment_bytes=args.fragment_bytes,
+                available_bytes=_host_free_bytes,
+                reserve_bytes=args.reserve_bytes,
+                writer_closed=args.writer_closed,
+            )
+            _write_output(
+                args.receipt,
+                {
+                    "schema_version": "packed-backup-receipt-v1",
+                    "writer_closed": args.writer_closed,
+                    "manifest": manifest.model_dump(mode="json"),
+                },
+            )
+            return 0
         if args.command == "restore-remote":
             if _host_free_bytes() < args.minimum_host_free_bytes:
                 raise ValueError("remote restore host capacity is below the declared floor")
@@ -386,6 +443,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 130
     except (
+        BackupReuseError,
         DriveTransportError,
         OSError,
         ValueError,

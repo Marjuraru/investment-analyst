@@ -10,7 +10,12 @@ sólo se enlaza la documentación vigente y el archivo histórico.
 - [Eficiencia de lectura](read_path_efficiency.md): firma `read-dependency-signature-v1`, caché
   acotada, telemetría `critical-read-performance-v1` y reapertura de vista.
 - [Continuidad](data_chassis_continuity_plan.md): archivo `continuity-archive-v1`, selección
-  `historical-selection-v1` y estado de 47; 48/49 siguen futuros.
+  `historical-selection-v1` y estado de 47; 48 ejecuta la recuperación selectiva y 49 conserva la
+  retención física.
+- [Runbook de recuperación histórica](historical_recovery_runbook.md): selección sellada,
+  importación bajo writer único, backup sucesor reutilizable y restore remoto.
+- [Retención y lista concreta 2026-10-23](planning_context/storage_retirement_2026-10-23.md):
+  cobertura retenida, último consumidor y propuesta de retiro sin borrar candidatos preexistentes.
 
 - [Interfaz local y operación continua](local_interface.md)
 - [Readiness operacional y recuperación](operational_readiness.md)
