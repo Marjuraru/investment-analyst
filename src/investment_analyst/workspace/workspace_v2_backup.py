@@ -12,7 +12,7 @@ import struct
 import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO, Literal, Protocol
@@ -328,8 +328,13 @@ class WorkspaceV2BackupService:
         fragment_bytes: int = _PACKED_CHUNK_BYTES,
         available_bytes: Callable[[], int] | None = None,
         reserve_bytes: int = _MINIMUM_RESERVE_BYTES,
+        writer_closed: bool = False,
     ) -> WorkspaceV2PackedBackupManifest | WorkspaceV2PackedStreamManifest:
-        """Resume a gzip-volume backup without recreating sealed volumes."""
+        """Resume a gzip-volume backup without recreating sealed volumes.
+
+        ``writer_closed`` is reserved for a verified immutable backup source whose
+        writer has already been closed and whose lock files are intentionally absent.
+        """
         if volume_bytes <= 8 or fragment_bytes <= 0:
             raise WorkspaceV2BackupError("packed backup limits must be positive")
         source_root, destination_root = _checked_packed_roots(source, destination)
@@ -340,7 +345,8 @@ class WorkspaceV2BackupService:
         if not incomplete.exists():
             _validate_capacity_reader(capacity_reader, reserve_bytes)
         try:
-            with _v2_writer_guard(source_root), self._writer_lock:
+            guard = nullcontext() if writer_closed else _v2_writer_guard(source_root)
+            with guard, self._writer_lock:
                 inspection = self._require_v2_inspection(source_root)
                 inventory_path = incomplete / _PACKED_INVENTORY_NAME
                 if inventory_path.exists():
@@ -663,6 +669,8 @@ def _open_packed_checkpoint(
 
 def _inventory_files(path: Path) -> Iterator[WorkspaceBackupFile]:
     for entry in iter_inventory(path):
+        if entry.get("path") == _MANIFEST_NAME:
+            continue
         try:
             yield WorkspaceBackupFile.model_validate(entry)
         except ValueError as error:
@@ -1344,7 +1352,9 @@ def _verify_streamed_restore_inventory(
         raise WorkspaceV2BackupError("packed restore verification checkpoint is invalid")
     if not isinstance(complete, bool):
         raise WorkspaceV2BackupError("packed restore verification checkpoint is invalid")
-    expected = iter_inventory(inventory_path)
+    expected = (
+        entry for entry in iter_inventory(inventory_path) if entry.get("path") != _MANIFEST_NAME
+    )
     actual_paths = _iter_restore_regular_files(destination)
     count = 0
     pending: list[tuple[Path, int, str]] = []
@@ -1420,7 +1430,11 @@ def _restore_packed_stream(
     next_fragment = int(checkpoint["next_fragment_ordinal"])
     if next_volume < 0 or next_fragment < 0:
         raise WorkspaceV2BackupError("packed restore checkpoint cursor is invalid")
-    entries = iter_inventory(backup_root / _PACKED_INVENTORY_NAME)
+    entries = (
+        entry
+        for entry in iter_inventory(backup_root / _PACKED_INVENTORY_NAME)
+        if entry.get("path") != _MANIFEST_NAME
+    )
     current = _stream_next_data_entry(entries, destination)
     current_offset = 0
     final_checkpoint = checkpoint
