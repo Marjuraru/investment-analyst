@@ -23,6 +23,8 @@ from investment_analyst.core.models import (
     RawRecord,
     SourceReference,
 )
+from investment_analyst.storage.raw_v2 import RawV2TemporalStamp
+from investment_analyst.storage.workspace_v2_repositories import WorkspaceV2RawRecordRepository
 from investment_analyst.workspace.historical_recovery import (
     HistoricalRecoveryClassification,
     HistoricalRecoveryEntityKind,
@@ -234,3 +236,47 @@ def test_importer_rejects_present_later_input_before_write(tmp_path: Path) -> No
         )
         with pytest.raises(HistoricalRecoveryError, match="PIT admission"):
             importer._admit_pit(HistoricalRecoveryEntityKind.METRIC_RESULT, [item])
+
+
+def test_importer_rejects_present_raw_with_different_pit(tmp_path: Path) -> None:
+    service, source_paths, destination_paths, output, _ = _seed(tmp_path)
+    manifest = load_historical_recovery_manifest(output / "selection.json")
+    item = next(
+        item
+        for item in _items(manifest, output)
+        if item.entity_kind is HistoricalRecoveryEntityKind.RAW_RECORD
+        and item.classification is HistoricalRecoveryClassification.YA_PRESENTE
+    )
+    with service.open_storage(destination_paths, WorkspaceAccessMode.READ_WRITE) as destination:
+        repository = destination.raw_records
+        assert isinstance(repository, WorkspaceV2RawRecordRepository)
+        record = repository.get(item.entity_id)
+        after = RawV2TemporalStamp(
+            available_at=record.available_at + timedelta(days=1),
+            received_at=record.received_at + timedelta(days=1),
+            source_retrieved_at=record.source.retrieved_at + timedelta(days=1),
+        )
+        repair = repository.plan_temporal_repair(
+            item.entity_id,
+            before=RawV2TemporalStamp(
+                available_at=record.available_at,
+                received_at=record.received_at,
+                source_retrieved_at=record.source.retrieved_at,
+            ),
+            after=after,
+        )
+        assert repository.repair_temporal_metadata(repair).changed is True
+
+    source = service.open_storage(source_paths, WorkspaceAccessMode.READ_ONLY)
+    destination = service.open_storage(destination_paths, WorkspaceAccessMode.READ_WRITE)
+    with source, destination:
+        importer = HistoricalRecoveryImporter(
+            source=source,
+            destination=destination,
+            manifest=manifest,
+            manifest_root=output,
+            checkpoint_path=tmp_path / "checkpoint.json",
+            source_fingerprint=manifest.source_fingerprint,
+        )
+        with pytest.raises(HistoricalRecoveryError, match="source identity differs"):
+            importer._verify_items([item])
