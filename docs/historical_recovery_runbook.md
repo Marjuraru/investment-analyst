@@ -199,18 +199,57 @@ that control file. `WorkspaceV2PhysicalDeltaIndexService` correctly rejects the 
 corruption: the packed restore already excludes the same control file and its file-level
 verification is complete.
 
-Therefore a physical delta cannot be derived from the retained packed parent without either:
+R4 permits the minimum control reconstruction instead of a full re-pack. The compatibility view
+`ops/data-chassis-48/v2-backup-final-20261024c-packed-view` reuses every immutable sealed volume by
+hardlink and writes only:
 
-- a compatible packed parent rebuilt from a workspace tree (no `backup_manifest.json`), requiring a
-  full re-pack of 4,242,905,469 logical bytes into approximately 1.3 GB of volumes; or
-- modifying the sealed parent controls, which R4 forbids.
+- a filtered `source-inventory.jsonl` that removes the single `backup_manifest.json` entry the journal
+  intentionally omits (175,803,044 B, SHA-256 `7908c9f7…`), recomputing its count, bytes and digest;
+- a small v3 manifest binding the filtered inventory (`ee8c46db…`, 870,444 files, 4,067,102,425 B),
+  the unchanged journal (`0b53eef6…`, 486 volumes) and the same workspace id.
 
-Per R4, this runbook records the minimum component requiring reconstruction and does not start a
-total copy automatically. The retained `.restore-final-20261024e.incomplete`, its checkpoint, the
-sealed backup c, the remote c and its manifest remain untouched. A later authorized epoch may
-rebuild the compatible packed parent, upload only the new volumes/objects, and resume the retained
-restore with an explicit prior/new manifest binding and a re-verification of the affected page plus
-the repaired document lineage.
+The sealed packed parent remains untouched (`431c59bf…`); the view is `157806cb…` with manifest
+SHA-256 `07e23a4c…`, 486 hardlinked volumes and 486 inode matches. No file exceeds 1 GB. The
+physical-delta index built from the view is `08b7845f…` with 870,444 files, 872,647 entries and
+4,067,102,425 logical bytes.
+
+Final delta and restore evidence:
+
+| Item | Value |
+| --- | --- |
+| Epoch | `770a315a-e52f-4927-9b82-66595d18a01e` |
+| Delta manifest | `ff305409a2ec2850855b6d3127ffe81c1ea8a14fec0a6a391a2b8a618cf0ef75` |
+| Delta files seal | `300e40fce79e5b7bd8744dfa0f13212eba35f25c5c9f25811bbecf6ef213aef2` |
+| Delta plan | 870,492 files; 568,185,469 new B in 585 objects; 3,516,107,740 reused B |
+| Upload receipt | `ops/data-chassis-48/repair-delta-20261025/upload-receipt.json`; 870,492 confirmed; completed `2026-10-25T19:54:55Z` |
+| Remote objects | `physical-delta/objects`, `physical-delta/controls`, `physical-delta/manifests`; each uploaded object independently read back and hashed |
+| Local staging cleanup | `ops/data-chassis-48/repair-delta-20261025/local-staging-cleanup.json` SHA-256 `8cd289a7…`; the remote copy is authoritative |
+| Retained parent | `.restore-final-20261024e.incomplete`, index `e583a403…`, byte-identical to sealed `c` |
+| Restored root | `ops/data-chassis-48/v2-restore-repair-20261025` |
+| Restore receipt | `ops/data-chassis-48/repair-delta-20261025/restore-receipt.json`; 870,492 files; completed `2026-10-25T21:30:02Z` |
+
+The restore acquired the delta from the remote, verified every object against the new manifest, and
+materialized a new isolated slot from the retained parent plus the remote delta. It did not patch
+the retained `.incomplete` from the active workspace. Post-restore verification:
+
+- `WorkspaceService.inspect` matches the active cut: 869,654 raw records, 203,049 observations,
+  41,737 metric results, 1,902 diagnostic results, status `ready`, workspace id
+  `70c64668-1738-4dfe-ba1f-7e72026bb7fe`.
+- `CompactAnalyticalStore.verify_complete` verifies 41,737 metrics and 1,902 diagnostics; the
+  historical seal remains 14,047 metrics / 1,881 diagnostics with the same digests and
+  `source_fingerprint`.
+- `verify_workspace_incremental_v2` reads 15,406 daily-evidence prefixes and 46,218 recursive
+  checkpoints.
+- The repaired discovery has `available_at=received_at=source.retrieved_at=2026-10-20T18:53:29.313510Z`,
+  unchanged `event_time=2026-10-21T20:49:24.008711Z`, unchanged content checksum `c24afa8d…`; all
+  six dependent document revisions pass `verify_revision`.
+
+Residual operational risk: the final restore materialized 870,492 files and the host `C:` free
+space fell to approximately 3.4 GB, below the 5 GB reserve. No file exceeds 1 GB (the restored
+`storage/v2/index.duckdb` is 682,110,976 B). The local delta payload staging was removed after its
+remote publication was verified; the retained evidence, backup `c`, packed `c`, remote `c`,
+`.incomplete e`, its checkpoint and the successor backup remain. A host-side trim/cleanup is needed
+before another large materialization.
 
 ## Known limitations
 
