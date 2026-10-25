@@ -1025,7 +1025,7 @@ class HistoricalRecoverySelectionBuilder:
             "record_id VARCHAR PRIMARY KEY, asset_id VARCHAR, source_id VARCHAR, "
             "schema_version VARCHAR, content_sha256 VARCHAR, byte_length BIGINT, "
             "available_at VARCHAR, event_time VARCHAR, source_checksum VARCHAR, "
-            "source_record_key VARCHAR)"
+            "source_record_key VARCHAR, received_at VARCHAR, source_retrieved_at VARCHAR)"
         )
         connection.execute(
             "INSERT INTO tmp_recovery_raw_rows "
@@ -1036,7 +1036,10 @@ class HistoricalRecoverySelectionBuilder:
             "CAST(r.event_time AS VARCHAR) AS event_time, "
             "json_extract_string(r.document_json, '$.source.checksum_sha256') "
             "AS source_checksum, "
-            "json_extract_string(r.document_json, '$.source.record_key') AS source_record_key "
+            "json_extract_string(r.document_json, '$.source.record_key') AS source_record_key, "
+            "CAST(r.received_at AS VARCHAR) AS received_at, "
+            "json_extract_string(r.document_json, '$.source.retrieved_at') "
+            "AS source_retrieved_at "
             "FROM raw_record_index r WHERE r.record_id IN "
             "(SELECT record_id FROM tmp_recovery_raw)"
         )
@@ -1378,7 +1381,8 @@ class HistoricalRecoverySelectionBuilder:
         connection = source.store.connection
         rows_all = connection.execute(
             "SELECT record_id, asset_id, source_id, schema_version, content_sha256, "
-            "byte_length, available_at, event_time, source_checksum, source_record_key "
+            "byte_length, available_at, event_time, source_checksum, source_record_key, "
+            "received_at, source_retrieved_at "
             "FROM tmp_recovery_raw_rows ORDER BY record_id"
         ).fetchall()
         connection.execute("DROP TABLE IF EXISTS tmp_recovery_raw_rows")
@@ -1421,6 +1425,9 @@ class HistoricalRecoverySelectionBuilder:
                 str(source.get("source_id") or row[4]),
                 source.get("checksum_sha256"),
                 source.get("record_key"),
+                payload.get("available_at"),
+                payload.get("received_at"),
+                source.get("retrieved_at"),
             )
         return output
 
@@ -1435,14 +1442,19 @@ class HistoricalRecoverySelectionBuilder:
         classification = HistoricalRecoveryClassification.IMPORTAR_FALTANTE
         basis = None
         if present is not None:
-            same_source = (
+            same_identity = (
                 present[0] == schema_version
                 and (present[1] or None) == asset_id
                 and present[2] == source_id
                 and present[3] == row[8]
                 and present[4] == row[9]
             )
-            if not same_source:
+            same_point_in_time = (
+                _instant(present[5]) == _instant(row[6])
+                and _instant(present[6]) == _instant(row[10])
+                and _instant(present[7]) == _instant(row[11])
+            )
+            if not same_identity or not same_point_in_time:
                 classification = HistoricalRecoveryClassification.CONFLICTO
             else:
                 classification = HistoricalRecoveryClassification.YA_PRESENTE
@@ -2362,6 +2374,9 @@ class HistoricalRecoveryImporter:
                     or model.schema_version != source.schema_version
                     or model.source.source_id != source.source.source_id
                     or (model.asset_id or None) != (source.asset_id or None)
+                    or model.available_at != source.available_at
+                    or model.received_at != source.received_at
+                    or model.source.retrieved_at != source.source.retrieved_at
                 ):
                     raise HistoricalRecoveryError(
                         "historical recovery destination raw source identity differs"

@@ -5,12 +5,28 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
-from uuid import UUID
+from typing import Literal
+from uuid import UUID, uuid4
 
+from pydantic import ConfigDict, Field
+
+from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
+from investment_analyst.evidence.sec_documents.repository import (
+    SecDocumentRepository,
+    revision_from_raw_record,
+)
 from investment_analyst.storage.compact_analytical_v2 import CompactAnalyticalStore
+from investment_analyst.storage.errors import StorageError
+from investment_analyst.storage.raw_v2 import (
+    RawV2TemporalRepair,
+    RawV2TemporalRepairReceipt,
+    RawV2TemporalStamp,
+)
+from investment_analyst.storage.workspace_v2_repositories import WorkspaceV2RawRecordRepository
 from investment_analyst.workspace.backup_reuse import inspect_backup_parent
 from investment_analyst.workspace.continuity_archive import (
     ContinuityArchiveError,
@@ -63,6 +79,73 @@ _INVENTORY_CLASSIFICATIONS = (
     "CONFLICT",
     "UNKNOWN",
 )
+_TEMPORAL_REPAIR_SPEC_SCHEMA = "raw-v2-temporal-repair-spec-v1"
+_TEMPORAL_REPAIR_AUTHORIZATION_SCHEMA = "raw-v2-temporal-repair-authorization-v1"
+_TEMPORAL_REPAIR_RECEIPT_SCHEMA = "raw-v2-temporal-repair-receipt-v1"
+_SHA256_PATTERN = r"^[0-9a-f]{64}$"
+
+
+class _TemporalRepairSpec(ContractModel):
+    """Externally supplied, bounded identity and temporal values of one repair."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal["raw-v2-temporal-repair-spec-v1"] = _TEMPORAL_REPAIR_SPEC_SCHEMA
+    workspace_id: UUID
+    record_id: UUID
+    source_id: NonEmptyStr
+    source_checksum_sha256: str = Field(pattern=_SHA256_PATTERN)
+    source_record_key: NonEmptyStr
+    document_raw_record_id: UUID
+    revision_id: UUID
+    accession: NonEmptyStr
+    before: RawV2TemporalStamp
+    after: RawV2TemporalStamp
+
+
+class _TemporalRepairAuthorization(ContractModel):
+    """Typed authorization derived from one spec and the current stored bytes."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal["raw-v2-temporal-repair-authorization-v1"] = (
+        _TEMPORAL_REPAIR_AUTHORIZATION_SCHEMA
+    )
+    spec: _TemporalRepairSpec
+    spec_sha256: str = Field(pattern=_SHA256_PATTERN)
+    repair: RawV2TemporalRepair
+    executor_sha256: str = Field(pattern=_SHA256_PATTERN)
+    created_at: UTCDateTime
+
+
+class _TemporalRepairDocumentLineage(ContractModel):
+    """Post-repair document lineage bound to the corrected discovery times."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    document_raw_record_id: UUID
+    revision_id: UUID
+    accession: NonEmptyStr
+    discovery_available_at: UTCDateTime
+    discovery_received_at: UTCDateTime
+    discovery_source_retrieved_at: UTCDateTime
+    revision_retrieved_at: UTCDateTime
+    metadata_observed_at: UTCDateTime | None = None
+
+
+class _TemporalRepairReceipt(ContractModel):
+    """Small before/after receipt for one exact temporal repair."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal["raw-v2-temporal-repair-receipt-v1"] = _TEMPORAL_REPAIR_RECEIPT_SCHEMA
+    workspace_id: UUID
+    authorization_sha256: str = Field(pattern=_SHA256_PATTERN)
+    spec_sha256: str = Field(pattern=_SHA256_PATTERN)
+    repair: RawV2TemporalRepairReceipt
+    document_lineage: _TemporalRepairDocumentLineage
+    executor_sha256: str = Field(pattern=_SHA256_PATTERN)
+    completed_at: UTCDateTime
 
 
 def _now() -> datetime:
@@ -86,6 +169,98 @@ def _new_file(path: Path) -> Path:
         raise ValueError("output path must be new")
     destination.parent.mkdir(parents=True, exist_ok=True)
     return destination
+
+
+def _canonical_sha256(model: ContractModel) -> str:
+    document = json.dumps(
+        model.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(document.encode("utf-8")).hexdigest()
+
+
+def _executor_sha256() -> str:
+    return _sha256_file(Path(__file__).resolve())
+
+
+def _write_new_model(path: Path, model: ContractModel) -> Path:
+    destination = _new_file(path)
+    document = json.dumps(
+        model.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(document, encoding="utf-8")
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+def _load_model[T: ContractModel](path: Path, model: type[T]) -> T:
+    try:
+        return model.model_validate_json(path.expanduser().resolve().read_bytes())
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{model.__name__} input is unreadable or malformed") from error
+
+
+def _v2_raw_repository(storage) -> WorkspaceV2RawRecordRepository:
+    repository = storage.raw_records
+    if not isinstance(repository, WorkspaceV2RawRecordRepository):
+        raise ValueError("temporal repair requires workspace v2 raw storage")
+    return repository
+
+
+def _temporal_stamp(record) -> RawV2TemporalStamp:
+    return RawV2TemporalStamp(
+        available_at=record.available_at,
+        received_at=record.received_at,
+        source_retrieved_at=record.source.retrieved_at,
+    )
+
+
+def _verify_temporal_identity(record, document, spec: _TemporalRepairSpec):
+    if (
+        record.source.source_id != spec.source_id
+        or record.source.checksum_sha256 != spec.source_checksum_sha256
+        or record.source.record_key != spec.source_record_key
+    ):
+        raise ValueError("temporal repair source identity does not match the spec")
+    payload = record.payload
+    if not isinstance(payload, dict) or payload.get("body_sha256") != spec.source_checksum_sha256:
+        raise ValueError("temporal repair payload hash does not match the spec")
+    revision = revision_from_raw_record(document)
+    if (
+        revision.revision_id != spec.revision_id
+        or revision.discovery_raw_record_id != spec.record_id
+        or revision.document.filing.accession != spec.accession
+        or revision.asset_id != record.asset_id
+    ):
+        raise ValueError("temporal repair document lineage does not match the spec")
+    return revision
+
+
+def _document_lineage(stamp: RawV2TemporalStamp, revision) -> _TemporalRepairDocumentLineage:
+    observed_at = getattr(revision, "metadata_observed_at", None)
+    if revision.retrieved_at < stamp.received_at:
+        raise ValueError("temporal repair leaves the discovery after its document revision")
+    if observed_at is not None and observed_at != stamp.received_at:
+        raise ValueError("temporal repair conflicts with the metadata observation time")
+    return _TemporalRepairDocumentLineage(
+        document_raw_record_id=revision.raw_record_id,
+        revision_id=revision.revision_id,
+        accession=revision.document.filing.accession,
+        discovery_available_at=stamp.available_at,
+        discovery_received_at=stamp.received_at,
+        discovery_source_retrieved_at=stamp.source_retrieved_at,
+        revision_retrieved_at=revision.retrieved_at,
+        metadata_observed_at=observed_at,
+    )
 
 
 def _workspace(service: WorkspaceService, root: Path):
@@ -639,6 +814,127 @@ def _recovery_repair(args: argparse.Namespace) -> int:
     return 0
 
 
+def _recovery_repair_temporal_plan(args: argparse.Namespace) -> int:
+    service = WorkspaceService()
+    spec = _load_model(Path(args.spec), _TemporalRepairSpec)
+    destination_paths = service.resolve(Path(args.destination_workspace))
+    manifest = service.manifest(destination_paths.root)
+    if manifest.format_version != 2 or manifest.workspace_id != spec.workspace_id:
+        raise ValueError("temporal repair workspace does not match the spec")
+    storage = service.open_storage(destination_paths, WorkspaceAccessMode.READ_ONLY)
+    with storage:
+        repository = _v2_raw_repository(storage)
+        record = repository.get(spec.record_id)
+        document = repository.get(spec.document_raw_record_id)
+        revision = _verify_temporal_identity(record, document, spec)
+        if _temporal_stamp(record) != spec.before:
+            raise ValueError("temporal repair prior state does not match the stored record")
+        lineage = _document_lineage(spec.after, revision)
+        repair = repository.plan_temporal_repair(
+            spec.record_id, before=spec.before, after=spec.after
+        )
+    authorization = _TemporalRepairAuthorization(
+        spec=spec,
+        spec_sha256=_canonical_sha256(spec),
+        repair=repair,
+        executor_sha256=_executor_sha256(),
+        created_at=_now(),
+    )
+    output = _write_new_model(Path(args.output), authorization)
+    print(
+        json.dumps(
+            {
+                "schema_version": "raw-v2-temporal-repair-plan-v1",
+                "workspace_id": str(manifest.workspace_id),
+                "record_id": str(spec.record_id),
+                "before_checksum_sha256": repair.before_checksum_sha256,
+                "after_checksum_sha256": repair.after_checksum_sha256,
+                "document_lineage": lineage.model_dump(mode="json"),
+                "authorization": str(output),
+                "authorization_sha256": _canonical_sha256(authorization),
+                "executor_sha256": authorization.executor_sha256,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _recovery_repair_temporal_apply(args: argparse.Namespace) -> int:
+    service = WorkspaceService()
+    authorization = _load_model(Path(args.authorization), _TemporalRepairAuthorization)
+    spec = authorization.spec
+    if _canonical_sha256(spec) != authorization.spec_sha256:
+        raise ValueError("temporal repair spec digest does not match the authorization")
+    if authorization.repair.record_id != spec.record_id:
+        raise ValueError("temporal repair authorization record differs from its spec")
+    destination_paths = service.resolve(Path(args.destination_workspace))
+    manifest = service.manifest(destination_paths.root)
+    if manifest.format_version != 2 or manifest.workspace_id != spec.workspace_id:
+        raise ValueError("temporal repair workspace does not match the authorization")
+    receipt_path = Path(args.receipt).expanduser().resolve()
+    if receipt_path.exists() or receipt_path.is_symlink():
+        existing = _load_model(receipt_path, _TemporalRepairReceipt)
+        if (
+            existing.workspace_id != spec.workspace_id
+            or existing.authorization_sha256 != _canonical_sha256(authorization)
+            or existing.spec_sha256 != authorization.spec_sha256
+            or existing.repair.record_id != spec.record_id
+            or existing.repair.after_checksum_sha256 != authorization.repair.after_checksum_sha256
+        ):
+            raise ValueError("existing temporal repair receipt binds different inputs")
+        print(
+            json.dumps(
+                {
+                    "schema_version": "raw-v2-temporal-repair-apply-v1",
+                    "changed": False,
+                    "receipt": str(receipt_path),
+                    "receipt_sha256": _sha256_file(receipt_path),
+                    "repair": existing.repair.model_dump(mode="json"),
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+        return 0
+    storage = service.open_storage(destination_paths, WorkspaceAccessMode.READ_WRITE)
+    with storage:
+        repository = _v2_raw_repository(storage)
+        repair_receipt = repository.repair_temporal_metadata(authorization.repair)
+        record = repository.get(spec.record_id)
+        document = repository.get(spec.document_raw_record_id)
+        revision = _verify_temporal_identity(record, document, spec)
+        if _temporal_stamp(record) != spec.after:
+            raise ValueError("temporal repair did not settle the authorized timestamps")
+        lineage = _document_lineage(spec.after, revision)
+        SecDocumentRepository(repository, storage.documents).verify_revision(revision)
+    receipt = _TemporalRepairReceipt(
+        workspace_id=spec.workspace_id,
+        authorization_sha256=_canonical_sha256(authorization),
+        spec_sha256=authorization.spec_sha256,
+        repair=repair_receipt,
+        document_lineage=lineage,
+        executor_sha256=_executor_sha256(),
+        completed_at=_now(),
+    )
+    output = _write_new_model(receipt_path, receipt)
+    print(
+        json.dumps(
+            {
+                "schema_version": "raw-v2-temporal-repair-apply-v1",
+                "changed": repair_receipt.changed,
+                "receipt": str(output),
+                "receipt_sha256": _sha256_file(output),
+                "repair": repair_receipt.model_dump(mode="json"),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _recovery_status(args: argparse.Namespace) -> int:
     service = WorkspaceService()
     manifest_path = Path(args.manifest)
@@ -780,6 +1076,18 @@ def _parser() -> argparse.ArgumentParser:
     recovery_repair.add_argument("--intent", required=True)
     recovery_repair.add_argument("--receipt", required=True)
     recovery_repair.set_defaults(handler=_recovery_repair)
+
+    temporal_plan = subparsers.add_parser("recovery-repair-temporal-plan")
+    temporal_plan.add_argument("--destination-workspace", required=True)
+    temporal_plan.add_argument("--spec", required=True)
+    temporal_plan.add_argument("--output", required=True)
+    temporal_plan.set_defaults(handler=_recovery_repair_temporal_plan)
+
+    temporal_apply = subparsers.add_parser("recovery-repair-temporal-apply")
+    temporal_apply.add_argument("--destination-workspace", required=True)
+    temporal_apply.add_argument("--authorization", required=True)
+    temporal_apply.add_argument("--receipt", required=True)
+    temporal_apply.set_defaults(handler=_recovery_repair_temporal_apply)
     return parser
 
 
@@ -793,6 +1101,7 @@ def main(argv: list[str] | None = None) -> int:
         HistoricalRecoveryBudgetError,
         HistoricalRecoveryError,
         HistoricalSelectionError,
+        StorageError,
         WorkspaceError,
         OSError,
         ValueError,

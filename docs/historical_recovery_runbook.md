@@ -42,11 +42,13 @@ is consumer-driven, not a bulk archive copy:
 metrics/diagnostics stay `ARCHIVE_ONLY`. They are recorded as exclusions, never silently dropped.
 
 Each selected entity is classified `YA_PRESENTE`, `IMPORTAR_FALTANTE`, `RECONSTRUIR_DERIVADO`,
-`ARCHIVE_ONLY`, `CONFLICTO` or `AUSENTE_ORIGEN`. A conflict stops the seal. An already present raw or
-observation entity is accepted only when its persisted source identity matches; the v2 normalization
-of timestamps is recorded as `source-identity-v2-normalization`, not treated as a content change.
-The item `content_sha256` is the SHA-256 of the persisted v1 document; canonical model digests are
-verified again at import and in the historical seal.
+`ARCHIVE_ONLY`, `CONFLICTO` or `AUSENTE_ORIGEN`. A conflict stops the seal. An already present raw is
+accepted only when its persisted source identity **and** its point-in-time timestamps
+(`available_at`, `received_at`, `source.retrieved_at`) match the source. Equal identifiers or a
+content checksum alone do not prove PIT equivalence: a temporal difference is `CONFLICTO`, never a
+silent normalization and never an automatic rewrite of the destination. Newly imported raws retain
+the exact source timestamps. The item `content_sha256` is the SHA-256 of the persisted v1 document;
+canonical model digests are verified again at import and in the historical seal.
 
 ## Commands
 
@@ -125,6 +127,89 @@ the existing memory, thread and temp limits; no limit is relaxed to force an ope
 6. Retain the v1 source and the parent backup until the pre-existing retention list is explicitly
    authorized. Rollback is restore from the verified successor or the parent plus its unchanged
    files; no destructive workspace operation is part of rollback.
+
+## R4 temporal repair of one SEC submissions discovery
+
+R4 authorizes one audited exception to raw immutability: only `received_at`, `available_at` and
+`source.retrieved_at` of discovery `4847c4d0-9531-58c1-bc6b-113e3d00f970`
+(`sec-edgar:aapl:submissions`) may be restored to the v1 values. The document raw
+`463601e9-0e3b-5256-b28e-69760b677851`, revision `1309de76-228f-5f1e-bd4b-4cdec9edf8c3`
+(accession `0001140361-26-040126`) is the bounded lineage witness; its bytes are unchanged.
+
+The repair is a typed storage operation, not a generic save:
+
+- `RawV2TemporalStamp` and `RawV2TemporalRepair` bind the record, the prior checksum and the exact
+  corrected checksum. `plan_temporal_repair` reads and verifies the current record without writing.
+- `repair_temporal_metadata` writes the corrected content-addressed blob first, verifies it, and only
+  then updates the single index row (path, checksum, `available_at`, `received_at`) in one
+  transaction. An interrupted run leaves either the old or the new consistent pair; the old blob is
+  retained. Applying the same authorization again returns `changed=false` without writing.
+- `event_time`, payload, content checksum, record key, asset, schema and all other raws are untouched.
+
+Executed evidence (workspace `70c64668-1738-4dfe-ba1f-7e72026bb7fe`):
+
+| Item | Value |
+| --- | --- |
+| Spec | `ops/data-chassis-48/temporal-repair-spec-20261025.json`, SHA-256 `e3d9e3ae330ae4b9d1e84f50c1dd7469a92d50e2e6ae7ac7c727cc9097c60b2a` |
+| Authorization | `ops/data-chassis-48/temporal-repair-authorization-20261025.json`, SHA-256 `9726ad456d858a3f659acf5936ec84d081079d76cf8ab72670f0d6ed7483e68d` |
+| Receipt | `ops/data-chassis-48/temporal-repair-receipt-20261025.json`, SHA-256 `44d2714fa369e77ab6dd7ff910f723e162b74eae8a5f3c3b8523134b8a94cd02` |
+| Before | `e6f127efcf25c3d5642e774ca1f999b040b1567e3fca1292888243a05f9da2a1` |
+| After | `3fbd8a088dd167465ea9418ec24f9c1fb5255e0844f5750526c21c4108bc81f5` |
+| Executor | `scripts/manage_historical_continuity.py` SHA-256 `3f92a3f0571fcaddd487fb00635cdd26d93f38c9b020c66bc3a6d3f7797d43a7` |
+| Replay | `changed=false`, receipt bytes unchanged |
+
+Post-repair checks: raw index count unchanged at 869,615; observations 202,933; historical metrics
+41,661 and diagnostics 1,901; seal `14047/1881` and its digests unchanged; all six document revisions
+that reference the discovery pass `SecDocumentRepository.verify_revision`, including the acquisition
+causality `received_at=2026-10-20T18:53:29.313510Z <= revision.retrieved_at=2026-10-20T18:53:30.208310Z`.
+No other raw requires repair; the five sibling revisions already fail-safe if the discovery were
+later than their retrieval and none is affected by the corrected cut.
+
+### Backup delta propagation and the packed-format blocker
+
+The successor backup reuses the sealed unpacked parent `v2-backup-final-20261024c` and copies only
+files whose size or SHA-256 differ. Lock files are excluded by the existing inventory rule, so the
+physical change set is the 672,149,504-byte index, the 170,666-byte repaired blob and the successor
+manifest. No sealed parent file is modified; unchanged files are hardlinked and re-verified.
+
+Executed successor evidence:
+
+| Item | Value |
+| --- | --- |
+| Successor | `ops/data-chassis-48/v2-backup-repair-20261025` |
+| New backup id | `6d9df860-973c-596f-aaee-f8c916b1c225` |
+| Parent backup id | `b57be147-4d54-5a1f-8993-e3d04afff9bb` |
+| Parent manifest | `7908c9f79134a10f7c007ba0da5fbb9cfe9b578ad0f1467e90e52ec66121cb02` (unchanged after reuse) |
+| Files | 870,445 total: 2 copied, 870,443 reused |
+| Bytes | 4,067,273,091 total: 672,320,170 copied, 3,394,952,921 reused |
+| Receipt | `ops/data-chassis-48/v2-backup-repair-20261025-receipt.json`; `parent_unchanged=true`, `verified=true` |
+
+The active workspace, the successor and the sealed parent keep the same raw count (869,615),
+observation count (202,933), metric count (41,661), diagnostic count (1,901) and historical seal
+digests. The successor contains the repaired index and blob; the parent still contains the original
+checksum `e6f127…`, proving the sealed base was not mutated.
+
+The retained packed backup `v2-backup-final-20261024c-packed` cannot safely feed the existing
+physical-delta index. Its `source-inventory.jsonl` includes `backup_manifest.json` because it was
+packed from an unpacked backup directory, while `packed-backup-volumes.jsonl` intentionally omits
+that control file. `WorkspaceV2PhysicalDeltaIndexService` correctly rejects the pair at
+`volume-00000000` (`manifest.json` fragment vs `backup_manifest.json` inventory entry) with
+`packed journal mapping differs from inventory`. This is a sealed-format limitation, not a
+corruption: the packed restore already excludes the same control file and its file-level
+verification is complete.
+
+Therefore a physical delta cannot be derived from the retained packed parent without either:
+
+- a compatible packed parent rebuilt from a workspace tree (no `backup_manifest.json`), requiring a
+  full re-pack of 4,242,905,469 logical bytes into approximately 1.3 GB of volumes; or
+- modifying the sealed parent controls, which R4 forbids.
+
+Per R4, this runbook records the minimum component requiring reconstruction and does not start a
+total copy automatically. The retained `.restore-final-20261024e.incomplete`, its checkpoint, the
+sealed backup c, the remote c and its manifest remain untouched. A later authorized epoch may
+rebuild the compatible packed parent, upload only the new volumes/objects, and resume the retained
+restore with an explicit prior/new manifest binding and a re-verification of the affected page plus
+the repaired document lineage.
 
 ## Known limitations
 

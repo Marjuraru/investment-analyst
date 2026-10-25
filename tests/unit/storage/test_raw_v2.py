@@ -1,7 +1,7 @@
 """Unit tests for the isolated raw v2 staging substrate."""
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,7 +15,9 @@ from investment_analyst.storage.raw_v2 import (
     RawV2Staging,
     RawV2StagingError,
     RawV2StagingMarker,
+    RawV2TemporalStamp,
 )
+from investment_analyst.storage.serialization import canonical_json_bytes, sha256_hex
 
 _AVAILABLE = datetime(2026, 7, 10, 16, 1, tzinfo=UTC)
 _RECEIVED = datetime(2026, 7, 10, 16, 3, tzinfo=UTC)
@@ -223,4 +225,122 @@ def test_import_inventory_pages_are_bounded_and_verified(tmp_path: Path) -> None
             staging.list_inventory_page(limit=257)
         with pytest.raises(RawV2StagingError, match="together"):
             staging.list_inventory_page(limit=2, after_received_at=last.received_at)
+    staging.close()
+
+
+def _temporal_stamp(record: RawRecord) -> RawV2TemporalStamp:
+    return RawV2TemporalStamp(
+        available_at=record.available_at,
+        received_at=record.received_at,
+        source_retrieved_at=record.source.retrieved_at,
+    )
+
+
+def _corrected(record: RawRecord, after: RawV2TemporalStamp) -> RawRecord:
+    return record.model_copy(
+        update={
+            "available_at": after.available_at,
+            "received_at": after.received_at,
+            "source": record.source.model_copy(update={"retrieved_at": after.source_retrieved_at}),
+        }
+    )
+
+
+def test_temporal_repair_is_narrow_recoverable_and_idempotent(tmp_path: Path) -> None:
+    staging, connection = _staging(tmp_path)
+    with staging:
+        record = _record(
+            payload={
+                "document": {"accessionNumber": "0001140361-26-040126"},
+                "body_sha256": "a" * 64,
+            }
+        )
+        staging.save(record)
+        before = _temporal_stamp(record)
+        corrected_at = record.available_at - timedelta(days=1)
+        after = RawV2TemporalStamp(
+            available_at=corrected_at,
+            received_at=corrected_at,
+            source_retrieved_at=corrected_at,
+        )
+        repair = staging.plan_temporal_repair(record.record_id, before=before, after=after)
+        original_row = connection.execute(
+            "SELECT relative_path, checksum_sha256 FROM raw_v2_index WHERE record_id = ?",
+            [str(record.record_id)],
+        ).fetchone()
+        assert original_row is not None
+        assert repair.before_checksum_sha256 == original_row[1]
+        assert repair.after_checksum_sha256 != repair.before_checksum_sha256
+        assert repair.after_checksum_sha256 == sha256_hex(
+            canonical_json_bytes(_corrected(record, after))
+        )
+
+        # Interrupted apply: the corrected blob exists but the index still points
+        # to the prior address. The retry must complete without a partial state.
+        staging._write_blob(
+            repair.after_checksum_sha256,
+            canonical_json_bytes(_corrected(record, after)),
+        )
+        receipt = staging.repair_temporal_metadata(repair)
+        assert receipt.changed is True
+        assert receipt.before_relative_path == original_row[0]
+        assert receipt.after_relative_path != original_row[0]
+
+        repaired = staging.get(record.record_id)
+        assert repaired.available_at == corrected_at
+        assert repaired.received_at == corrected_at
+        assert repaired.source.retrieved_at == corrected_at
+        assert repaired.event_time == record.event_time
+        assert repaired.payload == record.payload
+        assert repaired.source.checksum_sha256 == record.source.checksum_sha256
+        assert repaired.asset_id == record.asset_id
+        assert repaired.schema_version == record.schema_version
+        assert repaired.record_id == record.record_id
+        assert receipt.after_checksum_sha256 == sha256_hex(canonical_json_bytes(repaired))
+
+        # The prior blob remains as immutable evidence.
+        assert staging._resolve_blob(str(original_row[0])).is_file()
+        assert staging.repair_temporal_metadata(repair).changed is False
+        assert staging.get(record.record_id) == repaired
+        assert connection.execute(
+            "SELECT checksum_sha256 FROM raw_v2_index WHERE record_id = ?",
+            [str(record.record_id)],
+        ).fetchone() == (repair.after_checksum_sha256,)
+    staging.close()
+
+
+def test_temporal_repair_fails_closed_on_unbound_state(tmp_path: Path) -> None:
+    staging, connection = _staging(tmp_path)
+    with staging:
+        record = _record()
+        staging.save(record)
+        before = _temporal_stamp(record)
+        corrected_at = record.available_at - timedelta(days=1)
+        after = RawV2TemporalStamp(
+            available_at=corrected_at,
+            received_at=corrected_at,
+            source_retrieved_at=corrected_at,
+        )
+        wrong_before = RawV2TemporalStamp(
+            available_at=record.available_at - timedelta(days=2),
+            received_at=record.received_at,
+            source_retrieved_at=record.source.retrieved_at,
+        )
+        with pytest.raises(RecordConflictError, match="prior state"):
+            staging.plan_temporal_repair(record.record_id, before=wrong_before, after=after)
+        with pytest.raises(RecordNotFoundError, match="was not found"):
+            staging.plan_temporal_repair(uuid4(), before=before, after=after)
+
+        repair = staging.plan_temporal_repair(record.record_id, before=before, after=after)
+        tampered_after = repair.model_copy(update={"after_checksum_sha256": "0" * 64})
+        with pytest.raises(RecordConflictError, match="authorized checksum"):
+            staging.repair_temporal_metadata(tampered_after)
+        tampered_before = repair.model_copy(update={"before_checksum_sha256": "1" * 64})
+        with pytest.raises(RecordConflictError, match="prior and corrected state"):
+            staging.repair_temporal_metadata(tampered_before)
+        assert staging.get(record.record_id) == record
+        assert connection.execute(
+            "SELECT checksum_sha256 FROM raw_v2_index WHERE record_id = ?",
+            [str(record.record_id)],
+        ).fetchone() == (repair.before_checksum_sha256,)
     staging.close()

@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid4
 
 from duckdb import DuckDBPyConnection
-from pydantic import ConfigDict, Field, ValidationError
+from pydantic import ConfigDict, Field, ValidationError, model_validator
 
 from investment_analyst.analytics.analysis_snapshot import AnalysisSnapshot
 from investment_analyst.analytics.evidence_set import EvidenceSegment, EvidenceSet
@@ -223,6 +223,57 @@ class MarketObservationPage(ContractModel):
     groups: tuple[MarketObservationGroupProjection, ...]
     next_observed_at: UTCDateTime | None = None
     next_raw_record_id: UUID | None = None
+
+
+class RawV2TemporalStamp(ContractModel):
+    """The three source timestamps authorized by one narrow metadata correction."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    available_at: UTCDateTime
+    received_at: UTCDateTime
+    source_retrieved_at: UTCDateTime
+
+    @model_validator(mode="after")
+    def _validate_order(self) -> RawV2TemporalStamp:
+        if self.available_at > self.received_at:
+            raise ValueError("raw v2 available_at must not be later than received_at")
+        return self
+
+
+class RawV2TemporalRepair(ContractModel):
+    """Typed authorization to correct exactly one staged record's temporal metadata."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    record_id: UUID
+    before_checksum_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    after_checksum_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    before: RawV2TemporalStamp
+    after: RawV2TemporalStamp
+
+    @model_validator(mode="after")
+    def _validate_changed(self) -> RawV2TemporalRepair:
+        if self.before == self.after:
+            raise ValueError("raw v2 temporal repair must change at least one timestamp")
+        if self.before_checksum_sha256 == self.after_checksum_sha256:
+            raise ValueError("raw v2 temporal repair must change the record bytes")
+        return self
+
+
+class RawV2TemporalRepairReceipt(ContractModel):
+    """Small before/after record of one narrow temporal correction."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    record_id: UUID
+    before_checksum_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    after_checksum_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    before_relative_path: str
+    after_relative_path: str
+    before: RawV2TemporalStamp
+    after: RawV2TemporalStamp
+    changed: bool
 
 
 class RawV2StagingError(StorageError):
@@ -598,6 +649,135 @@ class RawV2Staging:
         return {
             record_id: self._hydrate(record_id, indexed[record_id]) for record_id in ordered_ids
         }
+
+    def plan_temporal_repair(
+        self,
+        record_id: UUID,
+        *,
+        before: RawV2TemporalStamp,
+        after: RawV2TemporalStamp,
+    ) -> RawV2TemporalRepair:
+        """Verify one record and derive the exact corrected checksum without writing.
+
+        The returned authorization binds the record identifier, the current
+        checksum and the checksum of the canonical bytes produced by replacing
+        only ``available_at``, ``received_at`` and ``source.retrieved_at``.
+        """
+        self._require_open()
+        rows = self._select_rows([record_id])
+        if not rows:
+            raise RecordNotFoundError(f"raw v2 record {record_id} was not found")
+        record = self._hydrate(record_id, rows[0])
+        if self._temporal_stamp(record) != before:
+            raise RecordConflictError(
+                "raw v2 record timestamps do not match the repair's prior state"
+            )
+        corrected = self._corrected_record(record, after)
+        return RawV2TemporalRepair(
+            record_id=record_id,
+            before_checksum_sha256=str(rows[0][2]),
+            after_checksum_sha256=sha256_hex(canonical_json_bytes(corrected)),
+            before=before,
+            after=after,
+        )
+
+    def repair_temporal_metadata(self, repair: RawV2TemporalRepair) -> RawV2TemporalRepairReceipt:
+        """Apply one authorized temporal correction recoverably and idempotently.
+
+        The corrected blob is written and verified before the single index row
+        is updated inside one transaction, so a reader never observes a broken
+        reference and an interrupted run can be repeated. Applying an already
+        completed repair returns ``changed=False`` without writing.
+        """
+        self._require_writable()
+        rows = self._select_rows([repair.record_id])
+        if not rows:
+            raise RecordNotFoundError(f"raw v2 record {repair.record_id} was not found")
+        relative_path, checksum = str(rows[0][1]), str(rows[0][2])
+        if checksum == repair.after_checksum_sha256:
+            record = self._hydrate(repair.record_id, rows[0])
+            if self._temporal_stamp(record) != repair.after:
+                raise RecordConflictError(
+                    "raw v2 repaired record timestamps do not match the authorization"
+                )
+            return RawV2TemporalRepairReceipt(
+                record_id=repair.record_id,
+                before_checksum_sha256=repair.before_checksum_sha256,
+                after_checksum_sha256=repair.after_checksum_sha256,
+                before_relative_path=relative_path,
+                after_relative_path=relative_path,
+                before=repair.before,
+                after=repair.after,
+                changed=False,
+            )
+        if checksum != repair.before_checksum_sha256:
+            raise RecordConflictError(
+                "raw v2 record checksum differs from the repair's prior and corrected state"
+            )
+        record = self._hydrate(repair.record_id, rows[0])
+        if self._temporal_stamp(record) != repair.before:
+            raise RecordConflictError(
+                "raw v2 record timestamps do not match the repair's prior state"
+            )
+        corrected = self._corrected_record(record, repair.after)
+        document = canonical_json_bytes(corrected)
+        corrected_checksum = sha256_hex(document)
+        if corrected_checksum != repair.after_checksum_sha256:
+            raise RecordConflictError(
+                "raw v2 corrected bytes differ from the repair's authorized checksum"
+            )
+        corrected_relative_path = self._write_blob(corrected_checksum, document)
+        with write_transaction(self._connection):
+            settled = self._connection.execute(
+                f"UPDATE {_INDEX_TABLE} SET relative_path = ?, checksum_sha256 = ?, "
+                "available_at = ?, received_at = ? WHERE record_id = ? AND checksum_sha256 = ?",
+                [
+                    corrected_relative_path.as_posix(),
+                    corrected_checksum,
+                    _instant_text(corrected.available_at),
+                    _instant_text(corrected.received_at),
+                    str(repair.record_id),
+                    repair.before_checksum_sha256,
+                ],
+            ).fetchone()
+            if settled is None or int(settled[0]) != 1:
+                raise RecordConflictError(
+                    "raw v2 temporal repair did not update exactly one indexed record"
+                )
+        updated_rows = self._select_rows([repair.record_id])
+        if len(updated_rows) != 1:
+            raise RawV2StagingError("raw v2 temporal repair lost its indexed record")
+        self._hydrate(repair.record_id, updated_rows[0])
+        return RawV2TemporalRepairReceipt(
+            record_id=repair.record_id,
+            before_checksum_sha256=repair.before_checksum_sha256,
+            after_checksum_sha256=repair.after_checksum_sha256,
+            before_relative_path=relative_path,
+            after_relative_path=corrected_relative_path.as_posix(),
+            before=repair.before,
+            after=repair.after,
+            changed=True,
+        )
+
+    @staticmethod
+    def _temporal_stamp(record: RawRecord) -> RawV2TemporalStamp:
+        return RawV2TemporalStamp(
+            available_at=record.available_at,
+            received_at=record.received_at,
+            source_retrieved_at=record.source.retrieved_at,
+        )
+
+    @staticmethod
+    def _corrected_record(record: RawRecord, after: RawV2TemporalStamp) -> RawRecord:
+        return record.model_copy(
+            update={
+                "available_at": after.available_at,
+                "received_at": after.received_at,
+                "source": record.source.model_copy(
+                    update={"retrieved_at": after.source_retrieved_at}
+                ),
+            }
+        )
 
     def list_record_ids(
         self,

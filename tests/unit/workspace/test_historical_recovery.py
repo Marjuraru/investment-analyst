@@ -24,6 +24,8 @@ from investment_analyst.core.models import (
     RawRecord,
     SourceReference,
 )
+from investment_analyst.storage.raw_v2 import RawV2TemporalStamp
+from investment_analyst.storage.workspace_v2_repositories import WorkspaceV2RawRecordRepository
 from investment_analyst.workspace.historical_recovery import (
     HistoricalRecoveryError,
     HistoricalRecoveryImporter,
@@ -299,6 +301,8 @@ def test_import_is_idempotent_replay_reports_no_new_rows(tmp_path: Path) -> None
             checkpoint_path=checkpoint,
             source_fingerprint=manifest.source_fingerprint,
         ).run()
+        for record_id in source.raw_records.list_record_ids():
+            assert destination.raw_records.get(record_id) == source.raw_records.get(record_id)
     assert summary.created_raw == 3
     assert summary.created_observations == 2
     assert summary.created_metrics == 1
@@ -488,6 +492,80 @@ def test_conflicting_destination_identity_fails_selection(tmp_path: Path) -> Non
     )
     with pytest.raises(HistoricalRecoveryError, match="conflict"):
         builder.build(known_at=_KNOWN_AT, output_root=tmp_path / "conflicting")
+
+
+def test_existing_raw_with_different_pit_is_a_conflict_until_repaired(tmp_path: Path) -> None:
+    source_root, _ = _seed_source(tmp_path)
+    destination_root = _seed_destination(tmp_path)
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    market_id = uuid5(NAMESPACE_URL, "recovery-raw-market")
+    with (
+        service.open_storage(service.resolve(source_root), WorkspaceAccessMode.READ_ONLY) as source,
+        service.open_storage(
+            service.resolve(destination_root), WorkspaceAccessMode.READ_WRITE
+        ) as destination,
+    ):
+        source_raw = source.raw_records.get(market_id)
+        shifted_at = source_raw.available_at + timedelta(days=1)
+        shifted = source_raw.model_copy(
+            update={
+                "available_at": shifted_at,
+                "received_at": shifted_at,
+                "source": source_raw.source.model_copy(
+                    update={"retrieved_at": source_raw.source.retrieved_at + timedelta(days=1)}
+                ),
+            }
+        )
+        destination.raw_records.save(shifted)
+        assert (
+            shifted.source.checksum_sha256 == source_raw.source.checksum_sha256
+            and shifted.source.record_key == source_raw.source.record_key
+        )
+
+    builder = _builder(
+        service=service,
+        source_root=source_root,
+        destination_root=destination_root,
+    )
+    with pytest.raises(HistoricalRecoveryError, match="conflict"):
+        builder.build(known_at=_KNOWN_AT, output_root=tmp_path / "pit-conflict")
+
+    with service.open_storage(
+        service.resolve(destination_root), WorkspaceAccessMode.READ_WRITE
+    ) as destination:
+        repository = destination.raw_records
+        assert isinstance(repository, WorkspaceV2RawRecordRepository)
+        plan = repository.plan_temporal_repair(
+            market_id,
+            before=RawV2TemporalStamp(
+                available_at=shifted.available_at,
+                received_at=shifted.received_at,
+                source_retrieved_at=shifted.source.retrieved_at,
+            ),
+            after=RawV2TemporalStamp(
+                available_at=source_raw.available_at,
+                received_at=source_raw.received_at,
+                source_retrieved_at=source_raw.source.retrieved_at,
+            ),
+        )
+        assert repository.repair_temporal_metadata(plan).changed is True
+        assert repository.repair_temporal_metadata(plan).changed is False
+        assert destination.raw_records.get(market_id) == source_raw
+
+    repaired_builder = _builder(
+        service=service,
+        source_root=source_root,
+        destination_root=destination_root,
+    )
+    manifest, _, _ = repaired_builder.build(
+        known_at=_KNOWN_AT, output_root=tmp_path / "pit-repaired"
+    )
+    assert manifest.totals.conflicts == 0
+    assert any(
+        family.already_present > 0
+        for family in manifest.family_totals
+        if family.entity_kind.value == "raw-record"
+    )
 
 
 def test_budget_rejects_insufficient_host_space(tmp_path: Path) -> None:
