@@ -162,8 +162,9 @@ Post-repair checks: raw index count unchanged at 869,615; observations 202,933; 
 41,661 and diagnostics 1,901; seal `14047/1881` and its digests unchanged; all six document revisions
 that reference the discovery pass `SecDocumentRepository.verify_revision`, including the acquisition
 causality `received_at=2026-10-20T18:53:29.313510Z <= revision.retrieved_at=2026-10-20T18:53:30.208310Z`.
-No other raw requires repair; the five sibling revisions already fail-safe if the discovery were
-later than their retrieval and none is affected by the corrected cut.
+The five sibling revisions were retrieved at `2026-10-21T20:49:46–48Z`, so they were already causally
+valid with either timestamp; only the revision retrieved at `2026-10-20T18:53:30.208310Z` required
+the correction. No other raw requires repair.
 
 ### Backup delta propagation and the packed-format blocker
 
