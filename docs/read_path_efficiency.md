@@ -49,6 +49,10 @@ En un workspace formato 2, la cobertura de mercado y el precio de valoración us
   orden contractual del resultado; el formato 1 sigue secuencial;
 - la tabla de observaciones se verifica una vez por conexión y los instantes ISO repetidos usan una
   caché acotada;
+- la firma de cobertura acota observaciones y raw al rango `min(market_start, fundamental_start)` →
+  `known_at`, de modo que el coste depende del universo/ventana consultados y no de toda la historia;
+- Mesa prioriza la matriz de 37 activos y difiere los loaders secundarios hasta que termina; un fallo
+  libera el tablero para reintento;
 - el formato 1 conserva el camino anterior sin cambios.
 
 La matriz cubierta se amplía a la proyección v2 sin cambiar fórmulas, `Decimal`, IDs, versiones,
