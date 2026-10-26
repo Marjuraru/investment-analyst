@@ -47,8 +47,6 @@ En un workspace formato 2, la cobertura de mercado y el precio de valoración us
   rango completo si no encuentra una barra, conservando la última barra PIT y su verificación;
 - la cobertura v2 reparte los activos en hasta cuatro conexiones read-only aisladas y conserva el
   orden contractual del resultado; el formato 1 sigue secuencial;
-- la ausencia opcional de `pandas` se cachea una vez para evitar que DuckDB repita la búsqueda de
-  importación en cada parámetro; no se instala ni emula la dependencia;
 - la tabla de observaciones se verifica una vez por conexión y los instantes ISO repetidos usan una
   caché acotada;
 - el formato 1 conserva el camino anterior sin cambios.
