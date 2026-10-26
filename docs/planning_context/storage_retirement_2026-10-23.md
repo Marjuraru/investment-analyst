@@ -1,6 +1,11 @@
 # Storage retention decision and concrete list (2026-10-23)
 
-Authority: `DATA-CHASSIS-48` / Issue #357. This document is the unique, concrete list requested by
+> Referencia histórica fechada. La ejecución vigente de retención usa
+> `scripts/manage_storage_retirement.py` y el contrato `operational-retention-plan-v1`; la matriz de
+> readiness vive en [`../v2_operational_readiness.md`](../v2_operational_readiness.md). Esta lista no
+> autoriza borrar candidatos preexistentes por sí sola.
+
+Authority histórica: `DATA-CHASSIS-48` / Issue #357. This document is the unique, concrete list requested by
 the user before importing. It records measured bytes, the retained coverage and the last known
 consumer. **No pre-existing candidate below was deleted by BUILD.** Deletion of a pre-existing
 candidate requires the user's literal confirmation; uncertainty is retained, never converted into

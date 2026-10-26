@@ -1,16 +1,12 @@
 # Reincorporación selectiva de v1 y de las semanas de transición
 
-PLAN posterior al arranque v2 nuevo aprobado el 2026-10-21. No autoriza importar ni borrar ahora.
-Autoridad presente: Issue #353 (`DATA-CHASSIS-47`), base `012bbc5e`, rama
-`codex/data-chassis-47`. READ-1 queda absorbido en 47; no se publica ni ejecuta aparte. La
-selección/histórico de 48 sigue futura. Autoridad previa: Issue #349 (`DATA-CHASSIS-46`), base `b5e714a`, y el
-[registro de continuidad](data_chassis_continuity_plan.md). DATA-CHASSIS permanece NEXT y esta
-secuencia no declara Q1–Q7 `MET`.
+> Referencia histórica fechada. `DATA-CHASSIS` está `DONE`; la autoridad vigente son
+> [`product_roadmap.md`](product_roadmap.md), [`basic_functional_release_plan.md`](basic_functional_release_plan.md)
+> y el Issue `workflow:active`. Este plan no autoriza importar ni borrar.
 
-La ruta obligatoria es 46 → 47 → 48 → 49: 46 formaliza inventario y selección; 47 cubre el archivo
-recuperable y ejecuta el piloto; 48 recupera selectivamente por consumidor con un manifiesto sellado
-y un writer único; 49 retira físicamente y cierra. Los tramos 47–49 no son Issues activos ni
-autoridad ejecutable anticipada.
+La secuencia registrada entonces fue 46 → 47 → 48 → 49. Los tramos 47–49 no son Issues activos ni
+autoridad ejecutable anticipada. `DATA-CHASSIS` permaneció `NEXT` hasta el cierre de 48 y esta
+secuencia no declara Q1–Q7 `MET`.
 
 ## Objetivo y frontera
 

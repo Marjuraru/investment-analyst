@@ -677,19 +677,24 @@ class CorporateValuationService:
     def _price(self, request: CorporateValuationRequest) -> MarketBar | None:
         start = datetime.combine(date(1970, 1, 1), datetime.min.time(), UTC)
         end = datetime.combine(request.valuation_date + timedelta(days=1), datetime.min.time(), UTC)
-        bars = (
-            HistoricalMarketDataService(self._storage)
-            .query(
-                HistoricalBarQuery(
-                    asset_id=request.asset_id,
-                    source_id=self._market_source_id or "",
-                    start=start,
-                    end=end,
-                    known_at=request.known_at,
-                )
-            )
-            .bars
+        query = HistoricalBarQuery(
+            asset_id=request.asset_id,
+            source_id=self._market_source_id or "",
+            start=start,
+            end=end,
+            known_at=request.known_at,
         )
+        if self._semantic_identity_v2:
+            from investment_analyst.analytics.market.history_v2 import (
+                HistoricalMarketDataV2Service,
+            )
+
+            service = HistoricalMarketDataV2Service(self._storage.store.raw_staging)
+            projection = service.query(query)
+            if not projection.bars:
+                return None
+            return service.materialize(projection.bars[-1], query)
+        bars = HistoricalMarketDataService(self._storage).query(query).bars
         return bars[-1] if bars else None
 
     def _annual_facts(self, request: CorporateValuationRequest) -> _AnnualSelection | None:

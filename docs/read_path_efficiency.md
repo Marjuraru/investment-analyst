@@ -1,6 +1,7 @@
 # Eficiencia de lectura de evidencia
 
-> Decisión PLAN 2026-10-21: [arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Activación verificada por #346 MERGED en `b5e714a`; release observada `daad58d`; workspace UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; historia v1/F5 preservada. La formalización, neutralidad y retención continúan en [DATA-CHASSIS-46](data_chassis_continuity_plan.md) (#349). Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+> Estado vigente 2026-10-26: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
+> `NEXT`. La matriz V1–V6 vive en [`v2_operational_readiness.md`](v2_operational_readiness.md).
 
 ## Contrato vigente (`read-dependency-signature-v1`)
 
@@ -25,6 +26,30 @@ activo. Las superficies no cubiertas permanecen pendientes justificadas en este 
 declaran optimizadas.
 
 El contrato del arranque exige cero hidratación ajena, paginación completa y medición de filas/bytes/query plan. Las referencias inferiores a document_json y call sites preservados describen su bloque histórico; no obligan a mantener una lectura ineficiente reproducida en el scope autorizado de #345.
+
+## Proyección v2 y reapertura (`FUNDAMENTALS-COVERAGE-READINESS`)
+
+En un workspace formato 2, la cobertura de mercado y el precio de valoración usan
+`HistoricalMarketDataV2Service` sobre el índice tipado de `raw_v2`:
+
+- la selección PIT conserva el mismo orden, revisión única y error de ambigüedad que
+  `HistoricalMarketDataService`; los conteos `candidate_versions` y `discarded_revisions` se suman por
+  página;
+- no se hidrata un `RawRecord` por barra histórica: la cobertura materializa sólo la última barra
+  seleccionada y la valoración sólo el precio seleccionado, verificando checksum, observaciones y
+  alcance;
+- `get_many` calcula una sola vez por lote la existencia de la tabla de proyecciones JSON, en lugar
+  de consultar `information_schema` por registro;
+- el formato 1 conserva el camino anterior sin cambios.
+
+La matriz cubierta se amplía a la proyección v2 sin cambiar fórmulas, `Decimal`, IDs, versiones,
+resultados ni límites PIT. El corpus ajeno 1x/10x se prueba en scratch y no aumenta la hidratación de
+la selección individual.
+
+En el cliente, un fallo de cualquier loader diferido libera el tablero de `loadedBoardIds` tras
+`Promise.allSettled`, de modo que una nueva activación reintenta. La cobertura de Mesa vuelve a lanzar
+el error después de renderizar el estado de ausencia, sin dejar el tablero bloqueado ni presentar la
+respuesta fallida como datos vigentes.
 
 
 Las lecturas de `RawRecord` verifican siempre el SHA-256 del archivo antes de

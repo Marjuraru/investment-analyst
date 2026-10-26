@@ -1,21 +1,23 @@
 # Índice documental
 
 Este índice es la entrada única a la documentación tracked del repositorio. La disposición completa
-de los 109 Markdown tracked (107 de la base más los dos documentos nuevos) y de los 3 Markdown
+de los 110 Markdown tracked (107 de la base más los tres documentos nuevos) y de los 3 Markdown
 protegidos no tracked vive en el [registro de continuidad](data_chassis_continuity_plan.md); aquí
 sólo se enlaza la documentación vigente y el archivo histórico.
 
 ## Operación actual
 
+- [Readiness operativa v2](v2_operational_readiness.md): matriz V1–V6, caminos críticos, retención
+  verificable y estado de entrega para retomar `FUNDAMENTALS-COVERAGE`, que sigue siendo el único
+  `NEXT`.
 - [Eficiencia de lectura](read_path_efficiency.md): firma `read-dependency-signature-v1`, caché
-  acotada, telemetría `critical-read-performance-v1` y reapertura de vista.
-- [Continuidad](data_chassis_continuity_plan.md): archivo `continuity-archive-v1`, selección
-  `historical-selection-v1` y estado de 47; 48 ejecuta la recuperación selectiva y 49 conserva la
-  retención física.
-- [Runbook de recuperación histórica](historical_recovery_runbook.md): selección sellada,
-  importación bajo writer único, backup sucesor reutilizable y restore remoto.
+  acotada, proyección v2, telemetría `critical-read-performance-v1` y reapertura de vista.
+- [Continuidad](data_chassis_continuity_plan.md): registro histórico de 46–48; `DATA-CHASSIS` está
+  `DONE` y la readiness v2 documenta la retención y limpieza vigentes.
+- [Runbook de recuperación histórica](historical_recovery_runbook.md): evidencia histórica de
+  selección sellada, importación bajo writer único, backup sucesor reutilizable y restore remoto.
 - [Retención y lista concreta 2026-10-23](planning_context/storage_retirement_2026-10-23.md):
-  cobertura retenida, último consumidor y propuesta de retiro sin borrar candidatos preexistentes.
+  referencia histórica de cobertura retenida, último consumidor y propuesta de retiro.
 
 - [Interfaz local y operación continua](local_interface.md)
 - [Readiness operacional y recuperación](operational_readiness.md)

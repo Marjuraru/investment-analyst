@@ -711,10 +711,22 @@ function loadDeferredBoardData(boardId) {
       assetId: selectedMarketAsset,
       knownAt: byId("report-known-at").value.trim(),
     });
-    for (const load of loaders) void load(deferredRequest);
+    Promise.allSettled(
+      loaders.map((load) => Promise.resolve().then(() => load(deferredRequest))),
+    ).then((results) => {
+      if (results.some((result) => result.status === "rejected")) {
+        loadedBoardIds.delete(boardId);
+      }
+    });
     return;
   }
-  for (const load of loaders) void load();
+  Promise.allSettled(loaders.map((load) => Promise.resolve().then(() => load()))).then(
+    (results) => {
+      if (results.some((result) => result.status === "rejected")) {
+        loadedBoardIds.delete(boardId);
+      }
+    },
+  );
 }
 
 // Feather-style stroke icon paths, one per BOARD_REGISTRY.icon value. "grid"

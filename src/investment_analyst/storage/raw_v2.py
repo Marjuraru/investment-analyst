@@ -646,8 +646,14 @@ class RawV2Staging:
         missing = [record_id for record_id in ordered_ids if record_id not in indexed]
         if missing:
             raise RecordNotFoundError(f"raw v2 record {missing[0]} was not found")
+        projection_table_exists = self._workspace_projection_table_exists()
         return {
-            record_id: self._hydrate(record_id, indexed[record_id]) for record_id in ordered_ids
+            record_id: self._hydrate(
+                record_id,
+                indexed[record_id],
+                projection_table_exists=projection_table_exists,
+            )
+            for record_id in ordered_ids
         }
 
     def plan_temporal_repair(
@@ -1052,7 +1058,12 @@ class RawV2Staging:
         return rows
 
     def _hydrate(
-        self, record_id: UUID, row: tuple[object, ...], *, verified_record: RawRecord | None = None
+        self,
+        record_id: UUID,
+        row: tuple[object, ...],
+        *,
+        verified_record: RawRecord | None = None,
+        projection_table_exists: bool | None = None,
     ) -> RawRecord:
         (
             _indexed_id,
@@ -1085,7 +1096,9 @@ class RawV2Staging:
             or _parse_instant_text(received_at) != record.received_at
         ):
             raise RawV2StagingError("raw v2 index metadata does not match its file")
-        if self._workspace_projection_table_exists():
+        if projection_table_exists is None:
+            projection_table_exists = self._workspace_projection_table_exists()
+        if projection_table_exists:
             projection_rows = self._connection.execute(
                 f"SELECT field_name, field_value FROM {WORKSPACE_RAW_JSON_PROJECTIONS_TABLE} "
                 "WHERE record_id = ?",

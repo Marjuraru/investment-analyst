@@ -5,9 +5,10 @@
 > vigente y sus límites viven en [data_chassis_continuity_plan.md](data_chassis_continuity_plan.md).
 
 
-> Documento histórico de la decisión de 2026-10-21. #345 cerrado y #346 MERGED; el estado vigente y
-> la secuencia obligatoria 46→47→48→49 están en el
-> [registro de continuidad](data_chassis_continuity_plan.md).
+> Documento histórico de la decisión de 2026-10-21. #345 cerrado y #346 MERGED; `DATA-CHASSIS` está
+> `DONE`. La autoridad vigente son
+> [`product_roadmap.md`](product_roadmap.md), [`basic_functional_release_plan.md`](basic_functional_release_plan.md)
+> y el Issue `workflow:active`; este documento no es autoridad ejecutable.
 
 Decisión humana de 2026-10-21: primero un workspace v2 nuevo, probado y observable; después,
 incorporación de historia necesaria desde un archivo recuperable. Esta decisión sustituye el
@@ -16,8 +17,8 @@ retirar el estado F5, crear varios Issues activos ni llamar terminado a un objet
 
 ## Ruta y autoridad
 
-DATA-CHASSIS-45 / #345 / PR346 pasa de propuesta COMPLETES a ADVANCES. DATA-CHASSIS permanece como
-único NEXT; FUNDAMENTALS-COVERAGE sigue PLANNED. El cierre global conserva el protocolo y Q1–Q7:
+DATA-CHASSIS-45 / #345 / PR346 pasó de propuesta COMPLETES a ADVANCES. DATA-CHASSIS permaneció como
+único `NEXT` en ese corte; FUNDAMENTALS-COVERAGE siguió `PLANNED`. El cierre global conserva el protocolo y Q1–Q7:
 comparadores no equivalentes permanecen UNKNOWN. Una base nueva pequeña no acredita reducción
 sobre el inventario histórico completo. La propuesta se integra sólo al fusionar el candidato.
 

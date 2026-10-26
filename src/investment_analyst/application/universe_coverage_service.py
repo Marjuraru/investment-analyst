@@ -10,6 +10,7 @@ from investment_analyst.analytics.fundamentals.research_service import (
 )
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
 from investment_analyst.analytics.market.history_service import HistoricalMarketDataService
+from investment_analyst.analytics.market.history_v2 import HistoricalMarketDataV2Service
 from investment_analyst.analytics.valuation.models import CorporateValuationRequest
 from investment_analyst.analytics.valuation.service import CorporateValuationService
 from investment_analyst.application.analysis_capabilities import analysis_capabilities_for
@@ -148,27 +149,45 @@ class UniverseCoverageService:
                 candidate_versions=0,
                 discarded_revisions=0,
             )
-        series = history.query(
-            HistoricalBarQuery(
-                asset_id=descriptor.asset_id,
-                source_id=descriptor.source_id,
-                start=start,
-                end=end,
-                known_at=request.known_at,
-            )
+        query = HistoricalBarQuery(
+            asset_id=descriptor.asset_id,
+            source_id=descriptor.source_id,
+            start=start,
+            end=end,
+            known_at=request.known_at,
         )
-        latest = series.bars[-1] if series.bars else None
+        if getattr(self._storage.paths, "format_version", 1) == 2:
+            projection_service = HistoricalMarketDataV2Service(self._storage.store.raw_staging)
+            projection = projection_service.query(query)
+            latest = (
+                projection_service.materialize(projection.bars[-1], query)
+                if projection.bars
+                else None
+            )
+            bar_count = len(projection.bars)
+            candidate_versions = projection.candidate_versions
+            discarded_revisions = projection.discarded_revisions
+            earliest_timestamp = projection.bars[0].timestamp if projection.bars else None
+            latest_timestamp = projection.bars[-1].timestamp if projection.bars else None
+        else:
+            series = history.query(query)
+            latest = series.bars[-1] if series.bars else None
+            bar_count = series.coverage.bar_count
+            candidate_versions = series.coverage.candidate_versions
+            discarded_revisions = series.coverage.discarded_revisions
+            earliest_timestamp = series.coverage.earliest_timestamp
+            latest_timestamp = series.coverage.latest_timestamp
         return UniverseMarketCoverage(
             capability=CoverageCapability.SUPPORTED,
             evidence=EvidenceState.PRESENT if latest else EvidenceState.MISSING,
             source_id=descriptor.source_id,
             volume_unit=descriptor.volume_unit,
             history_start=descriptor.default_market_start,
-            bar_count=series.coverage.bar_count,
-            candidate_versions=series.coverage.candidate_versions,
-            discarded_revisions=series.coverage.discarded_revisions,
-            earliest_timestamp=series.coverage.earliest_timestamp,
-            latest_timestamp=series.coverage.latest_timestamp,
+            bar_count=bar_count,
+            candidate_versions=candidate_versions,
+            discarded_revisions=discarded_revisions,
+            earliest_timestamp=earliest_timestamp,
+            latest_timestamp=latest_timestamp,
             latest_available_at=latest.available_at if latest else None,
             latest_raw_record_id=latest.raw_record_id if latest else None,
             latest_observation_ids=tuple(sorted(latest.observation_ids.values(), key=str))

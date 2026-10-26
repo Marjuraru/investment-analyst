@@ -1,5 +1,10 @@
 # V2 nuevo: arranque, aceptación y medición
 
+> Referencia histórica fechada. `DATA-CHASSIS` está `DONE`; la autoridad vigente son
+> [`product_roadmap.md`](product_roadmap.md), [`basic_functional_release_plan.md`](basic_functional_release_plan.md)
+> y el Issue `workflow:active`. Este plan describe la ejecución histórica de 45 y no es autoridad
+> ejecutable.
+
 Decisión humana de 2026-10-21, Work Block DATA-CHASSIS-45 / Issue #345 / PR #346.
 Estado observado 2026-10-22: v2 activo en la release `daad58d`; #346 MERGED en `b5e714a`; UUID
 `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; DB `281.817.088 B`; coverage200 sin writes. El candidato de
@@ -36,10 +41,11 @@ activarlo mediante el servicio de releases y operar con observabilidad por inten
 y F5 parcial como fuentes históricas; planificar su incorporación selectiva sin convertirla en
 requisito del arranque. No borrar datos para empezar ni activar el restore-v2 parcial.
 
-El bloque ADVANCES DATA-CHASSIS, que permanece NEXT. No declara Q1–Q7 satisfechos comparando una
+El bloque avanzó DATA-CHASSIS, que permaneció `NEXT` en ese corte. No declara Q1–Q7 satisfechos comparando una
 base vacía con toda v1; no cambia el protocolo ni el registro canónico. FUNDAMENTALS-COVERAGE
-permanece PLANNED. Después: archivo/inventario histórico → piloto de incorporación selectiva →
-lotes necesarios y cierre de los objetivos aún pendientes. Son fases futuras, no Issues ya creados.
+permaneció `PLANNED` hasta el cierre de 48. Después: archivo/inventario histórico → piloto de
+incorporación selectiva → lotes necesarios y cierre de los objetivos aún pendientes. Eran fases
+futuras, no Issues ya creados.
 
 ## Contratos reutilizados y compatibilidad
 

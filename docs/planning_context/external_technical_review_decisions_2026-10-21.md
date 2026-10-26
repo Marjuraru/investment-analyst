@@ -1,11 +1,15 @@
 # Revisión crítica del informe técnico externo de 2026-10-21
 
+> Referencia histórica fechada. `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
+> `NEXT`; la matriz vigente vive en [`../v2_operational_readiness.md`](../v2_operational_readiness.md).
+> Este registro no es un Work Block ni autoriza ejecución.
+
 ## Autoridad, alcance y evidencia
 
 Decisión documental solicitada por el usuario: aprovechar el informe para la planificación futura,
 sin crear Work Block, ampliar #345, modificar su manifest ni intervenir al builder.
-DATA-CHASSIS conserva NEXT; FUNDAMENTALS-COVERAGE sigue PLANNED. Este registro no cierra Q1–Q7.
-Las oportunidades siguientes no son nuevos gates del bloque activo ni una cola de ejecución autorizada.
+En ese corte DATA-CHASSIS conservaba `NEXT` y FUNDAMENTALS-COVERAGE seguía `PLANNED`. Este registro no cierra Q1–Q7.
+Las oportunidades siguientes no eran nuevos gates del bloque activo ni una cola de ejecución autorizada.
 
 Informe original: `~/projects/investment-analyst/docs/external_technical_review_2026-10-21.md`.
 SHA-256 del documento leído: b67c1db23124504ebdba5eb1ce098a4cc05f7b60453dc78fc714b8d8aa344dc1. Se conserva sin editar.
