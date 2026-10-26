@@ -12,33 +12,28 @@ when CI is unavailable or under diagnosis, or when the Work Block explicitly req
 
 ## Environment and commands
 
-The job uses the fixed `ubuntu-24.04` runner label and Python 3.12, matching the supported project
+The gate uses the fixed `ubuntu-24.04` runner label and Python 3.12, matching the supported project
 runtime. It bootstraps the pinned `uv 0.11.29` release, verifies that `uv.lock` matches
-`pyproject.toml`, synchronizes the exact locked development environment, then executes:
+`pyproject.toml`, and synchronizes the exact locked development environment. The literal required
+check remains `Python 3.12 quality` and aggregates:
 
-```bash
-uv lock --check
-uv sync --locked --extra dev
-uv run --locked --extra dev python -m ruff check .
-uv run --locked --extra dev python -m ruff format --check .
-uv run --locked --extra dev python -m pytest \
-  --cov=investment_analyst \
-  --cov-report=term-missing
-uv run --locked --extra dev pip-audit \
-  --local \
-  --skip-editable \
-  --progress-spinner off
-```
+1. a deterministic collection of the complete test universe (`ci-partition-manifest-v1`);
+2. four disjoint shards, each validating the planned universe digest before running its exact node
+   ids;
+3. repository-wide Ruff check and format verification;
+4. combined branch/subprocess coverage with a global floor of 82.00%;
+5. `pip-audit --local --skip-editable` against the locked environment.
 
-`--locked` checks project metadata instead of silently changing the lock. `uv sync` performs an exact
-environment synchronization and installs the project in editable mode. `setup-python` caches only
-pip downloads used to bootstrap the pinned uv version; the lock remains the dependency source of
-truth.
+The authoritative recipe and local shard commands live in
+`.github/workflows/ci_support/README.md`. Builders run `FOCUSED` checks while iterating; the
+aggregate `FULL` gate is mandatory for the exact final SHA before AUDIT and merge. `FOCUSED` cannot
+produce `FULL`, and green evidence is never transferred between SHAs.
 
-Coverage uses branch measurement and subprocess instrumentation from `pyproject.toml`. The enforced
-floor is 82.00%; the collected count and coverage for a candidate are read from the exact-SHA CI run,
-not inferred from a historical local number. `pip-audit` examines the exact installed locked
-environment and fails when its vulnerability service reports a known issue.
+The local `FULL` recipe remains `bash scripts/check.sh`, executed once when CI, dependencies, lock,
+or toolchain changes, when CI is unavailable, or when the Work Block explicitly requires it. The
+optional `compare_serial=true` dispatch compares the partition engine with a serial reference and
+requires at least 40% critical-path reduction; it is not a second required check. Serial-reference
+evidence is reused only for the same SHA and collection.
 
 ## Security and resource limits
 
@@ -51,6 +46,8 @@ environment and fails when its vulnerability service reports a known issue.
 - A concurrency group cancels superseded runs for the same workflow and ref.
 - The job has a 45-minute timeout (extended from 20 minutes by `DEV-CI-TIMEOUT-45`) and never calls
   market or fundamental providers.
+- Artifacts retain the exact run/attempt manifests, shard receipts, coverage and balance report for
+  7 days; a missing artifact or receipt fails the aggregate closed.
 - CI requires no Alpaca, SEC, broker, or trading credentials.
 - Dependency synchronization cannot update `uv.lock` during CI.
 - The security audit never applies automatic dependency fixes.

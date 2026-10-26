@@ -1,6 +1,7 @@
 # Runbook de aceptación operacional exact-SHA
 
-> Decisión PLAN 2026-10-21: [arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Activación verificada por #346 MERGED en `b5e714a`; release observada `daad58d`; workspace UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; historia v1/F5 preservada. La formalización, neutralidad y retención continúan en [DATA-CHASSIS-46](data_chassis_continuity_plan.md) (#349). Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+> Estado vigente 2026-10-26: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
+> `NEXT`. La matriz V1–V6 vive en [`v2_operational_readiness.md`](v2_operational_readiness.md).
 
 #345 autoriza candidato exact-SHA en raíz v2 nueva después de CI/recuperación/gates; la autorización está en el Issue, no en el observer. El observer sigue siendo read-only y no ejecuta providers; éstos usan sus fachadas normales bajo alcance separado.
 

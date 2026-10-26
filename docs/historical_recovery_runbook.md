@@ -1,6 +1,11 @@
 # Historical recovery runbook (DATA-CHASSIS-48)
 
-Authority: `DATA-CHASSIS-48` / Issue #357, base `origin/main@5992fdb8ad3bcf1c0df2b60239dd528dec9936fc`,
+> Referencia histórica fechada. `DATA-CHASSIS` está `DONE`; la autoridad vigente son
+> [`product_roadmap.md`](product_roadmap.md), [`basic_functional_release_plan.md`](basic_functional_release_plan.md)
+> y el Issue `workflow:active`. Este runbook describe la ejecución histórica de 48 y no autoriza una
+> nueva activación, cambio de schema, proveedor ni borrado de evidencia preexistente.
+
+Authority histórica: `DATA-CHASSIS-48` / Issue #357, base `origin/main@5992fdb8ad3bcf1c0df2b60239dd528dec9936fc`,
 expected branch `codex/data-chassis-48`, writer role `BUILD_PRODUCT`, `R3/CRITICAL`, `route_effect: COMPLETES`.
 This document describes the executed procedure and its evidence. It does not authorize a new
 workspace activation, schema change, provider change, or deletion of pre-existing evidence.

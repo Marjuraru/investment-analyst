@@ -1,20 +1,19 @@
 # Hoja de ruta estratégica del producto
 
-> Decisión PLAN 2026-10-21: [arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Activación verificada por #346 MERGED en `b5e714a`; release observada `daad58d`; workspace UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; historia v1/F5 preservada. La formalización, neutralidad y retención continúan en [DATA-CHASSIS-46](data_chassis_continuity_plan.md) (#349). Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+> Estado vigente 2026-10-26: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
+> `NEXT`. La readiness operativa v2 se registra en
+> [`v2_operational_readiness.md`](v2_operational_readiness.md): avanza prerrequisitos de interfaz,
+> lectura, limpieza y entrega, sin declarar cobertura fundamental nueva ni cerrar la ruta.
+>
+> Las notas y cronologías fechadas de este documento son registro histórico. No describen un Issue
+> activo ni autorizan ejecución; la única autoridad de Work Block es el Issue abierto con
+> `workflow:active` resuelto desde GitHub vivo.
 
-> **DATA-CHASSIS-47 (#353, 2026-10-22):** el bloque activo ejecuta la unión READ-1+47 sobre
-> `origin/main@012bbc5e41ade21318c02af343ed4c20436624d1`, rama `codex/data-chassis-47`,
-> policy `AUTO` con autorización CRITICAL integrada. Entrega el contrato de lectura
-> `read-dependency-signature-v1`, caché acotada con telemetría, reapertura de vista
-> versionada, `historical-selection-v1`/`historical-selection-progress-v1`, archivo
-> `continuity-archive-v1` y el piloto scratch con replay. 48 y 49 siguen siendo ruta
-> futura, no autoridad ejecutable.
+## Prioridad operativa de 2026-10-26
 
-## Prioridad operativa de 2026-10-21
+DATA-CHASSIS cerró con `DATA-CHASSIS-48`/#357 (`COMPLETES`) tras la reparación temporal R4, el delta físico de la vista packed compatible y el restore final verificado desde el padre retenido más los objetos remotos. `FUNDAMENTALS-COVERAGE` queda como el único `NEXT`. `FUNDAMENTALS-COVERAGE-READINESS`/#361 (`ADVANCES`) deja v2 listo para retomar desarrollo: lecturas críticas acotadas, recuperación remota utilizable, espacio local seguro y documentación vigente. No declara más cobertura fundamental ni cierra la fila. Se permite adquisición reciente y warm-up necesario mediante fuentes existentes; el archivo anterior no se re-descarga masivamente. Las cronologías inferiores conservan contexto histórico, no autoridad para sustituir esta secuencia.
 
-DATA-CHASSIS cerró con `DATA-CHASSIS-48`/#357 (`COMPLETES`) tras la reparación temporal R4, el delta físico de la vista packed compatible y el restore final verificado desde el padre retenido más los objetos remotos. `FUNDAMENTALS-COVERAGE` queda como el único `NEXT`. Se permite adquisición reciente y warm-up necesario mediante fuentes existentes; el archivo anterior no se re-descarga masivamente. Las cronologías inferiores conservan contexto histórico, no autoridad para sustituir esta secuencia.
-
-## Revisión técnica externa: oportunidades posteriores al bloque activo
+## Revisión técnica externa: oportunidades posteriores a DATA-CHASSIS-48
 
 La [revisión contrastada de2026-10-21](planning_context/external_technical_review_decisions_2026-10-21.md)
 registra qué críticas son verificables y cuáles son estimaciones o datos obsoletos. Es planificación
@@ -520,7 +519,7 @@ exportaciones, pero parten ocultas y no focusables mediante `hidden`; la reversi
 atributo. No se agregan endpoints, polling, mutaciones, dependencias ni deep-links públicos.
 
 La prioridad viva queda reconciliada: `LOCAL-INTERFACE` está `DONE`, `SEC-CORPUS` completó su ruta con
-`SEC-CORPUS-31` y `EQUITY-UNIVERSE` es el único `NEXT`, conservando las lecturas Caz ya integradas como base.
+`SEC-CORPUS-31` y `EQUITY-UNIVERSE` fue el único `NEXT` en ese corte, conservando las lecturas Caz ya integradas como base.
 `RUNTIME-EFFICIENCY-5`/#223 ya está integrado —retiró la resolución implícita de activo del camino de
 lectura— y `RUNTIME-EFFICIENCY-6` retira los contratos Apple productivos `aapl-market-chart-v5` y
 `AaplDailyRunRequestSnapshot`, dejando a Apple como un valor y no como una categoría del sistema de tipos,
@@ -723,8 +722,8 @@ son nuevas capacidades de análisis, no acceden al workspace ni ejecutan provide
 atribuyen causalidad de memoria. La duración de la captura es finita y explícita, sin duración mínima
 ni número mínimo de muestras, sesiones o ciclos como gate. `RELEASE-ACCEPTANCE` fue reconciliada
 HUMAN como `RELEASE-ACCEPTANCE DONE → EQUITY-UNIVERSE NEXT → SEC-CORPUS PLANNED`; esa secuencia quedó
-consumida y hoy la ruta viva es `LOCAL-INTERFACE DONE` y `SEC-CORPUS DONE` con `EQUITY-UNIVERSE NEXT`.
-La transición integrada es `EQUITY-UNIVERSE DONE → SEC-CORPUS NEXT`; #134/#135 integraron el
+consumida y en ese corte la ruta viva era `LOCAL-INTERFACE DONE` y `SEC-CORPUS DONE` con `EQUITY-UNIVERSE NEXT`.
+La transición integrada fue `EQUITY-UNIVERSE DONE → SEC-CORPUS NEXT`; #134/#135 integraron el
 sustrato institucional 13F, #140 la composición/completitud, #142 las métricas de cambio reportado,
 #144 el peso declarado y #146 la concentración efímera. #151 añade eventos institucionales descriptivos persistidos
 (`cazatiburones_institutional_events_v1`), candidatos con cooldown de 24h y consulta reproducible por snapshot_id;
@@ -741,22 +740,22 @@ observaciones. `SEC-CORPUS-30` integró la operación programada y reanudable de
 completo bajo el job `sec:institutional:13f-cycle` y `SEC-CORPUS-31` completa la ruta con la ventana de
 dos cierres adyacentes y su cadena derivada bajo el job `sec:institutional:13f-history`; `SEC-CORPUS`
 y `EQUITY-UNIVERSE` quedan `DONE` (`EQUITY-UNIVERSE` completado por `RUNTIME-EFFICIENCY-7` en `a56f851`).
-`FUNDAMENTALS-COVERAGE-1`/#228 (#229) integró la base de acciones ordinarias en `b0c41cd` y la fila pasa a
+`FUNDAMENTALS-COVERAGE-1`/#228 (#229) integró la base de acciones ordinarias en `b0c41cd`; la fila pasó a
 `PLANNED` por priorización humana explícita del 2026-09-12 ante la criticidad del almacenamiento físico.
-La fase vigente es `DATA-CHASSIS` (`DATA-CHASSIS-0`/#230, `ADVANCES`), que queda como la única ruta `NEXT`:
-durante toda la fase no hay desarrollo de UI salvo un indicador operativo estrictamente necesario, no se
-amplían activos del catálogo y no se re-descarga evidencia histórica.
+La fase vigente de ese corte fue `DATA-CHASSIS` (`DATA-CHASSIS-0`/#230, `ADVANCES`), que quedó como la única ruta `NEXT`:
+durante toda la fase no hubo desarrollo de UI salvo un indicador operativo estrictamente necesario, no se
+ampliaron activos del catálogo y no se re-descargó evidencia histórica.
 `EXTENDED-SOAK /
 DEDICATED-RUNTIME ALWAYS-ON ACCEPTANCE` queda diferido a un Work
 Block independiente.
 
-La continuación vigente de `DATA-CHASSIS` es la secuencia obligatoria
+La continuación registrada entonces de `DATA-CHASSIS` fue la secuencia obligatoria
 [46 → 47 → 48 → 49](data_chassis_continuity_plan.md): 46 formaliza documentación, neutralidad e
-inventario; 47 queda implementado por #353 con archivo recuperable y piloto scratch; 48 reincorpora
-por lotes con consumidor; 49 ejecuta la limpieza física y el cierre formal. `DATA-CHASSIS` permanece
-único `NEXT` y `FUNDAMENTALS-COVERAGE` sigue `PLANNED`. 48 y 49 no son Issues activos ni autoridad
-ejecutable anticipada: cada PLAN los resuelve desde main, runtime y evidencia nueva. Ningún tramo
-declara Q1–Q7 `MET` por comparar universos o cargas distintas.
+inventario; 47 quedó implementado por #353 con archivo recuperable y piloto scratch; 48 reincorporó
+por lotes con consumidor; 49 ejecutó la limpieza física y el cierre formal. `DATA-CHASSIS` permaneció
+único `NEXT` y `FUNDAMENTALS-COVERAGE` siguió `PLANNED` hasta el cierre de 48. 48 y 49 no eran Issues
+activos ni autoridad ejecutable anticipada: cada PLAN los resolvía desde main, runtime y evidencia
+nueva. Ningún tramo declaró Q1–Q7 `MET` por comparar universos o cargas distintas.
 
 `route_transition:DATA-CHASSIS:ADVANCES`
 

@@ -513,6 +513,7 @@ async function loadMesaUniverseCoverage() {
     ) return;
     resetMesaBvlRegistrySummary();
     renderMesaUniverseAbsentTable(createElement("span", "", error.message));
+    throw error;
   } finally {
     if (sequence === mesaUniverseCoverageRequestSequence) body.setAttribute("aria-busy", "false");
   }

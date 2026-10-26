@@ -167,6 +167,37 @@ def test_known_at_and_alien_asset_scope_change_the_signature(tmp_path: Path) -> 
         storage.close()
 
 
+def test_coverage_range_excludes_out_of_range_observation(tmp_path: Path) -> None:
+    _service, storage = _workspace(tmp_path)
+    try:
+        record = _record("210.50")
+        observation = _observation(record, "210.50", observed_at=_NOW - timedelta(days=1))
+        storage.raw_records.save(record)
+        storage.observations.save(observation)
+        wide = ReadDependencyQuery(
+            family=ReadDependencyFamily.COVERAGE,
+            endpoint="/api/v1/universe-coverage",
+            asset_ids=(_ASSET,),
+            source_ids=(_SOURCE,),
+            known_at=_NOW,
+            start=_NOW - timedelta(days=2),
+            end=_NOW,
+            selector="coverage",
+        )
+        narrow = wide.model_copy(update={"start": _NOW - timedelta(hours=12)})
+        wide_signature = build_read_dependency_signature(storage, wide)
+        narrow_signature = build_read_dependency_signature(storage, narrow)
+        assert wide_signature.digest != narrow_signature.digest
+        assert str(observation.observation_id) in {
+            item.dependency_id for item in wide_signature.dependencies
+        }
+        assert str(observation.observation_id) not in {
+            item.dependency_id for item in narrow_signature.dependencies
+        }
+    finally:
+        storage.close()
+
+
 def test_v1_storage_fails_closed_without_a_snapshot_binding(tmp_path: Path) -> None:
     service = WorkspaceService(environ={}, home=tmp_path / "home")
     initialized = service.initialize(tmp_path / "v1", format_version=1)

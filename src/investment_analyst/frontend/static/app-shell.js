@@ -518,7 +518,7 @@ byId("market-end").value = yesterday.toISOString().slice(0, 10);
 byId("valuation-date").value = yesterday.toISOString().slice(0, 10);
 byId("valuation-history-start").value = `${yesterday.getUTCFullYear() - 3}-01-01`;
 byId("valuation-history-end").value = yesterday.toISOString().slice(0, 10);
-byId("report-known-at").value = new Date().toISOString();
+byId("report-known-at").value = defaultKnownAtCut();
 renderKnownAtCut(byId("report-known-at").value.trim());
 byId("comparison-end").value = yesterday.toISOString().slice(0, 10);
 const comparisonStart = new Date(yesterday);
@@ -657,11 +657,11 @@ function navigateToContext(request) {
 // another endpoint, parameter or transport contract.
 const BOARD_DEFERRED_LOADS = Object.freeze({
   mesa: Object.freeze([
+    loadMesaUniverseCoverage,
     refreshOverview,
     loadMesaAnalyticalNews,
     loadMesaCazatiburonesNewsFamilies,
     loadMesaIncidents,
-    loadMesaUniverseCoverage,
   ]),
   activo: Object.freeze([
     queryReport,
@@ -705,16 +705,45 @@ function loadDeferredBoardData(boardId) {
   const loaders = BOARD_DEFERRED_LOADS[boardId];
   if (!loaders) return;
   loadedBoardIds.add(boardId);
+  if (boardId === "mesa" && loaders.length > 1) {
+    Promise.resolve()
+      .then(() => loaders[0]())
+      .catch(() => {
+        loadedBoardIds.delete(boardId);
+      })
+      .finally(() => {
+        Promise.allSettled(
+          loaders.slice(1).map((load) => Promise.resolve().then(() => load())),
+        ).then((results) => {
+          if (results.some((result) => result.status === "rejected")) {
+            loadedBoardIds.delete(boardId);
+          }
+        });
+      });
+    return;
+  }
   if (boardId === "activo") {
     const deferredRequest = Object.freeze({
       sequence: ++activoBoardRequestSequence,
       assetId: selectedMarketAsset,
       knownAt: byId("report-known-at").value.trim(),
     });
-    for (const load of loaders) void load(deferredRequest);
+    Promise.allSettled(
+      loaders.map((load) => Promise.resolve().then(() => load(deferredRequest))),
+    ).then((results) => {
+      if (results.some((result) => result.status === "rejected")) {
+        loadedBoardIds.delete(boardId);
+      }
+    });
     return;
   }
-  for (const load of loaders) void load();
+  Promise.allSettled(loaders.map((load) => Promise.resolve().then(() => load()))).then(
+    (results) => {
+      if (results.some((result) => result.status === "rejected")) {
+        loadedBoardIds.delete(boardId);
+      }
+    },
+  );
 }
 
 // Feather-style stroke icon paths, one per BOARD_REGISTRY.icon value. "grid"

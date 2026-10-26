@@ -1,16 +1,16 @@
 # Continuidad, retención y neutralidad de activos
 
-Registro único de la secuencia `DATA-CHASSIS 46 → 47 → 48 → 49`. Autoridad vigente: Issue #353
-(`DATA-CHASSIS-47`), base `origin/main@012bbc5e41ade21318c02af343ed4c20436624d1`, rama
-`codex/data-chassis-47`, `route_effect: ADVANCES`, policy `AUTO` con autorización CRITICAL
-integrada. #349 conserva el registro de 46. Este documento es evidencia y planificación; no autoriza importar, borrar, cambiar schema,
-activar otro workspace ni declarar el cierre de `DATA-CHASSIS` o Q1–Q7.
+Registro histórico fechado de la secuencia `DATA-CHASSIS 46 → 47 → 48 → 49`. `DATA-CHASSIS` está
+`DONE`; la autoridad vigente son [`product_roadmap.md`](product_roadmap.md),
+[`basic_functional_release_plan.md`](basic_functional_release_plan.md) y el Issue `workflow:active`.
+Este documento conserva evidencia y planificación histórica; no autoriza importar, borrar, cambiar
+schema, activar otro workspace ni declarar el cierre de `DATA-CHASSIS` o Q1–Q7.
 
-`route_transition:DATA-CHASSIS:ADVANCES`
+`route_transition:DATA-CHASSIS:ADVANCES` (registro histórico).
 
 ## 0. Implementación y evidencia de DATA-CHASSIS-47
 
-El bloque activo entrega cuatro contratos aislados y una receta canónica:
+El bloque 47 entregó cuatro contratos aislados y una receta canónica:
 
 - `read-dependency-signature-v1` (`storage/read_dependency_signature.py`): identidad por UUID,
   versión de código/contrato/catálogo, endpoint, argumentos completos, `known_at` y selección
@@ -70,8 +70,8 @@ Apple y `aapl_local_service.lock` permanecen como compatibilidad explícita, no 
 Inventario vivo: **107 Markdown tracked** en `git ls-files '*.md'` en la base, más **3 Markdown
 protegidos no tracked** (`issue230_body.md`, `docs/storage_cleanup_decision_2026-10-11.md` y
 `docs/external_technical_review_2026-10-21.md`). No hay duplicados exactos entre los 107 tracked.
-La tabla incluye además los dos documentos nuevos de este bloque (`docs/README.md` y este registro);
-el árbol final tendrá **109 Markdown tracked**.
+La tabla incluye además los tres documentos nuevos de esta ruta (`docs/README.md`, este registro y
+`docs/v2_operational_readiness.md`); el árbol final tiene **110 Markdown tracked**.
 
 Disposición: `PROTECTED` 17, `CANONICAL` 81, `ARCHIVE_REFERENCE` 8, `MERGE_INTO` 3 y `RETIRE` 0.
 `ARCHIVE_REFERENCE` y `MERGE_INTO` son estados de retención: ningún archivo se borra en 46. Las
@@ -81,6 +81,7 @@ columna `Refs` cuenta documentos tracked que mencionan el nombre o la ruta.
 | Documento | Decisión | Autoridad / consumidor | Refs | Scripts | Bytes |
 | --- | --- | --- | ---: | --- | ---: |
 | `docs/README.md` | CANONICAL | Índice documental único; nuevo en 46 | — | — | nuevo |
+| `docs/v2_operational_readiness.md` | CANONICAL | Documento vigente de readiness V1–V6 y matriz de caminos críticos; nuevo en 2026-10-26 | — | — | nuevo |
 | `docs/data_chassis_continuity_plan.md` | CANONICAL | Registro único de continuidad, retención y neutralidad; nuevo en 46 | — | — | nuevo |
 | `.agents/rules/investment-analyst-core.md` | PROTECTED | Gobernanza o evidencia inmutable; el guard verifica su hash de base | 4 | scripts/check_workflow_guards.py | 9111 |
 | `.agents/skills/audit/SKILL.md` | PROTECTED | Ruta de governance; BUILD_PRODUCT no puede modificarla y el guard rechaza el cambio | 2 | scripts/check_workflow_guards.py | 3709 |

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 from investment_analyst.analytics.fundamentals.research_models import AaplFundamentalResearchRequest
@@ -9,7 +10,11 @@ from investment_analyst.analytics.fundamentals.research_service import (
     SecIssuerFundamentalResearchService,
 )
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
-from investment_analyst.analytics.market.history_service import HistoricalMarketDataService
+from investment_analyst.analytics.market.history_service import (
+    HistoricalMarketDataService,
+    summarize_market_history_v2,
+)
+from investment_analyst.analytics.market.history_v2 import HistoricalMarketDataV2Service
 from investment_analyst.analytics.valuation.models import CorporateValuationRequest
 from investment_analyst.analytics.valuation.service import CorporateValuationService
 from investment_analyst.application.analysis_capabilities import analysis_capabilities_for
@@ -74,19 +79,38 @@ class UniverseCoverageService:
             raise ValueError(f"asset is not configured in the catalog: {unknown[0]}")
         start, end = inclusive_utc_date_bounds(request.market_start, request.market_end)
         bvl = self._bvl_views(request, asset_ids)
-        history = HistoricalMarketDataService(self._storage)
-        assets = tuple(
-            self._asset_view(
-                catalog_assets[asset_id],
-                descriptors.get(asset_id),
-                request,
-                start,
-                end,
-                history,
-                bvl.get(asset_id),
+        if getattr(self._storage.paths, "format_version", 1) == 2 and len(asset_ids) > 1:
+
+            def view(asset_id: str) -> UniverseCoverageAsset:
+                with LocalStorage(self._storage.paths, read_only=True) as storage:
+                    return self._asset_view(
+                        catalog_assets[asset_id],
+                        descriptors.get(asset_id),
+                        request,
+                        start,
+                        end,
+                        HistoricalMarketDataService(storage),
+                        bvl.get(asset_id),
+                        storage,
+                    )
+
+            with ThreadPoolExecutor(max_workers=min(4, len(asset_ids))) as executor:
+                assets = tuple(executor.map(view, asset_ids))
+        else:
+            history = HistoricalMarketDataService(self._storage)
+            assets = tuple(
+                self._asset_view(
+                    catalog_assets[asset_id],
+                    descriptors.get(asset_id),
+                    request,
+                    start,
+                    end,
+                    history,
+                    bvl.get(asset_id),
+                    self._storage,
+                )
+                for asset_id in asset_ids
             )
-            for asset_id in asset_ids
-        )
         return UniverseCoverageResult(
             catalog_version=self._catalog.catalog_version,
             catalog_sha256=_catalog_sha256(self._catalog),
@@ -116,6 +140,7 @@ class UniverseCoverageService:
         end: datetime,
         history: HistoricalMarketDataService,
         bvl_view: BvlRegistryAsset | None,
+        storage: LocalStorage,
     ) -> UniverseCoverageAsset:
         return UniverseCoverageAsset(
             asset_id=asset.asset_id,
@@ -124,9 +149,9 @@ class UniverseCoverageService:
             asset_class=asset.asset_class,
             exchange=asset.exchange or "UNKNOWN",
             quote_currency=asset.quote_currency,
-            market=self._market_view(descriptor, request, start, end, history),
-            fundamentals=self._fundamental_view(asset, request),
-            corporate_valuation=self._valuation_view(asset, request),
+            market=self._market_view(descriptor, request, start, end, history, storage),
+            fundamentals=self._fundamental_view(asset, request, storage),
+            corporate_valuation=self._valuation_view(asset, request, storage),
             bvl_registry=self._bvl_registry_view(asset, bvl_view, request),
             additional_capabilities_not_queried=_additional_capabilities(asset),
             limitations=_limitations(asset, descriptor),
@@ -139,6 +164,7 @@ class UniverseCoverageService:
         start: datetime,
         end: datetime,
         history: HistoricalMarketDataService,
+        storage: LocalStorage,
     ) -> UniverseMarketCoverage:
         if descriptor is None:
             return UniverseMarketCoverage(
@@ -148,27 +174,45 @@ class UniverseCoverageService:
                 candidate_versions=0,
                 discarded_revisions=0,
             )
-        series = history.query(
-            HistoricalBarQuery(
-                asset_id=descriptor.asset_id,
-                source_id=descriptor.source_id,
-                start=start,
-                end=end,
-                known_at=request.known_at,
-            )
+        query = HistoricalBarQuery(
+            asset_id=descriptor.asset_id,
+            source_id=descriptor.source_id,
+            start=start,
+            end=end,
+            known_at=request.known_at,
         )
-        latest = series.bars[-1] if series.bars else None
+        if getattr(storage.paths, "format_version", 1) == 2:
+            projection_service = HistoricalMarketDataV2Service(storage.store.raw_staging)
+            summary = summarize_market_history_v2(storage.store.raw_staging, query)
+            latest = (
+                projection_service.materialize(summary.latest_projection, query)
+                if summary.latest_projection is not None
+                else None
+            )
+            bar_count = summary.bar_count
+            candidate_versions = summary.candidate_versions
+            discarded_revisions = summary.discarded_revisions
+            earliest_timestamp = summary.earliest_timestamp
+            latest_timestamp = summary.latest_timestamp
+        else:
+            series = history.query(query)
+            latest = series.bars[-1] if series.bars else None
+            bar_count = series.coverage.bar_count
+            candidate_versions = series.coverage.candidate_versions
+            discarded_revisions = series.coverage.discarded_revisions
+            earliest_timestamp = series.coverage.earliest_timestamp
+            latest_timestamp = series.coverage.latest_timestamp
         return UniverseMarketCoverage(
             capability=CoverageCapability.SUPPORTED,
             evidence=EvidenceState.PRESENT if latest else EvidenceState.MISSING,
             source_id=descriptor.source_id,
             volume_unit=descriptor.volume_unit,
             history_start=descriptor.default_market_start,
-            bar_count=series.coverage.bar_count,
-            candidate_versions=series.coverage.candidate_versions,
-            discarded_revisions=series.coverage.discarded_revisions,
-            earliest_timestamp=series.coverage.earliest_timestamp,
-            latest_timestamp=series.coverage.latest_timestamp,
+            bar_count=bar_count,
+            candidate_versions=candidate_versions,
+            discarded_revisions=discarded_revisions,
+            earliest_timestamp=earliest_timestamp,
+            latest_timestamp=latest_timestamp,
             latest_available_at=latest.available_at if latest else None,
             latest_raw_record_id=latest.raw_record_id if latest else None,
             latest_observation_ids=tuple(sorted(latest.observation_ids.values(), key=str))
@@ -183,7 +227,10 @@ class UniverseCoverageService:
         )
 
     def _fundamental_view(
-        self, asset: CatalogAsset, request: UniverseCoverageRequest
+        self,
+        asset: CatalogAsset,
+        request: UniverseCoverageRequest,
+        storage: LocalStorage,
     ) -> UniverseFundamentalCoverage:
         if asset.asset_class is not AssetClass.EQUITY:
             return _empty_fundamentals(CoverageCapability.NOT_APPLICABLE)
@@ -195,7 +242,7 @@ class UniverseCoverageService:
             ProviderNamespaceMissingError,
         ):
             return _empty_fundamentals(CoverageCapability.NOT_CONFIGURED)
-        result = SecIssuerFundamentalResearchService(self._storage, configuration).query(
+        result = SecIssuerFundamentalResearchService(storage, configuration).query(
             AaplFundamentalResearchRequest(
                 known_at=request.known_at,
                 frequency=DataFrequency(request.frequency),
@@ -229,7 +276,10 @@ class UniverseCoverageService:
         )
 
     def _valuation_view(
-        self, asset: CatalogAsset, request: UniverseCoverageRequest
+        self,
+        asset: CatalogAsset,
+        request: UniverseCoverageRequest,
+        storage: LocalStorage,
     ) -> UniverseValuationCoverage:
         if asset.asset_class is not AssetClass.EQUITY:
             return _empty_valuation(CoverageCapability.NOT_APPLICABLE)
@@ -243,7 +293,7 @@ class UniverseCoverageService:
         ):
             return _empty_valuation(CoverageCapability.NOT_CONFIGURED)
         snapshot = CorporateValuationService(
-            self._storage,
+            storage,
             capabilities=analysis_capabilities_for(asset),
             market_source_id=market.source_id,
             fundamental_source_id=fundamental.companyfacts_source_id,

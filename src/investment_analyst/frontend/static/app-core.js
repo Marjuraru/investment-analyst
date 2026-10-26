@@ -809,7 +809,7 @@ async function loadMarketAssets() {
     knownAtByAsset.set(selectedMarketAsset, byId("report-known-at").value.trim());
     resetListedCompanyReport();
     selectedMarketAsset = assetId;
-    byId("report-known-at").value = knownAtByAsset.get(assetId) || new Date().toISOString();
+    byId("report-known-at").value = knownAtByAsset.get(assetId) || defaultKnownAtCut();
     renderKnownAtCut(byId("report-known-at").value.trim());
     marketChartPayload = null;
     marketChartViewport = null;
@@ -1149,6 +1149,12 @@ function initializeAssetSubtabs() {
       next.focus();
     });
   }
+}
+
+function defaultKnownAtCut() {
+  const cut = new Date();
+  cut.setUTCHours(0, 0, 0, 0);
+  return cut.toISOString();
 }
 
 function applySelectedMarketAsset() {

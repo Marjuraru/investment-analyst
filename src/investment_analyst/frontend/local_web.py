@@ -1165,12 +1165,20 @@ class AaplLocalController:
                 }
             )
         )
+        dependency_start = datetime.combine(
+            min(request.market_start, request.fundamental_start),
+            datetime.min.time(),
+            UTC,
+        )
+        dependency_end = request.known_at
         query = ReadDependencyQuery(
             family=ReadDependencyFamily.COVERAGE,
             endpoint="/api/v1/universe-coverage",
             asset_ids=tuple(sorted(asset_ids)),
             source_ids=sources,
             known_at=request.known_at,
+            start=dependency_start if dependency_start < dependency_end else None,
+            end=dependency_end if dependency_start < dependency_end else None,
             selector=(
                 f"market={request.market_start}..{request.market_end};"
                 f"fundamental={request.fundamental_start}..{request.fundamental_end};"

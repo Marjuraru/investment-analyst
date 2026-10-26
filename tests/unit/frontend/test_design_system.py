@@ -4592,7 +4592,7 @@ def _check_ui8_composition_is_documented(design_doc: str, local_doc: str, plan_d
     assert "`UI-13`" in local_doc
     assert "`UI-13`" in plan_doc
     assert "`SEC-CORPUS` completó su ruta" in plan_doc
-    assert "`DATA-CHASSIS` queda como la única ruta `NEXT`" in plan_doc
+    assert "`DATA-CHASSIS` quedó `DONE` y `FUNDAMENTALS-COVERAGE` es el único `NEXT`." in plan_doc
 
 
 def test_ui8_composition_and_route_are_documented() -> None:
@@ -5013,7 +5013,7 @@ def test_docs_state_technical_review_bvl_and_clean_ui_boundaries() -> None:
         assert "master-detail" in document
     assert "Anexo2TextodcRentaFija.pdf" in local_doc
     assert "`SEC-CORPUS` completó su ruta" in plan_doc
-    assert "`DATA-CHASSIS` queda como la única ruta `NEXT`" in plan_doc
+    assert "`DATA-CHASSIS` quedó `DONE` y `FUNDAMENTALS-COVERAGE` es el único `NEXT`." in plan_doc
     assert "UI-11" in plan_doc
 
 

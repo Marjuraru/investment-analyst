@@ -1,6 +1,7 @@
 # Local storage
 
-> Decisión PLAN 2026-10-21: [arranque v2 nuevo](data_chassis_v2_fresh_start_plan.md). Activación verificada por #346 MERGED en `b5e714a`; release observada `daad58d`; workspace UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; historia v1/F5 preservada. La formalización, neutralidad y retención continúan en [DATA-CHASSIS-46](data_chassis_continuity_plan.md) (#349). Las recetas de migración anteriores son históricas y no se ejecutan para el arranque nuevo.
+> Estado vigente 2026-10-26: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
+> `NEXT`. La matriz V1–V6 vive en [`v2_operational_readiness.md`](v2_operational_readiness.md).
 
 Distinguir índice/proyección y payload: filtrar antes de hidratar; cargar evidencia y dependencias sólo para el consumidor que las requiere, sin truncar resultados ni saltar hashes. Las secciones de document_json que describen v1 no cambian la representación compacta v2.
 
@@ -64,3 +65,23 @@ La valoración corporativa no cambia el schema DuckDB ni el formato del workspac
 usan la categoría `valuation` y sus valores evaluados usan la tabla append-only `metric_results`;
 los estados `not_evaluable`/`not_applicable` permanecen en el snapshot de consulta. Un pipeline
 guarda métricas una a una para conservar progreso válido si una escritura posterior falla.
+
+## Retención operativa (`operational-retention-plan-v1`)
+
+`scripts/manage_storage_retirement.py` implementa el contrato aditivo
+`operational-retention-plan-v1` sin cambiar el schema ni el formato del workspace:
+
+- `plan` mide rutas exactas bajo una raíz autorizada y sella clase, decisión, motivo, último
+  consumidor, dependencias, evidencia remota, bytes lógicos/asignados/exclusivos y fingerprint de
+  inventario; `verify` vuelve a medir sin mutar y falla ante cualquier drift;
+- `publish` sube el plan y su inventario de control al namespace cifrado y exige readback SHA-256;
+- `retire` es una ejecución separada, idempotente y reanudable con checkpoint durable y recibo
+  terminal; sólo ejecuta `REMOTE_ONLY`/`RETIRE_AFTER`, nunca `UNKNOWN`;
+- la protección es fail-closed: rutas fuera de la raíz, symlinks, referencias de workspace/release,
+  unit systemd, procesos con cwd/argumentos/fds dentro del árbol y capacidad por debajo de la reserva
+  bloquean la operación;
+- los bytes exclusivos descuentan inodos compartidos; no se infiere liberación de espacio desde bytes
+  lógicos ni desde una copia local parcheada.
+
+El plan y sus recibos viven fuera del workspace financiero. La cadena remota conserva base y deltas;
+no se borran objetos remotos ni se usa `sync --delete`.

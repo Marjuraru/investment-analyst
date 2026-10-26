@@ -13,6 +13,33 @@ import pytest
 APP_CORE = (
     files("investment_analyst.frontend").joinpath("static/app-core.js").read_text(encoding="utf-8")
 )
+APP_SHELL = (
+    files("investment_analyst.frontend").joinpath("static/app-shell.js").read_text(encoding="utf-8")
+)
+APP_MESA = (
+    files("investment_analyst.frontend").joinpath("static/app-mesa.js").read_text(encoding="utf-8")
+)
+
+
+def test_deferred_board_failure_releases_the_loaded_marker_for_retry() -> None:
+    loader = re.search(
+        r"function loadDeferredBoardData\(boardId\) \{.*?\n\}",
+        APP_SHELL,
+        flags=re.DOTALL,
+    )
+    assert loader, "loadDeferredBoardData must exist in app-shell.js"
+    body = loader.group(0)
+    assert "Promise.allSettled" in body
+    assert "loadedBoardIds.delete(boardId)" in body
+    assert "throw error;" in APP_MESA
+
+
+def test_default_known_at_cut_is_a_stable_utc_day() -> None:
+    assert "function defaultKnownAtCut()" in APP_CORE
+    assert "cut.setUTCHours(0, 0, 0, 0);" in APP_CORE
+    assert "knownAtByAsset.get(assetId) || defaultKnownAtCut()" in APP_CORE
+    assert "knownAtByAsset.get(assetId) || new Date().toISOString()" not in APP_CORE
+    assert 'byId("report-known-at").value = defaultKnownAtCut();' in APP_SHELL
 
 
 def _resolver_source() -> str:

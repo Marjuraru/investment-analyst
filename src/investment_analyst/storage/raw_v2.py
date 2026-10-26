@@ -22,6 +22,7 @@ from collections.abc import Collection, Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Literal
@@ -347,6 +348,7 @@ def _project_raw_json_fields(record: RawRecord) -> list[tuple[str, str]]:
     return projections
 
 
+@lru_cache(maxsize=8192)
 def _instant_text(value: datetime | None) -> str | None:
     """Store instants as canonical ISO text; DuckDB TIMESTAMPTZ needs pytz to bind."""
     if value is None:
@@ -356,6 +358,7 @@ def _instant_text(value: datetime | None) -> str | None:
     return value.astimezone(UTC).isoformat()
 
 
+@lru_cache(maxsize=8192)
 def _parse_instant_text(value: object) -> datetime | None:
     if value is None:
         return None
@@ -382,6 +385,7 @@ class RawV2Staging:
         self._read_only = read_only
         self._raw_root = destination / _BLOB_DIR_PARTS[0]
         self._is_open = False
+        self._observation_table_ready = False
 
     @property
     def is_open(self) -> bool:
@@ -397,6 +401,7 @@ class RawV2Staging:
         """Validate the destination and marker without trusting prior bytes."""
         if self._is_open:
             return self
+        self._observation_table_ready = False
         destination = self._destination
         if destination.is_symlink():
             raise RawV2StagingError("raw v2 staging destination cannot be a symbolic link")
@@ -406,7 +411,7 @@ class RawV2Staging:
         if self._read_only:
             self._read_marker(marker_path)
             self._require_index_table(marker_path, create=False)
-            ensure_observation_v2_table(self._connection, create=False)
+            self._ensure_observation_table(create=False)
             self._ensure_optional_analytical_tables(create=False)
             self._is_open = True
             return self
@@ -436,7 +441,7 @@ class RawV2Staging:
         if not marker_path.exists():
             self._write_marker(marker_path)
         self._require_index_table(marker_path, create=True)
-        ensure_observation_v2_table(self._connection, create=True)
+        self._ensure_observation_table(create=True)
         self._ensure_optional_analytical_tables(create=True)
         self._lock_path = destination / _STAGING_LOCK_FILENAME
         try:
@@ -470,6 +475,7 @@ class RawV2Staging:
                     os.close(descriptor)
                 self._lock_descriptor = None
         self._is_open = False
+        self._observation_table_ready = False
 
     @property
     def staging_id(self) -> str | None:
@@ -646,8 +652,14 @@ class RawV2Staging:
         missing = [record_id for record_id in ordered_ids if record_id not in indexed]
         if missing:
             raise RecordNotFoundError(f"raw v2 record {missing[0]} was not found")
+        projection_table_exists = self._workspace_projection_table_exists()
         return {
-            record_id: self._hydrate(record_id, indexed[record_id]) for record_id in ordered_ids
+            record_id: self._hydrate(
+                record_id,
+                indexed[record_id],
+                projection_table_exists=projection_table_exists,
+            )
+            for record_id in ordered_ids
         }
 
     def plan_temporal_repair(
@@ -1052,7 +1064,12 @@ class RawV2Staging:
         return rows
 
     def _hydrate(
-        self, record_id: UUID, row: tuple[object, ...], *, verified_record: RawRecord | None = None
+        self,
+        record_id: UUID,
+        row: tuple[object, ...],
+        *,
+        verified_record: RawRecord | None = None,
+        projection_table_exists: bool | None = None,
     ) -> RawRecord:
         (
             _indexed_id,
@@ -1085,7 +1102,9 @@ class RawV2Staging:
             or _parse_instant_text(received_at) != record.received_at
         ):
             raise RawV2StagingError("raw v2 index metadata does not match its file")
-        if self._workspace_projection_table_exists():
+        if projection_table_exists is None:
+            projection_table_exists = self._workspace_projection_table_exists()
+        if projection_table_exists:
             projection_rows = self._connection.execute(
                 f"SELECT field_name, field_value FROM {WORKSPACE_RAW_JSON_PROJECTIONS_TABLE} "
                 "WHERE record_id = ?",
@@ -1252,7 +1271,7 @@ class RawV2Staging:
             if not isinstance(observation, NormalizedObservation):
                 raise ObservationV2Error("observation v2 save requires NormalizedObservation")
         self._require_writable()
-        ensure_observation_v2_table(self._connection, create=True)
+        self._ensure_observation_table(create=True)
         return ObservationV2Store(self._connection).save_many(typed)
 
     def get_observations(
@@ -1260,7 +1279,7 @@ class RawV2Staging:
     ) -> dict[UUID, NormalizedObservation]:
         """Hydrate verified typed observations in deterministic order."""
         self._require_open()
-        ensure_observation_v2_table(self._connection, create=False)
+        self._ensure_observation_table(create=False)
         hydrated = ObservationV2Store(self._connection).get_many(tuple(observation_ids))
         for key, observation in hydrated.items():
             if (
@@ -1285,7 +1304,7 @@ class RawV2Staging:
         if (after_available_at is None) != (after_observation_id is None):
             raise ObservationV2Error("observation inventory cursor requires both fields together")
         self._require_open()
-        ensure_observation_v2_table(self._connection, create=False)
+        self._ensure_observation_table(create=False)
         clauses: list[str] = []
         parameters: list[object] = []
         if after_available_at is not None and after_observation_id is not None:
@@ -1311,7 +1330,7 @@ class RawV2Staging:
     ) -> list[NormalizedObservation]:
         """Hydrate typed PIT observations in stable order with verification."""
         self._require_open()
-        ensure_observation_v2_table(self._connection, create=False)
+        self._ensure_observation_table(create=False)
         frequency_value = frequency.value if hasattr(frequency, "value") else frequency
         clauses: list[str] = []
         parameters: list[object] = []
@@ -1375,7 +1394,7 @@ class RawV2Staging:
         ):
             raise RawV2StagingError("market observation cursor must be timezone-aware")
         self._require_open()
-        ensure_observation_v2_table(self._connection, create=False)
+        self._ensure_observation_table(create=False)
         cursor_sql = ""
         cursor_parameters: list[object] = []
         if after_observed_at is not None and after_raw_record_id is not None:
@@ -1537,7 +1556,7 @@ class RawV2Staging:
             if instant.tzinfo is None or instant.utcoffset() is None:
                 raise RawV2StagingError(f"market history {label} must be timezone-aware")
         self._require_open()
-        ensure_observation_v2_table(self._connection, create=False)
+        self._ensure_observation_table(create=False)
         row = self._connection.execute(
             "SELECT MIN(observed_at) FROM normalized_observations_v2 "
             "WHERE asset_id = ? AND source_id = ? AND frequency = ? "
@@ -1721,7 +1740,7 @@ class RawV2Staging:
                 raise MetricV2Error("metric v2 save requires MetricResult")
         self._require_writable()
         ensure_metric_v2_tables(self._connection, create=True)
-        ensure_observation_v2_table(self._connection, create=False)
+        self._ensure_observation_table(create=False)
         receipt = MetricV2Store(self._connection).save_many(typed)
         self._ensure_optional_analytical_tables(create=True)
         return receipt
@@ -1908,7 +1927,7 @@ class RawV2Staging:
             raise EvidenceSetV2Error("evidence v2 save requires EvidenceSet")
         self._require_writable()
         ensure_evidence_v2_tables(self._connection, create=True)
-        ensure_observation_v2_table(self._connection, create=False)
+        self._ensure_observation_table(create=False)
         created = EvidenceSetV2Store(self._connection).save_set(evidence_set)
         self._ensure_optional_analytical_tables(create=True)
         return created
@@ -2074,6 +2093,12 @@ class RawV2Staging:
         except RawV2StagingError:
             return False
         return True
+
+    def _ensure_observation_table(self, *, create: bool) -> None:
+        if self._observation_table_ready:
+            return
+        ensure_observation_v2_table(self._connection, create=create)
+        self._observation_table_ready = True
 
     def _require_open(self) -> None:
         if not self._is_open:

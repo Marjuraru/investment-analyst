@@ -515,7 +515,7 @@ bloque la barra, sus subpestañas y el panel colapsable de actualización. `tecn
 una búsqueda de catálogo local sin barra de alcance global; `revisar` recibe en `UI-10` su
 master-detail con dos familias semánticas separadas. `cazatiburones` recibe en `UI-11` el índice y
 sus filtros, y en `UI-13` un detalle por selección local sin barra global. Esas entregas no alteran
-el hecho de que `SEC-CORPUS` sigue siendo la única ruta `NEXT`.
+el hecho de que `FUNDAMENTALS-COVERAGE` es el único `NEXT`.
 
 ### Densidad, alcance global y selección local (`UI-13`)
 
