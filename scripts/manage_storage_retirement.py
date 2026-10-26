@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+from investment_analyst.application.local_release import LocalReleaseError, LocalReleaseService
 from investment_analyst.workspace.drive_transport import (
     DriveTransport,
     DriveTransportConfig,
@@ -92,6 +94,17 @@ def _parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status", help="read the durable retention cursor and receipt")
     status.add_argument("--checkpoint", type=_absolute_path, required=True)
     status.add_argument("--receipt", type=_absolute_path, required=True)
+
+    release = commands.add_parser(
+        "retire-release",
+        help="retire one unreferenced installed release through the release service",
+    )
+    release.add_argument("--sha", required=True)
+    release.add_argument("--operation-id", type=UUID, required=True)
+    release.add_argument("--retained-controls", type=_absolute_path, required=True)
+    release.add_argument(
+        "--retained-release-path", type=_absolute_path, action="append", default=[]
+    )
     return parser
 
 
@@ -202,11 +215,23 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 0
+        if args.command == "retire-release":
+            if re.fullmatch(r"[0-9a-f]{40}", args.sha) is None:
+                raise ValueError("release SHA must be exactly 40 lowercase hex characters")
+            receipt = LocalReleaseService().retire_unused_release(
+                args.sha,
+                operation_id=args.operation_id,
+                retained_controls=args.retained_controls,
+                retained_release_paths=tuple(args.retained_release_path),
+            )
+            _print(receipt.model_dump(mode="json"))
+            return 0
     except RetentionNotAdmitted as error:
         print(f"manage_storage_retirement: {error}", file=sys.stderr)
         return 3
     except (
         DriveTransportError,
+        LocalReleaseError,
         OSError,
         StorageRetirementError,
         ValueError,

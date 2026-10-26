@@ -37,7 +37,7 @@ from investment_analyst.workspace.workspace_v2_lifecycle import (
 
 _DEFAULT_ROOT = Path("/home/marjuraru/.local/share/investment-analyst")
 _DEFAULT_RESERVE_BYTES = 5_000_000_000
-_SMALL_CONTENT_BYTES = 1024 * 1024
+_SMALL_CONTENT_BYTES = 4096
 _EXECUTABLE = frozenset({RetentionDecision.REMOTE_ONLY, RetentionDecision.RETIRE_AFTER})
 _PROTECTED_RELEASE_SHA = "dbbdfd021b0fee20be31b2d2a845874b0e861067"
 
@@ -51,7 +51,8 @@ class RetentionNotAdmitted(StorageRetirementError):
 
 
 def _host_free_bytes() -> int:
-    return int(shutil.disk_usage(Path("/mnt/c")).free)
+    path = Path("/mnt/c")
+    return int(shutil.disk_usage(path if path.exists() else Path("/")).free)
 
 
 def _wsl_free_bytes() -> int:
@@ -520,22 +521,30 @@ class StorageRetirementService:
         for current, directories, files in os.walk(root, followlinks=False):
             base = Path(current)
             if base.is_symlink():
-                raise StorageRetirementError("retention tree contains a symbolic link")
+                raise StorageRetirementError(
+                    f"retention tree contains a symbolic link: {base.relative_to(root).as_posix()}"
+                )
             directories.sort()
             for name in directories:
                 path = base / name
+                relative = path.relative_to(root).as_posix()
                 if path.is_symlink():
-                    raise StorageRetirementError("retention tree contains a symbolic link")
+                    raise StorageRetirementError(
+                        f"retention tree contains a symbolic link: {relative}"
+                    )
                 records.append(
                     {
                         "record": "directory",
-                        "path": path.relative_to(root).as_posix(),
+                        "path": relative,
                     }
                 )
             for name in sorted(files):
                 path = base / name
+                relative = path.relative_to(root).as_posix()
                 if path.is_symlink() or not path.is_file():
-                    raise StorageRetirementError("retention tree contains an unsafe entry")
+                    raise StorageRetirementError(
+                        f"retention tree contains an unsafe entry: {relative}"
+                    )
                 records.append(self._file_record(path, root))
                 file_count += 1
         records.sort(key=lambda item: (str(item["record"]), str(item["path"])))
