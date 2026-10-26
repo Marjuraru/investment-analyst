@@ -111,6 +111,10 @@ class StorageRetirementService:
         self._runtime_root = (
             runtime_root if runtime_root is not None else self._allowed_root / "runtime"
         )
+        self._deployment_cache: object | None = None
+        self._bindings_cache: object | None = None
+        self._systemctl_cache: dict[str, str] | None = None
+        self._unit_text_cache: str | None = None
 
     def plan(self, request: RetentionPlanRequest) -> OperationalRetentionPlan:
         """Measure every exact request path and seal the complete inventory."""
@@ -652,35 +656,48 @@ class StorageRetirementService:
         return frozenset(shas)
 
     def _deployment_state(self) -> object:
-        if self._deployment_state_loader is not None:
-            return self._deployment_state_loader()
-        return LocalReleaseService().load_deployment_state()
+        if self._deployment_cache is None:
+            if self._deployment_state_loader is not None:
+                self._deployment_cache = self._deployment_state_loader()
+            else:
+                self._deployment_cache = LocalReleaseService().load_deployment_state()
+        return self._deployment_cache
 
     def _bindings(self) -> object:
-        if self._workspace_bindings_loader is not None:
-            return self._workspace_bindings_loader()
-        return LocalReleaseService().load_workspace_bindings()
+        if self._bindings_cache is None:
+            if self._workspace_bindings_loader is not None:
+                self._bindings_cache = self._workspace_bindings_loader()
+            else:
+                self._bindings_cache = LocalReleaseService().load_workspace_bindings()
+        return self._bindings_cache
 
     def _unit_text(self) -> str:
-        try:
-            return (
-                self._systemd_unit_path.read_text(encoding="utf-8")
-                if self._systemd_unit_path.is_file()
-                else ""
-            )
-        except OSError as error:
-            raise StorageRetirementError("service unit cannot be inspected") from error
+        if self._unit_text_cache is None:
+            try:
+                self._unit_text_cache = (
+                    self._systemd_unit_path.read_text(encoding="utf-8")
+                    if self._systemd_unit_path.is_file()
+                    else ""
+                )
+            except OSError as error:
+                raise StorageRetirementError("service unit cannot be inspected") from error
+        return self._unit_text_cache
 
     def _systemctl_properties(self) -> dict[str, str]:
-        if self._systemctl_properties_loader is not None:
-            return self._systemctl_properties_loader()
-        try:
-            properties = LocalReleaseService().systemctl.show_properties(
-                "investment-analyst.service", ("ExecStart", "WorkingDirectory")
-            )
-        except Exception as error:
-            raise StorageRetirementError("systemd references cannot be verified") from error
-        return {str(key): str(value) for key, value in properties.items()}
+        if self._systemctl_cache is None:
+            if self._systemctl_properties_loader is not None:
+                self._systemctl_cache = self._systemctl_properties_loader()
+            else:
+                try:
+                    properties = LocalReleaseService().systemctl.show_properties(
+                        "investment-analyst.service", ("ExecStart", "WorkingDirectory")
+                    )
+                except Exception as error:
+                    raise StorageRetirementError(
+                        "systemd references cannot be verified"
+                    ) from error
+                self._systemctl_cache = {str(key): str(value) for key, value in properties.items()}
+        return self._systemctl_cache
 
     def _remove(self, path: Path) -> None:
         try:
