@@ -7,19 +7,33 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from migrate_workspace_v2 import _host_free_bytes
-
+from investment_analyst.workspace.backup_reuse import BackupReuseError, BackupReuseService
 from investment_analyst.workspace.drive_transport import (
     DriveTransport,
     DriveTransportConfig,
     DriveTransportError,
 )
 from investment_analyst.workspace.service import WorkspaceService
-from investment_analyst.workspace.workspace_v2_backup import WorkspaceV2BackupService
+from investment_analyst.workspace.workspace_v2_backup import (
+    _PACKED_INVENTORY_NAME,
+    _PACKED_JOURNAL_NAME,
+    _PACKED_MANIFEST_NAME,
+    _PACKED_VOLUME_DIRECTORY,
+    WorkspaceV2BackupError,
+    WorkspaceV2BackupService,
+    WorkspaceV2PackedStreamManifest,
+    _stream_manifest,
+)
+from investment_analyst.workspace.workspace_v2_backup_inventory import (
+    WorkspaceV2BackupInventoryTrailer,
+    iter_inventory,
+)
 from investment_analyst.workspace.workspace_v2_lifecycle import (
     WorkspaceV2LifecycleError,
     WorkspaceV2LifecycleService,
@@ -156,6 +170,36 @@ def _parser() -> argparse.ArgumentParser:
     restore_remote.add_argument("--reserve-bytes", type=int, default=5_000_000_000)
     restore_remote.add_argument("--minimum-host-free-bytes", type=int, default=25_000_000_000)
     restore_remote.add_argument("--receipt", type=_new_file, required=True)
+
+    create_reuse = commands.add_parser(
+        "create-reuse", help="create a verified successor reusing identical parent files"
+    )
+    create_reuse.add_argument("--source", type=Path, required=True)
+    create_reuse.add_argument("--destination", type=Path, required=True)
+    create_reuse.add_argument("--parent", type=Path, required=True)
+    create_reuse.add_argument("--reserve-bytes", type=int, default=5_000_000_000)
+    create_reuse.add_argument("--allow-copy-fallback", action="store_true")
+    create_reuse.add_argument("--receipt", type=_new_file, required=True)
+
+    create_packed = commands.add_parser(
+        "create-packed", help="create a resumable packed backup from a verified source"
+    )
+    create_packed.add_argument("--source", type=Path, required=True)
+    create_packed.add_argument("--destination", type=Path, required=True)
+    create_packed.add_argument("--volume-bytes", type=int, default=8 * 1024 * 1024)
+    create_packed.add_argument("--fragment-bytes", type=int, default=1024 * 1024)
+    create_packed.add_argument("--reserve-bytes", type=int, default=5_000_000_000)
+    create_packed.add_argument("--writer-closed", action="store_true")
+    create_packed.add_argument("--receipt", type=_new_file, required=True)
+
+    create_view = commands.add_parser(
+        "create-packed-view",
+        help="derive a hardlinked packed view whose inventory matches its journal",
+    )
+    create_view.add_argument("--source", type=Path, required=True)
+    create_view.add_argument("--destination", type=Path, required=True)
+    create_view.add_argument("--exclude", default="backup_manifest.json")
+    create_view.add_argument("--receipt", type=_new_file, required=True)
     return parser
 
 
@@ -183,6 +227,143 @@ def _load_inventory(path: Path) -> LifecycleInventory:
         return LifecycleInventory.model_validate_json(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise ValueError("lifecycle inventory is malformed") from error
+
+
+def _host_free_bytes() -> int:
+    return int(shutil.disk_usage(Path("/mnt/c")).free)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_packed_view(workspace_service: WorkspaceService, args: argparse.Namespace) -> int:
+    source = args.source.expanduser().resolve()
+    destination = args.destination.expanduser().resolve()
+    if destination.exists() or destination.is_symlink():
+        raise ValueError("packed view destination must be a new path")
+    if destination == source or source in destination.parents or destination in source.parents:
+        raise ValueError("packed view roots must be disjoint")
+    service = WorkspaceV2BackupService(workspace_service)
+    _, source_manifest = service.inspect_packed_for_restore(source)
+    if not isinstance(source_manifest, WorkspaceV2PackedStreamManifest):
+        raise ValueError("packed view requires a v3 stream manifest")
+    source_inventory = source / _PACKED_INVENTORY_NAME
+    source_journal = source / _PACKED_JOURNAL_NAME
+    source_volumes = source / _PACKED_VOLUME_DIRECTORY
+    destination.mkdir(parents=True)
+    volumes = destination / _PACKED_VOLUME_DIRECTORY
+    volumes.mkdir()
+    temporary = destination / f".{_PACKED_INVENTORY_NAME}.{os.getpid()}.tmp"
+    digest = hashlib.sha256()
+    count = 0
+    total_bytes = 0
+    excluded: dict[str, object] | None = None
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+            for entry in iter_inventory(source_inventory):
+                if entry["path"] == args.exclude:
+                    if excluded is not None:
+                        raise ValueError("packed view exclusion is duplicated")
+                    excluded = entry
+                    continue
+                line = json.dumps(entry, separators=(",", ":"), sort_keys=True)
+                stream.write(line + "\n")
+                digest.update((line + "\n").encode("utf-8"))
+                count += 1
+                total_bytes += int(entry["size_bytes"])
+            if excluded is None:
+                raise ValueError("packed view exclusion is absent")
+            trailer = WorkspaceV2BackupInventoryTrailer(
+                file_count=count,
+                total_bytes=total_bytes,
+                digest_sha256=digest.hexdigest(),
+            )
+            stream.write(json.dumps(trailer.model_dump(mode="json"), separators=(",", ":")))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination / _PACKED_INVENTORY_NAME)
+    finally:
+        temporary.unlink(missing_ok=True)
+    os.link(source_journal, destination / _PACKED_JOURNAL_NAME)
+    volume_files = sorted(source_volumes.glob("volume-*.gz"))
+    if len(volume_files) != source_manifest.volume_count:
+        raise ValueError("packed view source volume count differs")
+    inode_matches = 0
+    for volume in volume_files:
+        target = volumes / volume.name
+        os.link(volume, target)
+        source_stat = volume.stat()
+        target_stat = target.stat()
+        if (source_stat.st_dev, source_stat.st_ino) == (
+            target_stat.st_dev,
+            target_stat.st_ino,
+        ):
+            inode_matches += 1
+    if inode_matches != len(volume_files):
+        raise ValueError("packed view volume is not a hardlink")
+    manifest = _stream_manifest(
+        workspace_id=source_manifest.source_workspace_id,
+        counts=source_manifest.counts,
+        inventory_path=destination / _PACKED_INVENTORY_NAME,
+        journal_path=destination / _PACKED_JOURNAL_NAME,
+        created_at=datetime.now(UTC),
+    )
+    _write_output(destination / _PACKED_MANIFEST_NAME, manifest.to_json_dict())
+    _, verified = service.inspect_packed_for_restore(destination)
+    if (
+        not isinstance(verified, WorkspaceV2PackedStreamManifest)
+        or verified.backup_id != manifest.backup_id
+        or verified.inventory != manifest.inventory
+    ):
+        raise ValueError("packed view did not verify")
+    receipt = {
+        "schema_version": "workspace-v2-packed-view-receipt-v1",
+        "created_at": datetime.now(UTC).isoformat(),
+        "source": {
+            "root": str(source),
+            "manifest_sha256": _sha256_file(source / _PACKED_MANIFEST_NAME),
+            "backup_id": str(source_manifest.backup_id),
+            "inventory": source_manifest.inventory.model_dump(mode="json"),
+        },
+        "excluded": {
+            "path": args.exclude,
+            "sha256": str(excluded["sha256"]),
+            "size_bytes": int(excluded["size_bytes"]),
+        },
+        "view": {
+            "root": str(destination),
+            "manifest_sha256": _sha256_file(destination / _PACKED_MANIFEST_NAME),
+            "backup_id": str(manifest.backup_id),
+            "inventory": manifest.inventory.model_dump(mode="json"),
+            "journal_sha256": manifest.journal_sha256,
+            "volume_count": manifest.volume_count,
+        },
+        "hardlinks": {
+            "journal": True,
+            "volumes": len(volume_files),
+            "inode_matches": inode_matches,
+        },
+    }
+    _write_output(args.receipt, receipt)
+    print(
+        json.dumps(
+            {
+                "source_backup_id": str(source_manifest.backup_id),
+                "view_backup_id": str(manifest.backup_id),
+                "files": manifest.inventory.file_count,
+                "bytes": manifest.inventory.total_bytes,
+                "volumes": manifest.volume_count,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -319,6 +500,40 @@ def main(argv: list[str] | None = None) -> int:
                 receipt_path=args.receipt,
             )
             return 0
+        if args.command == "create-packed-view":
+            return _write_packed_view(workspace_service, args)
+        if args.command == "create-reuse":
+            service = BackupReuseService(workspace_service)
+            receipt = service.create_successor(
+                args.source,
+                args.destination,
+                args.parent,
+                available_bytes=_host_free_bytes if args.allow_copy_fallback else None,
+                reserve_bytes=args.reserve_bytes,
+                allow_copy_fallback=args.allow_copy_fallback,
+            )
+            _write_output(args.receipt, receipt.model_dump(mode="json"))
+            return 0
+        if args.command == "create-packed":
+            service = WorkspaceV2BackupService(workspace_service)
+            manifest = service.create_packed(
+                args.source,
+                args.destination,
+                volume_bytes=args.volume_bytes,
+                fragment_bytes=args.fragment_bytes,
+                available_bytes=_host_free_bytes,
+                reserve_bytes=args.reserve_bytes,
+                writer_closed=args.writer_closed,
+            )
+            _write_output(
+                args.receipt,
+                {
+                    "schema_version": "packed-backup-receipt-v1",
+                    "writer_closed": args.writer_closed,
+                    "manifest": manifest.model_dump(mode="json"),
+                },
+            )
+            return 0
         if args.command == "restore-remote":
             if _host_free_bytes() < args.minimum_host_free_bytes:
                 raise ValueError("remote restore host capacity is below the declared floor")
@@ -386,9 +601,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 130
     except (
+        BackupReuseError,
         DriveTransportError,
         OSError,
         ValueError,
+        WorkspaceV2BackupError,
         WorkspaceV2LifecycleError,
         WorkspaceV2RemoteError,
     ) as error:

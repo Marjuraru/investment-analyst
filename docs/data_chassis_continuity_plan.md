@@ -349,7 +349,7 @@ antes de importar. Ninguna ausencia se completa con cero.
 | --- | --- | --- |
 | **46, este bloque** | Formalización documental, selección neutral corregida, inventario/selección y calendario por eventos | Sin importación ni eliminación de datos grandes; no audita indefinidamente todo el producto |
 | **47, archivo recuperable y piloto** | Cubrir el delta histórico único no respaldado; selección cerrada; piloto scratch no vacío de mercado+fundamental/documental, solape LIVE/HISTORICAL, conflictos/restart/PIT; representación autorizada por PLAN antes de BUILD | Inventario y presupuesto de 46; no copiar una DB encima del activo ni reparar F5 por rutina |
-| **48, reincorporación útil** | Importar la selección por lotes acotados con checkpoints, writer único, prioridad por consumidor, sin cambiar fechas/IDs, igualdad de conjuntos/lineage y backup/restore por corte; consultas operativas | Piloto y contrato verificados; no importar todo el archivo por defecto; no volver a descargar historia reproducible sólo para simplificar |
+| **48, recuperación selectiva** | Selección única read-only por consumidor (37 activos, familias diarias/fundamentales/eventos/13F/documentos), manifiesto paginado y presupuesto; importación bajo writer único con checkpoints; backup sucesor con reutilización física del parent; restore remoto final; consultas operativas | Piloto y contrato verificados; no importar todo el archivo por defecto; no volver a descargar historia reproducible sólo para simplificar; no backup por lote |
 | **49, limpieza física y cierre OBLIGATORIOS** | Ejecutar la lista literal de retiradas elegibles con hashes/recibos/último consumidor; verificar recuperación y servicio; medir bytes antes/después; reconciliar docs, Q1–Q7 y pendientes; todo retenido tiene motivo/evento o retención permanente explícita | Últimos consumidores satisfechos; sin borrar evidencia única ni datos UNKNOWN; compactación VHD aparte con mecanismo/ventana/autoridad concretos |
 
 47 puede retirar staging propio ya verificado dentro de su futura lista literal; no se pospone todo
@@ -415,8 +415,11 @@ Comandos read-only y resultados relevantes (2026-10-22):
   `BUILD BLOCKED` de la recuperación, no como dato perdido.
 - Los conteos v1 y v2 no son comparables por universo, UUID y reglas de exclusión; no se declara
   porcentaje migrado ni ahorro de almacenamiento.
-- `C:` está al 95% de uso; una importación por lotes exige presupuesto medido y backup/restore por
-  corte. No se compacta el VHD en 46.
+- `C:` está al 95% de uso. La lectura/inventario read-only no requiere un mínimo universal de 25 GB:
+  no se copia la DB para inventariar ni se bloquea la lectura por ese umbral. Cualquier importación o
+  escritura grande exige el presupuesto medido de 5 GB + pico y aviso previo; el backup sucesor
+  reutiliza bytes idénticos del parent inmutable y no se crea un backup por lote. No se compacta el
+  VHD en 46–48.
 - Los worktrees y checkpoints existentes se preservan; cualquier retirada usa el mecanismo Git
   soportado y ocurre en 49 con autorización humana.
 - Apple permanece como compatibilidad explícita; la neutralidad no elimina adaptadores ni fuentes.

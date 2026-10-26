@@ -29,6 +29,9 @@ from investment_analyst.storage.observation_v2 import OBSERVATION_V2_TABLE
 from investment_analyst.storage.raw_v2 import (
     WORKSPACE_RAW_JSON_PROJECTIONS_TABLE,
     RawV2Staging,
+    RawV2TemporalRepair,
+    RawV2TemporalRepairReceipt,
+    RawV2TemporalStamp,
 )
 
 _PAGE = 256
@@ -74,6 +77,20 @@ class WorkspaceV2RawRecordRepository:
 
     def get(self, record_id: UUID) -> RawRecord:
         return self._staging.get(record_id)
+
+    def plan_temporal_repair(
+        self,
+        record_id: UUID,
+        *,
+        before: RawV2TemporalStamp,
+        after: RawV2TemporalStamp,
+    ) -> RawV2TemporalRepair:
+        """Derive one narrow temporal repair authorization without writing."""
+        return self._staging.plan_temporal_repair(record_id, before=before, after=after)
+
+    def repair_temporal_metadata(self, repair: RawV2TemporalRepair) -> RawV2TemporalRepairReceipt:
+        """Apply one narrow temporal repair through the staging writer."""
+        return self._staging.repair_temporal_metadata(repair)
 
     def get_many(self, record_ids: Collection[UUID]) -> dict[UUID, RawRecord]:
         ordered = tuple(sorted(set(record_ids), key=str))

@@ -12,14 +12,14 @@
 
 ## Prioridad operativa de 2026-10-21
 
-DATA-CHASSIS sigue NEXT. #345 ADVANCES con arranque nuevo; no cierre por base vacía. Se permite adquisición reciente y warm-up necesario mediante fuentes existentes; el archivo anterior no se re-descarga masivamente. FUNDAMENTALS-COVERAGE permanece PLANNED. Las cronologías inferiores conservan contexto histórico, no autoridad para sustituir esta secuencia.
+DATA-CHASSIS cerró con `DATA-CHASSIS-48`/#357 (`COMPLETES`) tras la reparación temporal R4, el delta físico de la vista packed compatible y el restore final verificado desde el padre retenido más los objetos remotos. `FUNDAMENTALS-COVERAGE` queda como el único `NEXT`. Se permite adquisición reciente y warm-up necesario mediante fuentes existentes; el archivo anterior no se re-descarga masivamente. Las cronologías inferiores conservan contexto histórico, no autoridad para sustituir esta secuencia.
 
 ## Revisión técnica externa: oportunidades posteriores al bloque activo
 
 La [revisión contrastada de2026-10-21](planning_context/external_technical_review_decisions_2026-10-21.md)
 registra qué críticas son verificables y cuáles son estimaciones o datos obsoletos. Es planificación
-futura, no un Work Block ni ampliación de #345. DATA-CHASSIS conserva NEXT y FUNDAMENTALS-COVERAGE
-PLANNED; no cambia criterios globales ni declara integración/activación por este documento.
+futura, no un Work Block ni ampliación de #345. DATA-CHASSIS queda DONE y FUNDAMENTALS-COVERAGE
+NEXT; no cambia criterios globales ni declara integración/activación por este documento.
 
 Prioridad: terminar aceptación vigente; evaluar CI si domina el coste de iteración; continuar archivo
 histórico y piloto de incorporación selectiva. Optimizar escritura compacta sólo con perfil y

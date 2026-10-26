@@ -23,6 +23,10 @@ from investment_analyst.evidence.sec_documents.repository import (
     revision_to_raw_record,
 )
 from investment_analyst.storage import LocalStorage, StorageError, StoragePaths
+from investment_analyst.storage.raw_v2 import RawV2TemporalStamp
+from investment_analyst.storage.workspace_v2_repositories import WorkspaceV2RawRecordRepository
+from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.service import WorkspaceService
 
 
 def _revision(*, checksum: str, retrieved_at: datetime, discovery_id) -> SecDocumentRevision:
@@ -354,6 +358,58 @@ def test_v2_lineage_rejects_discovery_received_after_document_retrieval(tmp_path
         repository = SecDocumentRepository(storage.raw_records, storage.documents)
         with pytest.raises(StorageError, match="received after the revision was retrieved"):
             repository.verify_revision(revision)
+
+
+def test_v2_temporal_repair_restores_discovery_causality_idempotently(tmp_path: Path) -> None:
+    """A later discovery fails until only its authorized timestamps are corrected."""
+    accepted_at = datetime(2020, 3, 1, tzinfo=UTC)
+    retrieved_at = datetime(2026, 8, 1, tzinfo=UTC)
+    discovered_at = datetime(2026, 8, 2, tzinfo=UTC)
+    corrected_at = retrieved_at - timedelta(minutes=5)
+    discovery_id = uuid4()
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialized = service.initialize(tmp_path / "v2", format_version=2)
+    with service.open_storage(initialized.paths, WorkspaceAccessMode.READ_WRITE) as storage:
+        discovery = _submissions(discovery_id, discovered_at)
+        storage.raw_records.save(discovery)
+        blob = storage.documents.put(b"one!")
+        revision = _v2_revision(
+            checksum=blob.sha256,
+            accepted_at=accepted_at,
+            retrieved_at=retrieved_at,
+            discovery_id=discovery_id,
+        )
+        storage.raw_records.save(revision_to_raw_record(revision))
+
+        repository = storage.raw_records
+        assert isinstance(repository, WorkspaceV2RawRecordRepository)
+        sec_documents = SecDocumentRepository(repository, storage.documents)
+        with pytest.raises(StorageError, match="received after the revision was retrieved"):
+            sec_documents.verify_revision(revision)
+
+        repair = repository.plan_temporal_repair(
+            discovery_id,
+            before=RawV2TemporalStamp(
+                available_at=discovered_at,
+                received_at=discovered_at,
+                source_retrieved_at=discovered_at,
+            ),
+            after=RawV2TemporalStamp(
+                available_at=corrected_at,
+                received_at=corrected_at,
+                source_retrieved_at=corrected_at,
+            ),
+        )
+        assert repository.repair_temporal_metadata(repair).changed is True
+        assert repository.repair_temporal_metadata(repair).changed is False
+        repaired = repository.get(discovery_id)
+        assert repaired.available_at == corrected_at
+        assert repaired.received_at == corrected_at
+        assert repaired.source.retrieved_at == corrected_at
+        assert repaired.event_time == discovery.event_time
+        assert repaired.payload == discovery.payload
+        assert repaired.source.checksum_sha256 == discovery.source.checksum_sha256
+        sec_documents.verify_revision(revision)
 
 
 def test_metadata_revision_is_append_only_point_in_time_and_restores_shared_blob(

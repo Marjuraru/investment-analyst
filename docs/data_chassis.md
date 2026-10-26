@@ -1161,3 +1161,32 @@ FINALIZE después de AUDIT PASS, CI verde exacta y guards vivos. No autoriza la 
 del workspace permanente. El formato 1 permanece default hasta que el Work Block 43 resuelva y
 valide el inventario, restore, rollback y activación; Drive, limpieza y oportunidades opcionales
 siguen fuera de #337 y requieren el PLAN correspondiente.
+
+## Cierre del chasis de datos (`DATA-CHASSIS-48` / #357)
+
+`DATA-CHASSIS-48` cierra la ruta con la reparación temporal R4 de un único discovery, la admisión PIT
+corregida y un restore remoto verificado:
+
+- Discovery `4847c4d0-9531-58c1-bc6b-113e3d00f970`: `e6f127ef…` → `3fbd8a08…`; solo
+  `available_at`, `received_at` y `source.retrieved_at` pasan a `2026-10-20T18:53:29.313510Z`;
+  `event_time`, payload y checksum de contenido permanecen. Recibo `44d2714f…`, replay idempotente
+  `changed=false`, blob anterior retenido.
+- La admisión compara PIT, no solo ID/checksum; un raw presente con timestamps distintos es
+  `CONFLICTO` y un discovery posterior sigue fallando. Regresiones de conservación temporal,
+  conflicto, idempotencia y linaje documental.
+- Backup successor `6d9df860…`: 870.443 archivos reutilizados, 2 copiados, padre `b57be147…`
+  sin mutar. Vista packed compatible `157806cb…` con los 486 volúmenes sellados por hardlink y solo
+  el control `backup_manifest.json` filtrado; índice physical-delta `08b7845f…`.
+- Delta `770a315a…`: 568.185.469 B nuevos en 585 objetos, 3.516.107.740 B reutilizados; upload
+  `ff305409…` verificado por lectura remota independiente. Restore `v2-restore-repair-20261025`
+  desde `.restore-final-20261024e.incomplete` más el delta remoto: 870.492 archivos, recibo
+  `2026-10-25T21:30:02Z`.
+- Verificación post-restore: 869.654 raws, 203.049 observaciones, 41.737 métricas y 1.902
+  diagnósticos, idénticos al corte activo; seal `14047/1881`; `verify_complete` e incremental
+  correctos; los seis documentos dependientes verifican.
+- Riesgo residual: el host `C:` quedó en ~3,3 GB libres, por debajo de la reserva de 5 GB, aunque
+  ningún archivo supera 1 GB. Se conservan backup `c`, packed `c`, remoto `c`, `.incomplete e`, su
+  checkpoint, el successor y los recibos; el staging local de payload delta se retiró tras publicar.
+- Ruta: `DATA-CHASSIS` pasa a `DONE` y `FUNDAMENTALS-COVERAGE` queda como único `NEXT`; Q1–Q7 no
+  cambian. CI exact-SHA `721c80e`: `Python 3.12 quality` success, cobertura 82,14%. AUDIT
+  independiente pendiente.
