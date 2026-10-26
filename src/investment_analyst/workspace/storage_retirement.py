@@ -37,7 +37,7 @@ from investment_analyst.workspace.workspace_v2_lifecycle import (
 
 _DEFAULT_ROOT = Path("/home/marjuraru/.local/share/investment-analyst")
 _DEFAULT_RESERVE_BYTES = 5_000_000_000
-_SMALL_CONTENT_BYTES = 4096
+_SMALL_CONTENT_BYTES = 0
 _EXECUTABLE = frozenset({RetentionDecision.REMOTE_ONLY, RetentionDecision.RETIRE_AFTER})
 _PROTECTED_RELEASE_SHA = "dbbdfd021b0fee20be31b2d2a845874b0e861067"
 

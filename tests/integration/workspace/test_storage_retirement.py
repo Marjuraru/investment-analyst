@@ -211,3 +211,19 @@ def test_cli_reports_budget_refusal_without_mutation(tmp_path: Path) -> None:
     )
     assert result.returncode == 3
     assert stage.is_dir()
+
+
+def test_cli_release_retirement_requires_an_exact_sha(tmp_path: Path) -> None:
+    controls = tmp_path / "release-controls"
+    result = _run(
+        "retire-release",
+        "--sha",
+        "abc",
+        "--operation-id",
+        "33333333-3333-3333-3333-333333333333",
+        "--retained-controls",
+        str(controls),
+    )
+    assert result.returncode == 2
+    assert "exactly 40 lowercase hex characters" in result.stderr
+    assert not controls.exists()
