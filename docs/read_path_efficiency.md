@@ -40,11 +40,24 @@ En un workspace formato 2, la cobertura de mercado y el precio de valoración us
   alcance;
 - `get_many` calcula una sola vez por lote la existencia de la tabla de proyecciones JSON, en lugar
   de consultar `information_schema` por registro;
+- `summarize_market_history_v2` selecciona todas las revisiones PIT y sus conteos con candidatos
+  ligeros, pero construye y verifica sólo la proyección más reciente; la ambigüedad del timestamp
+  seleccionado sigue fallando cerrado;
+- la valoración busca el precio en ventanas recientes (30/90/365/3650 días) y sólo expande hasta el
+  rango completo si no encuentra una barra, conservando la última barra PIT y su verificación;
+- la cobertura v2 reparte los activos en hasta cuatro conexiones read-only aisladas y conserva el
+  orden contractual del resultado; el formato 1 sigue secuencial;
+- la ausencia opcional de `pandas` se cachea una vez para evitar que DuckDB repita la búsqueda de
+  importación en cada parámetro; no se instala ni emula la dependencia;
+- la tabla de observaciones se verifica una vez por conexión y los instantes ISO repetidos usan una
+  caché acotada;
 - el formato 1 conserva el camino anterior sin cambios.
 
 La matriz cubierta se amplía a la proyección v2 sin cambiar fórmulas, `Decimal`, IDs, versiones,
 resultados ni límites PIT. El corpus ajeno 1x/10x se prueba en scratch y no aumenta la hidratación de
-la selección individual.
+la selección individual. La medición in-process del 2026-10-26 sobre el workspace activo dio ~9,9 s
+en frío y ~6,6 s en caliente para los 37 activos; el smoke de navegador y sus cinco muestras se
+registran en [`v2_operational_readiness.md`](v2_operational_readiness.md).
 
 En el cliente, un fallo de cualquier loader diferido libera el tablero de `loadedBoardIds` tras
 `Promise.allSettled`, de modo que una nueva activación reintenta. La cobertura de Mesa vuelve a lanzar
