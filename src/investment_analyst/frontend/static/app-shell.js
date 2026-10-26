@@ -657,11 +657,11 @@ function navigateToContext(request) {
 // another endpoint, parameter or transport contract.
 const BOARD_DEFERRED_LOADS = Object.freeze({
   mesa: Object.freeze([
+    loadMesaUniverseCoverage,
     refreshOverview,
     loadMesaAnalyticalNews,
     loadMesaCazatiburonesNewsFamilies,
     loadMesaIncidents,
-    loadMesaUniverseCoverage,
   ]),
   activo: Object.freeze([
     queryReport,
@@ -705,6 +705,23 @@ function loadDeferredBoardData(boardId) {
   const loaders = BOARD_DEFERRED_LOADS[boardId];
   if (!loaders) return;
   loadedBoardIds.add(boardId);
+  if (boardId === "mesa" && loaders.length > 1) {
+    Promise.resolve()
+      .then(() => loaders[0]())
+      .catch(() => {
+        loadedBoardIds.delete(boardId);
+      })
+      .finally(() => {
+        Promise.allSettled(
+          loaders.slice(1).map((load) => Promise.resolve().then(() => load())),
+        ).then((results) => {
+          if (results.some((result) => result.status === "rejected")) {
+            loadedBoardIds.delete(boardId);
+          }
+        });
+      });
+    return;
+  }
   if (boardId === "activo") {
     const deferredRequest = Object.freeze({
       sequence: ++activoBoardRequestSequence,

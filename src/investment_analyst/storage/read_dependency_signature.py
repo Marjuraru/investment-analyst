@@ -271,12 +271,17 @@ def _raw_dependencies(
     source_ids: tuple[str, ...],
     known_at: datetime,
     selector: str,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> tuple[ReadDependency, ...]:
     clauses = ["asset_id IN (" + _placeholders(asset_ids) + ")"]
     parameters: list[object] = [*asset_ids]
     if source_ids:
         clauses.append("source_id IN (" + _placeholders(source_ids) + ")")
         parameters.extend(source_ids)
+    if start is not None and end is not None:
+        clauses.append("event_time >= ? AND event_time < ?")
+        parameters.extend((_instant_text(start), _instant_text(end)))
     clauses.append("available_at <= ?")
     parameters.append(_instant_text(known_at))
     rows = connection.execute(
@@ -485,6 +490,8 @@ def _collect_dependencies(
             source_ids=query.source_ids,
             known_at=query.known_at,
             selector="coverage",
+            start=query.start,
+            end=query.end,
         )
         return observations + raw
     raise ReadSignatureUnavailable("read dependency family is not supported")
