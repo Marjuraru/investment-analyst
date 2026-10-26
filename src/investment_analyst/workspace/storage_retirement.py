@@ -693,9 +693,7 @@ class StorageRetirementService:
                         "investment-analyst.service", ("ExecStart", "WorkingDirectory")
                     )
                 except Exception as error:
-                    raise StorageRetirementError(
-                        "systemd references cannot be verified"
-                    ) from error
+                    raise StorageRetirementError("systemd references cannot be verified") from error
                 self._systemctl_cache = {str(key): str(value) for key, value in properties.items()}
         return self._systemctl_cache
 
