@@ -34,6 +34,13 @@ def test_deferred_board_failure_releases_the_loaded_marker_for_retry() -> None:
     assert "throw error;" in APP_MESA
 
 
+def test_default_known_at_cut_is_a_stable_utc_day() -> None:
+    assert "function defaultKnownAtCut()" in APP_CORE
+    assert "cut.setUTCHours(0, 0, 0, 0);" in APP_CORE
+    assert "knownAtByAsset.get(assetId) || defaultKnownAtCut()" in APP_CORE
+    assert "knownAtByAsset.get(assetId) || new Date().toISOString()" not in APP_CORE
+
+
 def _resolver_source() -> str:
     match = re.search(
         r"function resolveMarketAssetSelection\(assets, selectedAssetId\) \{.*?\n\}",
