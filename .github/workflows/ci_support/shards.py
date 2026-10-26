@@ -24,6 +24,7 @@ MANIFEST_SCHEMA = "ci-partition-manifest-v1"
 SELECTION_SCHEMA = "ci-shard-selection-v1"
 RECEIPT_SCHEMA = "ci-shard-receipt-v1"
 WEIGHTS_SCHEMA = "ci-module-weights-v1"
+REPORT_SCHEMA = "ci-balance-report-v1"
 
 TERMINAL_OUTCOMES = frozenset({"passed", "failed", "error", "skipped", "xfailed", "xpassed"})
 SUCCESS_OUTCOMES = frozenset({"passed", "skipped", "xfailed", "xpassed"})
@@ -840,6 +841,159 @@ def compare_serial(
     }
 
 
+def _read_epoch_file(path: Path | str, label: str) -> int:
+    try:
+        text = Path(path).read_text(encoding="utf-8").strip()
+    except OSError as error:
+        raise ContractError(f"{label} is absent or unreadable") from error
+    if not text.isdigit():
+        raise ContractError(f"{label} is not an epoch timestamp")
+    return int(text)
+
+
+def _directory_bytes(path: Path | str, *, exclude: Path | str | None = None) -> int:
+    root = Path(path)
+    if not root.is_dir():
+        raise ContractError(f"artifact directory is missing: {root}")
+    excluded = Path(exclude).resolve() if exclude is not None else None
+    total = 0
+    try:
+        for item in root.rglob("*"):
+            if not item.is_file():
+                continue
+            if excluded is not None and item.resolve() == excluded:
+                continue
+            total += item.stat().st_size
+    except OSError as error:
+        raise ContractError(f"cannot measure artifact bytes in {root}: {error}") from error
+    return total
+
+
+def _balance_ratio(values: Sequence[float]) -> float | None:
+    low = min(values)
+    return round(max(values) / low, 6) if low > 0 else None
+
+
+def build_report(
+    manifest: Manifest,
+    receipts_dir: Path | str,
+    partition_dir: Path | str,
+    quality_dir: Path | str,
+    *,
+    serial_dir: Path | str | None = None,
+    artifacts_dirs: Sequence[Path | str] | None = None,
+    retention_days: int = 7,
+    exclude_path: Path | str | None = None,
+    shard_count: int = 4,
+) -> dict[str, object]:
+    if retention_days <= 0:
+        raise ContractError("retention days must be positive")
+    receipts = Path(receipts_dir)
+    partition = Path(partition_dir)
+    quality = Path(quality_dir)
+    for label, path in (("receipts", receipts), ("partition", partition), ("quality", quality)):
+        if not path.is_dir():
+            raise ContractError(f"{label} directory is missing: {path}")
+    validation = validate_receipts(manifest, receipts, shard_count)
+    if not (partition / "timing-plan.json").is_file():
+        raise ContractError("plan timing is absent or unreadable")
+    plan_started, plan_finished = _read_timing(partition / "timing-plan.json", "plan timing")
+    if plan_finished < plan_started:
+        raise ContractError("plan timing is inconsistent")
+    aggregate_started = _read_epoch_file(quality / "aggregate-started-at", "aggregate start")
+    gate_finished = _read_epoch_file(quality / "gate-finished-at", "gate finish")
+    if gate_finished < aggregate_started:
+        raise ContractError("aggregate timing is inconsistent")
+    summary_by_shard = {int(item["shard"]): item for item in validation["shards"]}
+    rows: list[dict[str, object]] = []
+    wall_values: list[float] = []
+    pytest_values: list[float] = []
+    starts: list[int] = []
+    finishes: list[int] = []
+    for shard in range(1, shard_count + 1):
+        timing_path = receipts / f"timing-shard-{shard}.json"
+        if not timing_path.is_file():
+            raise ContractError(f"shard {shard} timing is absent or unreadable")
+        started, finished = _read_timing(timing_path, f"shard {shard} timing")
+        wall = finished - started
+        if wall <= 0:
+            raise ContractError(f"shard {shard} wall time is not positive")
+        pytest_seconds = float(summary_by_shard[shard]["duration_seconds"])
+        if pytest_seconds < 0 or pytest_seconds > wall:
+            raise ContractError(f"shard {shard} pytest time exceeds its wall time")
+        rows.append(
+            {
+                "shard": shard,
+                "selected_count": summary_by_shard[shard]["selected_count"],
+                "weight_seconds": summary_by_shard[shard]["weight_seconds"],
+                "wall_seconds": wall,
+                "pytest_seconds": round(pytest_seconds, 3),
+                "overhead_seconds": round(wall - pytest_seconds, 3),
+                "started_at_epoch": started,
+                "finished_at_epoch": finished,
+            }
+        )
+        wall_values.append(float(wall))
+        pytest_values.append(pytest_seconds)
+        starts.append(started)
+        finishes.append(finished)
+    if max(finishes) < plan_started:
+        raise ContractError("shard timing precedes the parallel path start")
+    queue_seconds = max(0, min(starts) - plan_finished)
+    execution_seconds = max(finishes) - min(starts)
+    plan_seconds = plan_finished - plan_started
+    aggregate_seconds = gate_finished - aggregate_started
+    critical_path_seconds = gate_finished - plan_started
+    if critical_path_seconds <= 0:
+        raise ContractError("critical path is not positive")
+    runner_seconds = plan_seconds + sum(wall_values) + aggregate_seconds
+    candidates = [Path(item) for item in (artifacts_dirs or (partition, receipts, quality))]
+    if serial_dir is not None and Path(serial_dir).is_dir():
+        candidates.append(Path(serial_dir))
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        roots.append(candidate)
+    artifact_bytes = sum(_directory_bytes(root, exclude=exclude_path) for root in roots)
+    weight_values = [float(item["weight_seconds"]) for item in validation["shards"]]
+    return {
+        "schema_version": REPORT_SCHEMA,
+        "source_sha": manifest.source_sha,
+        "run_id": manifest.run_id,
+        "run_attempt": manifest.run_attempt,
+        "python_version": manifest.python_version,
+        "weights_version": manifest.weights_version,
+        "weights_sha256": manifest.weights_sha256,
+        "universe_count": validation["universe_count"],
+        "universe_sha256": validation["universe_sha256"],
+        "plan_seconds": plan_seconds,
+        "aggregate_seconds": aggregate_seconds,
+        "critical_path_seconds": critical_path_seconds,
+        "runner_seconds": runner_seconds,
+        "runner_minutes": round(runner_seconds / 60, 2),
+        "queue_seconds": queue_seconds,
+        "execution_seconds": execution_seconds,
+        "artifact_bytes": artifact_bytes,
+        "retention_days": retention_days,
+        "per_shard": rows,
+        "balance": {
+            "wall_ratio": _balance_ratio(wall_values),
+            "pytest_ratio": _balance_ratio(pytest_values),
+            "weight_ratio": _balance_ratio(weight_values),
+            "wall_spread_seconds": max(wall_values) - min(wall_values),
+            "pytest_spread_seconds": round(max(pytest_values) - min(pytest_values), 3),
+        },
+        "method": (
+            "validated receipts plus workflow timing files; "
+            "artifact bytes are observed extracted bytes"
+        ),
+    }
+
+
 def _coverage_command(*arguments: str) -> list[str]:
     return [sys.executable, "-m", "coverage", *arguments]
 
@@ -1085,6 +1239,32 @@ def _command_compare(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _command_report(arguments: argparse.Namespace) -> int:
+    manifest = load_manifest(arguments.manifest, arguments.shards)
+    report = build_report(
+        manifest,
+        arguments.receipts_dir,
+        arguments.partition_dir,
+        arguments.quality_dir,
+        serial_dir=arguments.serial_dir,
+        artifacts_dirs=arguments.artifacts_dir or None,
+        retention_days=arguments.retention_days,
+        exclude_path=arguments.summary_out,
+        shard_count=arguments.shards,
+    )
+    _write_json(arguments.summary_out, report)
+    balance = report["balance"]
+    print(
+        "balance report: "
+        f"critical={report['critical_path_seconds']}s "
+        f"runner={report['runner_minutes']}min "
+        f"wall_ratio={balance['wall_ratio']} "
+        f"artifacts={report['artifact_bytes']}B "
+        f"retention={report['retention_days']}d"
+    )
+    return 0
+
+
 def _command_gate(arguments: argparse.Namespace) -> int:
     summary = evaluate_gate(
         plan_result=arguments.plan_result,
@@ -1160,6 +1340,18 @@ def _parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--max-ratio", type=float, default=0.6)
     compare_parser.add_argument("--summary-out", required=True)
     compare_parser.set_defaults(handler=_command_compare)
+
+    report_parser = subparsers.add_parser("report", help="publish balance and duration evidence")
+    report_parser.add_argument("--manifest", required=True)
+    report_parser.add_argument("--shards", type=int, default=4)
+    report_parser.add_argument("--receipts-dir", required=True)
+    report_parser.add_argument("--partition-dir", required=True)
+    report_parser.add_argument("--quality-dir", required=True)
+    report_parser.add_argument("--serial-dir")
+    report_parser.add_argument("--artifacts-dir", action="append", default=[])
+    report_parser.add_argument("--retention-days", type=int, default=7)
+    report_parser.add_argument("--summary-out", required=True)
+    report_parser.set_defaults(handler=_command_report)
 
     gate_parser = subparsers.add_parser("gate", help="require every branch to be green")
     gate_parser.add_argument("--plan-result", required=True)

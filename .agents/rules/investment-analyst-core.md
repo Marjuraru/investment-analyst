@@ -72,6 +72,11 @@ Inventario mínimo vigente de markdown aplicables (una sola clasificación por r
 | `docs/data_chassis_45_acceptance_runbook.md` | `HISTORICAL_REFERENCE` |
 | `docs/historical_recovery_runbook.md` | `HISTORICAL_REFERENCE` |
 
+`docs/continuous_integration.md` no es editable por `BUILD_GOVERNANCE`: queda explícitamente en el
+inventario del bloque PRODUCT posterior como `UPDATE` y este bloque no lo modifica. La receta CI-1
+vigente se documenta en `docs/development_protocol.md` y
+`.github/workflows/ci_support/README.md`.
+
 ## Decisión de continuidad DATA-CHASSIS
 
 Decisión humana registrada el `2026-10-22T19:47:53Z` (momento UTC de formalización; la hora exacta

@@ -532,6 +532,10 @@ def test_ci_preserves_complete_assertions_coverage_and_failure_gate() -> None:
     )
     assert "shards.py coverage" in coverage_command
     assert "--fail-under 82" in coverage_command
+    report_command = _workflow_step_command(quality, "Publish balance and duration report")
+    assert "shards.py report" in report_command
+    assert "--retention-days 7" in report_command
+    assert "--summary-out" in report_command
     compare_command = _workflow_step_command(quality, "Compare serial reference")
     assert "--aggregate-started-at" in compare_command
     assert "--aggregate-finished-at" in compare_command
@@ -990,6 +994,141 @@ def test_ci_gate_rejects_non_success_or_unexpected_serial_reference() -> None:
         _CI_SHARDS.evaluate_gate(**{**base, "serial_result": "success"})
     with pytest.raises(_CI_SHARDS.ContractError, match="input is invalid"):
         _CI_SHARDS.evaluate_gate(**{**base, "compare_serial": "yes"})
+
+
+def test_ci_committed_weights_are_measured_and_balanced() -> None:
+    weights = _CI_SHARDS.load_weights(CI_SUPPORT / "module_weights.json")
+
+    assert weights.version == "2026-10-26.1"
+    assert weights.source["workflow_run_id"] == "40253368902"
+    assert weights.source["job_id"] == "121349862244"
+    assert weights.source["source_sha"] == "265cd860157b399f7160bd91951e7d512de1ac1c"
+    assert weights.source["observed_seconds"] == round(sum(weights.modules.values()), 3)
+    module_universe = tuple(f"{path}::test_placeholder" for path in sorted(weights.modules))
+    partitions = _CI_SHARDS.build_partitions(module_universe, weights, 4)
+    loads = [partition.weight_seconds for partition in partitions]
+    assert max(loads) / min(loads) <= 1.01
+    assert max(weights.modules.values()) <= sum(weights.modules.values()) / 4
+
+
+def test_ci_balance_report_publishes_critical_path_and_rejects_incomplete_evidence(
+    tmp_path: Path,
+) -> None:
+    _write_mini_suite(tmp_path, failures=False)
+    manifest_path, parts = _plan_mini_suite(tmp_path)
+    manifest = _CI_SHARDS.load_manifest(manifest_path)
+    receipts = tmp_path / "receipts"
+    _run_all_shards(tmp_path, parts, receipts)
+    quality = tmp_path / "quality"
+    quality.mkdir()
+    (parts / "timing-plan.json").write_text(
+        json.dumps({"started_at_epoch": 1000, "finished_at_epoch": 1010}),
+        encoding="utf-8",
+    )
+    (quality / "aggregate-started-at").write_text("1100\n", encoding="utf-8")
+    (quality / "gate-finished-at").write_text("1110\n", encoding="utf-8")
+    walls: list[int] = []
+    for shard in range(1, 5):
+        receipt = json.loads((receipts / f"receipt-shard-{shard}.json").read_text(encoding="utf-8"))
+        wall = max(1, int(receipt["duration_seconds"]) + 5)
+        walls.append(wall)
+        (receipts / f"timing-shard-{shard}.json").write_text(
+            json.dumps(
+                {
+                    "shard": shard,
+                    "started_at_epoch": 1010,
+                    "finished_at_epoch": 1010 + wall,
+                    "duration_seconds": wall,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    report = _CI_SHARDS.build_report(manifest, receipts, parts, quality, retention_days=7)
+
+    assert report["schema_version"] == "ci-balance-report-v1"
+    assert report["universe_count"] == len(manifest.universe)
+    assert report["critical_path_seconds"] == 110
+    assert report["plan_seconds"] == 10
+    assert report["aggregate_seconds"] == 10
+    assert report["queue_seconds"] == 0
+    assert report["execution_seconds"] == max(walls)
+    assert report["runner_seconds"] == 10 + sum(walls) + 10
+    assert report["retention_days"] == 7
+    assert report["artifact_bytes"] > 0
+    assert len(report["per_shard"]) == 4
+    for row in report["per_shard"]:
+        assert row["overhead_seconds"] == round(row["wall_seconds"] - row["pytest_seconds"], 3)
+    assert report["balance"]["wall_ratio"] is not None
+    assert report["balance"]["weight_ratio"] is not None
+
+    (receipts / "timing-shard-4.json").unlink()
+    with pytest.raises(_CI_SHARDS.ContractError, match="absent or unreadable"):
+        _CI_SHARDS.build_report(manifest, receipts, parts, quality)
+    (receipts / "timing-shard-4.json").write_text(
+        json.dumps(
+            {
+                "shard": 4,
+                "started_at_epoch": 1010,
+                "finished_at_epoch": 1010 + walls[3],
+                "duration_seconds": walls[3],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    (quality / "gate-finished-at").write_text("not-an-epoch\n", encoding="utf-8")
+    with pytest.raises(_CI_SHARDS.ContractError, match="not an epoch timestamp"):
+        _CI_SHARDS.build_report(manifest, receipts, parts, quality)
+    (quality / "gate-finished-at").write_text("1110\n", encoding="utf-8")
+
+    receipt_path = receipts / "receipt-shard-1.json"
+    original_receipt = receipt_path.read_text(encoding="utf-8")
+    inflated = json.loads(original_receipt)
+    inflated["duration_seconds"] = walls[0] + 1
+    receipt_path.write_text(json.dumps(inflated), encoding="utf-8")
+    with pytest.raises(_CI_SHARDS.ContractError, match="pytest time exceeds its wall time"):
+        _CI_SHARDS.build_report(manifest, receipts, parts, quality)
+    receipt_path.write_text(original_receipt, encoding="utf-8")
+
+
+def test_ci_validation_levels_and_balance_report_are_documented() -> None:
+    protocol = _read("docs/development_protocol.md")
+    readme = _read(".github/workflows/ci_support/README.md")
+    normalized_protocol = " ".join(protocol.split())
+    normalized_readme = " ".join(readme.split())
+
+    assert protocol.count("### Validación focalizada y gate completo") == 1
+    assert readme.count("## Niveles de validación") == 1
+    assert readme.count("## Reporte de balance") == 1
+    for text in (protocol, readme):
+        assert "`FOCUSED`" in text
+        assert "`FULL`" in text
+        assert "`Python 3.12 quality`" in text
+        assert "`>=82%`" in text
+        assert "serial-reference" in text
+    assert "bash scripts/check.sh" in protocol
+    assert "una sola vez" in normalized_protocol
+    assert "ruta crítica" in normalized_protocol
+    assert "runner-minutes" in normalized_protocol
+    assert "retención de 7 días" in normalized_protocol
+    assert "se declara no comparable" in normalized_protocol
+    assert "no se presenta como aceleración observada" in normalized_protocol
+    assert "critical_path_seconds" in readme
+    assert "runner-minutes" in normalized_readme
+    assert "--retention-days 7" in readme
+    assert "40253368902" in readme
+    assert "337.718" in readme
+
+
+def test_product_ci_document_is_deferred_from_governance() -> None:
+    core_rule = _read(".agents/rules/investment-analyst-core.md")
+    normalized = " ".join(core_rule.split())
+
+    assert "docs/continuous_integration.md" in core_rule
+    assert "bloque PRODUCT posterior como `UPDATE`" in normalized
+    assert "no es editable por `BUILD_GOVERNANCE`" in normalized
+    assert (ROOT / "docs" / "continuous_integration.md").is_file()
 
 
 def _write_coverage_project(root: Path) -> None:

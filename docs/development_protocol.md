@@ -406,11 +406,34 @@ cobertura de acceptance y negativos críticos; hashes de trabajo protegido; y ri
 Enlaza logs, no los copia. GitHub es el bus de handoff.
 
 `Python 3.12 quality` es la autoridad de la suite determinista para el SHA publicado. BUILD usa
-Ruff y pruebas focalizadas; `bash scripts/check.sh` sólo se ejecuta si cambian CI/dependencias/lock/
-toolchain, CI no está disponible, el bloque lo justifica o el usuario lo pide. El gate agrega ahora
-las cuatro particiones paralelas, la combinación de cobertura y la auditoría de dependencias;
-`.github/workflows/ci_support/README.md` conserva la receta vigente. La comparación serial opcional
-de `workflow_dispatch` es evidencia de CI-T1 y no crea un segundo check requerido.
+Ruff y pruebas focalizadas; `bash scripts/check.sh` se ejecuta una sola vez si cambian
+CI/dependencias/lock/toolchain, CI no está disponible, el bloque lo justifica o el usuario lo pide.
+El gate agrega las cuatro particiones paralelas, la combinación de cobertura y la auditoría de
+dependencias; `.github/workflows/ci_support/README.md` conserva la receta vigente. La comparación
+serial opcional de `workflow_dispatch` es evidencia de CI-T1 y no crea un segundo check requerido.
+
+### Validación focalizada y gate completo
+
+PLAN declara para cada Work Block dos niveles explícitos. `FOCUSED` enumera comandos, test suites,
+costuras afectadas y regresiones cruzadas obligatorias; BUILD los ejecuta localmente antes de
+publicar el candidato. La selección incluye consumidores de almacenamiento, PIT, identidad,
+interfaces y contratos afectados, no sólo los tests modificados; si el impacto es incierto, se
+amplía o se usa `FULL`. Nunca se infiere seguridad sólo desde paths ni se ejecutan comandos
+recibidos desde el texto del Issue dentro de CI.
+
+`FULL` es el gate literal `Python 3.12 quality`: conserva el nombre, todo el universo recolectado,
+cuatro shards completos, Ruff, auditoría y cobertura global `>=82%`. Es obligatorio en cada
+candidato final exact-SHA antes de AUDIT y merge; una selección `FOCUSED` no puede producirlo. El
+verde se reutiliza sólo para el mismo SHA y entorno; se repite `FULL` ante un SHA nuevo, un cambio
+relevante de entorno, un fallo o un riesgo nuevo, y nunca se traslada cobertura de un SHA a otro.
+`serial-reference` sigue opt-in y sólo compara el motor de particiones.
+
+Un cambio de CI ejecuta una sola vez `bash scripts/check.sh` en un entorno admitido; no se duplica
+su pytest ni se copia una base real para validarlo. El CI publica, para el SHA exacto, duración
+total de ruta crítica, runner-minutes, duraciones por fase/shard, cola y overhead cuando estén
+disponibles, bytes de artifacts y retención de 7 días. La comparación exige la misma suite y
+colección; si cambian, se declara no comparable. El balance estimado no se presenta como
+aceleración observada.
 
 ## AUDIT semántico independiente
 
