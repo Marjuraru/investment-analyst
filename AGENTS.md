@@ -45,7 +45,14 @@ separate and must never be collapsed into an arbitrary or opaque aggregate score
 
 Market and fundamental diagnostics remain independent. A consolidated query may present both, but must not merge their analytical meaning.
 
-## Current canonical data scope
+## Canonical data scope and historical source example
+
+Apple is the historical reference example for the canonical source contracts below, not the only
+permitted asset. Keep its asset and source IDs, provider, feed, adjustment, and SEC `User-Agent`
+requirements intact. Planning status is not defined here: `DATA-CHASSIS` is `DONE`,
+`FUNDAMENTALS-COVERAGE` is the unique `NEXT`, and `docs/product_roadmap.md` plus
+`docs/basic_functional_release_plan.md` remain the route authority. The dated closure, deployed
+runtime, and workspace UUID are recorded in `.agents/rules/investment-analyst-core.md`.
 
 ### Apple market data
 
@@ -119,6 +126,7 @@ Empty completed Alpaca intervals are valid evidence:
 - Use read-only inspection for diagnostics whenever writes are not required.
 - Do not manually remove raw records, observations, metrics, diagnostics, manifests, Parquet data, or database rows.
 - Never expose credentials or raw secret values in logs, JSON output, errors, tests, or chat responses.
+- Every Work Block declares and reconciles its physical budget and retention with the single recipe in `docs/development_protocol.md`; do not duplicate the recipe here. Measure read-only first and treat `UNKNOWN` as unknown, never as zero.
 
 ## Working-tree and Git safety
 
@@ -155,6 +163,9 @@ results, and pending risks.
 
 - Read and follow `docs/development_protocol.md` for Work Blocks, profiles, target resolution,
   evidence, handoff, and concise outputs.
+- Documentation follows the single discipline in `docs/development_protocol.md` and the inventory
+  in `.agents/rules/investment-analyst-core.md`: one current authority per topic, explicit
+  historical references, and the minimum develop/operate documents stay in the repository and local.
 - For planning objectives, evidence maturity, comparable counts, cohesive Work Blocks and closure,
   use the single method in `docs/development_protocol.md`; the DATA-CHASSIS objective register and
   its dated snapshot live in `.agents/rules/investment-analyst-core.md`. The shared guard validates

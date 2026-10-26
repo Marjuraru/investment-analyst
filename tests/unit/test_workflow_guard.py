@@ -313,13 +313,14 @@ def _critical_auto_policy(
     expected_branch: str = "codex/dev-7-finalize-policy-guard",
     route_effect: str = "NONE",
     route_item: str = "DEV",
+    authorization_id: str = "human-dev-7",
 ) -> bytes:
     return json.dumps(
         {
             "schema_version": "critical-auto-policy-v1",
             "authorizations": [
                 {
-                    "authorization_id": "human-dev-7",
+                    "authorization_id": authorization_id,
                     "granted_at": "2026-10-07T05:45:23.081522+00:00",
                     "human_instruction": "Explicit human authorization for this bounded finalize.",
                     "purpose": "finalize_only",
@@ -396,8 +397,9 @@ def test_committed_critical_auto_policy_is_bounded_to_declared_blocks() -> None:
     assert [authorization.authorization_id for authorization in authorizations] == [
         "human-data-chassis-finalize-20261007",
         "human-data-chassis-continuity-finalize-20261022",
+        "human-v2-readiness-finalize-20261026",
     ]
-    legacy, continuity = authorizations
+    legacy, continuity, readiness = authorizations
     assert legacy.purpose == "finalize_only"
     assert legacy.writer_role == "BUILD_PRODUCT"
     assert [
@@ -422,6 +424,20 @@ def test_committed_critical_auto_policy_is_bounded_to_declared_blocks() -> None:
         ("DATA-CHASSIS-CLOSE", "codex/data-chassis-close", "COMPLETES"),
     ]
     assert continuity.blocks[2].route_effect == "COMPLETES"
+    assert readiness.purpose == "finalize_only"
+    assert readiness.writer_role == "BUILD_PRODUCT"
+    assert readiness.profile == "CRITICAL"
+    assert readiness.policy == "AUTO"
+    assert readiness.route_item == "FUNDAMENTALS-COVERAGE"
+    assert [
+        (block.block, block.expected_branch, block.route_effect) for block in readiness.blocks
+    ] == [
+        (
+            "FUNDAMENTALS-COVERAGE-READINESS",
+            "codex/fundamentals-coverage-readiness",
+            "ADVANCES",
+        )
+    ]
 
 
 def _continuity_body(route_effect: str, block: str, branch: str) -> str:
@@ -493,6 +509,84 @@ def test_continuity_authorization_is_absent_from_candidate_or_unbound_policy(
 
     assert result.decision == "GUARD FAILURE"
     assert "absent from the verified base policy" in result.reasons[0]
+
+
+def _v2_readiness_body(
+    *,
+    block: str = "FUNDAMENTALS-COVERAGE-READINESS",
+    branch: str = "codex/fundamentals-coverage-readiness",
+    route_effect: str = "ADVANCES",
+) -> str:
+    return (
+        _body(
+            policy="AUTO",
+            authorization="human-v2-readiness-finalize-20261026",
+            route_effect=route_effect,
+        )
+        .replace("DEV-7", block)
+        .replace("codex/dev-7-finalize-policy-guard", branch)
+    )
+
+
+def _v2_readiness_policy() -> bytes:
+    return _critical_auto_policy(
+        block="FUNDAMENTALS-COVERAGE-READINESS",
+        expected_branch="codex/fundamentals-coverage-readiness",
+        route_effect="ADVANCES",
+        route_item="FUNDAMENTALS-COVERAGE",
+        authorization_id="human-v2-readiness-finalize-20261026",
+    )
+
+
+def test_critical_auto_binds_fundamentals_coverage_readiness_advances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_MODULE, "_git_bytes", lambda _arguments, _label: _v2_readiness_policy())
+    metadata = parse_work_block(_v2_readiness_body())
+
+    evidence = _MODULE._critical_auto_evidence(metadata)
+
+    assert evidence is not None
+    assert evidence.authorization_id == "human-v2-readiness-finalize-20261026"
+    assert evidence.source == "verified_base"
+
+
+@pytest.mark.parametrize(
+    ("block", "branch", "route_effect"),
+    [
+        ("FUNDAMENTALS-COVERAGE-READINESS", "codex/fundamentals-coverage-readiness", "COMPLETES"),
+        ("FUNDAMENTALS-COVERAGE-READINESS", "codex/fundamentals-coverage-other", "ADVANCES"),
+        ("FUNDAMENTALS-COVERAGE-OTHER", "codex/fundamentals-coverage-readiness", "ADVANCES"),
+    ],
+)
+def test_critical_auto_rejects_wrong_readiness_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    block: str,
+    branch: str,
+    route_effect: str,
+) -> None:
+    monkeypatch.setattr(_MODULE, "_git_bytes", lambda _arguments, _label: _v2_readiness_policy())
+    metadata = parse_work_block(
+        _v2_readiness_body(block=block, branch=branch, route_effect=route_effect)
+    )
+
+    with pytest.raises(_MODULE.GuardFailure, match="does not bind the Work Block"):
+        _MODULE._critical_auto_evidence(metadata)
+
+
+def test_readiness_authorization_rejects_governance_auto() -> None:
+    with pytest.raises(ValueError, match="requires BUILD_PRODUCT"):
+        parse_work_block(_v2_readiness_body().replace("BUILD_PRODUCT", "BUILD_GOVERNANCE"))
+
+
+def test_readiness_authorization_is_not_authority_from_candidate_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_MODULE, "_git_bytes", lambda _arguments, _label: _critical_auto_policy())
+    metadata = parse_work_block(_v2_readiness_body())
+
+    with pytest.raises(_MODULE.GuardFailure, match="absent from the verified base policy"):
+        _MODULE._critical_auto_evidence(metadata)
 
 
 @pytest.mark.parametrize(

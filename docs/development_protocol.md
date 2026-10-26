@@ -89,12 +89,14 @@ comparabilidad, denominador y SHA; no interpreta fixtures o CI como ahorro opera
 es trazabilidad informativa, no una máquina paralela de estados.
 
 La fase sólo se cierra cuando se satisfacen todos sus criterios numéricos y no numéricos. En el
-cierre vigente de DATA-CHASSIS son obligatorios, además del registro Q1–Q7: igualdad Decimal entre
-ejecuciones full e incremental v2; checkpoints persistidos con invalidación por revisión; aislamiento
-y selección point-in-time; lotes de hasta 256 y cero hidratación de filas ajenas; inventario completo
-de migración con restore, rollback y v2 activo; backup de Drive restaurado; y desacoplamiento de
-features y explicación. El conteo de objetivos no sustituye estos gates. No se fija un número
-arbitrario de días/ciclos: se declara evidencia finita por escenario y se identifican ausencias.
+cierre histórico de DATA-CHASSIS fueron obligatorios, además del registro Q1–Q7: igualdad Decimal
+entre ejecuciones full e incremental v2; checkpoints persistidos con invalidación por revisión;
+aislamiento y selección point-in-time; lotes de hasta 256 y cero hidratación de filas ajenas;
+inventario completo de migración con restore, rollback y v2 activo; backup de Drive restaurado; y
+desacoplamiento de features y explicación. El conteo de objetivos no sustituye estos gates. No se
+fija un número arbitrario de días/ciclos: se declara evidencia finita por escenario y se identifican
+ausencias. DATA-CHASSIS ya está `DONE`: sus criterios y el registro Q1–Q7 permanecen como evidencia
+histórica fechada y no como objetivos de la fase vigente.
 
 Al revisar cierre, clasificar cada pendiente como criterio de aceptación no satisfecho, riesgo nuevo
 crítico u oportunidad opcional. Los dos primeros requieren resolver el criterio o volver a PLAN con
@@ -224,6 +226,49 @@ previsibles. Agrupa como máximo una solicitud inicial de autorizaciones externa
 acotadas. Los prompts inevitables del runtime se registran separadamente y nunca se eluden. Una
 capacidad imprevisible realmente necesaria termina `BUILD BLOCKED`; duración, cantidad de pasos o
 trabajo restante nunca son un bloqueo.
+
+## Presupuesto y retención por Work Block
+
+Antes de escribir rutas o propósito, cada Work Block declara read-only un presupuesto físico con
+estos campos exactos:
+
+| Campo | Contenido declarado |
+| --- | --- |
+| `rutas_proposito` | rutas que se escribirán y propósito de cada una |
+| `bytes_nuevos` | bytes persistentes nuevos previstos |
+| `bytes_modificados` | bytes existentes que se modificarán |
+| `temporales` | archivos temporales y su retirada |
+| `pico_adicional` | pico adicional coexistente |
+| `reutilizados` | recursos, evidencia y entorno reutilizados sin copiarlos |
+| `exclusivos_retirables` | bytes exclusivos retirables y su condición |
+| `libres_host_wsl` | espacio libre de host y WSL, medido por separado |
+| `reserva` | reserva que debe permanecer disponible |
+| `retencion` | qué se conserva, por qué y hasta qué evento concreto |
+
+Después de ejecutar, el bloque compara los bytes reales con ese presupuesto y explica cada
+desviación. `UNKNOWN` no es cero: se mide read-only primero y, si no puede medirse, se declara la
+ausencia. Se avisa explícitamente antes de agregar `>=100 MB` o antes de cualquier backup, restore o
+copia de datos. No hay backup por defecto.
+
+Se reutiliza evidencia exacta e inmutable y no se repiten campañas para fabricar recibos nuevos. Un
+conjunto de recuperación remoto cifrado puede requerir base y deltas: sus partes no se cuentan como
+respaldos redundantes. Una copia local se retira sólo tras cobertura y readback válidos y sin último
+consumidor conocido. No se asume liberar `C:` por borrar WSL ni se compacta un VHD vivo. Si el
+presupuesto se rebasa, se reordena, reduce o replantea con cifras antes de continuar; nunca se elevan
+límites por conveniencia. Ésta es la única receta: `AGENTS.md` y
+`.agents/rules/investment-analyst-core.md` la referencian sin duplicarla.
+
+## Disciplina documental
+
+Antes de escribir documentación, el bloque inventaría los markdown aplicables y clasifica cada ruta
+una sola vez como `KEEP_CANONICAL`, `UPDATE`, `MERGE`, `RETIRE` o `HISTORICAL_REFERENCE`. Cada tema
+tiene una sola autoridad vigente; una referencia histórica se rotula como tal y no se reescribe para
+aparentar consistencia. Una contradicción se resuelve corrigiendo la instrucción vigente y dejando el
+registro fechado, nunca borrando historia. Git conserva las versiones; la evidencia externa grande
+vive en Drive con manifest, mientras los documentos mínimos para desarrollar y operar permanecen en
+el repositorio y en local. Ningún bloque mueve esos documentos mínimos a Drive ni retira una
+referencia histórica sin clasificarla. El inventario vigente vive en
+`.agents/rules/investment-analyst-core.md` y no se duplica aquí.
 
 ## Algoritmo canónico de transición operativa
 

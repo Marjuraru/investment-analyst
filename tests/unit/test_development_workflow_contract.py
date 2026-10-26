@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -322,6 +323,81 @@ def test_continuity_decision_is_bounded_and_does_not_rewrite_historical_goals() 
         in normalized
     )
     assert "no concede operaciones nuevas ni relaja PIT, lineage, Decimal" in normalized
+
+
+def test_work_block_budget_recipe_is_single_and_structural() -> None:
+    protocol = _read("docs/development_protocol.md")
+    heading = "## Presupuesto y retención por Work Block"
+    assert protocol.count(heading) == 1
+    section = protocol.split(heading, maxsplit=1)[1].split("\n## ", maxsplit=1)[0]
+    fields = re.findall(r"^\| `([a-z_]+)` \|", section, flags=re.MULTILINE)
+    assert fields == [
+        "rutas_proposito",
+        "bytes_nuevos",
+        "bytes_modificados",
+        "temporales",
+        "pico_adicional",
+        "reutilizados",
+        "exclusivos_retirables",
+        "libres_host_wsl",
+        "reserva",
+        "retencion",
+    ]
+    normalized = " ".join(section.split())
+    for clause in (
+        "`UNKNOWN` no es cero",
+        "`>=100 MB`",
+        "No hay backup por defecto",
+        "base y deltas",
+        "sin último consumidor conocido",
+        "No se asume liberar `C:` por borrar WSL ni se compacta un VHD vivo",
+        "nunca se elevan límites por conveniencia",
+        "la referencian sin duplicarla",
+    ):
+        assert clause in normalized
+
+    agents = _read("AGENTS.md")
+    core_rule = _read(".agents/rules/investment-analyst-core.md")
+    normalized_core_rule = " ".join(core_rule.split())
+    assert heading not in agents
+    assert heading not in core_rule
+    assert "single recipe in `docs/development_protocol.md`" in agents
+    assert (
+        "receta de presupuesto y retención de `docs/development_protocol.md` es la única"
+        in normalized_core_rule
+    )
+
+
+def test_documentary_inventory_is_unique_existing_and_classified() -> None:
+    protocol = _read("docs/development_protocol.md")
+    core_rule = _read(".agents/rules/investment-analyst-core.md")
+    normalized_core_rule = " ".join(core_rule.split())
+    assert protocol.count("## Disciplina documental") == 1
+    allowed = {"KEEP_CANONICAL", "UPDATE", "MERGE", "RETIRE", "HISTORICAL_REFERENCE"}
+    for classification in allowed:
+        assert f"`{classification}`" in protocol
+
+    heading = "Inventario mínimo vigente de markdown aplicables"
+    assert core_rule.count(heading) == 1
+    section = core_rule.split(heading, maxsplit=1)[1].split("\n## ", maxsplit=1)[0]
+    rows = re.findall(r"^\| `([^`]+)` \| `([A-Z_]+)` \|$", section, flags=re.MULTILINE)
+    assert rows
+    paths = [path for path, _ in rows]
+    assert len(set(paths)) == len(paths)
+    classifications = dict(rows)
+    assert set(classifications.values()) <= allowed
+    for path in paths:
+        assert (ROOT / path).is_file(), path
+    assert classifications["docs/product_roadmap.md"] == "KEEP_CANONICAL"
+    assert classifications["docs/basic_functional_release_plan.md"] == "KEEP_CANONICAL"
+    assert classifications["docs/data_chassis.md"] == "HISTORICAL_REFERENCE"
+    assert classifications["docs/data_chassis_continuity_plan.md"] == "HISTORICAL_REFERENCE"
+    assert ".agents/rules/investment-analyst-core.md" in protocol
+    assert "single discipline in `docs/development_protocol.md`" in _read("AGENTS.md")
+    assert "`DATA-CHASSIS` está `DONE`" in normalized_core_rule
+    assert "`FUNDAMENTALS-COVERAGE` es el único `NEXT`" in normalized_core_rule
+    assert "### DATA-CHASSIS — snapshot histórico de referencia" in core_rule
+    assert "registro histórico fechado" in normalized_core_rule
 
 
 def test_governance_writer_frontier_has_one_authoritative_classifier() -> None:
