@@ -32,7 +32,23 @@ metas de latencia son criterios de aceptación, no afirmaciones actuales.
 | `V3` | Lectura correcta y coste estructural | Equivalencia Decimal, IDs, PIT, orden y conteos; cero modelos de activos ajenos en selección individual; cero recomputación pesada en cache hit válido; corpus ajeno 1x/10x sin aumentar hidratación; requests idénticos coalescen. Evidencia: pruebas focalizadas y matriz read-only. |
 | `V4` | Resguardo remoto sin copias locales inútiles | Cadena recuperable vigente; faltantes únicos preservados; lista literal de retirada y retención con motivo; cero backup/restore/staging local grande sin consumidor final justificado. Evidencia: recibos de `manage_storage_retirement.py`, manifests remotos y readback. |
 | `V5` | Presupuesto físico | Host y WSL ≥5.000.000.000 B más pico antes de cada operación grande; final ≥reserva; deltas reales y enlaces físicos contabilizados; ninguna cifra de liberación inferida. Evidencia: `df -B1` y recibos con bytes lógicos, asignados y exclusivos. |
-| `V6` | Documentación y entrega | Matriz markdown sin instrucciones vigentes contradictorias; enlaces y pruebas válidos; `FUNDAMENTALS-COVERAGE` único `NEXT`; CI exact-SHA, AUDIT y FINALIZE según policy. |
+| `V6` | Documentación y entrega | Matriz markdown sin instrucciones vigentes contradictorias; enlaces y pruebas válidas; `FUNDAMENTALS-COVERAGE` único `NEXT`; CI exact-SHA, AUDIT y FINALIZE según policy. |
+
+## Resultados medidos (2026-10-26)
+
+| Objetivo | Estado | Evidencia |
+| --- | --- | --- |
+| `V1` | `MET` | Release `ecbf33a85b21c9ac34fa0041097a64978fbb24ff` activo, mismo UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; `GET /api/v1/overview` 200; `Result=success`, `NRestarts=0`; `MemoryPeak=1.897.328.640 B` < `MemoryMax=3.221.225.472 B`; `oom=0`, `oom_kill=0`; rollback previo `3ece53b…` conservado. |
+| `V2` | `MET` | Smoke real de navegador, cinco muestras: shell mediana `262,8 ms`/máx `277,4 ms`; primera matriz mediana `4.296 ms`/máx `5.430 ms`; reapertura mediana `5 ms`/máx `6,9 ms`; cero 5xx. Probe HTTP directo del mismo corte: `18.683 s` en frío y `4.392 s` en caliente. `browser-smoke.json` SHA-256 `ee2abf270c9a22c58f4fb510b79970bd5d226bc2fd5e20aa4b4a07ad312409e2`. |
+| `V3` | `MET` | Equivalencia v1/v2 de conteos, PIT y última barra en pruebas focalizadas; cobertura con 37 activos; `0` hidrataciones de activos ajenos en selección individual; cache hit válido sin recomputación pesada; corpus ajeno 1x/10x cubierto por las pruebas de lectura. |
+| `V4` | `MET` | Plan sellado `3bfa2561…`, 33 rutas retiradas, readback remoto verificado y recibo `2625569b…`; releases antiguos retirados con recibos; `0e93c6…`, v1 y rehearsal 43 retenidos con consumidor o cobertura no demostrada. |
+| `V5` | `MET` | WSL `879.265.140.736 B` → `942.896.627.712 B` libres (`+63.631.486.976 B`); host `10.116.333.568 B` libres al cierre; reserva de `5.000.000.000 B` preservada; bytes lógicos/asignados/exclusivos separados. |
+| `V6` | `MET` | `Python 3.12 quality` verde para `ecbf33a…`; pruebas de ruta, documentación y entrega verdes; `FUNDAMENTALS-COVERAGE` sigue siendo el único `NEXT`. |
+
+El probe HTTP frío de `18.683 s` queda por debajo del máximo de `20 s`; las cinco muestras de
+navegador se ejecutaron con la firma del mismo corte ya cacheada y registraron `4,2–5,4 s`. La
+muestra aislada de arranque en frío del navegador es la que fija el máximo; no se oculta el coste
+frío ni se presenta como mediana.
 
 ## Matriz de caminos críticos
 
