@@ -39,6 +39,7 @@ def test_default_known_at_cut_is_a_stable_utc_day() -> None:
     assert "cut.setUTCHours(0, 0, 0, 0);" in APP_CORE
     assert "knownAtByAsset.get(assetId) || defaultKnownAtCut()" in APP_CORE
     assert "knownAtByAsset.get(assetId) || new Date().toISOString()" not in APP_CORE
+    assert 'byId("report-known-at").value = defaultKnownAtCut();' in APP_SHELL
 
 
 def _resolver_source() -> str:

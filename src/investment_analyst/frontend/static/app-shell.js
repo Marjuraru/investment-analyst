@@ -518,7 +518,7 @@ byId("market-end").value = yesterday.toISOString().slice(0, 10);
 byId("valuation-date").value = yesterday.toISOString().slice(0, 10);
 byId("valuation-history-start").value = `${yesterday.getUTCFullYear() - 3}-01-01`;
 byId("valuation-history-end").value = yesterday.toISOString().slice(0, 10);
-byId("report-known-at").value = new Date().toISOString();
+byId("report-known-at").value = defaultKnownAtCut();
 renderKnownAtCut(byId("report-known-at").value.trim());
 byId("comparison-end").value = yesterday.toISOString().slice(0, 10);
 const comparisonStart = new Date(yesterday);
