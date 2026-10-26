@@ -11,7 +11,10 @@ from pathlib import Path
 
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
 from investment_analyst.analytics.market.bar_schemas import ALPACA_SOURCE_ID
-from investment_analyst.analytics.market.history_service import HistoricalMarketDataService
+from investment_analyst.analytics.market.history_service import (
+    HistoricalMarketDataService,
+    summarize_market_history_v2,
+)
 from investment_analyst.analytics.market.history_v2 import HistoricalMarketDataV2Service
 from investment_analyst.application.runtime import StorageLocationRequest
 from investment_analyst.application.universe_coverage import UniverseCoverageApplication
@@ -195,6 +198,13 @@ def test_v2_market_projection_matches_v1_and_hydrates_only_the_latest_bar(
         assert v2_bars[-1] == v1.bars[-1]
         assert projection.bars[0].timestamp == v1.coverage.earliest_timestamp
         assert projection.bars[-1].timestamp == v1.coverage.latest_timestamp
+        summary = summarize_market_history_v2(storage.store.raw_staging, query)
+        assert summary.bar_count == len(v2_bars)
+        assert summary.candidate_versions == projection.candidate_versions
+        assert summary.discarded_revisions == projection.discarded_revisions
+        assert summary.earliest_timestamp == v1.coverage.earliest_timestamp
+        assert summary.latest_timestamp == v1.coverage.latest_timestamp
+        assert summary.latest_projection == projection.bars[-1]
 
         calls = {"blob_reads": 0, "projection_checks": 0}
         original_read_blob = storage.store.raw_staging._read_blob
@@ -246,3 +256,15 @@ def test_v2_market_projection_matches_v1_and_hydrates_only_the_latest_bar(
         sorted(v1.bars[-1].observation_ids.values(), key=str)
     )
     assert calls["blob_reads"] == 2
+    parallel = UniverseCoverageApplication.create_default().query(
+        StorageLocationRequest(workspace=workspace),
+        UniverseCoverageRequest(
+            known_at=known_at,
+            market_start=date(2026, 1, 1),
+            market_end=date(2026, 1, 31),
+            fundamental_start=date(2020, 1, 1),
+            fundamental_end=date(2026, 1, 31),
+            asset_ids=("crypto:btc-usd", ASSET_ID),
+        ),
+    )
+    assert parallel.assets[1].model_dump() == result.assets[0].model_dump()

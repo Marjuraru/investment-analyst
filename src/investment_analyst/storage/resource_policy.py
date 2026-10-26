@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import os
 import re
+import sys
 import threading
 import time
 import weakref
@@ -641,6 +643,22 @@ def verify_connection_policy(
     return settings
 
 
+def cache_absent_optional_pandas() -> None:
+    """Cache one negative optional-dependency lookup for DuckDB parameter binding.
+
+    DuckDB probes pandas for every bound parameter. When pandas is not installed,
+    each probe otherwise repeats the full import search and dominates read-path
+    latency. A cached negative entry raises ImportError immediately and does not
+    install or emulate pandas.
+    """
+    if "pandas" in sys.modules:
+        return
+    try:
+        importlib.import_module("pandas")
+    except ImportError:
+        sys.modules["pandas"] = None
+
+
 def connect_duckdb(
     database: str | Path,
     *,
@@ -649,6 +667,7 @@ def connect_duckdb(
     default_memory_bytes: int = 2_000_000_000,
     default_threads: int = 2,
 ) -> duckdb.DuckDBPyConnection:
+    cache_absent_optional_pandas()
     selected = connection_policy(
         database,
         policy=policy,

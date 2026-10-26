@@ -13,6 +13,7 @@ from investment_analyst.analytics.market.bar_models import HistoricalBarQuery, M
 from investment_analyst.analytics.market.history_service import (
     AmbiguousRevisionError,
     HistoricalMarketDataService,
+    summarize_market_history_v2,
 )
 from investment_analyst.analytics.valuation.identity import (
     valuation_result_id,
@@ -675,25 +676,39 @@ class CorporateValuationService:
         )
 
     def _price(self, request: CorporateValuationRequest) -> MarketBar | None:
-        start = datetime.combine(date(1970, 1, 1), datetime.min.time(), UTC)
+        earliest = datetime.combine(date(1970, 1, 1), datetime.min.time(), UTC)
         end = datetime.combine(request.valuation_date + timedelta(days=1), datetime.min.time(), UTC)
-        query = HistoricalBarQuery(
-            asset_id=request.asset_id,
-            source_id=self._market_source_id or "",
-            start=start,
-            end=end,
-            known_at=request.known_at,
-        )
         if self._semantic_identity_v2:
             from investment_analyst.analytics.market.history_v2 import (
                 HistoricalMarketDataV2Service,
             )
 
-            service = HistoricalMarketDataV2Service(self._storage.store.raw_staging)
-            projection = service.query(query)
-            if not projection.bars:
-                return None
-            return service.materialize(projection.bars[-1], query)
+            staging = self._storage.store.raw_staging
+            service = HistoricalMarketDataV2Service(staging)
+            for lookback_days in (30, 90, 365, 3650, None):
+                start = (
+                    earliest
+                    if lookback_days is None
+                    else max(earliest, end - timedelta(days=lookback_days))
+                )
+                query = HistoricalBarQuery(
+                    asset_id=request.asset_id,
+                    source_id=self._market_source_id or "",
+                    start=start,
+                    end=end,
+                    known_at=request.known_at,
+                )
+                summary = summarize_market_history_v2(staging, query)
+                if summary.latest_projection is not None:
+                    return service.materialize(summary.latest_projection, query)
+            return None
+        query = HistoricalBarQuery(
+            asset_id=request.asset_id,
+            source_id=self._market_source_id or "",
+            start=earliest,
+            end=end,
+            known_at=request.known_at,
+        )
         bars = HistoricalMarketDataService(self._storage).query(query).bars
         return bars[-1] if bars else None
 

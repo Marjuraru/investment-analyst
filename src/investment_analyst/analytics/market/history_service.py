@@ -4,6 +4,7 @@ from collections import defaultdict
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from investment_analyst.analytics.market.bar_models import (
@@ -19,6 +20,13 @@ from investment_analyst.analytics.market.bar_schemas import (
 from investment_analyst.core.models import NormalizedObservation, RawRecord
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import RecordNotFoundError, StorageError
+
+if TYPE_CHECKING:
+    from investment_analyst.analytics.market.history_v2 import DailyMarketBarProjection
+    from investment_analyst.storage.raw_v2 import (
+        MarketObservationGroupProjection,
+        RawV2Staging,
+    )
 
 
 class MarketHistoryError(Exception):
@@ -319,3 +327,139 @@ def select_point_in_time_revisions[RevisionCandidate](
     for at, state in by_timestamp.items():
         selected.append(require_unambiguous_revision(state, timestamp=at))
     return selected, len(candidates) - len(selected)
+
+
+@dataclass(frozen=True, slots=True)
+class MarketHistorySummary:
+    """PIT counts and only the latest fully verified v2 projection."""
+
+    query: HistoricalBarQuery
+    bar_count: int
+    candidate_versions: int
+    discarded_revisions: int
+    earliest_timestamp: datetime | None
+    latest_timestamp: datetime | None
+    latest_projection: "DailyMarketBarProjection | None"
+
+
+@dataclass(frozen=True, slots=True)
+class _V2SummaryCandidate:
+    group: "MarketObservationGroupProjection"
+    timestamp: datetime
+    available_at: datetime
+
+
+def summarize_market_history_v2(
+    staging: "RawV2Staging",
+    query: HistoricalBarQuery,
+) -> MarketHistorySummary:
+    """Select every PIT revision but build only the latest complete projection.
+
+    The query keeps the canonical timestamp ordering and ambiguity rule. Discarded
+    revisions are counted without materializing their values; the latest selected
+    group is still fully built and can be materialized by the caller to verify its
+    raw record, observations, units, quality and values.
+    """
+    from investment_analyst.analytics.market.history_v2 import HistoricalMarketDataV2Service
+
+    service = HistoricalMarketDataV2Service(staging)
+    schema = service._schema(query.source_id)  # noqa: SLF001 - canonical schema resolution
+    after_observed_at: datetime | None = None
+    after_raw_record_id: UUID | None = None
+    active_timestamp: datetime | None = None
+    active_revision: LatestRevisionState[_V2SummaryCandidate] = LatestRevisionState()
+    bar_count = 0
+    candidate_versions = 0
+    discarded_revisions = 0
+    earliest_timestamp: datetime | None = None
+    latest_candidate: _V2SummaryCandidate | None = None
+
+    def finalize() -> None:
+        nonlocal bar_count, candidate_versions, discarded_revisions
+        nonlocal earliest_timestamp, latest_candidate
+        if active_timestamp is None:
+            return
+        selected = require_unambiguous_revision(active_revision, timestamp=active_timestamp)
+        bar_count += 1
+        candidate_versions += active_revision.candidates_seen
+        discarded_revisions += active_revision.candidates_seen - 1
+        if earliest_timestamp is None:
+            earliest_timestamp = active_timestamp
+        latest_candidate = selected
+
+    while True:
+        page = staging.list_market_observation_page(
+            asset_id=query.asset_id,
+            source_id=query.source_id,
+            start=query.start,
+            end=query.end,
+            known_at=query.known_at,
+            limit=256,
+            after_observed_at=after_observed_at,
+            after_raw_record_id=after_raw_record_id,
+        )
+        for group in page.groups:
+            candidate = _summary_candidate(group, query)
+            if active_timestamp is not None and candidate.timestamp != active_timestamp:
+                finalize()
+            if candidate.timestamp != active_timestamp:
+                active_timestamp = candidate.timestamp
+                active_revision = LatestRevisionState()
+            active_revision = consider_revision(
+                active_revision,
+                candidate,
+                available_at=candidate.available_at,
+            )
+        if len(page.groups) < 256:
+            break
+        after_observed_at = page.next_observed_at
+        after_raw_record_id = page.next_raw_record_id
+        if after_observed_at is None or after_raw_record_id is None:
+            raise TraceabilityError("market observation page did not return its next cursor")
+    finalize()
+    latest_projection = (
+        HistoricalMarketDataV2Service._build_candidate(  # noqa: SLF001
+            latest_candidate.group,
+            schema,
+            query,
+        )
+        if latest_candidate is not None
+        else None
+    )
+    return MarketHistorySummary(
+        query=query,
+        bar_count=bar_count,
+        candidate_versions=candidate_versions,
+        discarded_revisions=discarded_revisions,
+        earliest_timestamp=earliest_timestamp,
+        latest_timestamp=latest_candidate.timestamp if latest_candidate is not None else None,
+        latest_projection=latest_projection,
+    )
+
+
+def _summary_candidate(
+    group: "MarketObservationGroupProjection",
+    query: HistoricalBarQuery,
+) -> _V2SummaryCandidate:
+    if group.raw_asset_id != query.asset_id or group.raw_source_id != query.source_id:
+        raise TraceabilityError("raw record asset or source does not match the query")
+    observations = group.observations
+    if not observations:
+        raise TraceabilityError("daily observation group is empty")
+    timestamps = {item.observed_at for item in observations}
+    availability = {item.available_at for item in observations}
+    if len(timestamps) != 1 or len(availability) != 1:
+        raise TraceabilityError("daily observation group has inconsistent timestamps")
+    timestamp = next(iter(timestamps))
+    available_at = next(iter(availability))
+    if timestamp is None or timestamp != group.raw_event_time:
+        raise TraceabilityError("raw record event_time does not match observations")
+    if group.raw_available_at != available_at:
+        raise TraceabilityError("raw record available_at does not match observations")
+    if available_at > query.known_at:
+        raise TraceabilityError("raw record was not available at known_at")
+    return _V2SummaryCandidate(
+        group=group,
+        timestamp=timestamp,
+        available_at=available_at,
+    )
