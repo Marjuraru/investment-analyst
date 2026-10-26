@@ -25,6 +25,58 @@ invocación puede realizar las mutaciones GitHub estrechas del protocolo, con do
 edits, branch writes, workspace ni relajación de guards. Devolver estado, SHA, BLOCKER/MAJOR,
 decisión/riesgo y siguiente acción.
 
+## Estado vigente y disciplina documental
+
+A la base declarada `30a67111617f7d30f22ad16ef67e29f0d86687ee` (#358 MERGED), `DATA-CHASSIS` está
+`DONE`. El runtime observado corresponde a ese SHA, con workspace v2 UUID
+`70c64668-1738-4dfe-ba1f-7e72026bb7fe` y rollback `097e4e356d23f98e3e5eb01e33732ef9a69d6752`.
+`FUNDAMENTALS-COVERAGE` es el único `NEXT` en `docs/product_roadmap.md` y
+`docs/basic_functional_release_plan.md`, que conservan la autoridad de ruta; este archivo no la
+reemplaza. El snapshot Q1–Q7 de abajo es registro histórico fechado de DATA-CHASSIS, no objetivos de
+la fase vigente.
+
+La receta de presupuesto y retención de `docs/development_protocol.md` es la única; este archivo no
+la duplica. La disciplina documental también es única: cada tema tiene una autoridad vigente, cada
+referencia histórica se rotula como tal y los documentos mínimos para desarrollar y operar permanecen
+en el repositorio y en local.
+
+La autorización `human-v2-readiness-finalize-20261026` vive en
+`.agents/rules/critical_auto_policy.json` y sólo vincula el bloque futuro
+`FUNDAMENTALS-COVERAGE-READINESS` (`codex/fundamentals-coverage-readiness`, `ADVANCES`). Es candidata
+hasta integrarse en `main`: el guard la verifica únicamente desde la base declarada y nunca desde el
+árbol candidato.
+
+Inventario mínimo vigente de markdown aplicables (una sola clasificación por ruta):
+
+| Ruta | Clasificación |
+| --- | --- |
+| `AGENTS.md` | `KEEP_CANONICAL` |
+| `docs/development_protocol.md` | `KEEP_CANONICAL` |
+| `docs/product_roadmap.md` | `KEEP_CANONICAL` |
+| `docs/basic_functional_release_plan.md` | `KEEP_CANONICAL` |
+| `README.md` | `KEEP_CANONICAL` |
+| `docs/README.md` | `KEEP_CANONICAL` |
+| `docs/read_path_efficiency.md` | `KEEP_CANONICAL` |
+| `docs/operational_readiness.md` | `KEEP_CANONICAL` |
+| `docs/local_interface.md` | `KEEP_CANONICAL` |
+| `docs/local_interface_design_system.md` | `KEEP_CANONICAL` |
+| `docs/professional_analysis_interface.md` | `KEEP_CANONICAL` |
+| `docs/data_chassis.md` | `HISTORICAL_REFERENCE` |
+| `docs/data_chassis_baseline.md` | `HISTORICAL_REFERENCE` |
+| `docs/data_chassis_continuity_plan.md` | `HISTORICAL_REFERENCE` |
+| `docs/data_chassis_closure_plan.md` | `HISTORICAL_REFERENCE` |
+| `docs/data_chassis_v2_fresh_start_plan.md` | `HISTORICAL_REFERENCE` |
+| `docs/data_chassis_v1_reintegration_plan.md` | `HISTORICAL_REFERENCE` |
+| `docs/data_chassis_43_migration_runbook.md` | `HISTORICAL_REFERENCE` |
+| `docs/data_chassis_44_backup_cutover_runbook.md` | `HISTORICAL_REFERENCE` |
+| `docs/data_chassis_45_acceptance_runbook.md` | `HISTORICAL_REFERENCE` |
+| `docs/historical_recovery_runbook.md` | `HISTORICAL_REFERENCE` |
+
+`docs/continuous_integration.md` no es editable por `BUILD_GOVERNANCE`: queda explícitamente en el
+inventario del bloque PRODUCT posterior como `UPDATE` y este bloque no lo modifica. La receta CI-1
+vigente se documenta en `docs/development_protocol.md` y
+`.github/workflows/ci_support/README.md`.
+
 ## Decisión de continuidad DATA-CHASSIS
 
 Decisión humana registrada el `2026-10-22T19:47:53Z` (momento UTC de formalización; la hora exacta
@@ -59,7 +111,7 @@ referencias. Los conteos pertenecen al conjunto estable de objetivos por fase; a
 nunca cero. `MET` exige evidencia operacional comparable. Los niveles `NONE`, `SCRATCH`,
 `INTEGRATED`, `DEPLOYED` y `OPERATIONAL` no se suman ni reemplazan el estado del objetivo.
 
-### DATA-CHASSIS — snapshot histórico y objetivos vigentes de referencia
+### DATA-CHASSIS — snapshot histórico de referencia
 
 Snapshot de PLAN a `2026-10-05T00:15:44+00:00`, `code_sha=ad6c72729866b2f283fb34bfa6783f0548f00cf7`,
 `runtime_sha=e276526871bd2efa7ddae3a4efc35d0d769b2c71`: **7 objetivos, 0 MET, 2 NOT_MET, 5

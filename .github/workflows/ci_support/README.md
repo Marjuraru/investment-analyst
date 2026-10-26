@@ -14,6 +14,25 @@ producto y no seleccionan tests por narrativa, nombre aproximado o coincidencia 
 - `module_weights.json` contiene pesos medidos por módulo, su procedencia y el peso por defecto para
   módulos nuevos. Un peso es una sugerencia de reparto; nunca decide qué tests se ejecutan.
 
+## Niveles de validación
+
+- `FOCUSED`: PLAN declara comandos, suites, costuras afectadas y regresiones cruzadas obligatorias;
+  BUILD los ejecuta localmente antes de publicar el candidato. Incluye consumidores de
+  almacenamiento, PIT, identidad, interfaces y contratos afectados, no sólo los tests modificados.
+  Si el impacto es incierto se amplía la selección o se usa `FULL`. No se infiere seguridad desde
+  paths ni se ejecutan comandos recibidos desde el texto del Issue dentro de CI.
+- `FULL`: el gate literal `Python 3.12 quality` conserva el nombre, todo el universo recolectado,
+  los cuatro shards, Ruff, auditoría y cobertura global `>=82%`. Es obligatorio en cada candidato
+  final exact-SHA antes de AUDIT/merge; `FOCUSED` no puede producirlo. El verde se reutiliza sólo
+  para el mismo SHA y entorno; se repite ante un SHA nuevo, un cambio relevante de entorno, un fallo
+  o un riesgo nuevo, y nunca se traslada cobertura entre SHAs. `serial-reference` sigue opt-in.
+
+La receta local del nivel `FULL` es `bash scripts/check.sh`, ejecutada una sola vez por cambio de CI
+o de dependencias/lock/toolchain; no se duplica su pytest ni se copia una base real para validarlo.
+`FOCUSED` usa los comandos declarados por el Work Block y no se convierte en un gate parcial que
+autorice merge. Los comandos de colecta, selección y ejecución de un shard están en
+[Ejecución local](#ejecución-local).
+
 ## Manifiesto `ci-partition-manifest-v1`
 
 El job de planificación escribe `ci-partition-manifest.json` y cuatro selecciones
@@ -106,14 +125,59 @@ por shard, runner-minutes de plan+máquinas y el desglose de cobertura. No se ac
 duplica la suite en PR normales. Un solo ensayo comparativo es suficiente; se repite sólo si un
 fallo, un cambio de candidato o un desequilibrio demostrado lo justifica.
 
+## Reporte de balance
+
+El job agregado publica `ci-balance-report-v1` con:
+
+- ruta crítica (`critical_path_seconds`) y `runner-minutes` del camino paralelo;
+- duración de plan, agregado, cola y ejecución de shards;
+- por shard: `wall_seconds`, `pytest_seconds`, `overhead_seconds`, peso y conteo;
+- ratios `wall_ratio`, `pytest_ratio` y `weight_ratio`, con spreads;
+- bytes observados de artifacts descargados y retención de 7 días;
+- `source_sha`, `run_id`, `run_attempt`, `universe_sha256`, `weights_sha256` y versión de pesos.
+
+Comando local (mismos archivos que produce el workflow):
+
+```bash
+.venv/bin/python .github/workflows/ci_support/shards.py report \
+  --manifest /tmp/ci-partition-manifest.json \
+  --receipts-dir /tmp/ci-receipts \
+  --partition-dir /tmp/ci-partitions \
+  --quality-dir /tmp/ci-quality \
+  --serial-dir /tmp/ci-serial \
+  --retention-days 7 \
+  --summary-out /tmp/ci-quality/balance-report.json
+```
+
+`--serial-dir` es opcional; si no existe, el reporte omite esos bytes. La comparación de balance
+exige la misma suite y colección. Un cambio de tests cambia el universo: se declara como no
+comparable y no se presenta una mejora estimada como aceleración observada.
+
 ## Pesos y recuperación
 
-Los pesos iniciales provienen del run oficial `39880858153` / job `120177616448`
-(`097e4e356d23f98e3e5eb01e33732ef9a69d6752`), calculados por delta de timestamps por test y sumados
-por módulo (2260.204 s observados). Un módulo nuevo entra con el peso por defecto positivo. Si un
-shard queda desbalanceado, se actualizan únicamente los pesos justificados, se versiona el archivo
-y se repite la comparación con el mismo SHA o con un candidato nuevo. No se omiten tests, no se
-rebaja el mínimo de cobertura y no se mueven pruebas a un job nocturno para alcanzar el objetivo.
+Los pesos vigentes son `2026-10-26.1`, derivados del run `40253368902` / job de planificación
+`121349862244` (`265cd860157b399f7160bd91951e7d512de1ac1c`), por duración de recibo por node id
+sumada por módulo (1350.873 s observados; 3878 node ids). El baseline previo `2026-10-23.1`
+(run `39880858153`, 2260.204 s) queda como referencia histórica. Un módulo nuevo entra con el peso
+por defecto positivo.
+
+Balance medido del baseline (run `40253368902`, pesos `2026-10-23.1`): shards 424/451/284/325 s,
+max/min de pared 1.588, ruta crítica 510 s, 25.42 runner-minutes, cola 10 s, overhead
+7.715/10.876/10.103/10.306 s. Con los pesos nuevos el reparto predicho es
+337.718/337.718/337.719/337.718 s; el run candidato publica la medición observada en
+`balance-report.json` y no se declara aceleración hasta leer ese reporte. El módulo mayor mide
+166.918 s frente a un ideal de 337.718 s, así que no se justifica reparto por node id: se conserva
+la agrupación por módulo para preservar fixtures de ámbito módulo. Si un módulo futuro domina y se
+demuestra independiente, se podrá habilitar reparto determinista por node id sólo para ese módulo,
+conservando agrupaciones de fixtures/recursos y sin partición aleatoria ni duplicación.
+
+Las pruebas nuevas de esta enmienda agregan node ids a `test_development_workflow_contract.py`, por
+lo que el universo del run candidato difiere del baseline en esos casos. La comparación declara esa
+diferencia; no se reutiliza el digest del universo anterior como si fuera el mismo.
+
+Si un shard queda desbalanceado, se actualizan únicamente los pesos justificados, se versiona el
+archivo y se repite la comparación con el mismo SHA o con un candidato nuevo. No se omiten tests, no
+se rebaja el mínimo de cobertura y no se mueven pruebas a un job nocturno para alcanzar el objetivo.
 
 Ante un fallo, el agregado deja los artefactos del run/attempt exacto y explica la causa. La
 recuperación consiste en corregir el candidato o el reparto y publicar un SHA nuevo; nunca en

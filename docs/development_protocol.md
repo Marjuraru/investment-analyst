@@ -89,12 +89,14 @@ comparabilidad, denominador y SHA; no interpreta fixtures o CI como ahorro opera
 es trazabilidad informativa, no una máquina paralela de estados.
 
 La fase sólo se cierra cuando se satisfacen todos sus criterios numéricos y no numéricos. En el
-cierre vigente de DATA-CHASSIS son obligatorios, además del registro Q1–Q7: igualdad Decimal entre
-ejecuciones full e incremental v2; checkpoints persistidos con invalidación por revisión; aislamiento
-y selección point-in-time; lotes de hasta 256 y cero hidratación de filas ajenas; inventario completo
-de migración con restore, rollback y v2 activo; backup de Drive restaurado; y desacoplamiento de
-features y explicación. El conteo de objetivos no sustituye estos gates. No se fija un número
-arbitrario de días/ciclos: se declara evidencia finita por escenario y se identifican ausencias.
+cierre histórico de DATA-CHASSIS fueron obligatorios, además del registro Q1–Q7: igualdad Decimal
+entre ejecuciones full e incremental v2; checkpoints persistidos con invalidación por revisión;
+aislamiento y selección point-in-time; lotes de hasta 256 y cero hidratación de filas ajenas;
+inventario completo de migración con restore, rollback y v2 activo; backup de Drive restaurado; y
+desacoplamiento de features y explicación. El conteo de objetivos no sustituye estos gates. No se
+fija un número arbitrario de días/ciclos: se declara evidencia finita por escenario y se identifican
+ausencias. DATA-CHASSIS ya está `DONE`: sus criterios y el registro Q1–Q7 permanecen como evidencia
+histórica fechada y no como objetivos de la fase vigente.
 
 Al revisar cierre, clasificar cada pendiente como criterio de aceptación no satisfecho, riesgo nuevo
 crítico u oportunidad opcional. Los dos primeros requieren resolver el criterio o volver a PLAN con
@@ -224,6 +226,49 @@ previsibles. Agrupa como máximo una solicitud inicial de autorizaciones externa
 acotadas. Los prompts inevitables del runtime se registran separadamente y nunca se eluden. Una
 capacidad imprevisible realmente necesaria termina `BUILD BLOCKED`; duración, cantidad de pasos o
 trabajo restante nunca son un bloqueo.
+
+## Presupuesto y retención por Work Block
+
+Antes de escribir rutas o propósito, cada Work Block declara read-only un presupuesto físico con
+estos campos exactos:
+
+| Campo | Contenido declarado |
+| --- | --- |
+| `rutas_proposito` | rutas que se escribirán y propósito de cada una |
+| `bytes_nuevos` | bytes persistentes nuevos previstos |
+| `bytes_modificados` | bytes existentes que se modificarán |
+| `temporales` | archivos temporales y su retirada |
+| `pico_adicional` | pico adicional coexistente |
+| `reutilizados` | recursos, evidencia y entorno reutilizados sin copiarlos |
+| `exclusivos_retirables` | bytes exclusivos retirables y su condición |
+| `libres_host_wsl` | espacio libre de host y WSL, medido por separado |
+| `reserva` | reserva que debe permanecer disponible |
+| `retencion` | qué se conserva, por qué y hasta qué evento concreto |
+
+Después de ejecutar, el bloque compara los bytes reales con ese presupuesto y explica cada
+desviación. `UNKNOWN` no es cero: se mide read-only primero y, si no puede medirse, se declara la
+ausencia. Se avisa explícitamente antes de agregar `>=100 MB` o antes de cualquier backup, restore o
+copia de datos. No hay backup por defecto.
+
+Se reutiliza evidencia exacta e inmutable y no se repiten campañas para fabricar recibos nuevos. Un
+conjunto de recuperación remoto cifrado puede requerir base y deltas: sus partes no se cuentan como
+respaldos redundantes. Una copia local se retira sólo tras cobertura y readback válidos y sin último
+consumidor conocido. No se asume liberar `C:` por borrar WSL ni se compacta un VHD vivo. Si el
+presupuesto se rebasa, se reordena, reduce o replantea con cifras antes de continuar; nunca se elevan
+límites por conveniencia. Ésta es la única receta: `AGENTS.md` y
+`.agents/rules/investment-analyst-core.md` la referencian sin duplicarla.
+
+## Disciplina documental
+
+Antes de escribir documentación, el bloque inventaría los markdown aplicables y clasifica cada ruta
+una sola vez como `KEEP_CANONICAL`, `UPDATE`, `MERGE`, `RETIRE` o `HISTORICAL_REFERENCE`. Cada tema
+tiene una sola autoridad vigente; una referencia histórica se rotula como tal y no se reescribe para
+aparentar consistencia. Una contradicción se resuelve corrigiendo la instrucción vigente y dejando el
+registro fechado, nunca borrando historia. Git conserva las versiones; la evidencia externa grande
+vive en Drive con manifest, mientras los documentos mínimos para desarrollar y operar permanecen en
+el repositorio y en local. Ningún bloque mueve esos documentos mínimos a Drive ni retira una
+referencia histórica sin clasificarla. El inventario vigente vive en
+`.agents/rules/investment-analyst-core.md` y no se duplica aquí.
 
 ## Algoritmo canónico de transición operativa
 
@@ -361,11 +406,34 @@ cobertura de acceptance y negativos críticos; hashes de trabajo protegido; y ri
 Enlaza logs, no los copia. GitHub es el bus de handoff.
 
 `Python 3.12 quality` es la autoridad de la suite determinista para el SHA publicado. BUILD usa
-Ruff y pruebas focalizadas; `bash scripts/check.sh` sólo se ejecuta si cambian CI/dependencias/lock/
-toolchain, CI no está disponible, el bloque lo justifica o el usuario lo pide. El gate agrega ahora
-las cuatro particiones paralelas, la combinación de cobertura y la auditoría de dependencias;
-`.github/workflows/ci_support/README.md` conserva la receta vigente. La comparación serial opcional
-de `workflow_dispatch` es evidencia de CI-T1 y no crea un segundo check requerido.
+Ruff y pruebas focalizadas; `bash scripts/check.sh` se ejecuta una sola vez si cambian
+CI/dependencias/lock/toolchain, CI no está disponible, el bloque lo justifica o el usuario lo pide.
+El gate agrega las cuatro particiones paralelas, la combinación de cobertura y la auditoría de
+dependencias; `.github/workflows/ci_support/README.md` conserva la receta vigente. La comparación
+serial opcional de `workflow_dispatch` es evidencia de CI-T1 y no crea un segundo check requerido.
+
+### Validación focalizada y gate completo
+
+PLAN declara para cada Work Block dos niveles explícitos. `FOCUSED` enumera comandos, test suites,
+costuras afectadas y regresiones cruzadas obligatorias; BUILD los ejecuta localmente antes de
+publicar el candidato. La selección incluye consumidores de almacenamiento, PIT, identidad,
+interfaces y contratos afectados, no sólo los tests modificados; si el impacto es incierto, se
+amplía o se usa `FULL`. Nunca se infiere seguridad sólo desde paths ni se ejecutan comandos
+recibidos desde el texto del Issue dentro de CI.
+
+`FULL` es el gate literal `Python 3.12 quality`: conserva el nombre, todo el universo recolectado,
+cuatro shards completos, Ruff, auditoría y cobertura global `>=82%`. Es obligatorio en cada
+candidato final exact-SHA antes de AUDIT y merge; una selección `FOCUSED` no puede producirlo. El
+verde se reutiliza sólo para el mismo SHA y entorno; se repite `FULL` ante un SHA nuevo, un cambio
+relevante de entorno, un fallo o un riesgo nuevo, y nunca se traslada cobertura de un SHA a otro.
+`serial-reference` sigue opt-in y sólo compara el motor de particiones.
+
+Un cambio de CI ejecuta una sola vez `bash scripts/check.sh` en un entorno admitido; no se duplica
+su pytest ni se copia una base real para validarlo. El CI publica, para el SHA exacto, duración
+total de ruta crítica, runner-minutes, duraciones por fase/shard, cola y overhead cuando estén
+disponibles, bytes de artifacts y retención de 7 días. La comparación exige la misma suite y
+colección; si cambian, se declara no comparable. El balance estimado no se presenta como
+aceleración observada.
 
 ## AUDIT semántico independiente
 

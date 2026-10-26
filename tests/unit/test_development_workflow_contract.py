@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -324,6 +325,81 @@ def test_continuity_decision_is_bounded_and_does_not_rewrite_historical_goals() 
     assert "no concede operaciones nuevas ni relaja PIT, lineage, Decimal" in normalized
 
 
+def test_work_block_budget_recipe_is_single_and_structural() -> None:
+    protocol = _read("docs/development_protocol.md")
+    heading = "## Presupuesto y retención por Work Block"
+    assert protocol.count(heading) == 1
+    section = protocol.split(heading, maxsplit=1)[1].split("\n## ", maxsplit=1)[0]
+    fields = re.findall(r"^\| `([a-z_]+)` \|", section, flags=re.MULTILINE)
+    assert fields == [
+        "rutas_proposito",
+        "bytes_nuevos",
+        "bytes_modificados",
+        "temporales",
+        "pico_adicional",
+        "reutilizados",
+        "exclusivos_retirables",
+        "libres_host_wsl",
+        "reserva",
+        "retencion",
+    ]
+    normalized = " ".join(section.split())
+    for clause in (
+        "`UNKNOWN` no es cero",
+        "`>=100 MB`",
+        "No hay backup por defecto",
+        "base y deltas",
+        "sin último consumidor conocido",
+        "No se asume liberar `C:` por borrar WSL ni se compacta un VHD vivo",
+        "nunca se elevan límites por conveniencia",
+        "la referencian sin duplicarla",
+    ):
+        assert clause in normalized
+
+    agents = _read("AGENTS.md")
+    core_rule = _read(".agents/rules/investment-analyst-core.md")
+    normalized_core_rule = " ".join(core_rule.split())
+    assert heading not in agents
+    assert heading not in core_rule
+    assert "single recipe in `docs/development_protocol.md`" in agents
+    assert (
+        "receta de presupuesto y retención de `docs/development_protocol.md` es la única"
+        in normalized_core_rule
+    )
+
+
+def test_documentary_inventory_is_unique_existing_and_classified() -> None:
+    protocol = _read("docs/development_protocol.md")
+    core_rule = _read(".agents/rules/investment-analyst-core.md")
+    normalized_core_rule = " ".join(core_rule.split())
+    assert protocol.count("## Disciplina documental") == 1
+    allowed = {"KEEP_CANONICAL", "UPDATE", "MERGE", "RETIRE", "HISTORICAL_REFERENCE"}
+    for classification in allowed:
+        assert f"`{classification}`" in protocol
+
+    heading = "Inventario mínimo vigente de markdown aplicables"
+    assert core_rule.count(heading) == 1
+    section = core_rule.split(heading, maxsplit=1)[1].split("\n## ", maxsplit=1)[0]
+    rows = re.findall(r"^\| `([^`]+)` \| `([A-Z_]+)` \|$", section, flags=re.MULTILINE)
+    assert rows
+    paths = [path for path, _ in rows]
+    assert len(set(paths)) == len(paths)
+    classifications = dict(rows)
+    assert set(classifications.values()) <= allowed
+    for path in paths:
+        assert (ROOT / path).is_file(), path
+    assert classifications["docs/product_roadmap.md"] == "KEEP_CANONICAL"
+    assert classifications["docs/basic_functional_release_plan.md"] == "KEEP_CANONICAL"
+    assert classifications["docs/data_chassis.md"] == "HISTORICAL_REFERENCE"
+    assert classifications["docs/data_chassis_continuity_plan.md"] == "HISTORICAL_REFERENCE"
+    assert ".agents/rules/investment-analyst-core.md" in protocol
+    assert "single discipline in `docs/development_protocol.md`" in _read("AGENTS.md")
+    assert "`DATA-CHASSIS` está `DONE`" in normalized_core_rule
+    assert "`FUNDAMENTALS-COVERAGE` es el único `NEXT`" in normalized_core_rule
+    assert "### DATA-CHASSIS — snapshot histórico de referencia" in core_rule
+    assert "registro histórico fechado" in normalized_core_rule
+
+
 def test_governance_writer_frontier_has_one_authoritative_classifier() -> None:
     guard = _read("scripts/check_workflow_guards.py")
     protocol = _read("docs/development_protocol.md")
@@ -456,6 +532,10 @@ def test_ci_preserves_complete_assertions_coverage_and_failure_gate() -> None:
     )
     assert "shards.py coverage" in coverage_command
     assert "--fail-under 82" in coverage_command
+    report_command = _workflow_step_command(quality, "Publish balance and duration report")
+    assert "shards.py report" in report_command
+    assert "--retention-days 7" in report_command
+    assert "--summary-out" in report_command
     compare_command = _workflow_step_command(quality, "Compare serial reference")
     assert "--aggregate-started-at" in compare_command
     assert "--aggregate-finished-at" in compare_command
@@ -914,6 +994,141 @@ def test_ci_gate_rejects_non_success_or_unexpected_serial_reference() -> None:
         _CI_SHARDS.evaluate_gate(**{**base, "serial_result": "success"})
     with pytest.raises(_CI_SHARDS.ContractError, match="input is invalid"):
         _CI_SHARDS.evaluate_gate(**{**base, "compare_serial": "yes"})
+
+
+def test_ci_committed_weights_are_measured_and_balanced() -> None:
+    weights = _CI_SHARDS.load_weights(CI_SUPPORT / "module_weights.json")
+
+    assert weights.version == "2026-10-26.1"
+    assert weights.source["workflow_run_id"] == "40253368902"
+    assert weights.source["job_id"] == "121349862244"
+    assert weights.source["source_sha"] == "265cd860157b399f7160bd91951e7d512de1ac1c"
+    assert weights.source["observed_seconds"] == round(sum(weights.modules.values()), 3)
+    module_universe = tuple(f"{path}::test_placeholder" for path in sorted(weights.modules))
+    partitions = _CI_SHARDS.build_partitions(module_universe, weights, 4)
+    loads = [partition.weight_seconds for partition in partitions]
+    assert max(loads) / min(loads) <= 1.01
+    assert max(weights.modules.values()) <= sum(weights.modules.values()) / 4
+
+
+def test_ci_balance_report_publishes_critical_path_and_rejects_incomplete_evidence(
+    tmp_path: Path,
+) -> None:
+    _write_mini_suite(tmp_path, failures=False)
+    manifest_path, parts = _plan_mini_suite(tmp_path)
+    manifest = _CI_SHARDS.load_manifest(manifest_path)
+    receipts = tmp_path / "receipts"
+    _run_all_shards(tmp_path, parts, receipts)
+    quality = tmp_path / "quality"
+    quality.mkdir()
+    (parts / "timing-plan.json").write_text(
+        json.dumps({"started_at_epoch": 1000, "finished_at_epoch": 1010}),
+        encoding="utf-8",
+    )
+    (quality / "aggregate-started-at").write_text("1100\n", encoding="utf-8")
+    (quality / "gate-finished-at").write_text("1110\n", encoding="utf-8")
+    walls: list[int] = []
+    for shard in range(1, 5):
+        receipt = json.loads((receipts / f"receipt-shard-{shard}.json").read_text(encoding="utf-8"))
+        wall = max(1, int(receipt["duration_seconds"]) + 5)
+        walls.append(wall)
+        (receipts / f"timing-shard-{shard}.json").write_text(
+            json.dumps(
+                {
+                    "shard": shard,
+                    "started_at_epoch": 1010,
+                    "finished_at_epoch": 1010 + wall,
+                    "duration_seconds": wall,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    report = _CI_SHARDS.build_report(manifest, receipts, parts, quality, retention_days=7)
+
+    assert report["schema_version"] == "ci-balance-report-v1"
+    assert report["universe_count"] == len(manifest.universe)
+    assert report["critical_path_seconds"] == 110
+    assert report["plan_seconds"] == 10
+    assert report["aggregate_seconds"] == 10
+    assert report["queue_seconds"] == 0
+    assert report["execution_seconds"] == max(walls)
+    assert report["runner_seconds"] == 10 + sum(walls) + 10
+    assert report["retention_days"] == 7
+    assert report["artifact_bytes"] > 0
+    assert len(report["per_shard"]) == 4
+    for row in report["per_shard"]:
+        assert row["overhead_seconds"] == round(row["wall_seconds"] - row["pytest_seconds"], 3)
+    assert report["balance"]["wall_ratio"] is not None
+    assert report["balance"]["weight_ratio"] is not None
+
+    (receipts / "timing-shard-4.json").unlink()
+    with pytest.raises(_CI_SHARDS.ContractError, match="absent or unreadable"):
+        _CI_SHARDS.build_report(manifest, receipts, parts, quality)
+    (receipts / "timing-shard-4.json").write_text(
+        json.dumps(
+            {
+                "shard": 4,
+                "started_at_epoch": 1010,
+                "finished_at_epoch": 1010 + walls[3],
+                "duration_seconds": walls[3],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    (quality / "gate-finished-at").write_text("not-an-epoch\n", encoding="utf-8")
+    with pytest.raises(_CI_SHARDS.ContractError, match="not an epoch timestamp"):
+        _CI_SHARDS.build_report(manifest, receipts, parts, quality)
+    (quality / "gate-finished-at").write_text("1110\n", encoding="utf-8")
+
+    receipt_path = receipts / "receipt-shard-1.json"
+    original_receipt = receipt_path.read_text(encoding="utf-8")
+    inflated = json.loads(original_receipt)
+    inflated["duration_seconds"] = walls[0] + 1
+    receipt_path.write_text(json.dumps(inflated), encoding="utf-8")
+    with pytest.raises(_CI_SHARDS.ContractError, match="pytest time exceeds its wall time"):
+        _CI_SHARDS.build_report(manifest, receipts, parts, quality)
+    receipt_path.write_text(original_receipt, encoding="utf-8")
+
+
+def test_ci_validation_levels_and_balance_report_are_documented() -> None:
+    protocol = _read("docs/development_protocol.md")
+    readme = _read(".github/workflows/ci_support/README.md")
+    normalized_protocol = " ".join(protocol.split())
+    normalized_readme = " ".join(readme.split())
+
+    assert protocol.count("### Validación focalizada y gate completo") == 1
+    assert readme.count("## Niveles de validación") == 1
+    assert readme.count("## Reporte de balance") == 1
+    for text in (protocol, readme):
+        assert "`FOCUSED`" in text
+        assert "`FULL`" in text
+        assert "`Python 3.12 quality`" in text
+        assert "`>=82%`" in text
+        assert "serial-reference" in text
+    assert "bash scripts/check.sh" in protocol
+    assert "una sola vez" in normalized_protocol
+    assert "ruta crítica" in normalized_protocol
+    assert "runner-minutes" in normalized_protocol
+    assert "retención de 7 días" in normalized_protocol
+    assert "se declara no comparable" in normalized_protocol
+    assert "no se presenta como aceleración observada" in normalized_protocol
+    assert "critical_path_seconds" in readme
+    assert "runner-minutes" in normalized_readme
+    assert "--retention-days 7" in readme
+    assert "40253368902" in readme
+    assert "337.718" in readme
+
+
+def test_product_ci_document_is_deferred_from_governance() -> None:
+    core_rule = _read(".agents/rules/investment-analyst-core.md")
+    normalized = " ".join(core_rule.split())
+
+    assert "docs/continuous_integration.md" in core_rule
+    assert "bloque PRODUCT posterior como `UPDATE`" in normalized
+    assert "no es editable por `BUILD_GOVERNANCE`" in normalized
+    assert (ROOT / "docs" / "continuous_integration.md").is_file()
 
 
 def _write_coverage_project(root: Path) -> None:

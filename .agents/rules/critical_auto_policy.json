@@ -64,6 +64,23 @@
           "route_effect": "COMPLETES"
         }
       ]
+    },
+    {
+      "authorization_id": "human-v2-readiness-finalize-20261026",
+      "granted_at": "2026-10-26T01:09:13Z",
+      "human_instruction": "Dejar v2 listo para retomar desarrollo y conservar la preferencia AUTO para la finalización del siguiente bloque de producto. Esta autorización se registra al formalizar DEV-V2-READINESS-1 el 2026-10-26T01:09:13Z; la hora exacta del mensaje original no quedó registrada.",
+      "purpose": "finalize_only",
+      "writer_role": "BUILD_PRODUCT",
+      "profile": "CRITICAL",
+      "finalize_policy": "AUTO",
+      "route_item": "FUNDAMENTALS-COVERAGE",
+      "blocks": [
+        {
+          "id": "FUNDAMENTALS-COVERAGE-READINESS",
+          "expected_branch": "codex/fundamentals-coverage-readiness",
+          "route_effect": "ADVANCES"
+        }
+      ]
     }
   ]
 }

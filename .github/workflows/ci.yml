@@ -464,6 +464,19 @@ jobs:
           --max-ratio 0.6
           --summary-out "$RUNNER_TEMP/ci-quality/comparison.json"
 
+      - name: Publish balance and duration report
+        if: always()
+        run: >-
+          uv run --locked --extra dev python .github/workflows/ci_support/shards.py report
+          --manifest "$RUNNER_TEMP/ci-partition/ci-partition-manifest.json"
+          --shards 4
+          --receipts-dir "$RUNNER_TEMP/ci-shards"
+          --partition-dir "$RUNNER_TEMP/ci-partition"
+          --quality-dir "$RUNNER_TEMP/ci-quality"
+          --serial-dir "$RUNNER_TEMP/ci-serial"
+          --retention-days 7
+          --summary-out "$RUNNER_TEMP/ci-quality/balance-report.json"
+
       - name: Collect aggregate evidence
         if: always()
         run: >-
