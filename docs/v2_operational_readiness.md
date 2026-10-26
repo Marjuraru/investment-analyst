@@ -67,6 +67,23 @@ La cadena remota reutilizada es `ia_drive_crypt` con base y deltas; los manifest
 inventarios se leen con rclone y se verifican por SHA-256 tras el readback. No se borran objetos
 remotos ni se usa `sync --delete`. Los secretos y la configuración rclone no se imprimen ni se suben.
 
+### Ejecución real del 2026-10-26
+
+| Evidencia | Resultado medido |
+| --- | --- |
+| Plan sellado | `plan_sha256=3bfa2561b0c7bd8c70f2a00c620739e6da191ca00e34354a2fbcd68898a8d239`; 40 entradas |
+| Publicación remota | `v2-readiness-20261026/plan-…json` y `control-…json`; readback SHA-256 verificado |
+| Retirada ejecutada | 33 rutas; `62.169.468.769 B` lógicos, `78.735.626.240 B` asignados, `53.988.843.520 B` exclusivos |
+| Espacio WSL | `879.265.140.736 B` → `942.896.627.712 B` libres (delta observado `+63.631.486.976 B`) |
+| Espacio host | `10.116.333.568 B` libres al cierre; reserva de `5.000.000.000 B` preservada |
+| Recibo | `ops/v2-readiness-20261026/retention-receipt.json`, `completed_at=2026-10-26T20:04:59.106709Z` |
+| Releases | 10 SHA antiguos retirados; `0e93c6…` retenido por el `memory-sampler` activo; current/previous/bindings conservados |
+| Retenido | `workspaces/default` 16 GB y `workspaces/data-chassis-43-rehearsal` 8,3 GB, sin cobertura remota demostrada |
+
+Las rutas retiradas eran staging, generaciones de backup y releases sin consumidor vivo. Los
+controles retenidos (`repair-delta`, selecciones, `continuity-archive-v1` y manifiesto v1) siguen
+locales. `UNKNOWN` no se convirtió en borrado: v1 y la rehearsal permanecen con motivo explícito.
+
 ## Entrega
 
 `FOCUSED` durante iteración y `FULL` como gate literal `Python 3.12 quality` sobre el SHA final.
