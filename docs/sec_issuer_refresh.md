@@ -105,3 +105,9 @@ métricas base para Barrick, 215 y 38 para BVN, y 149 y 38 para TSM; sus repetic
 exactamente los dos raw, todas las observaciones, todas las métricas y el diagnóstico. La interfaz
 usa un endpoint writer independiente, frecuencia anual y cachés de lectura por emisor.
 El flujo no calcula valoración, no combina scores, no recomienda operaciones y no ejecuta órdenes.
+
+El refresh también exige que cada raw reutilizado conserve una procedencia coherente con las
+observaciones que lo referencian. Al 2026-10-27 AAPL conserva una divergencia de `retrieved_at`
+entre el raw Company Facts `ddf69926…` y dos grupos de observaciones dependientes; la evaluación y
+el estado de esa reparación están en `docs/sec_provenance_repair_runbook.md`. Un raw con procedencia
+en conflicto no se reutiliza silenciosamente: el refresh falla de forma explícita.

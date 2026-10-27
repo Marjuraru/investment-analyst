@@ -482,6 +482,58 @@ def _decimal_equal(left: str | None, right: str | None) -> bool:
         return left == right
 
 
+def _observation_item(row, present, present_raw) -> HistoricalRecoveryItem:
+    observation_id = UUID(str(row[0]))
+    source_id = str(row[10] or "")
+    family = _source_family(source_id)
+    classification = HistoricalRecoveryClassification.IMPORTAR_FALTANTE
+    basis = None
+    if present is not None:
+        same_source = (
+            str(present[1]) == str(row[1])
+            and (str(present[2]) if present[2] is not None else None)
+            == (str(row[2]) if row[2] is not None else None)
+            and str(present[3]) == str(row[3])
+            and str(present[4]) == str(row[4])
+            and _instant(present[5]) == _instant(row[5])
+            and _instant(present[7]) == _instant(row[6])
+            and _decimal_equal(str(present[9]), str(row[12]))
+            and str(present[10]) == str(row[13])
+            and str(present[11]) == source_id
+            and _stable_record_key(str(present[12])) == _stable_record_key(str(row[11]))
+        )
+        if not same_source or _raw_provenance_conflict(row, present_raw):
+            classification = HistoricalRecoveryClassification.CONFLICTO
+        else:
+            classification = HistoricalRecoveryClassification.YA_PRESENTE
+            basis = HistoricalRecoveryPresentBasis.SOURCE_IDENTITY_V2_NORMALIZATION
+    elif _raw_provenance_conflict(row, present_raw):
+        classification = HistoricalRecoveryClassification.CONFLICTO
+    return HistoricalRecoveryItem(
+        entity_kind=HistoricalRecoveryEntityKind.OBSERVATION,
+        entity_id=observation_id,
+        family=family,
+        asset_id=str(row[2]) if row[2] is not None else None,
+        source_id=source_id or "unknown",
+        frequency=str(row[4]),
+        range_start=_instant(row[5]) or _instant(row[6]),
+        range_end=_instant(row[6]) or _instant(row[5]),
+        content_sha256=str(row[8]),
+        byte_length=int(row[9]),
+        consumer=_consumer(family),
+        classification=classification,
+        dependencies=(UUID(str(row[1])),),
+        present_basis=basis,
+    )
+
+
+def _raw_provenance_conflict(row, present_raw) -> bool:
+    """Report an observation whose referenced raw carries another retrieval instant."""
+    if present_raw is None:
+        return False
+    return _instant(present_raw[7]) != _instant(row[14])
+
+
 def _source_family(source_id: str) -> HistoricalRecoveryFamily:
     if source_id.startswith(
         ("sec-edgar:institutional", "sec-edgar:form-13f", "sec-edgar:manager")
@@ -1048,7 +1100,8 @@ class HistoricalRecoverySelectionBuilder:
             "observation_id VARCHAR PRIMARY KEY, raw_record_id VARCHAR, asset_id VARCHAR, "
             "field_name VARCHAR, frequency VARCHAR, observed_at VARCHAR, period_end VARCHAR, "
             "available_at VARCHAR, content_sha256 VARCHAR, byte_length BIGINT, "
-            "source_id VARCHAR, source_record_key VARCHAR, value VARCHAR, unit VARCHAR)"
+            "source_id VARCHAR, source_record_key VARCHAR, value VARCHAR, unit VARCHAR, "
+            "source_retrieved_at VARCHAR)"
         )
         connection.execute(
             "INSERT INTO tmp_recovery_obs_rows "
@@ -1061,7 +1114,8 @@ class HistoricalRecoverySelectionBuilder:
             "json_extract_string(o.document_json, '$.source.source_id') AS source_id, "
             "json_extract_string(o.document_json, '$.source.record_key') AS source_record_key, "
             "json_extract_string(o.document_json, '$.value') AS value, "
-            "json_extract_string(o.document_json, '$.unit') AS unit "
+            "json_extract_string(o.document_json, '$.unit') AS unit, "
+            "json_extract_string(o.document_json, '$.source.retrieved_at') AS source_retrieved_at "
             "FROM normalized_observations o WHERE o.observation_id IN "
             "(SELECT observation_id FROM tmp_recovery_obs)"
         )
@@ -1481,14 +1535,21 @@ class HistoricalRecoverySelectionBuilder:
         rows_all = connection.execute(
             "SELECT observation_id, raw_record_id, asset_id, field_name, frequency, "
             "observed_at, period_end, available_at, content_sha256, byte_length, source_id, "
-            "source_record_key, value, unit FROM tmp_recovery_obs_rows ORDER BY observation_id"
+            "source_record_key, value, unit, source_retrieved_at "
+            "FROM tmp_recovery_obs_rows ORDER BY observation_id"
         ).fetchall()
         connection.execute("DROP TABLE IF EXISTS tmp_recovery_obs_rows")
         for page_rows in _iter_chunks(rows_all, _PAGE_SIZE):
             identifiers = [UUID(str(row[0])) for row in page_rows]
             destination_rows = self._destination_observation_rows(destination, identifiers)
+            raw_identifiers = sorted({UUID(str(row[1])) for row in page_rows}, key=str)
+            destination_raw = self._destination_raw_rows(destination, raw_identifiers)
             for row in page_rows:
-                yield self._observation_item(row, destination_rows.get(UUID(str(row[0]))))
+                yield _observation_item(
+                    row,
+                    destination_rows.get(UUID(str(row[0]))),
+                    destination_raw.get(UUID(str(row[1]))),
+                )
 
     def _destination_observation_rows(
         self, destination: LocalStorage, identifiers: Sequence[UUID]
@@ -1501,48 +1562,6 @@ class HistoricalRecoverySelectionBuilder:
             [str(identifier) for identifier in identifiers],
         ).fetchall()
         return {UUID(str(row[0])): row for row in rows}
-
-    def _observation_item(self, row, present) -> HistoricalRecoveryItem:
-        observation_id = UUID(str(row[0]))
-        source_id = str(row[10] or "")
-        family = _source_family(source_id)
-        classification = HistoricalRecoveryClassification.IMPORTAR_FALTANTE
-        basis = None
-        if present is not None:
-            same_source = (
-                str(present[1]) == str(row[1])
-                and (str(present[2]) if present[2] is not None else None)
-                == (str(row[2]) if row[2] is not None else None)
-                and str(present[3]) == str(row[3])
-                and str(present[4]) == str(row[4])
-                and _instant(present[5]) == _instant(row[5])
-                and _instant(present[7]) == _instant(row[6])
-                and _decimal_equal(str(present[9]), str(row[12]))
-                and str(present[10]) == str(row[13])
-                and str(present[11]) == source_id
-                and _stable_record_key(str(present[12])) == _stable_record_key(str(row[11]))
-            )
-            if not same_source:
-                classification = HistoricalRecoveryClassification.CONFLICTO
-            else:
-                classification = HistoricalRecoveryClassification.YA_PRESENTE
-                basis = HistoricalRecoveryPresentBasis.SOURCE_IDENTITY_V2_NORMALIZATION
-        return HistoricalRecoveryItem(
-            entity_kind=HistoricalRecoveryEntityKind.OBSERVATION,
-            entity_id=observation_id,
-            family=family,
-            asset_id=str(row[2]) if row[2] is not None else None,
-            source_id=source_id or "unknown",
-            frequency=str(row[4]),
-            range_start=_instant(row[5]) or _instant(row[6]),
-            range_end=_instant(row[6]) or _instant(row[5]),
-            content_sha256=str(row[8]),
-            byte_length=int(row[9]),
-            consumer=_consumer(family),
-            classification=classification,
-            dependencies=(UUID(str(row[1])),),
-            present_basis=basis,
-        )
 
     def _metric_items(
         self, source: LocalStorage, destination: LocalStorage

@@ -271,6 +271,15 @@ class WorkspaceV2ObservationRepository:
             output.update(self._staging.get_observations(ordered[start : start + _PAGE]))
         return output
 
+    def list_ids_for_raw_record(self, raw_record_id: UUID) -> list[UUID]:
+        """Return the observation identifiers that reference one raw record."""
+        rows = self._connection.execute(
+            f"SELECT observation_id FROM {OBSERVATION_V2_TABLE} "
+            "WHERE raw_record_id = ? ORDER BY observation_id",
+            [str(raw_record_id)],
+        ).fetchall()
+        return [UUID(str(row[0])) for row in rows]
+
     def get_existing(self, observation_ids: Collection[UUID]) -> dict[UUID, NormalizedObservation]:
         ordered = tuple(sorted(set(observation_ids), key=str))
         found: set[UUID] = set()

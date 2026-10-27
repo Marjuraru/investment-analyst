@@ -32,6 +32,7 @@ from investment_analyst.workspace.historical_recovery import (
     HistoricalRecoveryImporter,
     HistoricalRecoveryItem,
     HistoricalRecoverySelectionBuilder,
+    _observation_item,
     load_historical_recovery_manifest,
     verify_historical_recovery_selection,
 )
@@ -280,3 +281,62 @@ def test_importer_rejects_present_raw_with_different_pit(tmp_path: Path) -> None
         )
         with pytest.raises(HistoricalRecoveryError, match="source identity differs"):
             importer._verify_items([item])
+
+
+def test_observation_classification_flags_mismatched_raw_provenance() -> None:
+    raw_id = uuid5(NAMESPACE_URL, "pit-integration-raw-provenance")
+    observation_id = uuid5(NAMESPACE_URL, "pit-integration-observation-provenance")
+    record_key = '{"companyfacts_record_id":"' + str(raw_id) + '"}'
+    row = (
+        str(observation_id),
+        str(raw_id),
+        _ASSET,
+        "close",
+        "1d",
+        _BASE.isoformat(),
+        _BASE.isoformat(),
+        _BASE.isoformat(),
+        "a" * 64,
+        10,
+        _SOURCE_ID,
+        record_key,
+        "100.00",
+        "USD",
+        _BASE.isoformat(),
+    )
+    present = (
+        str(observation_id),
+        str(raw_id),
+        _ASSET,
+        "close",
+        "1d",
+        _BASE.isoformat(),
+        None,
+        _BASE.isoformat(),
+        _BASE.isoformat(),
+        "100.00",
+        "USD",
+        _SOURCE_ID,
+        record_key,
+    )
+    matching = (
+        "pit-integration-v1",
+        _ASSET,
+        _SOURCE_ID,
+        "a" * 64,
+        record_key,
+        _BASE.isoformat(),
+        _BASE.isoformat(),
+        _BASE.isoformat(),
+    )
+    re_fetched = matching[:7] + ((_BASE + timedelta(days=1)).isoformat(),)
+    present_item = _observation_item(row, present, matching)
+    absent_item = _observation_item(row, None, matching)
+    present_conflict = _observation_item(row, present, re_fetched)
+    absent_conflict = _observation_item(row, None, re_fetched)
+    assert present_item.classification is HistoricalRecoveryClassification.YA_PRESENTE
+    assert absent_item.classification is HistoricalRecoveryClassification.IMPORTAR_FALTANTE
+    assert present_conflict.classification is HistoricalRecoveryClassification.CONFLICTO
+    assert absent_conflict.classification is HistoricalRecoveryClassification.CONFLICTO
+    assert present_conflict.present_basis is None
+    assert absent_conflict.present_basis is None

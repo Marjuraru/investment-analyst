@@ -177,6 +177,28 @@ mientras la observación conserva `2026-08-01T04:06:18Z`. El job programado de A
 matriz de causas responden con la evidencia local existente. La reparación de esa inconsistencia
 requiere un Work Block separado; no se reescribió ni se borró ningún dato en este bloque.
 
+## Evaluación de reparación de procedencia SEC — 2026-10-27
+
+El bloque `FUNDAMENTALS-SEC-PROVENANCE` evaluó la corrección mínima de `source.retrieved_at` sobre el
+workspace `70c64668-…` con el v1 retenido `19cf83b5-…` en modo read-only. El inventario cubrió 330
+raws SEC comparables (323 idénticos) y el plan sellado no admitió ninguna entrada:
+
+| Raw | Emisor | Dependientes | Clasificación |
+| --- | --- | --- | --- |
+| `ddf69926-344d-577c-aea7-c75018dc11f0` | AAPL Company Facts | 1355 | `dependent-clocks-incompatible` |
+| `caa19cbd-ef8c-590b-a2f0-f7c9e4121c07` | AMD Company Facts | 871 | `dependent-clocks-incompatible` |
+| `5caa7db7-2790-580b-bb6a-55150c68023b` | AMD Submissions | 0 | `no-dependents` |
+
+En AAPL, 1286 dependientes exigen `2026-10-21T20:49:52.509067Z` y 69 exigen
+`2026-08-01T04:06:18.471994Z`. Sustituir el campo repararía las 69 y rompería las 1286; en AMD
+rompería las 871. No se mutó ningún raw, ninguna observación, métrica ni diagnóstico, y el refresh
+SEC de AAPL sigue bloqueado por esta divergencia de linajes.
+
+La operación, sus criterios de admisión y su clasificación de conflictos quedan documentados en
+`docs/sec_provenance_repair_runbook.md`. Resolver qué linaje de procedencia es autoritativo requiere
+decisión de PLAN: las salidas conocidas (reescribir observaciones, reimportar historia o aceptar la
+divergencia) están fuera de la autorización vigente.
+
 ## Inventario documental aplicable
 
 | Documento | Clasificación | Acción |

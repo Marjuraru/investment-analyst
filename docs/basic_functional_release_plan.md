@@ -4,6 +4,12 @@
 > `NEXT`. La readiness operativa v2 ([`v2_operational_readiness.md`](v2_operational_readiness.md))
 > avanza sus prerrequisitos de interfaz, lectura, limpieza y entrega; no declara cobertura
 > fundamental nueva ni cierra la ruta.
+
+> `FUNDAMENTALS-SEC-PROVENANCE`/#365 (`ADVANCES`, sin cierre) integró la capacidad de reparación
+> acotada de procedencia SEC y su runbook. El inventario read-only del workspace activo clasificó
+> tres raws con linajes de reloj incompatibles y cero entradas admitidas, por lo que el refresh SEC
+> de AAPL sigue explícitamente bloqueado; resolver qué linaje es autoritativo requiere decisión de
+> PLAN. La fila permanece `NEXT`: no se declara cobertura nueva ni cobertura fundamental cerrada.
 >
 > Las notas siguientes y las narrativas fechadas de este documento son registro histórico. No
 > describen un Issue activo ni autorizan ejecución: la única autoridad de Work Block es el Issue

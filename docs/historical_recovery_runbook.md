@@ -274,3 +274,11 @@ The exact selection id, digest, page count, matrix, budget, import counters, bac
 remote restore receipt and post-deployment smoke are recorded in the DATA-CHASSIS-48 BUILD marker and
 in `docs/data_chassis.md`. This runbook is the procedure; GitHub and the persisted receipts remain the
 authoritative evidence.
+
+## Current provenance guard
+
+The selector now classifies an observation as `CONFLICTO` when the destination already holds its
+raw record with a different `source.retrieved_at` than the one the observation records, instead of
+importing or accepting it. That guard closes the seam that allowed a recovered observation to
+reference a raw of another retrieval lineage. The narrow repair procedure and its live result are in
+`docs/sec_provenance_repair_runbook.md`.
