@@ -798,6 +798,7 @@ class SecProvenanceEvidenceService:
         entries: list[SecProvenanceEvidenceEntry] = []
         conflicts: list[SecProvenanceEvidenceConflict] = []
         store = SecProvenanceEvidenceStore(self._destination.paths.root, read_only=True)
+        indirect = self._indirect_reference_counts()
         for configuration in self._configurations:
             normalizer = SecCompanyFactsNormalizer(configuration)
             for schema_version, source_id in self._issuer_sources(configuration):
@@ -815,7 +816,7 @@ class SecProvenanceEvidenceService:
                                 recorded,
                                 SecProvenanceClassification.UNREFERENCED_OR_INDIRECT,
                                 dependent_observations=0,
-                                indirect_references=self._indirect_references(record_id),
+                                indirect_references=indirect.get(str(record_id), 0),
                                 detail="no direct dependent observation",
                             )
                         )
@@ -1112,13 +1113,13 @@ class SecProvenanceEvidenceService:
             return {}
         return self._destination.observations.get_many(identifiers)
 
-    def _indirect_references(self, record_id: UUID) -> int:
+    def _indirect_reference_counts(self) -> dict[str, int]:
         rows = self._destination.store.connection.execute(
-            "SELECT count(*) FROM normalized_observations_v2 "
-            "WHERE raw_record_id <> ? AND source_record_key LIKE ?",
-            [str(record_id), f"%{record_id}%"],
-        ).fetchone()
-        return int(rows[0]) if rows else 0
+            "SELECT json_extract_string(source_record_key, "
+            "'$.submissions_record_id') AS reference, count(*) "
+            "FROM normalized_observations_v2 GROUP BY 1 HAVING reference IS NOT NULL"
+        ).fetchall()
+        return {str(row[0]): int(row[1]) for row in rows}
 
     def _source_record(self, record_id: UUID) -> RawRecord | None:
         if self._source is None:
