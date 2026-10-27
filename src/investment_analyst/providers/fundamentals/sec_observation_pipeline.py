@@ -24,8 +24,13 @@ from investment_analyst.providers.fundamentals.sec_fact_models import (
     SUBMISSIONS_SCHEMA_VERSION,
     get_sec_fact_definition,
 )
+from investment_analyst.providers.fundamentals.sec_provenance import (
+    SecAcquisitionProvenanceResolver,
+    build_evidence_resolver,
+)
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.errors import RecordNotFoundError, StorageError
+from investment_analyst.workspace.sec_provenance_models import SecProvenanceError
 
 
 class SecObservationPipelineError(RuntimeError):
@@ -130,6 +135,11 @@ class SecIssuerObservationPipeline:
                 "normalizer and observation pipeline configurations must match"
             )
         self._clock = clock
+        self._provenance: SecAcquisitionProvenanceResolver | None = build_evidence_resolver(
+            storage,
+            configuration=self._configuration,
+            normalizer=normalizer,
+        )
 
     def run(self) -> SecObservationImportSummary:
         """Select snapshots, validate all candidates, then persist idempotently."""
@@ -391,13 +401,30 @@ class SecIssuerObservationPipeline:
 
         expected = reconstructed.get(observation.observation_id)
         if expected is None or expected != observation:
-            raise SecObservationTraceabilityError(
-                f"observation {observation.observation_id} cannot be reconstructed"
-            )
+            expected = self._resolve_preserved_acquisition(observation, companyfacts_record)
 
         accession = _required_key(key, "accession_number")
         if accession not in observation.source.record_key:
             raise SecObservationTraceabilityError("SEC observation accession trace is missing")
+
+    def _resolve_preserved_acquisition(
+        self,
+        observation: NormalizedObservation,
+        companyfacts_record: RawRecord,
+    ) -> NormalizedObservation:
+        if self._provenance is None:
+            raise SecObservationTraceabilityError(
+                f"observation {observation.observation_id} cannot be reconstructed"
+            )
+        try:
+            return self._provenance.resolve(
+                observation,
+                companyfacts_record=companyfacts_record,
+            )
+        except SecProvenanceError as error:
+            raise SecObservationTraceabilityError(
+                f"observation {observation.observation_id} cannot be reconstructed"
+            ) from error
 
 
 def _validate_candidate(

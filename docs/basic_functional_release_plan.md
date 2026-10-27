@@ -4,6 +4,13 @@
 > `NEXT`. La readiness operativa v2 ([`v2_operational_readiness.md`](v2_operational_readiness.md))
 > avanza sus prerrequisitos de interfaz, lectura, limpieza y entrega; no declara cobertura
 > fundamental nueva ni cierra la ruta.
+
+
+> `FUNDAMENTALS-SEC-PROVENANCE`/#365 (`ADVANCES`, sin cierre) integra la evidencia local de
+> adquisición SEC (`sec-acquisition-provenance-v1`) y recupera el refresh sobre v2 sin reescribir
+> raws ni observaciones. Evidencia: 329 referencias clasificadas sin conflictos, 69 bindings
+> verificados, refresh AAPL completo con replay idempotente, AMD como control y cero accesos a v1 en
+> runtime. La fila permanece `NEXT`: no se declara cobertura fundamental nueva ni se cierra la ruta.
 >
 > Las notas siguientes y las narrativas fechadas de este documento son registro histórico. No
 > describen un Issue activo ni autorizan ejecución: la única autoridad de Work Block es el Issue

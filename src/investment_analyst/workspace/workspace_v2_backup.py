@@ -30,6 +30,7 @@ from investment_analyst.evidence.sec_documents.repository import (
 )
 from investment_analyst.storage import StorageError
 from investment_analyst.storage.compact_analytical_v2 import CompactAnalyticalStore
+from investment_analyst.storage.sec_provenance_evidence import SecProvenanceEvidenceStore
 from investment_analyst.storage.workspace_incremental_v2 import (
     WorkspaceIncrementalV2Error,
     verify_workspace_incremental_v2,
@@ -44,6 +45,10 @@ from investment_analyst.workspace.backup import (
     _sha256,
 )
 from investment_analyst.workspace.models import WorkspaceAccessMode, WorkspaceInspection
+from investment_analyst.workspace.sec_provenance_models import (
+    SecProvenanceError,
+    SecProvenanceUnavailableError,
+)
 from investment_analyst.workspace.service import WorkspaceService
 from investment_analyst.workspace.workspace_v2_backup_inventory import (
     WorkspaceV2BackupInventoryError,
@@ -1944,10 +1949,67 @@ def _checkpoint_uuid(value: object) -> UUID | None:
         ) from error
 
 
+def validate_sec_provenance_evidence(
+    workspace_root: Path,
+) -> tuple[int, int]:
+    """Validate the v2 acquisition evidence of a workspace or restored backup.
+
+    Returns the artifact and binding counts. Missing evidence is valid; an
+    artifact whose digest no longer matches, an orphan binding, or a binding
+    that does not resolve to its artifact fails closed before any restore is
+    accepted.
+    """
+    root = workspace_root.expanduser().resolve()
+    if not root.is_absolute() or not root.is_dir():
+        raise WorkspaceV2BackupError("provenance evidence workspace root is unsafe")
+    store = SecProvenanceEvidenceStore(root / "storage" / "v2", read_only=True)
+    try:
+        artifacts = {artifact.identity_digest: artifact for artifact in store.artifacts()}
+        bindings_root = store.root / "bindings"
+        observed: set[UUID] = set()
+        if bindings_root.is_dir():
+            for parent, directories, filenames in os.walk(bindings_root, followlinks=False):
+                directory = Path(parent)
+                if directory.is_symlink() or any(
+                    (directory / name).is_symlink() for name in directories
+                ):
+                    raise WorkspaceV2BackupError("provenance evidence contains symbolic links")
+                for name in sorted(filenames):
+                    path = directory / name
+                    if path.is_symlink() or not path.is_file():
+                        raise WorkspaceV2BackupError("provenance evidence binding is unsafe")
+                    reference = store.binding(UUID(path.stem))
+                    if reference is None:
+                        raise WorkspaceV2BackupError("provenance evidence binding is absent")
+                    artifact = artifacts.get(reference.identity_digest)
+                    if artifact is None:
+                        raise WorkspaceV2BackupError("provenance evidence binding has no artifact")
+                    if artifact.raw_record_id != reference.raw_record_id:
+                        raise WorkspaceV2BackupError(
+                            "provenance evidence binding references another raw"
+                        )
+                    if artifact.binding_for(reference.observation_id) is None:
+                        raise WorkspaceV2BackupError(
+                            "provenance evidence binding is not part of its artifact"
+                        )
+                    observed.add(reference.observation_id)
+        expected = {
+            binding.observation_id
+            for artifact in artifacts.values()
+            for binding in artifact.bindings
+        }
+        if expected != observed:
+            raise WorkspaceV2BackupError("provenance evidence bindings are incomplete")
+        return len(artifacts), len(observed)
+    except (SecProvenanceError, SecProvenanceUnavailableError) as error:
+        raise WorkspaceV2BackupError("provenance evidence verification failed") from error
+
+
 __all__ = [
     "WorkspaceV2BackupError",
     "WorkspaceV2BackupManifest",
     "WorkspaceV2PackedBackupManifest",
     "WorkspaceV2PackedStreamManifest",
     "WorkspaceV2BackupService",
+    "validate_sec_provenance_evidence",
 ]

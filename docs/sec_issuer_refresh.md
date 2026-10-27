@@ -105,3 +105,9 @@ métricas base para Barrick, 215 y 38 para BVN, y 149 y 38 para TSM; sus repetic
 exactamente los dos raw, todas las observaciones, todas las métricas y el diagnóstico. La interfaz
 usa un endpoint writer independiente, frecuencia anual y cachés de lectura por emisor.
 El flujo no calcula valoración, no combina scores, no recomienda operaciones y no ejecuta órdenes.
+
+El refresh verifica cada observación contra la adquisición que la produjo. Cuando dos adquisiciones
+válidas comparten la identidad de un raw SEC, la comprobación reconstruye primero el contexto
+actual y sólo ante una diferencia de procedencia usa la evidencia local
+`sec-acquisition-provenance-v1` del workspace v2. El runtime no necesita ni abre el workspace v1;
+la receta y el estado vigente están en `docs/sec_provenance_repair_runbook.md`.
