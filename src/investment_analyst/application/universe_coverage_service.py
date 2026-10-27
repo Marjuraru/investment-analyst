@@ -81,22 +81,32 @@ class UniverseCoverageService:
         start, end = inclusive_utc_date_bounds(request.market_start, request.market_end)
         bvl = self._bvl_views(request, asset_ids)
         if getattr(self._storage.paths, "format_version", 1) == 2 and len(asset_ids) > 1:
+            worker_count = min(4, len(asset_ids))
+            partitions = tuple(
+                tuple(asset_ids[index::worker_count]) for index in range(worker_count)
+            )
 
-            def view(asset_id: str) -> UniverseCoverageAsset:
+            def view(partition: tuple[str, ...]) -> dict[str, UniverseCoverageAsset]:
                 with LocalStorage(self._storage.paths, read_only=True) as storage:
-                    return self._asset_view(
-                        catalog_assets[asset_id],
-                        descriptors.get(asset_id),
-                        request,
-                        start,
-                        end,
-                        HistoricalMarketDataService(storage),
-                        bvl.get(asset_id),
-                        storage,
-                    )
+                    return {
+                        asset_id: self._asset_view(
+                            catalog_assets[asset_id],
+                            descriptors.get(asset_id),
+                            request,
+                            start,
+                            end,
+                            None,
+                            bvl.get(asset_id),
+                            storage,
+                        )
+                        for asset_id in partition
+                    }
 
-            with ThreadPoolExecutor(max_workers=min(4, len(asset_ids))) as executor:
-                assets = tuple(executor.map(view, asset_ids))
+            views: dict[str, UniverseCoverageAsset] = {}
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                for partition_result in executor.map(view, partitions):
+                    views.update(partition_result)
+            assets = tuple(views[asset_id] for asset_id in asset_ids)
         else:
             history = (
                 HistoricalMarketDataService(self._storage)

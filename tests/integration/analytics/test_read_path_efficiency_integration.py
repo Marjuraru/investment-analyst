@@ -206,6 +206,17 @@ def test_v2_market_projection_matches_v1_and_hydrates_only_the_latest_bar(
         assert summary.latest_timestamp == v1.coverage.latest_timestamp
         assert summary.latest_projection == projection.bars[-1]
 
+        full_pages = {"count": 0}
+        original_full_page = RawV2Staging.list_market_observation_page
+
+        def counted_full_page(self, **kwargs):
+            full_pages["count"] += 1
+            return original_full_page(self, **kwargs)
+
+        monkeypatch.setattr(RawV2Staging, "list_market_observation_page", counted_full_page)
+        assert summarize_market_history_v2(storage.store.raw_staging, query) == summary
+        assert full_pages["count"] == 1
+
         calls = {"blob_reads": 0, "projection_checks": 0}
         original_read_blob = storage.store.raw_staging._read_blob
         original_projection_check = storage.store.raw_staging._workspace_projection_table_exists

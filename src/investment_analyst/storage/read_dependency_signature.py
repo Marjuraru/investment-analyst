@@ -497,6 +497,65 @@ def _collect_dependencies(
     raise ReadSignatureUnavailable("read dependency family is not supported")
 
 
+def build_composite_read_dependency_signature(
+    storage: LocalStorage,
+    queries: tuple[ReadDependencyQuery, ...],
+    *,
+    code_version: str = READ_DEPENDENCY_CODE_VERSION,
+    contract_version: str = READ_DEPENDENCY_CONTRACT_VERSION,
+) -> ReadDependencySignature:
+    """Build one signature from the union of several exact read selections."""
+    if not queries:
+        raise ReadSignatureUnavailable("a composite signature requires at least one query")
+    if storage.paths.format_version != 2 or storage.paths.workspace_id is None:
+        raise ReadSignatureUnavailable("a signature requires an identified workspace v2")
+    endpoints = {query.endpoint for query in queries}
+    known_ats = {query.known_at for query in queries}
+    if len(endpoints) != 1:
+        raise ReadSignatureUnavailable("composite queries require one endpoint")
+    if len(known_ats) != 1:
+        raise ReadSignatureUnavailable("composite queries require one known_at")
+    connection = storage.store.connection
+    merged: dict[tuple[str, str], ReadDependency] = {}
+    for query in queries:
+        for dependency in _collect_dependencies(connection, query):
+            key = (dependency.kind.value, dependency.dependency_id)
+            existing = merged.get(key)
+            if existing is not None and existing != dependency:
+                raise ReadSignatureUnavailable("composite read dependencies conflict")
+            merged[key] = dependency
+    catalog = ReadDependency(
+        kind=ReadDependencyKind.CATALOG,
+        dependency_id=str(storage.paths.workspace_id),
+        content_sha256=_catalog_version(connection),
+    )
+    ordered = tuple(
+        sorted(
+            (*merged.values(), catalog),
+            key=lambda item: (item.kind.value, item.dependency_id),
+        )
+    )
+    arguments = [query.model_dump(mode="json") for query in queries]
+    arguments_digest = hashlib.sha256(
+        json.dumps(arguments, allow_nan=False, separators=(",", ":"), sort_keys=True).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    asset_ids = tuple(sorted({asset_id for query in queries for asset_id in query.asset_ids}))
+    return ReadDependencySignature(
+        workspace_id=storage.paths.workspace_id,
+        code_version=code_version,
+        contract_version=contract_version,
+        catalog_version=catalog.content_sha256,
+        endpoint=queries[0].endpoint,
+        arguments_digest=arguments_digest,
+        known_at=queries[0].known_at,
+        asset_ids=asset_ids,
+        semantic_selection=" | ".join(_semantic_selection(query) for query in queries),
+        dependencies=ordered,
+    )
+
+
 def build_read_dependency_signature(
     storage: LocalStorage,
     query: ReadDependencyQuery,

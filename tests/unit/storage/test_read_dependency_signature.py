@@ -206,3 +206,129 @@ def test_v1_storage_fails_closed_without_a_snapshot_binding(tmp_path: Path) -> N
         pytest.raises(ReadSignatureUnavailable),
     ):
         build_read_dependency_signature(storage, _query())
+
+
+def test_composite_signature_narrows_each_selection_to_its_own_range(tmp_path: Path) -> None:
+    from investment_analyst.storage.read_dependency_signature import (
+        build_composite_read_dependency_signature,
+    )
+
+    _service, storage = _workspace(tmp_path)
+    fundamental_source = "fixture:fundamentals"
+    try:
+        storage.sources.upsert(
+            SourceDefinition(
+                source_id=fundamental_source,
+                provider_name="Fixture",
+                dataset_name="Fundamentals",
+                source_type=SourceType.FUNDAMENTALS,
+                base_url="https://example.invalid",
+                is_official=True,
+                coverage_notes="Fixture fundamentals.",
+            )
+        )
+        old_record = _record("100").model_copy(update={"event_time": _NOW - timedelta(days=400)})
+        recent_record = _record("210")
+        fundamental_record = RawRecord(
+            record_id=uuid4(),
+            asset_id=_ASSET,
+            source=SourceReference(
+                source_id=fundamental_source,
+                record_key="AMD:revenue",
+                retrieved_at=_NOW,
+            ),
+            event_time=_NOW - timedelta(days=20),
+            available_at=_NOW,
+            received_at=_NOW,
+            payload={"revenue": "1000"},
+            schema_version="1",
+        )
+        storage.raw_records.save(old_record)
+        storage.raw_records.save(recent_record)
+        storage.raw_records.save(fundamental_record)
+        storage.observations.save(
+            _observation(old_record, "100", observed_at=_NOW - timedelta(days=400))
+        )
+        storage.observations.save(
+            _observation(recent_record, "210", observed_at=_NOW - timedelta(days=1))
+        )
+        storage.observations.save(
+            NormalizedObservation(
+                observation_id=uuid4(),
+                raw_record_id=fundamental_record.record_id,
+                asset_id=_ASSET,
+                field_name="fundamental.revenue",
+                value=Decimal("1000"),
+                unit="USD",
+                frequency=DataFrequency.ANNUAL,
+                observed_at=_NOW - timedelta(days=20),
+                available_at=_NOW,
+                normalized_at=_NOW,
+                source=SourceReference(
+                    source_id=fundamental_source,
+                    record_key="AMD:revenue",
+                    retrieved_at=_NOW,
+                ),
+                quality=DataQuality.VALID,
+                transformation_version="1.0.0",
+            )
+        )
+        monolithic = ReadDependencyQuery(
+            family=ReadDependencyFamily.COVERAGE,
+            endpoint="/api/v1/universe-coverage",
+            asset_ids=(_ASSET,),
+            source_ids=(fundamental_source, _SOURCE),
+            known_at=_NOW,
+            start=_NOW - timedelta(days=400),
+            end=_NOW,
+            selector="all",
+        )
+        market = ReadDependencyQuery(
+            family=ReadDependencyFamily.COVERAGE,
+            endpoint="/api/v1/universe-coverage",
+            asset_ids=(_ASSET,),
+            source_ids=(_SOURCE,),
+            known_at=_NOW,
+            start=_NOW - timedelta(days=30),
+            end=_NOW,
+            selector="market",
+        )
+        fundamental = ReadDependencyQuery(
+            family=ReadDependencyFamily.COVERAGE,
+            endpoint="/api/v1/universe-coverage",
+            asset_ids=(_ASSET,),
+            source_ids=(fundamental_source,),
+            known_at=_NOW,
+            start=_NOW - timedelta(days=30),
+            end=_NOW,
+            selector="fundamental",
+        )
+        baseline = build_read_dependency_signature(storage, monolithic)
+        composite = build_composite_read_dependency_signature(
+            storage,
+            (market, fundamental),
+        )
+
+        assert len(composite.dependencies) < len(baseline.dependencies)
+        composite_ids = {item.dependency_id for item in composite.dependencies}
+        baseline_ids = {item.dependency_id for item in baseline.dependencies}
+        assert str(old_record.record_id) in baseline_ids
+        assert str(old_record.record_id) not in composite_ids
+        assert str(recent_record.record_id) in composite_ids
+        assert str(fundamental_record.record_id) in composite_ids
+        assert (
+            composite.digest
+            == build_composite_read_dependency_signature(
+                storage,
+                (market, fundamental),
+            ).digest
+        )
+
+        storage.observations.save(_observation(recent_record, "211", field_name="open"))
+        changed = build_composite_read_dependency_signature(
+            storage,
+            (market, fundamental),
+        )
+        assert changed.digest != composite.digest
+    finally:
+        storage.close()

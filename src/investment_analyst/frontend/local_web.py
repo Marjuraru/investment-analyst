@@ -6,7 +6,7 @@ import json
 import threading
 import time
 from collections.abc import Callable, Mapping
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -244,6 +244,7 @@ from investment_analyst.storage.read_dependency_signature import (
     ReadDependencySignature,
     ReadSignatureUnavailable,
 )
+from investment_analyst.time_intervals import inclusive_utc_date_bounds
 from investment_analyst.workspace.service import WorkspaceError
 
 _MAX_REQUEST_BYTES = 16_384
@@ -957,6 +958,18 @@ class AaplLocalController:
         except ReadSignatureUnavailable:
             return None
 
+    def _composite_signature(
+        self,
+        queries: tuple[ReadDependencyQuery, ...],
+    ) -> ReadDependencySignature | None:
+        try:
+            return self._application.read_composite_dependency_signature(
+                queries,
+                location=StorageLocationRequest(workspace=self._workspace),
+            )
+        except ReadSignatureUnavailable:
+            return None
+
     def _signed_read(
         self,
         query: ReadDependencyQuery,
@@ -970,6 +983,21 @@ class AaplLocalController:
             loader,
             revalidate=lambda: self._signature(query),
             family=query.family.value,  # type: ignore[arg-type]
+        )
+
+    def _signed_read_composite(
+        self,
+        queries: tuple[ReadDependencyQuery, ...],
+        loader: Callable[[], _ReadValue],
+    ) -> _ReadValue:
+        signature = self._composite_signature(queries)
+        if signature is None:
+            return loader()
+        return self._signature_cache.get_or_load(
+            signature,
+            loader,
+            revalidate=lambda: self._composite_signature(queries),
+            family="coverage",
         )
 
     def run_payload(self, payload: dict[str, object]) -> AaplDailyRunState:
@@ -1155,38 +1183,92 @@ class AaplLocalController:
 
     def coverage_request(self, request: UniverseCoverageRequest) -> UniverseCoverageResult:
         """Read cached universe coverage evidence without providers or writer acquisition."""
-        asset_ids = request.asset_ids or self._catalog_asset_ids
-        sources = tuple(
+        asset_ids = tuple(sorted(request.asset_ids or self._catalog_asset_ids))
+        descriptors = tuple(self._market_assets_by_id.get(asset_id) for asset_id in asset_ids)
+        market_sources = tuple(
+            sorted({descriptor.source_id for descriptor in descriptors if descriptor is not None})
+        )
+        fundamental_assets = tuple(
             sorted(
                 {
-                    source
-                    for asset_id in asset_ids
-                    for source in self._descriptor_source_ids(asset_id)
+                    asset_id
+                    for asset_id, descriptor in zip(asset_ids, descriptors, strict=True)
+                    if descriptor is not None and descriptor.fundamental_source_ids
                 }
             )
         )
-        dependency_start = datetime.combine(
-            min(request.market_start, request.fundamental_start),
-            datetime.min.time(),
-            UTC,
+        fundamental_sources = tuple(
+            sorted(
+                {
+                    source_id
+                    for descriptor in descriptors
+                    if descriptor is not None
+                    for source_id in descriptor.fundamental_source_ids
+                }
+            )
         )
-        dependency_end = request.known_at
-        query = ReadDependencyQuery(
-            family=ReadDependencyFamily.COVERAGE,
-            endpoint="/api/v1/universe-coverage",
-            asset_ids=tuple(sorted(asset_ids)),
-            source_ids=sources,
-            known_at=request.known_at,
-            start=dependency_start if dependency_start < dependency_end else None,
-            end=dependency_end if dependency_start < dependency_end else None,
-            selector=(
-                f"market={request.market_start}..{request.market_end};"
-                f"fundamental={request.fundamental_start}..{request.fundamental_end};"
-                f"frequency={request.frequency}"
-            ),
+        market_start, market_end = inclusive_utc_date_bounds(
+            request.market_start,
+            request.market_end,
         )
-        return self._signed_read(
-            query,
+        fundamental_start, fundamental_end = inclusive_utc_date_bounds(
+            request.fundamental_start,
+            request.fundamental_end,
+        )
+        fundamental_end = min(fundamental_end, request.known_at)
+        if fundamental_start >= fundamental_end:
+            fundamental_end = fundamental_start + timedelta(microseconds=1)
+        queries: list[ReadDependencyQuery] = []
+        if market_sources:
+            queries.append(
+                ReadDependencyQuery(
+                    family=ReadDependencyFamily.COVERAGE,
+                    endpoint="/api/v1/universe-coverage",
+                    asset_ids=asset_ids,
+                    source_ids=market_sources,
+                    known_at=request.known_at,
+                    start=market_start,
+                    end=market_end,
+                    selector=(
+                        f"market={request.market_start}..{request.market_end};"
+                        f"frequency={request.frequency};segment=market"
+                    ),
+                )
+            )
+        if fundamental_assets and fundamental_sources:
+            queries.append(
+                ReadDependencyQuery(
+                    family=ReadDependencyFamily.COVERAGE,
+                    endpoint="/api/v1/universe-coverage",
+                    asset_ids=fundamental_assets,
+                    source_ids=fundamental_sources,
+                    known_at=request.known_at,
+                    start=fundamental_start,
+                    end=fundamental_end,
+                    selector=(
+                        f"fundamental={request.fundamental_start}..{request.fundamental_end};"
+                        f"frequency={request.frequency};segment=fundamental"
+                    ),
+                )
+            )
+        if not queries:
+            queries.append(
+                ReadDependencyQuery(
+                    family=ReadDependencyFamily.COVERAGE,
+                    endpoint="/api/v1/universe-coverage",
+                    asset_ids=asset_ids,
+                    known_at=request.known_at,
+                    start=fundamental_start,
+                    end=fundamental_end,
+                    selector=(
+                        f"market={request.market_start}..{request.market_end};"
+                        f"fundamental={request.fundamental_start}..{request.fundamental_end};"
+                        f"frequency={request.frequency}"
+                    ),
+                )
+            )
+        return self._signed_read_composite(
+            tuple(queries),
             lambda: self._application.query_universe_coverage(
                 request,
                 location=StorageLocationRequest(workspace=self._workspace),

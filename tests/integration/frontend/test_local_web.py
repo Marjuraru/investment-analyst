@@ -377,6 +377,29 @@ class _FakeApplication:
             ),
         )
 
+    def read_composite_dependency_signature(self, queries, *, location):
+        payload = "|".join(query.model_dump_json() for query in queries)
+        return ReadDependencySignature(
+            workspace_id=UUID("00000000-0000-4000-8000-000000000047"),
+            code_version="test",
+            contract_version="test",
+            catalog_version="0" * 64,
+            endpoint=queries[0].endpoint,
+            arguments_digest=hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            known_at=queries[0].known_at,
+            asset_ids=tuple(
+                sorted({asset_id for query in queries for asset_id in query.asset_ids})
+            ),
+            semantic_selection=" | ".join(query.family.value for query in queries),
+            dependencies=(
+                ReadDependency(
+                    kind=ReadDependencyKind.CATALOG,
+                    dependency_id="test",
+                    content_sha256="1" * 64,
+                ),
+            ),
+        )
+
     def __init__(self) -> None:
         self.requests: list[ConsolidatedDiagnosticRequest] = []
         self.locations: list[StorageLocationRequest] = []
@@ -5283,6 +5306,29 @@ class _MutableSignatureApplication(_FakeApplication):
             known_at=query.known_at,
             asset_ids=query.asset_ids,
             semantic_selection=query.family.value,
+            dependencies=(
+                ReadDependency(
+                    kind=ReadDependencyKind.CATALOG,
+                    dependency_id="content",
+                    content_sha256=self.signature_salt * 64,
+                ),
+            ),
+        )
+
+    def read_composite_dependency_signature(self, queries, *, location):
+        payload = "|".join(query.model_dump_json() for query in queries).encode("utf-8")
+        return ReadDependencySignature(
+            workspace_id=self.signature_workspace,
+            code_version="test",
+            contract_version="test",
+            catalog_version="0" * 64,
+            endpoint=queries[0].endpoint,
+            arguments_digest=hashlib.sha256(payload).hexdigest(),
+            known_at=queries[0].known_at,
+            asset_ids=tuple(
+                sorted({asset_id for query in queries for asset_id in query.asset_ids})
+            ),
+            semantic_selection=" | ".join(query.family.value for query in queries),
             dependencies=(
                 ReadDependency(
                     kind=ReadDependencyKind.CATALOG,

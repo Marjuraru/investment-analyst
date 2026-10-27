@@ -226,6 +226,32 @@ class MarketObservationPage(ContractModel):
     next_raw_record_id: UUID | None = None
 
 
+class MarketObservationSummaryGroup(ContractModel):
+    """Lightweight SQL summary of one raw market-record observation group."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    raw_record_id: UUID
+    raw_asset_id: str
+    raw_source_id: str
+    raw_event_time: UTCDateTime
+    raw_available_at: UTCDateTime
+    raw_checksum_sha256: str
+    observed_at: UTCDateTime
+    available_at: UTCDateTime
+    observation_count: int = Field(ge=1)
+
+
+class MarketObservationSummaryPage(ContractModel):
+    """Bounded keyset page of lightweight raw market-record summaries."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    groups: tuple[MarketObservationSummaryGroup, ...]
+    next_observed_at: UTCDateTime | None = None
+    next_raw_record_id: UUID | None = None
+
+
 class RawV2TemporalStamp(ContractModel):
     """The three source timestamps authorized by one narrow metadata correction."""
 
@@ -1541,6 +1567,130 @@ class RawV2Staging:
             groups=tuple(groups),
             next_observed_at=_parse_instant_text(last_observed_at),
             next_raw_record_id=last_raw_record_id,
+        )
+
+    def list_market_observation_summary_page(
+        self,
+        *,
+        asset_id: str,
+        source_id: str,
+        start: datetime,
+        end: datetime,
+        known_at: datetime,
+        limit: int,
+        after_observed_at: datetime | None = None,
+        after_raw_record_id: UUID | None = None,
+    ) -> MarketObservationSummaryPage:
+        """Return one bounded page of lightweight market groups without hydration."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 256:
+            raise RawV2StagingError("market observation page limit must be between 1 and 256")
+        for label, instant in (("start", start), ("end", end), ("known_at", known_at)):
+            if instant.tzinfo is None or instant.utcoffset() is None:
+                raise RawV2StagingError(f"market observation {label} must be timezone-aware")
+        if start >= end:
+            raise RawV2StagingError("market observation range must be non-empty")
+        if (after_observed_at is None) != (after_raw_record_id is None):
+            raise RawV2StagingError("market observation cursor requires both fields together")
+        if after_observed_at is not None and (
+            after_observed_at.tzinfo is None or after_observed_at.utcoffset() is None
+        ):
+            raise RawV2StagingError("market observation cursor must be timezone-aware")
+        self._require_open()
+        self._ensure_observation_table(create=False)
+        cursor_sql = ""
+        cursor_parameters: list[object] = []
+        if after_observed_at is not None and after_raw_record_id is not None:
+            cursor_sql = " AND (o.observed_at, o.raw_record_id) > (?, ?)"
+            cursor_parameters = [
+                _instant_text(after_observed_at),
+                str(after_raw_record_id),
+            ]
+        rows = self._connection.execute(
+            "SELECT o.observed_at, o.raw_record_id, r.asset_id, r.source_id, r.event_time, "
+            "r.available_at, r.checksum_sha256, COUNT(*), MIN(o.observed_at), "
+            "MAX(o.observed_at), MIN(o.available_at), MAX(o.available_at) "
+            "FROM normalized_observations_v2 AS o "
+            "LEFT JOIN raw_v2_index AS r ON r.record_id = o.raw_record_id "
+            "WHERE o.asset_id = ? AND o.source_id = ? AND o.frequency = ? "
+            "AND o.observed_at IS NOT NULL AND o.observed_at >= ? AND o.observed_at < ? "
+            "AND o.available_at <= ?"
+            f"{cursor_sql} "
+            "GROUP BY o.observed_at, o.raw_record_id, r.asset_id, r.source_id, r.event_time, "
+            "r.available_at, r.checksum_sha256 "
+            "ORDER BY o.observed_at, o.raw_record_id LIMIT ?",
+            [
+                asset_id,
+                source_id,
+                DataFrequency.DAY_1.value,
+                _instant_text(start),
+                _instant_text(end),
+                _instant_text(known_at),
+                *cursor_parameters,
+                limit,
+            ],
+        ).fetchall()
+        groups: list[MarketObservationSummaryGroup] = []
+        seen: set[UUID] = set()
+        for row in rows:
+            if len(row) != 12:
+                raise ObservationV2Error("market observation summary row is malformed")
+            raw_record_id = UUID(str(row[1]))
+            if raw_record_id in seen:
+                raise ObservationV2Error("market observation summary group is not uniform")
+            seen.add(raw_record_id)
+            raw_asset_id = row[2]
+            raw_source_id = row[3]
+            raw_checksum = row[6]
+            observed_at = _parse_instant_text(row[0])
+            raw_event_time = _parse_instant_text(row[4])
+            raw_available_at = _parse_instant_text(row[5])
+            observed_min = _parse_instant_text(row[8])
+            observed_max = _parse_instant_text(row[9])
+            available_min = _parse_instant_text(row[10])
+            available_max = _parse_instant_text(row[11])
+            if (
+                raw_asset_id is None
+                or raw_source_id is None
+                or not isinstance(raw_checksum, str)
+                or observed_at is None
+                or raw_event_time is None
+                or raw_available_at is None
+                or observed_min is None
+                or observed_max is None
+                or available_min is None
+                or available_max is None
+            ):
+                raise ObservationV2Error("market observation summary reference is missing")
+            if (
+                observed_at != observed_min
+                or observed_min != observed_max
+                or available_min != available_max
+                or raw_event_time != observed_min
+                or raw_available_at != available_min
+            ):
+                raise ObservationV2Error("market observation summary group is not uniform")
+            if available_min > known_at:
+                raise ObservationV2Error("market observation summary was not available at known_at")
+            groups.append(
+                MarketObservationSummaryGroup(
+                    raw_record_id=raw_record_id,
+                    raw_asset_id=str(raw_asset_id),
+                    raw_source_id=str(raw_source_id),
+                    raw_event_time=raw_event_time,
+                    raw_available_at=raw_available_at,
+                    raw_checksum_sha256=raw_checksum,
+                    observed_at=observed_at,
+                    available_at=available_min,
+                    observation_count=int(row[7]),
+                )
+            )
+        if not groups:
+            return MarketObservationSummaryPage(groups=())
+        last = groups[-1]
+        return MarketObservationSummaryPage(
+            groups=tuple(groups),
+            next_observed_at=last.observed_at,
+            next_raw_record_id=last.raw_record_id,
         )
 
     def earliest_market_observation_timestamp(
