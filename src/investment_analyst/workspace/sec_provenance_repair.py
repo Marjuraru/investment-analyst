@@ -1115,9 +1115,10 @@ class SecProvenanceEvidenceService:
 
     def _indirect_reference_counts(self) -> dict[str, int]:
         rows = self._destination.store.connection.execute(
-            "SELECT json_extract_string(source_record_key, "
-            "'$.submissions_record_id') AS reference, count(*) "
-            "FROM normalized_observations_v2 GROUP BY 1 HAVING reference IS NOT NULL"
+            "SELECT CASE WHEN json_valid(source_record_key) THEN "
+            "json_extract_string(source_record_key, '$.submissions_record_id') END "
+            "AS reference, count(*) FROM normalized_observations_v2 "
+            "GROUP BY 1 HAVING reference IS NOT NULL"
         ).fetchall()
         return {str(row[0]): int(row[1]) for row in rows}
 
