@@ -10,10 +10,10 @@ fundamental nueva, no cierra esa ruta y no sustituye la autoridad de
 | --- | --- |
 | Work Block | `FUNDAMENTALS-COVERAGE-CYCLE` (#363) |
 | Base declarada | `origin/main@a9dd555b9368168d145e357f380e9d0c47acfd41` |
-| Runtime desplegado | `351181bf37c150f656c80f1f76a9fa82d8116b86` (medición); rollback inmediato `32898b58…` |
+| Runtime desplegado | HEAD de `codex/fundamentals-coverage-cycle`; código de lectura medido `351181bf37c150f656c80f1f76a9fa82d8116b86` (los commits posteriores sólo cambian documentación) |
 | Workspace activo | `workspaces/active-v2-20261021` |
 | UUID v2 | `70c64668-1738-4dfe-ba1f-7e72026bb7fe` |
-| Rollback de referencia | `d2d2c36149db717bb94a810b15503ceb17786061` (retenido) |
+| Rollback de referencia | `351181bf37c150f656c80f1f76a9fa82d8116b86` (inmediato); `d2d2c36149db717bb94a810b15503ceb17786061` (retenido) |
 | Medición de adquisición | `351181b` (árbol de runtime equivalente); mercado 20–26 oct, SEC no repetido por limitación previa |
 | `route_effect` | `ADVANCES` sobre `FUNDAMENTALS-COVERAGE`, que permanece el único `NEXT` |
 
@@ -135,7 +135,7 @@ siguiente paso sería una proyección de dependencias más precisa o reducir el 
 ### C5 — entrega y límites
 
 CI `Python 3.12 quality` verde para `351181b`; el candidato está desplegado en el UUID actual y el
-rollback inmediato `32898b5` se conserva. La adquisición real de mercado fue acotada: AAPL
+rollback inmediato `351181b` se conserva. La adquisición real de mercado fue acotada: AAPL
 `already_current` (la barra 26-oct ya se había adquirido), AMD 1 barra/26 métricas, TSM y BVN 4
 barras/95 métricas cada uno, BTC 1 vela/20 métricas; el replay de los mismos cortes devolvió
 `already_current` en los cinco activos y reutilizó 111/106/100/100/140 métricas. DB +34.078.720 B y
