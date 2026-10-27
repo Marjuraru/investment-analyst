@@ -295,6 +295,13 @@ tienen evidencia, y evidencia presente dentro de 365 días está al día. `Últi
 máximo válido de `reference_at` y `latest_input_available_at` de esos tres dominios solamente; si
 no existe, se presenta como ausencia accesible. No usa `computed_at`, la hora de render ni BVL.
 
+Cuando una celda sin evidencia conserva un motivo explícito, el nombre accesible y el `title`
+añaden ese motivo sin cambiar la marca ni inventar un sexto estado: `share_basis_unavailable` y los
+demás `reason_codes` de valoración se traducen con la misma tabla que el panel, y una frecuencia
+fundamental no declarada por el perfil SEC del emisor se presenta como bloqueada con la explicación
+"Frecuencia no implementada para este emisor". Un `missing` sin motivo sigue siendo "Sin evidencia";
+la interfaz no presenta cero, cobertura completa ni una causa inferida.
+
 `Registro BVL` deja de ser una columna o dominio analítico: aparece una sola vez en Fuentes
 bloqueadas, derivado del mismo payload ya cargado. Su lectura separa activos aplicables, evidencia
 presente, evidencia ausente, no consultada, sin configurar, no implementada y no aplica; no afirma
@@ -1115,11 +1122,17 @@ modifican.
 
 ## Panel de valoración
 
-El panel «Valoración» aparece solo cuando el descriptor del catálogo declara empresa corporativa,
-mercado/fundamentales y base de unidad del título. Se carga bajo demanda mediante
+El panel «Valoración» aparece para todo emisor que declara fundamentales SEC. La base de unidad del
+título ya no oculta la sección: si falta, `GET /api/v1/valuation` devuelve
+`status=not_evaluable` con `share_basis_unavailable` en las once métricas y el panel muestra ese
+motivo, la ausencia de precio/ejercicio y la limitación del catálogo. ETF y cripto sin fundamentales
+no reciben la sección. Se carga bajo demanda mediante
 `GET /api/v1/valuation`; muestra precio y edad, ejercicio/filing, moneda/factor, estados por métrica,
-fórmula e IDs de inputs. La exportación JSON conserva los textos Decimal exactos. ETF y cripto no
-reciben ratios corporativos; la API puede devolver `not_applicable` sin abrir writer ni proveedor.
+fórmula e IDs de inputs. La exportación JSON conserva los textos Decimal exactos.
+
+Al cambiar de activo, `resetListedCompanyReport()` limpia también las cuatro tarjetas de ratios
+(margen neto, crecimiento de ingresos, pasivos/activos y variación del resultado) y sus títulos, de
+modo que un reporte fallido no deja valores del activo anterior.
 
 La historia materializada usa por separado `GET /api/v1/valuation-history` con corte UTC, rango
 inclusivo, base `latest_annual` y límite explícito. Sólo se solicita al pulsar «Cargar historia»:

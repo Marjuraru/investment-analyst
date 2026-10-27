@@ -255,7 +255,7 @@ def test_v2_market_projection_matches_v1_and_hydrates_only_the_latest_bar(
     assert aapl.latest_observation_ids == tuple(
         sorted(v1.bars[-1].observation_ids.values(), key=str)
     )
-    assert calls["blob_reads"] == 2
+    assert calls["blob_reads"] == 1
     parallel = UniverseCoverageApplication.create_default().query(
         StorageLocationRequest(workspace=workspace),
         UniverseCoverageRequest(

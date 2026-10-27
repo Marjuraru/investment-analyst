@@ -13,6 +13,7 @@ import investment_analyst.analytics.valuation.service as valuation_service
 from investment_analyst.analytics.market.bar_models import MarketBar
 from investment_analyst.analytics.valuation import (
     AmbiguousValuationEvidenceError,
+    CorporateValuationError,
     CorporateValuationRequest,
     CorporateValuationService,
     ValuationInput,
@@ -946,3 +947,52 @@ def test_adr_issuers_remain_not_evaluable_with_share_basis_unavailable(asset_id:
     assert {item.reason_code for item in snapshot.metrics} == {
         ValuationReasonCode.SHARE_BASIS_UNAVAILABLE
     }
+
+
+def test_selected_price_avoids_a_second_market_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(_reference_rows())
+    price = _price()
+    monkeypatch.setattr(
+        service,
+        "_price",
+        lambda request: pytest.fail("selected price must not trigger a market read"),
+    )
+    request = CorporateValuationRequest(
+        asset_id=_ASSET_ID,
+        known_at=_KNOWN_AT,
+        valuation_date=_KNOWN_AT.date(),
+    )
+
+    snapshot = service.query(request, computed_at=_KNOWN_AT, selected_price=price)
+
+    assert snapshot.status is ValuationSnapshotStatus.EVALUATED
+    assert snapshot.inputs[0].observation_id == price.observation_ids["close"]
+    assert snapshot.valuation_as_of == price.timestamp
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"asset_id": "equity:us:msft"},
+        {"source_id": "alpaca-market-data:iex:msft:daily-bars:adjustment-all"},
+        {"frequency": DataFrequency.QUARTERLY},
+        {"available_at": _KNOWN_AT + timedelta(days=1)},
+        {"timestamp": _KNOWN_AT + timedelta(days=1)},
+    ],
+)
+def test_selected_price_must_match_the_requested_cut(update: dict[str, object]) -> None:
+    service = _service(_reference_rows())
+    request = CorporateValuationRequest(
+        asset_id=_ASSET_ID,
+        known_at=_KNOWN_AT,
+        valuation_date=_KNOWN_AT.date(),
+    )
+
+    with pytest.raises(CorporateValuationError, match="selected price"):
+        service.query(
+            request,
+            computed_at=_KNOWN_AT,
+            selected_price=_price().model_copy(update=update),
+        )

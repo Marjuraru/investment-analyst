@@ -66,6 +66,22 @@ En el cliente, un fallo de cualquier loader diferido libera el tablero de `loade
 el error después de renderizar el estado de ausencia, sin dejar el tablero bloqueado ni presentar la
 respuesta fallida como datos vigentes.
 
+### Precio seleccionado compartido (`FUNDAMENTALS-COVERAGE-CYCLE`)
+
+En una consulta de cobertura de un equity, la lectura de mercado ya selecciona y verifica la última
+barra PIT del corte. La valoración corporativa de la misma consulta reutiliza esa barra verificada
+en lugar de repetir `summarize_market_history_v2` y `materialize` sobre el mismo activo/fuente/corte.
+`CorporateValuationService.query` acepta un `selected_price` keyword-only interno y lo valida contra
+activo, fuente, frecuencia, `available_at <= known_at` y fecha de valoración; si no coincide, falla
+cerrado. La búsqueda por ventanas 30/90/365/3650/todo se conserva para los consumidores que no
+disponen de una barra previa, como la lectura directa de valoración de un activo.
+
+El resultado es exactamente el mismo: la última barra <= `valuation_date` dentro de la ventana de
+cobertura es también la última barra elegible de la historia. La prueba estructural
+`test_v2_market_projection_matches_v1_and_hydrates_only_the_latest_bar` baja de dos a una lectura de
+blob por activo y conserva conteos, PIT, `Decimal`, orden y payload. `test_selected_price_avoids_a_second_market_read`
+y `test_selected_price_must_match_the_requested_cut` pinnean la equivalencia y el rechazo.
+
 
 Las lecturas de `RawRecord` verifican siempre el SHA-256 del archivo antes de
 deserializarlo. La copia canónica `document_json` del índice se conserva por

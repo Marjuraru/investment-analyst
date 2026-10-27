@@ -1,6 +1,6 @@
 # Hoja de ruta estratégica del producto
 
-> Estado vigente 2026-10-26: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
+> Estado vigente 2026-10-27: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
 > `NEXT`. La readiness operativa v2 se registra en
 > [`v2_operational_readiness.md`](v2_operational_readiness.md): avanza prerrequisitos de interfaz,
 > lectura, limpieza y entrega, sin declarar cobertura fundamental nueva ni cerrar la ruta.
@@ -9,9 +9,9 @@
 > activo ni autorizan ejecución; la única autoridad de Work Block es el Issue abierto con
 > `workflow:active` resuelto desde GitHub vivo.
 
-## Prioridad operativa de 2026-10-26
+## Prioridad operativa de 2026-10-27
 
-DATA-CHASSIS cerró con `DATA-CHASSIS-48`/#357 (`COMPLETES`) tras la reparación temporal R4, el delta físico de la vista packed compatible y el restore final verificado desde el padre retenido más los objetos remotos. `FUNDAMENTALS-COVERAGE` queda como el único `NEXT`. `FUNDAMENTALS-COVERAGE-READINESS`/#361 (`ADVANCES`) deja v2 listo para retomar desarrollo: lecturas críticas acotadas, recuperación remota utilizable, espacio local seguro y documentación vigente. No declara más cobertura fundamental ni cierra la fila. Se permite adquisición reciente y warm-up necesario mediante fuentes existentes; el archivo anterior no se re-descarga masivamente. Las cronologías inferiores conservan contexto histórico, no autoridad para sustituir esta secuencia.
+DATA-CHASSIS cerró con `DATA-CHASSIS-48`/#357 (`COMPLETES`) tras la reparación temporal R4, el delta físico de la vista packed compatible y el restore final verificado desde el padre retenido más los objetos remotos. `FUNDAMENTALS-COVERAGE` queda como el único `NEXT`. `FUNDAMENTALS-COVERAGE-READINESS`/#361 (`ADVANCES`) dejó v2 listo para retomar desarrollo: lecturas críticas acotadas, recuperación remota utilizable, espacio local seguro y documentación vigente. `FUNDAMENTALS-COVERAGE-CYCLE`/#363 (`ADVANCES`) avanza los prerrequisitos operativos sin cerrar la fila: ciclo semanal determinista con fines de semana, feriados y reintentos acotados; frecuencia IFRS no declarada explicada como `not_implemented`/`not_queried`; ausencias de valoración visibles; y precio PIT compartido entre cobertura y valoración. No declara más cobertura fundamental ni cierra la ruta. Se permite adquisición reciente y warm-up necesario mediante fuentes existentes; el archivo anterior no se re-descarga masivamente. Las cronologías inferiores conservan contexto histórico, no autoridad para sustituir esta secuencia.
 
 ## Revisión técnica externa: oportunidades posteriores a DATA-CHASSIS-48
 

@@ -271,6 +271,51 @@ const MESA_MATRIX_STATE_LABELS = Object.freeze({
   "not-applicable": "No aplica",
 });
 
+const MESA_VALUATION_REASON_LABELS = Object.freeze({
+  share_basis_unavailable: "Base entre título y acción no disponible",
+  security_unit_mismatch: "Unidad del título incompatible",
+  corporate_action_basis_unavailable: "Base de acción corporativa no demostrable",
+  price_unavailable: "Precio no disponible en el corte",
+  price_ambiguous: "Revisión de precio ambigua",
+  fundamentals_unavailable: "Ejercicio anual no disponible en el corte",
+  fundamental_revision_ambiguous: "Revisión fundamental ambigua",
+  period_mismatch: "Períodos incompatibles",
+  source_mismatch: "Fuentes incompatibles",
+  frequency_mismatch: "Frecuencias incompatibles",
+  accounting_basis_mismatch: "Taxonomías contables incompatibles",
+  currency_mismatch: "Monedas incompatibles; no se aplica FX",
+  unit_mismatch: "Unidades financieras incompatibles",
+  missing_input: "Falta un input oficial requerido",
+  invalid_denominator: "Denominador nulo, negativo o inválido",
+  ebitda_unavailable: "D&A anual oficial compatible no disponible",
+});
+
+function mesaCoverageExplanation(domainKey, coverage) {
+  if (domainKey === "fundamentals" && coverage.capability === "not_implemented") {
+    return "Frecuencia no implementada para este emisor";
+  }
+  if (domainKey === "corporate_valuation" && coverage.evidence === "missing") {
+    const codes = Array.isArray(coverage.reason_codes) ? coverage.reason_codes : [];
+    const reasons = codes
+      .map((code) => MESA_VALUATION_REASON_LABELS[code])
+      .filter((label) => typeof label === "string");
+    if (reasons.length) return reasons.join(" · ");
+  }
+  return "";
+}
+
+function applyMesaCoverageExplanation(container, explanation) {
+  if (!explanation) return;
+  const mark = container.querySelector(".mesa-matrix-state");
+  if (!mark) return;
+  const base = mark.getAttribute("aria-label") || "";
+  const label = base ? `${base} · ${explanation}` : explanation;
+  mark.setAttribute("aria-label", label);
+  mark.setAttribute("title", label);
+  const hidden = mark.querySelector(".visually-hidden");
+  if (hidden) hidden.textContent = label;
+}
+
 const MESA_ASSET_CLASS_LABELS = Object.freeze({
   equity: "Acción",
   etf: "ETF",
@@ -419,6 +464,10 @@ function renderMesaUniverseMatrix(payload) {
         coverage.capability,
         coverage.evidence,
         coverage.reference_age_days ?? coverage.latest_input_age_days ?? null,
+      );
+      applyMesaCoverageExplanation(
+        domainButton,
+        mesaCoverageExplanation(key, coverage),
       );
       domainCell.append(domainButton);
       row.append(domainCell);

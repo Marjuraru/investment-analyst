@@ -1195,7 +1195,7 @@ function applySelectedMarketAsset() {
     element.classList.toggle("hidden", !presentation.hasFundamentals);
   }
   for (const element of document.querySelectorAll("[data-valuation-only]")) {
-    element.classList.toggle("hidden", !presentation.hasCorporateValuation);
+    element.classList.toggle("hidden", !presentation.hasFundamentals);
   }
   for (const element of document.querySelectorAll("[data-complete-run-only]")) {
     element.classList.toggle("hidden", !presentation.hasFundamentals);

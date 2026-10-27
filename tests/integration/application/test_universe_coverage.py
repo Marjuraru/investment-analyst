@@ -72,6 +72,38 @@ def test_default_query_keeps_bvl_identities_when_market_is_not_configured(tmp_pa
     assert bvl.bvl_registry.evidence is EvidenceState.MISSING
 
 
+def test_ifrs_issuer_reports_quarterly_fundamentals_as_not_implemented(tmp_path) -> None:
+    workspace = WorkspaceService().initialize(tmp_path / "workspace").paths.root
+    request = UniverseCoverageRequest(
+        known_at=datetime(2026, 8, 29, tzinfo=UTC),
+        market_start=date(2026, 8, 1),
+        market_end=date(2026, 8, 28),
+        fundamental_start=date(2020, 1, 1),
+        fundamental_end=date(2026, 8, 28),
+        frequency="quarterly",
+        asset_ids=("equity:us:tsm",),
+    )
+
+    result = UniverseCoverageApplication.create_default().query(
+        StorageLocationRequest(workspace=workspace),
+        request,
+    )
+
+    tsm = result.assets[0]
+    assert tsm.fundamentals.capability is CoverageCapability.NOT_IMPLEMENTED
+    assert tsm.fundamentals.evidence is EvidenceState.NOT_QUERIED
+    assert tsm.fundamentals.frequency == "quarterly"
+    assert tsm.fundamentals.metrics_returned == 0
+    assert any("annual fundamentals only" in item for item in tsm.limitations)
+
+    annual = UniverseCoverageApplication.create_default().query(
+        StorageLocationRequest(workspace=workspace),
+        request.model_copy(update={"frequency": "annual"}),
+    )
+    assert annual.assets[0].fundamentals.capability is CoverageCapability.SUPPORTED
+    assert annual.assets[0].fundamentals.evidence is EvidenceState.MISSING
+
+
 def test_valuation_reasons_distinguish_common_shares_from_adr_in_coverage(tmp_path) -> None:
     workspace = WorkspaceService().initialize(tmp_path / "workspace").paths.root
     request = UniverseCoverageRequest(

@@ -1968,7 +1968,11 @@ function renderFundamentalRatios(section) {
     ["fundamental.liabilities_to_assets", "fundamental-liabilities-assets"],
     ["fundamental.net_income_yoy_change_rate", "fundamental-income-growth"],
   ]);
-  for (const id of targets.values()) byId(id).textContent = "—";
+  for (const id of targets.values()) {
+    const target = byId(id);
+    target.textContent = "—";
+    target.removeAttribute("title");
+  }
   for (const metric of section?.metrics || []) {
     const id = targets.get(metric.metric_key);
     if (!id) continue;
@@ -2262,7 +2266,7 @@ function renderValuationHistory(payload, { preserveSelection = false, preserveWi
 }
 
 async function queryValuationHistory() {
-  if (!marketAssetPresentation().hasCorporateValuation) return;
+  if (!marketAssetPresentation().hasFundamentals) return;
   const button = byId("query-valuation-history");
   setButtonBusy(button, true, "Consultando…", "Cargar historia");
   try {
@@ -2319,7 +2323,7 @@ function renderValuationHistoryRule(payload) {
 }
 
 async function queryValuationHistoryRule() {
-  if (!marketAssetPresentation().hasCorporateValuation) return;
+  if (!marketAssetPresentation().hasFundamentals) return;
   const button = byId("query-valuation-history-rule");
   setButtonBusy(button, true, "Evaluando…", "Evaluar regla");
   try {
@@ -2405,7 +2409,7 @@ function renderValuation(payload) {
 }
 
 async function queryValuation() {
-  if (!marketAssetPresentation().hasCorporateValuation) return;
+  if (!marketAssetPresentation().hasFundamentals) return;
   const card = byId("valuation-card");
   const button = byId("query-valuation");
   card.setAttribute("aria-busy", "true");
@@ -2568,6 +2572,7 @@ function renderReport(report) {
 function resetListedCompanyReport() {
   reportPayload = null;
   listedCompanyReportRequest += 1;
+  renderFundamentalRatios(null);
   setExportAvailable("export-report-json", false);
   const reportArea = byId("report-area");
   reportArea.classList.add("hidden");

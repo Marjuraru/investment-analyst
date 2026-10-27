@@ -43,7 +43,9 @@ contrastó con su
 Su incorporación no autoriza aplicar el conector SEC a ETF, criptomonedas ni empresas BVL/SMV.
 El catálogo declara además la taxonomía: US-GAAP admite anual y trimestral mediante 10-K/10-Q; el
 perfil IFRS admite solo anual mediante 20-F/40-F. Una frecuencia incompatible falla antes de
-consultar SEC o abrir una operación de escritura.
+consultar SEC o abrir una operación de escritura. La cobertura de universo aplica la misma
+declaración: una consulta `quarterly` sobre un perfil IFRS devuelve `capability=not_implemented` y
+`evidence=not_queried`, no `missing`, y añade la limitación de perfil al activo.
 
 ## Ejecución
 

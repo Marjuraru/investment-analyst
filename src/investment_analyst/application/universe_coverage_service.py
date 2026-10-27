@@ -9,7 +9,7 @@ from investment_analyst.analytics.fundamentals.research_models import AaplFundam
 from investment_analyst.analytics.fundamentals.research_service import (
     SecIssuerFundamentalResearchService,
 )
-from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
+from investment_analyst.analytics.market.bar_models import HistoricalBarQuery, MarketBar
 from investment_analyst.analytics.market.history_service import (
     HistoricalMarketDataService,
     summarize_market_history_v2,
@@ -51,6 +51,7 @@ from investment_analyst.catalog.provider_context import (
 )
 from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.core.models import AssetClass, DataFrequency
+from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.storage import LocalStorage
 from investment_analyst.time_intervals import inclusive_utc_date_bounds
 
@@ -97,7 +98,11 @@ class UniverseCoverageService:
             with ThreadPoolExecutor(max_workers=min(4, len(asset_ids))) as executor:
                 assets = tuple(executor.map(view, asset_ids))
         else:
-            history = HistoricalMarketDataService(self._storage)
+            history = (
+                HistoricalMarketDataService(self._storage)
+                if getattr(self._storage.paths, "format_version", 1) == 1
+                else None
+            )
             assets = tuple(
                 self._asset_view(
                     catalog_assets[asset_id],
@@ -138,10 +143,18 @@ class UniverseCoverageService:
         request: UniverseCoverageRequest,
         start: datetime,
         end: datetime,
-        history: HistoricalMarketDataService,
+        history: HistoricalMarketDataService | None,
         bvl_view: BvlRegistryAsset | None,
         storage: LocalStorage,
     ) -> UniverseCoverageAsset:
+        market, selected_price = self._market_view(
+            descriptor,
+            request,
+            start,
+            end,
+            history,
+            storage,
+        )
         return UniverseCoverageAsset(
             asset_id=asset.asset_id,
             symbol=asset.symbol,
@@ -149,9 +162,14 @@ class UniverseCoverageService:
             asset_class=asset.asset_class,
             exchange=asset.exchange or "UNKNOWN",
             quote_currency=asset.quote_currency,
-            market=self._market_view(descriptor, request, start, end, history, storage),
+            market=market,
             fundamentals=self._fundamental_view(asset, request, storage),
-            corporate_valuation=self._valuation_view(asset, request, storage),
+            corporate_valuation=self._valuation_view(
+                asset,
+                request,
+                storage,
+                selected_price=selected_price,
+            ),
             bvl_registry=self._bvl_registry_view(asset, bvl_view, request),
             additional_capabilities_not_queried=_additional_capabilities(asset),
             limitations=_limitations(asset, descriptor),
@@ -163,16 +181,19 @@ class UniverseCoverageService:
         request: UniverseCoverageRequest,
         start: datetime,
         end: datetime,
-        history: HistoricalMarketDataService,
+        history: HistoricalMarketDataService | None,
         storage: LocalStorage,
-    ) -> UniverseMarketCoverage:
+    ) -> tuple[UniverseMarketCoverage, MarketBar | None]:
         if descriptor is None:
-            return UniverseMarketCoverage(
-                capability=CoverageCapability.NOT_CONFIGURED,
-                evidence=EvidenceState.NOT_QUERIED,
-                bar_count=0,
-                candidate_versions=0,
-                discarded_revisions=0,
+            return (
+                UniverseMarketCoverage(
+                    capability=CoverageCapability.NOT_CONFIGURED,
+                    evidence=EvidenceState.NOT_QUERIED,
+                    bar_count=0,
+                    candidate_versions=0,
+                    discarded_revisions=0,
+                ),
+                None,
             )
         query = HistoricalBarQuery(
             asset_id=descriptor.asset_id,
@@ -195,6 +216,8 @@ class UniverseCoverageService:
             earliest_timestamp = summary.earliest_timestamp
             latest_timestamp = summary.latest_timestamp
         else:
+            if history is None:
+                raise ValueError("v1 market coverage requires the historical market service")
             series = history.query(query)
             latest = series.bars[-1] if series.bars else None
             bar_count = series.coverage.bar_count
@@ -202,7 +225,7 @@ class UniverseCoverageService:
             discarded_revisions = series.coverage.discarded_revisions
             earliest_timestamp = series.coverage.earliest_timestamp
             latest_timestamp = series.coverage.latest_timestamp
-        return UniverseMarketCoverage(
+        coverage = UniverseMarketCoverage(
             capability=CoverageCapability.SUPPORTED,
             evidence=EvidenceState.PRESENT if latest else EvidenceState.MISSING,
             source_id=descriptor.source_id,
@@ -225,6 +248,7 @@ class UniverseCoverageService:
                 request.known_at, latest.available_at if latest else None
             ),
         )
+        return coverage, latest
 
     def _fundamental_view(
         self,
@@ -242,6 +266,16 @@ class UniverseCoverageService:
             ProviderNamespaceMissingError,
         ):
             return _empty_fundamentals(CoverageCapability.NOT_CONFIGURED)
+        if not fundamental_frequency_supported(configuration, request.frequency):
+            return UniverseFundamentalCoverage(
+                capability=CoverageCapability.NOT_IMPLEMENTED,
+                evidence=EvidenceState.NOT_QUERIED,
+                source_id=configuration.companyfacts_source_id,
+                frequency=request.frequency,
+                source_periods=0,
+                output_periods=0,
+                metrics_returned=0,
+            )
         result = SecIssuerFundamentalResearchService(storage, configuration).query(
             AaplFundamentalResearchRequest(
                 known_at=request.known_at,
@@ -280,6 +314,8 @@ class UniverseCoverageService:
         asset: CatalogAsset,
         request: UniverseCoverageRequest,
         storage: LocalStorage,
+        *,
+        selected_price: MarketBar | None,
     ) -> UniverseValuationCoverage:
         if asset.asset_class is not AssetClass.EQUITY:
             return _empty_valuation(CoverageCapability.NOT_APPLICABLE)
@@ -309,6 +345,7 @@ class UniverseCoverageService:
                 valuation_date=request.market_end,
             ),
             computed_at=request.known_at,
+            selected_price=selected_price,
         )
         reasons = tuple(
             sorted(
@@ -412,7 +449,23 @@ def _limitations(asset: CatalogAsset, descriptor: MarketAssetDescriptor | None) 
         limitations.append("Coinbase Exchange daily candles are venue-specific spot-market data")
     if asset.asset_class is AssetClass.EQUITY and asset.security_unit_factor is None:
         limitations.append("corporate valuation requires documented share-unit basis")
+    if (
+        descriptor is not None
+        and descriptor.has_fundamentals
+        and descriptor.fundamental_frequencies == (DataFrequency.ANNUAL,)
+    ):
+        limitations.append(
+            "SEC issuer profile exposes annual fundamentals only; quarterly is not implemented"
+        )
     return tuple(limitations)
+
+
+def fundamental_frequency_supported(
+    configuration: SecAssetConfiguration,
+    frequency: str,
+) -> bool:
+    """Return whether the issuer profile declares the requested SEC frequency."""
+    return frequency in configuration.supported_frequencies
 
 
 def _age_days(known_at: datetime, reference_at: datetime | None) -> int | None:
