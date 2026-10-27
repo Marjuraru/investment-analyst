@@ -5538,3 +5538,45 @@ def test_a_persisted_intraday_interval_falls_back_to_the_daily_default() -> None
     query_chart = _extract_js_function(analysis, "queryMarketChart")
     assert "const intraday = isIntradayInterval();" in query_chart
     assert 'intraday ? "/api/market-intraday" : "/api/market-chart"' in query_chart
+
+
+def test_mesa_cells_explain_supported_frequency_and_valuation_absences() -> None:
+    explanation = _extract_js_function(APP_JS, "mesaCoverageExplanation")
+    assert 'coverage.capability === "not_implemented"' in explanation
+    assert "Frecuencia no implementada para este emisor" in explanation
+    assert 'coverage.evidence === "missing"' in explanation
+    assert "coverage.reason_codes" in explanation
+    assert "share_basis_unavailable" in _read("app-mesa.js")
+    assert "Base entre título y acción no disponible" in _read("app-mesa.js")
+    matrix = _extract_js_function(APP_JS, "renderMesaUniverseMatrix")
+    assert "mesaCoverageExplanation(key, coverage)" in matrix
+    assert "applyMesaCoverageExplanation(" in matrix
+    assert "asset.limitations" not in matrix
+    assert "api(" not in matrix
+
+
+def test_valuation_section_is_visible_for_fundamental_issuers_without_share_basis() -> None:
+    apply_selected = _extract_js_function(APP_JS, "applySelectedMarketAsset")
+    valuation_toggle = apply_selected[
+        apply_selected.index('querySelectorAll("[data-valuation-only]")') :
+    ]
+    valuation_toggle = valuation_toggle[: valuation_toggle.index("}")]
+    assert "!presentation.hasFundamentals" in valuation_toggle
+    assert "hasCorporateValuation" not in valuation_toggle
+    analysis = _read("app-analysis.js")
+    for function_name in (
+        "queryValuation",
+        "queryValuationHistory",
+        "queryValuationHistoryRule",
+    ):
+        body = _extract_js_function(analysis, function_name)
+        assert "marketAssetPresentation().hasFundamentals" in body
+        assert "hasCorporateValuation" not in body
+
+
+def test_listed_company_report_reset_clears_stale_ratio_cards() -> None:
+    analysis = _read("app-analysis.js")
+    reset = _extract_js_function(analysis, "resetListedCompanyReport")
+    assert "renderFundamentalRatios(null);" in reset
+    ratios = _extract_js_function(analysis, "renderFundamentalRatios")
+    assert 'target.removeAttribute("title");' in ratios

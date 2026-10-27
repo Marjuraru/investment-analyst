@@ -311,6 +311,7 @@ from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.read_dependency_signature import (
     ReadDependencyQuery,
     ReadDependencySignature,
+    build_composite_read_dependency_signature,
     build_read_dependency_signature,
 )
 from investment_analyst.workspace.models import WorkspaceAccessMode, WorkspaceInitialization
@@ -517,6 +518,19 @@ class InvestmentAnalystApplication:
             access_mode=WorkspaceAccessMode("read_only"),
         ) as storage:
             return build_read_dependency_signature(storage, query)
+
+    def read_composite_dependency_signature(
+        self,
+        queries: tuple[ReadDependencyQuery, ...],
+        *,
+        location: StorageLocationRequest,
+    ) -> ReadDependencySignature:
+        """Return one content-bound signature for a composed read selection."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode("read_only"),
+        ) as storage:
+            return build_composite_read_dependency_signature(storage, queries)
 
     def query_listed_company_diagnostics(
         self,

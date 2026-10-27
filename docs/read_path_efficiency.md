@@ -66,6 +66,51 @@ En el cliente, un fallo de cualquier loader diferido libera el tablero de `loade
 el error después de renderizar el estado de ausencia, sin dejar el tablero bloqueado ni presentar la
 respuesta fallida como datos vigentes.
 
+### Precio seleccionado compartido (`FUNDAMENTALS-COVERAGE-CYCLE`)
+
+En una consulta de cobertura de un equity, la lectura de mercado ya selecciona y verifica la última
+barra PIT del corte. La valoración corporativa de la misma consulta reutiliza esa barra verificada
+en lugar de repetir `summarize_market_history_v2` y `materialize` sobre el mismo activo/fuente/corte.
+`CorporateValuationService.query` acepta un `selected_price` keyword-only interno y lo valida contra
+activo, fuente, frecuencia, `available_at <= known_at` y fecha de valoración; si no coincide, falla
+cerrado. La búsqueda por ventanas 30/90/365/3650/todo se conserva para los consumidores que no
+disponen de una barra previa, como la lectura directa de valoración de un activo.
+
+El resultado es exactamente el mismo: la última barra <= `valuation_date` dentro de la ventana de
+cobertura es también la última barra elegible de la historia. La prueba estructural
+`test_v2_market_projection_matches_v1_and_hydrates_only_the_latest_bar` baja de dos a una lectura de
+blob por activo y conserva conteos, PIT, `Decimal`, orden y payload. `test_selected_price_avoids_a_second_market_read`
+y `test_selected_price_must_match_the_requested_cut` pinnean la equivalencia y el rechazo.
+
+### Firma compuesta y resumen ligero (`FUNDAMENTALS-COVERAGE-CYCLE`)
+
+La cobertura compone dos selecciones en lugar de una ventana global de diez años: mercado
+`[market_start 00:00Z, market_end+1d 00:00Z)` y fundamentales/valoración
+`[fundamental_start 00:00Z, min(fundamental_end+1d, known_at))`. La firma compuesta
+(`build_composite_read_dependency_signature`) deduplica la unión de dependencias, falla cerrado ante
+conflictos de contenido y su `arguments_digest` cubre ambas consultas; ningún resultado leído queda
+fuera de la firma. La cobertura v2 usa exactamente cuatro particiones de trabajo, cada una con una
+conexión read-only reutilizada, en lugar de abrir una conexión por activo.
+
+`summarize_market_history_v2` usa la nueva `list_market_observation_summary_page` (un `GROUP BY` de
+índice con conteo y límites de `observed_at`/`available_at`) para recorrer todas las revisiones PIT;
+sólo materializa la proyección completa del grupo seleccionado más reciente. La verificación de
+uniformidad, ambigüedad, `Decimal`, orden y última barra se conserva; la prueba estructural exige
+una sola página completa y el payload de cobertura conserva el mismo SHA-256.
+
+Medición in-process del 2026-10-27 sobre el workspace activo, mismos inputs y `known_at`:
+
+| Componente | Antes | Después |
+| --- | --- | --- |
+| Dependencias de firma | 208.422 | 89.980 |
+| Firma (una construcción) | ~2,96 s | ~1,45 s |
+| Loader de cobertura 37 | ~9,73 s | ~6,5 s |
+| Firma + loader + revalidación | ~15,83 s | ~9,4 s |
+| Payload de cobertura | `47d65eb2…` | `47d65eb2…` (idéntico) |
+
+La medición HTTP/browser fría y caliente de cinco muestras del candidato exacto se registra en
+[`v2_operational_readiness.md`](v2_operational_readiness.md).
+
 
 Las lecturas de `RawRecord` verifican siempre el SHA-256 del archivo antes de
 deserializarlo. La copia canónica `document_json` del índice se conserva por

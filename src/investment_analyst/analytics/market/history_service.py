@@ -3,7 +3,7 @@
 from collections import defaultdict
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -24,7 +24,7 @@ from investment_analyst.storage.errors import RecordNotFoundError, StorageError
 if TYPE_CHECKING:
     from investment_analyst.analytics.market.history_v2 import DailyMarketBarProjection
     from investment_analyst.storage.raw_v2 import (
-        MarketObservationGroupProjection,
+        MarketObservationSummaryGroup,
         RawV2Staging,
     )
 
@@ -344,7 +344,7 @@ class MarketHistorySummary:
 
 @dataclass(frozen=True, slots=True)
 class _V2SummaryCandidate:
-    group: "MarketObservationGroupProjection"
+    raw_record_id: UUID
     timestamp: datetime
     available_at: datetime
 
@@ -388,7 +388,7 @@ def summarize_market_history_v2(
         latest_candidate = selected
 
     while True:
-        page = staging.list_market_observation_page(
+        page = staging.list_market_observation_summary_page(
             asset_id=query.asset_id,
             source_id=query.source_id,
             start=query.start,
@@ -417,15 +417,27 @@ def summarize_market_history_v2(
         if after_observed_at is None or after_raw_record_id is None:
             raise TraceabilityError("market observation page did not return its next cursor")
     finalize()
-    latest_projection = (
-        HistoricalMarketDataV2Service._build_candidate(  # noqa: SLF001
-            latest_candidate.group,
+    latest_projection = None
+    if latest_candidate is not None:
+        groups = staging.list_market_observation_page(
+            asset_id=query.asset_id,
+            source_id=query.source_id,
+            start=latest_candidate.timestamp,
+            end=latest_candidate.timestamp + timedelta(microseconds=1),
+            known_at=query.known_at,
+            limit=256,
+        ).groups
+        latest_group = next(
+            (group for group in groups if group.raw_record_id == latest_candidate.raw_record_id),
+            None,
+        )
+        if latest_group is None:
+            raise TraceabilityError("latest market observation group is unavailable")
+        latest_projection = HistoricalMarketDataV2Service._build_candidate(  # noqa: SLF001
+            latest_group,
             schema,
             query,
         )
-        if latest_candidate is not None
-        else None
-    )
     return MarketHistorySummary(
         query=query,
         bar_count=bar_count,
@@ -438,28 +450,19 @@ def summarize_market_history_v2(
 
 
 def _summary_candidate(
-    group: "MarketObservationGroupProjection",
+    group: "MarketObservationSummaryGroup",
     query: HistoricalBarQuery,
 ) -> _V2SummaryCandidate:
     if group.raw_asset_id != query.asset_id or group.raw_source_id != query.source_id:
         raise TraceabilityError("raw record asset or source does not match the query")
-    observations = group.observations
-    if not observations:
-        raise TraceabilityError("daily observation group is empty")
-    timestamps = {item.observed_at for item in observations}
-    availability = {item.available_at for item in observations}
-    if len(timestamps) != 1 or len(availability) != 1:
-        raise TraceabilityError("daily observation group has inconsistent timestamps")
-    timestamp = next(iter(timestamps))
-    available_at = next(iter(availability))
-    if timestamp is None or timestamp != group.raw_event_time:
+    if group.observed_at != group.raw_event_time:
         raise TraceabilityError("raw record event_time does not match observations")
-    if group.raw_available_at != available_at:
+    if group.available_at != group.raw_available_at:
         raise TraceabilityError("raw record available_at does not match observations")
-    if available_at > query.known_at:
+    if group.available_at > query.known_at:
         raise TraceabilityError("raw record was not available at known_at")
     return _V2SummaryCandidate(
-        group=group,
-        timestamp=timestamp,
-        available_at=available_at,
+        raw_record_id=group.raw_record_id,
+        timestamp=group.observed_at,
+        available_at=group.available_at,
     )

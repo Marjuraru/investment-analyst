@@ -10,6 +10,30 @@ install a scheduler, or retry providers indefinitely. The caller supplies the in
 range for every execution. The separate local interface and calendar scheduler are documented in
 [`local_interface.md`](local_interface.md).
 
+## Weekly operational cycle
+
+The local watchlist scheduler runs one tick per day at 07:00 `America/Lima`. Each job derives its
+inclusive `market_end` from the previous local calendar day and the planner fetches only missing
+range edges (prefix, suffix, or both); it never infers internal gaps from weekends, exchange
+holidays, or absent calendar days. A completed empty provider response (`bars: []` or
+`bars: null`) is valid evidence: the pipeline persists the deterministic interval receipt only
+after every page succeeded, without creating bars, observations, `market_as_of`, or metrics. A
+receipt is not a bar and cannot be used as one.
+
+Saturday and Sunday requests therefore produce empty receipts when the provider confirms no
+session, and the next weekday session is fetched as a new suffix. A weekday exchange holiday uses
+the same path. Crypto daily jobs are not paused by weekday; a Sunday Coinbase session remains
+legitimate work. SEC fundamentals are independent: the SEC job is consulted on every scheduled
+tick even when the market job is `already_current`.
+
+The scheduler executes jobs sequentially with one writer per tick. A successful daily job is not
+relaunched on the same local date; an interrupted `RUNNING` attempt is recovered as `INTERRUPTED`
+and retried after `retry_backoff_seconds`, bounded by `max_attempts_per_day`. Provider `429` and
+transient transport failures use the same bounded retry policy; the attempt records the honest
+category instead of presenting a failed fetch as success. The deterministic matrix lives in
+`tests/integration/application/test_operational_weekly_cycle.py`; it uses scratch storage, two
+distinct clocks, and local transports, and does not contact providers or the permanent workspace.
+
 ## Platform and configuration
 
 Run the command with the repository's Python environment inside WSL. The process lock uses the

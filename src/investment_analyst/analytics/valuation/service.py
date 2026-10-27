@@ -410,6 +410,7 @@ class CorporateValuationService:
         request: CorporateValuationRequest,
         *,
         computed_at: datetime | None = None,
+        selected_price: MarketBar | None = None,
     ) -> CorporateValuationSnapshot:
         """Reconstruct one valuation using only evidence eligible at the requested cut."""
         self._storage.require_open()
@@ -433,7 +434,11 @@ class CorporateValuationService:
                 ValuationStatus.NOT_EVALUABLE,
             )
         try:
-            price = self._price(request)
+            price = (
+                self._selected_price(request, selected_price)
+                if selected_price is not None
+                else self._price(request)
+            )
         except AmbiguousRevisionError as error:
             raise AmbiguousValuationEvidenceError(
                 "eligible market price revisions are ambiguous"
@@ -674,6 +679,23 @@ class CorporateValuationService:
             metrics=metrics,
             coverage=_coverage(metrics),
         )
+
+    def _selected_price(
+        self,
+        request: CorporateValuationRequest,
+        price: MarketBar,
+    ) -> MarketBar:
+        if (
+            price.asset_id != request.asset_id
+            or price.source_id != self._market_source_id
+            or price.frequency is not DataFrequency.DAY_1
+            or price.available_at > request.known_at
+            or price.timestamp.date() > request.valuation_date
+        ):
+            raise CorporateValuationError(
+                "selected price does not match the requested valuation cut"
+            )
+        return price
 
     def _price(self, request: CorporateValuationRequest) -> MarketBar | None:
         earliest = datetime.combine(date(1970, 1, 1), datetime.min.time(), UTC)

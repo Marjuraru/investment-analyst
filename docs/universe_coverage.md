@@ -23,6 +23,15 @@ límite de inicio 2025-01-01 es una restricción conservadora de solicitud, no l
 Las acciones sin base documental de unidades de acción quedan `not_evaluable` en valoración con
 `share_basis_unavailable`; no se heredan ratios a ETF o cripto.
 
+La frecuencia fundamental es una dimensión declarada por el perfil SEC del emisor, no una elección
+libre del consumidor. `annual` está disponible para los perfiles US-GAAP e IFRS; `quarterly` sólo
+para US-GAAP. Si se consulta una frecuencia no declarada, la sección de fundamentales devuelve
+`capability=not_implemented` y `evidence=not_queried` con el `source_id` y la frecuencia pedida, y
+la limitación del activo explicita que el perfil expone sólo anual. No se convierte la frecuencia,
+no se reutilizan periodos anuales bajo una etiqueta trimestral y no se presenta la ausencia como
+`missing` de datos. `missing` sigue significando que la consulta local no encontró evidencia
+elegible al corte para una capacidad y frecuencia declaradas.
+
 El final de mercado sólo puede ser un día UTC completamente transcurrido al `known_at`; los rangos
 públicos siguen siendo inclusivos. La consulta por defecto recorre todo el catálogo; `--asset-id`
 restringe a IDs canónicos únicos y ordenados.
