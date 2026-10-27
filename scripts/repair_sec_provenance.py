@@ -32,9 +32,9 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--workspace", type=Path, required=True)
         command.add_argument("--source-workspace", type=Path, required=True)
         command.add_argument("--executor-sha", required=True)
+        command.add_argument("--asset", action="append", default=[])
         if name == "plan":
             command.add_argument("--output", type=Path, required=True)
-            command.add_argument("--asset", action="append", default=[])
         else:
             command.add_argument("--plan", type=Path, required=True)
         if name == "apply":
@@ -77,7 +77,7 @@ def _service(
     repair = SecProvenanceRepairService(
         storage,
         source=source,
-        configurations=_configurations(runtime, list(arguments.asset or [])),
+        configurations=_configurations(runtime, list(arguments.asset)),
         destination_workspace_id=destination_manifest.workspace_id,
         source_workspace_id=source_manifest.workspace_id,
         executor_sha=arguments.executor_sha,
