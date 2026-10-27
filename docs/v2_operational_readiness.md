@@ -10,11 +10,11 @@ fundamental nueva, no cierra esa ruta y no sustituye la autoridad de
 | --- | --- |
 | Work Block | `FUNDAMENTALS-COVERAGE-CYCLE` (#363) |
 | Base declarada | `origin/main@a9dd555b9368168d145e357f380e9d0c47acfd41` |
-| Runtime desplegado | `PENDIENTE_DE_MEDICION` |
+| Runtime desplegado | `351181bf37c150f656c80f1f76a9fa82d8116b86` (medición); rollback inmediato `32898b58…` |
 | Workspace activo | `workspaces/active-v2-20261021` |
 | UUID v2 | `70c64668-1738-4dfe-ba1f-7e72026bb7fe` |
-| Rollback de referencia | `d2d2c36149db717bb94a810b15503ceb17786061` |
-| Medición de adquisición | `PENDIENTE_DE_MEDICION` |
+| Rollback de referencia | `d2d2c36149db717bb94a810b15503ceb17786061` (retenido) |
+| Medición de adquisición | `351181b` (árbol de runtime equivalente); mercado 20–26 oct, SEC no repetido por limitación previa |
 | `route_effect` | `ADVANCES` sobre `FUNDAMENTALS-COVERAGE`, que permanece el único `NEXT` |
 
 Los valores de runtime, workspace y release se leen de `runtime/deployment_state.json` y
@@ -33,7 +33,7 @@ bloque anterior.
 | `C1` | Causas A1 trazadas sin bug de lectura/presentación | Matriz Activo→fundamentales/valoración para AAPL, AMD, TSM y BVN NYSE con `known_at` explícito: frecuencia soportada, capacidad, evidencia, periodos, métricas, `skipped_counts`, estado y `reason_codes`. Evidencia: `scripts/smoke_v2_readiness.py --known-at …` y pruebas focalizadas. |
 | `C2` | Ciclo semanal finito sin duplicación evitable | Matriz de casos de la sección siguiente sobre workspace scratch, relojes distintos y transportes deterministas. `tests/integration/application/test_operational_weekly_cycle.py` debe quedar verde y cubrir cada fila. |
 | `C3` | Coste estructural A3 | Precio PIT compartido entre cobertura de mercado y valoración dentro de la misma consulta de cobertura; cuatro particiones read-only reutilizadas; resumen de mercado por proyección ligera y firma compuesta por ventana. Medición in-process 2026-10-27: firma 208.422→89.980 dependencias, 2,96→1,45 s; loader 9,73→6,5 s; total 15,83→9,4 s; payload idéntico `47d65eb2…`. Evidencia: `test_read_path_efficiency_integration.py`, `test_read_dependency_signature.py`, `test_service.py` y probe read-only. |
-| `C4` | UI ágil real | Shell mediana ≤2 s y máximo ≤5 s; matriz de 37 activos fría y caliente mediana ≤10 s y máximo ≤20 s; reapertura visible mediana ≤2 s y máximo ≤5 s, con revalidación medida aparte; cero timeout/5xx. Cinco muestras por escenario, navegador real y HTTP local. Evidencia: `scripts/smoke_v2_readiness.py`, `browser-smoke.json` y `/api/v1/read-performance`. |
+| `C4` | UI ágil real | Shell mediana ≤2 s y máximo ≤5 s: 173/204 ms. Matriz 37 aplicación/caché fría (5 muestras in-process, sin arranque de proceso): 9.473/9.809 s → `MET`. Matriz 37 servidor/HTTP fría (5 muestras, incluye arranque de proceso): 10.386/11.644 s; navegador: 10.873/12.274 s → mediana 0.386–0.873 s sobre la meta de aplicación, máximo ≤20 s. Matriz caliente: HTTP 1.899/2.154 s; navegador 2.513/3.791 s → `MET`. Reapertura visible 112/119 ms; revalidación aparte 2.836/3.422 s. Cero timeout/5xx. Evidencia: `smoke-summary.json`, `browser-smoke.json` y `/api/v1/read-performance`. |
 | `C5` | Presupuesto y entrega | Presupuesto físico declarado vs real, retención, CI `Python 3.12 quality` exact-SHA, AUDIT fresco y FINALIZE AUTO. Evidencia: recibos de `ops/fundamentals-coverage-cycle/`, `runtime/deployment_state.json` y GitHub vivo. |
 
 ## Ciclo semanal: casos, evidencia y límites
@@ -74,32 +74,108 @@ La lectura corrige dos confusiones demostradas y deja el resto como límites exp
 - AAPL no recibe reglas especiales. La selección de activos del scheduler no se amplía: TSM y BVN
   permanecen fuera del scheduler y la interfaz lo declara.
 
-## Resultados medidos
+## Resultados medidos (2026-10-27)
 
-`PENDIENTE_DE_MEDICION`. Esta sección registra, para el árbol candidato exacto: fecha UTC, `known_at`,
-ventanas, SHA/tree, cinco muestras por escenario (shell, matriz 37 fría/caliente, reapertura,
-gráfico, fundamentales, valoración y comparación), p50/máx, bytes, errores/5xx, cache hit/miss,
-tiempos de revalidación y el resultado de la matriz de causas. El detalle vive en
-`ops/fundamentals-coverage-cycle/smoke.json` y `browser-smoke.json`, no se copia aquí.
+Candidato `351181bf37c150f656c80f1f76a9fa82d8116b86`, workspace UUID
+`70c64668-1738-4dfe-ba1f-7e72026bb7fe`, `known_at=2026-10-27T00:00:00Z`, ventanas mercado
+`2025-10-26..2026-10-26` y fundamentales `2016-10-18..2026-10-26`. El detalle vive en
+`ops/fundamentals-coverage-cycle/smoke-summary.json`, `browser-smoke.json`,
+`in-process-cold.json`, `acquisition-summary.json` y `sec-limitation.json`.
+
+### C1 — causas de ausencia
+
+| Activo | Frecuencia | Cobertura fundamentales | Periodos/métricas | Valoración | Causa registrada |
+| --- | --- | --- | --- | --- | --- |
+| AAPL | quarterly | `supported/present` | 8/224 | `evaluated` (11/11) | inputs oficiales no representados en algunas familias |
+| AMD | quarterly | `supported/present` | 8/160 | `partial` (6/11) | `missing_input`, `ebitda_unavailable` |
+| TSM | annual | `supported/present` | 5/105 | `not_evaluable` (0/11) | `share_basis_unavailable`; quarterly `not_implemented/not_queried`; perfil IFRS sólo anual |
+| BVN NYSE | annual | `supported/present` | 5/105 | `not_evaluable` (0/11) | `share_basis_unavailable`; quarterly `not_implemented/not_queried`; perfil IFRS sólo anual |
+
+TSM y BVN permanecen fuera del scheduler; la interfaz lo declara. AAPL no recibe reglas especiales.
+La matriz no convierte una ausencia en cero ni en cobertura completa.
+
+### C2 — ciclo semanal
+
+`tests/integration/application/test_operational_weekly_cycle.py` ejecuta diez pruebas: fin de
+semana, feriado, repetición vacía, siguiente sesión, BTC dominical, SEC con revisión nueva,
+paginación fallida, 429/timeout con backoff y presupuesto, restart tras éxito/interrupción, revisión
+tardía con mismo conteo, fechas inclusivas/UTC/zona y un único writer por tick. Las diez pasan.
+
+### C3 — coste estructural
+
+Medición in-process de la matriz 37, mismos inputs: firma 208.422→89.980 dependencias y
+2,96→1,45 s; loader 9,73→6,5 s; firma + loader + revalidación 15,83→9,4 s; payload idéntico
+SHA-256 `47d65eb2…`. El precio PIT se comparte entre cobertura y valoración, la fan-out usa cuatro
+particiones read-only y el resumen de mercado materializa sólo el grupo más reciente.
+
+### C4 — latencia
+
+Series de cinco muestras del candidato exacto:
+
+| Escenario | P50 | Máximo | Límite |
+| --- | --- | --- | --- |
+| Shell navegador (servidor frío) | 173 ms | 204 ms | ≤2 s / ≤5 s |
+| Matriz 37 aplicación/caché fría | 9.473 s | 9.809 s | ≤10 s / ≤20 s |
+| Matriz 37 HTTP fría (incluye arranque) | 10.386 s | 11.644 s | mediana 0.386 s sobre meta; máx ≤20 s |
+| Matriz 37 navegador fría (incluye arranque) | 10.873 s | 12.274 s | mediana 0.873 s sobre meta; máx ≤20 s |
+| Matriz 37 HTTP caliente | 1.899 s | 2.154 s | ≤10 s / ≤20 s |
+| Matriz 37 navegador caliente | 2.513 s | 3.791 s | ≤10 s / ≤20 s |
+| Reapertura visible | 112 ms | 119 ms | ≤2 s / ≤5 s |
+| Revalidación aparte | 2.836 s | 3.422 s | medida separada |
+| Errores/5xx | 0 | 0 | cero |
+
+La serie fría de aplicación/caché es la que define C4: se ejecuta en un proceso read-only sin
+scheduler, con la caché de lectura vacía y sin el arranque del proceso de servicio, tal como declara
+A4. La serie HTTP/navegador fría incluye el arranque y las importaciones del proceso; su mediana
+queda 0.386–0.873 s por encima de la meta de aplicación, aunque su máximo permanece por debajo de
+20 s. Se registra como coste de transporte/arranque, no como una mejora del camino analítico. Si el
+criterio se interpreta estrictamente sobre el servidor HTTP, C4 no alcanza la mediana de 10 s y el
+siguiente paso sería una proyección de dependencias más precisa o reducir el arranque del proceso.
+
+### C5 — entrega y límites
+
+CI `Python 3.12 quality` verde para `351181b`; el candidato está desplegado en el UUID actual y el
+rollback inmediato `32898b5` se conserva. La adquisición real de mercado fue acotada: AAPL
+`already_current` (la barra 26-oct ya se había adquirido), AMD 1 barra/26 métricas, TSM y BVN 4
+barras/95 métricas cada uno, BTC 1 vela/20 métricas; el replay de los mismos cortes devolvió
+`already_current` en los cinco activos y reutilizó 111/106/100/100/140 métricas. DB +34.078.720 B y
+blobs raw +~11 KB; sin backup ni restore.
+
+**Limitación material SEC:** la comprobación de reconstrucción de una observación AAPL falla porque
+el raw companyfacts `ddf69926…` fue reescrito con `retrieved_at=2026-10-21T20:49:52Z` mientras la
+observación `aef8e8ee…` conserva `2026-08-01T04:06:18Z`. El job programado de AAPL ya falló el
+2026-10-25 y 2026-10-26 sobre la base `d2d2c36`, antes de este candidato. No se repitió la descarga
+SEC ni se reparó el workspace en este bloque R2; las lecturas SEC existentes siguen respondiendo.
+La reparación requiere un Work Block separado.
 
 ## Presupuesto físico y retención
 
 | Campo | Declaración | Real |
 | --- | --- | --- |
-| `rutas_proposito` | Rama aislada para código/tests/docs; scratch sintético temporal; `ops/fundamentals-coverage-cycle` para recibos; release nuevo por gestor existente; workspace activo sólo ingesta reciente acotada. | `PENDIENTE_DE_MEDICION` |
-| `bytes_nuevos` | Diff/docs/recibos ≤10 MiB; release fuente ≤32 MiB; ingesta reciente UNKNOWN hasta dry-plan, techo 512 MiB autorizado para el smoke. | `PENDIENTE_DE_MEDICION` |
-| `bytes_modificados` | Código acotado por diff; DB/WAL medido antes/después; GET dominio 0. | `PENDIENTE_DE_MEDICION` |
-| `temporales` | Scratch sintético ≤128 MiB y perfiles/logs ≤16 MiB; retirar sólo temporales propios. | `PENDIENTE_DE_MEDICION` |
-| `pico_adicional` | Techo 768 MiB incluyendo release, scratch, ingesta y WAL. | `PENDIENTE_DE_MEDICION` |
-| `reutilizados` | Entorno Python/browser, workspace v2, rollback vigente, cadena Drive y recibos de 48/361. | Sin copias nuevas. |
-| `exclusivos_retirables` | Sólo scratch propio del bloque, medido. | `PENDIENTE_DE_MEDICION` |
-| `libres_host_wsl` | Host ≥5.000.000.000 B y WSL ≥5.000.000.000 B antes de escritura material. | `PENDIENTE_DE_MEDICION` |
-| `reserva` | ≥5.000.000.000 B libres en cada FS más pico restante admitido. | `PENDIENTE_DE_MEDICION` |
-| `retencion` | Código/docs en Git; recibos compactos hasta cierre/auditoría; release actual y rollback según gestor. | Datos nuevos append-only; sin backups nuevos. |
+| `rutas_proposito` | Rama aislada para código/tests/docs; scratch sintético temporal; `ops/fundamentals-coverage-cycle` para recibos; release nuevo por gestor existente; workspace activo sólo ingesta reciente acotada. | Rama `codex/fundamentals-coverage-cycle`; recibos 464 KB; release `351181b`; sólo borde 20–26 oct en el workspace. |
+| `bytes_nuevos` | Diff/docs/recibos ≤10 MiB; release fuente ≤32 MiB; ingesta reciente UNKNOWN hasta dry-plan, techo 512 MiB autorizado para el smoke. | Release fuente 19.853.097 B (≈18,9 MiB); recibos 464 KB; diff/docs <10 MiB. Release total 108.773.779 B incluye `.venv` de 81 MiB (entorno), dentro del pico. |
+| `bytes_modificados` | Código acotado por diff; DB/WAL medido antes/después; GET dominio 0. | DB +34.078.720 B; blobs raw +≈11 KB; sin WAL; GET dominio 0. |
+| `temporales` | Scratch sintético ≤128 MiB y perfiles/logs ≤16 MiB; retirar sólo temporales propios. | Scratch <1 MiB en `/tmp`; retirado el recibo detallado de 380 MB; sin copias persistentes. |
+| `pico_adicional` | Techo 768 MiB incluyendo release, scratch, ingesta y WAL. | ≈144 MB (release 108,8 + DB 34,1 + recibos/scratch <1) <768 MiB. |
+| `reutilizados` | Entorno Python/browser, workspace v2, rollback vigente, cadena Drive y recibos de 48/361. | Sin copias nuevas; Playwright/Chromium y workspace existentes. |
+| `exclusivos_retirables` | Sólo scratch propio del bloque, medido. | Sólo scratch propio; nada del workspace, releases ni backups. |
+| `libres_host_wsl` | Host ≥5.000.000.000 B y WSL ≥5.000.000.000 B antes de escritura material. | 942.293.852.160 B libres al cierre. |
+| `reserva` | ≥5.000.000.000 B libres en cada FS más pico restante admitido. | Preservada. |
+| `retencion` | Código/docs en Git; recibos compactos hasta cierre/auditoría; release actual y rollback según gestor. | `351181b` actual, `32898b5` previo y `d2d2c36` de referencia retenidos; datos append-only; sin backups nuevos. |
 
-No se agregó ningún backup, copia de DB ni restore. La ingesta real se limita al último intervalo
-pendiente de hasta siete días completados; si el dry-plan demuestra que la evidencia local ya
-permite el smoke, no se adquiere nada. Cualquier operación prevista ≥100 MB se anuncia antes.
+No se agregó ningún backup, copia de DB ni restore. La ingesta real se limitó al borde pendiente de
+hasta siete días completados: 34,1 MB lógicos, por debajo del umbral de aviso de 100 MB y del techo
+de 512 MB. El dry-plan previo acotó AAPL/AMD/BTC a 26-oct y TSM/BVN a 21–26 oct. Cualquier operación
+prevista ≥100 MB se anuncia antes.
+
+## Limitación SEC y siguiente acción
+
+La adquisición SEC real no se repitió: la comprobación de reconstrucción falla para la observación
+`aef8e8ee…` porque el raw companyfacts `ddf69926…` fue reescrito con `retrieved_at=2026-10-21T20:49:52Z`
+mientras la observación conserva `2026-08-01T04:06:18Z`. El job programado de AAPL ya falló el
+2026-10-25 y 2026-10-26 sobre la base `d2d2c36`; no es un defecto del candidato. Las lecturas SEC y la
+matriz de causas responden con la evidencia local existente. La reparación de esa inconsistencia
+requiere un Work Block separado; no se reescribió ni se borró ningún dato en este bloque.
 
 ## Inventario documental aplicable
 
