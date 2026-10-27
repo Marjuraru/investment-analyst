@@ -30,7 +30,22 @@ from investment_analyst.storage.raw_v2 import (
     RawV2TemporalRepairReceipt,
     RawV2TemporalStamp,
 )
+from investment_analyst.storage.sec_provenance_evidence import SecProvenanceEvidenceStore
 from investment_analyst.storage.serialization import canonical_json_bytes, sha256_hex
+from investment_analyst.workspace.sec_provenance_models import (
+    SecAcquisitionProvenance,
+    SecProvenanceClassification,
+    SecProvenanceEvidenceBudget,
+    SecProvenanceEvidenceConflict,
+    SecProvenanceEvidenceEntry,
+    SecProvenanceEvidenceGroup,
+    SecProvenanceEvidencePlan,
+    SecProvenanceEvidenceReceipt,
+    SecProvenanceEvidenceReceiptEntry,
+    SecProvenanceEvidenceVerification,
+    SecProvenanceObservationBinding,
+    payload_digest,
+)
 
 PLAN_SCHEMA = "sec-provenance-repair-plan-v1"
 RECEIPT_SCHEMA = "sec-provenance-repair-receipt-v1"
@@ -569,10 +584,20 @@ def _reconstruct(
     configuration: SecAssetConfiguration,
     dependents: Mapping[UUID, object],
 ) -> tuple[int, int]:
+    results = _reconstruct_results(record, destination, configuration, dependents)
+    exact = sum(1 for matched in results.values() if matched)
+    return exact, len(results) - exact
+
+
+def _reconstruct_results(
+    record: RawRecord,
+    destination: LocalStorage,
+    configuration: SecAssetConfiguration,
+    dependents: Mapping[UUID, object],
+) -> dict[UUID, bool]:
     normalizer = SecCompanyFactsNormalizer(configuration)
     cache: dict[tuple[UUID, datetime], dict[UUID, object]] = {}
-    exact = 0
-    divergent = 0
+    results: dict[UUID, bool] = {}
     for stored in dependents.values():
         key = json.loads(stored.source.record_key)
         submissions_id = UUID(key["submissions_record_id"])
@@ -599,11 +624,8 @@ def _reconstruct(
                 )
             }
             cache[cache_key] = rebuilt
-        if rebuilt.get(stored.observation_id) == stored:
-            exact += 1
-        else:
-            divergent += 1
-    return exact, divergent
+        results[stored.observation_id] = rebuilt.get(stored.observation_id) == stored
+    return results
 
 
 def _reference(
@@ -696,9 +718,553 @@ def write_plan(path: Path, plan: SecProvenanceRepairPlan) -> Path:
     return destination
 
 
+def load_evidence_plan(path: Path) -> SecProvenanceEvidencePlan:
+    """Load a sealed evidence plan and refuse a document whose digest does not verify."""
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        raise SecProvenanceEvidenceError("sealed evidence plan must be a JSON object")
+    declared = document.pop("plan_digest", None)
+    plan = SecProvenanceEvidencePlan.model_validate_json(json.dumps(document))
+    if declared is not None and declared != plan.digest():
+        raise SecProvenanceEvidenceError("sealed evidence plan digest does not match its bytes")
+    return plan
+
+
+def write_evidence_plan(path: Path, plan: SecProvenanceEvidencePlan) -> Path:
+    """Write one sealed evidence plan to a new path without overwriting evidence."""
+    destination = path.expanduser().resolve()
+    if destination.exists() or destination.is_symlink():
+        raise SecProvenanceEvidenceError("sealed evidence plan output path must be new")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(plan.to_json_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    return destination
+
+
 def iter_conflict_ids(plan: SecProvenanceRepairPlan) -> Iterable[str]:
     """Return the deterministic identifiers of every excluded raw."""
     return (str(item.raw_record_id) for item in plan.conflicts)
+
+
+class SecProvenanceEvidenceError(SecProvenanceRepairError):
+    """Raised when an evidence plan cannot be built, applied or verified."""
+
+
+class SecProvenanceEvidenceService:
+    """Plan, publish and verify preserved acquisition evidence for SEC raws."""
+
+    def __init__(
+        self,
+        destination: LocalStorage,
+        *,
+        source: LocalStorage | None,
+        configurations: Sequence[SecAssetConfiguration],
+        destination_workspace_id: UUID,
+        source_workspace_id: UUID,
+        executor_sha: str,
+        base_sha: str,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        ordered = tuple(sorted(configurations, key=lambda item: item.asset_id))
+        if not ordered:
+            raise SecProvenanceRepairScopeError("at least one SEC issuer must be declared")
+        if len({item.asset_id for item in ordered}) != len(ordered):
+            raise SecProvenanceRepairScopeError("SEC issuer configurations must be unique")
+        if len(executor_sha) != 40 or any(char not in "0123456789abcdef" for char in executor_sha):
+            raise SecProvenanceRepairScopeError("executor SHA must be a complete lower-case SHA-1")
+        if len(base_sha) != 40 or any(char not in "0123456789abcdef" for char in base_sha):
+            raise SecProvenanceRepairScopeError("base SHA must be a complete lower-case SHA-1")
+        if destination.paths.format_version != 2:
+            raise SecProvenanceRepairScopeError("destination workspace is not a v2 workspace")
+        if source is not None and source.paths.format_version != 1:
+            raise SecProvenanceRepairScopeError("retained source workspace is not a v1 workspace")
+        self._destination = destination
+        self._source = source
+        self._configurations = ordered
+        self._destination_workspace_id = destination_workspace_id
+        self._source_workspace_id = source_workspace_id
+        self._executor_sha = executor_sha
+        self._base_sha = base_sha
+        self._clock = clock
+
+    def build_plan(self) -> SecProvenanceEvidencePlan:
+        """Classify the declared universe and seal the admissible evidence."""
+        if self._source is None:
+            raise SecProvenanceEvidenceError("planning requires the retained v1 workspace")
+        groups: list[SecProvenanceEvidenceGroup] = []
+        entries: list[SecProvenanceEvidenceEntry] = []
+        conflicts: list[SecProvenanceEvidenceConflict] = []
+        store = SecProvenanceEvidenceStore(self._destination.paths.root, read_only=True)
+        for configuration in self._configurations:
+            normalizer = SecCompanyFactsNormalizer(configuration)
+            for schema_version, source_id in self._issuer_sources(configuration):
+                for record_id in self._destination.raw_records.list_record_ids(
+                    source_id=source_id,
+                    schema_version=schema_version,
+                ):
+                    recorded = self._destination.raw_records.get(record_id)
+                    if recorded.asset_id != configuration.asset_id:
+                        continue
+                    dependents = self._dependents(record_id)
+                    if not dependents:
+                        groups.append(
+                            _evidence_group(
+                                recorded,
+                                SecProvenanceClassification.UNREFERENCED_OR_INDIRECT,
+                                dependent_observations=0,
+                                indirect_references=self._indirect_references(record_id),
+                                detail="no direct dependent observation",
+                            )
+                        )
+                        continue
+                    results = _reconstruct_results(
+                        recorded, self._destination, configuration, dependents
+                    )
+                    failing = {
+                        identifier: observation
+                        for identifier, observation in dependents.items()
+                        if not results[identifier]
+                    }
+                    if not failing:
+                        groups.append(
+                            _evidence_group(
+                                recorded,
+                                SecProvenanceClassification.CURRENT_VALID,
+                                dependent_observations=len(dependents),
+                                current_reconstructing=len(dependents),
+                            )
+                        )
+                        continue
+                    entry, conflict = self._prove_evidence(
+                        recorded,
+                        failing,
+                        configuration,
+                        normalizer,
+                        store,
+                        dependent_observations=len(dependents),
+                        current_reconstructing=len(dependents) - len(failing),
+                    )
+                    if entry is not None:
+                        entries.append(entry)
+                        groups.append(
+                            _evidence_group(
+                                recorded,
+                                SecProvenanceClassification.HISTORICAL_PROVENANCE_REQUIRED,
+                                dependent_observations=len(dependents),
+                                current_reconstructing=len(dependents) - len(failing),
+                                historical_required=len(failing),
+                                detail="preserved acquisition proven for every dependent",
+                            )
+                        )
+                    else:
+                        assert conflict is not None
+                        conflicts.append(conflict)
+                        groups.append(
+                            _evidence_group(
+                                recorded,
+                                SecProvenanceClassification.UNRESOLVED,
+                                dependent_observations=len(dependents),
+                                current_reconstructing=len(dependents) - len(failing),
+                                historical_required=len(failing),
+                                detail=conflict.detail,
+                            )
+                        )
+        budget = _evidence_budget(entries)
+        return SecProvenanceEvidencePlan(
+            generated_at=self._now(),
+            executor_sha=self._executor_sha,
+            base_sha=self._base_sha,
+            destination_workspace_id=self._destination_workspace_id,
+            source_workspace_id=self._source_workspace_id,
+            catalog_assets=tuple(item.asset_id for item in self._configurations),
+            groups=tuple(sorted(groups, key=lambda item: str(item.raw_record_id))),
+            entries=tuple(sorted(entries, key=lambda item: str(item.artifact.raw_record_id))),
+            conflicts=tuple(sorted(conflicts, key=lambda item: str(item.raw_record_id))),
+            budget=budget,
+        )
+
+    def apply(self, plan: SecProvenanceEvidencePlan) -> SecProvenanceEvidenceReceipt:
+        """Publish the sealed evidence and its bindings without touching financial data."""
+        self._verify_plan_identity(plan)
+        if not plan.entries:
+            raise SecProvenanceEvidenceError("the sealed plan contains no admissible evidence")
+        store = SecProvenanceEvidenceStore(self._destination.paths.root, read_only=False)
+        results: list[SecProvenanceEvidenceReceiptEntry] = []
+        files = 0
+        written = 0
+        for entry in plan.entries:
+            publication = store.publish(entry.artifact)
+            files += (1 if publication.artifact_created else 0) + publication.bindings_created
+            written += publication.bytes_written
+            results.append(
+                SecProvenanceEvidenceReceiptEntry(
+                    identity_digest=entry.artifact.identity_digest,
+                    raw_record_id=entry.artifact.raw_record_id,
+                    artifact_created=publication.artifact_created,
+                    bindings_created=publication.bindings_created,
+                )
+            )
+        return SecProvenanceEvidenceReceipt(
+            plan_digest=plan.digest(),
+            destination_workspace_id=self._destination_workspace_id,
+            executor_sha=self._executor_sha,
+            completed_at=self._now(),
+            entries=tuple(results),
+            files_created=files,
+            bytes_written=written,
+        )
+
+    def verify(self, plan: SecProvenanceEvidencePlan) -> SecProvenanceEvidenceVerification:
+        """Prove every bound observation from the destination workspace alone."""
+        self._verify_plan_identity(plan)
+        store = SecProvenanceEvidenceStore(self._destination.paths.root, read_only=True)
+        artifacts = 0
+        bindings = 0
+        reconstructed = 0
+        divergent = 0
+        for entry in plan.entries:
+            artifact = store.acquisition(entry.artifact.identity_digest)
+            if artifact.content_digest != entry.artifact.content_digest:
+                raise SecProvenanceEvidenceError("published evidence differs from the sealed plan")
+            artifacts += 1
+            configuration = self._configurations_of(artifact.asset_id)
+            normalizer = SecCompanyFactsNormalizer(configuration)
+            current = self._destination.raw_records.get(artifact.raw_record_id)
+            if payload_digest(current.payload) != artifact.payload_digest_sha256:
+                divergent += len(artifact.bindings)
+                bindings += len(artifact.bindings)
+                continue
+            original = artifact.original_record(current.payload)
+            if sha256_hex(canonical_json_bytes(original)) != artifact.original_raw_sha256:
+                divergent += len(artifact.bindings)
+                bindings += len(artifact.bindings)
+                continue
+            for binding in artifact.bindings:
+                bindings += 1
+                reference = store.binding(binding.observation_id)
+                if reference is None or reference.identity_digest != artifact.identity_digest:
+                    divergent += 1
+                    continue
+                stored = self._destination.observations.get(binding.observation_id)
+                if _observation_digest(stored) != binding.observation_sha256:
+                    divergent += 1
+                    continue
+                submissions = self._destination.raw_records.get(binding.submissions_record_id)
+                if (
+                    submissions.source.checksum_sha256
+                    != binding.submissions_payload_checksum_sha256
+                ):
+                    divergent += 1
+                    continue
+                rebuilt = _reconstruct_observation(
+                    original,
+                    submissions,
+                    stored,
+                    configuration,
+                    normalizer,
+                )
+                if rebuilt == stored:
+                    reconstructed += 1
+                else:
+                    divergent += 1
+        return SecProvenanceEvidenceVerification(
+            plan_digest=plan.digest(),
+            verified_at=self._now(),
+            artifacts=artifacts,
+            bindings=bindings,
+            reconstructed=reconstructed,
+            divergent=divergent,
+            verified=bool(plan.entries) and divergent == 0 and reconstructed == bindings,
+        )
+
+    def _prove_evidence(
+        self,
+        recorded: RawRecord,
+        failing: Mapping[UUID, object],
+        configuration: SecAssetConfiguration,
+        normalizer: SecCompanyFactsNormalizer,
+        store: SecProvenanceEvidenceStore,
+        *,
+        dependent_observations: int,
+        current_reconstructing: int,
+    ) -> tuple[SecProvenanceEvidenceEntry | None, SecProvenanceEvidenceConflict | None]:
+        original = self._source_record(recorded.record_id)
+        if original is None:
+            return None, _evidence_conflict(
+                recorded,
+                "no retained v1 raw with this identity",
+                dependent_observations,
+                current_reconstructing,
+                ("raw:absent-in-v1",),
+            )
+        differences = _payload_differences(recorded, original)
+        if differences:
+            return None, _evidence_conflict(
+                recorded,
+                "persisted payload differs from the retained acquisition",
+                dependent_observations,
+                current_reconstructing,
+                tuple(differences),
+            )
+        bindings: list[SecProvenanceObservationBinding] = []
+        problems: list[str] = []
+        cache: dict[tuple[UUID, datetime], dict[UUID, object]] = {}
+        for identifier in sorted(failing, key=str):
+            stored = failing[identifier]
+            source_observation = self._source_observation(identifier)
+            if source_observation is None:
+                problems.append(f"observation:{identifier}:absent-in-v1")
+                continue
+            if _observation_digest(source_observation) != _observation_digest(stored):
+                problems.append(f"observation:{identifier}:content-differs-from-v1")
+                continue
+            record_key = json.loads(stored.source.record_key)
+            submissions_id = UUID(record_key["submissions_record_id"])
+            try:
+                submissions = self._destination.raw_records.get(submissions_id)
+            except Exception:
+                problems.append(f"submissions:{submissions_id}:absent")
+                continue
+            cache_key = (submissions_id, stored.normalized_at)
+            rebuilt = cache.get(cache_key)
+            if rebuilt is None:
+                extraction = normalizer.extract(
+                    original,
+                    submissions,
+                    normalized_at=stored.normalized_at,
+                )
+                rebuilt = {
+                    item.observation_id: item
+                    for item in (
+                        sec_fact_to_observation(
+                            fact,
+                            original,
+                            submissions,
+                            normalized_at=stored.normalized_at,
+                            configuration=configuration,
+                        )
+                        for fact in extraction.facts
+                    )
+                }
+                cache[cache_key] = rebuilt
+            if rebuilt.get(identifier) != stored:
+                problems.append(f"observation:{identifier}:not-reconstructible")
+                continue
+            bindings.append(
+                SecProvenanceObservationBinding(
+                    observation_id=identifier,
+                    observation_sha256=_observation_digest(stored),
+                    submissions_record_id=submissions_id,
+                    submissions_payload_checksum_sha256=str(submissions.source.checksum_sha256),
+                    normalized_at=stored.normalized_at,
+                    transformation_version=stored.transformation_version,
+                )
+            )
+        if problems:
+            return None, _evidence_conflict(
+                recorded,
+                "historical provenance cannot be proven for every dependent",
+                dependent_observations,
+                current_reconstructing,
+                tuple(problems),
+            )
+        artifact = SecAcquisitionProvenance(
+            destination_workspace_id=self._destination_workspace_id,
+            source_workspace_id=self._source_workspace_id,
+            raw_record_id=recorded.record_id,
+            asset_id=recorded.asset_id,
+            source_id=recorded.source.source_id,
+            raw_schema_version=recorded.schema_version,
+            payload_checksum_sha256=str(recorded.source.checksum_sha256),
+            payload_digest_sha256=payload_digest(recorded.payload),
+            original_raw_sha256=sha256_hex(canonical_json_bytes(original)),
+            original_source=original.source,
+            original_event_time=original.event_time,
+            original_available_at=original.available_at,
+            original_received_at=original.received_at,
+            bindings=tuple(sorted(bindings, key=lambda item: str(item.observation_id))),
+        )
+        return (
+            SecProvenanceEvidenceEntry(
+                artifact=artifact,
+                evidence_present_before=store.artifact_path(artifact.identity_digest).is_file(),
+                dependent_observations=len(failing),
+                reconstructed=len(bindings),
+            ),
+            None,
+        )
+
+    def _issuer_sources(
+        self,
+        configuration: SecAssetConfiguration,
+    ) -> tuple[tuple[str, str], ...]:
+        return (
+            ("sec-edgar-companyfacts-snapshot-v1", configuration.companyfacts_source_id),
+            ("sec-edgar-submissions-snapshot-v1", configuration.submissions_source_id),
+        )
+
+    def _dependents(self, record_id: UUID) -> dict[UUID, object]:
+        identifiers = self._destination.observations.list_ids_for_raw_record(record_id)
+        if not identifiers:
+            return {}
+        return self._destination.observations.get_many(identifiers)
+
+    def _indirect_references(self, record_id: UUID) -> int:
+        rows = self._destination.store.connection.execute(
+            "SELECT count(*) FROM normalized_observations_v2 "
+            "WHERE raw_record_id <> ? AND source_record_key LIKE ?",
+            [str(record_id), f"%{record_id}%"],
+        ).fetchone()
+        return int(rows[0]) if rows else 0
+
+    def _source_record(self, record_id: UUID) -> RawRecord | None:
+        if self._source is None:
+            return None
+        try:
+            return self._source.raw_records.get(record_id)
+        except Exception:
+            return None
+
+    def _source_observation(self, observation_id: UUID) -> object | None:
+        if self._source is None:
+            return None
+        try:
+            return self._source.observations.get(observation_id)
+        except Exception:
+            return None
+
+    def _configurations_of(self, asset_id: str) -> SecAssetConfiguration:
+        for configuration in self._configurations:
+            if configuration.asset_id == asset_id:
+                return configuration
+        raise SecProvenanceRepairScopeError(f"asset {asset_id} is outside the declared scope")
+
+    def _verify_plan_identity(self, plan: SecProvenanceEvidencePlan) -> None:
+        if plan.executor_sha != self._executor_sha:
+            raise SecProvenanceRepairScopeError("sealed plan executor does not match this executor")
+        if plan.base_sha != self._base_sha:
+            raise SecProvenanceRepairScopeError("sealed plan base does not match the declared base")
+        if plan.destination_workspace_id != self._destination_workspace_id:
+            raise SecProvenanceRepairScopeError("sealed plan destination workspace does not match")
+        if plan.source_workspace_id != self._source_workspace_id:
+            raise SecProvenanceRepairScopeError("sealed plan source workspace does not match")
+        if plan.catalog_assets != tuple(item.asset_id for item in self._configurations):
+            raise SecProvenanceRepairScopeError("sealed plan issuers do not match this scope")
+
+    def _now(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise SecProvenanceEvidenceError("clock must return a timezone-aware datetime")
+        return value.astimezone(UTC)
+
+
+def _evidence_group(
+    record: RawRecord,
+    classification: SecProvenanceClassification,
+    *,
+    dependent_observations: int,
+    current_reconstructing: int = 0,
+    historical_required: int = 0,
+    indirect_references: int = 0,
+    detail: str = "",
+) -> SecProvenanceEvidenceGroup:
+    return SecProvenanceEvidenceGroup(
+        raw_record_id=record.record_id,
+        asset_id=record.asset_id,
+        source_id=record.source.source_id,
+        raw_schema_version=record.schema_version,
+        classification=classification,
+        dependent_observations=dependent_observations,
+        current_reconstructing=current_reconstructing,
+        historical_required=historical_required,
+        indirect_references=indirect_references,
+        detail=detail,
+    )
+
+
+def _evidence_conflict(
+    record: RawRecord,
+    detail: str,
+    dependent_observations: int,
+    current_reconstructing: int,
+    differences: tuple[str, ...],
+) -> SecProvenanceEvidenceConflict:
+    return SecProvenanceEvidenceConflict(
+        raw_record_id=record.record_id,
+        asset_id=record.asset_id,
+        source_id=record.source.source_id,
+        raw_schema_version=record.schema_version,
+        detail=detail or "unresolved",
+        dependent_observations=dependent_observations,
+        current_reconstructing=current_reconstructing,
+        field_differences=differences,
+    )
+
+
+def _evidence_budget(
+    entries: Sequence[SecProvenanceEvidenceEntry],
+) -> SecProvenanceEvidenceBudget:
+    files = 0
+    size = 0
+    bindings = 0
+    for entry in entries:
+        entry_files, entry_bytes = SecProvenanceEvidenceStore.measure(entry.artifact)
+        files += entry_files
+        size += entry_bytes
+        bindings += len(entry.artifact.bindings)
+    return SecProvenanceEvidenceBudget(
+        artifacts=len(entries),
+        bindings=bindings,
+        bytes_new=size,
+    )
+
+
+def _payload_differences(recorded: RawRecord, original: RawRecord) -> list[str]:
+    differences: list[str] = []
+    if recorded.asset_id != original.asset_id:
+        differences.append("raw:asset")
+    if recorded.source.source_id != original.source.source_id:
+        differences.append("raw:source_id")
+    if recorded.schema_version != original.schema_version:
+        differences.append("raw:schema_version")
+    if recorded.source.checksum_sha256 != original.source.checksum_sha256:
+        differences.append("raw:payload_checksum")
+    if recorded.source.record_key != original.source.record_key:
+        differences.append("raw:record_key")
+    if recorded.payload != original.payload:
+        differences.append("raw:payload")
+    return differences
+
+
+def _observation_digest(observation: object) -> str:
+    return sha256_hex(canonical_json_bytes(observation))
+
+
+def _reconstruct_observation(
+    record: RawRecord,
+    submissions: RawRecord,
+    stored: object,
+    configuration: SecAssetConfiguration,
+    normalizer: SecCompanyFactsNormalizer,
+) -> object | None:
+    extraction = normalizer.extract(record, submissions, normalized_at=stored.normalized_at)
+    rebuilt = {
+        item.observation_id: item
+        for item in (
+            sec_fact_to_observation(
+                fact,
+                record,
+                submissions,
+                normalized_at=stored.normalized_at,
+                configuration=configuration,
+            )
+            for fact in extraction.facts
+        )
+    }
+    return rebuilt.get(stored.observation_id)
 
 
 __all__ = [
@@ -715,10 +1281,14 @@ __all__ = [
     "SecProvenanceRepairReceiptEntry",
     "SecProvenanceRepairScopeError",
     "SecProvenanceRepairService",
+    "SecProvenanceEvidenceError",
+    "SecProvenanceEvidenceService",
+    "load_evidence_plan",
     "SecProvenanceRepairVerification",
     "corrected_record",
     "iter_conflict_ids",
     "load_plan",
     "stamp_of",
+    "write_evidence_plan",
     "write_plan",
 ]

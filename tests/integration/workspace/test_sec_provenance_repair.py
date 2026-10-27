@@ -14,6 +14,7 @@ from investment_analyst.core.models import NormalizedObservation, RawRecord
 from investment_analyst.providers.asset_config import SecAssetConfiguration
 from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
     SecCompanyFactsNormalizer,
+    sec_fact_to_observation,
 )
 from investment_analyst.providers.fundamentals.sec_edgar import (
     SecEdgarClient,
@@ -21,6 +22,7 @@ from investment_analyst.providers.fundamentals.sec_edgar import (
 )
 from investment_analyst.providers.fundamentals.sec_observation_pipeline import (
     SecIssuerObservationPipeline,
+    SecObservationTraceabilityError,
 )
 from investment_analyst.providers.fundamentals.sec_raw_records import (
     aapl_sec_configuration,
@@ -29,9 +31,14 @@ from investment_analyst.providers.fundamentals.sec_raw_records import (
     sec_document_to_raw_record,
 )
 from investment_analyst.providers.http import HttpResponse
+from investment_analyst.storage.sec_provenance_evidence import SecProvenanceEvidenceStore
 from investment_analyst.workspace.models import WorkspaceAccessMode
+from investment_analyst.workspace.sec_provenance_models import (
+    SecProvenanceClassification,
+)
 from investment_analyst.workspace.sec_provenance_repair import (
     SecProvenanceConflictReason,
+    SecProvenanceEvidenceService,
     SecProvenanceRepairConflictError,
     SecProvenanceRepairScopeError,
     SecProvenanceRepairService,
@@ -72,16 +79,23 @@ def _load_fixture(name: str) -> dict[str, object]:
     )
 
 
-def _prepared_documents(marker: str) -> tuple[bytes, bytes]:
+def _prepared_documents(
+    marker: str,
+    *,
+    annual: bool = True,
+    quarterly: bool = True,
+) -> tuple[bytes, bytes]:
     submissions = _load_fixture("aapl_submissions.json")
     recent = submissions["filings"]["recent"]
+    wanted = [index for index, enabled in ((0, annual), (1, quarterly)) if enabled]
+    for key, values in list(recent.items()):
+        if isinstance(values, list):
+            recent[key] = [values[index] for index in wanted]
     recent["acceptanceDateTime"] = [
-        "2026-01-30T21:00:00Z",
-        "2026-04-30T21:00:00Z",
+        ["2026-01-30T21:00:00Z", "2026-04-30T21:00:00Z"][index] for index in wanted
     ]
     recent["primaryDocument"] = [
-        "aapl-20251231x10k.htm",
-        "aapl-20260331x10q.htm",
+        ["aapl-20251231x10k.htm", "aapl-20260331x10q.htm"][index] for index in wanted
     ]
 
     def duration(annual: bool, value: str) -> dict[str, str]:
@@ -101,17 +115,16 @@ def _prepared_documents(marker: str) -> tuple[bytes, bytes]:
         del result["start"]
         return result
 
+    durations = [duration(True, "1000.25"), duration(False, "260.50")]
+    incomes = [duration(True, "200.10"), duration(False, "52.25")]
+    instants = [instant(True, "5000"), instant(False, "5100")]
     companyfacts = _load_fixture("aapl_companyfacts.json")
     companyfacts["description"] = marker
     companyfacts["facts"] = {
         "us-gaap": {
-            "RevenueFromContractWithCustomerExcludingAssessedTax": {
-                "units": {"USD": [duration(True, "1000.25"), duration(False, "260.50")]}
-            },
-            "NetIncomeLoss": {
-                "units": {"USD": [duration(True, "200.10"), duration(False, "52.25")]}
-            },
-            "Assets": {"units": {"USD": [instant(True, "5000"), instant(False, "5100")]}},
+            "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"USD": durations}},
+            "NetIncomeLoss": {"units": {"USD": incomes}},
+            "Assets": {"units": {"USD": instants}},
         },
         "dei": companyfacts["facts"]["dei"],
     }
@@ -126,8 +139,10 @@ def _records_at(
     *,
     marker: str,
     configuration: SecAssetConfiguration,
+    annual: bool = True,
+    quarterly: bool = True,
 ) -> tuple[RawRecord, RawRecord]:
-    submissions, companyfacts = _prepared_documents(marker)
+    submissions, companyfacts = _prepared_documents(marker, annual=annual, quarterly=quarterly)
     client = SecEdgarClient(
         FixtureTransport(submissions, companyfacts),
         SecEdgarIdentity("Investment Analyst integration@example.com"),
@@ -378,3 +393,275 @@ def test_sealed_plan_refuses_a_foreign_scope(tmp_path: Path) -> None:
             repair.apply(empty)
         with pytest.raises(SecProvenanceRepairScopeError, match="executor"):
             repair.apply(plan.model_copy(update={"executor_sha": "b" * 40}))
+
+
+def _service_opens(service: WorkspaceService, source_root: Path, destination_root: Path):
+    storage = service.open_storage(service.resolve(destination_root), WorkspaceAccessMode.READ_ONLY)
+    source = service.open_storage(service.resolve(source_root), WorkspaceAccessMode.READ_ONLY)
+    return storage, source
+
+
+def _evidence_service(
+    service: WorkspaceService,
+    storage,
+    source,
+    configuration: SecAssetConfiguration,
+    *,
+    source_root: Path | None = None,
+    source_workspace_id=None,
+) -> SecProvenanceEvidenceService:
+    resolved_source = source_workspace_id
+    if resolved_source is None:
+        if source_root is None:
+            raise AssertionError("a source workspace must be declared")
+        resolved_source = service.manifest(source_root).workspace_id
+    return SecProvenanceEvidenceService(
+        storage,
+        source=source,
+        configurations=(configuration,),
+        destination_workspace_id=service.manifest(storage.paths.root.parent.parent).workspace_id,
+        source_workspace_id=resolved_source,
+        executor_sha=EXECUTOR_SHA,
+        base_sha=EXECUTOR_SHA,
+    )
+
+
+def _apply_evidence(service, destination_root, configuration, plan):
+    storage = service.open_storage(service.resolve(destination_root), WorkspaceAccessMode.READ_ONLY)
+    with storage:
+        evidence = _evidence_service(
+            service,
+            storage,
+            None,
+            configuration,
+            source_workspace_id=plan.source_workspace_id,
+        )
+        return evidence.apply(plan)
+
+
+def _verify_evidence(service, destination_root, configuration, plan):
+    storage = service.open_storage(service.resolve(destination_root), WorkspaceAccessMode.READ_ONLY)
+    with storage:
+        evidence = _evidence_service(
+            service,
+            storage,
+            None,
+            configuration,
+            source_workspace_id=plan.source_workspace_id,
+        )
+        return evidence.verify(plan)
+
+
+def _seed_mixed_workspaces(tmp_path: Path, configuration: SecAssetConfiguration):
+    service = WorkspaceService()
+    source_root = service.initialize(tmp_path / "v1", format_version=1).paths.root
+    destination_root = service.initialize(tmp_path / "v2", format_version=2).paths.root
+    source = service.open_storage(service.resolve(source_root), WorkspaceAccessMode.READ_WRITE)
+    with source:
+        source.assets.upsert(create_sec_aapl_asset())
+        for definition in get_sec_source_definitions(configuration):
+            source.sources.upsert(definition)
+        records = _records_at(
+            ORIGINAL_RETRIEVAL,
+            marker="mixed",
+            configuration=configuration,
+            annual=False,
+            quarterly=True,
+        )
+        for record in records:
+            source.raw_records.save(record)
+        summary = SecIssuerObservationPipeline(
+            source,
+            SecCompanyFactsNormalizer(configuration),
+            configuration=configuration,
+            clock=lambda: NORMALIZED_AT,
+        ).run()
+        assert summary.observations_created == 3
+        identifiers = [
+            UUID(str(row[0]))
+            for row in source.store.connection.execute(
+                "SELECT observation_id FROM normalized_observations ORDER BY observation_id"
+            ).fetchall()
+        ]
+        historical = tuple(source.observations.get_many(identifiers).values())
+        historical_records = records
+    destination = service.open_storage(
+        service.resolve(destination_root), WorkspaceAccessMode.READ_WRITE
+    )
+    with destination:
+        destination.assets.upsert(create_sec_aapl_asset())
+        for definition in get_sec_source_definitions(configuration):
+            destination.sources.upsert(definition)
+        current_records = _records_at(
+            LATER_RETRIEVAL,
+            marker="mixed",
+            configuration=configuration,
+            annual=True,
+            quarterly=False,
+        )
+        destination.raw_records.save(current_records[1])
+        destination.raw_records.save(current_records[0])
+        destination.raw_records.save(historical_records[0])
+        destination.observations.save_many(historical)
+        native_extractor = SecCompanyFactsNormalizer(configuration).extract(
+            current_records[1],
+            current_records[0],
+            normalized_at=LATER_NORMALIZED_AT,
+        )
+        destination.observations.save_many(
+            sec_fact_to_observation(
+                fact,
+                current_records[1],
+                current_records[0],
+                normalized_at=LATER_NORMALIZED_AT,
+                configuration=configuration,
+            )
+            for fact in native_extractor.facts
+        )
+        financial_counts = {
+            table: int(
+                destination.store.connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            )
+            for table in (
+                "raw_v2_index",
+                "normalized_observations_v2",
+                "workspace_metric_results_v2",
+                "workspace_diagnostic_results_v2",
+            )
+        }
+    return service, source_root, destination_root, historical, financial_counts
+
+
+def test_evidence_plan_apply_and_replay_preserve_both_acquisition_groups(
+    tmp_path: Path,
+) -> None:
+    configuration = aapl_sec_configuration()
+    service, source_root, destination_root, historical, financial_counts = _seed_mixed_workspaces(
+        tmp_path, configuration
+    )
+    storage, source = _service_opens(service, source_root, destination_root)
+    with storage, source:
+        plan = _evidence_service(
+            service, storage, source, configuration, source_root=source_root
+        ).build_plan()
+    assert len(plan.entries) == 1
+    entry = plan.entries[0]
+    assert len(entry.artifact.bindings) == len(historical) == 3
+    assert entry.reconstructed == 3
+    assert plan.budget.artifacts == 1
+    assert plan.budget.bindings == 3
+    assert plan.budget.bytes_new > 0
+    classifications = {group.classification for group in plan.groups}
+    assert SecProvenanceClassification.HISTORICAL_PROVENANCE_REQUIRED in classifications
+
+    receipt = _apply_evidence(service, destination_root, configuration, plan)
+    assert receipt.files_created == 4
+    assert receipt.bytes_written == plan.budget.bytes_new
+    verification = _verify_evidence(service, destination_root, configuration, plan)
+    assert verification.verified is True
+    assert verification.reconstructed == 3
+    assert verification.divergent == 0
+
+    replay = _apply_evidence(service, destination_root, configuration, plan)
+    assert replay.files_created == 0
+    assert replay.bytes_written == 0
+
+    destination = service.open_storage(
+        service.resolve(destination_root), WorkspaceAccessMode.READ_ONLY
+    )
+    with destination:
+        after = {
+            table: int(
+                destination.store.connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            )
+            for table in (
+                "raw_v2_index",
+                "normalized_observations_v2",
+                "workspace_metric_results_v2",
+                "workspace_diagnostic_results_v2",
+            )
+        }
+    assert after == financial_counts
+
+
+def test_verifier_resolves_preserved_acquisition_without_v1(tmp_path: Path) -> None:
+    configuration = aapl_sec_configuration()
+    service, source_root, destination_root, historical, _ = _seed_mixed_workspaces(
+        tmp_path, configuration
+    )
+    storage, source = _service_opens(service, source_root, destination_root)
+    with storage, source:
+        plan = _evidence_service(
+            service, storage, source, configuration, source_root=source_root
+        ).build_plan()
+    _apply_evidence(service, destination_root, configuration, plan)
+
+    destination = service.open_storage(
+        service.resolve(destination_root), WorkspaceAccessMode.READ_ONLY
+    )
+    with destination:
+        pipeline = SecIssuerObservationPipeline(
+            destination,
+            SecCompanyFactsNormalizer(configuration),
+            configuration=configuration,
+            clock=lambda: LATER_NORMALIZED_AT,
+        )
+        for observation in historical:
+            pipeline._verify_observation(
+                observation,
+                raw_record_cache={},
+                reconstruction_cache={},
+            )
+        store = SecProvenanceEvidenceStore(destination.paths.root, read_only=True)
+        artifact = store.acquisition(plan.entries[0].artifact.identity_digest)
+        store.artifact_path(artifact.identity_digest).unlink()
+    destination = service.open_storage(
+        service.resolve(destination_root), WorkspaceAccessMode.READ_ONLY
+    )
+    with destination:
+        pipeline = SecIssuerObservationPipeline(
+            destination,
+            SecCompanyFactsNormalizer(configuration),
+            configuration=configuration,
+            clock=lambda: LATER_NORMALIZED_AT,
+        )
+        with pytest.raises(SecObservationTraceabilityError, match="cannot be reconstructed"):
+            pipeline._verify_observation(
+                historical[0],
+                raw_record_cache={},
+                reconstruction_cache={},
+            )
+
+
+def test_evidence_plan_is_unresolved_without_v1_and_verify_rejects_missing_binding(
+    tmp_path: Path,
+) -> None:
+    configuration = aapl_sec_configuration()
+    service, source_root, destination_root, historical, _ = _seed_mixed_workspaces(
+        tmp_path, configuration
+    )
+    storage, source = _service_opens(service, source_root, destination_root)
+    with storage, source:
+        plan = _evidence_service(
+            service, storage, source, configuration, source_root=source_root
+        ).build_plan()
+    _apply_evidence(service, destination_root, configuration, plan)
+
+    binding = SecProvenanceEvidenceStore(
+        service.resolve(destination_root).root / "storage" / "v2", read_only=True
+    ).binding_path(historical[0].observation_id)
+    binding.unlink()
+    broken = _verify_evidence(service, destination_root, configuration, plan)
+    assert broken.verified is False
+    assert broken.divergent > 0
+
+    empty_source_root = service.initialize(tmp_path / "empty", format_version=1).paths.root
+    storage, source = _service_opens(service, empty_source_root, destination_root)
+    with storage, source:
+        missing = _evidence_service(
+            service, storage, source, configuration, source_root=empty_source_root
+        ).build_plan()
+    assert missing.entries == ()
+    assert missing.conflicts
+    assert missing.conflicts[0].detail
+    assert missing.conflicts[0].field_differences
