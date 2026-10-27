@@ -277,8 +277,9 @@ authoritative evidence.
 
 ## Current provenance guard
 
-The selector now classifies an observation as `CONFLICTO` when the destination already holds its
-raw record with a different `source.retrieved_at` than the one the observation records, instead of
+The selector classifies an observation as `CONFLICTO` when the destination already holds its raw
+record with a different `source.retrieved_at` than the one the observation records, instead of
 importing or accepting it. That guard closes the seam that allowed a recovered observation to
-reference a raw of another retrieval lineage. The narrow repair procedure and its live result are in
+reference a raw of another retrieval lineage. Legitimate historical groups are proved afterwards by
+the local `sec-acquisition-provenance-v1` evidence, whose procedure and live result are in
 `docs/sec_provenance_repair_runbook.md`.

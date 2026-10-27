@@ -177,7 +177,27 @@ mientras la observación conserva `2026-08-01T04:06:18Z`. El job programado de A
 matriz de causas responden con la evidencia local existente. La reparación de esa inconsistencia
 requiere un Work Block separado; no se reescribió ni se borró ningún dato en este bloque.
 
-## Evaluación de reparación de procedencia SEC — 2026-10-27
+## Evidencia de adquisición SEC — enmienda P2 del 2026-10-27
+
+La enmienda de `FUNDAMENTALS-SEC-PROVENANCE` sustituye la corrección del reloj compartido por un
+contrato aislado de evidencia de adquisición (`sec-acquisition-provenance-v1`), persistido en
+`storage/v2/sec-provenance/` y consumido por el verificador SEC real. La sección siguiente conserva
+la evaluación anterior como historia fechada: describía la reparación de `source.retrieved_at` que
+la enmienda retiró.
+
+Evidencia ejecutada: 329 referencias SEC clasificadas (29 `CURRENT_VALID`, 1
+`HISTORICAL_PROVENANCE_REQUIRED`, 299 `UNREFERENCED_OR_INDIRECT`, 0 `UNRESOLVED`); un artefacto con
+69 bindings y 48.076 B; verificación 69/69 exacta y replay sin archivos nuevos. El refresh SEC real
+de AAPL volvió a completarse (1.286 observaciones reutilizadas, 0 duplicadas, diagnóstico `positive`
+con cobertura 1,00) y su replay con otro `known_at` no creó registros; AMD confirmó el control sin
+evidencia (871 reutilizadas). Los datos financieros preexistentes conservaron digest idéntico
+(observaciones 203.351, diagnósticos 1.911, raws 869.736, métricas 42.149); el refresh añadió 11
+métricas nuevas de valoración AAPL. Durante el refresh real, 1.188 muestras de descriptores no
+observaron ningún acceso al workspace v1.
+
+Receta vigente: `docs/sec_provenance_repair_runbook.md`.
+
+## Evaluación de reparación de procedencia SEC — 2026-10-27 (histórico, superado por la enmienda P2)
 
 El bloque `FUNDAMENTALS-SEC-PROVENANCE` evaluó la corrección mínima de `source.retrieved_at` sobre el
 workspace `70c64668-…` con el v1 retenido `19cf83b5-…` en modo read-only. El inventario cubrió 330

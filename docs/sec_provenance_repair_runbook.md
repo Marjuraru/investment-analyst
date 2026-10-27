@@ -1,127 +1,138 @@
-# Reparación de procedencia SEC de un workspace v2
+# Procedencia de adquisición SEC en un workspace v2
 
-Este runbook es la autoridad única de operación para corregir `source.retrieved_at` de un raw SEC ya
-persistido en un workspace v2 cuando el workspace v1 retenido demuestra el instante original. No
-introduce una adquisición, un esquema, una fórmula ni una interpretación point-in-time nueva.
+Este runbook es la autoridad única para conservar dos adquisiciones válidas de un mismo raw SEC y
+para recuperar el refresh sin reescribir raws ni observaciones. No introduce adquisiciones, esquemas
+SQL, fórmulas, versiones del normalizador ni interpretaciones point-in-time nuevas.
 
-## Alcance admitido
+## Frontera del contrato
 
-La herramienta sólo puede reescribir `source.retrieved_at` de un raw de `sec-edgar:<ticker>:` ya
-existente. `available_at`, `received_at`, `event_time`, `payload`, `source.checksum_sha256`,
-`source.record_key`, `record_id`, `asset_id` y `schema_version` permanecen intactos. El checksum
-canónico del blob cambia sólo como consecuencia del campo corregido y se actualiza mediante
-`RawV2TemporalRepair`.
+`sec-acquisition-provenance-v1` es un artefacto JSON tipado, inmutable y append-only, guardado en
+`storage/v2/sec-provenance/` del mismo workspace:
 
-Queda fuera de alcance: reescribir observaciones, importar de nuevo historia, borrar raws, tocar
-métricas o diagnósticos, cambiar fórmulas, versiones de algoritmo, catálogo, endpoints o feeds.
+| Ruta | Contenido |
+| --- | --- |
+| `acquisitions/<id[:2]>/<id[2:4]>/<id>.json` | metadata completa de la adquisición original y los bindings de sus observaciones |
+| `bindings/<obs[:2]>/<obs[2:4]>/<obs>.json` | referencia mínima `observation_id → identity_digest` |
 
-## Precondiciones
+La identidad (`identity_digest`) es el SHA-256 canónico de `schema`, UUID de destino, `raw_record_id`,
+hash canónico del raw original y bindings ordenados. El sobre guarda además `content_digest_sha256`
+del artefacto completo. La fecha de creación y el SHA del ejecutor viven en el recibo, nunca en el
+artefacto.
 
-1. Workspace v1 retenido y legible; se abre siempre `READ_ONLY`.
-2. Workspace v2 destino con formato `2`.
-3. Ventana sin writer para `apply`: el servicio debe estar detenido o sin lock. `plan` y `verify`
-   funcionan en `READ_ONLY` y pueden ejecutarse con el servicio activo.
-4. SHA completo del candidato que ejecuta la operación (`--executor-sha`). Queda sellado en el plan.
-5. Rutas de plan y recibo nuevas; la herramienta nunca sobrescribe evidencia previa.
+El artefacto no duplica el payload financiero: conserva su checksum, su digest canónico y la
+`SourceReference` completa. La reconstrucción del raw original se hace en memoria con el payload ya
+persistido en v2, y su hash canónico debe coincidir con `original_raw_sha256`.
+
+Lo prohibido sigue prohibido: no se usa `RawRecord` como contenedor de metadata interna fingiendo
+una adquisición, no se modifican `RawRecord` ni `NormalizedObservation`, no se reescribe el reloj
+compartido de un raw actual y no se toca evidencia histórica para que encaje.
+
+## Estados válidos de un raw
+
+| Estado | Significado |
+| --- | --- |
+| `CURRENT_VALID` | todas sus observaciones se reconstruyen con la adquisición actual |
+| `HISTORICAL_PROVENANCE_REQUIRED` | algunas sólo se reconstruyen con una adquisición preservada, y la evidencia prueba cada binding |
+| `UNREFERENCED_OR_INDIRECT` | no tiene observaciones dependientes directas; se cuentan sus referencias indirectas antes de cerrarlo |
+| `UNRESOLVED` | falta prueba, el payload difiere o una observación no se reconstruye: se presenta con diferencias por campo |
+
+Una ausencia en v1 no es por sí misma un conflicto: un raw nuevo de v2 sin dependientes históricos es
+`UNREFERENCED_OR_INDIRECT`. Sólo se exige v1 cuando hay que probar un grupo histórico.
 
 ## Comandos
 
 ```bash
-# 1. Inventario y plan sellado (read-only)
-PYTHONPATH=$PWD/src .venv/bin/python scripts/repair_sec_provenance.py plan \
+# 1. Clasificación read-only del universo SEC declarado (v1 + v2)
+PYTHONPATH=$PWD/src .venv/bin/python scripts/repair_sec_provenance.py classify \
   --workspace <workspace-v2> --source-workspace <workspace-v1> \
-  --executor-sha <full-sha> --output <ops>/sec-provenance-repair-plan.json
+  --executor-sha <full-sha>
 
-# 2. Aplicación exacta (ventana sin writer)
-PYTHONPATH=$PWD/src .venv/bin/python scripts/repair_sec_provenance.py apply \
+# 2. Plan de evidencia sellado (read-only; escribe sólo el JSON del plan)
+PYTHONPATH=$PWD/src .venv/bin/python scripts/repair_sec_provenance.py evidence-plan \
   --workspace <workspace-v2> --source-workspace <workspace-v1> \
-  --executor-sha <full-sha> --plan <plan.json> --receipt <ops>/receipt.json
+  --executor-sha <full-sha> --base-sha <declared-base-sha> --output <ops>/evidence-plan.json
 
-# 3. Verificación estructural (read-only, repetible)
-PYTHONPATH=$PWD/src .venv/bin/python scripts/repair_sec_provenance.py verify \
-  --workspace <workspace-v2> --source-workspace <workspace-v1> \
-  --executor-sha <full-sha> --plan <plan.json>
+# 3. Publicación de evidencia (no abre v1; no escribe datos financieros)
+PYTHONPATH=$PWD/src .venv/bin/python scripts/repair_sec_provenance.py evidence-apply \
+  --workspace <workspace-v2> --executor-sha <full-sha> \
+  --plan <ops>/evidence-plan.json --receipt <ops>/evidence-receipt.json
+
+# 4. Verificación desde el workspace destino únicamente
+PYTHONPATH=$PWD/src .venv/bin/python scripts/repair_sec_provenance.py evidence-verify \
+  --workspace <workspace-v2> --executor-sha <full-sha> --plan <ops>/evidence-plan.json
 ```
 
-`plan` imprime el digest, el número de referencias, entradas y conflictos, y los IDs de ambos
-conjuntos. `apply` exige que el estado vivo sea exactamente el `before` sellado o ya el `after`
-sellado; un tercer estado rechaza sin escribir. `verify` sólo devuelve `0` si cada raw quedó en su
-estado `after` y todas sus observaciones dependientes se reconstruyen exactamente.
+`evidence-apply` abre la base en modo read-only y sólo publica archivos bajo `storage/v2/sec-provenance/`
+más el recibo externo. `evidence-verify` y el runtime normal no aceptan ni abren la ruta v1.
 
-Sin `--asset`, el inventario cubre los emisores SEC declarados por el catálogo (20 en la base
-vigente). El plan siempre recorre Company Facts y Submissions de cada emisor y no hidrata blobs de
-otras fuentes: no recorre 13F, documentos completos ni respaldos.
+Los modos antiguos `plan`, `apply` y `verify` de `sec-provenance-repair-plan-v1` siguen existiendo
+como diagnóstico de la corrección temporal estrecha. **No son una alternativa aplicable a este
+defecto**: su plan sellado para el workspace activo no admite entradas.
 
-## Criterio de admisión por raw
+## Admisión de un grupo histórico
 
-Se admite una entrada sólo si se cumplen todas las condiciones:
+Se admite un artefacto sólo si se cumplen todas las condiciones:
 
-1. el raw existe en v2 con el mismo `record_id` y en v1 con idéntico emisor, `source_id`,
-   `schema_version`, `source.record_key`, checksum de payload y payload completo;
-2. el estampado temporal difiere y el único campo que explica la diferencia es
-   `source.retrieved_at`;
-3. sustituir ese campo por el valor de v1 reconstruye **exactamente todas** las observaciones
-   dependientes del raw, usando el normalizador vigente y el par Company Facts/Submissions que cada
-   observación referencia;
-4. ningún otro consumidor cambia de estado (`available_at`, valores, unidades y versiones intactos).
+1. el raw actual y el original comparten `record_id`, emisor, `source_id`, `schema_version`,
+   `source.record_key`, checksum de payload y payload completo;
+2. cada observación ligada existe idéntica en v1 (mismo `observation_id` y mismo hash canónico);
+3. la adquisición original se reproduce en memoria y su hash coincide con `original_raw_sha256`;
+4. el normalizador vigente reconstruye **exactamente** cada observación ligada con su
+   `submissions_record_id`, su reloj de normalización y su versión de transformación.
 
-Cuando 3 falla se clasifica conflicto y el raw no se muta. La aplicación es por raw: un conflicto no
-bloquea la corrección de otro raw admitido, y no existe rollback global.
+Un fallo se clasifica con diferencias por campo (`observation:<id>:content-differs-from-v1`,
+`raw:payload`, `submissions:<id>:absent`, …), no con un contador agregado.
 
-## Clasificación de conflictos
+## Lectura en runtime
 
-| Razón | Significado |
-| --- | --- |
-| `evidence-missing` | v1 no conserva un raw con esa identidad |
-| `payload-mismatch` | la identidad existe pero el payload no es idéntico |
-| `no-dependents` | ninguna observación depende del raw: no hay defecto demostrable que corregir |
-| `dependent-clocks-incompatible` | parte de las observaciones se reconstruye y parte no: dos linajes de reloj sobre un mismo raw |
-| `reconstruction-diverges` | ninguna observación dependiente se reconstruye con el valor original |
+1. Se reconstruye primero con la adquisición actual.
+2. Sólo ante una diferencia de procedencia se consulta el binding de esa observación concreta.
+3. Se validan secuencialmente: workspace, raw, emisor, source, schema, checksum y digest del payload
+   persistido, hash de la observación, submissions, reloj, versión de transformación y hash del raw
+   original.
+4. Se reconstruye con el normalizador sin cambiar la comparación completa. Si algo no coincide, se
+   rechaza; no hay caída a v1 ni reparación automática.
 
-Un raw con conflicto impide afirmar reparación completa del workspace. El conflicto se presenta con
-IDs, conteos e impacto; nunca se resuelve inventando una representación de adquisiciones durante
-BUILD.
+La caché de reconstrucción se indexa por identidad de evidencia, submissions y reloj de
+normalización, y está acotada por número de grupos. Una evidencia borrada, truncada o corrupta falla
+cerrado; nunca se aceptan hashes recalculados a partir de un archivo alterado como prueba.
 
-## Idempotencia, reanudación y evidencia
+## Idempotencia, reanudación y rollback
 
-- El plan sella `plan_digest` (SHA-256 canónico) que liga workspace destino, workspace origen,
-  emisores, UUIDs ordenados, checksums before/after, estampados before/after, evento, digest de
-  dependientes y prueba de reconstrucción.
-- `apply` verifica el plan completo antes de escribir y escribe el recibo una sola vez con el
-  resultado por raw (`changed`). Reejecutar devuelve `changed=0` sin tocar blobs.
+- Publicar dos veces el mismo artefacto no crea archivos ni bytes; un artefacto con el mismo id y
+  bytes distintos se rechaza.
+- Una interrupción después del artefacto y antes del recibo se reanuda sin duplicar archivos.
 - Un recibo existente que ligue otro plan o ejecutor se rechaza.
-- Los blobs anteriores permanecen en el workspace como evidencia; no se ejecuta GC.
-- La firma de dependencias de lectura incluye `source_retrieved_at`, por lo que la reparación
-  invalida cachés por el cambio pertinente y no por ignorar firmas.
+- Un rollback de código no borra evidencia: el runtime anterior vuelve a la limitación para ese
+  grupo histórico, nunca convierte la validación en sana.
+- El backup por inventario incluye `storage/v2/sec-provenance/**` automáticamente;
+  `validate_sec_provenance_evidence(workspace_root)` detecta artefactos corruptos, bindings huérfanos
+  y bindings incompletos antes de aceptar un restore.
 
-## Resultado vivo del 2026-10-27
+## Evidencia ejecutada — 2026-10-27
 
-El inventario read-only sobre `active-v2-20261021` (workspace `70c64668-…`) y el v1 retenido
-(`19cf83b5-…`) cubrió 330 raws SEC comparables: 323 idénticos y 3 con estampado distinto.
+Workspace `70c64668-1738-4dfe-ba1f-7e72026bb7fe`; v1 retenido `19cf83b5-8df3-4663-9369-4b61f86eceea`;
+base `601d12a6f2242b87032d34fcb4e45652e4be34f6`; el SHA exacto del candidato que publicó la
+evidencia queda en el marcador BUILD del PR.
 
-| Raw | Emisor | Dependientes | Resultado |
-| --- | --- | --- | --- |
-| `ddf69926-344d-577c-aea7-c75018dc11f0` | AAPL Company Facts | 1355 | `dependent-clocks-incompatible` |
-| `caa19cbd-ef8c-590b-a2f0-f7c9e4121c07` | AMD Company Facts | 871 | `dependent-clocks-incompatible` |
-| `5caa7db7-2790-580b-bb6a-55150c68023b` | AMD Submissions | 0 | `no-dependents` |
+| Medición | Resultado |
+| --- | --- |
+| Clasificación read-only | 329 referencias: 29 `CURRENT_VALID`, 1 `HISTORICAL_PROVENANCE_REQUIRED`, 299 `UNREFERENCED_OR_INDIRECT`, 0 `UNRESOLVED`; 25.733 observaciones actuales y 69 históricas |
+| Plan sellado | `40db8f4d11a226cd76b2a59ae3fb7da36af3422e178dcc4d02810fcf2d43814a`; 1 artefacto, 69 bindings, 48.076 B, 0 conflictos |
+| Apply | 70 archivos, 48.076 B; verificación 69/69 reconstruidas, 0 divergentes |
+| Replay | 0 archivos, 0 B |
+| Refresh AAPL | 2 documentos, 5.669 hechos examinados, 1.286 seleccionados, 0 observaciones y 0 raws creados, 155 métricas reutilizadas, diagnóstico `positive` con cobertura 1,00 |
+| Replay AAPL con otro reloj | `known_at=2026-10-27T22:30:00Z`, 0 creados, 155 métricas reutilizadas |
+| AMD (control sin evidencia) | 871 observaciones reutilizadas, 78 métricas reutilizadas, 0 creados |
+| Datos financieros preexistentes | observaciones 203.351, diagnósticos 1.911, raws 869.736 y métricas 42.149 con digest idéntico antes/después |
+| Runtime sin v1 | 1.188 muestras de descriptores durante el refresh real: 0 accesos a `workspaces/default` |
 
-En AAPL, 1286 observaciones exigen `2026-10-21T20:49:52.509067Z` y 69 exigen
-`2026-08-01T04:06:18.471994Z`; 43 de esas 69 son candidatas del refresh y fallan hoy. En AMD las 871
-dependientes exigen `2026-10-22T01:55:28.905318Z`. Sustituir el campo por el valor de v1 repararía
-las 69 de AAPL y rompería las 1286 restantes; en AMD rompería las 871. Por eso el plan sellado no
-contiene entradas admitidas y no se mutó ningún raw.
-
-Decisión requerida de PLAN: definir qué linaje de procedencia es autoritativo cuando un mismo raw
-canónico fue adquirido dos veces con el mismo payload y relojes distintos. Las opciones conocidas
-—reescribir observaciones, reimportar historia o aceptar la divergencia— están prohibidas por el
-Work Block vigente; no se ejecutó ninguna.
+El refresh creó 11 métricas nuevas de valoración AAPL en el corte `2026-10-26`, contabilizadas aparte.
 
 ## Limitaciones
 
-- IEX no interviene aquí: es un procedimiento de procedencia SEC, no de cobertura de mercado.
-- La reparación no crea observaciones, no recalcula métricas ni diagnósticos y no modifica
-  valoración.
-- Un raw con `no-dependents` no se corrige: su `retrieved_at` vigente es evidencia legítima de la
-  adquisición que lo creó.
-- Este procedimiento no sustituye un backup del workspace ni cubre ingestas posteriores; el paquete
-  de recuperación, si se autoriza, se declara aparte con su propio presupuesto y readback.
+- IEX sigue siendo cobertura de una bolsa; esta evidencia es de procedencia SEC, no de cobertura.
+- La evidencia acredita una adquisición ya persistida; no adelanta `available_at` ni `known_at`
+  financieros.
+- No se borra v1 en este procedimiento: su retirada requiere inventario y readback propios.
+- Un grupo sin evidencia y sin reconstrucción actual sigue fallando cerrado; no se rellena con cero.
