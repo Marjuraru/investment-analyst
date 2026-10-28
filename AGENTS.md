@@ -187,10 +187,16 @@ results, and pending risks.
   manifest and working tree resolve uniquely. Generic `BUILD` is not a valid post-rollout writer
   role. `BUILD_GOVERNANCE` requires an authority snapshot verified against its declared base and
   never uses candidate governance bytes as authority before merge.
-  For a FAST Work Block, or a CRITICAL `BUILD_PRODUCT` Work Block with a verified base-policy
-  authorization, whose effective `finalize_policy` is AUTO, it also authorizes the narrow
+  For a Work Block whose effective `finalize_policy` is AUTO and whose declared base admits a
+  verified finalization authorization — a standing v2 grant for any supported writer role/profile,
+  or the legacy CRITICAL `BUILD_PRODUCT` block authorization — it also authorizes the narrow
   FINALIZE procedure after all live guards pass; otherwise it never authorizes merge,
   ready-for-review, scope expansion, or protected local work.
+- `Finalization authorization` names one standing v2 grant in
+  `.agents/rules/critical_auto_policy.json`. It is valid only for `finalize_policy: AUTO`, from the
+  declared base, and never from candidate bytes; `Critical AUTO authorization` remains the legacy
+  CRITICAL/`BUILD_PRODUCT` binding. Both fields together fail closed. AUDIT and FINALIZE re-read the
+  same grant in live `main` by acquired SHA; revoked, reduced, changed, or unreadable stops.
 - BUILD y AUDIT deben ejecutar `scripts/check_workflow_guards.py` con adquisición viva autoritativa.
   `--json` sólo sirve para diagnóstico offline y nunca es un gate ni una resolución de target. El
   CLI es read-only, estructural y fail-closed; materializa las rutas del diff, aplica policy de

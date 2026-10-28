@@ -1,5 +1,5 @@
 {
-  "schema_version": "critical-auto-policy-v1",
+  "schema_version": "critical-auto-policy-v2",
   "authorizations": [
     {
       "authorization_id": "human-data-chassis-finalize-20261007",
@@ -81,6 +81,19 @@
           "route_effect": "ADVANCES"
         }
       ]
+    }
+  ],
+  "standing_authorizations": [
+    {
+      "authorization_id": "human-standing-auto-finalize-20261028",
+      "granted_at": "2026-10-28T03:42:14Z",
+      "human_instruction": "«quiero que la finalizacion sea auto, ya no HUMAN APPROVAL. Esto para los siguientes bloques» ratificado por «Además, el bloque debe ser finalizacion AUTO SIEMPRE». Formalizado el 2026-10-28T03:42:14Z (27-oct Lima); no se registra la hora del mensaje original.",
+      "repository": "Marjuraru/investment-analyst",
+      "purpose": "finalize_only",
+      "writer_roles": ["BUILD_PRODUCT", "BUILD_GOVERNANCE", "UI_WORKER"],
+      "profiles": ["FAST", "STANDARD", "CRITICAL"],
+      "finalize_policy": "AUTO",
+      "status": "ACTIVE"
     }
   ]
 }

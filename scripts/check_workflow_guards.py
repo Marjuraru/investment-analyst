@@ -62,7 +62,11 @@ _IMMUTABLE_HEADING = "### Superficies del repositorio no modificables — deny p
 _MANIFEST_SCHEMA = "workflow-acceptance-manifest-v1"
 _GOAL_REVIEW_SCHEMA = "workflow-goal-review-v1"
 _CRITICAL_AUTO_POLICY_SCHEMA = "critical-auto-policy-v1"
+_CRITICAL_AUTO_POLICY_SCHEMA_V2 = "critical-auto-policy-v2"
 _CRITICAL_AUTO_POLICY_PATH = ".agents/rules/critical_auto_policy.json"
+_FINALIZE_WRITER_ROLES = frozenset({"BUILD_PRODUCT", "BUILD_GOVERNANCE", "UI_WORKER"})
+_FINALIZE_PROFILES = frozenset({"FAST", "STANDARD", "CRITICAL"})
+_STANDING_STATUSES = frozenset({"ACTIVE", "REVOKED"})
 _GOAL_REVIEW_HINT = re.compile(r'"schema_version"\s*:\s*"?workflow-goal-review-v1\b')
 _MANIFEST_KINDS = frozenset({"acceptance", "invariant", "negative"})
 _REQUIREMENT_KINDS = frozenset(
@@ -185,11 +189,46 @@ class CriticalAutoAuthorization:
 
 
 @dataclass(frozen=True, slots=True)
+class StandingAuthorization:
+    authorization_id: str
+    repository: str
+    purpose: str
+    writer_roles: tuple[str, ...]
+    profiles: tuple[str, ...]
+    policy: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class FinalizationPolicy:
+    schema_version: str
+    authorizations: tuple[CriticalAutoAuthorization, ...]
+    standing_authorizations: tuple[StandingAuthorization, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CriticalAutoEvidence:
     authorization_id: str
     base_sha: str
     policy_sha256: str
     source: str
+
+
+@dataclass(frozen=True, slots=True)
+class StandingAuthorizationEvidence:
+    authorization_id: str
+    repository: str
+    base_sha: str
+    policy_sha256: str
+    status: str
+    source: str
+    live_main_sha: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FinalizationAuthority:
+    critical_auto: CriticalAutoEvidence | None
+    standing_authorization: StandingAuthorizationEvidence | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +260,7 @@ class WorkBlockMetadata:
     expected_branch: str
     writer_role: str
     critical_auto_authorization: str | None
+    finalization_authorization: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +319,7 @@ class GuardSnapshot:
     base_protected: bool | None = None
     scope_evidence: ScopeEvidence | None = None
     authority_snapshot: AuthoritySnapshot | None = None
+    repository: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,6 +354,7 @@ class GuardResult:
     scope: ScopeEvaluation | None = None
     classification: BuildClassification | None = None
     critical_auto: CriticalAutoEvidence | None = None
+    standing_authorization: StandingAuthorizationEvidence | None = None
 
     def as_json(self) -> dict[str, object]:
         metadata: dict[str, object] | None = None
@@ -327,6 +369,7 @@ class GuardResult:
                 "base_sha": self.metadata.base_sha,
                 "expected_branch": self.metadata.expected_branch,
                 "writer_role": self.metadata.writer_role,
+                "finalization_authorization": self.metadata.finalization_authorization,
             }
         return {
             "decision": self.decision,
@@ -357,6 +400,36 @@ class GuardResult:
                     "source": self.critical_auto.source,
                 }
                 if self.critical_auto is not None
+                else None
+            ),
+            "finalization_authorization": (
+                {
+                    "authorization_id": self.standing_authorization.authorization_id,
+                    "repository": self.standing_authorization.repository,
+                    "base_sha": self.standing_authorization.base_sha,
+                    "policy_sha256": self.standing_authorization.policy_sha256,
+                    "status": self.standing_authorization.status,
+                    "source": self.standing_authorization.source,
+                    "live_main_sha": self.standing_authorization.live_main_sha,
+                    "binding": {
+                        "block": (self.metadata.block if self.metadata is not None else None),
+                        "expected_branch": (
+                            self.metadata.expected_branch if self.metadata is not None else None
+                        ),
+                        "writer_role": (
+                            self.metadata.writer_role if self.metadata is not None else None
+                        ),
+                        "head_sha": (
+                            self.build.marker.sha if self.build.marker is not None else None
+                        ),
+                        "manifest_sha256": (
+                            dict(self.build.marker.fields).get("manifest_sha256")
+                            if self.build.marker is not None
+                            else None
+                        ),
+                    },
+                }
+                if self.standing_authorization is not None
                 else None
             ),
             "classification": (
@@ -747,6 +820,7 @@ def parse_work_block(body: str) -> WorkBlockMetadata:
         "expected branch": "expected_branch",
         "writer role": "writer_role",
         "critical auto authorization": "critical_auto_authorization",
+        "finalization authorization": "finalization_authorization",
     }
     values: dict[str, str] = {}
     for match in METADATA_FIELD.finditer(body):
@@ -794,18 +868,33 @@ def parse_work_block(body: str) -> WorkBlockMetadata:
         raise GuardFailure("Work Block ID is invalid")
     if not re.fullmatch(r"[A-Za-z0-9._/-]+", values["expected_branch"]):
         raise GuardFailure("expected branch is invalid")
-    authorization = values.get("critical_auto_authorization")
-    if authorization is not None and not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9._:-]*", authorization
+    legacy_authorization = values.get("critical_auto_authorization")
+    standing_authorization = values.get("finalization_authorization")
+    for field, authorization in (
+        ("critical AUTO authorization", legacy_authorization),
+        ("finalization authorization", standing_authorization),
     ):
-        raise GuardFailure("critical AUTO authorization ID is invalid")
-    if profile == "CRITICAL" and policy == "AUTO":
-        if writer_role != "BUILD_PRODUCT":
-            raise GuardFailure("critical AUTO requires BUILD_PRODUCT")
-        if authorization is None:
-            raise GuardFailure("critical AUTO authorization is absent")
-    elif authorization is not None:
-        raise GuardFailure("critical AUTO authorization is only valid for CRITICAL/AUTO")
+        if authorization is not None and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:-]*", authorization
+        ):
+            raise GuardFailure(f"{field} ID is invalid")
+    if legacy_authorization is not None and standing_authorization is not None:
+        raise GuardFailure("finalization authorization fields are mutually exclusive")
+    if policy == "AUTO":
+        if legacy_authorization is not None:
+            if profile != "CRITICAL":
+                raise GuardFailure("critical AUTO authorization is only valid for CRITICAL/AUTO")
+            if writer_role != "BUILD_PRODUCT":
+                raise GuardFailure("critical AUTO requires BUILD_PRODUCT")
+        elif standing_authorization is None:
+            if profile == "CRITICAL":
+                raise GuardFailure("critical AUTO authorization is absent")
+            raise GuardFailure("finalization authorization is absent for AUTO")
+    else:
+        if legacy_authorization is not None:
+            raise GuardFailure("critical AUTO authorization is only valid for CRITICAL/AUTO")
+        if standing_authorization is not None:
+            raise GuardFailure("finalization authorization is only valid for AUTO")
     return WorkBlockMetadata(
         block=values["block"],
         risk=risk,
@@ -816,7 +905,8 @@ def parse_work_block(body: str) -> WorkBlockMetadata:
         base_sha=base_match.group("sha"),
         expected_branch=values["expected_branch"],
         writer_role=writer_role,
-        critical_auto_authorization=authorization,
+        critical_auto_authorization=legacy_authorization,
+        finalization_authorization=standing_authorization,
     )
 
 
@@ -836,7 +926,34 @@ def _critical_auto_text(mapping: Mapping[str, object], field: str) -> str:
     return value.strip()
 
 
-def _parse_critical_auto_policy(value: bytes) -> tuple[CriticalAutoAuthorization, ...]:
+def _critical_auto_utc(mapping: Mapping[str, object], field: str) -> None:
+    value = _critical_auto_text(mapping, field)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise GuardFailure(f"critical AUTO policy {field} is invalid") from error
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise GuardFailure(f"critical AUTO policy {field} must be UTC")
+
+
+def _closed_text_list(
+    mapping: Mapping[str, object], field: str, allowed: frozenset[str]
+) -> tuple[str, ...]:
+    raw = _sequence(mapping.get(field), f"critical AUTO policy {field}")
+    if not raw:
+        raise GuardFailure(f"critical AUTO policy {field} are absent")
+    values: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise GuardFailure(f"critical AUTO policy {field} contain invalid text")
+        candidate = item.strip().upper()
+        if candidate not in allowed or candidate in values:
+            raise GuardFailure(f"critical AUTO policy {field} contain unknown or duplicate values")
+        values.append(candidate)
+    return tuple(values)
+
+
+def _parse_finalization_policy(value: bytes) -> FinalizationPolicy:
     try:
         root = _mapping(
             json.loads(value.decode("utf-8"), object_pairs_hook=_critical_auto_policy_object),
@@ -844,9 +961,18 @@ def _parse_critical_auto_policy(value: bytes) -> tuple[CriticalAutoAuthorization
         )
     except (UnicodeDecodeError, json.JSONDecodeError, GuardFailure) as error:
         raise GuardFailure("critical AUTO policy is not valid strict JSON") from error
-    if set(root) != {"schema_version", "authorizations"}:
-        raise GuardFailure("critical AUTO policy has unknown or missing fields")
-    if root.get("schema_version") != _CRITICAL_AUTO_POLICY_SCHEMA:
+    schema = root.get("schema_version")
+    if schema == _CRITICAL_AUTO_POLICY_SCHEMA:
+        if set(root) != {"schema_version", "authorizations"}:
+            raise GuardFailure("critical AUTO policy has unknown or missing fields")
+        raw_standing: tuple[object, ...] = ()
+    elif schema == _CRITICAL_AUTO_POLICY_SCHEMA_V2:
+        if set(root) != {"schema_version", "authorizations", "standing_authorizations"}:
+            raise GuardFailure("critical AUTO policy has unknown or missing fields")
+        raw_standing = _sequence(
+            root.get("standing_authorizations"), "critical AUTO standing authorizations"
+        )
+    else:
         raise GuardFailure("critical AUTO policy schema_version is invalid")
     raw_authorizations = _sequence(root.get("authorizations"), "critical AUTO authorizations")
     if not raw_authorizations:
@@ -875,13 +1001,7 @@ def _parse_critical_auto_policy(value: bytes) -> tuple[CriticalAutoAuthorization
             or authorization_id in seen_authorizations
         ):
             raise GuardFailure("critical AUTO authorization ID is invalid or duplicate")
-        granted_at = _critical_auto_text(authorization, "granted_at")
-        try:
-            granted_at_value = datetime.fromisoformat(granted_at.replace("Z", "+00:00"))
-        except ValueError as error:
-            raise GuardFailure("critical AUTO authorization granted_at is invalid") from error
-        if granted_at_value.tzinfo is None or granted_at_value.utcoffset() != timedelta(0):
-            raise GuardFailure("critical AUTO authorization granted_at must be UTC")
+        _critical_auto_utc(authorization, "granted_at")
         _critical_auto_text(authorization, "human_instruction")
         purpose = _critical_auto_text(authorization, "purpose")
         writer_role = _critical_auto_text(authorization, "writer_role").upper()
@@ -922,11 +1042,69 @@ def _parse_critical_auto_policy(value: bytes) -> tuple[CriticalAutoAuthorization
                 authorization_id, purpose, writer_role, profile, policy, route_item, tuple(blocks)
             )
         )
-    return tuple(authorizations)
+    standing: list[StandingAuthorization] = []
+    for raw_standing_authorization in raw_standing:
+        authorization = _mapping(raw_standing_authorization, "critical AUTO standing authorization")
+        required = {
+            "authorization_id",
+            "granted_at",
+            "human_instruction",
+            "repository",
+            "purpose",
+            "writer_roles",
+            "profiles",
+            "finalize_policy",
+            "status",
+        }
+        if set(authorization) != required:
+            raise GuardFailure("critical AUTO standing authorization has unknown or missing fields")
+        authorization_id = _critical_auto_text(authorization, "authorization_id")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", authorization_id)
+            or authorization_id in seen_authorizations
+            or any(candidate.authorization_id == authorization_id for candidate in standing)
+        ):
+            raise GuardFailure("critical AUTO standing authorization ID is invalid or duplicate")
+        _critical_auto_utc(authorization, "granted_at")
+        _critical_auto_text(authorization, "human_instruction")
+        repository = _critical_auto_text(authorization, "repository")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+            raise GuardFailure("critical AUTO standing authorization repository is invalid")
+        purpose = _critical_auto_text(authorization, "purpose")
+        if purpose != "finalize_only":
+            raise GuardFailure("critical AUTO standing authorization purpose is invalid")
+        writer_roles = _closed_text_list(authorization, "writer_roles", _FINALIZE_WRITER_ROLES)
+        profiles = _closed_text_list(authorization, "profiles", _FINALIZE_PROFILES)
+        policy = _critical_auto_text(authorization, "finalize_policy").upper()
+        if policy != "AUTO":
+            raise GuardFailure("critical AUTO standing authorization policy is invalid")
+        status = _critical_auto_text(authorization, "status").upper()
+        if status not in _STANDING_STATUSES:
+            raise GuardFailure("critical AUTO standing authorization status is invalid")
+        standing.append(
+            StandingAuthorization(
+                authorization_id,
+                repository,
+                purpose,
+                writer_roles,
+                profiles,
+                policy,
+                status,
+            )
+        )
+    return FinalizationPolicy(cast(str, schema), tuple(authorizations), tuple(standing))
+
+
+def _parse_critical_auto_policy(value: bytes) -> tuple[CriticalAutoAuthorization, ...]:
+    return _parse_finalization_policy(value).authorizations
 
 
 def _critical_auto_evidence(metadata: WorkBlockMetadata) -> CriticalAutoEvidence | None:
-    if metadata.profile != "CRITICAL" or metadata.policy != "AUTO":
+    if (
+        metadata.profile != "CRITICAL"
+        or metadata.policy != "AUTO"
+        or metadata.critical_auto_authorization is None
+    ):
         return None
     policy_bytes = _git_bytes(
         ("show", f"{metadata.base_sha}:{_CRITICAL_AUTO_POLICY_PATH}"),
@@ -935,7 +1113,7 @@ def _critical_auto_evidence(metadata: WorkBlockMetadata) -> CriticalAutoEvidence
     authorization = next(
         (
             candidate
-            for candidate in _parse_critical_auto_policy(policy_bytes)
+            for candidate in _parse_finalization_policy(policy_bytes).authorizations
             if candidate.authorization_id == metadata.critical_auto_authorization
         ),
         None,
@@ -960,6 +1138,131 @@ def _critical_auto_evidence(metadata: WorkBlockMetadata) -> CriticalAutoEvidence
     )
 
 
+def _live_main_policy(repository: str) -> tuple[str, bytes]:
+    main = _mapping(
+        _gh_json(["api", f"repos/{repository}/commits/main"], "live main commit"),
+        "live main commit",
+    )
+    main_sha = _required_str(main, ("sha",), "live main SHA")
+    if FULL_SHA.fullmatch(main_sha) is None:
+        raise GuardFailure("live main SHA is invalid")
+    policy = _mapping(
+        _gh_json(
+            [
+                "api",
+                f"repos/{repository}/contents/{_CRITICAL_AUTO_POLICY_PATH}?ref={main_sha}",
+            ],
+            "standing finalization policy live main",
+        ),
+        "standing finalization policy live main",
+    )
+    encoded = _required_str(policy, ("content",), "standing policy content")
+    encoding = _required_str(policy, ("encoding",), "standing policy encoding")
+    if encoding != "base64":
+        raise GuardFailure("standing policy encoding is unknown")
+    try:
+        payload = base64.b64decode(encoded, validate=False)
+    except ValueError as error:
+        raise GuardFailure("standing policy content is unreadable") from error
+    return main_sha, payload
+
+
+def _validate_standing_binding(
+    metadata: WorkBlockMetadata,
+    repository: str,
+    authorization: StandingAuthorization,
+    source: str,
+) -> None:
+    if authorization.status != "ACTIVE":
+        raise GuardFailure(f"standing finalization authorization is not ACTIVE in {source}")
+    if authorization.repository != repository:
+        raise GuardFailure(f"standing finalization authorization repository differs in {source}")
+    if authorization.purpose != "finalize_only" or authorization.policy != "AUTO":
+        raise GuardFailure(
+            f"standing finalization authorization purpose or policy differs in {source}"
+        )
+    if metadata.writer_role not in authorization.writer_roles:
+        raise GuardFailure(
+            f"standing finalization authorization does not bind the writer role in {source}"
+        )
+    if metadata.profile not in authorization.profiles:
+        raise GuardFailure(
+            f"standing finalization authorization does not bind the profile in {source}"
+        )
+
+
+def _standing_authorization_evidence(
+    metadata: WorkBlockMetadata,
+    repository: str | None,
+    phase: str,
+) -> StandingAuthorizationEvidence | None:
+    if metadata.policy != "AUTO" or metadata.finalization_authorization is None:
+        return None
+    if repository is None:
+        raise GuardFailure("standing finalization authorization requires a live repository")
+    policy_bytes = _git_bytes(
+        ("show", f"{metadata.base_sha}:{_CRITICAL_AUTO_POLICY_PATH}"),
+        "standing finalization policy base file",
+    )
+    policy = _parse_finalization_policy(policy_bytes)
+    authorization = next(
+        (
+            candidate
+            for candidate in policy.standing_authorizations
+            if candidate.authorization_id == metadata.finalization_authorization
+        ),
+        None,
+    )
+    if authorization is None:
+        raise GuardFailure(
+            "standing finalization authorization is absent from the verified base policy"
+        )
+    _validate_standing_binding(metadata, repository, authorization, "verified base")
+    live_main_sha: str | None = None
+    if phase in {"audit", "finalize"}:
+        live_main_sha, live_bytes = _live_main_policy(repository)
+        live_policy = _parse_finalization_policy(live_bytes)
+        live_authorization = next(
+            (
+                candidate
+                for candidate in live_policy.standing_authorizations
+                if candidate.authorization_id == authorization.authorization_id
+            ),
+            None,
+        )
+        if live_authorization is None:
+            raise GuardFailure("standing finalization authorization is absent from live main")
+        _validate_standing_binding(metadata, repository, live_authorization, "live main")
+        if live_authorization != authorization:
+            raise GuardFailure("standing finalization authorization changed in live main")
+    return StandingAuthorizationEvidence(
+        authorization.authorization_id,
+        repository,
+        metadata.base_sha,
+        hashlib.sha256(policy_bytes).hexdigest(),
+        authorization.status,
+        "verified_base_standing",
+        live_main_sha,
+    )
+
+
+def _finalization_authority(
+    metadata: WorkBlockMetadata,
+    repository: str | None,
+    phase: str,
+) -> FinalizationAuthority:
+    """Resolve the single typed finalization authority consumed by every phase."""
+    if metadata.policy != "AUTO":
+        return FinalizationAuthority(None, None)
+    if metadata.critical_auto_authorization is not None:
+        return FinalizationAuthority(_critical_auto_evidence(metadata), None)
+    if metadata.finalization_authorization is not None:
+        return FinalizationAuthority(
+            None, _standing_authorization_evidence(metadata, repository, phase)
+        )
+    raise GuardFailure("finalization authorization is absent for AUTO")
+
+
 def _matches_path(pattern: str, path: str) -> bool:
     return path.startswith(pattern[:-2]) if pattern.endswith("/**") else path == pattern
 
@@ -972,6 +1275,8 @@ def _validate_scope(
     metadata: WorkBlockMetadata,
     body: str,
     evidence: ScopeEvidence,
+    *,
+    standing_authorization: StandingAuthorizationEvidence | None = None,
 ) -> ScopeEvaluation:
     """Evaluate the declared R3 scope against live path and hash evidence."""
     scope = parse_declared_scope(body)
@@ -1006,7 +1311,7 @@ def _validate_scope(
     if len(set(paths)) != len(paths):
         raise GuardFailure("changed path list contains duplicates")
     governance = tuple(path for path in paths if _is_governance_path(path))
-    if governance and metadata.policy == "AUTO":
+    if governance and metadata.policy == "AUTO" and standing_authorization is None:
         raise GuardFailure(f"governance path requires HUMAN policy: {governance[0]}")
 
     consumed: list[str] = []
@@ -1034,10 +1339,12 @@ def _validate_scope(
         if (
             metadata.risk != "R3"
             or metadata.profile != "CRITICAL"
-            or metadata.policy != "HUMAN"
+            or (metadata.policy != "HUMAN" and standing_authorization is None)
             or metadata.route_effect != "NONE"
         ):
-            raise GuardFailure("governance writer requires R3/CRITICAL/HUMAN/NONE")
+            raise GuardFailure(
+                "governance writer requires R3/CRITICAL/NONE and HUMAN or verified standing AUTO"
+            )
         for path in paths:
             if not _is_governance_path(path) and path not in {
                 "tests/unit/test_workflow_guard.py",
@@ -1345,6 +1652,7 @@ def snapshot_from_json(value: object) -> GuardSnapshot:
         base_protected=_optional_bool(root, ("base_protected",)),
         scope_evidence=_parse_scope_evidence(root.get("scope_evidence")),
         authority_snapshot=_parse_authority_snapshot(root.get("authority_snapshot")),
+        repository=_optional_str(root, ("repository",)),
     )
 
 
@@ -1740,6 +2048,7 @@ def _build_result(
     next_action: str,
     reasons: tuple[str, ...] = (),
     critical_auto: CriticalAutoEvidence | None = None,
+    standing_authorization: StandingAuthorizationEvidence | None = None,
 ) -> GuardResult:
     return GuardResult(
         status,
@@ -1751,6 +2060,7 @@ def _build_result(
         scope,
         _classification(status, terminal, owner, next_action),
         critical_auto,
+        standing_authorization,
     )
 
 
@@ -1762,6 +2072,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
     mutation_plan: tuple[str, ...] = ()
     scope: ScopeEvaluation | None = None
     critical_auto: CriticalAutoEvidence | None = None
+    standing_authorization: StandingAuthorizationEvidence | None = None
     try:
         if phase not in {"build", "audit", "finalize"}:
             raise GuardFailure("phase is unknown")
@@ -1775,9 +2086,16 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
         if snapshot.source == "live":
             if snapshot.scope_evidence is None:
                 raise GuardFailure("live scope evidence is absent")
-            scope = _validate_scope(metadata, snapshot.issue.body, snapshot.scope_evidence)
+            authority = _finalization_authority(metadata, snapshot.repository, phase)
+            critical_auto = authority.critical_auto
+            standing_authorization = authority.standing_authorization
+            scope = _validate_scope(
+                metadata,
+                snapshot.issue.body,
+                snapshot.scope_evidence,
+                standing_authorization=standing_authorization,
+            )
             _validate_authority_snapshot(metadata, snapshot)
-            critical_auto = _critical_auto_evidence(metadata)
         elif snapshot.source == "json":
             return GuardResult(
                 "NON_AUTHORITATIVE", (), metadata, build, audit, mutation_plan, scope
@@ -1796,6 +2114,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
                 owner=metadata.writer_role,
                 next_action="create the expected draft PR from the verified base",
                 critical_auto=critical_auto,
+                standing_authorization=standing_authorization,
             )
         pull_request = snapshot.pull_request
         markers = _parse_all_markers(snapshot.comments)
@@ -1817,6 +2136,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
                         "complete BUILD validation and publish structured exact-SHA evidence"
                     ),
                     critical_auto=critical_auto,
+                    standing_authorization=standing_authorization,
                 )
             _validate_manifest_requirements(build.marker, manifest, snapshot, scope)
             _validate_checks(snapshot)
@@ -1832,6 +2152,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
                     owner=metadata.writer_role,
                     next_action="execute the required smoke and publish its evidence",
                     critical_auto=critical_auto,
+                    standing_authorization=standing_authorization,
                 )
             return _build_result(
                 "READY",
@@ -1844,6 +2165,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
                 owner="AUDIT",
                 next_action="start a fresh AUDIT for this exact SHA",
                 critical_auto=critical_auto,
+                standing_authorization=standing_authorization,
             )
         if build.marker is None or build.marker.status != "PASS":
             raise GuardFailure("BUILD PASS marker is absent or not PASS")
@@ -1862,6 +2184,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
                 mutation_plan,
                 scope,
                 critical_auto=critical_auto,
+                standing_authorization=standing_authorization,
             )
         if audit.marker is None or audit.marker.status != "PASS":
             raise GuardFailure("AUDIT PASS marker is absent or not PASS")
@@ -1894,6 +2217,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
                     mutation_plan,
                     scope,
                     critical_auto=critical_auto,
+                    standing_authorization=standing_authorization,
                 )
             if receipt.decision == "REJECT":
                 return GuardResult(
@@ -1905,6 +2229,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
                     mutation_plan,
                     scope,
                     critical_auto=critical_auto,
+                    standing_authorization=standing_authorization,
                 )
             decision = "HUMAN_FINALIZE_AUTHORIZED"
         else:
@@ -1918,6 +2243,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
             mutation_plan,
             scope,
             critical_auto=critical_auto,
+            standing_authorization=standing_authorization,
         )
     except GuardFailure as error:
         if phase == "build":
@@ -1933,6 +2259,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
                 next_action="stop without changing protected state",
                 reasons=(str(error),),
                 critical_auto=critical_auto,
+                standing_authorization=standing_authorization,
             )
         return GuardResult(
             "GUARD FAILURE",
@@ -1943,6 +2270,7 @@ def evaluate(snapshot: GuardSnapshot, phase: str = "finalize") -> GuardResult:
             mutation_plan,
             scope,
             critical_auto=critical_auto,
+            standing_authorization=standing_authorization,
         )
 
 
@@ -2310,6 +2638,7 @@ def snapshot_from_live(
             source="live",
             scope_evidence=_live_scope_evidence(metadata, issue_body, repo, None),
             authority_snapshot=authority_snapshot,
+            repository=repo,
         )
     candidate_map = _mapping(pr_candidates[0], "target PR")
     resolved_pr_number = _required_int(candidate_map, ("number",), "target PR number")
@@ -2456,6 +2785,7 @@ def snapshot_from_live(
                 if authority_snapshot is not None
                 else None
             ),
+            "repository": repo,
         }
     )
     return replace(snapshot, source="live")

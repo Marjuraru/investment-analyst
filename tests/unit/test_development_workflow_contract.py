@@ -276,6 +276,67 @@ def test_static_contract_cross_references_skills_permissions_markers_and_alias()
     assert "id: acceptance_manifest" in template
     assert "workflow-acceptance-manifest-v1" in template
     assert "id: owner" not in template
+    assert "critical-auto-policy-v2" in protocol
+    assert "standing_authorizations" in protocol
+    assert "Finalization authorization" in protocol
+    assert "revocación" in protocol
+    assert "critical-auto-policy-v2" in core_rule
+    assert "standing_authorizations" in core_rule
+    assert "Finalization authorization" in core_rule
+    assert "Finalization authorization" in skills["plan"]
+    assert "standing" in skills["build"]
+    assert "main vivo" in skills["audit"]
+    assert "id: finalization_authorization" in template
+
+
+def test_standing_finalization_authorization_is_bounded_and_revocable() -> None:
+    policy = json.loads(_read(".agents/rules/critical_auto_policy.json"))
+
+    assert policy["schema_version"] == "critical-auto-policy-v2"
+    assert [item["authorization_id"] for item in policy["authorizations"]] == [
+        "human-data-chassis-finalize-20261007",
+        "human-data-chassis-continuity-finalize-20261022",
+        "human-v2-readiness-finalize-20261026",
+    ]
+    assert len(policy["standing_authorizations"]) == 1
+    grant = policy["standing_authorizations"][0]
+    assert grant == {
+        "authorization_id": "human-standing-auto-finalize-20261028",
+        "granted_at": "2026-10-28T03:42:14Z",
+        "human_instruction": (
+            "«quiero que la finalizacion sea auto, ya no HUMAN APPROVAL. Esto para los "
+            "siguientes bloques» ratificado por «Además, el bloque debe ser finalizacion "
+            "AUTO SIEMPRE». Formalizado el 2026-10-28T03:42:14Z (27-oct Lima); no se "
+            "registra la hora del mensaje original."
+        ),
+        "repository": "Marjuraru/investment-analyst",
+        "purpose": "finalize_only",
+        "writer_roles": ["BUILD_PRODUCT", "BUILD_GOVERNANCE", "UI_WORKER"],
+        "profiles": ["FAST", "STANDARD", "CRITICAL"],
+        "finalize_policy": "AUTO",
+        "status": "ACTIVE",
+    }
+
+    protocol = " ".join(_read("docs/development_protocol.md").split())
+    core_rule = " ".join(_read(".agents/rules/investment-analyst-core.md").split())
+    agents = " ".join(_read("AGENTS.md").split())
+    plan = _read(".agents/skills/plan/SKILL.md")
+    build = _read(".agents/skills/build/SKILL.md")
+    audit = _read(".agents/skills/audit/SKILL.md")
+    template = _read(".github/ISSUE_TEMPLATE/work_block.yml")
+
+    assert "standing_authorizations" in protocol
+    assert "main remoto adquirido por SHA" in protocol
+    assert "no revocan un grant intacto" in protocol
+    assert "no concede escritura de producto" in protocol
+    assert "candidato de este Work Block" in core_rule
+    assert "no autoriza producto" in core_rule
+    assert "Finalization authorization" in agents
+    assert "never from candidate bytes" in agents
+    assert "Finalization authorization" in plan
+    assert "standing verificado" in build
+    assert "main vivo" in audit
+    assert "id: finalization_authorization" in template
 
 
 def test_efficient_read_rule_preserves_pit_lineage_and_grants_no_new_operations() -> None:

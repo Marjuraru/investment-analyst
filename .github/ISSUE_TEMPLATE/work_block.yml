@@ -28,8 +28,11 @@ body:
     validations: {required: true}
   - type: dropdown
     id: finalize_policy
-    attributes: {label: Finalize policy, options: [AUTO, HUMAN]}
+    attributes: {label: Finalize policy, options: [AUTO, HUMAN], description: "AUTO requiere una autorización verificada en la base; HUMAN conserva el receipt exact-SHA."}
     validations: {required: true}
+  - type: input
+    id: finalization_authorization
+    attributes: {label: Finalization authorization, description: "ID standing v2 repo-scoped o legacy Critical AUTO authorization; sólo con finalize_policy AUTO. Ambos campos juntos fallan."}
   - type: input
     id: base_sha
     attributes: {label: Base SHA, description: "SHA remoto completo."}
@@ -40,7 +43,7 @@ body:
     validations: {required: true}
   - type: dropdown
     id: writer_role
-    attributes: {label: Writer role, description: "Rol único que puede escribir; BUILD_PRODUCT no toca governance, BUILD_GOVERNANCE exige R3/CRITICAL/HUMAN/NONE y snapshot de base, UI_WORKER es producto restringido.", options: [BUILD_PRODUCT, BUILD_GOVERNANCE, UI_WORKER]}
+    attributes: {label: Writer role, description: "Rol único que puede escribir; BUILD_PRODUCT no toca governance, BUILD_GOVERNANCE exige R3/CRITICAL/NONE y HUMAN o standing AUTO verificado, UI_WORKER es producto restringido.", options: [BUILD_PRODUCT, BUILD_GOVERNANCE, UI_WORKER]}
     validations: {required: true}
   - type: textarea
     id: scope_delta

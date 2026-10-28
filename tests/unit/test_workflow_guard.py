@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import json
@@ -33,6 +34,7 @@ from check_workflow_guards import (  # noqa: E402
     PullRequestSnapshot,
     ScopeEvidence,
     SmokeSnapshot,
+    StandingAuthorizationEvidence,
     _validate_audit_independence,
     _validate_scope,
     evaluate,
@@ -92,9 +94,15 @@ def _body(
     risk: str = "R3",
     route_effect: str = "NONE",
     authorization: str | None = None,
+    finalization_authorization: str | None = None,
 ) -> str:
     authorization_line = (
         f"- **Critical AUTO authorization:** `{authorization}`.\n" if authorization else ""
+    )
+    finalization_line = (
+        f"- **Finalization authorization:** `{finalization_authorization}`.\n"
+        if finalization_authorization
+        else ""
     )
     return (
         f"""<!-- development-workflow:work-block-v1 -->
@@ -107,7 +115,7 @@ def _body(
 - **Base remota exacta:** `origin/main@{BASE_SHA}`.
 - **Expected branch:** `codex/dev-7-finalize-policy-guard`.
 - **Writer role:** `{writer_role}`.
-{authorization_line}
+{authorization_line}{finalization_line}
 """
         + _manifest(route_effect)
         + _scope_body()
@@ -243,6 +251,7 @@ def _structured_marker(
     status: str = "PASS",
     comment_id: int | None = None,
     sha: str = FULL_SHA,
+    block: str = "DEV-7",
 ) -> CommentSnapshot:
     manifest = parse_acceptance_manifest(body)
     evidence_val = "verified" if role == "build" else "audit-verified"
@@ -257,7 +266,7 @@ def _structured_marker(
     reviewer = "reviewer=fresh-auditor\n" if role == "audit" else ""
     return CommentSnapshot(
         comment_id if comment_id is not None else (100 if role == "build" else 101),
-        f"<!-- development-workflow:{role}-v2\nblock=DEV-7\nsha={sha}\nstatus={status}\n"
+        f"<!-- development-workflow:{role}-v2\nblock={block}\nsha={sha}\nstatus={status}\n"
         f"manifest_sha256={manifest.digest}\n{reviewer}-->\n"
         f"{json.dumps({'items': items}, separators=(',', ':'))}\n",
     )
@@ -288,6 +297,9 @@ def _snapshot(
     open_threads: int | None = 0,
     changed_paths: tuple[ChangedPath, ...] = (),
     authority_snapshot: AuthoritySnapshot | None = None,
+    repository: str | None = "Marjuraru/investment-analyst",
+    present_paths: frozenset[str] = frozenset(),
+    route_document: str | None = None,
 ) -> GuardSnapshot:
     return GuardSnapshot(
         issue=_issue(body or _body()),
@@ -302,8 +314,9 @@ def _snapshot(
         mergeability_state="clean",
         viewer_permission="WRITE",
         base_protected=True,
-        scope_evidence=ScopeEvidence(changed_paths, {}, {}),
+        scope_evidence=ScopeEvidence(changed_paths, {}, {}, present_paths, route_document),
         authority_snapshot=authority_snapshot,
+        repository=repository,
     )
 
 
@@ -342,7 +355,119 @@ def _critical_auto_policy(
     ).encode("utf-8")
 
 
-def test_metadata_requires_unique_structural_fields_and_human_critical() -> None:
+STANDING_ID = "human-standing-auto-finalize-20261028"
+STANDING_REPOSITORY = "Marjuraru/investment-analyst"
+LIVE_MAIN_SHA = "e" * 40
+
+
+def _standing_policy(
+    *,
+    authorization_id: str = STANDING_ID,
+    status: str = "ACTIVE",
+    writer_roles: tuple[str, ...] = ("BUILD_PRODUCT", "BUILD_GOVERNANCE", "UI_WORKER"),
+    profiles: tuple[str, ...] = ("FAST", "STANDARD", "CRITICAL"),
+    repository: str = STANDING_REPOSITORY,
+    extra_standing: tuple[dict[str, object], ...] = (),
+) -> bytes:
+    legacy = json.loads(_critical_auto_policy())["authorizations"]
+    standing = {
+        "authorization_id": authorization_id,
+        "granted_at": "2026-10-28T03:42:14Z",
+        "human_instruction": "Standing human authorization for future finalization.",
+        "repository": repository,
+        "purpose": "finalize_only",
+        "writer_roles": list(writer_roles),
+        "profiles": list(profiles),
+        "finalize_policy": "AUTO",
+        "status": status,
+    }
+    return json.dumps(
+        {
+            "schema_version": "critical-auto-policy-v2",
+            "authorizations": legacy,
+            "standing_authorizations": [standing, *extra_standing],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _standing_body(
+    *,
+    profile: str = "CRITICAL",
+    writer_role: str = "BUILD_PRODUCT",
+    risk: str = "R3",
+    route_effect: str = "NONE",
+    authorization_id: str = STANDING_ID,
+) -> str:
+    return _body(
+        profile=profile,
+        policy="AUTO",
+        writer_role=writer_role,
+        risk=risk,
+        route_effect=route_effect,
+        finalization_authorization=authorization_id,
+    )
+
+
+def _patch_standing(
+    monkeypatch: pytest.MonkeyPatch,
+    base_policy: bytes,
+    *,
+    live_policy: bytes | None = None,
+    main_sha: str = LIVE_MAIN_SHA,
+    repository: str = STANDING_REPOSITORY,
+    reads: list[str] | None = None,
+) -> None:
+    def git_bytes(arguments: tuple[str, ...], label: str) -> bytes:
+        assert arguments == (
+            "show",
+            f"{BASE_SHA}:{_MODULE._CRITICAL_AUTO_POLICY_PATH}",
+        ), arguments
+        assert label == "standing finalization policy base file"
+        if reads is not None:
+            reads.append("base")
+        return base_policy
+
+    monkeypatch.setattr(_MODULE, "_git_bytes", git_bytes)
+    if live_policy is None:
+        return
+
+    def gh_json(arguments: list[str], label: str) -> object:
+        if arguments == ["api", f"repos/{repository}/commits/main"]:
+            if reads is not None:
+                reads.append("commit")
+            return {"sha": main_sha}
+        expected = (
+            "api",
+            f"repos/{repository}/contents/{_MODULE._CRITICAL_AUTO_POLICY_PATH}?ref={main_sha}",
+        )
+        assert tuple(arguments) == expected, arguments
+        assert label == "standing finalization policy live main"
+        if reads is not None:
+            reads.append("policy")
+        return {
+            "content": base64.b64encode(live_policy).decode("ascii"),
+            "encoding": "base64",
+        }
+
+    monkeypatch.setattr(_MODULE, "_gh_json", gh_json)
+
+
+def _standing_evidence(
+    *,
+    repository: str = STANDING_REPOSITORY,
+    status: str = "ACTIVE",
+    live_main_sha: str | None = None,
+) -> StandingAuthorizationEvidence:
+    return StandingAuthorizationEvidence(
+        STANDING_ID,
+        repository,
+        BASE_SHA,
+        DECLARED_DIGEST,
+        status,
+        "verified_base_standing",
+        live_main_sha,
+    )
     assert parse_work_block(_body()).policy == "HUMAN"
     with pytest.raises(ValueError, match="duplicate Work Block field"):
         parse_work_block(_body() + "- **Profile:** `STANDARD`.\n")
@@ -644,17 +769,18 @@ def test_declared_scope_distinguishes_checkpoint_from_immutable_and_accepts_exac
 
 
 def test_scope_fails_closed_for_governance_auto_and_path_contracts() -> None:
-    auto = _body(profile="FAST", policy="AUTO")
-    governance = evaluate(
-        _snapshot(
-            body=auto,
-            changed_paths=(ChangedPath("scripts/check_workflow_guards.py", "modified"),),
-        ),
-        phase="build",
+    auto_body = _governance_writer_body(
+        ("scripts/check_workflow_guards.py",), profile="FAST", policy="HUMAN"
     )
-    assert governance.decision == "GUARD FAILURE"
-    assert governance.reasons == (
-        "governance path requires HUMAN policy: scripts/check_workflow_guards.py",
+    auto_metadata = replace(parse_work_block(auto_body), policy="AUTO")
+    with pytest.raises(ValueError) as governance_failure:
+        _validate_scope(
+            auto_metadata,
+            auto_body,
+            ScopeEvidence((ChangedPath("scripts/check_workflow_guards.py", "modified"),), {}, {}),
+        )
+    assert str(governance_failure.value) == (
+        "governance path requires HUMAN policy: scripts/check_workflow_guards.py"
     )
 
     outside = evaluate(
@@ -695,16 +821,17 @@ def test_scope_fails_closed_for_governance_auto_and_path_contracts() -> None:
     ),
 )
 def test_every_declared_governance_path_requires_human_policy(path: str) -> None:
-    result = evaluate(
-        _snapshot(
-            body=_body(profile="FAST", policy="AUTO"),
-            changed_paths=(ChangedPath(path, "modified"),),
-        ),
-        phase="build",
-    )
+    body = _governance_writer_body((path,), profile="FAST", policy="HUMAN")
+    metadata = replace(parse_work_block(body), policy="AUTO")
 
-    assert result.decision == "GUARD FAILURE"
-    assert result.reasons == (f"governance path requires HUMAN policy: {path}",)
+    with pytest.raises(ValueError) as failure:
+        _validate_scope(
+            metadata,
+            body,
+            ScopeEvidence((ChangedPath(path, "modified"),), {}, {}),
+        )
+
+    assert str(failure.value) == f"governance path requires HUMAN policy: {path}"
 
 
 def test_scope_hash_categories_and_deny_precede_allowlist() -> None:
@@ -1938,3 +2065,610 @@ def test_sec_corpus_21_is_not_reopened_reverted_or_reaudited() -> None:
     snap_sec = _snapshot(body=body, comments=(sec_audit_marker,))
     res_sec = evaluate(snap_sec, phase="audit")
     assert res_sec.decision == "GUARD FAILURE"
+
+
+def test_metadata_accepts_standing_finalization_authorization() -> None:
+    for writer_role in ("BUILD_PRODUCT", "BUILD_GOVERNANCE", "UI_WORKER"):
+        for profile in ("FAST", "STANDARD", "CRITICAL"):
+            metadata = parse_work_block(_standing_body(profile=profile, writer_role=writer_role))
+            assert metadata.finalization_authorization == STANDING_ID
+            assert metadata.critical_auto_authorization is None
+            assert metadata.policy == "AUTO"
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        parse_work_block(
+            _body(
+                policy="AUTO",
+                authorization="human-dev-7",
+                finalization_authorization=STANDING_ID,
+            )
+        )
+    with pytest.raises(ValueError, match="only valid for AUTO"):
+        parse_work_block(_body(finalization_authorization=STANDING_ID))
+    with pytest.raises(ValueError, match="finalization authorization is absent for AUTO"):
+        parse_work_block(_body(profile="FAST", policy="AUTO"))
+    with pytest.raises(ValueError, match="only valid for CRITICAL/AUTO"):
+        parse_work_block(_body(profile="FAST", policy="AUTO", authorization="human-dev-7"))
+    with pytest.raises(ValueError, match="finalization authorization ID is invalid"):
+        parse_work_block(_standing_body(authorization_id="bad id"))
+
+
+def test_committed_policy_v2_preserves_v1_and_adds_the_standing_grant() -> None:
+    parsed = _MODULE._parse_finalization_policy(
+        (ROOT / ".agents" / "rules" / "critical_auto_policy.json").read_bytes()
+    )
+
+    assert parsed.schema_version == "critical-auto-policy-v2"
+    assert [authorization.authorization_id for authorization in parsed.authorizations] == [
+        "human-data-chassis-finalize-20261007",
+        "human-data-chassis-continuity-finalize-20261022",
+        "human-v2-readiness-finalize-20261026",
+    ]
+    assert [authorization.authorization_id for authorization in parsed.standing_authorizations] == [
+        STANDING_ID
+    ]
+    grant = parsed.standing_authorizations[0]
+    assert grant.repository == STANDING_REPOSITORY
+    assert grant.purpose == "finalize_only"
+    assert grant.writer_roles == ("BUILD_PRODUCT", "BUILD_GOVERNANCE", "UI_WORKER")
+    assert grant.profiles == ("FAST", "STANDARD", "CRITICAL")
+    assert grant.policy == "AUTO"
+    assert grant.status == "ACTIVE"
+
+
+def test_finalization_policy_v2_fails_closed() -> None:
+    def rejects(policy: bytes, reason: str) -> None:
+        with pytest.raises(_MODULE.GuardFailure, match=reason):
+            _MODULE._parse_finalization_policy(policy)
+
+    def encoded(**changes: object) -> bytes:
+        root = json.loads(_standing_policy())
+        standing = root["standing_authorizations"][0]
+        assert isinstance(standing, dict)
+        standing.update(changes)
+        return json.dumps(root).encode()
+
+    root = json.loads(_standing_policy())
+    root["extra"] = 1
+    rejects(json.dumps(root).encode(), "unknown or missing fields")
+    root = json.loads(_standing_policy())
+    root.pop("standing_authorizations")
+    rejects(json.dumps(root).encode(), "unknown or missing fields")
+    root = json.loads(_standing_policy())
+    root["authorizations"] = []
+    rejects(json.dumps(root).encode(), "authorizations are absent")
+    rejects(encoded(authorization_id="human-dev-7"), "ID is invalid or duplicate")
+    rejects(encoded(writer_roles=["BUILD"]), "writer_roles contain unknown or duplicate")
+    rejects(encoded(profiles=[]), "profiles are absent")
+    rejects(encoded(repository="invalid"), "repository is invalid")
+    rejects(encoded(granted_at="2026-10-28T03:42:14"), "must be UTC")
+    rejects(encoded(finalize_policy="HUMAN"), "policy is invalid")
+    rejects(encoded(purpose="merge"), "purpose is invalid")
+    rejects(encoded(status="PENDING"), "status is invalid")
+    rejects(encoded(extra="field"), "unknown or missing fields")
+    rejects(
+        b'{"schema_version":"critical-auto-policy-v2",'
+        b'"schema_version":"critical-auto-policy-v2",'
+        b'"authorizations":[],"standing_authorizations":[]}',
+        "not valid strict JSON",
+    )
+
+
+def test_standing_auto_uses_only_verified_base_bytes_and_reports_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = _standing_policy()
+    _patch_standing(monkeypatch, base)
+
+    result = evaluate(_snapshot(body=_standing_body()), phase="build")
+
+    assert result.decision == "READY"
+    assert result.critical_auto is None
+    assert result.standing_authorization is not None
+    assert result.as_json()["finalization_authorization"] == {
+        "authorization_id": STANDING_ID,
+        "repository": STANDING_REPOSITORY,
+        "base_sha": BASE_SHA,
+        "policy_sha256": hashlib.sha256(base).hexdigest(),
+        "status": "ACTIVE",
+        "source": "verified_base_standing",
+        "live_main_sha": None,
+        "binding": {
+            "block": "DEV-7",
+            "expected_branch": "codex/dev-7-finalize-policy-guard",
+            "writer_role": "BUILD_PRODUCT",
+            "head_sha": FULL_SHA,
+            "manifest_sha256": parse_acceptance_manifest(_standing_body()).digest,
+        },
+    }
+    assert "Standing human authorization" not in json.dumps(result.as_json())
+
+
+@pytest.mark.parametrize(
+    ("metadata", "repository", "policy", "reason"),
+    [
+        (
+            _standing_body(profile="FAST"),
+            STANDING_REPOSITORY,
+            _standing_policy(profiles=("CRITICAL",)),
+            "does not bind the profile",
+        ),
+        (
+            _standing_body(writer_role="UI_WORKER"),
+            STANDING_REPOSITORY,
+            _standing_policy(writer_roles=("BUILD_PRODUCT",)),
+            "does not bind the writer role",
+        ),
+        (
+            _standing_body(),
+            "Other/repo",
+            _standing_policy(),
+            "repository differs",
+        ),
+        (
+            _standing_body(),
+            STANDING_REPOSITORY,
+            _standing_policy(status="REVOKED"),
+            "not ACTIVE",
+        ),
+        (
+            _standing_body(),
+            STANDING_REPOSITORY,
+            _standing_policy(authorization_id="other-standing"),
+            "absent from the verified base policy",
+        ),
+        (
+            _standing_body(),
+            STANDING_REPOSITORY,
+            _critical_auto_policy(),
+            "absent from the verified base policy",
+        ),
+    ],
+)
+def test_standing_auto_rejects_invalid_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+    metadata: str,
+    repository: str,
+    policy: bytes,
+    reason: str,
+) -> None:
+    monkeypatch.setattr(_MODULE, "_git_bytes", lambda _arguments, _label: policy)
+
+    with pytest.raises(_MODULE.GuardFailure, match=reason):
+        _MODULE._standing_authorization_evidence(parse_work_block(metadata), repository, "build")
+
+
+def test_standing_auto_rechecks_the_same_grant_in_two_independent_finalize_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = _standing_policy()
+    reads: list[str] = []
+    _patch_standing(monkeypatch, base, live_policy=base, reads=reads)
+    body = _standing_body()
+
+    first = evaluate(_snapshot(body=body), phase="finalize")
+    second = evaluate(_snapshot(body=body), phase="finalize")
+
+    assert first.decision == "AUTO_FINALIZE_AUTHORIZED"
+    assert second.decision == "AUTO_FINALIZE_AUTHORIZED"
+    assert reads == [
+        "base",
+        "commit",
+        "policy",
+        "base",
+        "commit",
+        "policy",
+    ]
+    assert first.as_json()["finalization_authorization"]["live_main_sha"] == LIVE_MAIN_SHA
+
+
+def test_standing_auto_stops_when_live_main_revokes_or_changes_the_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = _standing_policy()
+    body = _standing_body()
+
+    _patch_standing(monkeypatch, base, live_policy=_standing_policy(status="REVOKED"))
+    revoked = evaluate(_snapshot(body=body), phase="audit")
+    assert revoked.decision == "GUARD FAILURE"
+    assert "not ACTIVE in live main" in revoked.reasons[0]
+
+    _patch_standing(
+        monkeypatch,
+        base,
+        live_policy=_standing_policy(writer_roles=("BUILD_PRODUCT",)),
+    )
+    changed = evaluate(_snapshot(body=body), phase="audit")
+    assert changed.decision == "GUARD FAILURE"
+    assert "changed in live main" in changed.reasons[0]
+
+    _patch_standing(monkeypatch, base, live_policy=_standing_policy(profiles=("FAST",)))
+    reduced = evaluate(_snapshot(body=body), phase="audit")
+    assert reduced.decision == "GUARD FAILURE"
+    assert "does not bind the profile in live main" in reduced.reasons[0]
+
+    _patch_standing(
+        monkeypatch,
+        base,
+        live_policy=_standing_policy(authorization_id="other-standing"),
+    )
+    absent = evaluate(_snapshot(body=body), phase="audit")
+    assert absent.decision == "GUARD FAILURE"
+    assert "absent from live main" in absent.reasons[0]
+
+    extra = json.loads(base)["standing_authorizations"][0]
+    extra["authorization_id"] = "other-standing"
+    _patch_standing(monkeypatch, base, live_policy=_standing_policy(extra_standing=(extra,)))
+    unaffected = evaluate(_snapshot(body=body), phase="audit")
+    assert unaffected.decision == "AUDIT GUARD PASS"
+
+
+def test_standing_grant_is_never_read_from_candidate_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_MODULE, "_git_bytes", lambda _arguments, _label: _critical_auto_policy())
+
+    result = evaluate(_snapshot(body=_standing_body()), phase="build")
+
+    assert result.decision == "GUARD FAILURE"
+    assert "absent from the verified base policy" in result.reasons[0]
+    assert result.standing_authorization is None
+
+
+def test_governance_writer_accepts_auto_only_with_a_verified_standing_authorization() -> None:
+    body = _governance_writer_body(("scripts/check_workflow_guards.py",), policy="HUMAN").replace(
+        "- **finalize_policy:** `HUMAN`.",
+        f"- **finalize_policy:** `AUTO`.\n- **Finalization authorization:** `{STANDING_ID}`.",
+    )
+    metadata = parse_work_block(body)
+    changed = (ChangedPath("scripts/check_workflow_guards.py", "modified"),)
+
+    scope = _validate_scope(
+        metadata,
+        body,
+        ScopeEvidence(changed, {}, {}),
+        standing_authorization=_standing_evidence(),
+    )
+    assert scope.consumed_allowlist_paths == ("scripts/check_workflow_guards.py",)
+
+    with pytest.raises(ValueError, match="governance path requires HUMAN policy"):
+        _validate_scope(metadata, body, ScopeEvidence(changed, {}, {}))
+
+    product_body = _governance_writer_body(
+        ("scripts/check_workflow_guards.py", "docs/unrelated_product.md"),
+        policy="HUMAN",
+    ).replace(
+        "- **finalize_policy:** `HUMAN`.",
+        f"- **finalize_policy:** `AUTO`.\n- **Finalization authorization:** `{STANDING_ID}`.",
+    )
+    product_metadata = parse_work_block(product_body)
+    with pytest.raises(ValueError, match="governance writer cannot modify product path"):
+        _validate_scope(
+            product_metadata,
+            product_body,
+            ScopeEvidence((ChangedPath("docs/unrelated_product.md", "modified"),), {}, {}),
+            standing_authorization=_standing_evidence(),
+        )
+
+    product_writer_body = _governance_writer_body(
+        ("scripts/check_workflow_guards.py",),
+        policy="HUMAN",
+        writer_role="BUILD_PRODUCT",
+    ).replace(
+        "- **finalize_policy:** `HUMAN`.",
+        f"- **finalize_policy:** `AUTO`.\n- **Finalization authorization:** `{STANDING_ID}`.",
+    )
+    with pytest.raises(ValueError, match="product writer cannot modify governance path"):
+        _validate_scope(
+            parse_work_block(product_writer_body),
+            product_writer_body,
+            ScopeEvidence(changed, {}, {}),
+            standing_authorization=_standing_evidence(),
+        )
+
+
+ADR_BLOCK = "FUNDAMENTALS-ADR-INTEGRATION"
+ADR_BRANCH = "codex/fundamentals-adr-integration"
+ADR_HEAD_SHA = "1" * 40
+ADR_PATHS = (
+    "docs/basic_functional_release_plan.md",
+    "src/investment_analyst/catalog/models.py",
+    "src/investment_analyst/analytics/valuation/service.py",
+    "tests/unit/test_valuation.py",
+)
+
+
+def _adr_manifest() -> str:
+    manifest = {
+        "schema_version": "workflow-acceptance-manifest-v1",
+        "route_effect": "ADVANCES",
+        "items": [
+            {
+                "id": "A1",
+                "kind": "acceptance",
+                "requirements": [
+                    "changed_path:docs/basic_functional_release_plan.md",
+                    "changed_path:src/investment_analyst/catalog/models.py",
+                    "focused_test:tests/unit/test_valuation.py",
+                    "ci:Python 3.12 quality",
+                    "smoke:governance-to-adr-product-transition-scratch",
+                ],
+            },
+            {
+                "id": "A2",
+                "kind": "acceptance",
+                "requirements": [
+                    "route_transition:FUNDAMENTALS-COVERAGE:ADVANCES",
+                    "live_probe:standing-grant-reused-without-ledger-edit",
+                ],
+            },
+            {
+                "id": "N1",
+                "kind": "negative",
+                "requirements": [
+                    "changed_path:src/investment_analyst/analytics/valuation/service.py",
+                ],
+            },
+        ],
+    }
+    return f"\n```json\n{json.dumps(manifest, separators=(',', ':'))}\n```\n"
+
+
+def _adr_body() -> str:
+    allowlist = "\n".join(f"- `{path}` — `{DECLARED_DIGEST}`." for path in ADR_PATHS)
+    return f"""<!-- development-workflow:work-block-v1 -->
+
+- **Work Block ID:** `{ADR_BLOCK}`.
+- **Risk:** `R3`.
+- **Profile:** `CRITICAL`.
+- **finalize_policy:** `AUTO`.
+- **route_effect:** `ADVANCES`.
+- **Base remota exacta:** `origin/main@{BASE_SHA}`.
+- **Expected branch:** `{ADR_BRANCH}`.
+- **Writer role:** `BUILD_PRODUCT`.
+- **Finalization authorization:** `{STANDING_ID}`.
+
+## Strict delta allowlist
+
+{allowlist}
+
+## Superficies protegidas
+
+### Checkpoint dormante — verificación de hash en el primary worktree
+
+### Superficies del repositorio no modificables — deny por ruta cambiada
+
+## Superficies prohibidas
+
+- `docs/archive/**` — `deny`.
+- `docs/incidents/**` — `deny`.
+""" + _adr_manifest()
+
+
+def _adr_route_document() -> str:
+    return (
+        "| Item | State | Note |\n"
+        "| --- | --- | --- |\n"
+        "| `FUNDAMENTALS-COVERAGE` | `NEXT` | ADR integration |\n"
+        "| `OTHER` | `BLOCKED` | pending |\n"
+    )
+
+
+def _adr_comments(body: str | None = None) -> tuple[CommentSnapshot, ...]:
+    resolved = body or _adr_body()
+    return (
+        _structured_marker(
+            "build",
+            resolved,
+            sha=ADR_HEAD_SHA,
+            block=ADR_BLOCK,
+            comment_id=200,
+        ),
+        _structured_marker(
+            "audit",
+            resolved,
+            sha=ADR_HEAD_SHA,
+            block=ADR_BLOCK,
+            comment_id=201,
+        ),
+    )
+
+
+def _adr_snapshot(
+    *,
+    body: str | None = None,
+    comments: tuple[CommentSnapshot, ...],
+    branch: str = ADR_BRANCH,
+    head_sha: str = ADR_HEAD_SHA,
+    base_sha: str = BASE_SHA,
+    changed_paths: tuple[ChangedPath, ...] | None = None,
+    route_document: str | None = None,
+    repository: str = STANDING_REPOSITORY,
+    requested_changes: bool = False,
+    open_threads: int = 0,
+    smoke: SmokeSnapshot | None = None,
+    mergeable: bool = True,
+    mergeability_state: str = "clean",
+    viewer_permission: str = "WRITE",
+    base_protected: bool = True,
+) -> GuardSnapshot:
+    resolved_body = body or _adr_body()
+    if changed_paths is None:
+        changed_paths = tuple(ChangedPath(path, "modified") for path in ADR_PATHS)
+    if route_document is None:
+        route_document = _adr_route_document()
+    if smoke is None:
+        smoke = SmokeSnapshot("PASS", "scratch transition evidence")
+    return GuardSnapshot(
+        issue=_issue(resolved_body),
+        pull_request=PullRequestSnapshot(371, "OPEN", branch, head_sha, "main", base_sha, True),
+        comments=comments,
+        checks=(CheckSnapshot("Python 3.12 quality", "completed", "success"),),
+        smoke=smoke,
+        requested_changes=requested_changes,
+        open_threads=open_threads,
+        source="live",
+        mergeable=mergeable,
+        mergeability_state=mergeability_state,
+        viewer_permission=viewer_permission,
+        base_protected=base_protected,
+        scope_evidence=ScopeEvidence(changed_paths, {}, {}, frozenset(), route_document),
+        repository=repository,
+    )
+
+
+def test_adr_product_transition_reaches_auto_finalize_without_human_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = _standing_policy()
+    reads: list[str] = []
+    _patch_standing(monkeypatch, base, live_policy=base, reads=reads)
+    body = _adr_body()
+    comments = _adr_comments(body)
+
+    build = evaluate(_adr_snapshot(body=body, comments=(comments[0],)), phase="build")
+    assert build.decision == "READY"
+    assert build.standing_authorization is not None
+    assert build.standing_authorization.authorization_id == STANDING_ID
+
+    audit = evaluate(_adr_snapshot(body=body, comments=comments), phase="audit")
+    assert audit.decision == "AUDIT GUARD PASS"
+
+    first = evaluate(_adr_snapshot(body=body, comments=comments), phase="finalize")
+    second = evaluate(_adr_snapshot(body=body, comments=comments), phase="finalize")
+
+    assert first.decision == "AUTO_FINALIZE_AUTHORIZED"
+    assert second.decision == "AUTO_FINALIZE_AUTHORIZED"
+    assert first.as_json()["finalization_authorization"]["status"] == "ACTIVE"
+    assert reads == [
+        "base",
+        "base",
+        "commit",
+        "policy",
+        "base",
+        "commit",
+        "policy",
+        "base",
+        "commit",
+        "policy",
+    ]
+
+
+def test_adr_transition_fails_closed_on_scope_evidence_and_revocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = _standing_policy()
+    body = _adr_body()
+    comments = _adr_comments(body)
+
+    _patch_standing(monkeypatch, base, live_policy=base)
+    first = evaluate(_adr_snapshot(body=body, comments=comments), phase="finalize")
+    assert first.decision == "AUTO_FINALIZE_AUTHORIZED"
+
+    _patch_standing(monkeypatch, base, live_policy=_standing_policy(status="REVOKED"))
+    revoked = evaluate(_adr_snapshot(body=body, comments=comments), phase="finalize")
+    assert revoked.decision == "GUARD FAILURE"
+    assert "not ACTIVE in live main" in revoked.reasons[0]
+
+    _patch_standing(monkeypatch, base, live_policy=base)
+    outside = evaluate(
+        _adr_snapshot(
+            body=body,
+            comments=comments,
+            changed_paths=tuple(
+                ChangedPath(path, "modified")
+                for path in (*ADR_PATHS, "src/investment_analyst/analytics/valuation/unsafe.py")
+            ),
+        ),
+        phase="build",
+    )
+    assert outside.decision == "GUARD FAILURE"
+    assert "absent from strict allowlist" in outside.reasons[0]
+
+    wrong_base_body = body.replace(f"origin/main@{BASE_SHA}", f"origin/main@{HISTORICAL_SHA}")
+    monkeypatch.setattr(
+        _MODULE,
+        "_git_bytes",
+        lambda _arguments, _label: _critical_auto_policy(),
+    )
+    wrong_base = evaluate(
+        _adr_snapshot(
+            body=wrong_base_body,
+            comments=(comments[0],),
+            base_sha=HISTORICAL_SHA,
+        ),
+        phase="build",
+    )
+    assert wrong_base.decision == "GUARD FAILURE"
+    assert "absent from the verified base policy" in wrong_base.reasons[0]
+
+    copied = _structured_marker("audit", body, sha=ADR_HEAD_SHA, block=ADR_BLOCK, comment_id=201)
+    build_marker = _structured_marker(
+        "build", body, sha=ADR_HEAD_SHA, block=ADR_BLOCK, comment_id=200
+    )
+    copied = replace(
+        copied,
+        body=copied.body.partition("-->\n")[0] + "-->\n" + build_marker.body.partition("-->\n")[2],
+    )
+    _patch_standing(monkeypatch, base, live_policy=base)
+    copied_result = evaluate(
+        _adr_snapshot(body=body, comments=(build_marker, copied)), phase="audit"
+    )
+    assert copied_result.decision == "GUARD FAILURE"
+    assert "copied audit evidence payload" in copied_result.reasons[0]
+
+    pending = _structured_marker("audit", body, sha=ADR_HEAD_SHA, block=ADR_BLOCK, comment_id=201)
+    payload = json.loads(pending.body.partition("-->\n")[2])
+    payload["items"][0]["verdict"] = "PENDING"
+    pending = replace(
+        pending,
+        body=pending.body.partition("-->\n")[0]
+        + "-->\n"
+        + json.dumps(payload, separators=(",", ":"))
+        + "\n",
+    )
+    pending_result = evaluate(
+        _adr_snapshot(body=body, comments=(build_marker, pending)), phase="finalize"
+    )
+    assert pending_result.decision == "GUARD FAILURE"
+    assert "not PASS" in pending_result.reasons[0]
+
+
+def test_next_block_reuses_the_standing_grant_without_inheriting_prior_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_standing(monkeypatch, _standing_policy())
+    next_block = "FUNDAMENTALS-IFRS-NEXT"
+    next_branch = "codex/fundamentals-ifrs-next"
+    next_sha = "3" * 40
+    next_body = _adr_body().replace(ADR_BLOCK, next_block).replace(ADR_BRANCH, next_branch)
+
+    metadata = parse_work_block(next_body)
+    assert metadata.block == next_block
+    assert metadata.expected_branch == next_branch
+    assert metadata.finalization_authorization == STANDING_ID
+
+    inherited = evaluate(
+        _adr_snapshot(
+            body=next_body,
+            comments=_adr_comments(_adr_body()),
+            branch=next_branch,
+            head_sha=next_sha,
+        ),
+        phase="build",
+    )
+    assert inherited.decision == "GUARD FAILURE"
+
+    fresh = _structured_marker("build", next_body, sha=next_sha, block=next_block, comment_id=300)
+    rebuilt = evaluate(
+        _adr_snapshot(
+            body=next_body,
+            comments=(fresh,),
+            branch=next_branch,
+            head_sha=next_sha,
+        ),
+        phase="build",
+    )
+    assert rebuilt.decision == "READY"
+    assert rebuilt.standing_authorization is not None
+    assert rebuilt.standing_authorization.authorization_id == STANDING_ID
