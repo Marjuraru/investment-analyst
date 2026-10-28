@@ -110,7 +110,16 @@ def test_default_catalog_resource_is_canonical_utf8_json() -> None:
     text = resource.read_text(encoding="utf-8")
     payload = json.loads(text)
     assert text == f"{json.dumps(payload, indent=2, sort_keys=True)}\n"
-    assert "https://" not in text
+    documented_sources: list[str] = []
+    for asset in payload["assets"]:
+        revisions = asset.get("security_unit_basis_revisions", [])
+        documented_sources.extend(revision["source_url"] for revision in revisions)
+        declared = {
+            key: value for key, value in asset.items() if key != "security_unit_basis_revisions"
+        }
+        assert "https://" not in json.dumps(declared)
+    assert documented_sources
+    assert all(source.startswith("https://www.sec.gov/") for source in documented_sources)
     assert "created_at" not in text
     assert "credential" not in text.casefold()
 

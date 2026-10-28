@@ -13,10 +13,11 @@ permite exportar el snapshot JSON exacto; el redondeo de moneda, ratio y porcent
 la presentación.
 
 La v1 aplica únicamente a `listed_company` + `corporate` con mercado diario, SEC configurada y un
-contrato central de unidad del título. Apple y AMD declaran `reported_common_share`, factor exacto
-`1`, `adjustment=all` y `security-unit-basis-v1`. Un ADR sin ratio depositario explícito queda
-`share_basis_unavailable`; ETF y cripto quedan `not_applicable`. El catálogo conserva por separado
-los perfiles Bitcoin, Ethereum y altcoin y no habilita activos nuevos.
+contrato central de unidad del título. Apple, AMD y las dieciocho acciones ordinarias declaran
+`reported_common_share`, factor exacto `1`, `adjustment=all` y `security-unit-basis-v1`. Un ADR sin
+ratio depositario declarado, o sin revisión elegible en el corte, queda `share_basis_unavailable`;
+ETF y cripto quedan `not_applicable`. El catálogo conserva por separado los perfiles Bitcoin,
+Ethereum y altcoin y no habilita activos nuevos.
 
 ## Selección temporal y compatibilidad
 
@@ -37,6 +38,63 @@ pero no se oculta. No existe FX: una moneda de reporte distinta a la cotización
 `currency_mismatch`. La base común v1 declara compatibilidad entre el precio Alpaca
 `adjustment=all` y la unidad reportada, pero también declara que las acciones proceden del cierre
 anual: no se infieren recompras, emisiones o conversiones posteriores.
+
+## Base documentada acción↔ADS (`security-unit-basis-v2`)
+
+Un ADR usa `CatalogAsset.security_unit_basis_revisions`, una tupla ordenada de revisiones estrictas
+`SecurityUnitBasisRevision`. Cada revisión declara `schema_version=security-unit-basis-v2`,
+`basis=depositary_receipt`, `factor` Decimal positivo y finito, `adjustment=all`,
+`reported_share_unit=common_share`, `valid_from` inclusivo, `valid_to` exclusivo opcional,
+`available_at` UTC, CIK, accession, `source_url` y `source_sha256` de los bytes oficiales. El campo
+`revision` es el SHA-256 canónico de todos los campos semánticos, excluyendo el propio `revision` y
+el literal de esquema; un valor declarado que no coincida falla cerrado.
+
+Los cuatro campos estáticos (`security_unit_factor`, `security_unit_basis`,
+`security_unit_basis_version`, `security_unit_market_adjustment`) y las revisiones son
+representaciones mutuamente excluyentes: declarar ambas, o revisiones fuera de orden, invalida el
+catálogo. Las dieciocho bases ordinarias legacy conservan exactamente su camino, valores, IDs y
+claves de reuso; los snapshots históricos sin evidencia siguen siendo legibles.
+
+Declaración real sellada el 2026-10-28 (bytes oficiales leídos una vez con la identidad SEC
+configurada; sólo se conservan metadatos y extractos mínimos en Git):
+
+| Activo | CIK | Accession | Documento | Unidad | Factor | Disponibilidad |
+| --- | --- | --- | --- | --- | --- | --- |
+| `equity:us:tsm` | `0001046179` | `0001628280-26-025362` | `exhibit21.htm` (EX-2.1, 20-F 2026-04-16) | 1 ADS = 5 acciones comunes | `0.2` | `2026-04-17T00:00:00Z` |
+| `equity:us:bvn` | `0001013131` | `0001104659-26-053101` | `R1.htm` (20-F 2026-04-30) | 1 ADS = 1 acción común | `1` | `2026-05-01T00:00:00Z` |
+
+La cota de disponibilidad es conservadora: el día siguiente a la presentación, no un timestamp de
+aceptación SEC inventado. `valid_from` coincide con esa cota y la vigencia queda abierta hasta una
+revisión documentada; no existe vigilancia automática de acciones corporativas. El SHA-256 de TSM
+es `9b4a4e6c…805a141`, el de BVN `ec2067c4…3e8dd` y el fixture
+`tests/fixtures/valuation/adr_basis_sources.json` conserva la referencia completa.
+
+Resolución única compartida por consulta, refresh, cobertura y export:
+
+1. filtrar revisiones con `available_at <= known_at`;
+2. colapsar cada `valid_from` a su revisión de mayor disponibilidad elegible; un empate con
+   contenido semánticamente distinto falla como ambigüedad, nunca por UUID u orden;
+3. seleccionar por intervalo `[valid_from, valid_to)` sobre `valuation_date`; dos tramos distintos
+   que cubran la fecha sin resolución inequívoca fallan cerrados;
+4. comprobar que la fecha del precio seleccionado también pertenece al tramo.
+
+Así, una revisión correctora que cierra un intervalo no permite volver a la versión anterior abierta,
+y un cambio de factor o intervalo publicado después del corte no altera reconstrucciones anteriores.
+`share_basis_unavailable` indica ausencia de revisión elegible; `corporate_action_basis_unavailable`
+indica ambigüedad de declaración; `security_unit_mismatch` indica precio fuera del tramo o unidad
+incompatible. No se aplica un factor por defecto `1` a un ADR.
+
+`ValuationSecurityBasis` conserva sus cuatro campos y admite `basis_evidence` opcional con la
+revisión seleccionada. Cuando existe evidencia, `contract_version` es
+`security-unit-basis-v2:<revision>` y los parámetros persistidos, el snapshot, la API, el export y el
+panel existente exponen fuente, SHA-256, factor, unidad, disponibilidad y tramo. `available_at` de
+cada métrica y del snapshot incorpora la disponibilidad de la base documental; nunca `computed_at`.
+La identidad UUIDv8 liga el digest de la revisión y sus parámetros, de modo que un cambio de ratio
+crea una identidad distinta sin reescribir historia, y un replay idéntico conserva IDs.
+
+Capacidad ADR no equivale a cobertura completa. TSM sólo usa hechos USD ya normalizados y BVN
+conserva sus ausencias legítimas: no hay FX, TTM, IFRS trimestral, estimación de deuda, D&A o
+acciones, ni conversión de moneda del PDF.
 
 ## Fórmulas v1
 
@@ -70,11 +128,12 @@ revisión ambigua, período/fuente/frecuencia/base contable/moneda/unidad incomp
 denominador inválido y EBITDA no disponible.
 
 Las métricas evaluadas se persisten como `MetricResult` con categoría `valuation`. El `result_id`
-UUIDv5 incorpora activo, clave, `known_at`, fecha de valoración, base anual, período, precio,
-versión de unidad, IDs de inputs y algoritmo. La misma evidencia y semántica reutiliza identidad;
-una revisión o input distinto crea historia append-only. Cada métrica referencia solo sus inputs
-transitivos exactos. Los estados no evaluables no se persisten como cero: permanecen en la
-proyección y en los contadores operativos.
+UUIDv5 legacy incorpora activo, clave, `known_at`, fecha de valoración, base anual, período, precio,
+versión de unidad, IDs de inputs y algoritmo. En workspace v2 la identidad es UUIDv8, excluye el
+corte y liga la versión, el factor y el digest de la revisión ADR cuando existe. La misma evidencia
+y semántica reutiliza identidad; una revisión o input distinto crea historia append-only. Cada
+métrica referencia solo sus inputs transitivos exactos. Los estados no evaluables no se persisten
+como cero: permanecen en la proyección y en los contadores operativos.
 
 Los refresh de mercado cotizado, fundamentales SEC y el bootstrap Apple calculan o reutilizan la
 valoración después de persistir nueva evidencia, dentro de la misma conexión writer. No realizan

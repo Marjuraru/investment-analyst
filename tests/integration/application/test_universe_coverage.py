@@ -135,7 +135,27 @@ def test_valuation_reasons_distinguish_common_shares_from_adr_in_coverage(tmp_pa
     for adr_id in ("equity:us:bvn", "equity:us:tsm"):
         cov = assets_by_id[adr_id].corporate_valuation
         assert cov.capability is CoverageCapability.SUPPORTED
-        assert "share_basis_unavailable" in cov.reason_codes
+        assert "share_basis_unavailable" not in cov.reason_codes
+        assert "price_unavailable" in cov.reason_codes
+        assert not any(
+            "documented share-unit basis" in item for item in assets_by_id[adr_id].limitations
+        )
+
+    early = UniverseCoverageApplication.create_default().query(
+        StorageLocationRequest(workspace=workspace),
+        request.model_copy(
+            update={
+                "known_at": datetime(2026, 4, 1, tzinfo=UTC),
+                "market_start": date(2026, 3, 1),
+                "market_end": date(2026, 3, 31),
+                "fundamental_start": date(2020, 1, 1),
+                "fundamental_end": date(2026, 3, 31),
+            }
+        ),
+    )
+    early_by_id = {item.asset_id: item for item in early.assets}
+    for adr_id in ("equity:us:bvn", "equity:us:tsm"):
+        assert "share_basis_unavailable" in early_by_id[adr_id].corporate_valuation.reason_codes
 
 
 def _sec_observation(

@@ -8,6 +8,7 @@ from uuid import UUID
 
 from pydantic import BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
+from investment_analyst.catalog.models import SecurityUnitBasisRevision
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 
@@ -90,6 +91,7 @@ class ValuationSecurityBasis(ContractModel):
     market_units_per_reported_share: FinancialDecimal
     market_adjustment: Literal["all"]
     contract_version: NonEmptyStr
+    basis_evidence: SecurityUnitBasisRevision | None = None
 
     @field_validator("market_units_per_reported_share")
     @classmethod
@@ -97,6 +99,22 @@ class ValuationSecurityBasis(ContractModel):
         if not value.is_finite() or value <= 0:
             raise ValueError("market_units_per_reported_share must be finite and positive")
         return value
+
+    @model_validator(mode="after")
+    def validate_basis_evidence(self) -> "ValuationSecurityBasis":
+        """Keep documented evidence coherent with the applied conversion."""
+        evidence = self.basis_evidence
+        if evidence is None:
+            return self
+        if self.basis != "depositary_receipt" or evidence.basis != self.basis:
+            raise ValueError("basis evidence requires a depositary receipt basis")
+        if evidence.factor != self.market_units_per_reported_share:
+            raise ValueError("basis evidence factor must match the applied factor")
+        if evidence.adjustment != self.market_adjustment:
+            raise ValueError("basis evidence adjustment must match the applied adjustment")
+        if self.contract_version != f"{evidence.schema_version}:{evidence.revision}":
+            raise ValueError("contract_version must bind the documented basis revision")
+        return self
 
 
 class ValuationInput(ContractModel):

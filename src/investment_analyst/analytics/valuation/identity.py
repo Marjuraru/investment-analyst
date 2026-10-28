@@ -9,6 +9,7 @@ from pydantic import JsonValue
 
 from investment_analyst.analytics.metric_identity_v2 import metric_result_id_v2
 from investment_analyst.analytics.valuation.models import CorporateValuationRequest
+from investment_analyst.catalog.models import SecurityUnitBasisRevision
 from investment_analyst.core.models import DataQuality
 
 _NAMESPACE = UUID("12a332a7-6bd1-4b25-9a3a-48801b65c725")
@@ -43,6 +44,28 @@ def valuation_result_id(
     return uuid5(_NAMESPACE, encoded)
 
 
+def _basis_evidence_parameters(
+    evidence: SecurityUnitBasisRevision | None,
+) -> dict[str, JsonValue] | None:
+    if evidence is None:
+        return None
+    return {
+        "accession_number": evidence.accession_number,
+        "adjustment": evidence.adjustment,
+        "available_at": evidence.available_at.isoformat(),
+        "basis": evidence.basis,
+        "cik": evidence.cik,
+        "factor": str(evidence.factor),
+        "reported_share_unit": evidence.reported_share_unit,
+        "revision": evidence.revision,
+        "schema_version": evidence.schema_version,
+        "source_sha256": evidence.source_sha256,
+        "source_url": evidence.source_url,
+        "valid_from": evidence.valid_from.isoformat(),
+        "valid_to": evidence.valid_to.isoformat() if evidence.valid_to is not None else None,
+    }
+
+
 def valuation_result_parameters_v2(
     *,
     request: CorporateValuationRequest,
@@ -51,9 +74,10 @@ def valuation_result_parameters_v2(
     security_basis_version: str,
     formula: str,
     market_units_per_reported_share: Decimal,
+    basis_evidence: SecurityUnitBasisRevision | None = None,
 ) -> dict[str, JsonValue]:
     """Return semantic persisted parameters without the request cut."""
-    return {
+    parameters: dict[str, JsonValue] = {
         "category": "valuation",
         "basis": request.basis,
         "valuation_date": request.valuation_date.isoformat(),
@@ -65,6 +89,10 @@ def valuation_result_parameters_v2(
         "security_basis_version": security_basis_version,
         "market_units_per_reported_share": str(market_units_per_reported_share),
     }
+    evidence = _basis_evidence_parameters(basis_evidence)
+    if evidence is not None:
+        parameters["security_unit_basis_evidence"] = evidence
+    return parameters
 
 
 def valuation_result_id_v2(
@@ -81,6 +109,7 @@ def valuation_result_id_v2(
     algorithm_version: str,
     formula: str,
     market_units_per_reported_share: Decimal,
+    basis_evidence: SecurityUnitBasisRevision | None = None,
 ) -> UUID:
     """Return cut-independent UUIDv8 identity for one valuation metric."""
     parameters = valuation_result_parameters_v2(
@@ -90,6 +119,7 @@ def valuation_result_id_v2(
         security_basis_version=security_basis_version,
         formula=formula,
         market_units_per_reported_share=market_units_per_reported_share,
+        basis_evidence=basis_evidence,
     )
     return metric_result_id_v2(
         asset_id=request.asset_id,

@@ -1,6 +1,6 @@
 """Cut-independent identities for persisted v2 analytical results."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -24,6 +24,7 @@ from investment_analyst.analytics.valuation.identity import (
     valuation_result_parameters_v2,
 )
 from investment_analyst.analytics.valuation.models import CorporateValuationRequest
+from investment_analyst.catalog.models import SecurityUnitBasisRevision
 from investment_analyst.core.models import DataQuality
 
 _AVAILABLE = datetime(2026, 1, 5, tzinfo=UTC)
@@ -68,6 +69,93 @@ def test_valuation_v2_identity_excludes_request_cut_and_keeps_semantic_parameter
     assert first_id.version == 8
     assert first_id == second_id
     assert "known_at" not in parameters
+    assert "security_unit_basis_evidence" not in parameters
+
+
+def _adr_evidence(*, factor: str = "0.2", available_days: int = 0) -> SecurityUnitBasisRevision:
+    return SecurityUnitBasisRevision(
+        basis="depositary_receipt",
+        factor=factor,
+        adjustment="all",
+        valid_from=date(2026, 4, 17),
+        available_at=datetime(2026, 4, 17, tzinfo=UTC) + timedelta(days=available_days),
+        reported_share_unit="common_share",
+        cik="0001046179",
+        accession_number="0001628280-26-025362",
+        source_url="https://www.sec.gov/Archives/edgar/data/1046179/example.htm",
+        source_sha256="9b4a4e6cd176e5f55976dbe067d006b395aab2570115d943e6c089560805a141",
+    )
+
+
+def test_adr_basis_evidence_binds_identity_without_binding_the_cut() -> None:
+    evidence = _adr_evidence()
+    observation_ids = (uuid4(),)
+    request = CorporateValuationRequest(
+        asset_id="equity:us:tsm",
+        known_at=_CUT_1,
+        valuation_date=_AS_OF.date(),
+    )
+    coordinates = {
+        "metric_key": "valuation.corporate.market_cap",
+        "valuation_as_of": _AS_OF,
+        "available_at": _AVAILABLE,
+        "unit": "USD",
+        "annual_period_start": None,
+        "annual_period_end": _AS_OF,
+        "security_basis_version": f"security-unit-basis-v2:{evidence.revision}",
+        "input_observation_ids": observation_ids,
+        "algorithm_version": "corporate-valuation-latest-annual-v1-decimal34",
+        "formula": "close_price * shares_outstanding * market_units_per_reported_share",
+        "market_units_per_reported_share": Decimal("0.2"),
+        "basis_evidence": evidence,
+    }
+
+    baseline = valuation_result_id_v2(request=request, **coordinates)
+    later_cut = valuation_result_id_v2(
+        request=request.model_copy(update={"known_at": _CUT_2}), **coordinates
+    )
+    assert baseline == later_cut
+
+    changed_factor = _adr_evidence(factor="0.25")
+    assert (
+        valuation_result_id_v2(
+            request=request,
+            **{
+                **coordinates,
+                "security_basis_version": f"security-unit-basis-v2:{changed_factor.revision}",
+                "market_units_per_reported_share": Decimal("0.25"),
+                "basis_evidence": changed_factor,
+            },
+        )
+        != baseline
+    )
+
+    changed_availability = _adr_evidence(available_days=1)
+    assert (
+        valuation_result_id_v2(
+            request=request,
+            **{
+                **coordinates,
+                "available_at": _AVAILABLE + timedelta(days=1),
+                "security_basis_version": (
+                    f"security-unit-basis-v2:{changed_availability.revision}"
+                ),
+                "basis_evidence": changed_availability,
+            },
+        )
+        != baseline
+    )
+
+    parameters = valuation_result_parameters_v2(
+        request=request,
+        annual_period_start=None,
+        annual_period_end=_AS_OF,
+        security_basis_version=coordinates["security_basis_version"],
+        formula=coordinates["formula"],
+        market_units_per_reported_share=Decimal("0.2"),
+        basis_evidence=evidence,
+    )
+    assert parameters["security_unit_basis_evidence"]["revision"] == evidence.revision
 
 
 def test_activity_and_institutional_v2_identities_exclude_only_the_execution_cut() -> None:

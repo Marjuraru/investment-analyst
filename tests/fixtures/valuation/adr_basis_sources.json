@@ -1,0 +1,49 @@
+{
+  "schema_version": "adr-basis-sources-v1",
+  "acquired_at": "2026-10-28T16:20:15Z",
+  "acquisition_note": "Bytes read once from data.sec.gov with the configured SEC identity; only hashes, sizes and minimal excerpts are retained in Git.",
+  "sources": [
+    {
+      "accession_number": "0001628280-26-025362",
+      "asset_id": "equity:us:tsm",
+      "available_at": "2026-04-17T00:00:00Z",
+      "cik": "0001046179",
+      "document": "exhibit21.htm",
+      "document_bytes": 205675,
+      "document_type": "EX-2.1",
+      "filing_date": "2026-04-16",
+      "form": "20-F",
+      "index_bytes": 16361,
+      "index_sha256": "f84b51404dd48fdd671920002b4a20b2b4f9292a2c7404ea3262148a69fc4df7",
+      "index_url": "https://www.sec.gov/Archives/edgar/data/1046179/000162828026025362/0001628280-26-025362-index.html",
+      "period_of_report": "2025-12-31",
+      "ratio_excerpt": "American Depositary Shares, each representing five (5) Common Shares",
+      "reported_share_unit": "common_share",
+      "traded_unit": "depositary_receipt",
+      "units_per_reported_share": "0.2",
+      "source_sha256": "9b4a4e6cd176e5f55976dbe067d006b395aab2570115d943e6c089560805a141",
+      "source_url": "https://www.sec.gov/Archives/edgar/data/1046179/000162828026025362/exhibit21.htm"
+    },
+    {
+      "accession_number": "0001104659-26-053101",
+      "asset_id": "equity:us:bvn",
+      "available_at": "2026-05-01T00:00:00Z",
+      "cik": "0001013131",
+      "document": "R1.htm",
+      "document_bytes": 75612,
+      "document_type": "R1",
+      "filing_date": "2026-04-30",
+      "form": "20-F",
+      "index_bytes": 30381,
+      "index_sha256": "22b4d99cb8a837ff5cddae524b2ab8c01e046748eefd987b76e0124db10d1997",
+      "index_url": "https://www.sec.gov/Archives/edgar/data/1013131/000110465926053101/0001104659-26-053101-index.html",
+      "period_of_report": "2025-12-31",
+      "ratio_excerpt": "American Depositary Shares (\u201cADSs\u201d) representing one Common Share each",
+      "reported_share_unit": "common_share",
+      "traded_unit": "depositary_receipt",
+      "units_per_reported_share": "1",
+      "source_sha256": "ec2067c4ec169bbd068101dab16ad88159fac9be5825af76c7f851d71e83e8dd",
+      "source_url": "https://www.sec.gov/Archives/edgar/data/1013131/000110465926053101/R1.htm"
+    }
+  ]
+}

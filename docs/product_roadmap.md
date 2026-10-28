@@ -12,6 +12,14 @@
 > verificados, refresh AAPL completo con replay idempotente, AMD como control y cero accesos a v1 en
 > runtime. La fila permanece `NEXT`: no se declara cobertura fundamental nueva ni se cierra la ruta.
 >
+> `FUNDAMENTALS-ADR-INTEGRATION`/#369 (`ADVANCES`) incorpora la base documentada acción↔ADS como
+> contrato de catálogo con revisiones fechadas y disponibles (`security-unit-basis-v2`), selección
+> point-in-time única y adopción en valoración, cobertura, API y panel existente. TSM declara `0.2`
+> ADS por acción común y BVN `1`, con fuente SEC, CIK, accession, SHA-256 de los bytes y cota de
+> disponibilidad conservadora (`2026-04-17` y `2026-05-01`). La fila `FUNDAMENTALS-COVERAGE`
+> permanece `NEXT`: la capacidad ADR no equivale a cobertura completa ni cierra la ruta, y no se
+> añade FX, TTM, trimestral IFRS ni vigilancia automática de acciones corporativas.
+>
 > Las notas y cronologías fechadas de este documento son registro histórico. No describen un Issue
 > activo ni autorizan ejecución; la única autoridad de Work Block es el Issue abierto con
 > `workflow:active` resuelto desde GitHub vivo.

@@ -92,14 +92,29 @@ def test_sixteen_common_share_issuers_declare_explicit_share_basis() -> None:
     assert len(all_declared) == 18
 
 
-def test_bvn_and_tsm_remain_without_basis_declaration() -> None:
+def test_bvn_and_tsm_declare_documented_revisions_without_static_fields() -> None:
     catalog = AssetCatalogService.load_default()
+    expected = {
+        "equity:us:tsm": (Decimal("0.2"), "0001628280-26-025362", "0001046179"),
+        "equity:us:bvn": (Decimal("1"), "0001104659-26-053101", "0001013131"),
+    }
     for asset_id in _ADR_ISSUER_IDS:
         asset = catalog.get(asset_id)
         assert asset.security_unit_basis is None
         assert asset.security_unit_basis_version is None
         assert asset.security_unit_factor is None
         assert asset.security_unit_market_adjustment is None
+        assert len(asset.security_unit_basis_revisions) == 1
+        revision = asset.security_unit_basis_revisions[0]
+        factor, accession_number, cik = expected[asset_id]
+        assert revision.basis == "depositary_receipt"
+        assert revision.factor == factor
+        assert revision.reported_share_unit == "common_share"
+        assert revision.accession_number == accession_number
+        assert revision.cik == cik
+        assert revision.valid_from.isoformat() in {"2026-04-17", "2026-05-01"}
+        assert len(revision.revision) == 64
+        assert len(revision.source_sha256) == 64
 
 
 def test_non_equity_and_peru_assets_declare_no_security_unit_contract() -> None:
@@ -133,6 +148,7 @@ def _valuation_service_for_asset(
         security_unit_basis=asset.security_unit_basis,
         security_unit_basis_version=asset.security_unit_basis_version,
         security_unit_market_adjustment=asset.security_unit_market_adjustment,
+        security_unit_basis_revisions=asset.security_unit_basis_revisions,
     )
 
 
@@ -161,14 +177,23 @@ def test_corporate_valuation_does_not_fail_with_share_basis_unavailable_for_sixt
         assert snapshot.security_basis.market_units_per_reported_share == Decimal("1")
 
 
-def test_corporate_valuation_fails_with_share_basis_unavailable_for_adr_issuers() -> None:
+def test_adr_issuer_without_declaration_keeps_share_basis_unavailable() -> None:
     catalog = AssetCatalogService.load_default()
     resolver = ProviderAssetContextResolver(catalog)
     storage = _EmptyStorage()  # type: ignore[arg-type]
 
     for asset_id in _ADR_ISSUER_IDS:
         asset = catalog.get(asset_id)
-        service = _valuation_service_for_asset(catalog, resolver, storage, asset)  # type: ignore[arg-type]
+        alpaca = resolve_alpaca_configuration(resolver, asset_id=asset_id)
+        sec = resolve_sec_configuration(resolver, asset_id=asset_id)
+        service = CorporateValuationService(
+            storage,  # type: ignore[arg-type]
+            capabilities=analysis_capabilities_for(asset),
+            market_source_id=alpaca.source_id,
+            fundamental_source_id=sec.companyfacts_source_id,
+            price_currency=asset.quote_currency,
+            security_unit_factor=None,
+        )
         snapshot = service.query(
             CorporateValuationRequest(
                 asset_id=asset_id,
@@ -180,3 +205,29 @@ def test_corporate_valuation_fails_with_share_basis_unavailable_for_adr_issuers(
         assert snapshot.security_basis is None
         for metric in snapshot.metrics:
             assert metric.reason_code is ValuationReasonCode.SHARE_BASIS_UNAVAILABLE
+
+
+def test_adr_issuers_use_the_eligible_revision_instead_of_missing_basis() -> None:
+    catalog = AssetCatalogService.load_default()
+    resolver = ProviderAssetContextResolver(catalog)
+    storage = _EmptyStorage()  # type: ignore[arg-type]
+
+    for asset_id, expected_factor in (
+        ("equity:us:tsm", Decimal("0.2")),
+        ("equity:us:bvn", Decimal("1")),
+    ):
+        asset = catalog.get(asset_id)
+        service = _valuation_service_for_asset(catalog, resolver, storage, asset)  # type: ignore[arg-type]
+        snapshot = service.query(
+            CorporateValuationRequest(
+                asset_id=asset_id,
+                known_at="2026-09-12T00:00:00Z",
+                valuation_date="2026-09-11",
+            )
+        )
+        assert snapshot.status is ValuationSnapshotStatus.NOT_EVALUABLE
+        assert snapshot.security_basis is not None
+        assert snapshot.security_basis.market_units_per_reported_share == expected_factor
+        assert snapshot.security_basis.basis_evidence is not None
+        for metric in snapshot.metrics:
+            assert metric.reason_code is ValuationReasonCode.PRICE_UNAVAILABLE

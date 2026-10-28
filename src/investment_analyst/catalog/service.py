@@ -1,5 +1,6 @@
 """Load and query the static versioned asset catalog without I/O side effects."""
 
+import hashlib
 import json
 from importlib import resources
 from pathlib import Path
@@ -58,6 +59,16 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-standard JSON constant is not allowed: {value}")
 
 
+def _semantic_digest(document: AssetCatalogDocument) -> str:
+    encoded = json.dumps(
+        document.model_dump(mode="json"),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _normalized_slug(value: str, *, field_name: str) -> str:
     normalized = value.strip().casefold()
     if not normalized:
@@ -85,6 +96,7 @@ class AssetCatalogService:
         loaded = document if document is not None else self._load_path(Path(path))
         self._validate_version(loaded)
         self._document = loaded
+        self._semantic_digest = _semantic_digest(loaded)
         self._assets_by_id = MappingProxyType({asset.asset_id: asset for asset in loaded.assets})
         aliases: dict[str, list[CatalogAsset]] = {}
         external: dict[tuple[str, str, str], list[CatalogAsset]] = {}
@@ -127,6 +139,11 @@ class AssetCatalogService:
     def document(self) -> AssetCatalogDocument:
         """Return the immutable validated catalog document."""
         return self._document
+
+    @property
+    def semantic_digest(self) -> str:
+        """Return the declared catalog semantics, including unit-basis revisions."""
+        return self._semantic_digest
 
     def get(self, asset_id: str) -> CatalogAsset:
         """Return one asset by its canonical identifier."""

@@ -92,8 +92,11 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     for symbol in ("BVN", "TSM"):
         foreign_issuer = by_symbol[symbol]
         assert foreign_issuer.has_fundamentals
-        assert not foreign_issuer.has_corporate_valuation
+        assert foreign_issuer.has_corporate_valuation
         assert foreign_issuer.fundamental_frequencies == (DataFrequency.ANNUAL,)
+    for asset in universe.assets:
+        if asset.asset_class is not AssetClass.EQUITY:
+            assert not asset.has_corporate_valuation
     intel = by_symbol["INTC"]
     assert intel.analysis.fundamental_data_configured
     assert intel.has_fundamentals

@@ -161,6 +161,59 @@ def test_persistence_is_deterministic_and_idempotent() -> None:
     assert len(storage.metric_results.rows) == 1
     assert storage.metric_results.rows[0].input_observation_ids == [_INPUT_ID]
     assert storage.metric_results.rows[0].parameters["category"] == "valuation"
+    assert "security_unit_basis_evidence" not in storage.metric_results.rows[0].parameters
+
+
+def test_adr_basis_evidence_is_persisted_with_source_and_interval() -> None:
+    from investment_analyst.catalog.models import SecurityUnitBasisRevision
+
+    revision = SecurityUnitBasisRevision(
+        basis="depositary_receipt",
+        factor=Decimal("0.2"),
+        adjustment="all",
+        valid_from=date(2026, 4, 17),
+        available_at=datetime(2026, 4, 17, tzinfo=UTC),
+        reported_share_unit="common_share",
+        cik="0001046179",
+        accession_number="0001628280-26-025362",
+        source_url="https://www.sec.gov/Archives/edgar/data/1046179/example.htm",
+        source_sha256="9b4a4e6cd176e5f55976dbe067d006b395aab2570115d943e6c089560805a141",
+    )
+    basis = ValuationSecurityBasis(
+        basis="depositary_receipt",
+        market_units_per_reported_share=Decimal("0.2"),
+        market_adjustment="all",
+        contract_version=f"security-unit-basis-v2:{revision.revision}",
+        basis_evidence=revision,
+    )
+    snapshot = _snapshot("valuation.corporate.market_cap").model_copy(
+        update={"security_basis": basis}
+    )
+    snapshot = snapshot.model_copy(
+        update={
+            "metrics": tuple(
+                metric.model_copy(
+                    update={"result_id": UUID(f"00000000-0000-8000-8000-{index + 10:012d}")}
+                )
+                for index, metric in enumerate(snapshot.metrics)
+            )
+        }
+    )
+    storage = _Storage()
+
+    CorporateValuationPersistencePipeline(storage).persist(snapshot)
+
+    parameters = storage.metric_results.rows[0].parameters
+    evidence = parameters["security_unit_basis_evidence"]
+    assert parameters["market_units_per_reported_share"] == "0.2"
+    assert evidence["revision"] == revision.revision
+    assert evidence["factor"] == "0.2"
+    assert evidence["reported_share_unit"] == "common_share"
+    assert evidence["valid_from"] == "2026-04-17"
+    assert evidence["valid_to"] is None
+    assert evidence["available_at"] == "2026-04-17T00:00:00+00:00"
+    assert evidence["source_sha256"] == revision.source_sha256
+    assert evidence["accession_number"] == "0001628280-26-025362"
 
 
 def test_late_metric_failure_preserves_earlier_append_only_progress() -> None:

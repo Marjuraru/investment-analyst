@@ -348,6 +348,7 @@ class UniverseCoverageService:
             security_unit_basis=asset.security_unit_basis,
             security_unit_basis_version=asset.security_unit_basis_version,
             security_unit_market_adjustment=asset.security_unit_market_adjustment,
+            security_unit_basis_revisions=asset.security_unit_basis_revisions,
         ).query(
             CorporateValuationRequest(
                 asset_id=asset.asset_id,
@@ -457,7 +458,11 @@ def _limitations(asset: CatalogAsset, descriptor: MarketAssetDescriptor | None) 
         limitations.append("IEX market data is not consolidated SIP coverage")
     if descriptor is not None and descriptor.provider == "coinbase":
         limitations.append("Coinbase Exchange daily candles are venue-specific spot-market data")
-    if asset.asset_class is AssetClass.EQUITY and asset.security_unit_factor is None:
+    if (
+        asset.asset_class is AssetClass.EQUITY
+        and asset.security_unit_factor is None
+        and not asset.security_unit_basis_revisions
+    ):
         limitations.append("corporate valuation requires documented share-unit basis")
     if (
         descriptor is not None

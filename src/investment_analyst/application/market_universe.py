@@ -201,10 +201,15 @@ def _descriptor(
             has_fundamentals=fundamental_pipeline_available,
             has_corporate_valuation=(
                 fundamental_pipeline_available
-                and asset.security_unit_factor is not None
-                and asset.security_unit_basis is not None
-                and asset.security_unit_basis_version is not None
-                and asset.security_unit_market_adjustment == "all"
+                and (
+                    (
+                        asset.security_unit_factor is not None
+                        and asset.security_unit_basis is not None
+                        and asset.security_unit_basis_version is not None
+                        and asset.security_unit_market_adjustment == "all"
+                    )
+                    or bool(asset.security_unit_basis_revisions)
+                )
             ),
             fundamental_frequencies=fundamental_frequencies,
             fundamental_source_ids=(

@@ -309,6 +309,7 @@ from investment_analyst.providers.ownership.sec_ownership_pipeline import SecOwn
 from investment_analyst.providers.peru.smv_open_data import SmvOpenDataClient
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.read_dependency_signature import (
+    READ_DEPENDENCY_CODE_VERSION,
     ReadDependencyQuery,
     ReadDependencySignature,
     build_composite_read_dependency_signature,
@@ -517,7 +518,11 @@ class InvestmentAnalystApplication:
             location,
             access_mode=WorkspaceAccessMode("read_only"),
         ) as storage:
-            return build_read_dependency_signature(storage, query)
+            return build_read_dependency_signature(
+                storage,
+                query,
+                code_version=self._read_code_version(),
+            )
 
     def read_composite_dependency_signature(
         self,
@@ -530,7 +535,15 @@ class InvestmentAnalystApplication:
             location,
             access_mode=WorkspaceAccessMode("read_only"),
         ) as storage:
-            return build_composite_read_dependency_signature(storage, queries)
+            return build_composite_read_dependency_signature(
+                storage,
+                queries,
+                code_version=self._read_code_version(),
+            )
+
+    def _read_code_version(self) -> str:
+        """Bind read reuse to the exact code and declared catalog semantics."""
+        return f"{READ_DEPENDENCY_CODE_VERSION}:{self._runtime.catalog.semantic_digest}"
 
     def query_listed_company_diagnostics(
         self,
@@ -946,6 +959,7 @@ class InvestmentAnalystApplication:
                     security_unit_basis=asset.security_unit_basis,
                     security_unit_basis_version=asset.security_unit_basis_version,
                     security_unit_market_adjustment=asset.security_unit_market_adjustment,
+                    security_unit_basis_revisions=asset.security_unit_basis_revisions,
                 )
                 valuation_pipeline = CorporateValuationPersistencePipeline(storage)
             return ListedMarketRefreshPipeline(
@@ -1042,6 +1056,7 @@ class InvestmentAnalystApplication:
                     security_unit_basis=asset.security_unit_basis,
                     security_unit_basis_version=asset.security_unit_basis_version,
                     security_unit_market_adjustment=asset.security_unit_market_adjustment,
+                    security_unit_basis_revisions=asset.security_unit_basis_revisions,
                 ),
                 valuation_pipeline=CorporateValuationPersistencePipeline(storage),
             ).run(request)
@@ -1351,6 +1366,7 @@ class InvestmentAnalystApplication:
                 security_unit_basis=asset.security_unit_basis,
                 security_unit_basis_version=asset.security_unit_basis_version,
                 security_unit_market_adjustment=asset.security_unit_market_adjustment,
+                security_unit_basis_revisions=asset.security_unit_basis_revisions,
             ).query(request)
 
     def query_corporate_valuation_history(
@@ -1410,6 +1426,7 @@ class InvestmentAnalystApplication:
                 security_unit_basis=asset.security_unit_basis,
                 security_unit_basis_version=asset.security_unit_basis_version,
                 security_unit_market_adjustment=asset.security_unit_market_adjustment,
+                security_unit_basis_revisions=asset.security_unit_basis_revisions,
             ).query(request)
             return CorporateValuationPersistencePipeline(storage).persist(snapshot)
 
@@ -1486,6 +1503,7 @@ class InvestmentAnalystApplication:
                 security_unit_basis=asset.security_unit_basis,
                 security_unit_basis_version=asset.security_unit_basis_version,
                 security_unit_market_adjustment=asset.security_unit_market_adjustment,
+                security_unit_basis_revisions=asset.security_unit_basis_revisions,
             ),
             valuation_pipeline=CorporateValuationPersistencePipeline(storage),
             consolidated_service=AaplConsolidatedDiagnosticService(storage),

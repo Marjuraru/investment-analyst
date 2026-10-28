@@ -1,6 +1,9 @@
 """Strict, immutable models for the versioned asset catalog."""
 
+import hashlib
+import json
 import re
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Literal
@@ -8,10 +11,11 @@ from typing import Literal
 from pydantic import ConfigDict, StrictBool, StrictInt, field_validator, model_validator
 
 from investment_analyst.core.models import Asset, AssetClass
-from investment_analyst.core.models.base import ContractModel, NonEmptyStr
+from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 
 _SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _CAPABILITY_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)+$")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class CatalogCryptoProfile(StrEnum):
@@ -79,6 +83,158 @@ class ProviderBinding(ContractModel):
         return self.provider, self.namespace, self.identifier
 
 
+class SecurityUnitBasisAmbiguityError(ValueError):
+    """Raised when eligible security unit revisions cannot be resolved uniquely."""
+
+
+def security_unit_basis_revision_digest(
+    *,
+    basis: str,
+    factor: Decimal,
+    adjustment: str,
+    valid_from: date,
+    valid_to: date | None,
+    available_at: datetime,
+    reported_share_unit: str,
+    cik: str,
+    accession_number: str,
+    source_url: str,
+    source_sha256: str,
+) -> str:
+    """Return the canonical digest of every semantic revision field.
+
+    The revision identifier itself and the schema literal are excluded so the
+    digest never references its own value.
+    """
+    document = {
+        "accession_number": accession_number,
+        "adjustment": adjustment,
+        "available_at": available_at.isoformat(),
+        "basis": basis,
+        "cik": cik,
+        "factor": str(factor),
+        "reported_share_unit": reported_share_unit,
+        "source_sha256": source_sha256,
+        "source_url": source_url,
+        "valid_from": valid_from.isoformat(),
+        "valid_to": valid_to.isoformat() if valid_to is not None else None,
+    }
+    encoded = json.dumps(document, allow_nan=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+class SecurityUnitBasisRevision(ContractModel):
+    """One documented and time-bounded traded-unit to reported-share revision."""
+
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: Literal["security-unit-basis-v2"] = "security-unit-basis-v2"
+    basis: Literal["depositary_receipt"]
+    factor: Decimal
+    adjustment: Literal["all"]
+    valid_from: date
+    valid_to: date | None = None
+    available_at: UTCDateTime
+    reported_share_unit: Literal["common_share"]
+    cik: NonEmptyStr
+    accession_number: NonEmptyStr
+    source_url: NonEmptyStr
+    source_sha256: str
+    revision: NonEmptyStr = ""
+
+    @field_validator("factor", mode="before")
+    @classmethod
+    def reject_float_factor(cls, value: object) -> object:
+        """Require exact Decimal text for the traded-unit conversion."""
+        if isinstance(value, (bool, float)):
+            raise ValueError("factor must use Decimal-compatible text, not float")
+        return value
+
+    @field_validator("factor")
+    @classmethod
+    def positive_finite_factor(cls, value: Decimal) -> Decimal:
+        if not value.is_finite() or value <= 0:
+            raise ValueError("factor must be a finite positive Decimal")
+        return value
+
+    @field_validator("valid_from", "valid_to", mode="before")
+    @classmethod
+    def parse_calendar_dates(cls, value: object) -> object:
+        if isinstance(value, str):
+            return date.fromisoformat(value)
+        return value
+
+    @field_validator("source_sha256")
+    @classmethod
+    def validate_source_sha256(cls, value: str) -> str:
+        if not _SHA256_PATTERN.fullmatch(value):
+            raise ValueError("source_sha256 must be a lower-case hexadecimal SHA-256 digest")
+        return value
+
+    @model_validator(mode="after")
+    def validate_interval_and_revision(self) -> "SecurityUnitBasisRevision":
+        if self.valid_to is not None and self.valid_to <= self.valid_from:
+            raise ValueError("valid_to must be after valid_from")
+        digest = security_unit_basis_revision_digest(
+            basis=self.basis,
+            factor=self.factor,
+            adjustment=self.adjustment,
+            valid_from=self.valid_from,
+            valid_to=self.valid_to,
+            available_at=self.available_at,
+            reported_share_unit=self.reported_share_unit,
+            cik=self.cik,
+            accession_number=self.accession_number,
+            source_url=self.source_url,
+            source_sha256=self.source_sha256,
+        )
+        if self.revision and self.revision != digest:
+            raise ValueError("revision must match the canonical semantic digest")
+        if self.revision != digest:
+            object.__setattr__(self, "revision", digest)
+        return self
+
+    def covers(self, valuation_date: date) -> bool:
+        """Return whether one date belongs to the half-open revision interval."""
+        return self.valid_from <= valuation_date and (
+            self.valid_to is None or valuation_date < self.valid_to
+        )
+
+
+def select_security_unit_basis_revision(
+    revisions: tuple[SecurityUnitBasisRevision, ...],
+    *,
+    known_at: datetime,
+    valuation_date: date,
+) -> SecurityUnitBasisRevision | None:
+    """Select one eligible revision without UUID or declaration-order tie-breaking."""
+    eligible = tuple(item for item in revisions if item.available_at <= known_at)
+    if not eligible:
+        return None
+    latest_by_start: dict[date, SecurityUnitBasisRevision] = {}
+    for item in eligible:
+        current = latest_by_start.get(item.valid_from)
+        if current is None or item.available_at > current.available_at:
+            latest_by_start[item.valid_from] = item
+        elif item.available_at == current.available_at and item.revision != current.revision:
+            raise SecurityUnitBasisAmbiguityError(
+                "equally available security unit revisions disagree semantically"
+            )
+    candidates = tuple(
+        sorted(
+            (item for item in latest_by_start.values() if item.covers(valuation_date)),
+            key=lambda item: (item.valid_from, item.revision),
+        )
+    )
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        raise SecurityUnitBasisAmbiguityError(
+            "security unit revision intervals overlap without a unique resolution"
+        )
+    return candidates[0]
+
+
 class CatalogAsset(Asset):
     """Canonical core asset enriched with aliases and provider bindings."""
 
@@ -91,6 +247,7 @@ class CatalogAsset(Asset):
     security_unit_basis: Literal["reported_common_share", "depositary_receipt"] | None = None
     security_unit_basis_version: NonEmptyStr | None = None
     security_unit_market_adjustment: Literal["all"] | None = None
+    security_unit_basis_revisions: tuple[SecurityUnitBasisRevision, ...] = ()
 
     @field_validator("security_unit_factor", mode="before")
     @classmethod
@@ -151,10 +308,21 @@ class CatalogAsset(Asset):
             value is not None for value in unit_contract
         ):
             raise ValueError("security unit contract fields must be declared together")
-        if self.asset_class is not AssetClass.EQUITY and any(
-            value is not None for value in unit_contract
+        if self.asset_class is not AssetClass.EQUITY and (
+            any(value is not None for value in unit_contract) or self.security_unit_basis_revisions
         ):
             raise ValueError("security unit contracts are only valid for equities")
+        if self.security_unit_basis_revisions and any(value is not None for value in unit_contract):
+            raise ValueError("security unit revisions and static fields must not coexist")
+        revisions = tuple(item.revision for item in self.security_unit_basis_revisions)
+        if len(set(revisions)) != len(revisions):
+            raise ValueError("security unit revisions must be unique")
+        ordered = tuple(
+            (item.valid_from, item.available_at, item.revision)
+            for item in self.security_unit_basis_revisions
+        )
+        if ordered != tuple(sorted(ordered)):
+            raise ValueError("security unit revisions must be sorted by validity and availability")
         return self
 
 

@@ -35,6 +35,24 @@ La identidad de una vinculación es `(provider, namespace, identifier)`. El cat�
 canónicos e identidades externas duplicadas; una búsqueda inversa no puede elegir silenciosamente
 entre dos activos. La ambigüedad entre alias también se informa de forma explícita.
 
+## Unidad del título y revisiones ADR
+
+Una acción ordinaria declara el cuarteto estático `security_unit_factor`,
+`security_unit_basis=reported_common_share`, `security_unit_basis_version` y
+`security_unit_market_adjustment=all`. Un ADR declara `security_unit_basis_revisions`, una tupla
+ordenada por `(valid_from, available_at, revision)` de revisiones estrictas
+`security-unit-basis-v2`: `basis=depositary_receipt`, factor Decimal positivo,
+`reported_share_unit=common_share`, `valid_from` inclusivo, `valid_to` exclusivo opcional,
+`available_at` UTC, CIK, accession, `source_url`, `source_sha256` y un `revision` determinista que
+es el SHA-256 canónico de los campos semánticos.
+
+Las dos representaciones no coexisten en un mismo activo. Las dieciocho acciones ordinarias legacy
+conservan su cuarteto y su camino; `equity:us:tsm` y `equity:us:bvn` usan revisiones con factor
+`0.2` y `1`. El servicio calcula una vez por catálogo un `semantic_digest` que incluye las
+revisiones; las firmas de lectura lo ligan a `code_version`, de modo que una caché no puede
+reutilizar resultados de otra declaración del catálogo. El catálogo no aloja credenciales ni datos
+de mercado, sólo referencias oficiales y hashes de bytes.
+
 Los CIK de SEC son texto para conservar los diez dígitos y sus ceros iniciales. Los IDs de producto
 de Coinbase y símbolos de proveedores también se conservan exactamente, sin conversiones
 destructivas.

@@ -6,8 +6,10 @@ import pytest
 
 from investment_analyst.application.universe_coverage_models import UniverseCoverageRequest
 from investment_analyst.application.universe_coverage_service import (
+    _limitations,
     fundamental_frequency_supported,
 )
+from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.core.models import AssetClass
 from investment_analyst.providers.asset_config import (
     SecAccountingStandard,
@@ -115,3 +117,15 @@ def test_request_rejects_unsupported_frequency() -> None:
             fundamental_end=date(2026, 8, 28),
             frequency="monthly",
         )
+
+
+def test_documented_adr_revision_removes_the_missing_basis_limitation() -> None:
+    catalog = AssetCatalogService.load_default()
+
+    for asset_id in ("equity:us:tsm", "equity:us:bvn"):
+        limitations = _limitations(catalog.get(asset_id), None)
+        assert not any("documented share-unit basis" in item for item in limitations)
+
+    for asset_id in ("equity:pe:bvl:bvn", "equity:pe:bvl:scco"):
+        limitations = _limitations(catalog.get(asset_id), None)
+        assert any("documented share-unit basis" in item for item in limitations)

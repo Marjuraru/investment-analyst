@@ -2348,6 +2348,15 @@ function exportValuationHistoryRuleJson() {
   downloadText(`${safeFilePart(marketAssetPresentation().symbol)}-regla-valoracion-${safeFilePart(valuationRulePayload.request.end_date)}.json`, `${JSON.stringify(valuationRulePayload, null, 2)}\n`, "application/json");
 }
 
+function valuationBasisEvidenceText(basis) {
+  const evidence = basis?.basis_evidence;
+  if (!evidence) return "";
+  const span = evidence.valid_to
+    ? `${formatCalendarDate(evidence.valid_from)}–${formatCalendarDate(evidence.valid_to)}`
+    : `${formatCalendarDate(evidence.valid_from)} en adelante`;
+  return ` · tramo ${span} · ${evidence.reported_share_unit} · CIK ${evidence.cik} ${evidence.accession_number} · ${evidence.source_url} · sha256 ${evidence.source_sha256}`;
+}
+
 function renderValuation(payload) {
   valuationPayload = payload;
   const definitions = new Map(
@@ -2402,7 +2411,7 @@ function renderValuation(payload) {
     ? `${payload.filing_form || "Filing"} ${payload.filing_accession_number || ""} · ${formatInstant(payload.filing_accepted_at)}`
     : "No disponible en el corte";
   byId("valuation-unit-context").textContent = payload.security_basis
-    ? `${payload.price_currency}/${payload.report_currency} · ${payload.security_basis.basis} · factor exacto ${payload.security_basis.market_units_per_reported_share}`
+    ? `${payload.price_currency}/${payload.report_currency} · ${payload.security_basis.basis} · factor exacto ${payload.security_basis.market_units_per_reported_share}${valuationBasisEvidenceText(payload.security_basis)}`
     : "Base de título no disponible";
   byId("valuation-evidence").textContent = JSON.stringify(payload, null, 2);
   setExportAvailable("export-valuation-json", true);
