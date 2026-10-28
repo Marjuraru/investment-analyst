@@ -23,6 +23,7 @@ from investment_analyst.analytics.valuation import (
     ValuationStatus,
 )
 from investment_analyst.application.analysis_capabilities import analysis_capabilities_for
+from investment_analyst.catalog.models import SecurityUnitBasisRevision
 from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.core.models import (
     DataFrequency,
@@ -52,6 +53,7 @@ class _Observations:
         frequency: DataFrequency | None = None,
         quality: DataQuality | None = None,
         available_to: datetime | None = None,
+        **filters: object,
     ) -> list[NormalizedObservation]:
         rows = [
             row
@@ -917,13 +919,10 @@ def test_crypto_asset_is_not_applicable_without_reading_price() -> None:
     }
 
 
-@pytest.mark.parametrize("asset_id", ["equity:us:bvn", "equity:us:tsm"])
-def test_adr_issuers_remain_not_evaluable_with_share_basis_unavailable(asset_id: str) -> None:
+def _adr_service(asset_id: str) -> CorporateValuationService:
     catalog = AssetCatalogService.load_default()
     asset = catalog.get(asset_id)
-    assert asset.security_unit_basis is None
-    assert asset.security_unit_factor is None
-    service = CorporateValuationService(
+    return CorporateValuationService(
         _Storage([]),
         capabilities=analysis_capabilities_for(asset),
         market_source_id=f"alpaca-market-data:iex:{asset.symbol.lower()}:daily-bars:adjustment-all",
@@ -933,19 +932,95 @@ def test_adr_issuers_remain_not_evaluable_with_share_basis_unavailable(asset_id:
         security_unit_basis=asset.security_unit_basis,
         security_unit_basis_version=asset.security_unit_basis_version,
         security_unit_market_adjustment=asset.security_unit_market_adjustment,
+        security_unit_basis_revisions=asset.security_unit_basis_revisions,
     )
+
+
+@pytest.mark.parametrize("asset_id", ["equity:us:bvn", "equity:us:tsm"])
+def test_adr_issuers_apply_the_documented_revision_after_availability(asset_id: str) -> None:
+    catalog = AssetCatalogService.load_default()
+    asset = catalog.get(asset_id)
+    assert asset.security_unit_basis is None
+    assert asset.security_unit_factor is None
+    assert len(asset.security_unit_basis_revisions) == 1
+
+    eligible_at = asset.security_unit_basis_revisions[0].available_at
+    service = _adr_service(asset_id)
+    service._price = lambda request: None  # type: ignore[method-assign]
     snapshot = service.query(
         CorporateValuationRequest(
             asset_id=asset_id,
-            known_at=_KNOWN_AT,
-            valuation_date=_KNOWN_AT.date(),
+            known_at=eligible_at,
+            valuation_date=eligible_at.date(),
         ),
-        computed_at=_KNOWN_AT,
+        computed_at=eligible_at,
     )
+
+    assert snapshot.status is ValuationSnapshotStatus.NOT_EVALUABLE
+    assert snapshot.security_basis is not None
+    assert snapshot.security_basis.basis == "depositary_receipt"
+    assert snapshot.security_basis.basis_evidence == asset.security_unit_basis_revisions[0]
+    assert {item.reason_code for item in snapshot.metrics} == {
+        ValuationReasonCode.PRICE_UNAVAILABLE
+    }
+
+
+@pytest.mark.parametrize("asset_id", ["equity:us:bvn", "equity:us:tsm"])
+def test_adr_issuers_before_availability_remain_share_basis_unavailable(asset_id: str) -> None:
+    early = datetime(2026, 1, 2, tzinfo=UTC)
+    snapshot = _adr_service(asset_id).query(
+        CorporateValuationRequest(
+            asset_id=asset_id,
+            known_at=early,
+            valuation_date=early.date(),
+        ),
+        computed_at=early,
+    )
+
     assert snapshot.status is ValuationSnapshotStatus.NOT_EVALUABLE
     assert snapshot.security_basis is None
     assert {item.reason_code for item in snapshot.metrics} == {
         ValuationReasonCode.SHARE_BASIS_UNAVAILABLE
+    }
+
+
+def test_ambiguous_or_overlapping_revisions_fail_closed_without_arbitration() -> None:
+    catalog = AssetCatalogService.load_default()
+    asset = catalog.get("equity:us:tsm")
+    baseline = asset.security_unit_basis_revisions[0]
+    overlapping = SecurityUnitBasisRevision.model_validate(
+        {
+            **baseline.model_dump(exclude={"revision"}),
+            "valid_from": "2026-05-01",
+            "factor": "0.5",
+        }
+    )
+    service = CorporateValuationService(
+        _Storage([]),
+        capabilities=analysis_capabilities_for(asset),
+        market_source_id="alpaca-market-data:iex:tsm:daily-bars:adjustment-all",
+        fundamental_source_id="sec-edgar:tsm:companyfacts",
+        price_currency="USD",
+        security_unit_factor=asset.security_unit_factor,
+        security_unit_basis=asset.security_unit_basis,
+        security_unit_basis_version=asset.security_unit_basis_version,
+        security_unit_market_adjustment=asset.security_unit_market_adjustment,
+        security_unit_basis_revisions=(baseline, overlapping),
+    )
+    known_at = datetime(2026, 6, 1, tzinfo=UTC)
+    snapshot = service.query(
+        CorporateValuationRequest(
+            asset_id="equity:us:tsm",
+            known_at=known_at,
+            valuation_date=known_at.date(),
+        ),
+        computed_at=known_at,
+    )
+
+    assert snapshot.status is ValuationSnapshotStatus.NOT_EVALUABLE
+    assert snapshot.security_basis is None
+    assert {item.reason_code for item in snapshot.metrics} == {
+        ValuationReasonCode.CORPORATE_ACTION_BASIS_UNAVAILABLE
     }
 
 

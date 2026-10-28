@@ -820,6 +820,20 @@
         "sec_cik": "0001013131"
       },
       "quote_currency": "USD",
+      "security_unit_basis_revisions": [
+        {
+          "accession_number": "0001104659-26-053101",
+          "adjustment": "all",
+          "available_at": "2026-05-01T00:00:00Z",
+          "basis": "depositary_receipt",
+          "cik": "0001013131",
+          "factor": "1",
+          "reported_share_unit": "common_share",
+          "source_sha256": "ec2067c4ec169bbd068101dab16ad88159fac9be5825af76c7f851d71e83e8dd",
+          "source_url": "https://www.sec.gov/Archives/edgar/data/1013131/000110465926053101/R1.htm",
+          "valid_from": "2026-05-01"
+        }
+      ],
       "symbol": "BVN"
     },
     {
@@ -1705,6 +1719,20 @@
         "sec_cik": "0001046179"
       },
       "quote_currency": "USD",
+      "security_unit_basis_revisions": [
+        {
+          "accession_number": "0001628280-26-025362",
+          "adjustment": "all",
+          "available_at": "2026-04-17T00:00:00Z",
+          "basis": "depositary_receipt",
+          "cik": "0001046179",
+          "factor": "0.2",
+          "reported_share_unit": "common_share",
+          "source_sha256": "9b4a4e6cd176e5f55976dbe067d006b395aab2570115d943e6c089560805a141",
+          "source_url": "https://www.sec.gov/Archives/edgar/data/1046179/000162828026025362/exhibit21.htm",
+          "valid_from": "2026-04-17"
+        }
+      ],
       "symbol": "TSM"
     },
     {

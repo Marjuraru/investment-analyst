@@ -5705,5 +5705,10 @@ def test_static_ui_is_byte_identical_and_descriptor_and_response_schema_versions
     analysis_javascript = (static_dir / "app-analysis.js").read_text(encoding="utf-8")
     assert "chart.schema_version !== expectedSchemaVersion" in analysis_javascript
     assert "chart.schema_version," in analysis_javascript
+    assert "basis_evidence" in analysis_javascript
+    assert "valuationBasisEvidenceText" in analysis_javascript
+    assert "source_sha256" in analysis_javascript
+    for asset_id in ("equity:us:tsm", "equity:us:bvn"):
+        assert f'asset_id === "{asset_id}"' not in analysis_javascript
     for filename, _ in _ASSETS.values():
         assert "aapl-market-chart-v5" not in (static_dir / filename).read_text(encoding="utf-8")

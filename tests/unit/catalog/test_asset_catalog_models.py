@@ -1,5 +1,6 @@
 """Unit tests for strict immutable asset catalog models."""
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -149,6 +150,88 @@ def test_security_unit_contract_is_exact_complete_and_equity_only() -> None:
             security_unit_basis="unknown_basis",
             security_unit_basis_version="security-unit-basis-v1",
             security_unit_market_adjustment="all",
+        )
+
+
+def _revision(**updates: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "basis": "depositary_receipt",
+        "factor": "0.2",
+        "adjustment": "all",
+        "valid_from": "2026-04-17",
+        "available_at": "2026-04-17T00:00:00Z",
+        "reported_share_unit": "common_share",
+        "cik": "0001046179",
+        "accession_number": "0001628280-26-025362",
+        "source_url": "https://www.sec.gov/Archives/edgar/data/1046179/example.htm",
+        "source_sha256": ("9b4a4e6cd176e5f55976dbe067d006b395aab2570115d943e6c089560805a141"),
+    }
+    values.update(updates)
+    return values
+
+
+def test_security_unit_revision_is_deterministic_and_time_bounded() -> None:
+    from investment_analyst.catalog.models import SecurityUnitBasisRevision
+
+    revision = SecurityUnitBasisRevision.model_validate(_revision())
+    assert revision.basis == "depositary_receipt"
+    assert revision.factor == Decimal("0.2")
+    assert revision.valid_from == date(2026, 4, 17)
+    assert revision.valid_to is None
+    assert revision.reported_share_unit == "common_share"
+    assert len(revision.revision) == 64
+    assert revision.covers(date(2026, 4, 17))
+    assert revision.covers(date(2030, 1, 1))
+
+    assert SecurityUnitBasisRevision.model_validate(_revision()).revision == (revision.revision)
+    assert revision.model_dump(mode="json")["revision"] == revision.revision
+    assert (
+        SecurityUnitBasisRevision.model_validate(_revision(factor="0.25")).revision
+        != revision.revision
+    )
+    asserted = _revision(valid_to="2026-06-01")
+    closed = SecurityUnitBasisRevision.model_validate(asserted)
+    assert not closed.covers(date(2026, 6, 1))
+    assert closed.covers(date(2026, 5, 31))
+
+    with pytest.raises(ValidationError, match="canonical semantic digest"):
+        SecurityUnitBasisRevision.model_validate(_revision(revision="0" * 64))
+    with pytest.raises(ValidationError, match="valid_to must be after valid_from"):
+        SecurityUnitBasisRevision.model_validate(
+            _revision(valid_from="2026-06-01", valid_to="2026-06-01")
+        )
+    with pytest.raises(ValidationError, match="must use Decimal-compatible text"):
+        SecurityUnitBasisRevision.model_validate(_revision(factor=0.2))
+    with pytest.raises(ValidationError, match="lower-case hexadecimal"):
+        SecurityUnitBasisRevision.model_validate(_revision(source_sha256="ABC"))
+
+
+def test_catalog_asset_rejects_contradictory_or_unsorted_revisions() -> None:
+    from investment_analyst.catalog.models import SecurityUnitBasisRevision
+
+    first = SecurityUnitBasisRevision.model_validate(_revision())
+    later = SecurityUnitBasisRevision.model_validate(
+        _revision(valid_from="2026-05-01", available_at="2026-05-01T00:00:00Z")
+    )
+
+    declared = _asset(security_unit_basis_revisions=(first,))
+    assert declared.security_unit_basis_revisions == (first,)
+
+    with pytest.raises(ValidationError, match="must not coexist"):
+        _asset(
+            security_unit_factor="1",
+            security_unit_basis="reported_common_share",
+            security_unit_basis_version="security-unit-basis-v1",
+            security_unit_market_adjustment="all",
+            security_unit_basis_revisions=(first,),
+        )
+    with pytest.raises(ValidationError, match="sorted by validity"):
+        _asset(security_unit_basis_revisions=(later, first))
+    with pytest.raises(ValidationError, match="only valid for equities"):
+        _asset(
+            asset_id="fund:test",
+            asset_class=AssetClass.ETF,
+            security_unit_basis_revisions=(first,),
         )
 
 

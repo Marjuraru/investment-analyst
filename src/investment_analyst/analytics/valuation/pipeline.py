@@ -129,6 +129,7 @@ class CorporateValuationPersistencePipeline:
                     market_units_per_reported_share=(
                         snapshot.security_basis.market_units_per_reported_share
                     ),
+                    basis_evidence=snapshot.security_basis.basis_evidence,
                 )
             else:
                 parameters = {

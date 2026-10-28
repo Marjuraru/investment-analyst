@@ -16,9 +16,11 @@ from investment_analyst.analytics.market.history_service import (
     summarize_market_history_v2,
 )
 from investment_analyst.analytics.market.history_v2 import HistoricalMarketDataV2Service
+from investment_analyst.application.facade import InvestmentAnalystApplication
 from investment_analyst.application.runtime import StorageLocationRequest
 from investment_analyst.application.universe_coverage import UniverseCoverageApplication
 from investment_analyst.application.universe_coverage_models import UniverseCoverageRequest
+from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.frontend.local_web import AaplLocalHttpServer
 from investment_analyst.providers.market.alpaca_normalizer import (
     ASSET_ID,
@@ -28,6 +30,12 @@ from investment_analyst.providers.market.alpaca_normalizer import (
 from investment_analyst.providers.market.alpaca_stock import AlpacaStockBar
 from investment_analyst.storage import LocalStorage, StoragePaths
 from investment_analyst.storage.raw_v2 import RawV2Staging
+from investment_analyst.storage.read_dependency_signature import (
+    READ_DEPENDENCY_CODE_VERSION,
+    ReadDependencyFamily,
+    ReadDependencyKind,
+    ReadDependencyQuery,
+)
 from investment_analyst.workspace.service import WorkspaceService
 
 _BASE = datetime(2026, 1, 5, 16, tzinfo=UTC)
@@ -279,3 +287,49 @@ def test_v2_market_projection_matches_v1_and_hydrates_only_the_latest_bar(
         ),
     )
     assert parallel.assets[1].model_dump() == result.assets[0].model_dump()
+
+
+def test_read_dependency_signature_binds_code_and_catalog_revisions(
+    tmp_path: Path,
+) -> None:
+    initialized = WorkspaceService().initialize(tmp_path / "workspace", format_version=2)
+    workspace = initialized.paths.root
+    storage_paths = StoragePaths.from_workspace_root(
+        workspace,
+        format_version=2,
+        workspace_id=initialized.manifest.workspace_id,
+    )
+    with LocalStorage(storage_paths) as storage:
+        _stage_bar(
+            storage.store.raw_staging,
+            _bar(0),
+            retrieved_at=_BASE + timedelta(hours=2),
+        )
+    query = ReadDependencyQuery(
+        family=ReadDependencyFamily.MARKET_BARS,
+        endpoint="/api/market-chart",
+        asset_ids=(ASSET_ID,),
+        source_ids=(ALPACA_SOURCE_ID,),
+        start=_BASE,
+        end=_BASE + timedelta(days=2),
+        known_at=datetime(2026, 2, 1, tzinfo=UTC),
+    )
+    application = InvestmentAnalystApplication.create_default()
+    location = StorageLocationRequest(workspace=workspace)
+
+    signature = application.read_dependency_signature(query, location=location)
+    composite = application.read_composite_dependency_signature((query,), location=location)
+
+    catalog = AssetCatalogService.load_default()
+    expected_code_version = f"{READ_DEPENDENCY_CODE_VERSION}:{catalog.semantic_digest}"
+    assert signature.code_version == expected_code_version
+    assert composite.code_version == expected_code_version
+    assert any(
+        dependency.kind is ReadDependencyKind.OBSERVATION for dependency in signature.dependencies
+    )
+    assert any(
+        dependency.kind is ReadDependencyKind.CATALOG for dependency in signature.dependencies
+    )
+    assert not any(
+        dependency.dependency_id == "equity:us:tsm" for dependency in signature.dependencies
+    )

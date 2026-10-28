@@ -178,8 +178,10 @@ def test_valuation_query_is_read_only_provider_free_and_capability_driven(
     assert apple.schema_version == "corporate-valuation-snapshot-v1"
     assert apple.status is ValuationSnapshotStatus.NOT_EVALUABLE
     assert {item.reason_code for item in apple.metrics} == {ValuationReasonCode.PRICE_UNAVAILABLE}
+    assert foreign_adr.security_basis is not None
+    assert foreign_adr.security_basis.basis_evidence is not None
     assert {item.reason_code for item in foreign_adr.metrics} == {
-        ValuationReasonCode.SHARE_BASIS_UNAVAILABLE
+        ValuationReasonCode.PRICE_UNAVAILABLE
     }
     assert etf.status is bitcoin.status is ValuationSnapshotStatus.NOT_APPLICABLE
     assert storage_paths.database_path.read_bytes() == database_before

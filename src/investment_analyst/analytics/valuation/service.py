@@ -36,6 +36,11 @@ from investment_analyst.application.analysis_capabilities import (
     AssetAnalysisFamily,
     FundamentalAnalysisMode,
 )
+from investment_analyst.catalog.models import (
+    SecurityUnitBasisAmbiguityError,
+    SecurityUnitBasisRevision,
+    select_security_unit_basis_revision,
+)
 from investment_analyst.core.models import (
     DataFrequency,
     DataQuality,
@@ -335,7 +340,7 @@ def valuation_execution_reuse_key(
             {
                 "request": request.model_dump(mode="json"),
                 "price_currency": price_currency,
-                "security_basis": security_basis.model_dump(mode="json"),
+                "security_basis": security_basis.model_dump(mode="json", exclude_none=True),
             }
         ),
     )
@@ -390,6 +395,7 @@ class CorporateValuationService:
         security_unit_basis: str | None = None,
         security_unit_basis_version: str | None = None,
         security_unit_market_adjustment: str | None = None,
+        security_unit_basis_revisions: tuple[SecurityUnitBasisRevision, ...] = (),
     ) -> None:
         storage.require_open()
         self._storage = storage
@@ -401,6 +407,7 @@ class CorporateValuationService:
         self._security_unit_basis = security_unit_basis
         self._security_unit_basis_version = security_unit_basis_version
         self._security_unit_market_adjustment = security_unit_market_adjustment
+        self._security_unit_basis_revisions = security_unit_basis_revisions
         self._semantic_identity_v2 = (
             isinstance(storage, LocalStorage) and storage.paths.format_version == 2
         )
@@ -425,7 +432,15 @@ class CorporateValuationService:
                 else ValuationStatus.NOT_EVALUABLE
             )
             return self._unavailable(request, now, unavailable, status)
-        security_basis = self._security_basis()
+        try:
+            security_basis = self._security_basis(request)
+        except SecurityUnitBasisAmbiguityError:
+            return self._unavailable(
+                request,
+                now,
+                ValuationReasonCode.CORPORATE_ACTION_BASIS_UNAVAILABLE,
+                ValuationStatus.NOT_EVALUABLE,
+            )
         if security_basis is None:
             return self._unavailable(
                 request,
@@ -448,6 +463,15 @@ class CorporateValuationService:
                 request,
                 now,
                 ValuationReasonCode.PRICE_UNAVAILABLE,
+                ValuationStatus.NOT_EVALUABLE,
+                security_basis=security_basis,
+            )
+        basis_evidence = security_basis.basis_evidence
+        if basis_evidence is not None and not basis_evidence.covers(price.timestamp.date()):
+            return self._unavailable(
+                request,
+                now,
+                ValuationReasonCode.SECURITY_UNIT_MISMATCH,
                 ValuationStatus.NOT_EVALUABLE,
                 security_basis=security_basis,
             )
@@ -529,6 +553,8 @@ class CorporateValuationService:
             for definition in _DEFINITIONS
         )
         available_at = max(item.available_at for item in inputs)
+        if basis_evidence is not None:
+            available_at = max(available_at, basis_evidence.available_at)
         coverage = _coverage(metrics)
         status = _snapshot_status(coverage)
         limitations = [_IEX_LIMITATION, _SHARE_LIMITATION]
@@ -617,20 +643,39 @@ class CorporateValuationService:
             raise CorporateValuationError("computed_at must be timezone-aware")
         return resolved.astimezone(UTC)
 
-    def _security_basis(self) -> ValuationSecurityBasis | None:
+    def _security_basis(
+        self,
+        request: CorporateValuationRequest,
+    ) -> ValuationSecurityBasis | None:
+        """Resolve the single eligible traded-unit basis for this cut."""
         values = (
             self._security_unit_factor,
             self._security_unit_basis,
             self._security_unit_basis_version,
             self._security_unit_market_adjustment,
         )
-        if not all(value is not None for value in values):
+        if all(value is not None for value in values):
+            return ValuationSecurityBasis(
+                basis=self._security_unit_basis,
+                market_units_per_reported_share=self._security_unit_factor,
+                market_adjustment=self._security_unit_market_adjustment,
+                contract_version=self._security_unit_basis_version,
+            )
+        if any(value is not None for value in values):
+            return None
+        selected = select_security_unit_basis_revision(
+            self._security_unit_basis_revisions,
+            known_at=request.known_at,
+            valuation_date=request.valuation_date,
+        )
+        if selected is None:
             return None
         return ValuationSecurityBasis(
-            basis=self._security_unit_basis,
-            market_units_per_reported_share=self._security_unit_factor,
-            market_adjustment=self._security_unit_market_adjustment,
-            contract_version=self._security_unit_basis_version,
+            basis=selected.basis,
+            market_units_per_reported_share=selected.factor,
+            market_adjustment=selected.adjustment,
+            contract_version=f"{selected.schema_version}:{selected.revision}",
+            basis_evidence=selected,
         )
 
     def _eligibility_reason(self) -> ValuationReasonCode | None:
@@ -876,6 +921,13 @@ class CorporateValuationService:
         selected_inputs = tuple(inputs[role] for role in definition.input_roles if role in inputs)
         input_ids = tuple(sorted((item.observation_id for item in selected_inputs), key=str))
         available_at = max((item.available_at for item in selected_inputs), default=None)
+        basis_evidence = security_basis.basis_evidence
+        if basis_evidence is not None:
+            available_at = (
+                basis_evidence.available_at
+                if available_at is None
+                else max(available_at, basis_evidence.available_at)
+            )
         missing = tuple(role for role in definition.input_roles if role not in inputs)
         if missing:
             reason = (
@@ -920,6 +972,7 @@ class CorporateValuationService:
                 algorithm_version=definition.algorithm_version,
                 formula=definition.formula,
                 market_units_per_reported_share=security_basis.market_units_per_reported_share,
+                basis_evidence=security_basis.basis_evidence,
             )
         else:
             result_id = valuation_result_id(
