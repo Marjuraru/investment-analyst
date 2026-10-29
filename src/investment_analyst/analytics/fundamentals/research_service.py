@@ -29,6 +29,9 @@ from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer impor
     sec_transformation_version,
 )
 from investment_analyst.providers.fundamentals.sec_fact_models import (
+    DEI_SHARES_FIELD_NAME,
+    DEI_SHARES_TRANSFORMATION_VERSION,
+    DEI_TAXONOMY,
     get_sec_fact_definition,
 )
 from investment_analyst.providers.fundamentals.sec_raw_records import (
@@ -219,7 +222,12 @@ def _is_eligible(
         return False
     if observation.source.source_id != configuration.companyfacts_source_id:
         return False
-    if observation.transformation_version != transformation_version:
+    if observation.transformation_version == DEI_SHARES_TRANSFORMATION_VERSION:
+        if observation.field_name != DEI_SHARES_FIELD_NAME:
+            raise MalformedFundamentalResearchObservationError(
+                "DEI research observation must be shares outstanding"
+            )
+    elif observation.transformation_version != transformation_version:
         return False
     if observation.quality is not DataQuality.VALID:
         return False
@@ -236,13 +244,19 @@ def _is_eligible(
         return False
     if request.end_period_end is not None and period_end > request.end_period_end:
         return False
-    _validate_observation(observation, configuration)
+    _validate_observation(
+        observation,
+        configuration,
+        transformation_version=transformation_version,
+    )
     return True
 
 
 def _validate_observation(
     observation: NormalizedObservation,
     configuration: SecAssetConfiguration,
+    *,
+    transformation_version: str,
 ) -> None:
     if observation.asset_id != configuration.asset_id:
         raise MalformedFundamentalResearchObservationError(
@@ -250,9 +264,21 @@ def _validate_observation(
         )
     record_key = _record_key(observation)
     taxonomy = _required_string(record_key, "taxonomy")
-    if taxonomy != configuration.accounting_standard.value:
+    if taxonomy == DEI_TAXONOMY:
+        if observation.field_name != DEI_SHARES_FIELD_NAME:
+            raise MalformedFundamentalResearchObservationError(
+                "DEI research observation must be shares outstanding"
+            )
+        expected_transformation_version = DEI_SHARES_TRANSFORMATION_VERSION
+    else:
+        if taxonomy != configuration.accounting_standard.value:
+            raise MalformedFundamentalResearchObservationError(
+                "SEC research taxonomy does not match its configured issuer"
+            )
+        expected_transformation_version = transformation_version
+    if observation.transformation_version != expected_transformation_version:
         raise MalformedFundamentalResearchObservationError(
-            "SEC research taxonomy does not match its configured issuer"
+            "SEC research transformation version does not match its evidence"
         )
     definition = get_sec_fact_definition(
         observation.field_name,
@@ -265,6 +291,10 @@ def _validate_observation(
     if not observation.value.is_finite():
         raise MalformedFundamentalResearchObservationError(
             "SEC research observation value must be finite"
+        )
+    if taxonomy == DEI_TAXONOMY and observation.value <= 0:
+        raise MalformedFundamentalResearchObservationError(
+            "DEI research observation value must be positive"
         )
     if observation.period_end is None:
         raise MalformedFundamentalResearchObservationError(

@@ -18,6 +18,9 @@ COMPANYFACTS_SOURCE_ID = "sec-edgar:aapl:companyfacts"
 SUBMISSIONS_SCHEMA_VERSION = "sec-edgar-submissions-snapshot-v1"
 COMPANYFACTS_SCHEMA_VERSION = "sec-edgar-companyfacts-snapshot-v1"
 TRANSFORMATION_VERSION = "sec-aapl-companyfacts-normalizer-v1"
+DEI_TAXONOMY = "dei"
+DEI_SHARES_FIELD_NAME = "fundamental.shares_outstanding"
+DEI_SHARES_TRANSFORMATION_VERSION = "sec-companyfacts-dei-shares-v1"
 _ALLOWED_FORMS = frozenset({"10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "40-F/A"})
 
 
@@ -521,6 +524,19 @@ SEC_IFRS_RESEARCH_FACT_DEFINITIONS = (
 SEC_IFRS_NORMALIZED_FACT_DEFINITIONS = (
     SEC_IFRS_FACT_DEFINITIONS + SEC_IFRS_RESEARCH_FACT_DEFINITIONS
 )
+
+# DEI is a complementary disclosure taxonomy, not an issuer accounting standard.
+# It supplies only the annual common-share count and never replaces the configured
+# US-GAAP or IFRS concept selection.
+SEC_DEI_SHARES_FACT_DEFINITION = SecFactDefinition(
+    field_name=DEI_SHARES_FIELD_NAME,
+    taxonomy=DEI_TAXONOMY,
+    tag="EntityCommonStockSharesOutstanding",
+    unit="shares",
+    period_type=SecFactPeriodType.INSTANT,
+)
+SEC_COMPLEMENTARY_FACT_DEFINITIONS = (SEC_DEI_SHARES_FACT_DEFINITION,)
+
 _DEFINITIONS_BY_TAXONOMY = {
     SecAccountingStandard.US_GAAP.value: SEC_NORMALIZED_FACT_DEFINITIONS,
     SecAccountingStandard.IFRS.value: SEC_IFRS_NORMALIZED_FACT_DEFINITIONS,
@@ -530,6 +546,9 @@ _DEFINITION_BY_TAXONOMY_FIELD = {
     for definitions in _DEFINITIONS_BY_TAXONOMY.values()
     for item in definitions
 }
+_DEFINITION_BY_TAXONOMY_FIELD.update(
+    {(item.taxonomy, item.field_name): item for item in SEC_COMPLEMENTARY_FACT_DEFINITIONS}
+)
 
 
 class SecFilingMetadata(ContractModel):
@@ -614,6 +633,10 @@ class SecFundamentalFact(ContractModel):
             raise ValueError("form must be a supported SEC annual or quarterly filing")
         if self.frequency not in {DataFrequency.QUARTERLY, DataFrequency.ANNUAL}:
             raise ValueError("frequency must be quarterly or annual")
+        if self.taxonomy == DEI_TAXONOMY and self.frequency is not DataFrequency.ANNUAL:
+            raise ValueError("DEI shares facts must be annual")
+        if self.taxonomy == DEI_TAXONOMY and self.value <= 0:
+            raise ValueError("DEI shares facts must be positive")
         if self.quality is not DataQuality.VALID:
             raise ValueError("SEC fundamental facts must have VALID quality")
         if definition.period_type is SecFactPeriodType.DURATION:

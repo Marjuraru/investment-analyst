@@ -27,8 +27,13 @@ Ethereum y altcoin y no habilita activos nuevos.
 - una revisión posterior solo entra cuando su aceptación entra en el corte;
 - revisiones igualmente disponibles y semánticamente distintas fallan como ambigüedad;
 - los hechos de duración comparten emisor, source ID, frecuencia anual, ejercicio, `period_start`,
-  `period_end`, filing, moneda y taxonomía compatible;
+  `period_end`, filing, moneda y una única taxonomía contable monetaria (`us-gaap` o `ifrs-full`);
+- el número de acciones puede ser nativo de esa misma taxonomía monetaria o
+  `dei:EntityCommonStockSharesOutstanding`; DEI se admite exclusivamente para
+  `fundamental.shares_outstanding` y con el mismo filing, cierre, forma, año/período y aceptación;
 - los hechos instantáneos comparten `period_end` y revisión;
+- si sólo existen acciones y ningún hecho monetario, no se infiere base contable ni moneda de
+  reporte; la valoración puede calcular `market_cap` pero no inventa una taxonomía contable;
 - no se mezclan ejercicios, emisores, fuentes, frecuencias o monedas para completar ausencias;
 - `computed_at` puede ser posterior a `known_at`; `available_at` del resultado es el máximo de sus
   inputs y nunca se sustituye por el reloj de cálculo.
@@ -38,6 +43,15 @@ pero no se oculta. No existe FX: una moneda de reporte distinta a la cotización
 `currency_mismatch`. La base común v1 declara compatibilidad entre el precio Alpaca
 `adjustment=all` y la unidad reportada, pero también declara que las acciones proceden del cierre
 anual: no se infieren recompras, emisiones o conversiones posteriores.
+
+La combinación autorizada es una única taxonomía monetaria (`us-gaap` o `ifrs-full`) más DEI
+exclusivamente para el número de acciones. DEI no es una taxonomía contable, no altera las fórmulas,
+versiones, ratios ADR, moneda ni el significado de las métricas, y cada input conserva su
+`taxonomy`/`tag`/`observation_id` de origen. Las observaciones DEI usan
+`sec-companyfacts-dei-shares-v1`; las nativas conservan su versión. La base contable se determina
+sólo por los hechos monetarios, nunca por el primer elemento de la colección. Si una acción nativa
+pertenece a una taxonomía distinta de la monetaria, el resultado es
+`accounting_basis_mismatch`; si no hay hechos monetarios, `report_currency` queda ausente.
 
 ## Base documentada acción↔ADS (`security-unit-basis-v2`)
 
@@ -93,8 +107,9 @@ La identidad UUIDv8 liga el digest de la revisión y sus parámetros, de modo qu
 crea una identidad distinta sin reescribir historia, y un replay idéntico conserva IDs.
 
 Capacidad ADR no equivale a cobertura completa. TSM sólo usa hechos USD ya normalizados y BVN
-conserva sus ausencias legítimas: no hay FX, TTM, IFRS trimestral, estimación de deuda, D&A o
-acciones, ni conversión de moneda del PDF.
+conserva sus ausencias legítimas: no hay FX, TTM, IFRS trimestral ni estimación de deuda o D&A. El
+número de acciones anuales puede provenir de DEI; si falta, la ausencia es legítima y no se completa
+con otro ejercicio. No se convierte moneda del PDF.
 
 ## Fórmulas v1
 

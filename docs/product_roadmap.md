@@ -20,6 +20,13 @@
 > permanece `NEXT`: la capacidad ADR no equivale a cobertura completa ni cierra la ruta, y no se
 > añade FX, TTM, trimestral IFRS ni vigilancia automática de acciones corporativas.
 >
+> `FUNDAMENTALS-SEC-SHARES`/#371 (`ADVANCES`) incorpora `dei:EntityCommonStockSharesOutstanding`
+> como alternancia anual de acciones comunes cuando falta el concepto nativo elegible, con
+> procedencia exacta, versión `sec-companyfacts-dei-shares-v1` y adopción en investigación y
+> valoración. Preserva la selección nativa, rechaza el conflicto con causa explícita y no inventa base contable. La fila
+> `FUNDAMENTALS-COVERAGE` permanece `NEXT`: no se declara cobertura completa, no se cierra la ruta y
+> no se añaden FX, deuda IFRS, D&A sintética ni trimestral IFRS.
+>
 > Las notas y cronologías fechadas de este documento son registro histórico. No describen un Issue
 > activo ni autorizan ejecución; la única autoridad de Work Block es el Issue abierto con
 > `workflow:active` resuelto desde GitHub vivo.
@@ -27,6 +34,12 @@
 ## Prioridad operativa de 2026-10-27
 
 DATA-CHASSIS cerró con `DATA-CHASSIS-48`/#357 (`COMPLETES`) tras la reparación temporal R4, el delta físico de la vista packed compatible y el restore final verificado desde el padre retenido más los objetos remotos. `FUNDAMENTALS-COVERAGE` queda como el único `NEXT`. `FUNDAMENTALS-COVERAGE-READINESS`/#361 (`ADVANCES`) dejó v2 listo para retomar desarrollo: lecturas críticas acotadas, recuperación remota utilizable, espacio local seguro y documentación vigente. `FUNDAMENTALS-COVERAGE-CYCLE`/#363 (`ADVANCES`) avanza los prerrequisitos operativos sin cerrar la fila: ciclo semanal determinista con fines de semana, feriados y reintentos acotados; frecuencia IFRS no declarada explicada como `not_implemented`/`not_queried`; ausencias de valoración visibles; y precio PIT compartido entre cobertura y valoración. No declara más cobertura fundamental ni cierra la ruta. Se permite adquisición reciente y warm-up necesario mediante fuentes existentes; el archivo anterior no se re-descarga masivamente. Las cronologías inferiores conservan contexto histórico, no autoridad para sustituir esta secuencia.
+
+`FUNDAMENTALS-SEC-SHARES`/#371 (`ADVANCES`) avanza `FUNDAMENTALS-COVERAGE` sin cerrarla: adopta
+`dei:EntityCommonStockSharesOutstanding` como alternancia anual de acciones comunes, conserva la
+selección nativa, versiona las observaciones DEI, las expone en investigación y valoración y rechaza
+el conflicto con causa explícita. No promete cobertura completa ni añade FX, deuda IFRS, D&A sintética o trimestral
+IFRS; la fila sigue `NEXT`.
 
 ## Revisión técnica externa: oportunidades posteriores a DATA-CHASSIS-48
 

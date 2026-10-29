@@ -32,6 +32,22 @@ version, USD, exact XBRL tags selected in the normalizer, and observations marke
 for another asset fails instead of falling back to Apple. Filing form, fiscal year and fiscal period
 come only from the canonical audit key and are never inferred from dates.
 
+## Acciones comunes DEI
+
+La consulta core de cinco campos y sus versiones no cambian. El concepto complementario
+`dei:EntityCommonStockSharesOutstanding` se normaliza sólo como alternancia anual de
+`fundamental.shares_outstanding` cuando el concepto nativo del perfil no tiene una observación
+elegible en el mismo filing, cierre, forma, año y período fiscal, y aceptación SEC. Es un hecho
+instantáneo, exacto en `Decimal` positivo y finito, en unidad `shares`, y conserva `taxonomy=dei` y
+su tag real en el `record_key`; no convierte DEI en una taxonomía contable ni se mezcla con los cinco
+campos del query core. Las observaciones DEI usan la versión de transformación
+`sec-companyfacts-dei-shares-v1` y sólo son visibles para investigación anual y valoración; el query
+de cinco campos no las hidrata. Si el concepto nativo existe, se conserva; si ambos coinciden no se
+duplica, y si discrepan se rechaza la observación DEI, se conserva la nativa y el conflicto queda
+contabilizado explícitamente sin arbitraje ni redondeo; el resto del filing sigue normalizando. Una
+fecha de portada distinta del cierre anual, una unidad o un período no elegible se omite con causa
+explícita y nunca se completa con otro ejercicio.
+
 ## Performance and auditability
 
 The observation repository is read once for the requested issuer. Revision grouping and sorting are at most

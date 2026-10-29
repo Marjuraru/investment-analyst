@@ -230,3 +230,52 @@ def test_late_metric_failure_preserves_earlier_append_only_progress() -> None:
 
     assert len(storage.metric_results.rows) == 1
     assert storage.metric_results.rows[0].metric_key == ("valuation.corporate.enterprise_value")
+
+
+def test_dei_share_input_keeps_its_observation_identity_on_replay() -> None:
+    from investment_analyst.analytics.valuation.models import ValuationInput
+    from investment_analyst.core.models import DataFrequency
+
+    share_id = UUID("22222222-2222-2222-2222-222222222222")
+    snapshot = _snapshot("valuation.corporate.market_cap")
+    share_input = ValuationInput(
+        role="shares_outstanding",
+        observation_id=share_id,
+        raw_record_id=UUID(int=200),
+        source_id="sec-edgar:aapl:companyfacts",
+        value=Decimal("100"),
+        unit="shares",
+        frequency=DataFrequency.ANNUAL,
+        observed_at=_PERIOD_END,
+        period_end=_PERIOD_END,
+        available_at=_AVAILABLE_AT,
+        accession_number="0000320193-25-000079",
+        taxonomy="dei",
+        tag="EntityCommonStockSharesOutstanding",
+    )
+    metric = snapshot.metrics[0].model_copy(
+        update={
+            "input_observation_ids": (
+                *snapshot.metrics[0].input_observation_ids,
+                share_id,
+            )
+        }
+    )
+    snapshot = snapshot.model_copy(
+        update={"inputs": (*snapshot.inputs, share_input), "metrics": (metric,)}
+    )
+    storage = _Storage()
+    pipeline = CorporateValuationPersistencePipeline(storage)
+
+    first = pipeline.persist(snapshot)
+    replay = pipeline.persist(
+        snapshot.model_copy(update={"computed_at": datetime(2026, 2, 3, tzinfo=UTC)})
+    )
+
+    assert first.metric_results_created == 1
+    assert replay.metric_results_created == 0
+    assert replay.metric_results_reused == 1
+    assert storage.metric_results.rows[0].input_observation_ids == [
+        snapshot.inputs[0].observation_id,
+        share_id,
+    ]

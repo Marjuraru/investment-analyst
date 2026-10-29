@@ -21,6 +21,9 @@ from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer impor
 )
 from investment_analyst.providers.fundamentals.sec_fact_models import (
     COMPANYFACTS_SCHEMA_VERSION,
+    DEI_SHARES_FIELD_NAME,
+    DEI_SHARES_TRANSFORMATION_VERSION,
+    DEI_TAXONOMY,
     SUBMISSIONS_SCHEMA_VERSION,
     get_sec_fact_definition,
 )
@@ -438,22 +441,41 @@ def _validate_candidate(
         raise SecObservationTraceabilityError("SEC observation must match the configured asset")
     if observation.source.source_id != configuration.companyfacts_source_id:
         raise SecObservationTraceabilityError("SEC observation source is incorrect")
+    record_key = _record_key(observation)
+    taxonomy = _required_key(record_key, "taxonomy")
     try:
-        expected_unit = get_sec_fact_definition(
-            observation.field_name,
-            taxonomy=configuration.accounting_standard.value,
-        ).unit
+        definition = get_sec_fact_definition(observation.field_name, taxonomy=taxonomy)
     except ValueError as error:
         raise SecObservationTraceabilityError("SEC observation field is unsupported") from error
-    if observation.unit != expected_unit:
+    if observation.unit != definition.unit:
         raise SecObservationTraceabilityError(
             "SEC observation unit does not match its field definition"
         )
     if observation.frequency not in {DataFrequency.ANNUAL, DataFrequency.QUARTERLY}:
         raise SecObservationTraceabilityError("SEC observation frequency is invalid")
+    if taxonomy == DEI_TAXONOMY:
+        if observation.field_name != DEI_SHARES_FIELD_NAME:
+            raise SecObservationTraceabilityError("DEI observation must be shares outstanding")
+        if _required_key(record_key, "tag") != definition.tag:
+            raise SecObservationTraceabilityError(
+                "SEC observation tag does not match its field definition"
+            )
+        if observation.frequency is not DataFrequency.ANNUAL:
+            raise SecObservationTraceabilityError("DEI shares observation must be annual")
+        if not observation.value.is_finite() or observation.value <= 0:
+            raise SecObservationTraceabilityError(
+                "DEI shares observation must have a finite positive value"
+            )
+        expected_transformation_version = DEI_SHARES_TRANSFORMATION_VERSION
+    else:
+        if taxonomy != configuration.accounting_standard.value:
+            raise SecObservationTraceabilityError(
+                "SEC observation taxonomy does not match its configured issuer"
+            )
+        expected_transformation_version = transformation_version
     if observation.quality is not DataQuality.VALID:
         raise SecObservationTraceabilityError("SEC observation quality must be VALID")
-    if observation.transformation_version != transformation_version:
+    if observation.transformation_version != expected_transformation_version:
         raise SecObservationTraceabilityError("SEC observation transformation version is invalid")
     if observation.available_at > normalized_at:
         raise SecObservationTraceabilityError("SEC observation uses a future filing")
