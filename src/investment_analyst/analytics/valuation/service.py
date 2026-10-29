@@ -47,6 +47,10 @@ from investment_analyst.core.models import (
     MetricResult,
     NormalizedObservation,
 )
+from investment_analyst.providers.fundamentals.sec_fact_models import (
+    DEI_SHARES_FIELD_NAME,
+    DEI_TAXONOMY,
+)
 from investment_analyst.storage.execution_reuse_v2 import ExecutionReuseKey, canonical_digest
 from investment_analyst.storage.local import LocalStorage
 
@@ -851,12 +855,26 @@ class CorporateValuationService:
                 ValuationReasonCode.PERIOD_MISMATCH,
                 "annual duration inputs do not share one period_start",
             )
-        taxonomies = {_filing_metadata(item).taxonomy for item in facts.values()}
-        if len(taxonomies) > 1:
+        accounting_taxonomies = {
+            _filing_metadata(item).taxonomy
+            for item in facts.values()
+            if item.field_name in _MONETARY_FIELDS
+        }
+        if len(accounting_taxonomies) > 1:
             raise IncompatibleValuationEvidenceError(
                 ValuationReasonCode.ACCOUNTING_BASIS_MISMATCH,
                 "annual valuation inputs do not share one accounting taxonomy",
             )
+        shares = facts.get(DEI_SHARES_FIELD_NAME)
+        if shares is not None:
+            shares_taxonomy = _filing_metadata(shares).taxonomy
+            if shares_taxonomy != DEI_TAXONOMY and (
+                accounting_taxonomies and shares_taxonomy not in accounting_taxonomies
+            ):
+                raise IncompatibleValuationEvidenceError(
+                    ValuationReasonCode.ACCOUNTING_BASIS_MISMATCH,
+                    "annual share count is not compatible with the accounting taxonomy",
+                )
         return _AnnualSelection(
             facts=facts,
             metadata=metadata_by_revision[key],

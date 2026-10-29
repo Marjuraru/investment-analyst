@@ -39,7 +39,15 @@ from investment_analyst.core.models import (
     RawRecord,
 )
 from investment_analyst.providers.asset_config import AlpacaAssetConfiguration
-from investment_analyst.providers.fundamentals.sec_fact_models import get_sec_fact_definition
+from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer import (
+    IFRS_TRANSFORMATION_VERSION,
+)
+from investment_analyst.providers.fundamentals.sec_fact_models import (
+    DEI_SHARES_FIELD_NAME,
+    DEI_SHARES_TRANSFORMATION_VERSION,
+    SEC_DEI_SHARES_FACT_DEFINITION,
+    get_sec_fact_definition,
+)
 from investment_analyst.providers.market.alpaca_normalizer import (
     bar_to_observations,
     bar_to_raw_record,
@@ -158,6 +166,98 @@ def _seed_sec_facts(
                 },
                 quality=DataQuality.VALID,
                 transformation_version="sec-companyfacts-normalizer-v2",
+            )
+        )
+        raw_records.append(
+            RawRecord(
+                record_id=raw_id,
+                asset_id=asset_id,
+                source={
+                    "source_id": source_id,
+                    "record_key": json.dumps(
+                        {"companyfacts_record_id": str(raw_id)},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    "retrieved_at": available_at,
+                },
+                event_time=period_at,
+                available_at=available_at,
+                received_at=available_at,
+                payload={"fixture": field_name},
+                schema_version="sec-companyfacts-snapshot-v1",
+            )
+        )
+    storage.raw_records.save_many(raw_records)
+    storage.observations.save_many(observations)
+
+
+def _seed_dei_ifrs_facts(
+    storage: LocalStorage,
+    *,
+    asset_id: str,
+    source_id: str,
+    available_at: datetime,
+    accession_number: str,
+    period_end: date = date(2025, 12, 31),
+    dei_shares: str = "1000",
+) -> None:
+    period_at = datetime.combine(period_end, datetime.min.time(), tzinfo=UTC)
+    values = (
+        ("fundamental.revenue", "100000"),
+        ("fundamental.net_income", "20000"),
+        ("fundamental.stockholders_equity", "80000"),
+        ("fundamental.operating_income", "25000"),
+        ("fundamental.depreciation_and_amortization", "5000"),
+        ("fundamental.operating_cash_flow", "30000"),
+        ("fundamental.capital_expenditures", "10000"),
+        ("fundamental.cash_and_cash_equivalents", "20000"),
+    )
+    observations: list[NormalizedObservation] = []
+    raw_records: list[RawRecord] = []
+    definitions = [
+        (field_name, value, get_sec_fact_definition(field_name, taxonomy="ifrs-full"))
+        for field_name, value in values
+    ]
+    definitions.append((DEI_SHARES_FIELD_NAME, dei_shares, SEC_DEI_SHARES_FACT_DEFINITION))
+    for field_name, value, definition in definitions:
+        raw_id = uuid4()
+        key = {
+            "accession_number": accession_number,
+            "taxonomy": definition.taxonomy,
+            "tag": definition.tag,
+            "unit": definition.unit,
+            "period": period_end.isoformat(),
+            "companyfacts_record_id": str(raw_id),
+            "submissions_record_id": str(uuid4()),
+            "form": "20-F",
+            "fiscal_year": "2025",
+            "fiscal_period": "FY",
+        }
+        observations.append(
+            NormalizedObservation(
+                observation_id=uuid4(),
+                raw_record_id=raw_id,
+                asset_id=asset_id,
+                field_name=field_name,
+                value=Decimal(value),
+                unit=definition.unit,
+                frequency=DataFrequency.ANNUAL,
+                observed_at=period_at,
+                period_end=period_at,
+                available_at=available_at,
+                normalized_at=available_at,
+                source={
+                    "source_id": source_id,
+                    "record_key": json.dumps(key, separators=(",", ":"), sort_keys=True),
+                    "retrieved_at": available_at,
+                },
+                quality=DataQuality.VALID,
+                transformation_version=(
+                    DEI_SHARES_TRANSFORMATION_VERSION
+                    if definition.taxonomy == "dei"
+                    else IFRS_TRANSFORMATION_VERSION
+                ),
             )
         )
         raw_records.append(
@@ -700,3 +800,73 @@ def test_ordinary_common_share_assets_keep_legacy_basis(tmp_path: Path) -> None:
         assert snapshot.security_basis.contract_version == "security-unit-basis-v1"
         assert _market_cap(snapshot) == Decimal("100000")
         assert [metric.status for metric in snapshot.metrics] == [ValuationStatus.EVALUATED] * 11
+
+
+def test_dei_shares_enable_ifrs_adr_market_cap_and_replay(tmp_path: Path) -> None:
+    catalog = AssetCatalogService.load_default()
+    storage = _v2_storage(tmp_path / "workspace")
+    request = CorporateValuationRequest(
+        asset_id="equity:us:tsm",
+        known_at=datetime(2026, 4, 17, 20, tzinfo=UTC),
+        valuation_date=date(2026, 4, 17),
+    )
+    computed_at = datetime(2026, 4, 17, 21, tzinfo=UTC)
+
+    with storage:
+        _seed_dei_ifrs_facts(
+            storage,
+            asset_id="equity:us:tsm",
+            source_id=resolve_sec_configuration(
+                ProviderAssetContextResolver(catalog), asset_id="equity:us:tsm"
+            ).companyfacts_source_id,
+            available_at=_TSM_AVAILABLE,
+            accession_number="0001193125-25-083423",
+        )
+        _seed_bar(
+            storage,
+            configuration=_configuration(catalog, "equity:us:tsm"),
+            timestamp=datetime(2026, 4, 17, 16, tzinfo=UTC),
+            close="100",
+        )
+        first = _service(storage, "equity:us:tsm", catalog=catalog).query(
+            request, computed_at=computed_at
+        )
+        by_key = {metric.metric_key: metric for metric in first.metrics}
+        shares = next(item for item in first.inputs if item.role == "shares_outstanding")
+
+        assert first.status is ValuationSnapshotStatus.PARTIAL
+        assert first.report_currency == "USD"
+        assert _market_cap(first) == Decimal("20000")
+        assert by_key["valuation.corporate.price_to_earnings_latest_annual"].value == Decimal("1")
+        assert by_key["valuation.corporate.price_to_sales_latest_annual"].value == Decimal("0.2")
+        assert shares.taxonomy == "dei"
+        assert shares.tag == "EntityCommonStockSharesOutstanding"
+        assert shares.value == Decimal("1000")
+        assert first.coverage.evaluated == 6
+
+        persisted = CorporateValuationPersistencePipeline(storage).persist(first)
+        assert persisted.metric_results_created == 6
+
+        replay = _service(storage, "equity:us:tsm", catalog=catalog).query(
+            request, computed_at=computed_at + timedelta(minutes=5)
+        )
+        assert tuple(metric.result_id for metric in replay.metrics) == tuple(
+            metric.result_id for metric in first.metrics
+        )
+        assert (
+            CorporateValuationPersistencePipeline(storage).persist(replay).metric_results_created
+            == 0
+        )
+
+    reopened_storage = LocalStorage(storage.paths)
+    with reopened_storage:
+        reopened = _service(reopened_storage, "equity:us:tsm", catalog=catalog).query(
+            request, computed_at=computed_at + timedelta(minutes=10)
+        )
+        assert _market_cap(reopened) == Decimal("20000")
+        assert (
+            CorporateValuationPersistencePipeline(reopened_storage)
+            .persist(reopened)
+            .metric_results_created
+            == 0
+        )

@@ -31,6 +31,10 @@ from investment_analyst.core.models import (
     NormalizedObservation,
     SourceReference,
 )
+from investment_analyst.providers.fundamentals.sec_fact_models import (
+    DEI_SHARES_FIELD_NAME,
+    DEI_TAXONOMY,
+)
 
 _ASSET_ID = "equity:us:aapl"
 _KNOWN_AT = datetime(2026, 2, 1, tzinfo=UTC)
@@ -91,10 +95,11 @@ def _observation(
     fiscal_year: int = 2025,
     unit: str | None = None,
     taxonomy: str = "us-gaap",
+    tag: str | None = None,
     source_id: str = _SOURCE.source_id,
     frequency: DataFrequency = DataFrequency.ANNUAL,
 ) -> NormalizedObservation:
-    tag = field_name.removeprefix("fundamental.")
+    resolved_tag = tag or field_name.removeprefix("fundamental.")
     resolved_unit = unit or ("shares" if field_name.endswith("shares_outstanding") else "USD")
     return NormalizedObservation(
         raw_record_id=uuid4(),
@@ -114,7 +119,7 @@ def _observation(
                     {
                         "accession_number": accession_number,
                         "taxonomy": taxonomy,
-                        "tag": tag,
+                        "tag": resolved_tag,
                         "unit": resolved_unit,
                         "period": period_end.date().isoformat(),
                         "form": "10-K",
@@ -1071,3 +1076,234 @@ def test_selected_price_must_match_the_requested_cut(update: dict[str, object]) 
             computed_at=_KNOWN_AT,
             selected_price=_price().model_copy(update=update),
         )
+
+
+def _with_dei_shares(
+    rows: list[NormalizedObservation],
+    value: str = "100",
+    *,
+    available_at: datetime = _AVAILABLE_AT,
+    accession_number: str = "0000320193-25-000079",
+) -> list[NormalizedObservation]:
+    return [row for row in rows if row.field_name != DEI_SHARES_FIELD_NAME] + [
+        _observation(
+            DEI_SHARES_FIELD_NAME,
+            value,
+            taxonomy=DEI_TAXONOMY,
+            tag="EntityCommonStockSharesOutstanding",
+            available_at=available_at,
+            accession_number=accession_number,
+        )
+    ]
+
+
+def test_dei_shares_combine_with_us_gaap_monetary_facts() -> None:
+    rows = _with_dei_shares(_reference_rows())
+    service = _service(rows)
+    service._price = lambda request: _price()  # type: ignore[method-assign]
+
+    snapshot = service.query(
+        CorporateValuationRequest(
+            asset_id=_ASSET_ID,
+            known_at=_KNOWN_AT,
+            valuation_date=_KNOWN_AT.date(),
+        ),
+        computed_at=_KNOWN_AT,
+    )
+
+    by_key = {item.metric_key: item for item in snapshot.metrics}
+    shares = next(item for item in snapshot.inputs if item.role == "shares_outstanding")
+    assert snapshot.status is ValuationSnapshotStatus.EVALUATED
+    assert snapshot.coverage.evaluated == 11
+    assert by_key["valuation.corporate.market_cap"].value == Decimal("1000")
+    assert shares.taxonomy == DEI_TAXONOMY
+    assert shares.tag == "EntityCommonStockSharesOutstanding"
+    assert shares.unit == "shares"
+    assert snapshot.report_currency == "USD"
+
+
+def test_dei_shares_combine_with_ifrs_monetary_facts_without_mixing_basis() -> None:
+    rows = [
+        _observation("fundamental.revenue", "1000", taxonomy="ifrs-full", tag="Revenue"),
+        _observation("fundamental.net_income", "200", taxonomy="ifrs-full", tag="ProfitLoss"),
+        _observation(
+            "fundamental.stockholders_equity",
+            "800",
+            taxonomy="ifrs-full",
+            tag="EquityAttributableToOwnersOfParent",
+        ),
+        _observation(
+            "fundamental.operating_income",
+            "250",
+            taxonomy="ifrs-full",
+            tag="ProfitLossFromOperatingActivities",
+        ),
+        _observation(
+            "fundamental.depreciation_and_amortization",
+            "50",
+            taxonomy="ifrs-full",
+            tag="DepreciationAndAmortisationExpense",
+        ),
+        _observation(
+            "fundamental.operating_cash_flow",
+            "300",
+            taxonomy="ifrs-full",
+            tag="CashFlowsFromUsedInOperatingActivities",
+        ),
+        _observation(
+            "fundamental.capital_expenditures",
+            "100",
+            taxonomy="ifrs-full",
+            tag="PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities",
+        ),
+        _observation(
+            DEI_SHARES_FIELD_NAME,
+            "100",
+            taxonomy=DEI_TAXONOMY,
+            tag="EntityCommonStockSharesOutstanding",
+        ),
+    ]
+    service = _service(rows)
+    service._price = lambda request: _price()  # type: ignore[method-assign]
+
+    snapshot = service.query(
+        CorporateValuationRequest(
+            asset_id=_ASSET_ID,
+            known_at=_KNOWN_AT,
+            valuation_date=_KNOWN_AT.date(),
+        ),
+        computed_at=_KNOWN_AT,
+    )
+
+    by_key = {item.metric_key: item for item in snapshot.metrics}
+    shares = next(item for item in snapshot.inputs if item.role == "shares_outstanding")
+    assert snapshot.coverage.evaluated == 6
+    assert by_key["valuation.corporate.market_cap"].value == Decimal("1000")
+    assert by_key["valuation.corporate.price_to_earnings_latest_annual"].value == Decimal("5")
+    assert by_key["valuation.corporate.price_to_book"].value == Decimal("1.25")
+    assert by_key["valuation.corporate.price_to_sales_latest_annual"].value == Decimal("1")
+    assert shares.taxonomy == DEI_TAXONOMY
+    assert {item.taxonomy for item in snapshot.inputs if item.role != "close_price"} == {
+        "ifrs-full",
+        DEI_TAXONOMY,
+    }
+    assert snapshot.report_currency == "USD"
+
+
+def test_dei_shares_alone_do_not_invent_accounting_basis() -> None:
+    service = _service(
+        _with_dei_shares([]),
+    )
+    service._price = lambda request: _price()  # type: ignore[method-assign]
+
+    snapshot = service.query(
+        CorporateValuationRequest(
+            asset_id=_ASSET_ID,
+            known_at=_KNOWN_AT,
+            valuation_date=_KNOWN_AT.date(),
+        ),
+        computed_at=_KNOWN_AT,
+    )
+
+    by_key = {item.metric_key: item for item in snapshot.metrics}
+    assert snapshot.report_currency is None
+    assert snapshot.coverage.evaluated == 1
+    assert by_key["valuation.corporate.market_cap"].value == Decimal("1000")
+    assert next(item for item in snapshot.inputs if item.role == "shares_outstanding").taxonomy == (
+        DEI_TAXONOMY
+    )
+
+
+def test_dei_shares_read_scope_ignores_foreign_corpus() -> None:
+    rows = _with_dei_shares(_reference_rows())
+    price = _price()
+    baseline_service = _service(rows)
+    baseline_service._price = lambda request: price  # type: ignore[method-assign]
+    request = CorporateValuationRequest(
+        asset_id=_ASSET_ID,
+        known_at=_KNOWN_AT,
+        valuation_date=_KNOWN_AT.date(),
+    )
+    baseline = baseline_service.query(request, computed_at=_KNOWN_AT)
+    decoys = [
+        _observation(
+            "fundamental.revenue",
+            "999999",
+            asset_id="equity:us:msft",
+            source_id="sec-edgar:msft:companyfacts",
+        )
+        for _ in range(5)
+    ]
+    decoys.extend(
+        _observation(
+            "fundamental.revenue",
+            "999999",
+            source_id="sec-edgar:other:companyfacts",
+        )
+        for _ in range(3)
+    )
+    decoys.extend(
+        _observation(
+            "fundamental.revenue",
+            "999999",
+            available_at=_KNOWN_AT + timedelta(days=30),
+        )
+        for _ in range(2)
+    )
+    storage = _Storage([*rows, *decoys])
+    service = _service(rows, storage=storage)
+    service._price = lambda request: price  # type: ignore[method-assign]
+
+    snapshot = service.query(request, computed_at=_KNOWN_AT)
+
+    assert snapshot.model_dump_json() == baseline.model_dump_json()
+    assert storage.observations.hydrated == len(rows)
+
+
+def test_dei_revision_enters_only_after_its_availability() -> None:
+    revision_at = _KNOWN_AT + timedelta(days=2)
+    baseline_shares = _with_dei_shares([], value="100")[0]
+    revised_shares = _observation(
+        DEI_SHARES_FIELD_NAME,
+        "110",
+        taxonomy=DEI_TAXONOMY,
+        tag="EntityCommonStockSharesOutstanding",
+        available_at=revision_at,
+        accession_number="0000320193-26-000002",
+    )
+    rows = [baseline_shares, revised_shares]
+    before_service = _service(rows)
+    after_service = _service(rows)
+    before_service._price = lambda request: _price()  # type: ignore[method-assign]
+    after_service._price = lambda request: _price()  # type: ignore[method-assign]
+
+    before = before_service.query(
+        CorporateValuationRequest(
+            asset_id=_ASSET_ID,
+            known_at=revision_at - timedelta(seconds=1),
+            valuation_date=_KNOWN_AT.date(),
+        ),
+        computed_at=_KNOWN_AT,
+    )
+    after = after_service.query(
+        CorporateValuationRequest(
+            asset_id=_ASSET_ID,
+            known_at=revision_at,
+            valuation_date=_KNOWN_AT.date(),
+        ),
+        computed_at=revision_at + timedelta(days=1),
+    )
+
+    before_cap = next(
+        item for item in before.metrics if item.metric_key == "valuation.corporate.market_cap"
+    )
+    after_cap = next(
+        item for item in after.metrics if item.metric_key == "valuation.corporate.market_cap"
+    )
+    assert before_cap.value == Decimal("1000")
+    assert after_cap.value == Decimal("1100")
+    assert before_cap.result_id != after_cap.result_id
+    assert (
+        next(item for item in before.inputs if item.role == "shares_outstanding").observation_id
+        != next(item for item in after.inputs if item.role == "shares_outstanding").observation_id
+    )

@@ -3,6 +3,7 @@
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from investment_analyst.core.models import (
@@ -18,6 +19,9 @@ from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer impor
     SecCompanyFactsNormalizer,
 )
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarClient, SecEdgarIdentity
+from investment_analyst.providers.fundamentals.sec_fact_models import (
+    DEI_SHARES_TRANSFORMATION_VERSION,
+)
 from investment_analyst.providers.fundamentals.sec_observation_pipeline import (
     SecAaplObservationPipeline,
     SecIssuerObservationPipeline,
@@ -68,6 +72,8 @@ def _prepared_documents(
     marker: str,
     annual_assets: str = "5000",
     configuration: SecAssetConfiguration | None = None,
+    native_shares: bool = True,
+    dei_shares: str | None = None,
 ) -> tuple[bytes, bytes]:
     resolved = configuration or aapl_sec_configuration()
     submissions = _load_fixture("aapl_submissions.json")
@@ -100,31 +106,31 @@ def _prepared_documents(
 
     companyfacts = _load_fixture("aapl_companyfacts.json")
     companyfacts["description"] = marker
-    companyfacts["facts"] = {
-        "us-gaap": {
-            "RevenueFromContractWithCustomerExcludingAssessedTax": {
-                "units": {"USD": [duration(True, "1000.25"), duration(False, "260.50")]}
-            },
-            "NetIncomeLoss": {
-                "units": {"USD": [duration(True, "200.10"), duration(False, "52.25")]}
-            },
-            "Assets": {"units": {"USD": [instant(True, annual_assets), instant(False, "5100")]}},
-            "Liabilities": {"units": {"USD": [instant(True, "3000"), instant(False, "3050")]}},
-            "StockholdersEquity": {
-                "units": {"USD": [instant(True, "2000"), instant(False, "2050")]}
-            },
-            "EarningsPerShareDiluted": {
-                "units": {"USD/shares": [duration(True, "5.10"), duration(False, "1.30")]}
-            },
-            "WeightedAverageNumberOfDilutedSharesOutstanding": {
-                "units": {"shares": [duration(True, "100"), duration(False, "90")]}
-            },
-            "CommonStockSharesOutstanding": {
-                "units": {"shares": [instant(True, "95"), instant(False, "85")]}
-            },
+    us_gaap: dict[str, object] = {
+        "RevenueFromContractWithCustomerExcludingAssessedTax": {
+            "units": {"USD": [duration(True, "1000.25"), duration(False, "260.50")]}
         },
-        "dei": companyfacts["facts"]["dei"],
+        "NetIncomeLoss": {"units": {"USD": [duration(True, "200.10"), duration(False, "52.25")]}},
+        "Assets": {"units": {"USD": [instant(True, annual_assets), instant(False, "5100")]}},
+        "Liabilities": {"units": {"USD": [instant(True, "3000"), instant(False, "3050")]}},
+        "StockholdersEquity": {"units": {"USD": [instant(True, "2000"), instant(False, "2050")]}},
+        "EarningsPerShareDiluted": {
+            "units": {"USD/shares": [duration(True, "5.10"), duration(False, "1.30")]}
+        },
+        "WeightedAverageNumberOfDilutedSharesOutstanding": {
+            "units": {"shares": [duration(True, "100"), duration(False, "90")]}
+        },
     }
+    if native_shares:
+        us_gaap["CommonStockSharesOutstanding"] = {
+            "units": {"shares": [instant(True, "95"), instant(False, "85")]}
+        }
+    dei: dict[str, object] = companyfacts["facts"]["dei"]  # type: ignore[assignment]
+    if dei_shares is not None:
+        dei = {
+            "EntityCommonStockSharesOutstanding": {"units": {"shares": [instant(True, dei_shares)]}}
+        }
+    companyfacts["facts"] = {"us-gaap": us_gaap, "dei": dei}
     if resolved.asset_id != aapl_sec_configuration().asset_id:
         submissions = json.loads(json.dumps(submissions).replace("0000320193", resolved.cik))
         submissions["cik"] = resolved.cik
@@ -145,12 +151,16 @@ def _store_snapshots(
     marker: str,
     annual_assets: str = "5000",
     configuration: SecAssetConfiguration | None = None,
+    native_shares: bool = True,
+    dei_shares: str | None = None,
 ) -> tuple[RawRecord, RawRecord]:
     resolved = configuration or aapl_sec_configuration()
     submissions, companyfacts = _prepared_documents(
         marker=marker,
         annual_assets=annual_assets,
         configuration=resolved,
+        native_shares=native_shares,
+        dei_shares=dei_shares,
     )
     client = SecEdgarClient(
         FixtureTransport(submissions, companyfacts),
@@ -338,3 +348,53 @@ def test_observation_pipeline_keeps_two_sec_issuers_isolated(tmp_path: Path) -> 
         assert {item.source.source_id for item in amd_observations} == {amd.companyfacts_source_id}
         assert storage.metric_results.list() == []
         assert storage.diagnostics.list() == []
+
+
+def test_pipeline_persists_dei_annual_shares_when_native_is_absent(tmp_path: Path) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        _store_snapshots(
+            storage,
+            retrieved_at=FIRST_RETRIEVAL,
+            marker="DEI-only annual shares",
+            native_shares=False,
+            dei_shares="123456",
+        )
+        pipeline = SecAaplObservationPipeline(
+            storage,
+            SecCompanyFactsNormalizer(),
+            clock=lambda: NORMALIZED_AT,
+        )
+        first = pipeline.run()
+
+        shares = storage.observations.list(
+            asset_id="equity:us:aapl",
+            field_names={"fundamental.shares_outstanding"},
+        )
+        assert first.observations_created == 15
+        assert len(shares) == 1
+        observation = shares[0]
+        record_key = json.loads(observation.source.record_key or "{}")
+        assert observation.value == Decimal("123456")
+        assert observation.unit == "shares"
+        assert observation.frequency is DataFrequency.ANNUAL
+        assert observation.transformation_version == DEI_SHARES_TRANSFORMATION_VERSION
+        assert record_key["taxonomy"] == "dei"
+        assert record_key["tag"] == "EntityCommonStockSharesOutstanding"
+        assert record_key["unit"] == "shares"
+        assert record_key["period"] == "2025-12-31"
+        assert first.field_counts["fundamental.shares_outstanding"] == 1
+
+        second = pipeline.run()
+        assert second.observations_created == 0
+        assert second.observations_reused == 15
+
+    reopened_storage = LocalStorage(storage.paths)
+    with reopened_storage:
+        replay = SecAaplObservationPipeline(
+            reopened_storage,
+            SecCompanyFactsNormalizer(),
+            clock=lambda: NORMALIZED_AT + timedelta(days=1),
+        ).run()
+        assert replay.observations_created == 0
+        assert replay.observations_reused == 15
+        assert reopened_storage.observations.get(observation.observation_id) == observation

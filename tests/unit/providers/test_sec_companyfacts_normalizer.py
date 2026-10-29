@@ -25,6 +25,7 @@ from investment_analyst.providers.fundamentals.sec_fact_models import (
     ASSET_ID,
     COMPANYFACTS_SCHEMA_VERSION,
     COMPANYFACTS_SOURCE_ID,
+    DEI_SHARES_TRANSFORMATION_VERSION,
     SEC_RESEARCH_FACT_DEFINITIONS,
     SUBMISSIONS_SCHEMA_VERSION,
     SUBMISSIONS_SOURCE_ID,
@@ -372,6 +373,11 @@ def test_normalizer_selects_annual_ifrs_profile_for_foreign_issuer(
         "entityName": entity_name,
         "facts": {
             "ifrs-full": {tag: {"units": {"USD": [fact]}} for tag, fact in concepts.items()},
+            "dei": {
+                "EntityCommonStockSharesOutstanding": {
+                    "units": {"shares": [instant("25932733242")]}
+                }
+            },
             "us-gaap": {},
         },
     }
@@ -408,12 +414,270 @@ def test_normalizer_selects_annual_ifrs_profile_for_foreign_issuer(
         configuration=configuration,
     )
 
-    assert extraction.facts_selected == 5
-    assert extraction.annual_count == 5
+    assert extraction.facts_selected == 6
+    assert extraction.annual_count == 6
     assert extraction.quarterly_count == 0
-    assert {fact.taxonomy for fact in extraction.facts} == {"ifrs-full"}
+    assert {fact.taxonomy for fact in extraction.facts} == {"ifrs-full", "dei"}
     assert {fact.form for fact in extraction.facts} == {annual_form}
     assert observation.transformation_version == IFRS_TRANSFORMATION_VERSION
+    dei_shares = next(
+        fact for fact in extraction.facts if fact.field_name == "fundamental.shares_outstanding"
+    )
+    assert dei_shares.taxonomy == "dei"
+    assert dei_shares.tag == "EntityCommonStockSharesOutstanding"
+    assert dei_shares.unit == "shares"
+    assert dei_shares.value == Decimal("25932733242")
+    dei_observation = sec_fact_to_observation(
+        dei_shares,
+        companyfacts,
+        submissions,
+        normalized_at=NORMALIZED_AT,
+        configuration=configuration,
+    )
+    assert dei_observation.transformation_version == DEI_SHARES_TRANSFORMATION_VERSION
+
+
+def _dei_annual_fact(value: str, **overrides: object) -> dict[str, object]:
+    result: dict[str, object] = {
+        "end": "2025-12-31",
+        "val": value,
+        "accn": ANNUAL_ACCN,
+        "fy": "2025",
+        "fp": "FY",
+        "form": "10-K",
+        "filed": "2026-01-30",
+    }
+    result.update(overrides)
+    return result
+
+
+def _with_dei_shares(
+    document: dict[str, object],
+    facts: list[dict[str, object]],
+    *,
+    unit: str = "shares",
+) -> dict[str, object]:
+    document["facts"]["dei"] = {"EntityCommonStockSharesOutstanding": {"units": {unit: facts}}}
+    return document
+
+
+def test_dei_annual_shares_fill_missing_native_and_use_complementary_version() -> None:
+    document = _with_dei_shares(
+        _company_document(),
+        [
+            _dei_annual_fact("253715190"),
+            _dei_annual_fact(
+                "999",
+                accn=QUARTERLY_ACCN,
+                end="2026-03-31",
+                fy="2026",
+                fp="Q1",
+                form="10-Q",
+                filed="2026-04-30",
+            ),
+        ],
+    )
+    normalizer = SecCompanyFactsNormalizer()
+    company = _company(document=document)
+    submissions = _submissions()
+
+    result = normalizer.extract(company, submissions, normalized_at=NORMALIZED_AT)
+
+    shares = [fact for fact in result.facts if fact.field_name == "fundamental.shares_outstanding"]
+    assert len(shares) == 1
+    fact = shares[0]
+    assert fact.taxonomy == "dei"
+    assert fact.tag == "EntityCommonStockSharesOutstanding"
+    assert fact.unit == "shares"
+    assert fact.value == Decimal("253715190")
+    assert fact.frequency is DataFrequency.ANNUAL
+    assert fact.period_start is None
+    assert result.skipped_counts["non_annual_complementary:fundamental.shares_outstanding"] == 1
+
+    observation = sec_fact_to_observation(
+        fact,
+        company,
+        submissions,
+        normalized_at=NORMALIZED_AT,
+    )
+    assert observation.transformation_version == DEI_SHARES_TRANSFORMATION_VERSION
+    key = json.loads(observation.source.record_key or "{}")
+    assert key["taxonomy"] == "dei"
+    assert key["tag"] == "EntityCommonStockSharesOutstanding"
+    assert key["unit"] == "shares"
+    assert key["period"] == "2025-12-31"
+    assert key["accession_number"] == ANNUAL_ACCN
+
+    second_company = _company(
+        document=document,
+        retrieved_at=RETRIEVED_AT + timedelta(days=1),
+        checksum="b" * 64,
+    )
+    second_fact = next(
+        item
+        for item in normalizer.extract(
+            second_company,
+            submissions,
+            normalized_at=NORMALIZED_AT + timedelta(days=1),
+        ).facts
+        if item.field_name == "fundamental.shares_outstanding"
+    )
+    second_observation = sec_fact_to_observation(
+        second_fact,
+        second_company,
+        submissions,
+        normalized_at=NORMALIZED_AT + timedelta(days=1),
+    )
+    assert observation.observation_id == second_observation.observation_id
+
+    revised_document = _with_dei_shares(
+        _company_document(),
+        [_dei_annual_fact("253715191")],
+    )
+    revised_company = _company(document=revised_document)
+    revised_fact = next(
+        item
+        for item in normalizer.extract(
+            revised_company,
+            submissions,
+            normalized_at=NORMALIZED_AT,
+        ).facts
+        if item.field_name == "fundamental.shares_outstanding"
+    )
+    revised_observation = sec_fact_to_observation(
+        revised_fact,
+        revised_company,
+        submissions,
+        normalized_at=NORMALIZED_AT,
+    )
+    assert observation.observation_id != revised_observation.observation_id
+
+
+def test_dei_equal_native_is_not_duplicated_and_native_is_preserved() -> None:
+    document = _company_document()
+    document["facts"]["us-gaap"]["CommonStockSharesOutstanding"] = {
+        "units": {"shares": [_instant_fact(annual=True, value="95")]}
+    }
+    _with_dei_shares(document, [_dei_annual_fact("95")])
+
+    result = SecCompanyFactsNormalizer().extract(
+        _company(document=document),
+        _submissions(),
+        normalized_at=NORMALIZED_AT,
+    )
+
+    shares = [fact for fact in result.facts if fact.field_name == "fundamental.shares_outstanding"]
+    assert len(shares) == 1
+    assert shares[0].taxonomy == "us-gaap"
+    assert shares[0].tag == "CommonStockSharesOutstanding"
+    assert shares[0].value == Decimal("95")
+    assert result.skipped_counts["complementary_matches_native"] == 1
+
+
+def test_dei_conflict_with_native_shares_is_rejected_without_arbitration() -> None:
+    document = _company_document()
+    document["facts"]["us-gaap"]["CommonStockSharesOutstanding"] = {
+        "units": {"shares": [_instant_fact(annual=True, value="95")]}
+    }
+    _with_dei_shares(document, [_dei_annual_fact("96")])
+
+    result = SecCompanyFactsNormalizer().extract(
+        _company(document=document),
+        _submissions(),
+        normalized_at=NORMALIZED_AT,
+    )
+
+    shares = [fact for fact in result.facts if fact.field_name == "fundamental.shares_outstanding"]
+    assert len(shares) == 1
+    assert shares[0].taxonomy == "us-gaap"
+    assert shares[0].value == Decimal("95")
+    assert result.skipped_counts["conflicting_native_shares:fundamental.shares_outstanding"] == 1
+
+
+def test_dei_shares_require_annual_filing_context_and_exact_instant() -> None:
+    missing_year = _dei_annual_fact("2")
+    missing_year["fy"] = None
+    document = _with_dei_shares(
+        _company_document(),
+        [
+            _dei_annual_fact("1", end="2025-12-30"),
+            missing_year,
+            _dei_annual_fact("3", start="2025-01-01"),
+        ],
+    )
+
+    result = SecCompanyFactsNormalizer().extract(
+        _company(document=document),
+        _submissions(),
+        normalized_at=NORMALIZED_AT,
+    )
+
+    assert result.skipped_counts["report_date_mismatch"] == 1
+    assert result.skipped_counts["missing_fiscal_year"] == 1
+    assert result.skipped_counts["unexpected_period_start"] == 1
+    assert not [
+        fact for fact in result.facts if fact.field_name == "fundamental.shares_outstanding"
+    ]
+
+
+def test_dei_wrong_unit_missing_concept_and_future_acceptance_are_explicit() -> None:
+    wrong_unit_document = _with_dei_shares(
+        _company_document(),
+        [_dei_annual_fact("1")],
+        unit="USD",
+    )
+    wrong_unit = SecCompanyFactsNormalizer().extract(
+        _company(document=wrong_unit_document),
+        _submissions(),
+        normalized_at=NORMALIZED_AT,
+    )
+    assert wrong_unit.skipped_counts["missing_expected_unit:fundamental.shares_outstanding"] == 1
+
+    missing_concept_document = _company_document()
+    missing_concept_document["facts"]["dei"] = {}
+    missing_concept = SecCompanyFactsNormalizer().extract(
+        _company(document=missing_concept_document),
+        _submissions(),
+        normalized_at=NORMALIZED_AT,
+    )
+    assert (
+        missing_concept.skipped_counts[
+            "missing_complementary_concept:fundamental.shares_outstanding"
+        ]
+        == 1
+    )
+
+    future_document = _with_dei_shares(
+        _company_document(),
+        [_dei_annual_fact("4")],
+    )
+    future = SecCompanyFactsNormalizer().extract(
+        _company(document=future_document),
+        _submissions(),
+        normalized_at=datetime(2026, 1, 30, 20, tzinfo=UTC),
+    )
+    assert future.skipped_counts["future_acceptance"] >= 1
+    assert not [
+        fact for fact in future.facts if fact.field_name == "fundamental.shares_outstanding"
+    ]
+
+
+def test_dei_non_positive_values_are_skipped_with_explicit_reason() -> None:
+    document = _with_dei_shares(
+        _company_document(),
+        [_dei_annual_fact("0"), _dei_annual_fact("-1")],
+    )
+
+    result = SecCompanyFactsNormalizer().extract(
+        _company(document=document),
+        _submissions(),
+        normalized_at=NORMALIZED_AT,
+    )
+
+    assert result.skipped_counts["non_positive_complementary:fundamental.shares_outstanding"] == 2
+    assert not [
+        fact for fact in result.facts if fact.field_name == "fundamental.shares_outstanding"
+    ]
 
 
 def test_extracts_additional_research_catalog_without_expanding_core_query() -> None:

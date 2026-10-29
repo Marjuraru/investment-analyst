@@ -10,7 +10,7 @@ Cada ejecución abre una sola conexión writer y ejecuta exactamente:
 
 1. descarga de Submissions y Company Facts;
 2. persistencia append-only de los dos snapshots oficiales;
-3. normalización de hechos XBRL compatibles;
+3. normalización de hechos XBRL compatibles, incluida la alternancia anual DEI de acciones comunes;
 4. resolución del corte point-in-time;
 5. persistencia idempotente de cinco métricas base;
 6. persistencia de un diagnóstico fundamental independiente.
@@ -46,6 +46,25 @@ perfil IFRS admite solo anual mediante 20-F/40-F. Una frecuencia incompatible fa
 consultar SEC o abrir una operación de escritura. La cobertura de universo aplica la misma
 declaración: una consulta `quarterly` sobre un perfil IFRS devuelve `capability=not_implemented` y
 `evidence=not_queried`, no `missing`, y añade la limitación de perfil al activo.
+
+## Acciones comunes DEI
+
+El normalizador consulta además `dei:EntityCommonStockSharesOutstanding` como fuente complementaria
+de `fundamental.shares_outstanding`. Sólo admite el hecho instantáneo anual del mismo emisor,
+filing, accession, forma, año y período fiscal, cierre `reportDate` y aceptación SEC que los hechos
+del filing; una fecha de portada distinta no se transporta al cierre y se omite con causa explícita.
+La unidad debe ser `shares`, el valor debe ser `Decimal` finito y positivo, y no se aceptan acciones
+autorizadas, emitidas, promedio, diluidas ni de otra clase.
+
+La selección nativa del perfil US-GAAP o IFRS conserva prioridad en su mismo contexto. Si DEI
+coincide exactamente no se emite una segunda observación; si discrepa se rechaza la observación DEI,
+se conserva la nativa y el conflicto queda contabilizado explícitamente sin tolerancia, redondeo ni
+prioridad que lo esconda; el resto del filing sigue normalizando. Sólo cuando falta la nativa
+elegible se emite una observación DEI con `taxonomy=dei`, su tag real y la versión
+`sec-companyfacts-dei-shares-v1`; los conceptos existentes conservan sus versiones, bytes e IDs. El
+`record_key` mantiene taxonomy, tag, unidad, período y linaje, y la reconstrucción/replay reutiliza
+la misma identidad sin duplicar filas. Las ausencias y los rechazos quedan contabilizados en
+`skipped_counts`; no se completa un ejercicio con el valor de otro.
 
 ## Ejecución
 

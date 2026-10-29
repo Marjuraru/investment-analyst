@@ -10,14 +10,20 @@ from pydantic import ValidationError
 from investment_analyst.core.models import DataFrequency, DataQuality
 from investment_analyst.providers.fundamentals.sec_fact_models import (
     ASSET_ID,
+    DEI_SHARES_FIELD_NAME,
+    DEI_TAXONOMY,
+    SEC_COMPLEMENTARY_FACT_DEFINITIONS,
+    SEC_DEI_SHARES_FACT_DEFINITION,
     SEC_FACT_DEFINITIONS,
     SEC_IFRS_FACT_DEFINITIONS,
     SEC_IFRS_NORMALIZED_FACT_DEFINITIONS,
     SEC_NORMALIZED_FACT_DEFINITIONS,
     SEC_RESEARCH_FACT_DEFINITIONS,
+    SecFactPeriodType,
     SecFilingMetadata,
     SecFundamentalFact,
     get_sec_fact_definition,
+    sec_fact_definitions,
 )
 
 ACCEPTED_AT = datetime(2026, 1, 30, 21, tzinfo=UTC)
@@ -236,3 +242,79 @@ def test_fact_serialization_is_json_compatible() -> None:
     assert payload["value"] == "1000.25"
     assert payload["acceptance_at"] == "2026-01-30T21:00:00+00:00"
     assert _fact().model_dump_json()
+
+
+def _dei_fact(**overrides: object) -> SecFundamentalFact:
+    values: dict[str, object] = {
+        "asset_id": ASSET_ID,
+        "companyfacts_record_id": uuid4(),
+        "submissions_record_id": uuid4(),
+        "field_name": DEI_SHARES_FIELD_NAME,
+        "taxonomy": DEI_TAXONOMY,
+        "tag": "EntityCommonStockSharesOutstanding",
+        "unit": "shares",
+        "value": Decimal("253715190"),
+        "accession_number": "0001410578-25-001056",
+        "form": "20-F",
+        "fiscal_year": 2024,
+        "fiscal_period": "FY",
+        "period_start": None,
+        "period_end": date(2024, 12, 31),
+        "filed_date": date(2025, 2, 20),
+        "acceptance_at": datetime(2025, 2, 20, 21, tzinfo=UTC),
+        "frequency": DataFrequency.ANNUAL,
+        "quality": DataQuality.VALID,
+    }
+    values.update(overrides)
+    return SecFundamentalFact.model_validate(values)
+
+
+def test_dei_shares_definition_is_complementary_and_not_an_accounting_standard() -> None:
+    definition = SEC_DEI_SHARES_FACT_DEFINITION
+
+    assert (
+        definition.field_name,
+        definition.taxonomy,
+        definition.tag,
+        definition.unit,
+        definition.period_type,
+    ) == (
+        DEI_SHARES_FIELD_NAME,
+        "dei",
+        "EntityCommonStockSharesOutstanding",
+        "shares",
+        SecFactPeriodType.INSTANT,
+    )
+    assert (definition,) == SEC_COMPLEMENTARY_FACT_DEFINITIONS
+    assert get_sec_fact_definition(DEI_SHARES_FIELD_NAME, taxonomy=DEI_TAXONOMY) == definition
+    with pytest.raises(ValueError, match="unsupported SEC accounting taxonomy: dei"):
+        sec_fact_definitions(DEI_TAXONOMY)
+
+
+def test_dei_share_fact_is_annual_instant_and_uses_exact_decimal() -> None:
+    fact = _dei_fact(asset_id="equity:us:tsm")
+
+    assert fact.asset_id == "equity:us:tsm"
+    assert fact.value == Decimal("253715190")
+    assert fact.period_type is SecFactPeriodType.INSTANT
+    assert fact.taxonomy == DEI_TAXONOMY
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"frequency": DataFrequency.QUARTERLY}, "DEI shares facts must be annual"),
+        ({"tag": "NumberOfSharesOutstanding"}, "taxonomy and tag"),
+        ({"unit": "USD"}, "unit"),
+        ({"period_start": date(2024, 1, 1)}, "instant facts"),
+        ({"field_name": "fundamental.revenue"}, "field_name and taxonomy"),
+        ({"value": Decimal("0")}, "must be positive"),
+        ({"value": Decimal("-1")}, "must be positive"),
+    ],
+)
+def test_dei_share_fact_rejects_scope_violations(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        _dei_fact(**overrides)

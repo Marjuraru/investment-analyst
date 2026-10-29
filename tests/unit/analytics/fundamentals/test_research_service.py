@@ -38,6 +38,8 @@ from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer impor
 from investment_analyst.providers.fundamentals.sec_fact_models import (
     ASSET_ID,
     COMPANYFACTS_SOURCE_ID,
+    DEI_SHARES_TRANSFORMATION_VERSION,
+    DEI_TAXONOMY,
     TRANSFORMATION_VERSION,
     SecFactPeriodType,
     get_sec_fact_definition,
@@ -142,10 +144,16 @@ def _observation(
     record_key_updates: dict[str, object] | None = None,
     asset_id: str = ASSET_ID,
     source_id: str = COMPANYFACTS_SOURCE_ID,
+    taxonomy: str | None = None,
+    tag: str | None = None,
     transformation_version: str = TRANSFORMATION_VERSION,
     frequency: DataFrequency = DataFrequency.ANNUAL,
 ) -> NormalizedObservation:
-    definition = get_sec_fact_definition(field_name)
+    definition = (
+        get_sec_fact_definition(field_name, taxonomy=taxonomy)
+        if taxonomy is not None
+        else get_sec_fact_definition(field_name)
+    )
     resolved_unit = unit or definition.unit
     raw_id = raw_record_id or uuid4()
     period_start = (
@@ -160,7 +168,7 @@ def _observation(
     key: dict[str, object] = {
         "accession_number": "0000320193-25-000001",
         "taxonomy": definition.taxonomy,
-        "tag": definition.tag,
+        "tag": tag or definition.tag,
         "unit": resolved_unit,
         "period": period_end.isoformat(),
         "companyfacts_record_id": str(raw_id),
@@ -619,3 +627,145 @@ def test_scoped_research_rejects_malformed_eligible_evidence() -> None:
         AaplFundamentalResearchService(_Storage([observation])).query(  # type: ignore[arg-type]
             _request()
         )
+
+
+def test_dei_annual_shares_are_selected_with_exact_origin() -> None:
+    dei = _observation(
+        "fundamental.shares_outstanding",
+        "253715190",
+        taxonomy=DEI_TAXONOMY,
+        transformation_version=DEI_SHARES_TRANSFORMATION_VERSION,
+    )
+    observations = [
+        _observation(field_name, value)
+        for field_name, value in _VALUES.items()
+        if field_name != "fundamental.shares_outstanding"
+    ]
+    observations.append(dei)
+
+    result = AaplFundamentalResearchService(_Storage(observations)).query(  # type: ignore[arg-type]
+        _request()
+    )
+
+    assert _metric_values(result)["fundamental.research.shares_outstanding"] == Decimal("253715190")
+    metric = next(
+        item
+        for item in result.periods[0].metrics
+        if item.metric_key == "fundamental.research.shares_outstanding"
+    )
+    assert metric.inputs[0].observation_id == dei.observation_id
+    assert metric.inputs[0].field_name == "fundamental.shares_outstanding"
+    assert result.coverage.observations_eligible == len(observations)
+
+
+def test_dei_version_is_rejected_outside_its_declared_contract() -> None:
+    with pytest.raises(MalformedFundamentalResearchObservationError, match="DEI research"):
+        AaplFundamentalResearchService(
+            _Storage(
+                [
+                    _observation(
+                        "fundamental.revenue",
+                        "1000",
+                        transformation_version=DEI_SHARES_TRANSFORMATION_VERSION,
+                    )
+                ]
+            )  # type: ignore[arg-type]
+        ).query(_request())
+
+    with pytest.raises(MalformedFundamentalResearchObservationError, match="tag"):
+        AaplFundamentalResearchService(
+            _Storage(
+                [
+                    _observation(
+                        "fundamental.shares_outstanding",
+                        "100",
+                        taxonomy=DEI_TAXONOMY,
+                        tag="CommonStockSharesOutstanding",
+                        transformation_version=DEI_SHARES_TRANSFORMATION_VERSION,
+                    )
+                ]
+            )  # type: ignore[arg-type]
+        ).query(_request())
+
+    with pytest.raises(MalformedFundamentalResearchObservationError, match="transformation"):
+        AaplFundamentalResearchService(
+            _Storage(
+                [
+                    _observation(
+                        "fundamental.shares_outstanding",
+                        "100",
+                        taxonomy=DEI_TAXONOMY,
+                    )
+                ]
+            )  # type: ignore[arg-type]
+        ).query(_request())
+
+    with pytest.raises(MalformedFundamentalResearchObservationError, match="unit"):
+        AaplFundamentalResearchService(
+            _Storage(
+                [
+                    _observation(
+                        "fundamental.shares_outstanding",
+                        "100",
+                        taxonomy=DEI_TAXONOMY,
+                        unit="USD",
+                        transformation_version=DEI_SHARES_TRANSFORMATION_VERSION,
+                    )
+                ]
+            )  # type: ignore[arg-type]
+        ).query(_request())
+
+
+def test_dei_non_positive_value_is_rejected() -> None:
+    observation = _observation(
+        "fundamental.shares_outstanding",
+        "0",
+        taxonomy=DEI_TAXONOMY,
+        transformation_version=DEI_SHARES_TRANSFORMATION_VERSION,
+    )
+
+    with pytest.raises(MalformedFundamentalResearchObservationError, match="positive"):
+        AaplFundamentalResearchService(_Storage([observation])).query(  # type: ignore[arg-type]
+            _request()
+        )
+
+
+def test_dei_shares_read_scope_is_bounded_and_point_in_time() -> None:
+    dei = _observation(
+        "fundamental.shares_outstanding",
+        "100",
+        taxonomy=DEI_TAXONOMY,
+        transformation_version=DEI_SHARES_TRANSFORMATION_VERSION,
+    )
+    revenue = _observation("fundamental.revenue", "1000")
+    baseline = AaplFundamentalResearchService(_Storage([dei, revenue])).query(  # type: ignore[arg-type]
+        _request()
+    )
+    decoys = [
+        _observation(
+            "fundamental.revenue",
+            "999999",
+            asset_id="equity:us:amd",
+            source_id="sec-edgar:amd:companyfacts",
+            transformation_version=GENERIC_TRANSFORMATION_VERSION,
+        )
+        for _ in range(5)
+    ]
+    decoys.extend(
+        _observation("fundamental.revenue", "999999", frequency=DataFrequency.QUARTERLY)
+        for _ in range(3)
+    )
+    decoys.extend(
+        _observation(
+            "fundamental.revenue",
+            "999999",
+            available_at=_KNOWN_AT + timedelta(days=30),
+        )
+        for _ in range(2)
+    )
+    storage = _Storage([dei, revenue, *decoys])
+
+    result = AaplFundamentalResearchService(storage).query(_request())  # type: ignore[arg-type]
+
+    assert result.model_dump_json() == baseline.model_dump_json()
+    assert storage.observations.hydrated == 2

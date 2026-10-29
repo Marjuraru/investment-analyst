@@ -23,6 +23,10 @@ from investment_analyst.providers.asset_config import (
 from investment_analyst.providers.fundamentals.sec_fact_models import (
     ASSET_ID,
     COMPANYFACTS_SCHEMA_VERSION,
+    DEI_SHARES_FIELD_NAME,
+    DEI_SHARES_TRANSFORMATION_VERSION,
+    DEI_TAXONOMY,
+    SEC_COMPLEMENTARY_FACT_DEFINITIONS,
     TRANSFORMATION_VERSION,
     SecFactDefinition,
     SecFactPeriodType,
@@ -136,8 +140,9 @@ class SecCompanyFactsNormalizer:
             self._configuration,
         )
         taxonomy = self._configuration.accounting_standard.value
+        facts_mapping = _require_mapping(document.get("facts"), "document.facts")
         taxonomy_facts = _require_mapping(
-            _require_mapping(document.get("facts"), "document.facts").get(taxonomy),
+            facts_mapping.get(taxonomy),
             f"document.facts.{taxonomy}",
         )
         definitions = sec_fact_definitions(taxonomy)
@@ -194,6 +199,74 @@ class SecCompanyFactsNormalizer:
                 else:
                     skipped["duplicate_identical"] += 1
 
+        native_shares_by_context = {
+            _complementary_context(fact): fact
+            for fact in by_context.values()
+            if fact.field_name == DEI_SHARES_FIELD_NAME
+        }
+        for definition in SEC_COMPLEMENTARY_FACT_DEFINITIONS:
+            complementary_raw = facts_mapping.get(definition.taxonomy)
+            if complementary_raw is None:
+                skipped[f"missing_complementary_concept:{definition.field_name}"] += 1
+                continue
+            complementary_facts = _require_mapping(
+                complementary_raw,
+                f"document.facts.{definition.taxonomy}",
+            )
+            concept = complementary_facts.get(definition.tag)
+            if concept is None:
+                skipped[f"missing_complementary_concept:{definition.field_name}"] += 1
+                continue
+            concept_mapping = _require_mapping(
+                concept,
+                f"document.facts.{definition.taxonomy}.{definition.tag}",
+            )
+            units = _require_mapping(
+                concept_mapping.get("units"),
+                f"document.facts.{definition.taxonomy}.{definition.tag}.units",
+            )
+            unit_facts = units.get(definition.unit)
+            if unit_facts is None:
+                skipped[f"missing_expected_unit:{definition.field_name}"] += 1
+                continue
+            if not isinstance(unit_facts, list):
+                raise MalformedSecCompanyFactsError(
+                    f"{definition.unit} facts for {definition.tag} must be a list"
+                )
+            for position, raw_fact in enumerate(unit_facts):
+                examined += 1
+                candidate, reason = _parse_candidate(
+                    definition,
+                    raw_fact,
+                    filing_index,
+                    companyfacts_record,
+                    submissions_record,
+                    self._configuration,
+                    normalized_at=normalized_at,
+                    position=position,
+                )
+                if candidate is None:
+                    skipped[reason] += 1
+                    continue
+                context = _fact_context(candidate)
+                existing = by_context.get(context)
+                if existing is not None:
+                    if existing.value != candidate.value:
+                        raise ConflictingSecFactError(
+                            "contradictory values for SEC fact context "
+                            f"{candidate.field_name} {candidate.accession_number}"
+                        )
+                    skipped["duplicate_identical"] += 1
+                    continue
+                native = native_shares_by_context.get(_complementary_context(candidate))
+                if native is not None:
+                    if native.value != candidate.value:
+                        skipped[f"conflicting_native_shares:{definition.field_name}"] += 1
+                    else:
+                        skipped["complementary_matches_native"] += 1
+                    continue
+                by_context[context] = candidate
+
         facts = tuple(
             sorted(
                 by_context.values(),
@@ -239,7 +312,7 @@ def sec_fact_to_observation(
 ) -> NormalizedObservation:
     """Convert one selected SEC fact into a stable normalized observation."""
     resolved = configuration or aapl_sec_configuration()
-    transformation_version = sec_transformation_version(resolved)
+    transformation_version = sec_fact_transformation_version(fact, resolved)
     normalized_at = _utc_datetime(normalized_at, "normalized_at")
     _validate_companyfacts_record(companyfacts_record, resolved)
     SecFilingIndex.from_raw_record(submissions_record, resolved)
@@ -378,6 +451,10 @@ def _parse_candidate(
     )
     if frequency is None:
         return None, "unsupported_fiscal_period"
+    if definition.taxonomy == DEI_TAXONOMY and frequency is not DataFrequency.ANNUAL:
+        return None, f"non_annual_complementary:{definition.field_name}"
+    if definition.taxonomy == DEI_TAXONOMY and value <= 0:
+        return None, f"non_positive_complementary:{definition.field_name}"
 
     period_start: date | None = None
     if definition.period_type is SecFactPeriodType.DURATION:
@@ -467,11 +544,36 @@ def sec_transformation_version(configuration: SecAssetConfiguration) -> str:
     return GENERIC_TRANSFORMATION_VERSION
 
 
+def sec_fact_transformation_version(
+    fact: SecFundamentalFact,
+    configuration: SecAssetConfiguration,
+) -> str:
+    """Version the complementary DEI concept independently from native facts."""
+    if fact.taxonomy == DEI_TAXONOMY:
+        return DEI_SHARES_TRANSFORMATION_VERSION
+    return sec_transformation_version(configuration)
+
+
 def _fact_context(fact: SecFundamentalFact) -> tuple[object, ...]:
     return (
         fact.field_name,
         fact.taxonomy,
         fact.tag,
+        fact.unit,
+        fact.accession_number,
+        fact.period_start,
+        fact.period_end,
+        fact.form,
+        fact.fiscal_year,
+        fact.fiscal_period,
+        fact.acceptance_at,
+    )
+
+
+def _complementary_context(fact: SecFundamentalFact) -> tuple[object, ...]:
+    """Identify one filing context independently of the source taxonomy and tag."""
+    return (
+        fact.field_name,
         fact.unit,
         fact.accession_number,
         fact.period_start,
