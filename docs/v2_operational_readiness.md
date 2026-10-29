@@ -22,6 +22,96 @@ Los valores de runtime, workspace y release se leen de `runtime/deployment_state
 hasta repetir la matriz correspondiente. La medición de adquisición se etiqueta con el árbol exacto
 que la produjo; si el candidato final difiere sólo en documentación, se indica literalmente.
 
+## Adopción operacional 2026-10-29 (`FUNDAMENTALS-COVERAGE-OPERATIONS`/#373)
+
+Esta sección registra adopción real de la capacidad ya integrada. No cambia el denominador C1–C5 ni
+hereda `MET` de bloques anteriores; C1–C5 permanecen como historia fechada.
+
+| Campo | Valor |
+| --- | --- |
+| Work Block | `FUNDAMENTALS-COVERAGE-OPERATIONS` (#373) |
+| Base declarada | `origin/main@a5b8581c71faaeb98665cb0ae9bd835df1cf5664` |
+| Release activa | `a5b8581c71faaeb98665cb0ae9bd835df1cf5664`; rollback `4a9ccb4c070df622d15b14d150de69d5ad352f5c` |
+| Workspace | `workspaces/active-v2-20261021`, UUID `70c64668-1738-4dfe-ba1f-7e72026bb7fe` |
+| `route_effect` | `ADVANCES` sobre `FUNDAMENTALS-COVERAGE`, que sigue `NEXT` |
+| Corte de lectura | K1 `2026-10-29T19:47:00Z`; K0 `2026-10-27T00:00:00Z` |
+
+### A1 — activación de la base integrada
+
+El gestor existente activó la base exacta con
+`deploy_local_release.py update --sha a5b8581… --readiness-deadline-seconds 300`. Verificación viva:
+`current_commit=a5b8581…`, `previous_commit=4a9ccb4…`, `unit_matches_current=true`,
+`service_active=true`, `service_enabled=true`, overview HTTP 200, shell 76.947 bytes y assets 200.
+El `ExecStart` de la unidad conserva `--workspace …/active-v2-20261021`; no se reinició para fabricar
+un recibo ni se tocó el scheduler. La unidad mantiene 3 activos programados (BTC, AAPL, AMD).
+
+### A2 — ciclo real SEC, persistencia y consultas
+
+Una pasada secuencial de los cinco perfiles mediante `POST /api/fundamental-refresh` con
+`frequency=annual` y `requested_known_at=null`. Cinco de cinco terminaron con
+`traceability_verified=true`; no hubo error HTTP ni etapa fallida.
+
+| Emisor | `effective_known_at` | Raw creados/reutilizados | Observaciones creadas/reutilizadas | Métricas creadas/reutilizadas | Valoración creadas/reutilizadas/no evaluables | Diagnóstico |
+| --- | --- | --- | --- | --- | --- | --- |
+| AAPL | `2026-10-29T19:45:58Z` | 0/2 | 0/1.286 | 45/11 | 0/11/0 | `neutral`, cobertura 1,00 |
+| AMD | `2026-10-29T19:46:15Z` | 0/2 | 0/871 | 23/6 | 0/6/5 | `insufficient_data`, 0,60 |
+| B | `2026-10-29T19:46:22Z` | 0/2 | 12/166 | 44/5 | 6/0/5 | `positive`, 1,00 |
+| TSM | `2026-10-29T19:46:30Z` | 1/1 | 9/149 | 34/5 | 1/0/10 | `positive`, 1,00 |
+| BVN | `2026-10-29T19:46:37Z` | 1/1 | 6/224 | 34/5 | 1/0/10 | `positive`, 1,00 |
+
+Las 55 celdas de valoración, la procedencia DEI/ADR y la comparación K0/K1 viven en
+[`corporate_valuation_point_in_time.md`](corporate_valuation_point_in_time.md). La investigación
+anual devolvió cinco períodos por emisor y la repetición conservó IDs, valores y orden; la historia
+de valoración devolvió puntos nuevos con `valuation_date=2026-10-29` (AAPL 100/220 truncada, AMD 54,
+B 6, TSM 1, BVN 1). K0 conservó sus precios y cobertura y no recibió adquisiciones nuevas.
+
+### A3 — panel, coste y cobertura
+
+- No hay control de navegador disponible en este entorno (`agent-browser` y Chromium CLI ausentes).
+  No se afirma inspección visual. Se verificaron el shell (76.947 bytes), `/assets/styles.css`,
+  `/assets/app.js`, `/api/v1/overview` y las rutas anuales de investigación con HTTP 200; el código
+  del panel consume `capability`, `evidence`, `reason_codes` y frecuencia de los mismos contratos.
+- Apertura fría y reapertura caliente sobre `equity:us:b`, K2 `2026-10-28T00:00:00Z`: 1,570 s
+  (miss) → 0,450 s (hit) → 0,459 s (hit), 15.737 bytes idénticos, `partial` 6/11. La telemetría
+  existente pasó de 15 a 18 peticiones de valoración, 7 hits, 11 misses, 0 errores, p50 868,836 ms.
+- El archivo DuckDB no cambió de tamaño ni de `mtime` (652.226.560 B) y no apareció WAL: las
+  consultas no escribieron. RSS observado 299.216 kB; `MemoryCurrent` 729.157.632 B; swap 0. Límites
+  vigentes: proceso ≤3 GiB, DuckDB agregado ≤2 GB y spill ≤1 GB; agregado y spill no se midieron y
+  no se declaran como cero.
+- Cobertura anual con ventana fundamental de diez años: los cinco perfiles `present` (319, 218, 177,
+  172 y 174 métricas devueltas). Una consulta trimestral de TSM/BVN devuelve
+  `capability=not_implemented`, `evidence=not_queried` y la limitación de perfil; no se convierte en
+  `missing` ni en cero. El catálogo sigue con 31 activos y el scheduler con 3; no hubo adquisición
+  global ni cambio de watchlist.
+
+### A4 — documentación y entrega
+
+Se actualizaron sólo los cinco markdown de la allowlist: este documento,
+[`sec_issuer_refresh.md`](sec_issuer_refresh.md),
+[`corporate_valuation_point_in_time.md`](corporate_valuation_point_in_time.md) y los dos documentos
+de ruta. `docs/local_interface.md` y `docs/development_protocol.md` permanecen canónicos sin
+cambios; #371/#372 conservan su historia. El SHA documental exacto se fija en el marker BUILD del
+candidato; el runtime sigue ejecutando `a5b8581…`, cuyos bytes de producto son equivalentes porque
+el diff de este bloque es sólo documental.
+
+### Presupuesto físico reconciliado
+
+| Campo | Declaración | Real |
+| --- | --- | --- |
+| `rutas_proposito` | Cinco markdown; workspace activo sólo refresh SEC acotado; recibos en `/tmp` | Sólo cinco markdown; cinco emisores; recibos en scratch |
+| `bytes_nuevos` | Docs ≤128 KiB; release ≤160 MiB; DB/WAL ≤128 MiB | Release 104.938.255 B; docs <128 KiB; DB física −32.768.000 B por checkpoint, no por borrado |
+| `bytes_modificados` | Cinco archivos base; metadata runtime ≤1 MiB | Cinco markdown; `deployment_state.json` y unidad por el gestor |
+| `temporales` | Worktree ≤32 MiB; scratch ≤32 MiB | Worktree y scratch propios; recibos 332 KB |
+| `pico_adicional` | ≤448 MiB exclusivo | Release 104,9 MB + scratch <1 MB, sin copia de DB |
+| `reutilizados` | Release/objetos existentes, workspace, APIs, evidencias #372 | Reutilizados; sin copia de workspace |
+| `exclusivos_retirables` | Sólo temporales propios | Scratch propio; nada ajeno |
+| `libres_host_wsl` | C y WSL medidos por separado | WSL 940.838.445.056 B; C: 57.923.026.944 B |
+| `reserva` | C ≥25.000.000.000 B; WSL ≥5.000.000.000 B | Preservada |
+| `retencion` | Historia append-only; release actual y rollback; recibo compacto | `a5b8581`/`4a9ccb4` retenidos; sin backup nuevo; scratch hasta cierre |
+
+No hubo backup, restore, copia de DB, borrado de filas ni limpieza global. El presupuesto físico se
+reconcilió con bytes medidos; la reducción física del DuckDB es compactación, no pérdida de historia.
+
 ## Objetivos finitos C1–C5
 
 Denominador estable: cinco objetivos `C1`–`C5`. Un baseline no medido es `UNKNOWN`, nunca cero. Las
