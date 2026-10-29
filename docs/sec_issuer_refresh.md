@@ -6,14 +6,18 @@ key y mantiene el diagnóstico fundamental separado del diagnóstico de mercado.
 
 ## Etapas
 
-Cada ejecución abre una sola conexión writer y ejecuta exactamente:
+Cada ejecución abre una sola conexión writer y ejecuta exactamente las seis etapas del contrato
+`sec-issuer-fundamental-refresh-v1`, en este orden:
 
-1. descarga de Submissions y Company Facts;
-2. persistencia append-only de los dos snapshots oficiales;
-3. normalización de hechos XBRL compatibles, incluida la alternancia anual DEI de acciones comunes;
-4. resolución del corte point-in-time;
-5. persistencia idempotente de cinco métricas base;
-6. persistencia de un diagnóstico fundamental independiente.
+1. `sec_fetch`: descarga de Submissions y Company Facts y persistencia append-only de los dos
+   snapshots oficiales;
+2. `sec_normalization`: normalización de hechos XBRL compatibles, incluida la alternancia anual DEI de
+   acciones comunes;
+3. `known_at_resolution`: resolución del corte point-in-time (`requested_known_at` o reloj UTC);
+4. `fundamental_metrics`: persistencia idempotente de las cinco familias de métricas base;
+5. `fundamental_diagnostic`: persistencia de un diagnóstico fundamental independiente;
+6. `corporate_valuation`: cálculo y persistencia de la valoración `latest_annual` con
+   `valuation_date = effective_known_at.date()`.
 
 SEC se consulta en cada ejecución. Un snapshot idéntico reutiliza su identidad; una revisión crea
 otra versión sin borrar la anterior. Si una etapa falla, el error identifica la etapa y el progreso
@@ -98,6 +102,19 @@ El corte explícito se conserva exactamente. Si precede toda la evidencia normal
 frecuencia, el flujo se detiene antes de métricas y diagnóstico, pero conserva los snapshots y las
 observaciones recién validados.
 
+El mismo refresh se ejecuta sobre el workspace activo por binding desde la interfaz local:
+
+```bash
+curl -s -X POST http://127.0.0.1:8765/api/fundamental-refresh \
+  -H 'Content-Type: application/json' \
+  -d '{"asset_id":"equity:us:b","frequency":"annual","requested_known_at":null}'
+```
+
+El endpoint resuelve el emisor contra el catálogo, usa el mutex y la cola manual existentes,
+invalida las cachés de lectura afectadas y no adquiere mercado. `requested_known_at: null` resuelve
+el corte con el reloj UTC; un timestamp explícito se conserva exactamente. El workspace es el
+declarado por el binding de la release activa, no una ruta adivinada por el cliente.
+
 ## Resultado y límites
 
 `sec-issuer-fundamental-refresh-v1` informa documentos, hechos examinados y seleccionados,
@@ -123,7 +140,11 @@ habilitados. Los smokes IFRS reales del 29 de julio de 2026 produjeron 166 obser
 métricas base para Barrick, 215 y 38 para BVN, y 149 y 38 para TSM; sus repeticiones reutilizaron
 exactamente los dos raw, todas las observaciones, todas las métricas y el diagnóstico. La interfaz
 usa un endpoint writer independiente, frecuencia anual y cachés de lectura por emisor.
-El flujo no calcula valoración, no combina scores, no recomienda operaciones y no ejecuta órdenes.
+La etapa `corporate_valuation` calcula y persiste hasta once métricas `latest_annual` por emisor, con
+estado y motivo explícitos; el resumen informa creadas, reutilizadas y no evaluables. No combina
+scores, no recomienda operaciones y no ejecuta órdenes. La adopción operacional del 2026-10-29 se
+resume en [`corporate_valuation_point_in_time.md`](corporate_valuation_point_in_time.md) y
+[`v2_operational_readiness.md`](v2_operational_readiness.md).
 
 El refresh verifica cada observación contra la adquisición que la produjo. Cuando dos adquisiciones
 válidas comparten la identidad de un raw SEC, la comprobación reconstruye primero el contexto

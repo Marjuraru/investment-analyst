@@ -1,9 +1,11 @@
 # Hoja de ruta estratégica del producto
 
-> Estado vigente 2026-10-27: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
+> Estado vigente 2026-10-29: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
 > `NEXT`. La readiness operativa v2 se registra en
 > [`v2_operational_readiness.md`](v2_operational_readiness.md): avanza prerrequisitos de interfaz,
-> lectura, limpieza y entrega, sin declarar cobertura fundamental nueva ni cerrar la ruta.
+> lectura, limpieza y entrega, sin declarar cobertura fundamental nueva ni cerrar la ruta. La
+> adopción operacional de `FUNDAMENTALS-COVERAGE-OPERATIONS`/#373 se registra abajo; no cambia el
+> estado de la fila.
 
 
 > `FUNDAMENTALS-SEC-PROVENANCE`/#365 (`ADVANCES`, sin cierre) integra la evidencia local de
@@ -26,6 +28,15 @@
 > valoración. Preserva la selección nativa, rechaza el conflicto con causa explícita y no inventa base contable. La fila
 > `FUNDAMENTALS-COVERAGE` permanece `NEXT`: no se declara cobertura completa, no se cierra la ruta y
 > no se añaden FX, deuda IFRS, D&A sintética ni trimestral IFRS.
+>
+> `FUNDAMENTALS-COVERAGE-OPERATIONS`/#373 (`ADVANCES`) adopta realmente la capacidad SEC ya
+> integrada sobre la base `a5b8581…`: activa esa release local, ejecuta un refresh anual real de
+> cinco perfiles representativos (AAPL, AMD, Barrick `equity:us:b`, TSM y BVN), persiste
+> investigación, valoración e historia PIT y registra la cobertura honesta. La fila sigue `NEXT`: la
+> muestra no cierra `FUNDAMENTALS-COVERAGE`, no añade trimestral IFRS, FX, deuda IFRS ni D&A
+> sintética, y la siguiente frontera la decide PLAN con las carencias demostradas. Evidencia: 5/5 con
+> trazabilidad, 55 celdas de valoración (AAPL 11/11; AMD y B 6/11; TSM y BVN 1/11), DEI/ADR con
+> linaje exacto y K0 preservado.
 >
 > Las notas y cronologías fechadas de este documento son registro histórico. No describen un Issue
 > activo ni autorizan ejecución; la única autoridad de Work Block es el Issue abierto con

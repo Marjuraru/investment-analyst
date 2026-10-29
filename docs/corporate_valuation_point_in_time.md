@@ -175,3 +175,66 @@ persiste evaluaciones, no llama proveedores y no expresa barato/caro, señal o r
 El precio de las acciones configuradas procede de Alpaca Market Data, feed IEX, barras diarias y
 `adjustment=all`. IEX cubre una bolsa y no el SIP consolidado. La limitación acompaña cada snapshot,
 definición que usa precio y presentación correspondiente.
+
+## Adopción operacional 2026-10-29
+
+`FUNDAMENTALS-COVERAGE-OPERATIONS`/#373 adoptó la capacidad ya integrada sobre la base
+`origin/main@a5b8581c71faaeb98665cb0ae9bd835df1cf5664` (release local activa; rollback
+`4a9ccb4c070df622d15b14d150de69d5ad352f5c`) y el workspace UUID
+`70c64668-1738-4dfe-ba1f-7e72026bb7fe`. El refresh anual real se ejecutó sobre AAPL, AMD, Barrick
+(`equity:us:b`), TSM y BVN con `requested_known_at: null`; los cortes efectivos quedaron entre
+`2026-10-29T19:45:58Z` y `2026-10-29T19:46:37Z`. La lectura se consolidó con
+`known_at=2026-10-29T19:47:00Z` (K1) y se contrastó con `known_at=2026-10-27T00:00:00Z` (K0).
+
+### Matriz 5×11
+
+`not_evaluable` conserva el motivo y nunca se representa como cero. El total es 55 celdas:
+AAPL 11/11; AMD y B 6/11; TSM y BVN 1/11.
+
+| Métrica | AAPL | AMD | B | TSM | BVN |
+| --- | --- | --- | --- | --- | --- |
+| `earnings_yield_latest_annual` | `evaluated` | `evaluated` | `evaluated` | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) |
+| `enterprise_value` | `evaluated` | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) |
+| `enterprise_value_to_ebit_latest_annual` | `evaluated` | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) |
+| `enterprise_value_to_ebitda_latest_annual` | `evaluated` | `not_evaluable` (ebitda_unavailable) | `not_evaluable` (ebitda_unavailable) | `not_evaluable` (ebitda_unavailable) | `not_evaluable` (ebitda_unavailable) |
+| `enterprise_value_to_sales_latest_annual` | `evaluated` | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) |
+| `financial_debt` | `evaluated` | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) |
+| `free_cash_flow_yield_latest_annual` | `evaluated` | `evaluated` | `evaluated` | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) |
+| `market_cap` | `evaluated` | `evaluated` | `evaluated` | `evaluated` | `evaluated` |
+| `price_to_book` | `evaluated` | `evaluated` | `evaluated` | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) |
+| `price_to_earnings_latest_annual` | `evaluated` | `evaluated` | `evaluated` | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) |
+| `price_to_sales_latest_annual` | `evaluated` | `evaluated` | `evaluated` | `not_evaluable` (missing_input) | `not_evaluable` (missing_input) |
+
+TSM y BVN sólo evalúan `market_cap` porque el corte no ofrece los inputs monetarios comparables que
+exigen las demás fórmulas; la base ADR y el precio sí están disponibles. No se completa la ausencia
+con otro ejercicio, otro emisor, FX, deuda sintética ni D&A estimada. El precio de B tenía 9 días de
+antigüedad al corte y se publica con esa limitación.
+
+### Procedencia de acciones y base del título
+
+Los valores son `Decimal` serializados como texto. Las observaciones y raws conservan su identidad
+exacta y no se reescribieron.
+
+| Emisor | Tag y taxonomía | Accession | Observación / raw | Valor | Base aplicada |
+| --- | --- | --- | --- | --- | --- |
+| AAPL | `us-gaap:CommonStockSharesOutstanding` | `0000320193-25-000079` | `5e49533a-5421-5edf-b951-7f71b675ca78` / `ddf69926-344d-577c-aea7-c75018dc11f0` | `14773260000` | `reported_common_share`, factor `1` |
+| AMD | `us-gaap:CommonStockSharesOutstanding` | `0000002488-26-000018` | `9beea886-bce7-55c9-8cd6-acc71452a4d6` / `caa19cbd-ef8c-590b-a2f0-f7c9e4121c07` | `1630000000` | `reported_common_share`, factor `1` |
+| B | `dei:EntityCommonStockSharesOutstanding` | `0001193125-26-079253` | `f4c77d9f-7172-56a9-9fa4-e74d82251292` / `7f35f24d-a379-5740-b813-60a3858ea9b3` | `1675360395` | `reported_common_share`, factor `1` |
+| TSM | `dei:EntityCommonStockSharesOutstanding` | `0001628280-26-025362` | `91e71ffc-f4c5-5efa-94e3-eedc649320e9` / `678cbbf6-4500-5467-89a2-0b244a005279` | `25932524521` | `depositary_receipt`, factor `0.2`, revisión `1228824…`, `valid_from=2026-04-17` |
+| BVN | `dei:EntityCommonStockSharesOutstanding` | `0001104659-26-053101` | `875b74d2-73e6-51e6-983c-b2383cd09ca4` / `4bdaae69-5784-574e-88a9-652dadbb7f94` | `253715190` | `depositary_receipt`, factor `1`, revisión `b8a0066…`, `valid_from=2026-05-01` |
+
+B, TSM y BVN demuestran DEI real persistida; AAPL y AMD usan el concepto nativo y no necesitaron la
+alternancia DEI. Las revisiones ADR conservan su SHA-256 de fuente oficial (`9b4a4e6c…805a141` para
+TSM y `ec2067c4…3e8dd` para BVN) y la valoración selecciona la revisión point-in-time documentada.
+
+### K0, historia y reapertura
+
+- K0 devolvió la misma cobertura por emisor: AAPL `evaluated` 11/11; AMD y B `partial` 6/11; TSM y
+  BVN `partial` 1/11. Usó precios con `valuation_as_of` del 23-oct (AAPL/AMD) y 20-oct (B/TSM/BVN), y
+  `available_at <= K0`; ninguna adquisición de K1 se transportó a K0. Los `result_id` difieren donde
+  difiere el precio.
+- La historia materializada devolvió puntos nuevos con `valuation_date=2026-10-29`: AAPL 100/220
+  (truncada por límite), AMD 54, B 6, TSM 1 y BVN 1. No hay backfill ni puntos sintéticos.
+- La repetición de las lecturas de investigación y valoración conservó IDs, valores y orden; el
+  archivo DuckDB no cambió de tamaño ni de `mtime` y no apareció WAL. La reapertura fría/caliente se
+  registra en [`v2_operational_readiness.md`](v2_operational_readiness.md).
