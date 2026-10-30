@@ -771,6 +771,67 @@
                   <div id="unavailable-metrics-grid" class="fundamental-research-grid unavailable-metrics-grid"></div>
                 </details>
 
+                <details id="annual-horizons-panel" class="fundamental-research-disclosure">
+                  <summary>Horizontes anuales</summary>
+                  <div class="methodological-explanation">
+                    <p>Compara 3, 5 y 10 intervalos fiscales anuales consecutivos que terminan exactamente en el cierre elegido. Una historia insuficiente o discontinua se muestra como ausencia explícita y nunca se acorta en silencio.</p>
+                  </div>
+                  <div class="query-main">
+                    <label class="field">
+                      <span>Cierre anual de referencia</span>
+                      <input id="annual-horizons-anchor" type="date" required>
+                      <small>Se toma del cierre anual mostrado y puede editarse.</small>
+                    </label>
+                    <label class="field field-wide">
+                      <span>Métricas (1–6)</span>
+                      <select id="annual-horizons-metrics" multiple size="6" aria-describedby="annual-horizons-metrics-help"></select>
+                      <small id="annual-horizons-metrics-help">Seleccione entre una y seis métricas del catálogo de investigación.</small>
+                    </label>
+                    <fieldset class="field">
+                      <legend>Horizontes</legend>
+                      <label><input id="annual-horizons-3" type="checkbox" value="3" checked> 3 intervalos</label>
+                      <label><input id="annual-horizons-5" type="checkbox" value="5" checked> 5 intervalos</label>
+                      <label><input id="annual-horizons-10" type="checkbox" value="10" checked> 10 intervalos</label>
+                    </fieldset>
+                    <button id="query-annual-horizons" class="button secondary" type="button" disabled>
+                      Consultar horizontes
+                    </button>
+                    <button
+                      id="export-annual-horizons-json"
+                      class="data-export-button"
+                      type="button"
+                      aria-label="Exportar los horizontes anuales exactos como JSON"
+                      disabled
+                    >
+                      Exportar JSON
+                    </button>
+                  </div>
+                  <p id="annual-horizons-status" role="status">Sin consultar.</p>
+                  <div class="chart-table-scroll">
+                    <table>
+                      <caption>Horizontes anuales solicitados, con períodos reales y estado explícito</caption>
+                      <thead>
+                        <tr>
+                          <th scope="col">Métrica</th>
+                          <th scope="col">Horizonte</th>
+                          <th scope="col">Estado</th>
+                          <th scope="col">Períodos</th>
+                          <th scope="col">Primero</th>
+                          <th scope="col">Último</th>
+                          <th scope="col">Días</th>
+                          <th scope="col">Variación</th>
+                          <th scope="col">CAGR</th>
+                        </tr>
+                      </thead>
+                      <tbody id="annual-horizons-table-body"></tbody>
+                    </table>
+                  </div>
+                  <details class="fundamental-research-disclosure">
+                    <summary>Evidencia exacta</summary>
+                    <pre id="annual-horizons-evidence"></pre>
+                  </details>
+                </details>
+
                 <details class="fundamental-research-disclosure">
                   <summary>Fórmulas y evidencia exacta</summary>
                   <div id="fundamental-research-audit" class="fundamental-research-audit"></div>

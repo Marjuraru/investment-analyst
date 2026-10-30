@@ -56,6 +56,15 @@ from investment_analyst.analytics.fundamental_trend_service import (
 from investment_analyst.analytics.fundamentals.analysis_models import (
     AaplFundamentalAnalysisResult,
 )
+from investment_analyst.analytics.fundamentals.annual_horizon_models import (
+    ANNUAL_HORIZON_CHOICES,
+    FundamentalAnnualHorizonsRequest,
+    FundamentalAnnualHorizonsResult,
+)
+from investment_analyst.analytics.fundamentals.annual_horizon_service import (
+    FundamentalAnnualHorizonError,
+    annual_horizon_window_start,
+)
 from investment_analyst.analytics.fundamentals.research_history_models import (
     AaplFundamentalResearchHistoryResult,
 )
@@ -65,6 +74,7 @@ from investment_analyst.analytics.fundamentals.research_history_service import (
 from investment_analyst.analytics.fundamentals.research_models import (
     AaplFundamentalResearchRequest,
     AaplFundamentalResearchResult,
+    get_fundamental_research_metric_definition,
 )
 from investment_analyst.analytics.fundamentals.research_service import (
     FundamentalResearchError,
@@ -640,6 +650,16 @@ class _ApplicationOperations(Protocol):
         """Calculate bounded historical research for one SEC issuer."""
         ...
 
+    def query_sec_fundamental_annual_horizons(
+        self,
+        request: FundamentalAnnualHorizonsRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> FundamentalAnnualHorizonsResult:
+        """Calculate explicit annual horizons for one SEC issuer."""
+        ...
+
     def query_aapl_fundamental_analysis(
         self,
         request: AaplFundamentalResearchRequest,
@@ -845,6 +865,13 @@ class _WebOperations(Protocol):
         parameters: Mapping[str, tuple[str, ...]],
     ) -> dict[str, object]:
         """Return bounded historical fundamental research statistics."""
+        ...
+
+    def fundamental_research_horizons(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Return explicit fixed annual horizons for one SEC issuer."""
         ...
 
     def fundamental_analysis(
@@ -1715,6 +1742,56 @@ class AaplLocalController:
         return self._signed_read(
             query,
             lambda: self._application.query_sec_fundamental_research_history(
+                request,
+                asset_id=asset_id,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
+        )
+
+    def fundamental_research_horizons_request(
+        self,
+        request: FundamentalAnnualHorizonsRequest,
+        *,
+        asset_id: str,
+    ) -> FundamentalAnnualHorizonsResult:
+        """Return cached explicit annual horizons without providers or writes."""
+        anchor = datetime.combine(
+            request.end_period_end,
+            datetime.min.time(),
+            tzinfo=UTC,
+        )
+        field_names = tuple(
+            sorted(
+                {
+                    field.field_name
+                    for metric_key in request.metric_keys
+                    for field in get_fundamental_research_metric_definition(metric_key).input_fields
+                }
+            )
+        )
+        query = ReadDependencyQuery(
+            family=ReadDependencyFamily.FUNDAMENTALS,
+            endpoint="/api/fundamental-research-horizons",
+            asset_ids=(asset_id,),
+            source_ids=self._descriptor_source_ids(asset_id),
+            field_names=field_names,
+            metric_keys=request.metric_keys,
+            frequency=DataFrequency.ANNUAL.value,
+            start=datetime.combine(
+                annual_horizon_window_start(request.end_period_end),
+                datetime.min.time(),
+                tzinfo=UTC,
+            ),
+            end=anchor + timedelta(days=1),
+            known_at=request.known_at,
+            selector=(
+                f"anchor={request.end_period_end.isoformat()};"
+                f"horizons={','.join(str(item) for item in request.horizons)}"
+            ),
+        )
+        return self._signed_read(
+            query,
+            lambda: self._application.query_sec_fundamental_annual_horizons(
                 request,
                 asset_id=asset_id,
                 location=StorageLocationRequest(workspace=self._workspace),
@@ -2733,6 +2810,22 @@ class AaplLocalWebApplication:
             asset_id=descriptor.asset_id,
         ).to_json_dict()
 
+    def fundamental_research_horizons(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Validate query parameters and return explicit annual horizons."""
+        descriptor = self._fundamental_asset(parameters)
+        request = _fundamental_annual_horizons_request(
+            parameters,
+            asset_id=descriptor.asset_id,
+        )
+        self._require_fundamental_frequency(descriptor, DataFrequency.ANNUAL)
+        return self._controller.fundamental_research_horizons_request(
+            request,
+            asset_id=descriptor.asset_id,
+        ).to_json_dict()
+
     def fundamental_analysis(
         self,
         parameters: Mapping[str, tuple[str, ...]],
@@ -3138,6 +3231,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                     server.application.fundamental_research_history(parameters),
                 )
                 return
+            if parsed.path == "/api/fundamental-research-horizons":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=5)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.fundamental_research_horizons(parameters),
+                )
+                return
             if parsed.path == "/api/fundamental-analysis":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
                 parameters = {key: tuple(values) for key, values in raw.items()}
@@ -3333,6 +3434,7 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 BtcIntradayChartQueryError,
                 ConsolidatedDiagnosticQueryError,
                 CorporateValuationError,
+                FundamentalAnnualHorizonError,
                 FundamentalResearchError,
                 FundamentalResearchHistoryError,
             ),
@@ -3503,6 +3605,53 @@ def _fundamental_research_request(
         frequency=frequency,
         limit=period_limit,
     )
+
+
+def _fundamental_annual_horizons_request(
+    parameters: Mapping[str, tuple[str, ...]],
+    *,
+    asset_id: str,
+) -> FundamentalAnnualHorizonsRequest:
+    allowed = {"asset_id", "known_at", "end_period_end", "metric_keys", "horizons"}
+    if set(parameters) - allowed:
+        raise ValueError("fundamental annual horizons query contains unsupported parameters")
+    known_at = _aware_datetime(_one_parameter(parameters, "known_at", required=True))
+    end_period_end = _date_parameter(_one_parameter(parameters, "end_period_end", required=True))
+    metric_keys = _comma_list(
+        _one_parameter(parameters, "metric_keys", required=True),
+        "metric_keys",
+    )
+    raw_horizons = _one_parameter(parameters, "horizons", required=False)
+    horizons = (
+        ANNUAL_HORIZON_CHOICES
+        if raw_horizons is None
+        else tuple(_horizon_choice(item) for item in _comma_list(raw_horizons, "horizons"))
+    )
+    return FundamentalAnnualHorizonsRequest(
+        asset_id=asset_id,
+        known_at=known_at,
+        end_period_end=end_period_end,
+        metric_keys=metric_keys,
+        horizons=horizons,
+    )
+
+
+def _comma_list(value: str | None, name: str) -> tuple[str, ...]:
+    if value is None:
+        raise ValueError(f"{name} is required")
+    parts = value.split(",")
+    if any(not part or part != part.strip() for part in parts):
+        raise ValueError(f"{name} must be a comma-separated list without empty or padded values")
+    return tuple(parts)
+
+
+def _horizon_choice(value: str) -> int:
+    if not value.isascii() or not value.isdecimal():
+        raise ValueError("horizons must contain the integers 3, 5 or 10")
+    choice = int(value)
+    if choice not in ANNUAL_HORIZON_CHOICES:
+        raise ValueError("horizons must be a subset of 3, 5 and 10")
+    return choice
 
 
 def _optional_date(value: str | None) -> date | None:

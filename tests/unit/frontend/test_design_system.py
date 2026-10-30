@@ -1657,8 +1657,9 @@ def _check_no_new_capability_or_route_is_introduced_by_the_shell(app_js: str) ->
 # extracts the candidate's routes: every `/api/...` literal outside the
 # BOARD_REGISTRY declaration. UI-7 adds the already-integrated, read-only
 # Cazatiburones notification inbox route; #375 adds the already-integrated,
-# read-only explicit annual filing options route. No transport or contract
-# changes beyond those authorized Work Blocks.
+# read-only explicit annual filing options route; #377 adds the explicit
+# annual horizons route authorized by its own Work Block. No transport or
+# contract changes beyond those authorized Work Blocks.
 _BASELINE_API_ROUTES = frozenset(
     {
         "/api/alerts",
@@ -1667,6 +1668,7 @@ _BASELINE_API_ROUTES = frozenset(
         "/api/candidates/transition",
         "/api/fundamental-analysis",
         "/api/fundamental-refresh",
+        "/api/fundamental-research-horizons",
         "/api/fundamental-trend",
         "/api/listed-company-report",
         "/api/market-assets",

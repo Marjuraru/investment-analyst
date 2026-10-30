@@ -1,6 +1,6 @@
 # Hoja de ruta estratégica del producto
 
-> Estado vigente 2026-10-29: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
+> Estado vigente 2026-10-30: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
 > `NEXT`. La readiness operativa v2 se registra en
 > [`v2_operational_readiness.md`](v2_operational_readiness.md): avanza prerrequisitos de interfaz,
 > lectura, limpieza y entrega, sin declarar cobertura fundamental nueva ni cerrar la ruta. La
@@ -43,6 +43,14 @@
 > con las once fórmulas existentes, precio al corte y cero mezcla entre contextos. La fila
 > `FUNDAMENTALS-COVERAGE` permanece `NEXT`: no se declara mayor cobertura del último anual, no se
 > cierra la ruta y deuda, FX, trimestral IFRS y nuevas fuentes siguen fuera de este bloque.
+>
+> `FUNDAMENTALS-ANNUAL-HORIZONS`/#377 (`ADVANCES`, sin cierre) añade la vista efímera de horizontes
+> anuales explícitos de 3, 5 y 10 intervalos fiscales sobre métricas de investigación existentes.
+> Selecciona una ventana única por ancla, exige continuidad de 330–400 días, publica ausencias
+> explícitas en lugar de acortar el horizonte y reutiliza las estadísticas vigentes sin persistir
+> resultados. La fila `FUNDAMENTALS-COVERAGE` permanece `NEXT`: no se declara cobertura completa, no
+> se cierra la ruta y conceptos monetarios ausentes, retornos con balances promedio y nuevas fuentes
+> siguen pendientes.
 >
 > Las notas y cronologías fechadas de este documento son registro histórico. No describen un Issue
 > activo ni autorizan ejecución; la única autoridad de Work Block es el Issue abierto con

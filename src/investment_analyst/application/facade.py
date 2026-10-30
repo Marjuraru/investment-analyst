@@ -44,6 +44,13 @@ from investment_analyst.analytics.fundamentals.analysis_models import (
 from investment_analyst.analytics.fundamentals.analysis_service import (
     SecIssuerFundamentalAnalysisService,
 )
+from investment_analyst.analytics.fundamentals.annual_horizon_models import (
+    FundamentalAnnualHorizonsRequest,
+    FundamentalAnnualHorizonsResult,
+)
+from investment_analyst.analytics.fundamentals.annual_horizon_service import (
+    SecIssuerFundamentalAnnualHorizonService,
+)
 from investment_analyst.analytics.fundamentals.research_history_models import (
     AaplFundamentalResearchHistoryResult,
     FundamentalResearchHistoryResult,
@@ -1289,6 +1296,27 @@ class InvestmentAnalystApplication:
         ) as storage:
             return SecIssuerFundamentalResearchHistoryService(
                 SecIssuerFundamentalResearchService(storage, configuration)
+            ).query(request)
+
+    def query_sec_fundamental_annual_horizons(
+        self,
+        request: FundamentalAnnualHorizonsRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> FundamentalAnnualHorizonsResult:
+        """Calculate explicit annual horizons for one catalog-backed SEC issuer."""
+        configuration = resolve_sec_configuration(
+            self._runtime.provider_resolver,
+            asset_id=asset_id,
+        )
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return SecIssuerFundamentalAnnualHorizonService(
+                storage,
+                configuration,
             ).query(request)
 
     def query_aapl_fundamental_analysis(

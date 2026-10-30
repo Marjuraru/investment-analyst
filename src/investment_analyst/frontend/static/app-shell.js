@@ -719,6 +719,7 @@ function invalidateDeferredBoardLoads() {
   mesaUniverseCoverageRequestSequence += 1;
   cazatiburonesUniverseRequestSequence += 1;
   cazatiburonesRequestSequence += 1;
+  resetAnnualHorizons({ clearAnchor: true, clearMetrics: true });
   if (typeof resetCazatiburonesDetail === "function") resetCazatiburonesDetail();
 }
 

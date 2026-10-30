@@ -10,6 +10,12 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
+from investment_analyst.analytics.fundamentals.annual_horizon_models import (
+    FundamentalAnnualHorizonsRequest,
+)
+from investment_analyst.analytics.fundamentals.annual_horizon_service import (
+    SecIssuerFundamentalAnnualHorizonService,
+)
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
 from investment_analyst.analytics.market.bar_schemas import ALPACA_SOURCE_ID
 from investment_analyst.analytics.market.history_service import (
@@ -39,14 +45,18 @@ from investment_analyst.core.models import (
     NormalizedObservation,
     RawRecord,
 )
-from investment_analyst.frontend.local_web import AaplLocalHttpServer
+from investment_analyst.frontend.local_web import AaplLocalController, AaplLocalHttpServer
+from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
+from investment_analyst.providers.fundamentals.sec_fact_models import (
+    TRANSFORMATION_VERSION as AAPL_TRANSFORMATION_VERSION,
+)
 from investment_analyst.providers.fundamentals.sec_fact_models import get_sec_fact_definition
 from investment_analyst.providers.market.alpaca_normalizer import (
     ASSET_ID,
     bar_to_observations,
     bar_to_raw_record,
 )
-from investment_analyst.providers.market.alpaca_stock import AlpacaStockBar
+from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials, AlpacaStockBar
 from investment_analyst.storage import LocalStorage, StoragePaths
 from investment_analyst.storage.raw_v2 import RawV2Staging
 from investment_analyst.storage.read_dependency_signature import (
@@ -328,6 +338,7 @@ def _seed_annual_facts(
     accession_number: str,
     period_end: date,
     values: tuple[tuple[str, str, str], ...] = _FILING_FACTS,
+    transformation_version: str = "sec-companyfacts-normalizer-v2",
 ) -> None:
     period_at = datetime.combine(period_end, datetime.min.time(), tzinfo=UTC)
     observations: list[NormalizedObservation] = []
@@ -366,7 +377,7 @@ def _seed_annual_facts(
                     "retrieved_at": available_at,
                 },
                 quality=DataQuality.VALID,
-                transformation_version="sec-companyfacts-normalizer-v2",
+                transformation_version=transformation_version,
             )
         )
         raw_records.append(
@@ -581,3 +592,297 @@ def test_read_dependency_signature_binds_code_and_catalog_revisions(
     assert not any(
         dependency.dependency_id == "equity:us:tsm" for dependency in signature.dependencies
     )
+
+
+_ANNUAL_HORIZON_PERIODS = (
+    date(2015, 12, 26),
+    date(2016, 12, 31),
+    date(2017, 12, 30),
+    date(2018, 12, 29),
+    date(2019, 12, 28),
+    date(2020, 12, 26),
+    date(2021, 12, 25),
+    date(2022, 12, 31),
+    date(2023, 12, 30),
+    date(2024, 12, 28),
+    date(2025, 12, 27),
+)
+_ANNUAL_HORIZON_METRICS = (
+    "fundamental.research.free_cash_flow",
+    "fundamental.research.diluted_eps",
+    "fundamental.research.return_on_assets_ending_balance",
+)
+_ANNUAL_HORIZON_REQUEST_FIELDS = frozenset(
+    {
+        "fundamental.operating_cash_flow",
+        "fundamental.capital_expenditures",
+        "fundamental.diluted_earnings_per_share",
+        "fundamental.net_income",
+        "fundamental.assets",
+    }
+)
+_ANNUAL_HORIZON_UNREQUESTED_FIELDS = frozenset({"fundamental.gross_profit", "fundamental.revenue"})
+
+
+def _annual_horizon_values(index: int) -> tuple[tuple[str, str, str], ...]:
+    return (
+        ("fundamental.operating_cash_flow", str(100 + index * 10), "USD"),
+        ("fundamental.capital_expenditures", "20", "USD"),
+        (
+            "fundamental.diluted_earnings_per_share",
+            str(Decimal("2") + Decimal(index) / 10),
+            "USD/shares",
+        ),
+        ("fundamental.net_income", str(50 + index * 5), "USD"),
+        ("fundamental.assets", "500", "USD"),
+        ("fundamental.gross_profit", "400", "USD"),
+        ("fundamental.revenue", "1000", "USD"),
+    )
+
+
+def _seed_annual_horizon_corpus(
+    storage: LocalStorage,
+    *,
+    asset_id: str,
+    source_id: str,
+    available_at: datetime,
+    transformation_version: str,
+    accession_prefix: str,
+    fields: frozenset[str] | None = None,
+    periods: tuple[date, ...] = _ANNUAL_HORIZON_PERIODS,
+) -> None:
+    selected = fields or _ANNUAL_HORIZON_REQUEST_FIELDS | _ANNUAL_HORIZON_UNREQUESTED_FIELDS
+    for index, period_end in enumerate(periods):
+        _seed_annual_facts(
+            storage,
+            asset_id=asset_id,
+            source_id=source_id,
+            available_at=available_at,
+            accession_number=f"{accession_prefix}-{index:06d}",
+            period_end=period_end,
+            values=tuple(item for item in _annual_horizon_values(index) if item[0] in selected),
+            transformation_version=transformation_version,
+        )
+
+
+class _RunnerStub:
+    def inspect(self, *, workspace):
+        return None
+
+
+class _CountingApplication:
+    def __init__(self, delegate) -> None:
+        self._delegate = delegate
+        self.horizon_calls = 0
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._delegate, name)
+
+    def query_sec_fundamental_annual_horizons(self, request, *, asset_id, location):
+        self.horizon_calls += 1
+        return self._delegate.query_sec_fundamental_annual_horizons(
+            request,
+            asset_id=asset_id,
+            location=location,
+        )
+
+
+def test_annual_horizons_read_path_is_bounded_reusable_and_revision_sensitive(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    initialized = WorkspaceService().initialize(tmp_path / "workspace", format_version=2)
+    workspace = initialized.paths.root
+    storage_paths = StoragePaths.from_workspace_root(
+        workspace,
+        format_version=2,
+        workspace_id=initialized.manifest.workspace_id,
+    )
+    catalog = AssetCatalogService.load_default()
+    resolver = ProviderAssetContextResolver(catalog)
+    sec_source = resolve_sec_configuration(resolver, asset_id=ASSET_ID).companyfacts_source_id
+    accepted_at = datetime(2026, 1, 30, 12, tzinfo=UTC)
+    revision_at = datetime(2026, 3, 1, 12, tzinfo=UTC)
+    known_at = datetime(2026, 10, 29, 19, 47, tzinfo=UTC)
+    anchor = _ANNUAL_HORIZON_PERIODS[-1]
+    request = FundamentalAnnualHorizonsRequest(
+        asset_id=ASSET_ID,
+        known_at=known_at,
+        end_period_end=anchor,
+        metric_keys=_ANNUAL_HORIZON_METRICS,
+        horizons=(3, 5, 10),
+    )
+
+    hydrated: list[NormalizedObservation] = []
+    original_list = WorkspaceV2ObservationRepository.list
+
+    def counted_list(self, **filters):
+        rows = original_list(self, **filters)
+        hydrated.extend(rows)
+        return rows
+
+    monkeypatch.setattr(WorkspaceV2ObservationRepository, "list", counted_list)
+
+    def assert_local_only(previous: int, *, expected: int) -> int:
+        new_rows = hydrated[previous:]
+        assert len(new_rows) == expected
+        assert {row.asset_id for row in new_rows} == {ASSET_ID}
+        assert {row.source.source_id for row in new_rows} == {sec_source}
+        assert {row.field_name for row in new_rows} <= _ANNUAL_HORIZON_REQUEST_FIELDS
+        assert not ({row.field_name for row in new_rows} & _ANNUAL_HORIZON_UNREQUESTED_FIELDS)
+        return len(hydrated)
+
+    with LocalStorage(storage_paths) as storage:
+        _seed_annual_horizon_corpus(
+            storage,
+            asset_id=ASSET_ID,
+            source_id=sec_source,
+            available_at=accepted_at,
+            transformation_version=AAPL_TRANSFORMATION_VERSION,
+            accession_prefix="0000320193-25-9",
+        )
+        _seed_annual_horizon_corpus(
+            storage,
+            asset_id=ASSET_ID,
+            source_id=sec_source,
+            available_at=accepted_at,
+            transformation_version=AAPL_TRANSFORMATION_VERSION,
+            accession_prefix="0000320193-05-9",
+            fields=_ANNUAL_HORIZON_REQUEST_FIELDS,
+            periods=(date(2005, 12, 31),),
+        )
+        _seed_annual_horizon_corpus(
+            storage,
+            asset_id=ASSET_ID,
+            source_id="sec-edgar:foreign:companyfacts",
+            available_at=accepted_at,
+            transformation_version=AAPL_TRANSFORMATION_VERSION,
+            accession_prefix="0000000000-25-9",
+            fields=_ANNUAL_HORIZON_REQUEST_FIELDS,
+            periods=(anchor,),
+        )
+
+        configuration = resolve_sec_configuration(resolver, asset_id=ASSET_ID)
+        service = SecIssuerFundamentalAnnualHorizonService(storage, configuration)
+        baseline = service.query(request)
+        assert baseline.coverage.observations_examined == len(_ANNUAL_HORIZON_PERIODS) * len(
+            _ANNUAL_HORIZON_REQUEST_FIELDS
+        )
+        assert baseline.coverage.points_returned == len(_ANNUAL_HORIZON_PERIODS) * len(
+            _ANNUAL_HORIZON_METRICS
+        )
+        mark = assert_local_only(
+            0,
+            expected=len(_ANNUAL_HORIZON_PERIODS) * len(_ANNUAL_HORIZON_REQUEST_FIELDS),
+        )
+
+        for foreign_index in range(10):
+            _seed_annual_horizon_corpus(
+                storage,
+                asset_id=f"equity:us:foreign-{foreign_index:03d}",
+                source_id=sec_source,
+                available_at=accepted_at,
+                transformation_version="sec-companyfacts-normalizer-v2",
+                accession_prefix=f"0000000000-25-{foreign_index:06d}",
+                fields=frozenset({"fundamental.diluted_earnings_per_share"}),
+            )
+        first_x = service.query(request)
+        assert first_x == baseline
+        mark = assert_local_only(
+            mark,
+            expected=len(_ANNUAL_HORIZON_PERIODS) * len(_ANNUAL_HORIZON_REQUEST_FIELDS),
+        )
+
+        for foreign_index in range(10, 100):
+            _seed_annual_horizon_corpus(
+                storage,
+                asset_id=f"equity:us:foreign-{foreign_index:03d}",
+                source_id=sec_source,
+                available_at=accepted_at,
+                transformation_version="sec-companyfacts-normalizer-v2",
+                accession_prefix=f"0000000000-25-{foreign_index:06d}",
+                fields=frozenset({"fundamental.diluted_earnings_per_share"}),
+            )
+        ten_x = service.query(request)
+        assert ten_x == baseline
+        mark = assert_local_only(
+            mark,
+            expected=len(_ANNUAL_HORIZON_PERIODS) * len(_ANNUAL_HORIZON_REQUEST_FIELDS),
+        )
+
+    delegate = InvestmentAnalystApplication.create_default()
+    counting = _CountingApplication(delegate)
+    controller = AaplLocalController(
+        _RunnerStub(),
+        counting,  # type: ignore[arg-type]
+        workspace=workspace,
+        alpaca_credentials=AlpacaCredentials(
+            api_key="test-key",
+            secret_key="test-secret",
+        ),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    cold = controller.fundamental_research_horizons_request(
+        request,
+        asset_id=ASSET_ID,
+    )
+    assert counting.horizon_calls == 1
+    mark = assert_local_only(
+        mark,
+        expected=len(_ANNUAL_HORIZON_PERIODS) * len(_ANNUAL_HORIZON_REQUEST_FIELDS),
+    )
+    warm = controller.fundamental_research_horizons_request(
+        request,
+        asset_id=ASSET_ID,
+    )
+    assert counting.horizon_calls == 1
+    assert warm == cold
+    assert len(hydrated) == mark
+
+    with LocalStorage(storage_paths) as storage:
+        _seed_annual_facts(
+            storage,
+            asset_id=ASSET_ID,
+            source_id=sec_source,
+            available_at=revision_at,
+            accession_number="0000320193-26-000777",
+            period_end=anchor,
+            values=(("fundamental.diluted_earnings_per_share", "9.25", "USD/shares"),),
+            transformation_version=AAPL_TRANSFORMATION_VERSION,
+        )
+
+    revised = controller.fundamental_research_horizons_request(
+        request,
+        asset_id=ASSET_ID,
+    )
+    assert counting.horizon_calls == 2
+    mark = assert_local_only(
+        mark,
+        expected=len(_ANNUAL_HORIZON_PERIODS) * len(_ANNUAL_HORIZON_REQUEST_FIELDS) + 1,
+    )
+    cash = next(
+        series
+        for series in revised.series
+        if series.definition.metric_key == "fundamental.research.free_cash_flow"
+    )
+    assert cash.points[-1].value == Decimal("180")
+    eps = next(
+        series
+        for series in revised.series
+        if series.definition.metric_key == "fundamental.research.diluted_eps"
+    )
+    assert eps.points[-1].value == Decimal("9.25")
+    assert (
+        revised.coverage.observations_examined
+        == len(_ANNUAL_HORIZON_PERIODS) * len(_ANNUAL_HORIZON_REQUEST_FIELDS) + 1
+    )
+    assert revised.coverage.observations_superseded == 1
+    assert revised.coverage.points_returned == baseline.coverage.points_returned
+
+    again = controller.fundamental_research_horizons_request(
+        request,
+        asset_id=ASSET_ID,
+    )
+    assert counting.horizon_calls == 2
+    assert again == revised
+    assert len(hydrated) == mark

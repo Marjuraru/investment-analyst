@@ -84,6 +84,48 @@ CAGR. El CAGR se limita a series anuales de nivel —USD, USD por acción o acci
 positivos, usa días transcurridos y 365.2425 días por año. No se anualizan flujos trimestrales ni se
 denomina "estabilidad" a un score: la dispersión se muestra como rango exacto.
 
+## Horizontes anuales explícitos
+
+`fundamental-annual-horizons-request-v1` consulta una vista efímera
+`fundamental-annual-horizons-result-v1` con algoritmo
+`fundamental-fixed-annual-horizons-v1`. La solicitud exige `asset_id`, `known_at`,
+`end_period_end` como cierre ancla, entre una y seis `metric_keys` del catálogo de investigación y
+un subconjunto no vacío de horizontes `{3, 5, 10}`. El ancla no puede ser posterior al corte y sólo
+se admite frecuencia anual: el contrato no tiene parámetro de frecuencia y el transporte rechaza
+cualquier intento trimestral. El activo y la fuente se resuelven por catálogo; un ETF o cripto sin
+configuración SEC se rechaza con el mismo patrón HTTP, sin fallback a Apple.
+
+Un horizonte `N` exige `N` intervalos fiscales anuales consecutivos y `N + 1` cierres terminando
+exactamente en el ancla solicitada. La ventana de selección va desde `ancla − 4000 días` hasta el
+ancla, límite que cubre los diez intervalos máximos admisibles de 400 días. Cada diferencia entre
+cierres consecutivos debe estar entre 330 y 400 días inclusivos para admitir años de 52/53 semanas.
+La vista publica fechas reales y `elapsed_days`; no afirma `N` años calendario exactos ni
+interpola, rellena o busca automáticamente otro cierre.
+
+Los estados y su prioridad son:
+
+1. `anchor_unavailable`: la métrica no tiene valor en el cierre ancla.
+2. `insufficient_history`: hay menos de `N + 1` cierres candidatos.
+3. `nonconsecutive_periods`: el tramo candidato contiene un salto fuera de 330–400 días.
+4. `complete`: se cumplen todos los requisitos anteriores.
+
+Sólo un horizonte completo publica estadísticas. Un horizonte incompleto conserva su estado, sus
+fechas y el conteo observado/requerido, pero devuelve `statistics: null`; nunca publica las
+estadísticas del tramo más corto. Las estadísticas reutilizan exactamente media, rango, cambios y
+CAGR del historial ya publicado (`fundamental-research-history-v2-decimal34`). Una ventana completa
+puede tener CAGR no definido y lo declara con `cagr_reason`: `unit_not_eligible` para ratios o
+`nonpositive_endpoint` cuando alguno de los extremos no es positivo. Un valor intermedio negativo
+no prohíbe el CAGR bajo la fórmula vigente; la limitación se muestra explícitamente y el resultado
+nunca se denomina estabilidad o rentabilidad de inversión.
+
+Cada métrica devuelve una única serie de hasta once puntos candidatos con valor exacto, unidad,
+`available_at`, versión de algoritmo e IDs de observación, y filas por horizonte que referencian su
+tramo. La selección de revisiones, la comprobación point-in-time y las fórmulas son las existentes;
+la consulta no hidrata campos de métricas no solicitadas, no abre un writer, no adquiere
+proveedores, no registra `MetricDefinition` ni persiste resultados nuevos. El endpoint local es
+`GET /api/fundamental-research-horizons`; la interfaz sólo lo invoca mediante la acción explícita
+«Horizontes anuales».
+
 Para consultar los ejercicios anuales disponibles en el workspace permanente:
 
 ```bash
